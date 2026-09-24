@@ -2184,9 +2184,17 @@ data class SipralStackSettings(
      * there is no figure to give.
      */
     val mediaStallMs: Long,
+    /**
+     * Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
+     * default filled in.
+     *
+     * Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val g729AnnexB: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 12
+        const val SLOTS: Int = 13
 
         fun of(slots: LongArray): SipralStackSettings = SipralStackSettings(
             slots[0],
@@ -2201,6 +2209,7 @@ data class SipralStackSettings(
             slots[9],
             slots[10],
             slots[11],
+            slots[12],
         )
     }
 }
@@ -3051,6 +3060,23 @@ class SipralStackConfig(
      * caller's buffer is its own again when this returns.
      */
     val stunServer: String? = null,
+    /**
+     * Whether G.729's Annex B — silence compression: SID frames and
+     * nothing in a pause, and the comfort noise both ends make from
+     * them — is allowed on this stack's calls, as a `SipralToggle`. On
+     * by default, which is what `G729` means with no parameter (RFC
+     * 4856 §2.1.9): an offer says `annexb=yes`, and an answer says
+     * `yes` only where the offer allowed it. Off, both say `annexb=no`,
+     * which RFC 3551 §4.5.6 makes the far end's cue to send no SID
+     * frames, and this end sends none either. A per-call codec order
+     * keeps the stack's setting. Nothing changes for a call that does
+     * not run G.729, so the setting is taken whatever `codecs` names:
+     * a call's own order may name G.729 when the stack's does not.
+     *
+     * Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val g729AnnexB: Long = 0,
 )
 
 /**
@@ -4796,7 +4822,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -5290,7 +5316,7 @@ object Sipral {
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
         }

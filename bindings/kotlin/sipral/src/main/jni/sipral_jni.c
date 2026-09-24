@@ -797,7 +797,7 @@ Java_org_sipral_SipralNative_sipral_1capabilities(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -844,6 +844,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     jsize configStunServer_size = configStunServer ? (*env)->GetArrayLength(env, configStunServer) : 0;
     config_value.stun_server = (const char *)configStunServer_data;
     config_value.stun_server_len = (size_t)configStunServer_size;
+    config_value.g729_annex_b = (uint32_t)configG729AnnexB;
     sipral_handle_t stack_value = 0;
     sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
     if (configBindAddress) {
@@ -881,7 +882,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
     settings_value.size = sizeof settings_value;
     sipral_status_t status = sipral_stack_settings((sipral_handle_t)stack, &settings_value);
     {
-        jlong slots[12];
+        jlong slots[13];
         slots[0] = (jlong)settings_value.size;
         slots[1] = (jlong)settings_value.transport;
         slots[2] = (jlong)settings_value.retransmits;
@@ -894,7 +895,8 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
         slots[9] = (jlong)settings_value.offer_rtcp_mux;
         slots[10] = (jlong)settings_value.silence_suppression;
         slots[11] = (jlong)settings_value.media_stall_ms;
-        (*env)->SetLongArrayRegion(env, settings, 0, 12, slots);
+        slots[12] = (jlong)settings_value.g729_annex_b;
+        (*env)->SetLongArrayRegion(env, settings, 0, 13, slots);
     }
     return (jint)status;
 }

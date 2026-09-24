@@ -12,6 +12,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **G.729's Annex B can be switched off from C.** Rust had
+  `CodecCatalog::with_g729_annex_b` and the C ABI had nothing, so a C, Swift,
+  .NET, Kotlin or Python application could not stop an offer saying
+  `annexb=yes`. `sipral_stack_config_t::g729_annex_b` is that setting as a
+  `SipralToggle` — on by default, `SIPRAL_TOGGLE_OFF` for `annexb=no` in
+  offers and answers and no SID frames from this end — and
+  `sipral_stack_settings_t::g729_annex_b` reads it back, both appended at
+  their struct's tail.
 - **`crates/sipral-aec-webrtc` ships its own licence texts.** It sits outside
   the workspace `tools/license-gen` generates `THIRD-PARTY-LICENSES.txt`
   from, so nothing it links — the three `webrtc-audio-processing` crates,

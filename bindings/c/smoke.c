@@ -1944,6 +1944,86 @@ static void a_call_names_its_own_codecs(void)
     sipral_stack_destroy(stack);
 }
 
+/* G.729's Annex B from C: allowed unless the stack says otherwise, as RFC
+ * 4856 section 2.1.9 reads a G729 with no parameter; switched off, the offer
+ * says annexb=no; either way the settings say what it came to; and a value
+ * that is none of the three toggles builds nothing. */
+static sipral_handle_t annex_b_stack(uint32_t annex_b, sipral_status_t *created)
+{
+    static const char order[] = "G729";
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    *created = SIPRAL_STATUS_PANIC;
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for a stack Annex B is tried on", 0);
+        return SIPRAL_HANDLE_NONE;
+    }
+    sipral_stack_config_t config = fixture_stack_config(sizeof config, entropy, media_seed);
+    config.codecs = order;
+    config.codecs_len = strlen(order);
+    config.g729_annex_b = annex_b;
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    *created = sipral_stack_create(&config, &stack);
+    return stack;
+}
+
+static void g729_annex_b_is_the_stacks_to_say(void)
+{
+    static const char target[] = "sip:bob@example.com";
+    static const char media[] = "192.0.2.10:40000";
+    const struct {
+        uint32_t given;
+        uint32_t reads_back;
+        const char *offered;
+    } cases[] = {
+        { SIPRAL_TOGGLE_DEFAULT, SIPRAL_TOGGLE_ON, "a=fmtp:18 annexb=yes" },
+        { SIPRAL_TOGGLE_ON, SIPRAL_TOGGLE_ON, "a=fmtp:18 annexb=yes" },
+        { SIPRAL_TOGGLE_OFF, SIPRAL_TOGGLE_OFF, "a=fmtp:18 annexb=no" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        sipral_status_t created;
+        sipral_handle_t stack = annex_b_stack(cases[i].given, &created);
+        expect("a stack with an Annex B setting would not start",
+               created == SIPRAL_STATUS_OK);
+        if (stack == SIPRAL_HANDLE_NONE) {
+            continue;
+        }
+        sipral_stack_settings_t settings = { 0 };
+        settings.size = sizeof settings;
+        expect("the settings of an Annex B stack could not be read",
+               sipral_stack_settings(stack, &settings) == SIPRAL_STATUS_OK);
+        expect("g729_annex_b did not read back as what it came to",
+               settings.g729_annex_b == cases[i].reads_back);
+
+        sipral_account_config_t account_config = fixture_account_config(sizeof account_config);
+        sipral_handle_t account = SIPRAL_HANDLE_NONE;
+        expect("the account an Annex B offer is tried on was refused",
+               sipral_account_add(stack, &account_config, &account) == SIPRAL_STATUS_OK);
+        sipral_call_config_t call_config = { 0 };
+        call_config.size = sizeof call_config;
+        call_config.target = target;
+        call_config.target_len = strlen(target);
+        call_config.media_address = media;
+        call_config.media_address_len = strlen(media);
+        sipral_handle_t call = SIPRAL_HANDLE_NONE;
+        expect("a G.729 call would not go out",
+               sipral_call_place(stack, account, &call_config, &call, 0) == SIPRAL_STATUS_OK);
+        char invite[SIPRAL_MESSAGE_BYTES];
+        expect("the INVITE of a G.729 call never came out",
+               invite_out_of(stack, invite, sizeof invite));
+        expect("the offer did not say what the stack's Annex B setting was",
+               strstr(invite, cases[i].offered) != NULL);
+        sipral_stack_destroy(stack);
+    }
+
+    sipral_status_t refused;
+    sipral_handle_t nothing = annex_b_stack(3, &refused);
+    expect("a g729_annex_b that is none of the three toggles was taken",
+           refused == SIPRAL_STATUS_INVALID_ARGUMENT);
+    expect("the stack refused for its Annex B setting handed back a handle anyway",
+           nothing == SIPRAL_HANDLE_NONE);
+}
+
 /* -- why each codec lost -----------------------------------------------------
  *
  * D5 through the ABI: a call that settled on one format, and the list saying
@@ -2099,6 +2179,7 @@ int main(void)
     headers_cross_a_call();
     a_processor_runs_the_frames_of_a_call();
     a_call_names_its_own_codecs();
+    g729_annex_b_is_the_stacks_to_say();
     every_codec_says_what_became_of_it();
     a_call_keyed_by_a_handshake_says_so_in_its_offer();
     nothing_is_due_on_a_call_with_no_media();

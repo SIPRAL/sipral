@@ -1372,8 +1372,10 @@ frames unless their use was restricted — `annexb=no` is that restriction.
 So the parameter is each end's statement about what it will take:
 
 - **An offer** says `annexb=yes` unless the catalogue was built with
-  `CodecCatalog::with_g729_annex_b(false)`, when it says `annexb=no`. It is
-  always written out, never left to the default.
+  `CodecCatalog::with_g729_annex_b(false)` — from C,
+  `sipral_stack_config_t::g729_annex_b` set to `SIPRAL_TOGGLE_OFF`
+  (`docs/08-ffi.md`) — when it says `annexb=no`. It is always written out,
+  never left to the default.
 - **An answer** follows the offer: `annexb=yes` only where the offer said
   yes or nothing and the catalogue allows it, `annexb=no` otherwise
   (`CodecCatalog::answered_fmtp`). It is the one G.729 parameter the facade

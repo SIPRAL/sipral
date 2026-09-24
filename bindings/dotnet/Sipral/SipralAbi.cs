@@ -2221,6 +2221,23 @@ public struct SipralStackConfig
     /// How many bytes of it.
     /// </summary>
     public nuint StunServerLen;
+    /// <summary>
+    /// Whether G.729's Annex B — silence compression: SID frames and
+    /// nothing in a pause, and the comfort noise both ends make from
+    /// them — is allowed on this stack's calls, as a `SipralToggle`. On
+    /// by default, which is what `G729` means with no parameter (RFC
+    /// 4856 §2.1.9): an offer says `annexb=yes`, and an answer says
+    /// `yes` only where the offer allowed it. Off, both say `annexb=no`,
+    /// which RFC 3551 §4.5.6 makes the far end's cue to send no SID
+    /// frames, and this end sends none either. A per-call codec order
+    /// keeps the stack's setting. Nothing changes for a call that does
+    /// not run G.729, so the setting is taken whatever `codecs` names:
+    /// a call's own order may name G.729 when the stack's does not.
+    ///
+    /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public uint G729AnnexB;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -2357,6 +2374,14 @@ public struct SipralStackSettings
     /// there is no figure to give.
     /// </summary>
     public ulong MediaStallMs;
+    /// <summary>
+    /// Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
+    /// default filled in.
+    ///
+    /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public uint G729AnnexB;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>

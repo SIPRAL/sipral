@@ -424,6 +424,21 @@ record! {
         pub stun_server: *const c_char,
         /// How many bytes of it.
         pub stun_server_len: usize,
+        /// Whether G.729's Annex B — silence compression: SID frames and
+        /// nothing in a pause, and the comfort noise both ends make from
+        /// them — is allowed on this stack's calls, as a `SipralToggle`. On
+        /// by default, which is what `G729` means with no parameter (RFC
+        /// 4856 §2.1.9): an offer says `annexb=yes`, and an answer says
+        /// `yes` only where the offer allowed it. Off, both say `annexb=no`,
+        /// which RFC 3551 §4.5.6 makes the far end's cue to send no SID
+        /// frames, and this end sends none either. A per-call codec order
+        /// keeps the stack's setting. Nothing changes for a call that does
+        /// not run G.729, so the setting is taken whatever `codecs` names:
+        /// a call's own order may name G.729 when the stack's does not.
+        ///
+        /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub g729_annex_b: u32,
     }
 }
 
@@ -529,6 +544,12 @@ record! {
         /// filled in. Zero when the watchdog is off, which is the one case where
         /// there is no figure to give.
         pub media_stall_ms: u64,
+        /// Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
+        /// default filled in.
+        ///
+        /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub g729_annex_b: u32,
     }
 }
 
@@ -1148,6 +1169,7 @@ unsafe fn engine_for(
         toggled(config.offer_rtcp_mux, "offer_rtcp_mux", false)?,
         srtp_policy(config.srtp, "srtp")?,
         ice_policy(config.ice, "ice")?,
+        toggled(config.g729_annex_b, "g729_annex_b", true)?,
     )?;
     let clock = WallClock::from_unix(origin, config.media_clock_unix_seconds, 0);
     Ok(MediaEngine::new(catalog, media, clock, media_seed))
@@ -1377,6 +1399,7 @@ entry! {
                 offer_rtcp_mux: toggle_of(catalog.capabilities().rtcp_mux),
                 silence_suppression: toggle_of(state.media.silence_suppression),
                 media_stall_ms: state.media.stall_after.map_or(0, millis),
+                g729_annex_b: toggle_of(catalog.g729_annex_b()),
             })
         })?;
         unsafe { write_versioned(out_settings, settings) }?;
@@ -2108,6 +2131,7 @@ pub(crate) mod tests {
             nat: 0,
             stun_server: ptr::null(),
             stun_server_len: 0,
+            g729_annex_b: 0,
         }
     }
 
@@ -2266,6 +2290,7 @@ pub(crate) mod tests {
             offer_rtcp_mux: u32::MAX,
             silence_suppression: u32::MAX,
             media_stall_ms: u64::MAX,
+            g729_annex_b: u32::MAX,
         }
     }
 
@@ -2425,6 +2450,11 @@ pub(crate) mod tests {
         assert_eq!(read.offer_rtcp_mux, SipralToggle::Off as u32);
         assert_eq!(read.silence_suppression, SipralToggle::Off as u32);
         assert_eq!(read.media_stall_ms, 10_000, "the default watchdog");
+        assert_eq!(
+            read.g729_annex_b,
+            SipralToggle::On as u32,
+            "RFC 4856 §2.1.9: G729 with no parameter allows Annex B"
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
@@ -2440,6 +2470,7 @@ pub(crate) mod tests {
         config.offer_rtcp_mux = SipralToggle::On as u32;
         config.silence_suppression = SipralToggle::On as u32;
         config.media_stall_ms = 2_500;
+        config.g729_annex_b = SipralToggle::Off as u32;
         let (status, handle) = create(&config);
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let read = read_settings(handle);
@@ -2449,6 +2480,7 @@ pub(crate) mod tests {
         assert_eq!(read.offer_rtcp_mux, SipralToggle::On as u32);
         assert_eq!(read.silence_suppression, SipralToggle::On as u32);
         assert_eq!(read.media_stall_ms, 2_500);
+        assert_eq!(read.g729_annex_b, SipralToggle::Off as u32);
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
@@ -2528,8 +2560,10 @@ pub(crate) mod tests {
             unsafe { sipral_stack_settings(handle, ptr::null_mut()) },
             SipralStatus::InvalidArgument
         );
+        // shorter than the first published length: no header ever declared
+        // one this short, so it is no version of the struct at all
         let mut out = settings();
-        out.size = size_of::<SipralStackSettings>() - 1;
+        out.size = crate::versioned::min_size::STACK_SETTINGS - 1;
         assert_eq!(
             unsafe { sipral_stack_settings(handle, &raw mut out) },
             SipralStatus::UnsupportedVersion

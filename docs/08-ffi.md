@@ -770,6 +770,21 @@ wherever the struct is read, so a caller with one wrong learns it from the
 entry point it called rather than from a call that behaved as though it had
 not been set.
 
+**G.729's Annex B is a stack setting, appended at the tail of
+`sipral_stack_config_t`** as `g729_annex_b`, a `SipralToggle` like the other
+switches there: zero is this build's default, which is on — a `G729` line
+with no parameter allows Annex B (RFC 4856 §2.1.9), so an offer says
+`annexb=yes` — and `SIPRAL_TOGGLE_OFF` makes both offers and answers say
+`annexb=no` and keeps this end's encoder from sending SID frames. It is the
+catalogue's `CodecCatalog::with_g729_annex_b`, and it crosses the way
+`offer_dtmf` and `offer_rtcp_mux` do: a call's own `codecs` keeps it, since
+the override is derived from the stack's catalogue, and
+`sipral_stack_settings_t::g729_annex_b`, appended at that struct's tail,
+reads back what it came to. It is taken whatever `codecs` names, because a
+call's own order can name G.729 when the stack's does not; anything but the
+three toggle values is `SIPRAL_STATUS_INVALID_ARGUMENT` and builds nothing.
+`docs/05-media.md` says what Annex B does on the wire.
+
 **Why each codec lost** (D5) is the reporting half.
 `sipral_media_codec_candidate_count` and `sipral_media_codec_candidate_at`
 walk this call's own order and say what became of each entry: it won
