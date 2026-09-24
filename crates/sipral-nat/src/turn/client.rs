@@ -19,7 +19,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use crate::stun::binding::{
-    FEATURE_PASSWORD_ALGORITHMS, Key, derive_key, response_is_authentic, security_features,
+    FEATURE_PASSWORD_ALGORITHMS, Key, derive_key, is_unsigned_bad_request, response_is_authentic,
+    security_features,
 };
 use crate::stun::{
     AttributeType, BuildError, Class, DEFAULT_RC, DEFAULT_RM, DEFAULT_RTO, Integrity,
@@ -1031,6 +1032,11 @@ impl TurnClient {
             )
         {
             self.on_challenge(index, message, now);
+            return;
+        }
+        // an unsigned 400 is discarded as if it had never arrived, and the
+        // request is retransmitted as before (RFC 8489 §9.2.5)
+        if is_unsigned_bad_request(message) {
             return;
         }
         if authenticated
@@ -2050,6 +2056,79 @@ mod tests {
         assert_eq!(
             events(&mut client),
             vec![Event::Closed(TurnError::StaleNonceLoop)]
+        );
+    }
+
+    #[test]
+    fn an_unsigned_400_to_the_first_allocate_is_discarded() {
+        // RFC 8489 §9.2.5: a 400 with neither integrity attribute "MUST be
+        // discarded, as if it were never received", and the retransmissions
+        // go on. The first Allocate carries no credentials, so this is the
+        // one request whose errors are not already filtered by the key
+        let now = Instant::now();
+        let mut client = TurnClient::new(config());
+        let mut ids = Ids::new();
+        ids.feed(&mut client);
+        client.allocate(now).unwrap();
+        let first = sent(&mut client);
+        let first = Message::parse(&first).unwrap();
+
+        let mut builder = MessageBuilder::new(Class::Error, first.method(), first.transaction_id());
+        builder.add_error_code(400, b"Bad Request").unwrap();
+        assert_eq!(client.handle_input(&builder.finish(), now), Input::Consumed);
+        assert!(
+            events(&mut client).is_empty(),
+            "the allocation was given up"
+        );
+
+        // and the real answer, when it comes, is still read
+        client.handle_input(&challenge(&first, 401, NONCE), now);
+        ids.feed(&mut client);
+        let second = sent(&mut client);
+        let second = Message::parse(&second).unwrap();
+        assert_eq!(second.nonce(), Some(NONCE));
+    }
+
+    #[test]
+    fn a_nonce_rotated_without_stale_on_every_refresh_costs_one_retry_and_never_loops() {
+        // the registrar once retried a nonce that changed on every 401 for
+        // ever; here a server that answers each refresh with a fresh nonce
+        // and no 438 gets one retry per refresh, and one that refuses the
+        // retry as well ends the allocation rather than being asked again
+        let (mut client, mut ids) = ready(Instant::now());
+        for round in 0..5_u8 {
+            ids.feed(&mut client);
+            let now = client.deadline().expect("a refresh is due");
+            client.handle_timeout(now);
+            let refresh = sent(&mut client);
+            let refresh = Message::parse(&refresh).unwrap();
+            assert_eq!(refresh.method(), method::REFRESH);
+            let nonce = [b'n', round];
+            client.handle_input(&challenge(&refresh, 401, &nonce), now);
+            ids.feed(&mut client);
+            let retry = sent(&mut client);
+            let retry = Message::parse(&retry).unwrap();
+            assert_eq!(retry.nonce(), Some(&nonce[..]));
+            assert!(client.poll_transmit().is_none(), "more than one retry");
+            client.handle_input(&success(&retry, |_| {}), now);
+            assert!(client.is_allocated());
+        }
+
+        ids.feed(&mut client);
+        let now = client.deadline().expect("a refresh is due");
+        client.handle_timeout(now);
+        let refresh = sent(&mut client);
+        let refresh = Message::parse(&refresh).unwrap();
+        client.handle_input(&challenge(&refresh, 401, b"fresh-one"), now);
+        ids.feed(&mut client);
+        let retry = sent(&mut client);
+        let retry = Message::parse(&retry).unwrap();
+        let _refreshed = events(&mut client);
+        client.handle_input(&challenge(&retry, 401, b"fresh-two"), now);
+        assert!(client.poll_transmit().is_none(), "a third request went out");
+        assert_eq!(
+            events(&mut client),
+            vec![Event::Closed(TurnError::Unauthenticated)]
         );
     }
 

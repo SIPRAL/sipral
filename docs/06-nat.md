@@ -256,7 +256,9 @@ The decisions, and why each one is what it is:
   answer carrying the id of a request this end sent. The ids come from the
   media engine's generator, the one SRTP keys come from: an attacker off the
   path who could guess one could answer first and have this end advertise an
-  address of the attacker's choosing, in every `Contact` and every offer.
+  address of the attacker's choosing, in every `Contact` and every offer. An
+  unsigned 400 is not an answer: RFC 8489 §9.2.5 has it discarded and the
+  request retransmitted, and so it is.
 
 ## TURN
 
@@ -327,8 +329,11 @@ What it does, in the order a session meets it:
   rather than RFC 8445 §14.3's formula with the extra factor N, which grows with
   the square of the checklist and reaches minutes at the default pair limit;
   §14.3 allows other mechanisms above the floor.
-- **Responses.** Symmetric, or the pair fails. A success, a 487 and a 403 are
-  believed only when signed with the peer's password. A mapped address nobody
+- **Responses.** Symmetric, or the pair fails. A response of any class is
+  believed only when signed with the peer's password: an unsigned one, a 400
+  or a 401 included, is discarded as if it never came (RFC 8489 §9.1.4),
+  because anybody who saw the check could have written it, and the check
+  retransmits until a signed answer or its timeout. A mapped address nobody
   knew is a peer-reflexive local candidate; a check from a source nobody knew
   is a peer-reflexive remote candidate and triggers a check back on the same
   pair. A check that arrives before the answer is answered at once, and its

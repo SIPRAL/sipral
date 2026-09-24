@@ -431,6 +431,42 @@ fn an_unsigned_487_is_not_believed() {
 }
 
 #[test]
+fn an_unsigned_error_of_any_code_is_not_believed() {
+    // RFC 8489 §9.1.4: a response to a request sent under a short-term
+    // credential, without an integrity attribute that checks out, "MUST be
+    // discarded, as if it had never been received". Anyone who has seen the
+    // request can write one of these from the peer's address; none of them
+    // may fail the pair
+    let (mut agent, stream, mut ids, now) = gathered(Role::Controlling, config(false, false));
+    agent
+        .set_remote(
+            stream,
+            &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    ids.feed(&mut agent);
+    agent.handle_timeout(now);
+    let (_, id) = requests(&drain(&mut agent))[0];
+    for code in [
+        error_code::BAD_REQUEST,
+        error_code::UNAUTHENTICATED,
+        error_code::UNKNOWN_ATTRIBUTE,
+        500,
+    ] {
+        let mut builder = MessageBuilder::new(Class::Error, Method::BINDING, id);
+        builder.add_error_code(code, b"no").expect("code");
+        builder.add_fingerprint().expect("fingerprint");
+        agent.handle_datagram(address(LOCAL), address(PEER), &builder.finish(), now);
+        assert_eq!(
+            agent.pairs[0].state,
+            PairState::InProgress,
+            "an unsigned {code} failed the pair"
+        );
+    }
+}
+
+#[test]
 fn a_flood_of_sources_is_held_to_the_remote_candidate_and_pair_limits() {
     let limits = IceConfig {
         max_remote_candidates: 8,

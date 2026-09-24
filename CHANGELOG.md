@@ -572,6 +572,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   never wrote. After MESSAGE-INTEGRITY-SHA256 only FINGERPRINT counts now
   (RFC 8489 §14.6); after MESSAGE-INTEGRITY, MESSAGE-INTEGRITY-SHA256 and
   FINGERPRINT still do (§14.5).
+- **An unsigned error no longer fails an ICE check, and an unsigned 400 no
+  longer ends a STUN or TURN transaction.** The full ICE agent believed a
+  400, a 401, a 420 or any error other than 487 and 403 without a
+  MESSAGE-INTEGRITY, so anyone who saw a check could fail its pair from the
+  peer's address without the password; RFC 8489 §9.1.4 discards every
+  response that does not check out, and now so does the agent, whose check
+  retransmits until a signed answer or its timeout. `BindingClient` — the
+  STUN mappings of `sipral::Mappings` — and `TurnClient` ended their first,
+  unauthenticated request on an unsigned 400; §9.2.5 has it discarded and
+  the request retransmitted, which is what happens now.
 - **A resume asked for while the hold was still on its way is no longer
   accepted and lost.** `hold` and `resume` compared the request against the
   hold state last agreed, which a hold whose re-INVITE had not been answered

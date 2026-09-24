@@ -546,22 +546,14 @@ impl IceAgent {
             return;
         }
         let code = message.error_code().map(|error| error.code());
-        // a success, a 487 and a 403 are only believed signed with the peer's
-        // password; the errors a server answers before it can know a key
-        // (400, 401, 420) arrive unsigned by design
-        let signed = signed_with(message, &check.key);
-        let believed = match message.class() {
-            Class::Success => signed,
-            Class::Error => {
-                signed
-                    || !matches!(
-                        code,
-                        Some(error_code::ROLE_CONFLICT | error_code::FORBIDDEN) | None
-                    )
-            }
-            Class::Request | Class::Indication => false,
-        };
-        if !believed {
+        // "If the value does not match, or if both MESSAGE-INTEGRITY and
+        // MESSAGE-INTEGRITY-SHA256 are absent [...] the response MUST be
+        // discarded, as if it had never been received" (RFC 8489 §9.1.4),
+        // errors included: a 400 or a 401 a peer answers before it knows a
+        // key is indistinguishable from one written by anybody who saw the
+        // request, and believing it would let them fail the pair. The check
+        // retransmits and, if nothing signed ever comes, times out
+        if !signed_with(message, &check.key) {
             return;
         }
         let check = self.checks.swap_remove(index);

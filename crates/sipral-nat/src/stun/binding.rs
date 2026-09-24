@@ -396,6 +396,14 @@ impl BindingClient {
         {
             return self.on_challenge(&message);
         }
+        // "If the response is an error response with an error code of 400
+        // (Bad Request) and does not contain either the MESSAGE-INTEGRITY or
+        // MESSAGE-INTEGRITY-SHA256 attribute, then the response MUST be
+        // discarded, as if it were never received" (§9.2.5): the request
+        // goes on being retransmitted
+        if is_unsigned_bad_request(&message) {
+            return Progress::Idle;
+        }
 
         if let Some(key) = self.key.clone()
             && !response_is_authentic(&message, &key)
@@ -660,6 +668,16 @@ pub(crate) fn response_is_authentic(message: &Message<'_>, key: &Key) -> bool {
         Integrity::Absent => {}
     }
     message.verify_integrity(key.as_bytes()) == Integrity::Valid
+}
+
+/// A 400 with neither integrity attribute, which a client discards rather
+/// than acting on (§9.2.5).
+pub(crate) fn is_unsigned_bad_request(message: &Message<'_>) -> bool {
+    message.class() == Class::Error
+        && message
+            .error_code()
+            .is_some_and(|error| error.code() == error_code::BAD_REQUEST)
+        && !message.has_integrity()
 }
 
 fn is_stale_nonce(message: &Message<'_>) -> bool {
@@ -1218,6 +1236,28 @@ mod tests {
         assert_eq!(
             client.on_datagram(&response),
             Progress::Failed(Failure::Rejected { code: 500 })
+        );
+    }
+
+    #[test]
+    fn an_unsigned_400_is_discarded_and_the_transaction_runs_on() {
+        // "If the response is an error response with an error code of 400
+        // (Bad Request) and does not contain either the MESSAGE-INTEGRITY or
+        // MESSAGE-INTEGRITY-SHA256 attribute, then the response MUST be
+        // discarded, as if it were never received" (RFC 8489 §9.2.5)
+        let start = Instant::now();
+        let mut client = client();
+        client.start(identifier(1), start);
+
+        let mut builder = MessageBuilder::new(Class::Error, Method::BINDING, identifier(1));
+        builder.add_error_code(400, b"Bad Request").unwrap();
+        assert_eq!(client.on_datagram(&builder.finish()), Progress::Idle);
+        assert!(client.deadline().is_some(), "the transaction was ended");
+
+        let response = success(identifier(1), "198.51.100.7:53412");
+        assert_eq!(
+            client.on_datagram(&response),
+            Progress::Mapped(address("198.51.100.7:53412"))
         );
     }
 
