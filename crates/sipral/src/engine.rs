@@ -79,7 +79,7 @@ use sipral_ua::{
 use zeroize::Zeroizing;
 
 use crate::clock::WallClock;
-use crate::codec::{Codec, CodecCandidate, CodecCatalog, Keyed};
+use crate::codec::{Codec, CodecCandidate, CodecCatalog, Keyed, annex_b_allowed};
 use crate::counters::Counters;
 #[cfg(feature = "dtls")]
 use crate::dtls::Identity;
@@ -2070,6 +2070,10 @@ impl MediaEngine {
                 return;
             }
         };
+        // the catalogue's own word first: a description this layer did not
+        // write — a re-offer the user agent answered by echoing it — can say
+        // yes where this end would have said no
+        let annex_b = managed.catalog.g729_annex_b() && annex_b_agreed(local, remote, &plan);
         // D5: recorded here, at the point the negotiation is worked out, from
         // the far end's own description and this call's own catalogue —
         // never reconstructed later from state that may have moved on
@@ -2106,7 +2110,7 @@ impl MediaEngine {
             // one already running is not a change to report
             if slot.session.codec() == codec {
                 let unchanged = *slot.session.plan() == plan;
-                let adopted = slot.session.adopt(&plan, candidates, now);
+                let adopted = slot.session.adopt(&plan, candidates, annex_b, now);
                 drop(slot);
                 match adopted {
                     Ok(()) if unchanged => {}
@@ -2127,7 +2131,7 @@ impl MediaEngine {
         }
         // a different codec needs a different encoder, a different decoder
         // and a different frame length, so it needs a different session
-        self.start(call, &plan, codec, candidates, now);
+        self.start(call, &plan, codec, annex_b, candidates, now);
     }
 
     /// Open the stream for a plan, or carry the one that is running onto a
@@ -2142,6 +2146,7 @@ impl MediaEngine {
         call: CallHandle,
         plan: &MediaPlan,
         codec: Codec,
+        annex_b: bool,
         candidates: Vec<CodecCandidate>,
         now: Instant,
     ) {
@@ -2157,7 +2162,7 @@ impl MediaEngine {
             Some(held) => {
                 let mut slot = share::lock(&held);
                 slot.session
-                    .reformat(plan, frame_length, &config, candidates, now)
+                    .reformat(plan, frame_length, &config, candidates, annex_b, now)
             }
             None => {
                 #[cfg(feature = "dtls")]
@@ -2188,6 +2193,7 @@ impl MediaEngine {
                         handshake,
                         #[cfg(feature = "ice")]
                         ice,
+                        annex_b,
                         now,
                     },
                 )
@@ -2704,12 +2710,13 @@ fn take_stream(
     let names: Vec<&str> = formats.iter().map(String::as_str).collect();
     let mut accepted = AcceptedStream::in_offer_order(address.port(), offered, &names)
         .with_direction(Direction::SendRecv);
-    // a format whose parameters this end states whatever the offer said —
-    // G.729's `annexb=no` — gets its own line, which the answer then writes
-    // in place of the offer's
+    // a format whose parameters this end states rather than echoes —
+    // G.729's `annexb`, which follows the offer only as far as this
+    // catalogue allows — gets its own line, which the answer then writes in
+    // place of the offer's
     for line in formats
         .iter()
-        .filter_map(|format| stated_fmtp(offered, format))
+        .filter_map(|format| stated_fmtp(catalog, offered, format))
     {
         accepted = accepted.with_attribute(line);
     }
@@ -2734,12 +2741,40 @@ fn take_stream(
 
 /// The `a=fmtp` line this end writes for one offered format in its answer,
 /// when the codec behind it has parameters this end states rather than
-/// echoes ([`Codec::answer_fmtp`]).
-fn stated_fmtp(offered: &MediaDescription, format: &str) -> Option<Attribute> {
+/// echoes ([`CodecCatalog::answered_fmtp`]).
+fn stated_fmtp(
+    catalog: &CodecCatalog,
+    offered: &MediaDescription,
+    format: &str,
+) -> Option<Attribute> {
     let payload: u8 = format.parse().ok()?;
     let rtpmap = offered.rtpmap(payload).or_else(|| static_rtpmap(payload))?;
-    let fmtp = Codec::of(&NegotiatedCodec::new(rtpmap))?.answer_fmtp()?;
+    let codec = Codec::of(&NegotiatedCodec::new(rtpmap))?;
+    let fmtp = catalog.answered_fmtp(codec, offered.fmtp(payload))?;
     Some(Attribute::with_value("fmtp", &format!("{payload} {fmtp}")))
+}
+
+/// Whether both descriptions of a G.729 stream allowed Annex B, which is
+/// what turns its encoder's DTX on: each end's `annexb` says what that end
+/// will take, and one that says `no` is not sent SID frames. `false` for
+/// every other codec.
+fn annex_b_agreed(
+    local: &SessionDescription,
+    remote: &SessionDescription,
+    plan: &MediaPlan,
+) -> bool {
+    if Codec::of(&plan.codec) != Some(Codec::G729) {
+        return false;
+    }
+    let payload = plan.codec.payload();
+    let said = |description: &SessionDescription| {
+        description
+            .media
+            .first()
+            .and_then(|stream| stream.fmtp(payload))
+            .map(str::to_owned)
+    };
+    annex_b_allowed(said(local).as_deref()) && annex_b_allowed(said(remote).as_deref())
 }
 
 /// The formats of an offer `catalog` would keep, and whether any of them is a
@@ -3087,7 +3122,7 @@ mod answer_parameters {
     //! An offer of G.729 from a peer that is not this stack: every form a
     //! real one writes it in, including the one with no parameters at all,
     //! which the two-stack harness never produces because this end's own
-    //! offers always carry `annexb=no`.
+    //! offers always say `annexb` one way or the other.
 
     use std::net::SocketAddr;
 
@@ -3109,25 +3144,36 @@ mod answer_parameters {
             .expect("the offer is answered")
     }
 
-    /// RFC 3555 §4.1.9 reads G.729 with no `annexb` as G.729 with Annex B.
-    /// The answer says no whatever the offer said, on one line of its own.
+    /// RFC 4856 §2.1.9 reads G.729 with no `annexb` as G.729 with Annex B.
+    /// The answer follows the offer — `yes` where it said yes or nothing,
+    /// `no` where it said no — on one line of its own, and says `no` to
+    /// every offer when the catalogue has Annex B off.
     #[test]
-    fn an_answer_that_keeps_g729_says_it_takes_no_annex_b() {
+    fn an_answer_that_keeps_g729_follows_the_offer_on_annex_b() {
         let catalog = CodecCatalog::with_order(&["G729", "PCMU"]).expect("an order");
-        for stream in [
-            "m=audio 40002 RTP/AVP 18 0\r\n",
-            "m=audio 40002 RTP/AVP 18 0\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=yes\r\n",
-            "m=audio 40002 RTP/AVP 18 0\r\na=fmtp:18 annexb=no\r\n",
+        let off = catalog.clone().with_g729_annex_b(false);
+        for (stream, said) in [
+            ("m=audio 40002 RTP/AVP 18 0\r\n", "annexb=yes"),
+            (
+                "m=audio 40002 RTP/AVP 18 0\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=yes\r\n",
+                "annexb=yes",
+            ),
+            (
+                "m=audio 40002 RTP/AVP 18 0\r\na=fmtp:18 annexb=no\r\n",
+                "annexb=no",
+            ),
         ] {
-            let answer = answered(&catalog, stream);
-            let media = answer.media.first().expect("one stream");
-            assert_eq!(media.formats, ["18", "0"], "{stream}");
-            assert_eq!(media.fmtp(18), Some("annexb=no"), "{stream}");
-            assert_eq!(
-                media.attributes.iter().filter(|a| a.name == "fmtp").count(),
-                1,
-                "{stream}"
-            );
+            for (catalog, said) in [(&catalog, said), (&off, "annexb=no")] {
+                let answer = answered(catalog, stream);
+                let media = answer.media.first().expect("one stream");
+                assert_eq!(media.formats, ["18", "0"], "{stream}");
+                assert_eq!(media.fmtp(18), Some(said), "{stream}");
+                assert_eq!(
+                    media.attributes.iter().filter(|a| a.name == "fmtp").count(),
+                    1,
+                    "{stream}"
+                );
+            }
         }
     }
 
@@ -3265,6 +3311,7 @@ mod counter_wiring {
                 handshake: None,
                 #[cfg(feature = "ice")]
                 ice: None,
+                annex_b: false,
                 now,
             },
         )

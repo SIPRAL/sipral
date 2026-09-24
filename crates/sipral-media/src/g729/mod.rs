@@ -259,6 +259,15 @@ impl Decoder {
         self.noise(None)
     }
 
+    /// Whether the far end is in an Annex B pause: the last frame was a SID
+    /// frame, a frame not sent, or a frame lost in a pause. A frame that does
+    /// not arrive now is one the far end did not send (B.4.5), and
+    /// [`Decoder::untransmitted`] is what plays for it.
+    #[must_use]
+    pub const fn in_pause(&self) -> bool {
+        !self.after_speech
+    }
+
     /// Produce eighty samples for a frame that never arrived. After speech
     /// it is concealed as speech (§4.4, A.4.4): the last filter repeated,
     /// the last delay stretched by a sample a subframe, the gains decaying,
@@ -703,7 +712,9 @@ mod tests {
         for frame in arbitrary_frames(20, 0x5EED_0004) {
             decoder.decode(&frame);
         }
+        assert!(!decoder.in_pause());
         decoder.decode_sid(Sid::from_octets([0x5a, 0x3c]));
+        assert!(decoder.in_pause());
         let mut lost = decoder.clone();
         let mut untransmitted = decoder.clone();
         for _ in 0..5 {

@@ -275,6 +275,10 @@ pub(crate) struct Start {
     /// and already told what the peer said.
     #[cfg(feature = "ice")]
     pub(crate) ice: Option<crate::ice::Ice>,
+    /// Whether both descriptions allowed G.729's Annex B, so that the
+    /// encoder sends SID frames and nothing in the pauses. Meaningless for
+    /// any other codec.
+    pub(crate) annex_b: bool,
     pub(crate) now: Instant,
 }
 
@@ -307,6 +311,10 @@ pub struct MediaSession {
     activity: Activity,
     inbound_voice: Vad,
     outbound_voice: Vad,
+    /// Whether the configuration asked for silence suppression, and whether
+    /// this end's own detector does it — which it does not when G.729's
+    /// Annex B is doing it instead.
+    silence_suppression: bool,
     suppressing: bool,
     noise: Generator,
     recorder: Option<Recorder>,
@@ -446,6 +454,7 @@ impl MediaSession {
             handshake,
             #[cfg(feature = "ice")]
             ice,
+            annex_b,
             now,
         } = start;
         let agreed = Codec::of_plan(plan)?;
@@ -455,7 +464,9 @@ impl MediaSession {
                 most: MAX_RENDER_DELAY,
             });
         }
-        let coder = Coder::new(agreed, frame_ms)?;
+        let mut coder = Coder::new(agreed, frame_ms)?;
+        coder.set_annex_b(annex_b);
+        let discontinuous = coder.annex_b();
         let frame_ticks = agreed.frame_ticks(frame_ms);
         let stream = StreamConfig {
             ssrc: identity.ssrc,
@@ -465,7 +476,10 @@ impl MediaSession {
             sequence: identity.sequence,
             timestamp: identity.timestamp,
             remote: plan.remote,
-            silence_suppression: config.silence_suppression,
+            // a stream that stops sending in its pauses, whether this end's
+            // own suppression or Annex B's DTX does it, marks each talk
+            // spurt's first packet
+            silence_suppression: config.silence_suppression || discontinuous,
             playout: BufferConfig::new(frame_ticks),
             cname: config
                 .cname
@@ -512,7 +526,10 @@ impl MediaSession {
             activity: Activity::Speech,
             inbound_voice: Vad::new(agreed.sample_rate()),
             outbound_voice: Vad::new(agreed.sample_rate()),
-            suppressing: config.silence_suppression,
+            // Annex B has its own detector, and suppressing frames before it
+            // hears them would leave it deciding on half a conversation
+            silence_suppression: config.silence_suppression,
+            suppressing: config.silence_suppression && !discontinuous,
             noise: Generator::new(),
             recorder: None,
             echo: None,
@@ -1249,18 +1266,10 @@ impl MediaSession {
             Pull::Packet(frame) if frame.payload_type == payload_type => {
                 match coder.decode(frame.payload, room) {
                     Ok(Decoded::Audio(_)) => Playback::Packet,
-                    // G.729's SID frame: whatever speech came before it, then
-                    // the noise it starts, which the same generator a CN
-                    // payload feeds goes on playing through the pause
-                    Ok(Decoded::Silenced(written, described)) => {
-                        noise.received(described);
-                        noise.fill(room.get_mut(written..).unwrap_or_default());
-                        if written == 0 {
-                            Playback::ComfortNoise
-                        } else {
-                            Playback::Packet
-                        }
-                    }
+                    // a G.729 payload of a SID frame alone: the codec's own
+                    // comfort noise, which it carries on through the frames
+                    // the far end then does not send (below)
+                    Ok(Decoded::Noise(_)) => Playback::ComfortNoise,
                     // a payload the codec refuses is a corrupt one, and the
                     // right thing to play for it is the frame it displaced
                     Ok(Decoded::Unreadable) | Err(_) => conceal(coder, room),
@@ -1290,9 +1299,21 @@ impl MediaSession {
                 }
                 conceal(coder, room)
             }
-            Pull::Conceal | Pull::Stretch => conceal(coder, room),
+            Pull::Conceal => conceal(coder, room),
+            // a pause being made longer, or one the far end is keeping: a
+            // G.729 far end in an Annex B pause sent nothing on purpose, and
+            // its decoder carries the comfort noise on (B.4.5)
+            Pull::Stretch => {
+                if coder.pause(room).is_some() {
+                    Playback::ComfortNoise
+                } else {
+                    conceal(coder, room)
+                }
+            }
             Pull::Empty => {
-                if noise.is_silent() {
+                if coder.pause(room).is_some() {
+                    Playback::ComfortNoise
+                } else if noise.is_silent() {
                     room.fill(0);
                     Playback::Silence
                 } else {
@@ -1408,9 +1429,22 @@ impl MediaSession {
             self.rtp.suppress(self.frame_ticks);
             return Ok(None);
         }
-        let written = self.coder.encode(samples, &mut self.payload)?;
+        let sent = self.coder.encode(samples, &mut self.payload)?;
+        let written = sent.octets;
+        // G.729 with Annex B: a frame the DTX sent nothing for is time that
+        // passed, as a suppressed one is, and so is the start of a frame
+        // whose payload begins after a pause ended inside it
+        if written == 0 {
+            self.rtp.suppress(self.frame_ticks);
+            return Ok(None);
+        }
+        let skipped = ticks_in(sent.skipped, self.frame_ticks, self.coder.frame_samples());
+        if skipped > 0 {
+            self.rtp.suppress(skipped);
+        }
         let payload = self.payload.get(..written).unwrap_or_default();
-        let length = match self.rtp.send(payload, self.frame_ticks, &mut self.rtp_out) {
+        let ticks = self.frame_ticks.saturating_sub(skipped);
+        let length = match self.rtp.send(payload, ticks, &mut self.rtp_out) {
             Ok(length) => length,
             // a stream that agreed to be secured and is still waiting for its
             // keys drops the frame rather than queueing it. A frame held for
@@ -1832,9 +1866,20 @@ impl MediaSession {
         &mut self,
         plan: &MediaPlan,
         candidates: Vec<CodecCandidate>,
+        annex_b: bool,
         now: Instant,
     ) -> Result<(), MediaError> {
         let (fresh_local, fresh_remote) = Self::rekeyed(&self.plan, plan)?;
+        // a re-negotiation that allowed or refused G.729's Annex B from here
+        // on: the encoder starts again with its DTX on or off, and the
+        // stream's marker bit and this end's own detector follow it
+        if self.coder.annex_b() != annex_b {
+            self.coder.set_annex_b(annex_b);
+            let discontinuous = self.coder.annex_b();
+            self.rtp
+                .set_silence_suppression(self.silence_suppression || discontinuous);
+            self.suppressing = self.silence_suppression && !discontinuous;
+        }
         if plan.remote != self.plan.remote {
             self.rtp.relocate(plan.remote);
             // a far end that moved its media address has almost always
@@ -1916,6 +1961,7 @@ impl MediaSession {
         frame_ms: u32,
         config: &MediaConfig,
         candidates: Vec<CodecCandidate>,
+        annex_b: bool,
         now: Instant,
     ) -> Result<(), MediaError> {
         // open()'s own order, and all of it before the first assignment
@@ -1926,7 +1972,9 @@ impl MediaSession {
                 most: MAX_RENDER_DELAY,
             });
         }
-        let coder = Coder::new(agreed, frame_ms)?;
+        let mut coder = Coder::new(agreed, frame_ms)?;
+        coder.set_annex_b(annex_b);
+        let discontinuous = coder.annex_b();
         let (fresh_local, fresh_remote) = Self::rekeyed(&self.plan, plan)?;
 
         let was_rate = self.sample_rate();
@@ -1940,7 +1988,7 @@ impl MediaSession {
             accepted: accepted(plan),
             clock_rate: plan.codec.clock_rate(),
             remote: plan.remote,
-            silence_suppression: config.silence_suppression,
+            silence_suppression: config.silence_suppression || discontinuous,
             playout: BufferConfig::new(frame_ticks),
         });
         if moved {
@@ -1977,7 +2025,8 @@ impl MediaSession {
         self.activity = Activity::Speech;
         self.inbound_voice = Vad::new(rate);
         self.outbound_voice = Vad::new(rate);
-        self.suppressing = config.silence_suppression;
+        self.silence_suppression = config.silence_suppression;
+        self.suppressing = config.silence_suppression && !discontinuous;
         self.noise = Generator::new();
         self.stall_after = config.stall_after;
         self.heard = plan.dtmf.map(EventReceiver::new);
@@ -2459,6 +2508,16 @@ const fn sibling_law(codec: Codec) -> Option<(u8, Law)> {
 }
 
 /// Conceal one frame, whichever concealment this codec has.
+/// `samples` of a frame of `frame_samples` as RTP ticks, when the frame is
+/// `frame_ticks` long: the two differ for a codec whose clock is not its
+/// sampling rate, and for G.729, the only codec that skips any, they are the
+/// same.
+fn ticks_in(samples: usize, frame_ticks: u32, frame_samples: usize) -> u32 {
+    let samples = u64::try_from(samples).unwrap_or(u64::MAX);
+    let whole = u64::try_from(frame_samples).unwrap_or(1).max(1);
+    u32::try_from(samples.saturating_mul(u64::from(frame_ticks)) / whole).unwrap_or(frame_ticks)
+}
+
 fn conceal(coder: &mut Coder, room: &mut [i16]) -> Playback {
     if coder.conceal(room).is_err() {
         room.fill(0);

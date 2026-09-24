@@ -1821,6 +1821,16 @@ fn run(
         "   ({} sent, {} back, {} audible, {} refused",
         heard.sent, heard.received, heard.audible, heard.refused
     );
+    // G.729's Annex B, where the call used it: SID frames out and back, and
+    // the pauses played as the codec's comfort noise
+    if heard.sid_sent > 0 || heard.sid_received > 0 {
+        use std::fmt::Write as _;
+        let _ = write!(
+            said,
+            "; SID {} sent, {} back, {} frames of comfort noise",
+            heard.sid_sent, heard.sid_received, heard.comfort
+        );
+    }
     if let Some(report) = quality {
         use std::fmt::Write as _;
         let _ = write!(said, "; {}", report.summary());
@@ -2199,6 +2209,7 @@ mod tests {
             received: 0,
             audible: 0,
             refused: 3,
+            ..Heard::default()
         };
         for flow in [Flow::Call, Flow::Srtp] {
             let script = a_call_that_did_everything_but_carry_audio(flow);
@@ -2240,6 +2251,7 @@ mod tests {
             received: 150,
             audible: 40,
             refused: 1,
+            ..Heard::default()
         };
         let verdict = script.verdict(before, true);
         assert!(

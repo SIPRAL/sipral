@@ -241,6 +241,7 @@ mod tests {
                 handshake: None,
                 #[cfg(feature = "ice")]
                 ice: None,
+                annex_b: false,
                 now,
             },
         )

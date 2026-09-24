@@ -13,7 +13,9 @@
 //! packets accepted, packets refused, and frames loud enough to be the tone
 //! rather than concealment. Those four numbers are what the lab's result
 //! line has always printed, and they still come from watching the session
-//! from outside it, the same way a real audio device would.
+//! from outside it, the same way a real audio device would. A G.729 call
+//! that uses Annex B adds three: the SID frames sent and taken back, and the
+//! frames played as comfort noise.
 
 use std::env;
 use std::io::ErrorKind;
@@ -130,6 +132,28 @@ pub(crate) struct Heard {
     pub(crate) audible: u32,
     /// Datagrams `MediaSession::receive` reported as [`Arrival::Dropped`].
     pub(crate) refused: u32,
+    /// G.729 packets this end sent and took back whose payload ended in an
+    /// Annex B SID frame, and frames `MediaSession::playback` reported as
+    /// [`Playback::ComfortNoise`]: what says Annex B crossed the far end.
+    pub(crate) sid_sent: u32,
+    pub(crate) sid_received: u32,
+    pub(crate) comfort: u32,
+}
+
+/// G.729's static payload type (RFC 3551 table 4).
+const G729: u8 = 18;
+
+/// Whether an RTP datagram is G.729 whose payload ends in an Annex B SID
+/// frame: ten octets a speech frame and two for the SID (RFC 3551 §4.5.6),
+/// behind this harness's own fixed twelve-octet header — the facade writes
+/// neither contributing sources nor an extension.
+fn carries_sid(datagram: &[u8]) -> bool {
+    let is_g729 = datagram.get(1).is_some_and(|octet| octet & 0x7f == G729);
+    is_g729
+        && datagram
+            .len()
+            .checked_sub(12)
+            .is_some_and(|payload| payload % 10 == 2)
 }
 
 /// One call's RTP socket, and what has crossed it.
@@ -225,6 +249,9 @@ impl Media {
                     match session.receive(datagram, from, now) {
                         Arrival::Queued => {
                             self.heard.received = self.heard.received.saturating_add(1);
+                            if carries_sid(datagram) {
+                                self.heard.sid_received = self.heard.sid_received.saturating_add(1);
+                            }
                         }
                         Arrival::Dropped(_) => {
                             self.heard.refused = self.heard.refused.saturating_add(1);
@@ -279,6 +306,9 @@ impl Media {
                     .is_ok()
             {
                 self.heard.sent = self.heard.sent.saturating_add(1);
+                if carries_sid(datagram.payload) {
+                    self.heard.sid_sent = self.heard.sid_sent.saturating_add(1);
+                }
             }
             self.next += PACE;
         }
@@ -290,6 +320,9 @@ impl Media {
                     match session.receive(datagram, from, now) {
                         Arrival::Queued => {
                             self.heard.received = self.heard.received.saturating_add(1);
+                            if carries_sid(datagram) {
+                                self.heard.sid_received = self.heard.sid_received.saturating_add(1);
+                            }
                         }
                         Arrival::Dropped(_) => {
                             self.heard.refused = self.heard.refused.saturating_add(1);
@@ -316,6 +349,9 @@ impl Media {
             let outcome = session.playback(room);
             if matches!(outcome, Playback::Packet) && loudness(room) >= AUDIBLE {
                 self.heard.audible = self.heard.audible.saturating_add(1);
+            }
+            if matches!(outcome, Playback::ComfortNoise) {
+                self.heard.comfort = self.heard.comfort.saturating_add(1);
             }
             if let Some(gate) = self.quality.as_mut() {
                 gate.observe(outcome, room, rate);

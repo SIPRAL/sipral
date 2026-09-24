@@ -1365,32 +1365,59 @@ frame it displaced is concealed. A lost frame is concealed by the codec's
 own §4.4 concealment, inside the decoder's state, rather than by the
 waveform concealer G.711 and G.722 use.
 
-**Annex B is not implemented, and every description says so.** RFC 3555
-§4.1.9 (RFC 4856 §2.1.9 after it) reads a `G729` line with no `annexb`
-parameter as `annexb=yes`, and RFC 3551 has a receiver accept comfort-noise
-frames unless their use was restricted. So this stack writes `a=fmtp:18
-annexb=no` in its offers and in its answers, whatever the offer said —
-`Codec::answer_fmtp` is the one parameter the facade states rather than
-echoes. It never sends a SID frame. A peer that sends one anyway is not
-played as garbage or as a gap: the SID starts a pause at the level of the
-last frame decoded before it, each later SID of the same pause moves that
-level by the change in energy it carries (B.4.2.1's decibels, the one part
-of the frame read), and the facade's own RFC 3389 generator plays it, on
-through the silence the far end then keeps, exactly as a CN payload would.
-The noise is flat: Annex B's comfort noise is shaped by the SID's spectrum,
-and that part of the frame, like the rest of Annex B, is not decoded. One
-gap in the statement: a re-offer inside a call that the user agent answers
-by itself (a hold, say) echoes the offer's `annexb`, since that layer does
-not know codecs; the call then still sends no SID, and plays any it gets
-the same way.
+**Annex B is used where both ends allow it.** RFC 4856 §2.1.9 (RFC 3555
+§4.1.9 before it) reads a `G729` line with no `annexb` parameter as
+`annexb=yes`, and RFC 3551 §4.5.6 has a receiver accept comfort-noise
+frames unless their use was restricted — `annexb=no` is that restriction.
+So the parameter is each end's statement about what it will take:
+
+- **An offer** says `annexb=yes` unless the catalogue was built with
+  `CodecCatalog::with_g729_annex_b(false)`, when it says `annexb=no`. It is
+  always written out, never left to the default.
+- **An answer** follows the offer: `annexb=yes` only where the offer said
+  yes or nothing and the catalogue allows it, `annexb=no` otherwise
+  (`CodecCatalog::answered_fmtp`). It is the one G.729 parameter the facade
+  states rather than echoes.
+- **This end's encoder** uses Annex B — a SID frame when a pause starts or
+  its background changes, nothing while it goes on — only where the
+  catalogue allows it and both descriptions did, since each says what that
+  end will receive. A re-negotiation that changes either description
+  restarts the encoder with Annex B on or off.
+- **This end's decoder** plays a SID frame whatever was said: the codec's
+  own comfort noise, shaped by the SID's spectrum at its level, and carried
+  on through every frame the far end then does not send and through a lost
+  one inside the pause (B.4.5). The jitter buffer running dry in a pause is
+  that case, and plays as comfort noise rather than as silence.
+
+On the wire, a payload is what RFC 3551 §4.5.6 allows: speech frames and at
+most one SID frame after them. With DTX on, a frame length of several G.729
+frames can straddle a transition, and each case is cut this way: frames with
+nothing to send before the first that has something are left out of the
+payload and its timestamp moved past them; a SID frame followed by speech in
+the same packet — a pause ten milliseconds long — gives way to the speech;
+after a SID frame nothing more is sent in that packet. A packet with nothing
+to send is not sent, the RTP timestamp still moving by its length, and the
+first packet after one carries the marker bit (RFC 3551 §4.1), whether or
+not the application asked for silence suppression; the facade's own
+suppression stands aside on a stream whose encoder does Annex B, since the
+detector has to hear every frame.
+
+One gap remains in what a description says, and it is harmless now: a
+re-offer inside a call that the user agent answers by itself (a hold, say)
+echoes the offer's `annexb`, because that layer does not know codecs. With
+Annex B allowed — the default — that echo is exactly what the facade would
+have written. With it off, the echo can say `yes` where the facade would
+have said `no`; the answer then permits the far end to send SID frames,
+which this end decodes anyway, and this end's encoder still does not use
+Annex B, since the catalogue's word is asked first.
 
 What is established about it, in three tiers:
 
 | | What | How |
 |---|---|---|
-| Bit-exact | Annex A's decoder and encoder | every ITU Annex A conformance stream and input, bit for bit (above) |
+| Bit-exact | Annex A's decoder and encoder, and Annex B over them: the voice activity detector, the DTX and SID, the comfort noise | every ITU Annex A and Annex B conformance stream and input, bit for bit (above) |
 | Interoperable | a call offered G.729 alone, through the lab's Asterisk to its echo extension and back | `interop/harness`'s own `g729` flow: this end's encoder, Asterisk passing the frames through untranscoded, this end's decoder hearing the tone |
-| Not implemented | Annex B: the voice activity detector, discontinuous transmission, the SID's spectrum and Annex B's comfort-noise generator | a SID frame received is played as level-matched flat noise; none is sent |
+| Tested in-tree | Annex B in a call: `annexb` in offers and answers, SID frames and silence on the wire, comfort noise played, speech after a pause | two-stack tests between this stack and itself, both ways and with Annex B off at either end |
 
 G.113 rates G.729 in Table I.4 only with Annex B, so `Codec::quality_model`
 answers `None` for it, the way it does for G.722: an XR VoIP Metrics report

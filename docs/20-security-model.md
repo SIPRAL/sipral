@@ -142,10 +142,12 @@ with no crash and no hang, and every target but `headless_media`,
 `media_g729` and `turn_client` has had it run: the first eighteen on 21 and
 22 September 2026, about 37 billion executions, and the eight media ones
 before `media_g729` on 23 September, about 24 billion, nothing found on any
-(`docs/11-testing.md`). `media_g729` covers the G.729 decoder, the SID
-reader and the encoder; it, `turn_client` and `headless_media` have not had
-that gate yet, and `scripts/check.sh` builds all twenty-nine on every run so
-none of them rots uncompiled between releases.
+(`docs/11-testing.md`). `media_g729` covers the G.729 decoder — speech
+frames, Annex B's SID frames, frames not sent and frames lost — the payload
+reader and an encoder with Annex B's DTX; it, `turn_client` and
+`headless_media` have not had that gate yet, and `scripts/check.sh` builds
+all twenty-nine on every run so none of them rots uncompiled between
+releases.
 
 `ice` covers the one seam that is open to anybody before a
 key exists at all: an ICE agent binds the media port and answers connectivity

@@ -832,6 +832,14 @@ impl RtpSession {
         self.outbound.spurt_start = true;
     }
 
+    /// Whether this stream stops sending during silence from now on, which
+    /// is what lets the marker bit say a talk spurt starts (RFC 3551 §4.1):
+    /// a stream that began with every frame sent and was then renegotiated
+    /// into one that is not.
+    pub fn set_silence_suppression(&mut self, on: bool) {
+        self.outbound.silence_suppression = on;
+    }
+
     /// Where to send: the address packets are actually arriving from once one
     /// has, and the address the answer gave until then.
     #[must_use]
@@ -1951,6 +1959,36 @@ mod tests {
                     .marker
             );
         }
+    }
+
+    /// A stream renegotiated into stopping in its pauses marks the first
+    /// packet after one from then on, and one renegotiated out of it stops.
+    #[test]
+    fn suppression_switched_on_later_marks_the_next_spurt() {
+        let mut out = [0_u8; 256];
+        let mut session = RtpSession::new(
+            &StreamConfig {
+                silence_suppression: false,
+                ..config()
+            },
+            0.5,
+        );
+        let marked = |session: &mut RtpSession, out: &mut [u8; 256]| {
+            let n = session.send(&[0; 160], 160, out).expect("room");
+            RtpPacket::parse(&out[..n])
+                .expect("a packet")
+                .header()
+                .marker
+        };
+        session.suppress(160);
+        assert!(!marked(&mut session, &mut out));
+        session.set_silence_suppression(true);
+        session.suppress(160);
+        assert!(marked(&mut session, &mut out));
+        assert!(!marked(&mut session, &mut out));
+        session.set_silence_suppression(false);
+        session.suppress(160);
+        assert!(!marked(&mut session, &mut out));
     }
 
     #[test]

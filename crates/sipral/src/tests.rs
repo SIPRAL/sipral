@@ -388,6 +388,38 @@ impl Pair {
         played
     }
 
+    /// One frame from the caller to the callee: the datagram that went, if
+    /// one did, and what the callee then played and how.
+    fn one_way(
+        &mut self,
+        call: CallHandle,
+        remote: CallHandle,
+        samples: &[i16],
+    ) -> (Option<Vec<u8>>, Playback, Vec<i16>) {
+        let sent = self
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .capture(samples, self.now)
+            .expect("the frame encodes")
+            .map(|datagram| datagram.payload.to_vec());
+        let mut session = self
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media");
+        if let Some(datagram) = &sent {
+            let mut arriving = datagram.clone();
+            session.receive(&mut arriving, caller_media(), self.now);
+        }
+        let mut played = vec![0_i16; session.frame_samples()];
+        let outcome = session.playback(&mut played);
+        drop(session);
+        self.advance();
+        (sent, outcome, played)
+    }
+
     fn advance(&mut self) {
         self.now += TICK;
     }
@@ -990,11 +1022,45 @@ fn a_peer_that_negotiated_one_g711_law_and_sends_the_other_is_still_heard() {
     );
 }
 
-/// G.729 end to end: offered only because the order names it, on its static
-/// type with `annexb=no` both ways, twenty octets a packet, and the tone
-/// through this stack's own encoder and decoder.
+/// Frames of the tone, of silence, or of the tone again, through a G.729
+/// call, and what each came to: its payload's length (`None` for a frame
+/// not sent), whether its RTP header carried the marker bit, and what the
+/// far end played and how loud.
+fn g729_through(
+    pair: &mut Pair,
+    call: CallHandle,
+    remote: CallHandle,
+    shape: &[(bool, usize)],
+) -> Vec<(Option<usize>, bool, Playback, i64)> {
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut out = Vec::new();
+    for (talking, frames) in shape {
+        for _ in 0..*frames {
+            if *talking {
+                tone(&mut samples, 8_000, &mut phase);
+            } else {
+                samples.fill(0);
+            }
+            let (sent, outcome, played) = pair.one_way(call, remote, &samples);
+            let length = sent.as_ref().map(|datagram| datagram.len() - 12);
+            let marker = sent
+                .as_ref()
+                .and_then(|datagram| datagram.get(1))
+                .is_some_and(|octet| octet & 0x80 != 0);
+            out.push((length, marker, outcome, loudness(&played)));
+        }
+    }
+    out
+}
+
+/// G.729 end to end with Annex B, which a catalogue naming G.729 allows
+/// unless told otherwise: `annexb=yes` in the offer and in the answer, the
+/// tone as twenty octets a packet, a pause as a SID frame and then nothing
+/// on the wire while the far end plays the codec's own comfort noise, and
+/// the tone again, its first packet marked as a talk spurt's.
 #[test]
-fn a_call_on_g729_carries_the_tone_and_takes_no_annex_b() {
+fn a_g729_call_with_annex_b_both_ways_sends_a_pause_as_a_sid_and_silence() {
     let catalog = CodecCatalog::with_order(&["G729"]).expect("an order");
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
@@ -1008,7 +1074,103 @@ fn a_call_on_g729_carries_the_tone_and_takes_no_annex_b() {
             Some("18"),
             "{which}"
         );
-        assert_eq!(stream.fmtp(18), Some("annexb=no"), "{which}");
+        assert_eq!(stream.fmtp(18), Some("annexb=yes"), "{which}");
+    }
+
+    let heard = g729_through(
+        &mut pair,
+        call,
+        remote,
+        &[(true, 40), (false, 60), (true, 40)],
+    );
+    let talking = &heard[20..40];
+    assert!(
+        talking
+            .iter()
+            .all(|(length, _, outcome, loud)| *length == Some(20)
+                && *outcome == Playback::Packet
+                && *loud > 2_000),
+        "the tone before the pause: {talking:?}"
+    );
+    let pause = &heard[40..100];
+    let first_quiet = pause
+        .iter()
+        .position(|(length, ..)| *length != Some(20))
+        .expect("the pause changed what went out");
+    assert!(
+        matches!(pause[first_quiet].0, Some(2 | 12)),
+        "a pause starts with a SID frame: {pause:?}"
+    );
+    let not_sent = pause.iter().filter(|(length, ..)| length.is_none()).count();
+    assert!(not_sent > 40, "{not_sent} of 60 frames not sent: {pause:?}");
+    assert!(
+        pause[30..]
+            .iter()
+            .all(|(_, _, outcome, _)| *outcome == Playback::ComfortNoise),
+        "the far end played the pause as comfort noise: {pause:?}"
+    );
+    let again = &heard[100..];
+    let resumed = again
+        .iter()
+        .position(|(length, ..)| *length == Some(20))
+        .expect("the tone goes out again");
+    assert!(again[resumed].1, "a talk spurt's first packet is marked");
+    assert!(
+        again[20..].iter().all(|(_, marker, outcome, loud)| !*marker
+            && *outcome == Playback::Packet
+            && *loud > 2_000),
+        "the tone after the pause: {again:?}"
+    );
+}
+
+/// With Annex B off at either end, neither end uses it: an offer with it
+/// off says `annexb=no` and the answer follows; an answer that refuses the
+/// offer's `yes` stops the offerer using it too; and a pause then goes out
+/// frame by frame, twenty octets each, as speech.
+#[test]
+fn a_g729_call_with_annex_b_off_at_either_end_sends_every_frame() {
+    let on = CodecCatalog::with_order(&["G729"]).expect("an order");
+    let off = on.clone().with_g729_annex_b(false);
+    for (placing, answering, offered, answered) in [
+        (off.clone(), on.clone(), "annexb=no", "annexb=no"),
+        (on, off, "annexb=yes", "annexb=no"),
+    ] {
+        let mut pair = Pair::asymmetric(placing, answering);
+        let call = pair.connect();
+        let remote = pair.callee.call().expect("the callee knows the call");
+        let offer = one_stream(&pair.callee.offer_received().expect("an offer"));
+        let answer = one_stream(&pair.caller.answer_received().expect("an answer"));
+        assert_eq!(offer.fmtp(18), Some(offered));
+        assert_eq!(answer.fmtp(18), Some(answered));
+
+        let heard = g729_through(&mut pair, call, remote, &[(true, 20), (false, 40)]);
+        assert!(
+            heard
+                .iter()
+                .all(|(length, marker, ..)| *length == Some(20) && !*marker),
+            "{offered} / {answered}: {heard:?}"
+        );
+    }
+}
+
+/// G.729 end to end: offered only because the order names it, on its static
+/// type, twenty octets a packet, and the tone through this stack's own
+/// encoder and decoder.
+#[test]
+fn a_call_on_g729_carries_the_tone() {
+    let catalog = CodecCatalog::with_order(&["G729"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let offer = one_stream(&pair.callee.offer_received().expect("an offer"));
+    let answer = one_stream(&pair.caller.answer_received().expect("an answer"));
+    for (stream, which) in [(&offer, "offer"), (&answer, "answer")] {
+        assert_eq!(
+            stream.formats.first().map(String::as_str),
+            Some("18"),
+            "{which}"
+        );
     }
     let session = pair.caller.engine.session(call).expect("media");
     assert_eq!(session.codec(), Codec::G729);
@@ -1039,12 +1201,15 @@ fn a_call_on_g729_carries_the_tone_and_takes_no_annex_b() {
     );
 }
 
-/// A peer that sends Annex B anyway: a payload of nothing but a SID frame
-/// starts comfort noise, and the silence the far end then keeps is filled
-/// with the same noise rather than with nothing.
+/// A peer that sends Annex B even though this end said `annexb=no`: a
+/// payload of nothing but a SID frame starts the codec's comfort noise, and
+/// the silence the far end then keeps is filled with the same noise rather
+/// than with nothing.
 #[test]
 fn a_g729_sid_frame_from_the_far_end_is_played_as_comfort_noise() {
-    let catalog = CodecCatalog::with_order(&["G729"]).expect("an order");
+    let catalog = CodecCatalog::with_order(&["G729"])
+        .expect("an order")
+        .with_g729_annex_b(false);
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
     let remote = pair.callee.call().expect("the callee knows the call");
@@ -1057,7 +1222,8 @@ fn a_g729_sid_frame_from_the_far_end_is_played_as_comfort_noise() {
         pair.advance();
     }
 
-    // the next packet, cut down to its header and two octets of SID
+    // the next packet, cut down to its header and two octets of SID, whose
+    // energy is the top of Annex B's scale
     tone(&mut samples, 8_000, &mut phase);
     let mut datagram = pair
         .caller
@@ -1069,7 +1235,7 @@ fn a_g729_sid_frame_from_the_far_end_is_played_as_comfort_noise() {
         .map(|datagram| datagram.payload.to_vec())
         .expect("a frame goes out");
     datagram.truncate(12);
-    datagram.extend_from_slice(&[0x00, 0x14]);
+    datagram.extend_from_slice(&[0x00, 0x3e]);
 
     let mut session = pair
         .callee
@@ -1530,7 +1696,7 @@ AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
         .codec_candidates()
         .to_vec();
     let mut session = pair.caller.engine.session(call).expect("media");
-    let adopted = session.adopt(&moved, candidates, pair.now);
+    let adopted = session.adopt(&moved, candidates, false, pair.now);
     let still_encrypted = session.is_encrypted();
     drop(session);
 
@@ -2545,6 +2711,7 @@ fn the_first_rtcp_report_is_scheduled_from_this_calls_own_seed() {
                 handshake: None,
                 #[cfg(feature = "ice")]
                 ice: None,
+                annex_b: false,
                 now,
             },
         )
@@ -2849,6 +3016,7 @@ fn session(local: &SessionDescription, remote: &SessionDescription, now: Instant
             handshake: None,
             #[cfg(feature = "ice")]
             ice: None,
+            annex_b: false,
             now,
         },
     )
@@ -3096,6 +3264,7 @@ fn an_answer_this_build_cannot_decode_is_refused_by_name() {
             handshake: None,
             #[cfg(feature = "ice")]
             ice: None,
+            annex_b: false,
             now,
         },
     );
@@ -3105,6 +3274,100 @@ fn an_answer_this_build_cannot_decode_is_refused_by_name() {
             payload: 97,
             encoding: "SPEEX".to_owned()
         })
+    );
+}
+
+/// A G.729 stream opened without Annex B sends every frame of a pause; a
+/// re-negotiation that allows it turns the encoder's DTX on, the pause then
+/// going out as a SID frame and silence with the next talk spurt marked; and
+/// one that refuses it again turns it off.
+#[test]
+fn a_renegotiation_turns_g729_annex_b_on_and_off() {
+    let now = Instant::now();
+    let (ours, theirs) = plan_pair(
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n",
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n",
+    );
+    let plan = plan_of(&ours, &theirs);
+    let mut session = MediaSession::open(
+        &plan,
+        20,
+        &MediaConfig::default(),
+        Vec::new(),
+        Start {
+            identity: StreamIdentity {
+                ssrc: 1,
+                sequence: 1,
+                timestamp: 0,
+                seed: 7,
+            },
+            clock: WallClock::from_unix(now, 1_700_000_000, 0),
+            #[cfg(feature = "dtls")]
+            handshake: None,
+            #[cfg(feature = "ice")]
+            ice: None,
+            annex_b: false,
+            now,
+        },
+    )
+    .expect("G.729 is in every build");
+    // what each of a run of frames sent: its payload's length and marker
+    let mut phase = 0_u32;
+    let mut run = |session: &mut MediaSession, talking: bool, frames: usize| {
+        let mut samples = [0_i16; 160];
+        (0..frames)
+            .map(|_| {
+                if talking {
+                    tone(&mut samples, 8_000, &mut phase);
+                } else {
+                    samples.fill(0);
+                }
+                session
+                    .capture(&samples, now)
+                    .expect("the frame encodes")
+                    .map(|datagram| {
+                        let payload = datagram.payload;
+                        (
+                            payload.len() - 12,
+                            payload.get(1).is_some_and(|octet| octet & 0x80 != 0),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>()
+    };
+    run(&mut session, true, 20);
+    assert!(
+        run(&mut session, false, 40)
+            .iter()
+            .all(|sent| *sent == Some((20, false)))
+    );
+
+    session
+        .adopt(&plan, Vec::new(), true, now)
+        .expect("the same stream");
+    run(&mut session, true, 20);
+    let pause = run(&mut session, false, 40);
+    assert!(
+        pause.iter().filter(|sent| sent.is_none()).count() > 30,
+        "{pause:?}"
+    );
+    let again = run(&mut session, true, 10);
+    let first = again
+        .iter()
+        .flatten()
+        .next()
+        .expect("the tone goes out again");
+    assert!(first.1, "and its first packet is marked: {again:?}");
+
+    session
+        .adopt(&plan, Vec::new(), false, now)
+        .expect("the same stream");
+    assert!(
+        run(&mut session, false, 40)
+            .iter()
+            .all(|sent| *sent == Some((20, false)))
     );
 }
 
@@ -3177,7 +3440,7 @@ fn a_stream_re_keyed_by_a_re_negotiation_sends_under_the_new_key() {
     // the same two ends, same codec, same addresses, fresh keys
     let (ours_2, theirs_2) = savp_pair(OURS_AGAIN, THEIRS_AGAIN);
     sender
-        .adopt(&plan_of(&ours_2, &theirs_2), Vec::new(), now)
+        .adopt(&plan_of(&ours_2, &theirs_2), Vec::new(), false, now)
         .expect("the fresh keys are ones this build can open a stream with");
 
     // the far end, keyed the way the fresh pair of descriptions says
@@ -3205,7 +3468,7 @@ fn a_stream_re_keyed_by_a_re_negotiation_reads_the_peers_new_key() {
 
     let (ours_2, theirs_2) = savp_pair(OURS_AGAIN, THEIRS_AGAIN);
     receiver
-        .adopt(&plan_of(&ours_2, &theirs_2), Vec::new(), now)
+        .adopt(&plan_of(&ours_2, &theirs_2), Vec::new(), false, now)
         .expect("the fresh keys open");
 
     let mut peer = session(&theirs_2, &ours_2, now);
@@ -3232,7 +3495,7 @@ fn a_peer_that_has_not_switched_to_its_new_key_yet_is_still_heard() {
 
     let (ours_2, theirs_2) = savp_pair(OURS_AGAIN, THEIRS_AGAIN);
     receiver
-        .adopt(&plan_of(&ours_2, &theirs_2), Vec::new(), now)
+        .adopt(&plan_of(&ours_2, &theirs_2), Vec::new(), false, now)
         .expect("the fresh keys open");
 
     // still protected with the key the far end is replacing
@@ -3264,7 +3527,7 @@ fn a_re_offer_that_keeps_the_keys_does_not_re_open_the_replay_window() {
     // a session timer refresh, or a hold that changed only the direction:
     // the same two crypto lines, to the octet
     receiver
-        .adopt(&plan_of(&ours, &theirs), Vec::new(), now)
+        .adopt(&plan_of(&ours, &theirs), Vec::new(), false, now)
         .expect("the keys it already holds open");
 
     let arrival = receiver.receive(&mut datagram.clone(), theirs_address(), now);
@@ -3294,7 +3557,7 @@ fn a_re_offer_that_moves_only_our_own_key_leaves_the_peers_context_alone() {
     // our key moved; theirs did not
     let (ours_2, _) = savp_pair(OURS_AGAIN, THEIRS);
     receiver
-        .adopt(&plan_of(&ours_2, &theirs), Vec::new(), now)
+        .adopt(&plan_of(&ours_2, &theirs), Vec::new(), false, now)
         .expect("the fresh key opens");
 
     let arrival = receiver.receive(&mut datagram.clone(), theirs_address(), now);
@@ -3326,7 +3589,7 @@ fn a_re_offer_that_only_adds_a_key_lifetime_does_not_re_open_the_replay_window()
     let with_lifetime = format!("{THEIRS}|2^31");
     let (_, theirs_2) = savp_pair(OURS, &with_lifetime);
     receiver
-        .adopt(&plan_of(&ours, &theirs_2), Vec::new(), now)
+        .adopt(&plan_of(&ours, &theirs_2), Vec::new(), false, now)
         .expect("the key it already holds opens");
 
     let arrival = receiver.receive(&mut datagram.clone(), theirs_address(), now);
@@ -3355,7 +3618,7 @@ fn a_re_offer_that_shortens_the_tag_is_followed_without_a_new_key() {
 
     let (ours_32, theirs_32) = savp_pair_of("AES_CM_128_HMAC_SHA1_32", OURS, THEIRS);
     sender
-        .adopt(&plan_of(&ours_32, &theirs_32), Vec::new(), now)
+        .adopt(&plan_of(&ours_32, &theirs_32), Vec::new(), false, now)
         .expect("the same keys under a shorter tag open");
 
     let mut receiver = session(&theirs_32, &ours_32, now);
@@ -3787,10 +4050,24 @@ fn a_codec_change_on_a_secured_call_does_not_re_open_the_packet_index() {
     let theirs_2 = parse(savp_of("192.0.2.2", 40_002, 8, "PCMA/8000", SHA1_80, THEIRS).as_bytes())
         .expect("the answer parses");
     sender
-        .reformat(&plan_of(&ours_2, &theirs_2), 20, &config, Vec::new(), now)
+        .reformat(
+            &plan_of(&ours_2, &theirs_2),
+            20,
+            &config,
+            Vec::new(),
+            false,
+            now,
+        )
         .expect("the codec is one this build has");
     receiver
-        .reformat(&plan_of(&theirs_2, &ours_2), 20, &config, Vec::new(), now)
+        .reformat(
+            &plan_of(&theirs_2, &ours_2),
+            20,
+            &config,
+            Vec::new(),
+            false,
+            now,
+        )
         .expect("the codec is one this build has");
     assert_eq!(sender.codec(), Codec::Pcma, "the plan never reached it");
 

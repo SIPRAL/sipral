@@ -24,19 +24,20 @@
 //! # G.729's silence
 //!
 //! A G.729 payload can end in an Annex B SID frame, the far end's way of
-//! saying it has gone quiet and will send nothing more until something
-//! changes. This end signals `annexb=no` and should never see one, but a
-//! receiver that plays a SID as garbage or as a gap is the one that sounds
-//! broken, so it is read for what can be read of it without the rest of
-//! Annex B: a pause begins, at a level. The level is that of the far end's
-//! own last decoded frame, the nearest measure of its background this end
-//! has, and each later SID of the same pause moves it by the change in
-//! energy it states (B.4.2.1's decibels). What plays is the facade's own
-//! RFC 3389 generator at that level, the same noise a CN payload would
-//! have started — flat, where Annex B's comfort noise would be shaped by
-//! the SID's spectrum, which is the part not decoded.
+//! saying it has gone quiet and will send nothing more until the background
+//! changes. The decoder turns it into Annex B's comfort noise — shaped by
+//! the SID's spectrum, at its level — and goes on making that noise for
+//! every frame that does not arrive while the pause lasts
+//! ([`Coder::pause`]), because in a pause a frame that does not arrive is
+//! one the far end did not send (B.4.5).
+//!
+//! With Annex B negotiated both ways, the encoder runs Annex B's DTX too
+//! ([`Coder::set_annex_b`]): each ten-millisecond frame is speech, a SID
+//! frame or nothing, and a payload is cut from them the way RFC 3551
+//! §4.5.6 allows — speech frames and at most one SID frame after them. A
+//! frame length of several G.729 frames can hold a transition that no one
+//! payload can carry; [`Coder::encode`] says what it did with each case.
 
-use sipral_media::comfort_noise::ComfortNoise;
 use sipral_media::g711::Law;
 #[cfg(feature = "opus")]
 use sipral_media::opus;
@@ -77,9 +78,9 @@ enum Kind {
     /// [`Concealer::new`](sipral_media::plc::Concealer::new) would make them
     /// right rather than acceptable.
     Wideband(Box<(g722::Encoder, g722::Decoder)>, Concealer),
-    /// G.729, which conceals for itself (§4.4) and keeps what it knows of
-    /// the far end's pauses.
-    Celp(Box<(g729::Encoder, g729::Decoder)>, Pause),
+    /// G.729, which conceals for itself (§4.4) and makes its own comfort
+    /// noise (Annex B).
+    Celp(Box<(g729::Encoder, g729::Decoder)>),
     /// Opus, which conceals for itself. Only where the `opus` feature is on;
     /// without it there is no codec here that libopus decodes.
     #[cfg(feature = "opus")]
@@ -91,72 +92,23 @@ enum Kind {
 pub(crate) enum Decoded {
     /// This many samples of the far end's audio.
     Audio(usize),
-    /// This many samples of audio, and then a G.729 SID frame: the far end
-    /// has gone quiet, and this is the noise to fill the pause with, from
-    /// the rest of this frame on.
-    Silenced(usize, ComfortNoise),
+    /// This many samples of comfort noise: a G.729 payload that held nothing
+    /// but an Annex B SID frame.
+    Noise(usize),
     /// Nothing a decoder can read: a G.729 payload whose length is no
     /// arrangement of frames. What it displaced is concealed.
     Unreadable,
 }
 
-/// What a G.729 call knows about the far end's pauses: see the module
-/// documentation.
-#[derive(Debug, Default)]
-struct Pause {
-    /// The mean square of the last frame decoded from speech.
-    power: u64,
-    /// The first SID frame's energy in decibels and the noise amplitude the
-    /// pause started at, until speech ends the pause.
-    anchor: Option<(i8, i16)>,
-}
-
-/// One two-decibel step of amplitude, `10^(2/20)`, and its inverse, in Q14.
-/// Every level of B.4.2.1's quantizer is an even number of decibels, so a
-/// change between two of them is a whole number of these steps.
-const TWO_DB_UP: u32 = 20_626;
-const TWO_DB_DOWN: u32 = 13_014;
-
-impl Pause {
-    /// A frame of speech was decoded: remember how loud it was, and end any
-    /// pause.
-    fn spoke(&mut self, frame: &[i16]) {
-        let count = u64::try_from(frame.len()).unwrap_or(1).max(1);
-        let total: u64 = frame
-            .iter()
-            .map(|&sample| u64::from(sample.unsigned_abs()).pow(2))
-            .sum();
-        self.power = total / count;
-        self.anchor = None;
-    }
-
-    /// A SID frame arrived: the noise to play.
-    ///
-    /// The first of a pause sets the amplitude from the last speech, with
-    /// the peak of uniform noise of the same power — `√3` times its root
-    /// mean square, since that is the noise the generator makes. Every later
-    /// one moves it from there by the difference between its energy and the
-    /// first one's.
-    fn silenced(&mut self, sid: g729::Sid) -> ComfortNoise {
-        let level = sid.energy_db();
-        let (anchor, amplitude) = *self.anchor.get_or_insert_with(|| {
-            let peak = self.power.saturating_mul(3).isqrt();
-            (level, i16::try_from(peak).unwrap_or(i16::MAX))
-        });
-        let amplitude = scaled(amplitude, level.saturating_sub(anchor));
-        ComfortNoise::from_amplitude(amplitude)
-    }
-}
-
-/// `amplitude` moved by `decibels`, an even number, two at a time.
-fn scaled(amplitude: i16, decibels: i8) -> i16 {
-    let step = if decibels < 0 { TWO_DB_DOWN } else { TWO_DB_UP };
-    let mut value = u32::from(amplitude.unsigned_abs());
-    for _ in 0..decibels.unsigned_abs() / 2 {
-        value = (value * step + (1 << 13)) >> 14;
-        value = value.min(u32::from(i16::MAX.unsigned_abs()));
-    }
-    i16::try_from(value).unwrap_or(i16::MAX)
+/// What one frame of the microphone came to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Sent {
+    /// The payload's length in octets: zero for a frame with nothing to send.
+    pub(crate) octets: usize,
+    /// Samples at the start of the frame that are not in the payload, so the
+    /// payload's timestamp is this much later than the frame's. Only G.729
+    /// with Annex B has any: a pause that ends inside the frame.
+    pub(crate) skipped: usize,
 }
 
 // Opus is the only codec here that refuses anything, so with the feature off
@@ -199,10 +151,7 @@ impl Coder {
                 Box::new((g722::Encoder::new(), g722::Decoder::default())),
                 Concealer::new(),
             ),
-            Codec::G729 => Kind::Celp(
-                Box::new((g729::Encoder::new(), g729::Decoder::new())),
-                Pause::default(),
-            ),
+            Codec::G729 => Kind::Celp(Box::new((g729::Encoder::new(), g729::Decoder::new()))),
             #[cfg(feature = "opus")]
             Codec::Opus => {
                 let rate = SampleRate::from_hertz(codec.sample_rate())?;
@@ -230,7 +179,39 @@ impl Coder {
         self.frame_samples
     }
 
+    /// Run G.729's encoder with Annex B's DTX, or without it: what the
+    /// negotiation settled, both ends having allowed Annex B. A change
+    /// starts the encoder afresh, since its state is the DTX's too; every
+    /// other codec has no Annex B, and nothing changes for it.
+    pub(crate) fn set_annex_b(&mut self, on: bool) {
+        if let Kind::Celp(pair) = &mut self.kind
+            && pair.0.dtx() != on
+        {
+            pair.0 = if on {
+                g729::Encoder::with_dtx()
+            } else {
+                g729::Encoder::new()
+            };
+        }
+    }
+
+    /// Whether the encoder runs Annex B's DTX.
+    pub(crate) fn annex_b(&self) -> bool {
+        matches!(&self.kind, Kind::Celp(pair) if pair.0.dtx())
+    }
+
     /// Turn one frame of PCM into a payload, and say how long it is.
+    ///
+    /// For G.729 with Annex B, each ten-millisecond frame is speech, a SID
+    /// frame or nothing, and the payload is what RFC 3551 §4.5.6 lets one
+    /// carry: speech frames and, after them, at most one SID frame. Frames
+    /// with nothing to send before the first one that has something are
+    /// left out and counted in [`Sent::skipped`]. A SID frame followed by
+    /// speech in the same frame — a pause of ten milliseconds — is left out
+    /// the same way, since the payload cannot carry a SID before speech and
+    /// the speech is what matters; and after a SID frame nothing more goes
+    /// in: a pause frame is only time, and speech after it, in a frame of
+    /// thirty milliseconds or more, is not sent.
     ///
     /// # Errors
     // the variant is Opus's and exists only where Opus does, so the link has
@@ -245,18 +226,25 @@ impl Coder {
         doc = "None. Nothing in this build refuses a frame it can cut, so \
                the answer is always `Ok`."
     )]
-    pub(crate) fn encode(&mut self, samples: &[i16], out: &mut [u8]) -> Result<usize, MediaError> {
+    pub(crate) fn encode(&mut self, samples: &[i16], out: &mut [u8]) -> Result<Sent, MediaError> {
+        let whole = |octets| Sent { octets, skipped: 0 };
         match &mut self.kind {
-            Kind::Companded(law, _) => Ok(law.encode_into(samples, out)),
-            Kind::Wideband(pair, _) => Ok(pair.0.encode_into(samples, out)),
-            Kind::Celp(pair, _) => Ok(pair.0.encode_into(samples, out)),
+            Kind::Companded(law, _) => Ok(whole(law.encode_into(samples, out))),
+            Kind::Wideband(pair, _) => Ok(whole(pair.0.encode_into(samples, out))),
+            Kind::Celp(pair) if pair.0.dtx() => Ok(discontinuous(&mut pair.0, samples, out)),
+            Kind::Celp(pair) => Ok(whole(pair.0.encode_into(samples, out))),
             #[cfg(feature = "opus")]
-            Kind::Opus(pair) => Ok(pair.0.encode(samples, out)?),
+            Kind::Opus(pair) => Ok(whole(pair.0.encode(samples, out)?)),
         }
     }
 
-    /// Turn one payload into PCM, and say what it held: audio, audio and then
-    /// the start of a pause, or nothing readable.
+    /// Turn one payload into PCM, and say what it held: audio, comfort noise
+    /// alone, or nothing readable.
+    ///
+    /// A G.729 payload fills the whole of `out`: its frames and its SID
+    /// frame decoded, and the rest — a payload that carried less than a
+    /// frame's worth — as the pause going on if it ended in one, and
+    /// concealed as speech if it did not.
     ///
     /// # Errors
     // the variant is Opus's and exists only where Opus does, so the link has
@@ -288,26 +276,52 @@ impl Coder {
                 concealer.received(out.get_mut(..count).unwrap_or_default());
                 Ok(Decoded::Audio(count))
             }
-            Kind::Celp(pair, pause) => {
+            Kind::Celp(pair) => {
                 let Some(parsed) = g729::Payload::parse(payload)
                     .filter(|parsed| parsed.frame_count() > 0 || parsed.sid().is_some())
                 else {
                     return Ok(Decoded::Unreadable);
                 };
-                let count = pair.1.decode_into(parsed.speech(), out);
-                if let Some(last) = out.get(count.saturating_sub(g729::FRAME_SAMPLES)..count)
-                    && !last.is_empty()
-                {
-                    pause.spoke(last);
+                let count = pair.1.decode_into(payload, out);
+                let rest = out.get_mut(count..).unwrap_or_default();
+                let mut chunks = rest.chunks_exact_mut(g729::FRAME_SAMPLES);
+                for chunk in &mut chunks {
+                    chunk.copy_from_slice(&pair.1.conceal());
                 }
-                Ok(match parsed.sid() {
-                    Some(sid) => Decoded::Silenced(count, pause.silenced(sid)),
-                    None => Decoded::Audio(count),
+                chunks.into_remainder().fill(0);
+                Ok(if parsed.frame_count() == 0 {
+                    Decoded::Noise(out.len())
+                } else {
+                    Decoded::Audio(out.len())
                 })
             }
             #[cfg(feature = "opus")]
             Kind::Opus(pair) => Ok(Decoded::Audio(pair.1.decode(payload, out)?)),
         }
+    }
+
+    /// Fill a frame the far end did not send, when it did not send it
+    /// because it is in a pause: G.729's comfort noise, carried on from the
+    /// last SID frame (B.4.4). `None` for every other case — another codec,
+    /// or G.729 whose far end was last heard speaking — and nothing is
+    /// written.
+    pub(crate) fn pause(&mut self, out: &mut [i16]) -> Option<usize> {
+        let Kind::Celp(pair) = &mut self.kind else {
+            return None;
+        };
+        if !pair.1.in_pause() {
+            return None;
+        }
+        let frame = self.frame_samples.min(out.len());
+        let mut chunks = out
+            .get_mut(..frame)
+            .unwrap_or_default()
+            .chunks_exact_mut(g729::FRAME_SAMPLES);
+        for chunk in &mut chunks {
+            chunk.copy_from_slice(&pair.1.untransmitted());
+        }
+        chunks.into_remainder().fill(0);
+        Some(frame)
     }
 
     /// Fill a frame the far end sent and this end did not get.
@@ -335,8 +349,9 @@ impl Coder {
             }
             // a frame length is a whole number of G.729 frames, which the
             // catalogue checks where it is set; only an `out` shorter than
-            // one leaves a remainder, and that is written silent
-            Kind::Celp(pair, _) => {
+            // one leaves a remainder, and that is written silent. In a pause
+            // the decoder's concealment is the pause going on (B.4.5)
+            Kind::Celp(pair) => {
                 let mut chunks = out
                     .get_mut(..frame)
                     .unwrap_or_default()
@@ -350,6 +365,68 @@ impl Coder {
             #[cfg(feature = "opus")]
             Kind::Opus(pair) => Ok(pair.1.conceal(out)?),
         }
+    }
+}
+
+/// One frame of G.729 with Annex B's DTX, cut into a payload as
+/// [`Coder::encode`] describes.
+fn discontinuous(encoder: &mut g729::Encoder, samples: &[i16], out: &mut [u8]) -> Sent {
+    let frames = samples.chunks_exact(g729::FRAME_SAMPLES).map(|chunk| {
+        let mut frame = [0_i16; g729::FRAME_SAMPLES];
+        frame.copy_from_slice(chunk);
+        encoder.encode(&frame)
+    });
+    cut(frames, out)
+}
+
+/// The payload a run of G.729 frames with Annex B makes, written into `out`.
+fn cut(frames: impl Iterator<Item = g729::Encoded>, out: &mut [u8]) -> Sent {
+    let mut sent = Sent::default();
+    let mut speech = 0_usize;
+    // a SID frame is in the payload, or a pause came after its speech:
+    // nothing more may go in
+    let mut closed = false;
+    for encoded in frames {
+        match encoded {
+            g729::Encoded::Nothing => {
+                if sent.octets == 0 {
+                    sent.skipped += g729::FRAME_SAMPLES;
+                } else {
+                    closed = true;
+                }
+            }
+            g729::Encoded::Speech(octets) => {
+                if closed && speech == 0 {
+                    // a SID alone, and speech after it: the SID's frame goes
+                    // the way of a frame with nothing to send
+                    sent.skipped += g729::FRAME_SAMPLES;
+                    sent.octets = 0;
+                    closed = false;
+                }
+                if !closed && append(out, &mut sent.octets, &octets) {
+                    speech += 1;
+                }
+            }
+            g729::Encoded::Sid(sid) => {
+                if !closed {
+                    closed = append(out, &mut sent.octets, sid.as_octets());
+                }
+            }
+        }
+    }
+    sent
+}
+
+/// Put `octets` in `out` after the `written` already there, if they fit.
+fn append(out: &mut [u8], written: &mut usize, octets: &[u8]) -> bool {
+    let end = *written + octets.len();
+    match out.get_mut(*written..end) {
+        Some(slot) => {
+            slot.copy_from_slice(octets);
+            *written = end;
+            true
+        }
+        None => false,
     }
 }
 
@@ -367,8 +444,9 @@ impl core::fmt::Debug for Coder {
 
 #[cfg(test)]
 mod tests {
-    use super::{Coder, Decoded, scaled};
+    use super::{Coder, Decoded, Sent, cut};
     use crate::codec::{Codec, DEFAULT_FRAME_MS};
+    use sipral_media::g729::{Encoded, Sid};
 
     /// A tone the codecs can all carry, at a quarter of full scale so that
     /// nothing is clipping and the comparison is about the codec.
@@ -414,7 +492,7 @@ mod tests {
             let mut decoded = Decoded::Unreadable;
             for _ in 0..25 {
                 tone(&mut samples, codec.sample_rate(), &mut phase);
-                written = coder.encode(&samples, &mut payload).unwrap();
+                written = coder.encode(&samples, &mut payload).unwrap().octets;
                 decoded = coder.decode(&payload[..written], &mut back).unwrap();
             }
             assert!(written > 0, "{codec} produced an empty payload");
@@ -445,7 +523,7 @@ mod tests {
 
             for _ in 0..25 {
                 tone(&mut samples, codec.sample_rate(), &mut phase);
-                let written = coder.encode(&samples, &mut payload).unwrap();
+                let written = coder.encode(&samples, &mut payload).unwrap().octets;
                 coder.decode(&payload[..written], &mut back).unwrap();
             }
 
@@ -493,55 +571,135 @@ mod tests {
         let mut phase = 0_u32;
         for _ in 0..50 {
             tone(&mut samples, 8_000, &mut phase);
-            let written = coder.encode(&samples, &mut payload).unwrap();
+            let written = coder.encode(&samples, &mut payload).unwrap().octets;
             coder.decode(&payload[..written], &mut back).unwrap();
         }
         (coder, payload.to_vec())
     }
 
     /// A SID frame at the end of a payload decodes the speech before it and
-    /// starts a pause at about the level that speech had; one alone starts
-    /// it with nothing decoded.
+    /// the pause after it, all of the frame written; the frames that then do
+    /// not arrive are the pause going on, at the SID's level; and a SID
+    /// alone is a frame of noise.
     #[test]
-    fn a_g729_sid_frame_starts_a_pause_at_the_level_of_the_speech_before_it() {
+    fn a_g729_sid_frame_is_comfort_noise_and_the_pause_goes_on() {
         let (mut coder, payload) = g729_talking();
         let mut back = [0_i16; 160];
+        assert_eq!(coder.pause(&mut back), None, "nothing to carry on yet");
         let mut one_and_sid: Vec<u8> = payload[..10].to_vec();
-        one_and_sid.extend_from_slice(&[0x00, 0x14]); // energy index 10
-        let Ok(Decoded::Silenced(80, noise)) = coder.decode(&one_and_sid, &mut back) else {
-            panic!("one frame and a SID is audio, then a pause");
-        };
-        // the tone at a quarter of full scale sits about 12 dB below it, and
-        // uniform noise of the same power peaks √3 higher
+        one_and_sid.extend_from_slice(&[0x00, 0x14]); // energy index 10, 26 dB
+        assert_eq!(
+            coder.decode(&one_and_sid, &mut back),
+            Ok(Decoded::Audio(160))
+        );
+        let talking = loudness(&back[..80]);
+
+        let mut quiet = [0_i16; 160];
+        for _ in 0..20 {
+            assert_eq!(coder.pause(&mut quiet), Some(160));
+        }
+        assert!(loudness(&quiet) > 0, "noise, not silence");
         assert!(
-            (5..=16).contains(&noise.level()),
-            "{} dB below full scale",
-            noise.level()
+            loudness(&quiet) * 10 < talking,
+            "{} against the speech's {talking}",
+            loudness(&quiet)
         );
 
-        // and a SID alone, 6 dB louder than the first, raises it by as much
-        let Ok(Decoded::Silenced(0, louder)) = coder.decode(&[0x00, 0x1a], &mut back) else {
-            panic!("a SID alone is a pause with no audio before it");
-        };
-        let raised = i16::from(noise.level()) - i16::from(louder.level());
-        assert!((5..=7).contains(&raised), "raised by {raised} dB");
+        // a louder SID alone: noise, and louder
+        assert_eq!(
+            coder.decode(&[0x00, 0x3e], &mut back), // index 31, 66 dB
+            Ok(Decoded::Noise(160))
+        );
+        let mut louder = [0_i16; 160];
+        for _ in 0..20 {
+            coder.pause(&mut louder);
+        }
+        assert!(loudness(&louder) > 10 * loudness(&quiet));
     }
 
-    /// Speech after a pause ends it: the next pause is measured afresh from
-    /// the speech, not moved from the last one.
+    /// Speech after a pause ends it: a frame that then does not arrive is
+    /// concealed as speech, not carried on as noise.
     #[test]
     fn g729_speech_ends_a_pause() {
         let (mut coder, payload) = g729_talking();
         let mut back = [0_i16; 160];
-        let Ok(Decoded::Silenced(0, first)) = coder.decode(&[0x00, 0x14], &mut back) else {
-            panic!("a SID alone is a pause");
-        };
+        assert_eq!(
+            coder.decode(&[0x00, 0x14], &mut back),
+            Ok(Decoded::Noise(160))
+        );
+        assert_eq!(coder.pause(&mut back), Some(160));
         assert_eq!(coder.decode(&payload, &mut back), Ok(Decoded::Audio(160)));
-        let Ok(Decoded::Silenced(0, second)) = coder.decode(&[0x00, 0x3e], &mut back) else {
-            panic!("a SID alone is a pause");
+        assert_eq!(coder.pause(&mut back), None);
+    }
+
+    /// With Annex B, a tone goes out as speech, a pause as a SID frame and
+    /// then nothing, and the tone again as speech; and a coder that decodes
+    /// what went out plays the pause as noise.
+    #[test]
+    fn g729_with_annex_b_sends_a_pause_as_a_sid_and_then_nothing() {
+        let mut coder = Coder::new(Codec::G729, DEFAULT_FRAME_MS).unwrap();
+        assert!(!coder.annex_b());
+        coder.set_annex_b(true);
+        assert!(coder.annex_b());
+        let mut far = Coder::new(Codec::G729, DEFAULT_FRAME_MS).unwrap();
+        let mut samples = [0_i16; 160];
+        let mut payload = [0_u8; 22];
+        let mut back = [0_i16; 160];
+        let mut phase = 0_u32;
+        let mut sent = Vec::new();
+        for frame in 0..150 {
+            if (50..100).contains(&frame) {
+                samples.fill(0);
+            } else {
+                tone(&mut samples, 8_000, &mut phase);
+            }
+            let out = coder.encode(&samples, &mut payload).unwrap();
+            if out.octets == 0 {
+                far.pause(&mut back);
+            } else {
+                far.decode(&payload[..out.octets], &mut back).unwrap();
+            }
+            sent.push(out);
+        }
+        assert!(sent[..50].iter().all(|s| *s
+            == Sent {
+                octets: 20,
+                skipped: 0
+            }));
+        let pause = &sent[55..100];
+        assert!(
+            pause.iter().filter(|s| s.octets == 0).count() > 30,
+            "{pause:?}"
+        );
+        assert!(pause.iter().all(|s| s.octets == 0 || s.octets == 2));
+        assert!(sent[110..].iter().all(|s| s.octets == 20));
+        assert!(loudness(&back) > 500, "the tone decoded again");
+    }
+
+    /// The payloads a run of frames with Annex B makes, one case at a time:
+    /// what RFC 3551 §4.5.6 lets one payload carry, and what is left out.
+    #[test]
+    fn a_payload_is_speech_and_then_at_most_one_sid() {
+        let speech = Encoded::Speech([7; 10]);
+        let sid = Encoded::Sid(Sid::from_octets([0x12, 0x34]));
+        let nothing = Encoded::Nothing;
+        let mut out = [0_u8; 40];
+        let mut run = |frames: &[Encoded]| {
+            let sent = cut(frames.iter().copied(), &mut out);
+            (sent.octets, sent.skipped)
         };
-        let apart = i16::from(first.level()) - i16::from(second.level());
-        assert!(apart.abs() <= 3, "{apart} dB apart");
+        assert_eq!(run(&[speech, speech]), (20, 0));
+        assert_eq!(run(&[speech, sid]), (12, 0));
+        assert_eq!(run(&[sid, nothing]), (2, 0));
+        assert_eq!(run(&[nothing, nothing]), (0, 160));
+        assert_eq!(run(&[nothing, sid]), (2, 80));
+        assert_eq!(run(&[nothing, speech]), (10, 80));
+        // a ten-millisecond pause: the SID gives way to the speech after it
+        assert_eq!(run(&[sid, speech]), (10, 80));
+        assert_eq!(run(&[nothing, sid, speech]), (10, 160));
+        // after speech and a SID nothing more fits, speech included
+        assert_eq!(run(&[speech, sid, speech]), (12, 0));
+        assert_eq!(run(&[speech, sid, nothing]), (12, 0));
     }
 
     /// A length that is no arrangement of frames, and a payload with nothing
@@ -557,16 +715,5 @@ mod tests {
                 "{length} octets"
             );
         }
-    }
-
-    /// Two decibels at a time, both ways, and never past full scale.
-    #[test]
-    fn a_level_moves_by_the_decibels_it_is_given() {
-        let up = i32::from(scaled(1_000, 20));
-        assert!((9_900..=10_100).contains(&up), "{up}");
-        let down = i32::from(scaled(10_000, -20));
-        assert!((990..=1_010).contains(&down), "{down}");
-        assert_eq!(scaled(20_000, 60), i16::MAX);
-        assert_eq!(scaled(1_234, 0), 1_234);
     }
 }

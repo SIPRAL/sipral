@@ -327,8 +327,9 @@ public enum SipralCodec : uint
     /// <summary>
     /// G.729 with Annex A, payload type 18: eight kilobits of narrowband
     /// speech. In every build and in no default offer: a call offers it
-    /// only when a codec order names `G729`, and it states `annexb=no` in
-    /// every offer and in every answer that chooses codecs.
+    /// only when a codec order names `G729`. It offers `annexb=yes`,
+    /// answers with the offer's `annexb`, and uses Annex B's silence
+    /// compression where both descriptions allow it.
     /// </summary>
     G729 = 5,
 }

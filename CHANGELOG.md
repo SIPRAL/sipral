@@ -87,17 +87,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   every build and out of the default offer: a codec order that names
   `G729` puts it on payload type 18 (`SIPRAL_CODEC_G729` in the C ABI),
   ten-millisecond frames, two to a packet by default, lost frames concealed
-  by the codec's own concealment. Annex B is not built, so every offer and
-  every answer that chooses codecs says `annexb=no` whatever the offer said
-  (a re-offer the user agent answers by itself, such as a hold, echoes the
-  offer's instead), and a SID frame
-  from a peer that sends one anyway plays as flat comfort noise, starting
-  at the level of the speech before it and moved by the changes in energy
-  each later SID states, rather than as garbage or a gap. A `media_g729`
-  fuzz target covers the decoder, the payload reader and the encoder, and
-  the lab runs
-  a G.729-only call through Asterisk's echo extension, untranscoded, and
-  hears its own tone come back.
+  by the codec's own concealment. Annex B comes with it: an offer says
+  `annexb=yes` unless `CodecCatalog::with_g729_annex_b(false)` turns it
+  off, an answer follows the offer (RFC 4856 §2.1.9 reads a missing
+  `annexb` as yes), and where both descriptions allow it the encoder sends
+  a pause as a SID frame and then nothing, marking the next talk spurt's
+  first packet. A SID frame received plays as the codec's own comfort
+  noise, carried on through the frames the far end does not send, whatever
+  was negotiated. A `media_g729` fuzz target covers the decoder, the payload
+  reader and the encoder, and the lab runs a G.729-only call through
+  Asterisk's echo extension, untranscoded, and hears its own tone come
+  back.
 - **A G.729 encoder, bit-exact against every Annex A conformance input.**
   `sipral_media::g729::Encoder` encodes eighty samples into a ten-octet
   frame, or a buffer of several frames into an RTP payload, in Annex A's

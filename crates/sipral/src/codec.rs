@@ -69,11 +69,26 @@ pub const DEFAULT_FRAME_MS: u32 = 20;
 /// halves.
 const FIRST_DYNAMIC: u8 = 96;
 
-/// G.729's `a=fmtp` parameters, in an offer and in an answer alike: no Annex
-/// B. This build sends no SID frame and decodes one only as far as the level
-/// it states (`sipral_media::g729::Sid`), so it says so rather than leave
-/// RFC 3555's default of `yes` standing.
-const G729_WITHOUT_ANNEX_B: &str = "annexb=no";
+/// G.729's `a=fmtp` parameters: whether Annex B is allowed (RFC 4856
+/// §2.1.9), written out either way rather than left to the default of
+/// `yes` a missing parameter means, so that a reader of the description does
+/// not have to know the default.
+const fn annex_b_parameter(allowed: bool) -> &'static str {
+    if allowed { "annexb=yes" } else { "annexb=no" }
+}
+
+/// Whether a G.729 `a=fmtp` line allows Annex B. RFC 4856 §2.1.9 reads a
+/// missing `annexb` as `yes`, so only one that says `no` refuses it.
+pub(crate) fn annex_b_allowed(fmtp: Option<&str>) -> bool {
+    !fmtp.is_some_and(|parameters| {
+        parameters.split(';').any(|parameter| {
+            parameter.split_once('=').is_some_and(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("annexb")
+                    && value.trim().eq_ignore_ascii_case("no")
+            })
+        })
+    })
+}
 
 /// One codec this build contains.
 ///
@@ -94,9 +109,9 @@ pub enum Codec {
     G722,
     /// G.729 with Annex A: eight kilobits of narrowband speech, for the
     /// carrier that insists on it. Always in the build and never in the
-    /// default offer — see [`Codec::offered_by_default`]. It sends and
-    /// accepts no Annex B comfort noise of its own, and says so in every
-    /// description it writes (`annexb=no`, RFC 3555 §4.1.9).
+    /// default offer — see [`Codec::offered_by_default`]. Annex B's silence
+    /// compression goes with it where both ends allow it — see
+    /// [`CodecCatalog::with_g729_annex_b`].
     G729,
     /// Opus: the best of them, and the only one here that is linked rather
     /// than written, which is why it is the one behind a feature. A build
@@ -308,36 +323,18 @@ impl Codec {
     /// packets. It costs nothing when the peer does not send it and it is the
     /// difference between a lost packet and a heard one when it does.
     ///
-    /// G.729 gets `annexb=no`: see [`Codec::answer_fmtp`], which is the same
-    /// statement made in an answer.
+    /// G.729 gets `annexb=yes`, which is what a default catalogue offers;
+    /// one made with [`CodecCatalog::with_g729_annex_b`] off offers
+    /// `annexb=no` instead, and its answers say what that method describes.
+    /// Every other codec's parameters in an answer are the offer's own,
+    /// echoed, the way `sipral_core`'s answer writes them.
     #[must_use]
     pub const fn fmtp(self) -> Option<&'static str> {
         match self {
             #[cfg(feature = "opus")]
             Self::Opus => Some("useinbandfec=1"),
-            Self::G729 => Some(G729_WITHOUT_ANNEX_B),
+            Self::G729 => Some(annex_b_parameter(true)),
             Self::Pcmu | Self::Pcma | Self::G722 => None,
-        }
-    }
-
-    /// The `a=fmtp` parameters this end writes for the format in an answer,
-    /// whatever the offer said, where there are any.
-    ///
-    /// Only G.729 has one: `annexb=no`. RFC 3555 §4.1.9 (and RFC 4856
-    /// §2.1.9 after it) reads an absent `annexb` as yes, and RFC 3551
-    /// §4.5.6 has a receiver accept Annex B comfort-noise frames "if
-    /// restriction of their use has not been signaled" — so an answer that
-    /// echoed an offer with no parameter would be this end agreeing to a
-    /// format it does not write and decodes only as far as its level. Every
-    /// other codec's parameters are the offer's own, echoed, the way
-    /// `sipral_core`'s answer writes them.
-    #[must_use]
-    pub const fn answer_fmtp(self) -> Option<&'static str> {
-        match self {
-            Self::G729 => Some(G729_WITHOUT_ANNEX_B),
-            Self::Pcmu | Self::Pcma | Self::G722 => None,
-            #[cfg(feature = "opus")]
-            Self::Opus => None,
         }
     }
 
@@ -437,13 +434,14 @@ pub struct CodecCatalog {
     rtcp_mux: bool,
     srtp: SrtpPolicy,
     ice: IcePolicy,
+    annex_b: bool,
 }
 
 impl CodecCatalog {
     /// Every codec this build offers by default — all it contains but G.729
     /// ([`Codec::offered_by_default`]) — quality first, twenty-millisecond
-    /// frames, named events offered, RTCP on its own port and no SRTP
-    /// offered.
+    /// frames, named events offered, RTCP on its own port, no SRTP offered,
+    /// and G.729's Annex B allowed where G.729 is named.
     ///
     /// RTCP multiplexing is off because RFC 5761 §5.1.1 only permits it when
     /// both ends asked, and the equipment this stack is deployed against —
@@ -463,6 +461,7 @@ impl CodecCatalog {
             rtcp_mux: false,
             srtp: SrtpPolicy::NotOffered,
             ice: IcePolicy::Off,
+            annex_b: true,
         }
     }
 
@@ -598,6 +597,53 @@ impl CodecCatalog {
         self.ice
     }
 
+    /// Say whether G.729's Annex B — silence compression: SID frames and
+    /// nothing in a pause, and the comfort noise both ends make from them —
+    /// is allowed.
+    ///
+    /// On by default, which is what `G729` means with no parameter (RFC 4856
+    /// §2.1.9): an offer says `annexb=yes`, and an answer says whatever the
+    /// offer did, `yes` included only where the offer allowed it. Off, both
+    /// say `annexb=no`, which RFC 3551 §4.5.6 makes the far end's cue to
+    /// send no SID frames. The encoder uses Annex B only where both
+    /// descriptions allowed it; the decoder plays a SID frame whatever was
+    /// said, since a peer that sends one anyway is better heard than not.
+    /// Nothing changes for a catalogue that does not name G.729.
+    #[must_use]
+    pub const fn with_g729_annex_b(mut self, annex_b: bool) -> Self {
+        self.annex_b = annex_b;
+        self
+    }
+
+    /// Whether G.729's Annex B is allowed.
+    #[must_use]
+    pub const fn g729_annex_b(&self) -> bool {
+        self.annex_b
+    }
+
+    /// The `a=fmtp` parameters this catalogue offers `codec` with:
+    /// [`Codec::fmtp`], but for G.729, whose `annexb` is this catalogue's
+    /// to say.
+    pub(crate) const fn offered_fmtp(&self, codec: Codec) -> Option<&'static str> {
+        match codec {
+            Codec::G729 => Some(annex_b_parameter(self.annex_b)),
+            other => other.fmtp(),
+        }
+    }
+
+    /// The `a=fmtp` parameters this end writes for `codec` in an answer to
+    /// an offer that gave it `offered`, where this end states them rather
+    /// than echoes the offer's: only G.729's `annexb`, which is `yes` only
+    /// if the offer allowed it (RFC 4856 §2.1.9 reads its absence as `yes`)
+    /// and this catalogue does.
+    pub(crate) fn answered_fmtp(
+        &self,
+        codec: Codec,
+        offered: Option<&str>,
+    ) -> Option<&'static str> {
+        (codec == Codec::G729).then(|| annex_b_parameter(self.annex_b && annex_b_allowed(offered)))
+    }
+
     /// What is offered, in the order it is offered.
     #[must_use]
     pub fn codecs(&self) -> &[Codec] {
@@ -638,7 +684,7 @@ impl CodecCatalog {
                     assigned
                 });
                 let mapped = NegotiatedCodec::new(codec.rtpmap(payload));
-                match codec.fmtp() {
+                match self.offered_fmtp(*codec) {
                     Some(fmtp) => mapped.with_fmtp(fmtp),
                     None => mapped,
                 }
@@ -830,7 +876,7 @@ pub(crate) mod tests {
     }
 
     /// G.729 is in the build and out of the default offer, and an order
-    /// that names it offers it, on 18, saying it takes no Annex B.
+    /// that names it offers it, on 18, saying whether it takes Annex B.
     #[test]
     fn g729_is_offered_only_when_an_order_names_it() {
         assert!(Codec::ALL.contains(&Codec::G729));
@@ -852,9 +898,46 @@ pub(crate) mod tests {
             offer.rtpmap(18).map(|map| map.to_value()).as_deref(),
             Some("18 G729/8000")
         );
-        assert_eq!(offer.fmtp(18), Some("annexb=no"));
-        assert_eq!(Codec::G729.answer_fmtp(), Some("annexb=no"));
-        assert_eq!(Codec::Pcma.answer_fmtp(), None);
+        assert_eq!(offer.fmtp(18), Some("annexb=yes"));
+        let without = CodecCatalog::with_order(&["G729"])
+            .unwrap()
+            .with_g729_annex_b(false)
+            .capabilities()
+            .offer("audio", 40_000, Direction::SendRecv);
+        assert_eq!(without.fmtp(18), Some("annexb=no"));
+    }
+
+    /// RFC 4856 §2.1.9: `annexb` absent is `yes`, and only `no` refuses it;
+    /// an answer says `yes` only where the offer and the catalogue both
+    /// allow it, and nothing of its own for any codec but G.729.
+    #[test]
+    fn an_answer_allows_annex_b_only_where_the_offer_did() {
+        use super::annex_b_allowed;
+        assert!(annex_b_allowed(None));
+        assert!(annex_b_allowed(Some("annexb=yes")));
+        assert!(annex_b_allowed(Some("bitrate=8")));
+        assert!(!annex_b_allowed(Some("annexb=no")));
+        assert!(!annex_b_allowed(Some("foo=1; AnnexB = No")));
+
+        let on = CodecCatalog::with_order(&["G729"]).unwrap();
+        let off = on.clone().with_g729_annex_b(false);
+        assert!(on.g729_annex_b());
+        assert!(!off.g729_annex_b());
+        assert_eq!(on.answered_fmtp(Codec::G729, None), Some("annexb=yes"));
+        assert_eq!(
+            on.answered_fmtp(Codec::G729, Some("annexb=yes")),
+            Some("annexb=yes")
+        );
+        assert_eq!(
+            on.answered_fmtp(Codec::G729, Some("annexb=no")),
+            Some("annexb=no")
+        );
+        assert_eq!(off.answered_fmtp(Codec::G729, None), Some("annexb=no"));
+        assert_eq!(
+            off.answered_fmtp(Codec::G729, Some("annexb=yes")),
+            Some("annexb=no")
+        );
+        assert_eq!(on.answered_fmtp(Codec::Pcma, None), None);
     }
 
     /// G.729 codes ten milliseconds at a time, so an order naming it takes a
