@@ -5036,7 +5036,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 24;
+    public const uint AbiVersionMinor = 25;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
