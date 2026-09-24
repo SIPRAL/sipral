@@ -226,7 +226,15 @@ fn the_nonce_count_moves_by_one_and_never_repeats() {
             .unwrap_or_default()
     };
     assert_eq!(count(&first), "00000001");
-    assert_eq!(count(&second), "00000001", "a fresh nonce starts again");
+    // RFC 7616 §3.4 counts "the number of requests ... sent with the nonce
+    // value in this request", and the stale challenge named the same nonce:
+    // this is the second request with it, and a second 00000001 would read
+    // at the server as the first one replayed
+    assert_eq!(
+        count(&second),
+        "00000002",
+        "the same nonce, marked stale, carries on its count"
+    );
     assert_eq!(header(&second, HeaderName::CSeq), b"3 REGISTER");
 }
 
@@ -851,10 +859,25 @@ fn a_challenged_request_inside_a_call_on_a_stream_takes_its_sequence_from_the_di
         .request_in_dialog(dialog, &OutgoingInDialogRequest::new(Method::Info), t0)
         .expect("a second INFO goes");
     let next = sent(&mut endpoint);
-    assert_ne!(
-        header(&retry, HeaderName::CSeq),
-        header(&next, HeaderName::CSeq),
-        "the dialog handed the retry's number out twice"
+    // not only different: §12.2.1.1 has the local sequence number
+    // "incremented by one" for each request, and §22.2 has the retry take
+    // the next one "as it would normally" — so the three are consecutive
+    let number = |bytes: &[u8]| -> u32 {
+        String::from_utf8_lossy(&header(bytes, HeaderName::CSeq))
+            .split(' ')
+            .next()
+            .and_then(|digits| digits.parse().ok())
+            .expect("a CSeq number")
+    };
+    assert_eq!(
+        number(&retry),
+        number(&bytes) + 1,
+        "the retry did not take the next number"
+    );
+    assert_eq!(
+        number(&next),
+        number(&retry) + 1,
+        "the dialog handed the retry's number out twice, or skipped one"
     );
 }
 

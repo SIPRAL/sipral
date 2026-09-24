@@ -671,6 +671,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   now takes the RFC 2543 rule instead. An INVITE that names no `Contact`
   (RFC 3261 §8.1.1.8) is answered `400 Missing Contact` rather than handed up,
   rung and answered into a dialog that could never be reached.
+- **A stale nonce that comes back unchanged no longer gets a replayed nonce
+  count.** The count started again at `00000001` whenever a challenge said
+  `stale=true`, even when the nonce was the same one, so the retry carried
+  the nonce, cnonce and `nc` of a request already sent -- a replay to the
+  server. The count now starts again only for a new nonce value (RFC 7616
+  §3.4).
 - **A user agent answers what RFC 3261 §8.2 says a UAS answers, before the
   application is asked.** A REGISTER was handed to the application, and
   through the C ABI nothing ever answered it until the endpoint's own 408 at

@@ -393,9 +393,12 @@ The password is the one thing this layer must not hold, and answering with the
 wrong one is how an account gets locked, so *whether* to answer is the caller's
 decision. What the endpoint does own is the bookkeeping the RFC is exact about:
 `nc` moves by one per request and never skips, because a skipped number looks
-to a server like a replay; the `CSeq` moves too (§22.2); and the same nonce
-coming back without `stale` is read as a refusal rather than a fresh challenge,
-because §22.1 does not re-try credentials that were just rejected.
+to a server like a replay; it starts again only for a new nonce value, so the
+same nonce coming back marked `stale` carries its count on (RFC 7616 §3.4
+counts the requests sent "with the nonce value"); the `CSeq` moves too
+(§22.2); and the same nonce coming back without `stale` is read as a refusal
+rather than a fresh challenge, because §22.1 does not re-try credentials that
+were just rejected.
 
 A challenge outlives the transaction that earned it — the refusal is a final
 response, so the transaction ends on its timer while the password is still

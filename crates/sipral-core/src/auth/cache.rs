@@ -310,9 +310,16 @@ impl AuthCache {
             entry.call_id = Arc::clone(call_id);
             return Learned::Retry;
         }
+        // a new nonce starts its own count; the same one marked stale does
+        // not, for the reason the branch above keeps it: `nc` counts the
+        // requests sent "with the nonce value", and starting it again would
+        // send 00000001 under the same nonce and cnonce a second time — to
+        // the server, the first request replayed
+        if entry.challenge.nonce != challenge.nonce {
+            entry.cnonce = Arc::from(cnonce);
+            entry.count = 0;
+        }
         entry.challenge = challenge;
-        entry.cnonce = Arc::from(cnonce);
-        entry.count = 0;
         entry.refused = false;
         entry.call_id = Arc::clone(call_id);
         Learned::Retry
@@ -703,9 +710,29 @@ uri=\"sip:example.com\", response=\"00\""
         );
         assert_eq!(learn(&mut cache, &stale), Learned::Retry);
         let value = authorize(&mut cache);
+        // RFC 7616 §3.4: nc is the "count of the number of requests
+        // (including the current request) that the client has sent with the
+        // nonce value in this request". Two went with n1 already, so this is
+        // the third, stale or not; a second nc=00000001 with n1 is the same
+        // nc value "seen twice", which the server reads as a replay
+        assert!(
+            value.first().expect("one").1.contains("nc=00000003"),
+            "the same nonce carries on its own count: {value:?}"
+        );
+
+        // while a stale challenge with a nonce of its own starts one
+        let fresh = refusal(
+            401,
+            &[(
+                "WWW-Authenticate",
+                &challenge("example.com", "n2", ", stale=true"),
+            )],
+        );
+        assert_eq!(learn(&mut cache, &fresh), Learned::Retry);
+        let value = authorize(&mut cache);
         assert!(
             value.first().expect("one").1.contains("nc=00000001"),
-            "a new nonce starts its own count"
+            "a new nonce starts its own count: {value:?}"
         );
     }
 
