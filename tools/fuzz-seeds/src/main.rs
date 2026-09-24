@@ -1435,10 +1435,32 @@ fn media_g729_seeds() -> Result<Vec<Seed>, Wrong> {
     stream.push(0);
     stream.extend_from_slice(payload.get(..FRAME_OCTETS).unwrap_or_default());
 
+    // forty frames of speech, a quiet SID frame and a pause of a hundred
+    // and fifty frames not sent, one of them lost, then speech again: long
+    // enough for the target's encoder to reach the part of Annex B's voice
+    // activity detector that starts at its 129th frame (the long-term
+    // minimum of B.3.3 and the fourth smoothing stage), which a short input
+    // never does
+    let mut talking = vec![0_u8; 40 * FRAME_OCTETS];
+    Encoder::new().encode_into(&triangle(40 * 80, 20, 9_000), &mut talking);
+    let mut long_pause = Vec::new();
+    for frame in talking.chunks_exact(FRAME_OCTETS) {
+        long_pause.push(0);
+        long_pause.extend_from_slice(frame);
+    }
+    // energy index 2, zero decibels
+    long_pause.extend_from_slice(&[1, 0x00, 0x04]);
+    long_pause.extend((0..150).map(|frame| if frame == 75 { 2 } else { 3 }));
+    for frame in talking.chunks_exact(FRAME_OCTETS).take(20) {
+        long_pause.push(0);
+        long_pause.extend_from_slice(frame);
+    }
+
     let out = vec![
         ("three-encoded-frames", payload),
         ("two-frames-and-a-sid", with_sid),
         ("frames-a-sid-and-a-loss", stream),
+        ("speech-and-a-long-pause", long_pause),
     ];
     for (name, bytes) in &out {
         through_media_g729(name, bytes)?;

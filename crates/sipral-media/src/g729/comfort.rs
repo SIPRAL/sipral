@@ -159,7 +159,10 @@ impl Draw {
 /// Fill the current frame of `excitation` — the [`PAST`] samples before it
 /// are the past excitation — with comfort noise at the target gain `gain`
 /// (Q3). `taming`, at the encoder, learns each subframe's delay and
-/// adaptive-codebook gain as it would a speech subframe's.
+/// adaptive-codebook gain as it would a speech subframe's; neither the text
+/// nor any conformance stream settles that (the streams come out the same
+/// without it), so it is the choice that keeps the taming procedure's view
+/// of the excitation whole.
 pub(super) fn excite(
     gain: i16,
     excitation: &mut [i16; PAST + FRAME_SAMPLES],

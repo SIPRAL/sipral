@@ -696,6 +696,27 @@ mod tests {
         assert_eq!(encode_all(&mut encoder, &input), first);
     }
 
+    /// A reset keeps DTX as it was: an encoder made with it repeats, after
+    /// a reset, what it sent the first time — the pause's SID frame and the
+    /// frames it did not send included.
+    #[test]
+    fn a_reset_encoder_with_dtx_keeps_it() {
+        let mut input = voiced(20);
+        input.extend(hiss(40));
+        let run = |encoder: &mut Encoder| -> Vec<Encoded> {
+            input
+                .chunks_exact(FRAME_SAMPLES)
+                .map(|chunk| encoder.encode(&chunk.try_into().unwrap()))
+                .collect()
+        };
+        let mut encoder = Encoder::with_dtx();
+        let first = run(&mut encoder);
+        assert!(first.iter().any(|e| matches!(e, Encoded::Sid(_))));
+        encoder.reset();
+        assert!(encoder.dtx());
+        assert_eq!(run(&mut encoder), first);
+    }
+
     #[test]
     fn several_frames_in_one_payload_encode_as_they_would_one_by_one() {
         let input = voiced(3);
@@ -747,6 +768,63 @@ mod tests {
                 _ => i16::MAX,
             });
             decoder.decode(&encoder.encode(&samples).speech().unwrap());
+        }
+    }
+
+    /// The same inputs, and a DC at either end of the word, with DTX on and
+    /// each from the encoder's first frame, so that the detector starts its
+    /// averages from them: past the 128th frame, where the long-term minimum
+    /// takes over, nothing panics or overflows, and whatever is sent — speech,
+    /// a SID frame or nothing — decodes. Then all of them in turn through one
+    /// encoder, so that each follows another.
+    #[test]
+    fn extreme_inputs_encode_with_dtx_without_panicking() {
+        let mut state = 0x9e37_79b9_u32;
+        let mut extreme = |kind: usize, n: usize| -> i16 {
+            match kind {
+                0 => 0,
+                1 => i16::MAX,
+                2 => i16::MIN,
+                3 => {
+                    if (n / 4).is_multiple_of(2) {
+                        i16::MAX
+                    } else {
+                        i16::MIN
+                    }
+                }
+                4 => {
+                    if n.is_multiple_of(FRAME_SAMPLES) {
+                        i16::MIN
+                    } else {
+                        0
+                    }
+                }
+                _ => {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    i16::from_ne_bytes(state.to_ne_bytes()[..2].try_into().unwrap())
+                }
+            }
+        };
+        let mut run = |encoder: &mut Encoder, decoder: &mut Decoder, kind: usize, frames: usize| {
+            for frame in 0..frames {
+                let samples: [i16; FRAME_SAMPLES] =
+                    core::array::from_fn(|n| extreme(kind, frame * FRAME_SAMPLES + n));
+                match encoder.encode(&samples) {
+                    Encoded::Speech(octets) => decoder.decode(&octets),
+                    Encoded::Sid(sid) => decoder.decode_sid(sid),
+                    Encoded::Nothing => decoder.untransmitted(),
+                };
+            }
+        };
+        for kind in 0..6 {
+            run(&mut Encoder::with_dtx(), &mut Decoder::new(), kind, 300);
+        }
+        let mut encoder = Encoder::with_dtx();
+        let mut decoder = Decoder::new();
+        for kind in [0, 3, 0, 1, 5, 2, 0, 4, 0] {
+            run(&mut encoder, &mut decoder, kind, 150);
         }
     }
 }

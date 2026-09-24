@@ -186,8 +186,9 @@ pub struct MediaConfig {
     pub cname: Option<String>,
     /// This session's share of the call's RTCP bandwidth, in octets a second.
     pub rtcp_bandwidth: f64,
-    /// How long inbound audio may stop before [`MediaEvent::Stalled`].
-    /// `None` switches the watchdog off.
+    /// How long inbound audio may stop before [`MediaEvent::Stalled`] — or,
+    /// in a G.729 pause the far end announced (Annex B), how long its RTCP
+    /// reports may stop as well. `None` switches the watchdog off.
     pub stall_after: Option<Duration>,
     /// Whether to stop sending during silence.
     ///
@@ -304,6 +305,10 @@ pub struct MediaSession {
     packets_sent: u64,
     octets_sent: u64,
     last_inbound: Instant,
+    /// When the far end's last control report was believed: what says it is
+    /// still there while it sends no audio on purpose, in a pause it
+    /// announced (G.729's Annex B).
+    last_control: Instant,
     stall_after: Option<Duration>,
     stalled: bool,
     /// What the far end's last decoded frame was, which is what the buffer is
@@ -521,6 +526,7 @@ impl MediaSession {
             packets_sent: 0,
             octets_sent: 0,
             last_inbound: now,
+            last_control: now,
             stall_after: config.stall_after,
             stalled: false,
             activity: Activity::Speech,
@@ -1192,7 +1198,10 @@ impl MediaSession {
         let elapsed = self.elapsed(now);
         let ntp = self.clock.at(now);
         match self.rtp.rtcp_receive(datagram, from, elapsed, ntp) {
-            RtcpReceived::Report => Arrival::Control,
+            RtcpReceived::Report => {
+                self.last_control = now;
+                Arrival::Control
+            }
             RtcpReceived::Goodbye { .. } => Arrival::Goodbye,
             RtcpReceived::NotKeyed => Arrival::NotKeyed,
             RtcpReceived::ForeignAddress
@@ -1668,7 +1677,7 @@ impl MediaSession {
         let stall = self
             .stall_after
             .filter(|_| self.is_receiving() && !self.stalled)
-            .map(|after| self.last_inbound + after);
+            .map(|after| self.heard_from() + after);
         #[cfg(feature = "dtls")]
         let handshake = self.dtls.as_ref().and_then(|dtls| {
             let running = dtls.handshake.poll_timeout();
@@ -1719,10 +1728,24 @@ impl MediaSession {
         if self.stalled || !self.is_receiving() {
             return;
         }
-        let silent_for = now.saturating_duration_since(self.last_inbound);
-        if silent_for >= after {
+        if now.saturating_duration_since(self.heard_from()) >= after {
             self.stalled = true;
-            self.events.push_back(MediaEvent::Stalled { silent_for });
+            self.events.push_back(MediaEvent::Stalled {
+                silent_for: now.saturating_duration_since(self.last_inbound),
+            });
+        }
+    }
+
+    /// When the far end was last known to be there, which is what the stall
+    /// watchdog measures from: its last packet of audio — or, in a G.729
+    /// pause it announced with an Annex B SID frame, its last control report
+    /// if that is later, since in that pause no audio is what it said it
+    /// would send. A stream whose reports stop too is stalled as any other.
+    fn heard_from(&self) -> Instant {
+        if self.coder.far_end_paused() {
+            self.last_inbound.max(self.last_control)
+        } else {
+            self.last_inbound
         }
     }
 
@@ -2507,7 +2530,6 @@ const fn sibling_law(codec: Codec) -> Option<(u8, Law)> {
     }
 }
 
-/// Conceal one frame, whichever concealment this codec has.
 /// `samples` of a frame of `frame_samples` as RTP ticks, when the frame is
 /// `frame_ticks` long: the two differ for a codec whose clock is not its
 /// sampling rate, and for G.729, the only codec that skips any, they are the
@@ -2518,6 +2540,7 @@ fn ticks_in(samples: usize, frame_ticks: u32, frame_samples: usize) -> u32 {
     u32::try_from(samples.saturating_mul(u64::from(frame_ticks)) / whole).unwrap_or(frame_ticks)
 }
 
+/// Conceal one frame, whichever concealment this codec has.
 fn conceal(coder: &mut Coder, room: &mut [i16]) -> Playback {
     if coder.conceal(room).is_err() {
         room.fill(0);

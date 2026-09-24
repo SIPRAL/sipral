@@ -90,6 +90,10 @@ pub enum MediaEvent {
     /// the same watchdog and every one of them discovers the need the same
     /// way: from a complaint about a call where both people went quiet and
     /// neither hung up.
+    ///
+    /// A G.729 far end in a pause it announced with an Annex B SID frame
+    /// sends no audio on purpose, for as long as its background stays the
+    /// same; while its RTCP reports keep arriving that pause is not a stall.
     Stalled {
         /// How long the stream has been silent.
         silent_for: Duration,

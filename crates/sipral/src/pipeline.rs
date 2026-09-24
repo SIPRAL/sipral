@@ -300,6 +300,13 @@ impl Coder {
         }
     }
 
+    /// Whether the far end is in a pause it announced: a G.729 stream whose
+    /// last frame was an Annex B SID frame, or the pause one began. `false`
+    /// for every other codec, which announces nothing.
+    pub(crate) fn far_end_paused(&self) -> bool {
+        matches!(&self.kind, Kind::Celp(pair) if pair.1.in_pause())
+    }
+
     /// Fill a frame the far end did not send, when it did not send it
     /// because it is in a pause: G.729's comfort noise, carried on from the
     /// last SID frame (B.4.4). `None` for every other case — another codec,

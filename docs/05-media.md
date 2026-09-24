@@ -1330,7 +1330,7 @@ Against Release 3's Annex B set for Annex A, every stream matches:
 | `tstseq6.bit` → `tstseq6a.out` | 100: 74, 6, 18, 2 | losses, one of them a pause's first SID frame | identical, 8000 of 8000 |
 
 `tstseq5` and `tstseq6` come as streams only, with no input to encode.
-Three input files are not a whole number of frames (`tstseq2.bin` and
+Two input files are not a whole number of frames (`tstseq2.bin` and
 `tstseq3.bin` end fourteen and forty-four octets into a frame); the
 encoder takes the whole frames, as the reference streams do.
 
@@ -1387,7 +1387,12 @@ So the parameter is each end's statement about what it will take:
   own comfort noise, shaped by the SID's spectrum at its level, and carried
   on through every frame the far end then does not send and through a lost
   one inside the pause (B.4.5). The jitter buffer running dry in a pause is
-  that case, and plays as comfort noise rather than as silence.
+  that case, and plays as comfort noise rather than as silence. Nor is it a
+  stalled stream: a far end whose background does not change — a muted
+  microphone, say — sends one SID frame and then nothing for as long as the
+  pause lasts, so while the decoder is in a pause the far end announced,
+  `MediaEvent::Stalled` waits on its RTCP reports rather than on its audio,
+  and a stream whose reports stop as well is reported as ever.
 
 On the wire, a payload is what RFC 3551 §4.5.6 allows: speech frames and at
 most one SID frame after them. With DTX on, a frame length of several G.729

@@ -94,10 +94,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   a pause as a SID frame and then nothing, marking the next talk spurt's
   first packet. A SID frame received plays as the codec's own comfort
   noise, carried on through the frames the far end does not send, whatever
-  was negotiated. A `media_g729` fuzz target covers the decoder, the payload
-  reader and the encoder, and the lab runs a G.729-only call through
-  Asterisk's echo extension, untranscoded, and hears its own tone come
-  back.
+  was negotiated, and such a pause is not reported as a stalled stream
+  while the far end's RTCP keeps arriving. A `media_g729` fuzz target
+  covers the decoder, the payload reader and the encoder, and the lab runs
+  a G.729-only call through Asterisk's echo extension, untranscoded, and
+  hears its own tone come back.
 - **A G.729 encoder, bit-exact against every Annex A conformance input.**
   `sipral_media::g729::Encoder` encodes eighty samples into a ten-octet
   frame, or a buffer of several frames into an RTP payload, in Annex A's

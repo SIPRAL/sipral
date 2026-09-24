@@ -2796,6 +2796,57 @@ fn a_stream_that_stops_is_reported_and_the_call_is_not_touched() {
     );
 }
 
+/// A G.729 far end in an Annex B pause sends nothing on purpose, for as long
+/// as the pause lasts and its background does not change — a muted
+/// microphone sends one SID frame and then nothing at all. That is not a
+/// stream that stopped: while its RTCP keeps arriving the watchdog stays
+/// quiet, and once the RTCP stops too it reports the stall as ever.
+#[test]
+fn a_g729_pause_is_not_a_stall_while_the_far_ends_rtcp_arrives() {
+    let catalog = CodecCatalog::with_order(&["G729"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let heard = g729_through(&mut pair, call, remote, &[(true, 20), (false, 40)]);
+    assert!(
+        heard[30..]
+            .iter()
+            .all(|(length, _, outcome, _)| length.is_none() && *outcome == Playback::ComfortNoise),
+        "a pause, played as comfort noise: {heard:?}"
+    );
+
+    let stalled = |pair: &Pair| {
+        pair.callee
+            .media_events()
+            .into_iter()
+            .any(|event| matches!(event, MediaEvent::Stalled { .. }))
+    };
+    let mut believed = 0;
+    for _ in 0..30 {
+        pair.now += Duration::from_secs(1);
+        believed += pair.exchange_control(call, remote).1;
+        pair.callee.engine.handle_timeout(pair.now);
+        pair.callee.drain(pair.now, false);
+    }
+    assert!(
+        believed >= 4,
+        "{believed} reports crossed in thirty seconds"
+    );
+    assert!(
+        !stalled(&pair),
+        "thirty seconds of a pause with its RTCP arriving was reported as a stall"
+    );
+
+    // the far end's reports stop as well: that is a stream that stopped
+    pair.now += Duration::from_secs(11);
+    pair.callee.engine.handle_timeout(pair.now);
+    pair.callee.drain(pair.now, false);
+    assert!(
+        stalled(&pair),
+        "nothing arrived at all, and nothing said so"
+    );
+}
+
 /// The watchdog must not fire on a stream this end asked not to receive, or
 /// every hold turns into a fault report.
 ///
@@ -3368,6 +3419,190 @@ fn a_renegotiation_turns_g729_annex_b_on_and_off() {
         run(&mut session, false, 40)
             .iter()
             .all(|sent| *sent == Some((20, false)))
+    );
+}
+
+/// The plan of a call on one codec, `payload` with `rtpmap`, between two
+/// hand-written descriptions.
+fn one_codec_plan(payload: u8, rtpmap: &str) -> crate::MediaPlan {
+    let (ours, theirs) = plan_pair(
+        &format!(
+            "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+             m=audio 40000 RTP/AVP {payload}\r\na=rtpmap:{payload} {rtpmap}\r\n"
+        ),
+        &format!(
+            "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+             m=audio 40002 RTP/AVP {payload}\r\na=rtpmap:{payload} {rtpmap}\r\n"
+        ),
+    );
+    plan_of(&ours, &theirs)
+}
+
+/// A stream opened on `plan` with twenty-millisecond frames, Annex B as
+/// `annex_b` says.
+fn opened(
+    plan: &crate::MediaPlan,
+    config: &MediaConfig,
+    annex_b: bool,
+    now: Instant,
+) -> MediaSession {
+    MediaSession::open(
+        plan,
+        20,
+        config,
+        Vec::new(),
+        Start {
+            identity: StreamIdentity {
+                ssrc: 1,
+                sequence: 1,
+                timestamp: 0,
+                seed: 7,
+            },
+            clock: WallClock::from_unix(now, 1_700_000_000, 0),
+            #[cfg(feature = "dtls")]
+            handshake: None,
+            #[cfg(feature = "ice")]
+            ice: None,
+            annex_b,
+            now,
+        },
+    )
+    .expect("G.729 and PCMU are in every build")
+}
+
+/// The facade's own silence suppression stands aside on a G.729 stream whose
+/// encoder does Annex B, since the detector has to hear the pause to send
+/// its SID frame: with suppression asked for, a pause still starts with a
+/// SID frame when Annex B is on — from the start, from a re-negotiation or
+/// from a change of codec onto G.729 — and with Annex B off the suppression
+/// is what stops the frames, and no SID frame goes out.
+#[test]
+fn silence_suppression_stands_aside_for_g729_annex_b() {
+    let now = Instant::now();
+    let plan = one_codec_plan(18, "G729/8000");
+    let pcmu = one_codec_plan(0, "PCMU/8000");
+    let config = MediaConfig {
+        silence_suppression: true,
+        ..MediaConfig::default()
+    };
+    let open = |annex_b: bool| opened(&plan, &config, annex_b, now);
+    // the payload lengths a talk spurt and then a pause sent, `None` for a
+    // frame that sent nothing
+    let spurt_and_pause = |session: &mut MediaSession| {
+        let mut samples = [0_i16; 160];
+        let mut phase = 0_u32;
+        (0..60)
+            .map(|frame| {
+                if frame < 20 {
+                    tone(&mut samples, 8_000, &mut phase);
+                } else {
+                    samples.fill(0);
+                }
+                session
+                    .capture(&samples, now)
+                    .expect("the frame encodes")
+                    .map(|datagram| datagram.payload.len() - 12)
+            })
+            .collect::<Vec<_>>()
+    };
+    let sid = |sent: &Option<usize>| matches!(sent, Some(2 | 12));
+
+    let mut with_annex_b = open(true);
+    let sent = spurt_and_pause(&mut with_annex_b);
+    assert!(sent[20..].iter().any(sid), "{sent:?}");
+
+    let suppressed = |sent: &[Option<usize>]| {
+        !sent.iter().any(sid)
+            && sent
+                .get(30..)
+                .is_some_and(|rest| rest.iter().all(Option::is_none))
+    };
+    let sent = spurt_and_pause(&mut open(false));
+    assert!(
+        suppressed(&sent),
+        "the facade suppressed the pause: {sent:?}"
+    );
+
+    // a re-negotiation either way, before anything is sent
+    let mut turned_on = open(false);
+    turned_on
+        .adopt(&plan, Vec::new(), true, now)
+        .expect("the same stream");
+    let sent = spurt_and_pause(&mut turned_on);
+    assert!(sent[20..].iter().any(sid), "{sent:?}");
+    let mut turned_off = open(true);
+    turned_off
+        .adopt(&plan, Vec::new(), false, now)
+        .expect("the same stream");
+    let sent = spurt_and_pause(&mut turned_off);
+    assert!(suppressed(&sent), "{sent:?}");
+
+    // and a stream that moves onto G.729 from another codec
+    for annex_b in [true, false] {
+        let mut moved = opened(&pcmu, &config, false, now);
+        moved
+            .reformat(&plan, 20, &config, Vec::new(), annex_b, now)
+            .expect("onto G.729");
+        let sent = spurt_and_pause(&mut moved);
+        if annex_b {
+            assert!(sent[20..].iter().any(sid), "{sent:?}");
+        } else {
+            assert!(suppressed(&sent), "{sent:?}");
+        }
+    }
+}
+
+/// A G.729 pause that ends ten milliseconds into a packet's twenty: the
+/// packet carries the one frame of speech, stamped ten milliseconds into its
+/// time and marked as a talk spurt's first, and the next packet is stamped
+/// where it always would have been.
+#[test]
+fn a_g729_pause_that_ends_inside_a_packet_moves_its_timestamp() {
+    let now = Instant::now();
+    let mut stream = opened(
+        &one_codec_plan(18, "G729/8000"),
+        &MediaConfig::default(),
+        true,
+        now,
+    );
+    let mut samples = [0_i16; 160];
+    let mut phase = 0_u32;
+    let mut stamped = Vec::new();
+    for frame in 0..80_u32 {
+        match frame {
+            20..70 => samples.fill(0),
+            70 => {
+                samples.fill(0);
+                let mut late = [0_i16; 80];
+                tone(&mut late, 8_000, &mut phase);
+                samples[80..].copy_from_slice(&late);
+            }
+            _ => tone(&mut samples, 8_000, &mut phase),
+        }
+        if let Some(datagram) = stream.capture(&samples, now).expect("the frame encodes") {
+            let packet = datagram.payload;
+            let timestamp = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+            stamped.push((frame, packet.len() - 12, timestamp, packet[1] & 0x80 != 0));
+        }
+    }
+    let first = stamped[0].2;
+    let onset = stamped
+        .iter()
+        .find(|(frame, ..)| *frame == 70)
+        .expect("the frame the voice comes back in is sent");
+    assert_eq!(
+        (onset.1, onset.2.wrapping_sub(first), onset.3),
+        (10, 70 * 160 + 80, true),
+        "{stamped:?}"
+    );
+    let next = stamped
+        .iter()
+        .find(|(frame, ..)| *frame == 71)
+        .expect("and the one after it");
+    assert_eq!(
+        (next.1, next.2.wrapping_sub(first), next.3),
+        (20, 71 * 160, false),
+        "{stamped:?}"
     );
 }
 

@@ -2070,10 +2070,7 @@ impl MediaEngine {
                 return;
             }
         };
-        // the catalogue's own word first: a description this layer did not
-        // write — a re-offer the user agent answered by echoing it — can say
-        // yes where this end would have said no
-        let annex_b = managed.catalog.g729_annex_b() && annex_b_agreed(local, remote, &plan);
+        let annex_b = annex_b_in_use(&managed.catalog, local, remote, &plan);
         // D5: recorded here, at the point the negotiation is worked out, from
         // the far end's own description and this call's own catalogue —
         // never reconstructed later from state that may have moved on
@@ -2754,6 +2751,19 @@ fn stated_fmtp(
     Some(Attribute::with_value("fmtp", &format!("{payload} {fmtp}")))
 }
 
+/// Whether this end's G.729 encoder runs Annex B's DTX on `plan`: the
+/// catalogue's own word first — a description this layer did not write, a
+/// re-offer the user agent answered by echoing it, can say yes where this
+/// end would have said no — and then both descriptions'.
+fn annex_b_in_use(
+    catalog: &CodecCatalog,
+    local: &SessionDescription,
+    remote: &SessionDescription,
+    plan: &MediaPlan,
+) -> bool {
+    catalog.g729_annex_b() && annex_b_agreed(local, remote, plan)
+}
+
 /// Whether both descriptions of a G.729 stream allowed Annex B, which is
 /// what turns its encoder's DTX on: each end's `annexb` says what that end
 /// will take, and one that says `no` is not sent SID frames. `false` for
@@ -3128,7 +3138,7 @@ mod answer_parameters {
 
     use sipral_core::sdp::{SessionDescription, parse};
 
-    use super::write_answer;
+    use super::{annex_b_in_use, write_answer};
     use crate::codec::CodecCatalog;
 
     fn described(stream: &str) -> SessionDescription {
@@ -3188,6 +3198,54 @@ mod answer_parameters {
         let media = answer.media.first().expect("one stream");
         assert_eq!(media.formats, ["0"]);
         assert_eq!(media.fmtp(18), None);
+    }
+
+    /// Whether this end's encoder runs Annex B, from the two descriptions a
+    /// negotiation ends with: only where each allowed it — a description with
+    /// no `annexb` allows it (RFC 4856 §2.1.9), whichever end wrote it — and
+    /// never with the catalogue's Annex B off, even where both descriptions
+    /// say yes, as a re-offer the user agent answered by echoing it can.
+    #[test]
+    fn the_encoder_runs_annex_b_only_where_both_descriptions_and_the_catalogue_allow_it() {
+        let on = CodecCatalog::with_order(&["G729", "PCMU"]).expect("an order");
+        let off = on.clone().with_g729_annex_b(false);
+        let g729 = |fmtp: &str| described(&format!("m=audio 40002 RTP/AVP 18\r\n{fmtp}"));
+        let yes = "a=fmtp:18 annexb=yes\r\n";
+        let no = "a=fmtp:18 annexb=no\r\n";
+        for (local, remote, on_uses) in [
+            (yes, yes, true),
+            (yes, "", true),
+            ("", yes, true),
+            ("", "", true),
+            (yes, no, false),
+            (no, yes, false),
+            (no, "", false),
+            ("", no, false),
+        ] {
+            let (ours, theirs) = (g729(local), g729(remote));
+            let plan = ours
+                .media_plan(&theirs, 0)
+                .expect("a plan")
+                .expect("the stream is kept");
+            assert_eq!(
+                annex_b_in_use(&on, &ours, &theirs, &plan),
+                on_uses,
+                "ours {local:?}, theirs {remote:?}"
+            );
+            assert!(
+                !annex_b_in_use(&off, &ours, &theirs, &plan),
+                "ours {local:?}, theirs {remote:?}"
+            );
+        }
+
+        // and nothing of it for another codec, whatever a line for 18 says
+        let pcmu = |fmtp: &str| described(&format!("m=audio 40002 RTP/AVP 0\r\n{fmtp}"));
+        let (ours, theirs) = (pcmu(yes), pcmu(yes));
+        let plan = ours
+            .media_plan(&theirs, 0)
+            .expect("a plan")
+            .expect("the stream is kept");
+        assert!(!annex_b_in_use(&on, &ours, &theirs, &plan));
     }
 }
 

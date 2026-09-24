@@ -32,9 +32,11 @@
 //!   coefficient is below 0.75 and its spectral distance below 83 — the
 //!   conditions Appendix II quotes from the software (II.5.1, II.5.3);
 //! - the long-term minimum of B.3.3 is kept over sixteen stretches of eight
-//!   frames, and after the 128th frame the noise's energy is pulled down to
-//!   it when it falls below the minimum with a steady spectrum, or rises
-//!   more than ten decibels above it.
+//!   frames, and after the 128th frame the noise's energy is set to it when
+//!   it falls below the minimum with a steady spectrum (B.3.7), or when it
+//!   rises more than ten decibels above it, which the text does not say and
+//!   no conformance stream depends on (the streams come out the same
+//!   without it).
 
 use super::analysis::{Autocorrelation, WINDOW};
 use super::arith::{
