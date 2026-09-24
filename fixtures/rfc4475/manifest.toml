@@ -300,7 +300,8 @@ section = "3.3.1"
 title = "Missing Required Header Fields"
 file = "3.3-application/insuf.dat"
 # The RFC section calls for a 400 even though the message sits in the
-# application group: without Call-ID, To and From there is nothing to answer.
+# application group: validate refuses it for its missing Call-ID, and the
+# endpoint answers that 400 with the Via and CSeq it does carry.
 outcome = "reject"
 sha256 = "1e3efd9f3b238c6351ba12bc7eb46d843f2761b5d4a6b82b63bffdf07f2c5aee"
 

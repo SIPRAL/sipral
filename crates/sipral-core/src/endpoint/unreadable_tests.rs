@@ -7,9 +7,10 @@
 //! client retransmit into silence until timer B or F gives up: 400 for a
 //! request it cannot read (§21.4.1), 513 for one longer than it can take
 //! (§21.5.14). Both are written from what can still be recovered of the
-//! request — `Via`, `From`, `To`, `Call-ID`, `CSeq` — and what cannot be
-//! answered is dropped with a count and a diagnostic entry, never without a
-//! trace.
+//! request — its `Via`, and whichever of `From`, `To`, `Call-ID` and `CSeq`
+//! it carried — and what cannot be answered, because no `Via` says where an
+//! answer would go, is dropped with a count and a diagnostic entry, never
+//! without a trace.
 
 use super::tests::{
     deliver, endpoint, events, header, incoming, invite_request, local, peer, respond_to, sent,
@@ -399,6 +400,51 @@ Subject: {}\r\n\
     assert_eq!(dropped.address, Some(peer()));
 }
 
+#[test]
+fn a_refused_request_with_a_via_and_nothing_else_is_answered_with_what_it_had() {
+    // no `From`, `To`, `Call-ID` or `CSeq` to copy (§8.2.6.2), and a `Via`
+    // that says where the answer goes (§18.2.2): RFC 4475 §3.3.1 would
+    // "ideally" have a request like this answered 400, and it is
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let limit = Limits::DEFAULT.max_header_value_bytes as usize;
+    let request = format!(
+        "OPTIONS sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKbare1;rport\r\n\
+Subject: {}\r\n\
+\r\n",
+        "s".repeat(limit + 1)
+    );
+    assert!(arrive(&mut endpoint, request.as_bytes(), t0).is_err());
+    let out = transmits(&mut endpoint);
+    assert_eq!(out.len(), 1, "one answer");
+    let answer = out.first().expect("counted above");
+    assert_eq!(answer.destination, peer());
+    assert_eq!(
+        status_of(&answer.payload),
+        (
+            Some(StatusCode::BAD_REQUEST),
+            format!("Subject Too Long (limit {limit} bytes)")
+        )
+    );
+    assert_eq!(
+        header(&answer.payload, HeaderName::Via),
+        b"SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKbare1;rport".to_vec()
+    );
+    read_back(&answer.payload, |message| {
+        for name in [
+            HeaderName::From,
+            HeaderName::To,
+            HeaderName::CallId,
+            HeaderName::CSeq,
+        ] {
+            assert!(message.header(name).is_none(), "{name:?} was invented");
+        }
+    });
+    assert_eq!(endpoint.unreadable(), 1);
+    one_of(&endpoint_decisions(&endpoint), "request.refused.unreadable");
+}
+
 /// An OPTIONS whose head begins with `head` — its `Via` lines, and whatever
 /// else a test puts in front of them — and then the other four fields an
 /// answer copies.
@@ -533,30 +579,46 @@ fn an_answer_that_cannot_be_written_is_recorded_as_dropped_not_as_sent() {
 #[test]
 fn the_smallest_answerable_request_gets_back_under_two_and_a_half_times_its_size() {
     // a forged source address aims the answer at whoever owns it. The answer
-    // is the request's own five fields plus a status line, a tag and a
-    // `Content-Length`, so only a request of little else than those comes
-    // back larger, and this one is as little as can be answered: compact
-    // names, one bad line, 66 bytes answered with 156
+    // is the request's own `Via` and whichever of the other four fields it
+    // copies the request had, plus a status line, a tag when there is a `To`
+    // to put it in, and a `Content-Length`, so only a request of little else
+    // than those comes back larger. These are as little as can be answered:
+    // compact names, one bad line, and either all five fields — 66 bytes
+    // answered with 156 — or the `Via` alone, 37 answered with 76
     // (`docs/20-security-model.md`)
-    let t0 = Instant::now();
-    let mut endpoint = endpoint(t0);
-    let request = b"A a:b SIP/2.0\r\n\
+    for (request, expected) in [
+        (
+            &b"A a:b SIP/2.0\r\n\
 v:SIP/2.0/UDP a\r\n\
 f:a:b\r\n\
 t:a:b\r\n\
 i:c\r\n\
 CSeq:1 A\r\n\
 x\r\n\
-\r\n";
-    assert!(arrive(&mut endpoint, request, t0).is_err());
-    let answer = sent(&mut endpoint);
-    assert_eq!(status_of(&answer).0, Some(StatusCode::BAD_REQUEST));
-    assert!(
-        2 * answer.len() < 5 * request.len(),
-        "{} bytes answered with {}",
-        request.len(),
-        answer.len()
-    );
+\r\n"[..],
+            (66, 156),
+        ),
+        (
+            &b"A a:b SIP/2.0\r\n\
+v:SIP/2.0/UDP a\r\n\
+x\r\n\
+\r\n"[..],
+            (37, 76),
+        ),
+    ] {
+        let t0 = Instant::now();
+        let mut endpoint = endpoint(t0);
+        assert!(arrive(&mut endpoint, request, t0).is_err());
+        let answer = sent(&mut endpoint);
+        assert_eq!(status_of(&answer).0, Some(StatusCode::BAD_REQUEST));
+        assert_eq!((request.len(), answer.len()), expected);
+        assert!(
+            2 * answer.len() < 5 * request.len(),
+            "{} bytes answered with {}",
+            request.len(),
+            answer.len()
+        );
+    }
 }
 
 #[test]

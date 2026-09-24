@@ -238,13 +238,14 @@ fn badbranch_is_answered_by_the_old_rule_and_its_neighbour_is_not_taken_for_it()
 }
 
 #[test]
-fn insuf_is_dropped_without_breaking_anything() {
+fn insuf_is_refused_400_without_breaking_anything() {
     // §3.3.1: "An element receiving this message must not break because of
-    // the missing information. Ideally, it will respond with a 400". The
-    // ideal is not met: a response copies `From`, `To` and `Call-ID` from the
-    // request (§8.2.6.2) and this one has none of them, so the 400 would be
-    // missing three of the fields every response must carry. The stack
-    // records the refusal and writes nothing, and the next request is
+    // the missing information. Ideally, it will respond with a 400". It
+    // does, statelessly: a response copies `From`, `To` and `Call-ID` from
+    // the request (§8.2.6.2) and this one has none of them, so the 400
+    // carries what it had — the `Via` it is routed by (§18.2.2) and the
+    // `CSeq` the client matches it on (§17.1.3) — and invents nothing for
+    // the rest. Nothing reaches the application, and the next request is
     // served as though this one had never come
     let now = Instant::now();
     let mut agent = agent(now);
@@ -255,7 +256,18 @@ fn insuf_is_dropped_without_breaking_anything() {
         now,
     )
     .expect("a message that parses");
-    assert!(written(&mut agent).is_empty());
+    let answers = written(&mut agent);
+    assert_eq!(answers.len(), 1);
+    let answer = answers.first().expect("one");
+    assert_eq!(status(answer), 400);
+    assert_eq!(
+        header(answer, HeaderName::Via),
+        "SIP/2.0/UDP 192.0.2.95;branch=z9hG4bKkdj.insuf"
+    );
+    assert_eq!(header(answer, HeaderName::CSeq), "193942 INVITE");
+    for name in [HeaderName::From, HeaderName::To, HeaderName::CallId] {
+        assert_eq!(header(answer, name), "", "{name:?} was invented");
+    }
     assert!(events(&mut agent).is_empty());
 
     receive(

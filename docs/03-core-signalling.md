@@ -51,9 +51,11 @@ A message past a bound, or not well formed enough to parse, is never dropped
 without a trace. RFC 3261 §8.2 has a UAS answer what it cannot process rather
 than leave the client retransmitting until timer B or F gives up, so a request
 is answered — statelessly, from what can still be recovered of it — whenever
-its `Via`, `From`, `To`, `Call-ID` and `CSeq` can be read, which are the five
-fields every response copies (§8.2.6.2) and all an answer needs to reach the
-client and match its transaction:
+its top `Via` can be read, since that is where the answer goes (§18.2.2) and
+what the client matches it on (§17.1.3). The answer copies the `Via` and
+whichever of `From`, `To`, `Call-ID` and `CSeq` — the other four fields every
+response copies (§8.2.6.2) — the request carried, and invents nothing for
+the ones it did not:
 
 - **513 Message Too Large** (§21.5.14) for one longer than the message bound,
   with the bound in the reason phrase: `Message Too Large (limit 65535 bytes)`.
@@ -68,9 +70,14 @@ because a response that changed it would match nothing at the client. Inside
 a dialog the answer carries the dialog's own tags and the dialog stands;
 nothing about the call changes because one request in it could not be read.
 
+The same holds for a request that parsed but lacks those fields: RFC 4475
+§3.3.1's `insuf`, with no `From`, `To` or `Call-ID`, is refused by
+`RawMessage::validate` and answered `400 Bad Call-ID` carrying its `Via` and
+its `CSeq` (`ResponseBuilder::build_refusal`).
+
 What cannot be answered is dropped: a response, an ACK (never answered,
-§17.1.1.3), a request whose five fields cannot all be read, or one whose
-request line cannot. So is one whose top `Via` is itself past the value
+§17.1.1.3), a request with no `Via` that reads, or one whose request line
+cannot be read. So is one whose top `Via` is itself past the value
 bound, or holds a CR that ends no line: that `Via` routes the answer
 (§18.2.2), and a field the parser refused, or would have, does not get to say
 where this end sends anything — nor does the `Via` below one left out. An

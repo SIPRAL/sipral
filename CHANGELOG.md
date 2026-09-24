@@ -590,6 +590,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   a STUN transaction treats as a lost one and retransmits, and the drop is
   counted in `IceAgent::transmits_dropped` and
   `MediaSession::ice_transmits_dropped`.
+- **A request missing `From`, `To` or `Call-ID` is answered 400, not
+  dropped.** RFC 4475's `insuf` has none of the three and "ideally" gets a
+  400; the endpoint wrote nothing, because a response copies those fields
+  and the builder refused to write one without them. A refusal now needs
+  only the top `Via` that routes it: the 400 copies the `Via` and whichever
+  of `From`, `To`, `Call-ID` and `CSeq` the request carried, and invents
+  nothing for the rest (`ResponseBuilder::build_refusal`). The same holds
+  for a request the parser refuses, which used to be dropped unless all
+  five fields could be read. Only a request with no readable `Via` is
+  still dropped.
 - **A request the parser refuses is answered, not dropped without a trace.**
   An INVITE with a 6,000-byte display name got nothing back at all: one
   field past the parser's bound on a single value, and the whole request was
@@ -600,7 +610,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   otherwise, with a reason phrase naming the bound or the fault, such as
   `From Too Long (limit 16384 bytes)` — including when the field past the
   bound is one of those five, which goes back whole. What cannot be answered
-  (a response, an ACK, a request whose five fields cannot all be read, or
+  (a response, an ACK, a request whose top `Via` cannot be read, or
   one whose top `Via` is itself past the bound, since that `Via` would say
   where the answer goes) is counted by `Endpoint::unreadable` and, like
   every refusal, recorded in the endpoint's diagnostic record as

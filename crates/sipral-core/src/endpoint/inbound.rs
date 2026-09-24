@@ -272,9 +272,12 @@ impl Endpoint {
     /// is nothing worth remembering about a message this end could not read.
     ///
     /// Nothing is answered when the bytes are a response, an ACK (never
-    /// answered, §17.1.1.3), or a request whose `Via`, `From`, `To`,
-    /// `Call-ID` or `CSeq` cannot be read, since an answer without all five
-    /// reaches nobody who can match it (§8.2.6.2, §18.2.2). Either way the
+    /// answered, §17.1.1.3), or a request whose top `Via` cannot be read,
+    /// since that `Via` is where an answer goes (§18.2.2) and what the client
+    /// matches it on (§17.1.3). A `From`, `To`, `Call-ID` or `CSeq` that is
+    /// missing or cannot be read is not a reason to stay silent: the answer
+    /// copies whichever of them are there ([`ResponseBuilder::build_refusal`]),
+    /// as the answer to a request that parsed but lacks them does. Either way the
     /// count behind [`Endpoint::unreadable`] moves and the endpoint's record
     /// says which of the two happened, on the endpoint's record rather than a
     /// call's for the same reason overload refusals are: a stranger's garbage
@@ -319,7 +322,7 @@ impl Endpoint {
         let built = ResponseBuilder::for_request(&request, status)
             .to_tag(&tag)
             .reason(phrase.as_bytes())
-            .build();
+            .build_refusal();
         // the copied fields, a longer status line and a tag can pass the
         // message bound the builder still holds an answer to: nothing to send
         let Ok(message) = built else {
@@ -682,12 +685,18 @@ impl Endpoint {
     /// is nothing here worth remembering about a message this end could not
     /// read, and a retransmission of it earns the same answer again.
     ///
+    /// A request missing a field the answer would copy is answered all the
+    /// same, with what it had: RFC 4475 §3.3.1's `insuf` has no `From`, `To`
+    /// or `Call-ID` and "ideally" gets a 400, and the one field an answer
+    /// cannot go without is the `Via` that routes it
+    /// ([`ResponseBuilder::build_refusal`]).
+    ///
     /// Three of them are answered with nothing at all. An ACK is never
     /// answered (§17.1.1.3), so a malformed one is dropped where it stands.
-    /// A request whose own `Via` cannot be read names no place to send an
-    /// answer to, and §18.2.2 has the response go to where the `Via` says;
-    /// `ResponseBuilder::for_request` refuses to build one, and the refusal is
-    /// the drop. And a response is not judged here at all: §18.1.2 already
+    /// A request with no `Via` names no place to send an answer to, and
+    /// §18.2.2 has the response go to where the `Via` says; the builder
+    /// refuses to write one, and the refusal is the drop. And a response is
+    /// not judged here at all: §18.1.2 already
     /// discards one whose `Via` is not ours, and each reader of a response
     /// handles the field it reads, so a response carrying a fault in a field
     /// nobody reads stays usable rather than becoming a call that never
@@ -711,7 +720,7 @@ impl Endpoint {
         let built = ResponseBuilder::for_request(request, StatusCode::BAD_REQUEST)
             .to_tag(&tag)
             .reason(phrase.as_bytes())
-            .build();
+            .build_refusal();
         if let Ok(message) = built {
             self.queue(flow.transmit(message.bytes()));
         }
@@ -1972,24 +1981,21 @@ struct Arrival {
 }
 
 /// Whether what [`salvage_request`] recovered is enough to answer: a request
-/// that is not an ACK, with the five fields every response copies all
-/// readable, and a top `Via` inside the bound on one value.
+/// that is not an ACK, with a top `Via` that reads and is inside the bound on
+/// one value.
 ///
 /// The top `Via` is what routes the answer (§18.2.2) — its `maddr`, its port —
 /// and one past the bound is a field the parser refused, or would have had it
 /// got that far: nothing read from it decides where this end sends anything.
-/// The other four go back whole whatever their length, since they only have
-/// to match.
+/// `From`, `To`, `Call-ID` and `CSeq` go back whole whatever their length,
+/// since they only have to match, and an answer goes without any of them the
+/// request did not carry.
 fn can_be_answered(request: &RawMessage<'_>, value_bound: usize) -> bool {
     request.method().is_some_and(|method| method != Method::Ack)
         && request
             .header(HeaderName::Via)
             .is_some_and(|top| top.len() <= value_bound)
         && request.top_via().is_ok()
-        && request.call_id().is_ok()
-        && request.cseq().is_ok()
-        && request.from().is_ok()
-        && request.to().is_ok()
 }
 
 /// The status a request the parser refused is answered with, and a reason

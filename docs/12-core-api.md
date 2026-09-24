@@ -470,6 +470,9 @@ impl<'a> ResponseBuilder<'a> {
     pub fn header(self, name: HeaderName<'a>, value: &'a [u8]) -> Self;
     pub fn body(self, content_type: &'a [u8], body: &'a [u8]) -> Self;
     pub fn build(self) -> Result<OwnedMessage, BuildError>;
+    /// A stateless refusal of a request missing some of what a response
+    /// copies: only the `Via` is required, the rest is copied when present.
+    pub fn build_refusal(self) -> Result<OwnedMessage, BuildError>;
 }
 
 pub enum BuildError { MissingField(&'static str), IllegalValue(&'static str), OwnedField(&'static str), NotWellFormed(ParseError) }

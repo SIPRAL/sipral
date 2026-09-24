@@ -182,9 +182,10 @@ not a registrar), 420 for `bext01`, 415 for `invut`, 406 for `sdp01`, 400 for
 `multi01` and for `inv2543` (it names no `Contact`), 200 for `zeromf` and
 `badbranch`, 400 for `mcl01` over UDP (refused as a message, then answered
 statelessly from the fields that can still be read; over a stream the
-connection goes instead), and nothing at all for `bcast`. One falls short of
-the RFC and the tests say so rather than hide it: `insuf` is dropped rather
-than answered 400, because a response copies the three fields it lacks.
+connection goes instead), 400 for `insuf` (it has no `From`, `To` or
+`Call-ID` to copy, so the answer carries the `Via` that routes it and the
+`CSeq` the client matches it on, and invents nothing for the rest), and
+nothing at all for `bcast`.
 
 `scripts/check.sh` verifies every file's hash, so the corpus cannot drift, and
 `crates/sipral-core/tests/rfc4475.rs` reads the manifest rather than repeating

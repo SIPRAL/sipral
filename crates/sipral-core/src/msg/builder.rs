@@ -480,6 +480,28 @@ impl<'a> ResponseBuilder<'a> {
         self.fields.require(HeaderName::To, "To")?;
         self.fields.require(HeaderName::CallId, "Call-ID")?;
         self.fields.require(HeaderName::CSeq, "CSeq")?;
+        self.build_refusal()
+    }
+
+    /// Write a refusal of a request that lacks some of what a response
+    /// copies: whichever of `From`, `To`, `Call-ID` and `CSeq` the request
+    /// had, and no invented stand-in for the rest.
+    ///
+    /// RFC 4475 §3.3.1 sends a request with no `From`, `To` or `Call-ID` and
+    /// asks that it be answered 400. §8.2.6.2 has every response copy those
+    /// fields, and a request that has none leaves nothing to copy; what the
+    /// answer cannot do without is the `Via` (§18.2.2 sends it where the top
+    /// one says, and §17.1.3 matches it on that one's branch). So the `Via`
+    /// is still required and the rest is copied when it is there. For a
+    /// stateless 4xx or 5xx only: no dialog and no transaction can come of
+    /// an answer like this one.
+    ///
+    /// # Errors
+    /// [`BuildError::MissingField`] when the request had no `Via`, and
+    /// [`BuildError::IllegalValue`] for a value with a line break in it that
+    /// is not a fold.
+    pub fn build_refusal(self) -> Result<OwnedMessage, BuildError> {
+        self.fields.require(HeaderName::Via, "Via")?;
 
         let mut out = Vec::with_capacity(512);
         out.extend_from_slice(b"SIP/2.0 ");
@@ -828,6 +850,58 @@ CSeq: 2 BYE\r\n\
             ResponseBuilder::for_request(m, StatusCode::OK).build()
         });
         assert_eq!(built.err(), Some(BuildError::MissingField("From")));
+    }
+
+    #[test]
+    fn a_refusal_copies_what_the_request_had_and_invents_nothing() {
+        // RFC 4475 §3.3.1's insuf, down to the fields: a `Via` and a `CSeq`,
+        // and none of `From`, `To` or `Call-ID`
+        let request = b"INVITE sip:user@example.com SIP/2.0\r\n\
+CSeq: 193942 INVITE\r\n\
+Via: SIP/2.0/UDP 192.0.2.95;branch=z9hG4bKkdj.insuf\r\n\
+\r\n";
+        let built = with_request(request, |m| {
+            ResponseBuilder::for_request(m, StatusCode::BAD_REQUEST)
+                .to_tag(b"ours")
+                .reason(b"Bad Call-ID")
+                .build_refusal()
+                .expect("a refusal")
+        });
+        assert_eq!(
+            built.as_raw().as_bytes(),
+            b"SIP/2.0 400 Bad Call-ID\r\n\
+Via: SIP/2.0/UDP 192.0.2.95;branch=z9hG4bKkdj.insuf\r\n\
+CSeq: 193942 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n"
+        );
+        // and a request that had all of them gets all of them back, tag
+        // included, exactly as `build` writes them
+        let whole = |refusal: bool| {
+            with_request(REQUEST, |m| {
+                let builder =
+                    ResponseBuilder::for_request(m, StatusCode::BAD_REQUEST).to_tag(b"ours");
+                if refusal {
+                    builder.build_refusal()
+                } else {
+                    builder.build()
+                }
+                .expect("a response")
+            })
+        };
+        assert_eq!(
+            whole(true).as_raw().as_bytes(),
+            whole(false).as_raw().as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_refusal_still_needs_a_via_to_go_anywhere() {
+        let request = b"OPTIONS sip:b@example.com SIP/2.0\r\nCSeq: 1 OPTIONS\r\n\r\n";
+        let built = with_request(request, |m| {
+            ResponseBuilder::for_request(m, StatusCode::BAD_REQUEST).build_refusal()
+        });
+        assert_eq!(built.err(), Some(BuildError::MissingField("Via")));
     }
 
     #[test]

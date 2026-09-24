@@ -3203,6 +3203,44 @@ fn a_request_whose_cseq_disagrees_with_its_start_line_is_answered_400() {
     assert!(again.starts_with("SIP/2.0 400 Bad CSeq"), "{again}");
 }
 
+/// RFC 4475 §3.3.1's `insuf`: a request with no `From`, `To` or `Call-ID` is
+/// "ideally" answered 400, and the answer copies what the request had — the
+/// `Via` it is routed by and the `CSeq` it is matched on — and invents
+/// nothing in place of the rest.
+#[test]
+fn a_request_missing_the_fields_a_response_copies_is_answered_400_with_what_it_had() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let insufficient = b"INVITE sip:alice@192.0.2.1 SIP/2.0\r\n\
+CSeq: 193942 INVITE\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKinsuf1\r\n\
+Content-Length: 0\r\n\
+\r\n";
+
+    deliver(&mut endpoint, insufficient, t0);
+
+    let answer = sent(&mut endpoint);
+    let text = String::from_utf8_lossy(&answer).into_owned();
+    assert!(text.starts_with("SIP/2.0 400 Bad Call-ID\r\n"), "{text}");
+    assert_eq!(
+        header(&answer, HeaderName::Via),
+        b"SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKinsuf1".to_vec()
+    );
+    assert_eq!(header(&answer, HeaderName::CSeq), b"193942 INVITE".to_vec());
+    for name in [HeaderName::From, HeaderName::To, HeaderName::CallId] {
+        assert!(header(&answer, name).is_empty(), "{name:?} was invented");
+    }
+    assert!(events(&mut endpoint).is_empty());
+
+    // and with no `Via` there is nowhere to send one
+    let nowhere = b"INVITE sip:alice@192.0.2.1 SIP/2.0\r\n\
+CSeq: 193942 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n";
+    deliver(&mut endpoint, nowhere, t0);
+    assert!(transmits(&mut endpoint).is_empty());
+}
+
 /// The same fault in an ACK is dropped rather than answered: §17.1.1.3 has no
 /// response to an ACK, and inventing one would be a message the far end has
 /// no transaction for.

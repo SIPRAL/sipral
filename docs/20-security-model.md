@@ -53,15 +53,17 @@ sized now against the longest fields that legitimately travel on one line —
 a full RFC 8224 `Identity`, a long `History-Info` — and it costs no memory of
 its own, since a value is a span into the message rather than a copy. What
 a ceiling refuses is answered rather than dropped when it can be: a request
-whose `Via`, `From`, `To`, `Call-ID` and `CSeq` can still be read gets 513 or
-a 400 naming the bound, statelessly; the rest is counted and recorded
+whose top `Via` can still be read gets 513 or a 400 naming the bound,
+statelessly; the rest is counted and recorded
 (`docs/03-core-signalling.md`, "Limits, and what a refused message gets").
-The answer is those five fields as they came plus a status line, a tag and a
-`Content-Length`, so a forged source address gets back about what was sent
-for any request carrying more than the five, and under two and a half times
-it for the smallest one that can be answered at all — 66 bytes, every name
-compact, answered with 156. Where the answer goes is never read from a field
-past a bound: a request whose top `Via` is longer than the value bound, or
+The answer is the `Via` and whichever of `From`, `To`, `Call-ID` and `CSeq`
+the request carried, as they came, plus a status line, a tag when there is a
+`To` to put it in, and a `Content-Length`, so a forged source address gets
+back about what was sent for any request carrying more than those, and
+under two and a half times it for the smallest ones that can be answered at
+all — every name compact, 66 bytes with all five fields answered with 156,
+and 37 bytes with the `Via` alone answered with 76. Where the answer goes is
+never read from a field past a bound: a request whose top `Via` is longer than the value bound, or
 whose `Via` had to be left out, is not answered, since that `Via`'s `maddr`
 and port would decide where the answer lands. A second, separate `sdp::Limits`
 (`crates/sipral-core/src/sdp/parse.rs:41`) does the same for a body once it
