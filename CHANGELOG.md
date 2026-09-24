@@ -171,7 +171,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   while the far end's RTCP keeps arriving. A `media_g729` fuzz target
   covers the decoder, the payload reader and the encoder, and the lab runs
   a G.729-only call through Asterisk's echo extension, untranscoded, and
-  hears its own tone come back.
+  hears its own tone come back — from Rust, and from C with the codec
+  named in that one call's `sipral_call_config_t::codecs`.
 - **A G.729 encoder, bit-exact against every Annex A conformance input.**
   `sipral_media::g729::Encoder` encodes eighty samples into a ten-octet
   frame, or a buffer of several frames into an RTP payload, in Annex A's

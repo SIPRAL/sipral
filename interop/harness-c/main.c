@@ -86,6 +86,11 @@
 #define SPURT_MS 1200u
 #define PAUSE_MS 600u
 
+/* Audible frames `FLOW_G729` has to hear back from the echo: half a second
+ * of twenty-millisecond frames, of the call's dwell, a third of which is the
+ * tone's own pauses -- the Rust harness's own `G729_ECHOED`. */
+#define G729_ECHOED 25u
+
 /* `FLOW_ICE_NAT`: how long a path is waited for once the call is answered,
  * how long the tone then runs on it, and how many frames of the far end's
  * tone have to be heard -- interop/harness/src/ice_lite.rs's own `PATIENCE`,
@@ -632,6 +637,11 @@ static const char *stun_for_this_flow;
 static const char *turn_for_this_flow;
 static const char *turn_user_for_this_flow;
 static const char *turn_password_for_this_flow;
+
+/* The codec order the call a flow places is offered with, as
+ * `sipral_call_config_t::codecs` takes it, or NULL for the stack's own --
+ * every flow but `FLOW_G729`. */
+static const char *codecs_for_this_flow;
 
 /* Whether the flow being opened is `FLOW_ICE_NAT`: an account that never
  * registers, calling the other stack straight at its NAT's address, from
@@ -1358,6 +1368,10 @@ static int place(struct endpoint *end, const char *server, const char *extension
     call.media_address = end->rtp_address;
     call.media_address_len = strlen(end->rtp_address);
     call.srtp = srtp;
+    if (codecs_for_this_flow != NULL) {
+        call.codecs = codecs_for_this_flow;
+        call.codecs_len = strlen(codecs_for_this_flow);
+    }
     status = sipral_call_place(end->stack, end->account, &call, out_call, now_ms());
     if (status != SIPRAL_STATUS_OK) {
         wrong("sipral_call_place", status);
@@ -1380,6 +1394,10 @@ enum flow {
     FLOW_HOLD_CODEC_CHANGE,
     FLOW_MESSAGE,
     FLOW_MWI,
+    /* 8.6.15: G.729 alone, to Asterisk's echo, as the one endpoint there that
+     * allows it -- interop/harness/src/main.rs's own Flow::G729, and in the
+     * same place in the run, after message waiting and before DTLS-SRTP. */
+    FLOW_G729,
     FLOW_DTLS,
     /* The phone-to-phone peer: interop/harness/src/main.rs's own
      * Flow::PeerSrtp and Flow::PeerDtls, run only when SIPRAL_PEER names
@@ -1426,6 +1444,8 @@ static const char *flow_name(enum flow which)
         return "MESSAGE, echoed";
     case FLOW_MWI:
         return "message waiting indication";
+    case FLOW_G729:
+        return "G.729, echoed";
     case FLOW_DTLS:
         return "DTLS-SRTP, held and resumed";
     case FLOW_PEER_SRTP:
@@ -1469,6 +1489,8 @@ static const char *flow_key(enum flow which)
         return "message";
     case FLOW_MWI:
         return "mwi";
+    case FLOW_G729:
+        return "g729";
     case FLOW_DTLS:
         return "dtls";
     case FLOW_PEER_SRTP:
@@ -1551,6 +1573,12 @@ static void account_for(enum flow which, const char *server, const char **user,
         named = getenv("SIPRAL_USER_MWI");
         secret = getenv("SIPRAL_PASS_MWI");
         fallback = "labuser-mwi";
+    } else if (which == FLOW_G729) {
+        /* the one endpoint that allows G.729, and allows nothing else, so
+         * every other flow's offer is answered as it always was */
+        named = getenv("SIPRAL_USER_G729");
+        secret = getenv("SIPRAL_PASS_G729");
+        fallback = "labuser-g729";
     } else {
         return;
     }
@@ -1654,12 +1682,13 @@ static void dwell(struct endpoint *end, unsigned millis)
 
 /* Whether a flow is run against this server at all.
  *
- * Six of them only against Asterisk, and the Rust harness does the same for
+ * Seven of them only against Asterisk, and the Rust harness does the same for
  * the same reasons: `interop/asterisk/extensions.conf` is the only dialplan in
  * the lab with an extension that names a digit back, the one Asterisk names
  * never came back through the proxy from FreeSWITCH, and the SDES endpoint,
- * the INFO one, the echo extension MESSAGE is sent to and the mailbox message
- * waiting indication watches all exist only in Asterisk's own configuration.
+ * the INFO one, the echo extension MESSAGE is sent to, the mailbox message
+ * waiting indication watches and the one endpoint that allows G.729 all
+ * exist only in Asterisk's own configuration.
  * DTLS-SRTP runs on both, since `interop/freeswitch/lab.xml` answers 9005 as
  * well. `docs/11-testing.md` carries the reasons. A flow is not run where it
  * is known not to pass until somebody has found out why.
@@ -1679,6 +1708,7 @@ static int runs_against(enum flow which, const char *server, int for_baresip)
     case FLOW_HOLD_CODEC_CHANGE:
     case FLOW_MESSAGE:
     case FLOW_MWI:
+    case FLOW_G729:
         return strcmp(server, "asterisk") == 0;
     case FLOW_PEER_SRTP:
     case FLOW_PEER_DTLS:
@@ -1721,8 +1751,9 @@ static int runs_against(enum flow which, const char *server, int for_baresip)
  * has 9004, DTLS-SRTP 9005 — its own number so a capture shows which leg
  * keyed by handshake without reading the SDP — and `FLOW_MWI`'s own mailbox
  * extension is 9007, whose hangup handler is what leaves the message this
- * flow watches for. FLOW_PEER_SRTP and FLOW_PEER_DTLS are the same shape
- * against the phone-to-phone peer: one AOR per media policy
+ * flow watches for; `FLOW_G729` calls the echo, 9008 (`Answer(); Echo();`),
+ * so what it hears is its own tone back. FLOW_PEER_SRTP and FLOW_PEER_DTLS
+ * are the same shape against the phone-to-phone peer: one AOR per media policy
  * (interop/baresip/config/accounts) rather than one per extension number,
  * since baresip is a single client and not a dialplan. Every other flow calls
  * the extension the command line named, and a bridge answers it -- FLOW_CALL
@@ -1743,6 +1774,8 @@ static const char *extension_for(enum flow which, const char *named)
         return "9005";
     case FLOW_MWI:
         return "9007";
+    case FLOW_G729:
+        return "9008";
     case FLOW_PEER_SRTP:
         return "baresip-srtp";
     case FLOW_PEER_DTLS:
@@ -1812,6 +1845,7 @@ static uint32_t srtp_for(enum flow which)
     case FLOW_HOLD_CODEC_CHANGE:
     case FLOW_MESSAGE:
     case FLOW_MWI:
+    case FLOW_G729:
     case FLOW_NAT:
     case FLOW_ICE_NAT:
     case FLOW_COUNT:
@@ -2605,6 +2639,21 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
         break;
     }
 
+    case FLOW_G729:
+        /* the claim is the codec and the echo together: a call that settled
+         * on anything else proved nothing about G.729, and `audio_holds`
+         * asks for more than a stray frame of the tone back. The lab's
+         * Asterisk has no G.729 translator, so what `Echo()` hands back is
+         * what this end's encoder wrote, for this end's decoder */
+        dwell(end, DWELL_MS);
+        if (end->seen.codec_started != (uint32_t)SIPRAL_CODEC_G729) {
+            const char *codec = sipral_codec_name(end->seen.codec_started);
+            (void)snprintf(trouble, sizeof trouble, "the call settled on %s, not G.729",
+                           codec != NULL ? codec : "no codec at all");
+            return -1;
+        }
+        break;
+
     case FLOW_DTLS:
     case FLOW_PEER_DTLS: {
         /* FLOW_PEER_DTLS is this same case against the phone-to-phone
@@ -2707,16 +2756,25 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
 static int audio_holds(const struct endpoint *end, enum flow which)
 {
     const char *required = getenv("SIPRAL_REQUIRE_AUDIO");
-    if (which != FLOW_CALL && which != FLOW_SRTP && which != FLOW_NAT) {
+    if (which != FLOW_CALL && which != FLOW_SRTP && which != FLOW_NAT && which != FLOW_G729) {
         return 1;
     }
     if (end->sent == 0) {
         wrong_text("no audio left this end");
         return 0;
     }
-    if (required != NULL && required[0] != '\0' && required[0] != '0'
-        && end->audible == 0) {
+    if (required == NULL || required[0] == '\0' || required[0] == '0') {
+        return 1;
+    }
+    if (end->audible == 0) {
         wrong_text("nothing audible came back");
+        return 0;
+    }
+    if (which == FLOW_G729 && end->audible < G729_ECHOED) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "the echo came back as %u audible frames of %u wanted: %u sent, "
+                       "%u received, %u refused",
+                       end->audible, G729_ECHOED, end->sent, end->received, end->refused);
         return 0;
     }
     return 1;
@@ -3314,6 +3372,7 @@ int main(int argc, char **argv)
                                  ? getenv("SIPRAL_STUN_SERVER")
                                  : NULL;
         calling_a_peer = flow == FLOW_ICE_NAT;
+        codecs_for_this_flow = flow == FLOW_G729 ? "G729" : NULL;
         turn_for_this_flow = NULL;
         turn_user_for_this_flow = NULL;
         turn_password_for_this_flow = NULL;
