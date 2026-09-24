@@ -11,6 +11,11 @@
 //! that is told nothing retransmits until its own timer gives up, and one
 //! that is told 200 believes it was understood.
 //!
+//! The method question is asked twice. REGISTER is refused before anything
+//! else reads the request; any other method outside a dialog is refused only
+//! after every handler that claims one has passed it over, because only then
+//! is it known that nothing here implements it.
+//!
 //! One question more comes from the other direction. An INVITE whose
 //! `Accept` rules out `application/sdp` asks for an answer this agent cannot
 //! write, since every 2xx to an INVITE carries a session description, and
@@ -33,6 +38,13 @@ use crate::renegotiate::ALLOW;
 /// §21.4.6, which §8.2.1 answers a method this agent does not implement
 /// with.
 const METHOD_NOT_ALLOWED: StatusCode = match StatusCode::new(405) {
+    Ok(code) => code,
+    Err(_) => StatusCode::SERVER_ERROR,
+};
+
+/// §21.5.2, which §8.2.1 answers a method this agent does not recognise
+/// with.
+const NOT_IMPLEMENTED: StatusCode = match StatusCode::new(501) {
     Ok(code) => code,
     Err(_) => StatusCode::SERVER_ERROR,
 };
@@ -101,6 +113,60 @@ impl UserAgent {
             _ => Some(event),
         }
     }
+
+    /// §8.2.1 for a request outside a dialog that every handler of this
+    /// agent passed over: it is answered here rather than handed to the
+    /// application, which has no way to answer it through the C ABI and
+    /// would otherwise leave the peer retransmitting until the endpoint's
+    /// own 408 thirty-two seconds later.
+    ///
+    /// Run last, after every handler that claims a method outside a dialog
+    /// (OPTIONS, NOTIFY, MESSAGE) has had its turn, so nothing a handler
+    /// takes is ever refused here. See [`unclaimed_refusal`] for the status.
+    pub(crate) fn on_unclaimed_request(&mut self, event: Event, now: Instant) -> Option<Event> {
+        let Event::IncomingOutOfDialog {
+            transaction,
+            ref request,
+        } = event
+        else {
+            return Some(event);
+        };
+        let refusal = unclaimed_refusal(&request.as_raw());
+        self.endpoint.respond(transaction, &refusal, now).ok();
+        None
+    }
+}
+
+/// What a request outside a dialog that nothing here claimed is answered
+/// with.
+///
+/// - **481** when it names a dialog — a tag in its `To` — that this agent
+///   does not have (§12.2.2: "it MUST respond to the request with a 481
+///   (Call/Transaction Does Not Exist) status code"), whatever its method.
+/// - **481** for a method this agent implements only inside a dialog —
+///   BYE (§15.1.2), UPDATE, REFER, INFO and PRACK — since a request that
+///   names no dialog has none of this agent's to act in. All but INFO are
+///   in [`ALLOW`], so a 405 would list the very method it refused.
+/// - **405** with [`ALLOW`] for any other method RFC 3261 and its
+///   extensions define that this agent does not take outside a dialog:
+///   SUBSCRIBE (it is no notifier) and PUBLISH (it is no event state
+///   compositor). "If the UAS recognizes but does not support the method of
+///   a request, it MUST generate a 405 (Method Not Allowed) response", and
+///   §21.4.6 makes the `Allow` compulsory. REGISTER is refused the same
+///   way, earlier ([`method_refusal`]).
+/// - **501** for a method it does not recognise at all: "If the method is
+///   not recognized ... the UAS SHOULD generate a 501 (Not Implemented)"
+///   (§21.5.2).
+fn unclaimed_refusal(request: &RawMessage<'_>) -> OutgoingResponse {
+    let names_a_dialog = request.to().is_ok_and(|to| to.tag().is_some());
+    match request.method() {
+        _ if names_a_dialog => OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST),
+        Some(Method::Bye | Method::Update | Method::Refer | Method::Info | Method::Prack) => {
+            OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST)
+        }
+        Some(Method::Extension(_)) | None => OutgoingResponse::new(NOT_IMPLEMENTED),
+        Some(_) => OutgoingResponse::new(METHOD_NOT_ALLOWED).header(HeaderName::Allow, ALLOW),
+    }
 }
 
 /// §8.2.1: "If the UAS recognizes but does not support the method of a
@@ -110,9 +176,10 @@ impl UserAgent {
 /// REGISTER is the method it is written for here. A registrar keeps
 /// bindings, and this agent keeps none of anyone else's: RFC 4475 §3.3.7 has
 /// "endpoints choosing not to act as registrars ... simply reject the
-/// request", with a 405. Every other method that reaches this point out of a
-/// dialog is either claimed by a handler further on or left to the
-/// application, which may be the one that implements it.
+/// request", with a 405. It is refused here, before the Request-URI, because
+/// §8.2 asks about the method first. Every other method that reaches this
+/// point out of a dialog is either claimed by a handler further on or, if
+/// none claims it, refused by [`UserAgent::on_unclaimed_request`].
 fn method_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
     (request.method() == Some(Method::Register))
         .then(|| OutgoingResponse::new(METHOD_NOT_ALLOWED).header(HeaderName::Allow, ALLOW))

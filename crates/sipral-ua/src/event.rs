@@ -626,6 +626,10 @@ pub enum UaEvent {
     /// A protocol event this layer has no policy for.
     ///
     /// Nothing the endpoint says is dropped on the way through, and nothing
-    /// that passes here has been interpreted.
+    /// that passes here has been interpreted. The one exception is a request
+    /// outside a dialog that no handler here claims: RFC 3261 §8.2.1 leaves
+    /// no choice in how it is answered — 405 with `Allow`, 501, or 481 when
+    /// it names a dialog this agent does not have — so it is answered here
+    /// and never arrives as `Event::IncomingOutOfDialog` (`docs/04-ua.md`).
     Unclaimed(Event),
 }

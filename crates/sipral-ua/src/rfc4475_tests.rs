@@ -671,3 +671,139 @@ Contact: <sip:+13035551111@iftgw.example.com;user=phone>\r\n",
         );
     }
 }
+
+// -- §8.2.1 past the corpus: a method nothing here claims --------------------
+
+/// A request outside any dialog of this agent, over UDP: `method`, with
+/// `to` as its `To` value.
+fn out_of_dialog(method: &str, to: &str, branch: &str) -> Vec<u8> {
+    format!(
+        "{method} sip:user@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch}\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:caller@example.net>;tag=from{branch}\r\n\
+To: {to}\r\n\
+Call-ID: {branch}@192.0.2.9\r\n\
+CSeq: 1 {method}\r\n\
+Content-Length: 0\r\n\
+\r\n"
+    )
+    .into_bytes()
+}
+
+/// The one answer the agent wrote to `request`, and that nothing reached the
+/// application.
+fn answered(request: &[u8]) -> Vec<u8> {
+    let now = Instant::now();
+    let mut agent = agent(now);
+    receive(&mut agent, request, Over::Udp, now).expect("a message that parses");
+    let out = written(&mut agent);
+    assert_eq!(out.len(), 1, "{}", String::from_utf8_lossy(request));
+    let reported = events(&mut agent);
+    assert!(
+        !reported
+            .iter()
+            .any(|event| matches!(event, UaEvent::Unclaimed(_))),
+        "a refused request still reached the application: {reported:?}"
+    );
+    out.into_iter().next().unwrap_or_default()
+}
+
+/// The methods of an `Allow`, in order.
+fn methods(allow: &str) -> Vec<String> {
+    allow.split(',').map(|m| m.trim().to_owned()).collect()
+}
+
+#[test]
+fn a_method_this_agent_knows_but_does_not_take_outside_a_dialog_is_405_with_allow() {
+    // §8.2.1: "If the UAS recognizes but does not support the method of a
+    // request, it MUST generate a 405 (Method Not Allowed) response", and
+    // §21.4.6 makes the Allow compulsory. It lists what this agent takes,
+    // the same list its answer to OPTIONS gives (§20.5), and never the
+    // method it refused
+    let options = answered(&out_of_dialog("OPTIONS", "<sip:user@example.com>", "opt"));
+    assert_eq!(status(&options), 200);
+    let advertised = methods(&header(&options, HeaderName::Allow));
+    for method in ["SUBSCRIBE", "PUBLISH"] {
+        let answer = answered(&out_of_dialog(
+            method,
+            "<sip:user@example.com>",
+            &method.to_lowercase(),
+        ));
+        assert_eq!(status(&answer), 405, "{method}");
+        let allow = methods(&header(&answer, HeaderName::Allow));
+        assert_eq!(allow, advertised, "{method}");
+        assert_eq!(
+            allow,
+            [
+                "INVITE", "ACK", "CANCEL", "BYE", "OPTIONS", "UPDATE", "PRACK", "REFER", "NOTIFY"
+            ],
+            "{method}"
+        );
+        assert!(!allow.iter().any(|listed| listed == method), "{method}");
+        assert_eq!(header(&answer, HeaderName::CSeq), format!("1 {method}"));
+    }
+}
+
+#[test]
+fn a_method_this_agent_does_not_recognise_is_501() {
+    // §8.2.1: "If the method is not recognized ... the UAS SHOULD generate
+    // a 501 (Not Implemented) response" (§21.5.2)
+    for method in ["FOO", "NEWMETHOD", "invite"] {
+        let answer = answered(&out_of_dialog(
+            method,
+            "<sip:user@example.com>",
+            &format!("x{}", method.len()),
+        ));
+        assert_eq!(status(&answer), 501, "{method}");
+        assert_eq!(header(&answer, HeaderName::CSeq), format!("1 {method}"));
+    }
+}
+
+#[test]
+fn a_request_for_a_dialog_this_agent_does_not_have_is_481() {
+    // §12.2.2: a tag in `To` that matches no dialog "MUST" be answered 481,
+    // whatever the method, and a method this agent implements only inside a
+    // dialog names none of its dialogs without one (§15.1.2 for BYE), so a
+    // 405 listing it in Allow would contradict itself
+    for (method, to) in [
+        ("BYE", "<sip:user@example.com>;tag=gone"),
+        ("INFO", "<sip:user@example.com>;tag=gone"),
+        ("SUBSCRIBE", "<sip:user@example.com>;tag=gone"),
+        ("FOO", "<sip:user@example.com>;tag=gone"),
+        ("BYE", "<sip:user@example.com>"),
+        ("UPDATE", "<sip:user@example.com>"),
+        ("REFER", "<sip:user@example.com>"),
+        ("INFO", "<sip:user@example.com>"),
+    ] {
+        let answer = answered(&out_of_dialog(method, to, &format!("{method}{}", to.len())));
+        assert_eq!(status(&answer), 481, "{method} to {to}");
+    }
+}
+
+#[test]
+fn what_a_handler_claims_outside_a_dialog_is_still_its_own() {
+    // the refusal runs after every handler: a MESSAGE is taken by the
+    // messaging handler and reported, not refused
+    let now = Instant::now();
+    let mut agent = agent(now);
+    let mut message =
+        String::from_utf8(out_of_dialog("MESSAGE", "<sip:user@example.com>", "msg")).expect("text");
+    message = message.replace(
+        "Content-Length: 0\r\n\r\n",
+        "Content-Type: text/plain\r\nContent-Length: 2\r\n\r\nhi",
+    );
+    receive(&mut agent, message.as_bytes(), Over::Udp, now).expect("a message that parses");
+    let reported = events(&mut agent);
+    assert!(
+        reported
+            .iter()
+            .any(|event| matches!(event, UaEvent::MessageReceived { .. })),
+        "{reported:?}"
+    );
+    assert!(
+        written(&mut agent)
+            .iter()
+            .all(|answer| status(answer) != 405 && status(answer) != 501)
+    );
+}

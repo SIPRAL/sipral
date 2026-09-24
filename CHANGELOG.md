@@ -590,6 +590,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   a STUN transaction treats as a lost one and retransmits, and the drop is
   counted in `IceAgent::transmits_dropped` and
   `MediaSession::ice_transmits_dropped`.
+- **A request outside a dialog that nothing here takes is answered at
+  once.** A SUBSCRIBE, a PUBLISH, a stray BYE or a method nobody defined
+  reached the application as `UaEvent::Unclaimed`, and through the C ABI
+  nothing answered it until the endpoint's 408 thirty-two seconds later.
+  The user agent now answers it after every handler has passed it over, as
+  RFC 3261 §8.2.1 asks: 405 with `Allow` for SUBSCRIBE and PUBLISH, 501
+  for a method it does not recognise, and 481 for one whose `To` names a
+  dialog it does not have or whose method it takes only inside one (BYE,
+  UPDATE, REFER, INFO, PRACK). OPTIONS, MESSAGE and the NOTIFYs of its own
+  subscriptions are handled as before.
 - **A request missing `From`, `To` or `Call-ID` is answered 400, not
   dropped.** RFC 4475's `insuf` has none of the three and "ideally" gets a
   400; the endpoint wrote nothing, because a response copies those fields

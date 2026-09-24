@@ -410,7 +410,9 @@ impl UserAgent {
     /// The endpoint underneath, for what this layer has no policy for yet.
     ///
     /// What this layer has no policy for arrives as [`UaEvent::Unclaimed`] and
-    /// is answered through here. Registration, calls, transfers and
+    /// is answered through here — a request inside a dialog, since one
+    /// outside any that nothing here claims is answered by this layer
+    /// (§8.2.1). Registration, calls, transfers and
     /// subscriptions are not among them: a REGISTER or a SUBSCRIBE sent from
     /// here would be one this layer does not know it owns, and would neither
     /// be refreshed nor retried.
@@ -830,7 +832,11 @@ impl UserAgent {
         // in or out of any dialog, and everything above has already taken
         // what is its own
         let event = self.on_message_event(event, now)?;
-        self.on_session_event(event, now)
+        let event = self.on_session_event(event, now)?;
+        // last: a request outside a dialog that every handler above passed
+        // over is one this agent does not implement there, and §8.2.1 says
+        // what it is answered with rather than leaving it to the application
+        self.on_unclaimed_request(event, now)
     }
 
     /// `None` when the event belonged to a registration and has been dealt
