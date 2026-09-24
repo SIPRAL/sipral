@@ -368,12 +368,9 @@ fn mcl01_is_refused_as_a_whole_and_on_a_stream_takes_the_connection_with_it() {
     // TCP, the framing error is not recoverable, and the connection should
     // be closed."
     //
-    // Over UDP the datagram is refused before any of it is read as a
-    // message, and the refusal goes to the caller of `receive` rather than
-    // to the peer: no response is written, which is less than the RFC's
-    // "should respond". Answering needs the header fields of a message whose
-    // framing is already known to be wrong, and the parser does not hand
-    // those out.
+    // Over UDP the datagram is refused as a message, and the refusal still
+    // goes to the caller of `receive`; the peer gets the RFC's error, built
+    // statelessly from the fields that can still be read.
     let now = Instant::now();
     let mut agent = agent(now);
     let bytes = fixture("3.3-application/mcl01.dat");
@@ -381,7 +378,9 @@ fn mcl01_is_refused_as_a_whole_and_on_a_stream_takes_the_connection_with_it() {
         receive(&mut agent, &bytes, Over::Udp, now),
         Err(ReceiveError::Malformed(_))
     ));
-    assert!(written(&mut agent).is_empty());
+    let answers = written(&mut agent);
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    assert_eq!(answers.first().map(|answer| status(answer)), Some(400));
     assert!(events(&mut agent).is_empty());
 
     // over TCP the connection goes: nothing more is read from it

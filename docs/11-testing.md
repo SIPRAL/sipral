@@ -180,11 +180,11 @@ names, and what goes back on the wire is held to the RFC's paragraph for it:
 416 for the two Request-URI schemes, 405 for the five REGISTERs (this stack is
 not a registrar), 420 for `bext01`, 415 for `invut`, 406 for `sdp01`, 400 for
 `multi01` and for `inv2543` (it names no `Contact`), 200 for `zeromf` and
-`badbranch`, and nothing at all for `bcast`. Two fall short of the RFC and the
-tests say so rather than hide it: `insuf` is dropped rather than answered 400,
-because a response copies the three fields it lacks, and `mcl01` is refused to
-the caller of `receive` rather than answered, because its framing is known to
-be wrong before any field of it is read.
+`badbranch`, 400 for `mcl01` over UDP (refused as a message, then answered
+statelessly from the fields that can still be read; over a stream the
+connection goes instead), and nothing at all for `bcast`. One falls short of
+the RFC and the tests say so rather than hide it: `insuf` is dropped rather
+than answered 400, because a response copies the three fields it lacks.
 
 `scripts/check.sh` verifies every file's hash, so the corpus cannot drift, and
 `crates/sipral-core/tests/rfc4475.rs` reads the manifest rather than repeating
