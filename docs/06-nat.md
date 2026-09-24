@@ -657,16 +657,16 @@ from the offer to `MediaEvent::PathChosen` is the audio a call does not have
 at its start. The lab harness prints it on every ICE flow, twice: from the
 moment `place_with` wrote the offer, and from the answer arriving. Measured on
 the lab VM (Debian 13, 32 cores, Docker bridges, no impairment), 24 September
-2026, six runs of the lite flow, four of the two-NAT one and three of the
+2026, seven runs of the lite flow, five of the two-NAT one and six of the
 relayed one:
 
 | Peer | Offer to path | Answer to path |
 |---|---|---|
 | ICE-lite (`headless-socket-agent --ice-lite`), same network | 66–70 ms | 57–59 ms |
 | Full, each end behind a NAT of its own | 1115–1116 ms | 1112–1113 ms |
-| Full, the two NATs blocking each other, through a TURN relay | 1117–1118 ms | 1112–1115 ms |
+| Full, the two NATs blocking each other, through a TURN relay | 1114–1121 ms | 1112–1116 ms |
 
-The relayed call chose the same path all three times: the caller's
+The relayed call chose the same path all six times: the caller's
 server-reflexive candidate to the callee's relayed one, so the audio crossed
 coturn once, on a channel bound on the callee's allocation — one relay is all
 a path needs, and ICE ranks a pair with one relayed end above a pair with two.
