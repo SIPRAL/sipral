@@ -686,7 +686,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   marked `handling=optional`), or is content-coded, rang like any other; it
   is now 415 with `Accept` or `Accept-Encoding`. An INVITE whose `Accept`
   rules out `application/sdp` is now 406, since its answer would have to
-  carry one. Every message of RFC 4475 §3.2 to §3.4 is now fed to a user agent
+  carry one; as in HTTP, the most specific range decides, so
+  `application/sdp;q=0, */*` rules it out and `*/*;q=0, application/sdp`
+  does not. Every message of RFC 4475 §3.2 to §3.4 is now fed to a user agent
   in the test suite and held to what the RFC says goes back on the wire.
 - **An answered call that was addressed to no account names a `Contact`.**
   The 180 and the 200 for an INVITE that matched no account carried an

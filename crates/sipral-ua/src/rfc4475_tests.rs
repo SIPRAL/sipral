@@ -611,3 +611,52 @@ Content-Length: 0\r\n\
         "the BYE did not end the call"
     );
 }
+
+#[test]
+fn a_call_for_no_account_over_a_stream_names_the_stream_in_its_contact() {
+    // The Contact above names the address the INVITE arrived on. Over a
+    // stream it must also say which kind: §19.1.2 makes UDP the default for
+    // a `sip:` URI with no `transport`, so a peer that called over TCP or TLS
+    // and is handed a bare address would send its ACK and its BYE over UDP,
+    // to a socket this end may not even have
+    for (over, via, parameter) in [(Over::Tcp, "TCP", "tcp"), (Over::Tls, "TLS", "tls")] {
+        let now = Instant::now();
+        let mut agent = agent(now);
+        let invite = with_line(
+            &with_line(
+                &fixture("3.4-backward-compat/inv2543.dat"),
+                "Via: SIP/2.0/UDP iftgw.example.com\r\n",
+                &format!("Via: SIP/2.0/{via} iftgw.example.com\r\n"),
+            ),
+            "Call-ID: inv2543.1717@ift.client.example.com\r\n",
+            "Call-ID: inv2543.1717@ift.client.example.com\r\n\
+Contact: <sip:+13035551111@iftgw.example.com;user=phone>\r\n",
+        );
+        // and the Content-Length a stream cannot be framed without (§18.3),
+        // which inv2543 leaves out as RFC 2543 let it over UDP
+        let text = String::from_utf8(invite).expect("the fixture is text");
+        let (head, body) = text.split_once("\r\n\r\n").expect("a body");
+        let invite = format!("{head}\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        receive(&mut agent, invite.as_bytes(), over, now).expect("a message that parses");
+        written(&mut agent);
+        let call = events(&mut agent)
+            .into_iter()
+            .find_map(|event| match event {
+                UaEvent::IncomingCall { call, account, .. } => {
+                    assert_eq!(account, None, "{via}");
+                    Some(call)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the call over {via} was reported"));
+        agent.ring(call, None, now).expect("the 180 goes");
+        let ringing = written(&mut agent);
+        let ringing = ringing.first().expect("a 180");
+        assert_eq!(status(ringing), 180, "{via}");
+        assert_eq!(
+            header(ringing, HeaderName::Contact),
+            format!("<sip:192.0.2.1:5060;transport={parameter}>"),
+            "{via}"
+        );
+    }
+}

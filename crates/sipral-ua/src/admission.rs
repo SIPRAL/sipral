@@ -190,25 +190,41 @@ fn optional_body(request: &RawMessage<'_>) -> bool {
 /// Whether the peer will take a session description in the answer.
 ///
 /// §20.1: an absent `Accept` means `application/sdp`, and "an empty Accept
-/// header field means that no formats are acceptable". A media range takes
-/// SDP when it is `application/sdp`, `application/*` or `*/*` and does not
-/// carry a `q` of zero, which is how the HTTP rules §20.1 borrows say "not
-/// this".
+/// header field means that no formats are acceptable". The ranges that
+/// cover SDP are `application/sdp`, `application/*` and `*/*`, and §20.1
+/// keeps HTTP's semantics for them: "If more than one media range applies
+/// to a given type, the most specific reference has precedence" (RFC 2616
+/// §14.1). SDP is taken when the most specific of those present does not
+/// carry a `q` of zero, which is how those rules say "not this".
 fn takes_sdp(request: &RawMessage<'_>) -> bool {
     if request.header_count(HeaderName::Accept) == 0 {
         return true;
     }
-    request.accept().any(|range| {
+    // (how specific the range is, whether a range that specific takes SDP)
+    let mut deciding: Option<(u8, bool)> = None;
+    for range in request.accept() {
         let Ok(kind) = MediaTypeRef::parse(range) else {
-            return false;
+            continue;
         };
-        let covers =
-            kind.is("application", "sdp") || kind.is("application", "*") || kind.is("*", "*");
-        let refused = kind.params().any(|(name, value)| {
+        let specificity = if kind.is("application", "sdp") {
+            2
+        } else if kind.is("application", "*") {
+            1
+        } else if kind.is("*", "*") {
+            0
+        } else {
+            continue;
+        };
+        let taken = !kind.params().any(|(name, value)| {
             name.eq_ignore_ascii_case(b"q") && value.is_some_and(is_zero_quality)
         });
-        covers && !refused
-    })
+        deciding = match deciding {
+            Some((held, before)) if held > specificity => Some((held, before)),
+            Some((held, before)) if held == specificity => Some((held, before || taken)),
+            _ => Some((specificity, taken)),
+        };
+    }
+    deciding.is_some_and(|(_, taken)| taken)
 }
 
 /// `qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )`: zero when
@@ -299,6 +315,32 @@ Contact: <sip:bob@192.0.2.9>\r\n\
             "Accept: application/sdpx\r\n",
         ] {
             assert!(!accepts_sdp(refused), "{refused}");
+        }
+    }
+
+    #[test]
+    fn the_most_specific_range_in_an_accept_decides() {
+        // §20.1 keeps the semantics of HTTP's Accept, and RFC 2616 §14.1 has
+        // "Media ranges can be overridden by more specific media ranges or
+        // specific media types. If more than one media range applies to a
+        // given type, the most specific reference has precedence." A wider
+        // range that takes everything does not take back what a narrower one
+        // ruled out, and the other way round
+        for refused in [
+            "Accept: application/sdp;q=0, */*\r\n",
+            "Accept: */*\r\nAccept: application/sdp;q=0\r\n",
+            "Accept: application/*;q=0, */*\r\n",
+            "Accept: application/sdp;q=0, application/*\r\n",
+        ] {
+            assert!(!accepts_sdp(refused), "{refused}");
+        }
+        for taken in [
+            "Accept: */*;q=0, application/sdp\r\n",
+            "Accept: application/*;q=0, application/sdp\r\n",
+            "Accept: */*;q=0, application/*\r\n",
+            "Accept: text/plain;q=0, */*\r\n",
+        ] {
+            assert!(accepts_sdp(taken), "{taken}");
         }
     }
 
