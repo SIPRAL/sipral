@@ -609,7 +609,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   every REGISTER after it does until the registrar answers one with a 2xx;
   before, the registrar kept forking calls to the dead address until that
   binding expired. A mapping that moves back never asks for the address it is
-  on to go.
+  on to go. The `Contact` being removed goes as its URI alone, without
+  `+sip.instance`: Kamailio matches a removal by instance, and given both
+  under the same tag it drops the new binding with the old one.
 - **`TurnClient::deadline` is no longer in the past while a permission or a
   channel binding waits for its answer.** The renewal time of each
   permission and channel counted towards the deadline even after its

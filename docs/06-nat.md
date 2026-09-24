@@ -238,9 +238,11 @@ The decisions, and why each one is what it is:
   that REGISTER also carries the `Contact` it replaces with `expires=0`, so
   the registrar drops the old binding instead of forking calls to it until it
   expires (RFC 3261 §10.2.2). That includes the private address a REGISTER
-  sent before the first answer arrived. No `reg-id` is ever sent, so the
-  registrar keys both bindings by their URI (RFC 5626 §6) and removing the
-  one cannot remove the other. For a media socket still waiting, the call is
+  sent before the first answer arrived. The old `Contact` goes as its URI
+  alone, without `+sip.instance`: RFC 3261 §10.3 matches a removal to a
+  binding by URI, but Kamailio matches by instance, and given the new
+  `Contact` and the old one with `expires=0` under the same tag it keeps
+  neither. For a media socket still waiting, the call is
   described by the new address. A call already up is not re-INVITEd just for this. Its next
   re-INVITE or UPDATE — a hold, a resume, the session timer's own refresh —
   carries the account's `Contact` as it is then, which is the target refresh

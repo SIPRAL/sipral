@@ -670,10 +670,13 @@ impl UserAgent {
     /// `expires=0`, and every one after it does until the registrar has
     /// answered one with a 2xx, so the old binding is removed rather than
     /// left to expire (RFC 3261 §10.2.2) — including the private address a
-    /// REGISTER sent before the first STUN answer arrived. No `reg-id` is
-    /// sent, so the registrar keys each binding by its URI (RFC 5626 §6) and
-    /// removing the old one cannot touch the new. An account that was never
-    /// asked to register, or is giving its binding up, is only rewritten.
+    /// REGISTER sent before the first STUN answer arrived. The old `Contact`
+    /// goes as its URI alone, without `+sip.instance`: RFC 3261 §10.3 matches
+    /// a removal to a binding by URI, but a registrar that matches by
+    /// instance instead — Kamailio does — would take one carrying the tag
+    /// for the new binding as well and leave the account with none. An
+    /// account that was never asked to register, or is giving its binding
+    /// up, is only rewritten.
     ///
     /// A REGISTER that cannot leave is what a refresh that cannot leave is:
     /// [`UaEvent::RegistrationFailed`](crate::UaEvent::RegistrationFailed)
@@ -703,9 +706,9 @@ impl UserAgent {
             let Some(contact) = contact_at(&config.contact, to) else {
                 continue;
             };
-            let old = config.register_contact_value(true);
+            let old = config.removal_contact_value();
             config.contact = contact;
-            moved.push((*id, old, config.register_contact_value(true)));
+            moved.push((*id, old, config.removal_contact_value()));
         }
         moved.sort_unstable_by_key(|(id, ..)| *id);
         let count = moved.len();
@@ -2193,6 +2196,33 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&header(refresh, HeaderName::Contact)),
             "<sip:alice@203.0.113.7:41000>"
+        );
+    }
+
+    #[test]
+    fn the_contact_taken_back_names_its_address_and_not_the_instance() {
+        // a registrar that keys a binding by `+sip.instance` rather than by
+        // URI reads a removal carrying the tag as a removal of the instance:
+        // the lab's Kamailio, given the public Contact and the private one
+        // with expires=0 under the same tag, kept neither. The URI alone
+        // removes that one binding wherever bindings are keyed (RFC 3261
+        // §10.2.2), and the new Contact keeps its tag
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent
+            .add_account(account().instance_id("urn:uuid:0c4a8f5e-2b1d-4e6a-9f00-5d3e2a1b7c90"));
+        agent.register(id, t0).expect("a REGISTER");
+        let _first = transmits(&mut agent);
+
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
+        assert_eq!(agent.readdress(UDP, local(), public, t0), 1);
+        let out = transmits(&mut agent);
+        let contact = header(out.last().expect("the REGISTER"), HeaderName::Contact);
+        assert_eq!(
+            String::from_utf8_lossy(&contact),
+            "<sip:alice@203.0.113.7:41000>;\
+             +sip.instance=\"<urn:uuid:0c4a8f5e-2b1d-4e6a-9f00-5d3e2a1b7c90>\", \
+             <sip:alice@192.0.2.1>;expires=0"
         );
     }
 

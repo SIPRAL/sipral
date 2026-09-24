@@ -542,22 +542,20 @@ impl Account {
         self.contact_with(self.push.as_ref(), removing)
     }
 
+    /// `Contact` for asking a registrar to drop the binding at this
+    /// account's address and no other, in a REGISTER that may bind another
+    /// address in the same breath: the URI alone, as §4.1.2 writes it for a
+    /// removal, without the feature tags. RFC 3261 §10.3 matches a binding
+    /// by URI; a registrar that matches by `+sip.instance` instead reads a
+    /// removal carrying the tag as one of every binding the instance has,
+    /// the one the same request adds included.
+    pub(crate) fn removal_contact_value(&self) -> Box<[u8]> {
+        self.bracketed_uri(self.push.as_ref(), true)
+            .into_boxed_slice()
+    }
+
     fn contact_with(&self, push: Option<&Push>, removing: bool) -> Box<[u8]> {
-        let bytes = self.contact.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len() + 128);
-        out.push(b'<');
-        // URI parameters go before the URI headers (§19.1.1), so a contact
-        // written with headers has to be opened up rather than appended to
-        let cut = bytes
-            .iter()
-            .position(|byte| *byte == b'?')
-            .unwrap_or(bytes.len());
-        out.extend_from_slice(bytes.get(..cut).unwrap_or(bytes));
-        if let Some(push) = push {
-            push.write(&mut out, removing);
-        }
-        out.extend_from_slice(bytes.get(cut..).unwrap_or_default());
-        out.push(b'>');
+        let mut out = self.bracketed_uri(push, removing);
         if let Some(ref urn) = self.instance_id {
             // §4.1: c-p-instance = "+sip.instance" EQUAL
             //         DQUOTE "<" instance-val ">" DQUOTE — the angle brackets
@@ -573,6 +571,25 @@ impl Account {
             out.extend_from_slice(b";+sip.pnsreg");
         }
         out.into_boxed_slice()
+    }
+
+    fn bracketed_uri(&self, push: Option<&Push>, removing: bool) -> Vec<u8> {
+        let bytes = self.contact.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len() + 128);
+        out.push(b'<');
+        // URI parameters go before the URI headers (§19.1.1), so a contact
+        // written with headers has to be opened up rather than appended to
+        let cut = bytes
+            .iter()
+            .position(|byte| *byte == b'?')
+            .unwrap_or(bytes.len());
+        out.extend_from_slice(bytes.get(..cut).unwrap_or(bytes));
+        if let Some(push) = push {
+            push.write(&mut out, removing);
+        }
+        out.extend_from_slice(bytes.get(cut..).unwrap_or_default());
+        out.push(b'>');
+        out
     }
 }
 
