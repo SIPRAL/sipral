@@ -5245,6 +5245,73 @@ fn a_relay_is_offered_beside_the_host_candidate_and_given_back_when_the_call_end
 
 #[cfg(feature = "ice")]
 #[test]
+fn a_relay_goes_back_when_the_call_ends_before_it_was_answered() {
+    use crate::relay::tests::SERVER;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let relay = relay_for_the_caller(&mut pair);
+    let call = pair
+        .caller
+        .engine
+        .place_with(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            CallMedia::new(catalog, MediaConfig::default()).relay(relay),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    for datagram in pair.caller.outbound() {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, false);
+    assert!(pair.callee.call().is_some(), "the callee is ringing");
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    // the agent waiting with the allocation holds the credential, and a
+    // `Debug` of the engine around it prints none of it
+    let printed = format!("{:?}", pair.caller.engine);
+    assert!(!printed.contains("correct horse"), "{printed}");
+
+    // a phone that rings on: the agent holding the relay keeps the NAT
+    // binding towards the server alive though no session has opened
+    let due = pair
+        .caller
+        .engine
+        .poll_timeout()
+        .expect("the waiting agent has a deadline");
+    pair.now = due;
+    pair.caller.engine.handle_timeout(pair.now);
+    let sent: Vec<_> = std::iter::from_fn(|| pair.caller.engine.poll_transmit(pair.now)).collect();
+    assert!(
+        sent.iter()
+            .any(|(from, to, _)| *from == call && *to == server),
+        "{sent:?}"
+    );
+
+    // and the caller gives up before anyone answers
+    pair.caller
+        .agent
+        .hangup(call, pair.now)
+        .expect("the CANCEL");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    pair.caller.drain(pair.now, false);
+    assert_eq!(
+        relays_given_back(&mut pair.caller),
+        vec![(call, server)],
+        "a call that never opened its session still gives its relay back"
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
 fn a_relay_a_call_without_ice_cannot_use_goes_back_at_once() {
     use crate::relay::tests::SERVER;
 
@@ -5258,6 +5325,29 @@ fn a_relay_a_call_without_ice_cannot_use_goes_back_at_once() {
         .to_string();
     assert!(!offer.contains("a=candidate"), "{offer}");
     assert!(offer.contains("c=IN IP4 203.0.113.7\r\n"), "{offer}");
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    assert_eq!(relays_given_back(&mut pair.caller), vec![(call, server)]);
+}
+
+/// A lite end has host candidates only (RFC 8445 §5.2) and runs no agent
+/// that could hold an allocation: the relay goes back as the call is placed.
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn a_relay_a_lite_end_cannot_use_goes_back_at_once() {
+    use crate::relay::tests::SERVER;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Lite);
+    let mut pair = Pair::new(catalog.clone());
+    let call = place_with_a_relay(&mut pair, catalog);
+    let offer = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw an offer")
+        .to_string();
+    assert!(offer.contains("a=ice-lite"), "{offer}");
+    assert!(!offer.contains("typ relay"), "{offer}");
     let server: SocketAddr = SERVER.parse().expect("an address");
     assert_eq!(relays_given_back(&mut pair.caller), vec![(call, server)]);
 }
