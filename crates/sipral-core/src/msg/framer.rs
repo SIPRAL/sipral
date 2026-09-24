@@ -207,7 +207,11 @@ impl StreamFramer {
                 *need = None;
                 return Ok(Some(Framed::Message(message)));
             }
-            Err(ParseError::UnterminatedHeaders) => return Ok(None),
+            // the head has ended — that is what made it ready — so a parser
+            // that has not seen it end either stopped at the bound, the empty
+            // line straddling it, or reads a bare LF as no line end at all.
+            // Neither is "not yet": waiting would hold whatever followed, past
+            // every bound, since `push` lets a head that has ended grow on
             Err(error) => error,
         };
 
@@ -819,6 +823,63 @@ Content-Length: 5000\r\n\
             )]
         );
         assert_eq!(after, vec![Some("BYE".to_owned())]);
+    }
+
+    /// Feed `stream` and then `junk` in pieces, taking every message off as it
+    /// comes, and report the most the framer ever held; the connection may
+    /// end on the way, which is also a bound.
+    fn most_held(f: &mut StreamFramer, mode: ParseMode, stream: &[u8], junk: usize) -> usize {
+        let mut most = 0;
+        let filler = vec![b'x'; 512];
+        let pieces = std::iter::once(stream).chain(std::iter::repeat_n(&filler[..], junk / 512));
+        for piece in pieces {
+            if f.push(piece).is_err() {
+                return most;
+            }
+            loop {
+                match f.next_message(mode) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(_) => return most.max(f.pending()),
+                }
+            }
+            most = most.max(f.pending());
+        }
+        most
+    }
+
+    #[test]
+    fn a_head_whose_blank_line_straddles_the_bound_is_not_waited_on_forever() {
+        // the empty line begins inside the bound and ends past it, so the
+        // head is longer than the bound by up to three bytes; reading it as
+        // a head that fits and has not arrived yet held everything after it
+        for over in 1..=3 {
+            let bound = 200;
+            let mut head = b"OPTIONS sip:b@example.com SIP/2.0\r\n\
+Content-Length: 0\r\nSubject: "
+                .to_vec();
+            head.extend(std::iter::repeat_n(b'x', bound + over - 4 - head.len()));
+            head.extend_from_slice(b"\r\n\r\n");
+            assert_eq!(head.len(), bound + over);
+            for mode in [ParseMode::Strict, ParseMode::Lenient] {
+                let mut f = StreamFramer::new(u32::try_from(bound).expect("small"));
+                let kept = most_held(&mut f, mode, &head, 100_000);
+                assert!(kept <= 2 * bound, "{over} over, {mode:?}: {kept} held");
+            }
+        }
+    }
+
+    #[test]
+    fn a_head_ended_by_bare_line_feeds_is_not_waited_on_forever_when_strict() {
+        // the framer finds the end of a head at `\n\n` and the strict parser
+        // does not; one of the two has to decide, or what follows piles up
+        let head = b"OPTIONS sip:b@example.com SIP/2.0\r\n\
+Via: SIP/2.0/TCP h;branch=z9hG4bK1\n\
+Content-Length: 0\n\
+\n";
+        let mut f = StreamFramer::new(1_024);
+        let kept = most_held(&mut f, ParseMode::Strict, head, 100_000);
+        assert!(kept <= 2 * 1_024, "{kept} held");
     }
 
     #[test]
