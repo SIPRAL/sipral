@@ -136,7 +136,10 @@ pub struct EModelInputs {
     /// worked example is one way to arrive at it from a round-trip and two
     /// end-system delays.
     pub one_way_delay_ms: u32,
-    /// The percentage of packets lost, `Ppl` in equation 7-29, `0.0..=100.0`.
+    /// The percentage of packets that never reached the decoder, `Ppl` in
+    /// equation 7-29, `0.0..=100.0`: those the network lost and those the
+    /// jitter buffer discarded, which RFC 3611 §4.7.1 says "have equal
+    /// effect on the quality of the voice stream".
     pub packet_loss_percent: f64,
     /// `BurstR`, how bursty that loss was.
     pub burst_ratio: BurstRatio,

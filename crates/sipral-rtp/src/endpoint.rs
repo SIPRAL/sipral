@@ -1048,9 +1048,15 @@ impl RtpSession {
         // half of it as though it were the whole thing.
         let end_system_delay_ms = 0;
         let one_way_delay_ms = one_way_symmetric_delay_ms(round_trip_delay_ms, end_system_delay_ms);
+        // §4.7.1 keeps loss and jitter-buffer discards apart only to say
+        // where the damage was done: "Both have equal effect on the quality
+        // of the voice stream". A packet the buffer threw out is as missing
+        // from the earpiece as one the network lost, so `Ppl` is the two
+        // together.
+        let missing = u16::from(burst_gap.loss_rate) + u16::from(burst_gap.discard_rate);
         let report = emodel::evaluate(EModelInputs {
             one_way_delay_ms,
-            packet_loss_percent: f64::from(burst_gap.loss_rate) * (100.0 / 256.0),
+            packet_loss_percent: f64::from(missing) * (100.0 / 256.0),
             // No separate measurement of loss burstiness feeds this yet,
             // so G.107's own §7.5 default applies: "when packet loss is
             // random (i.e., independent) BurstR = 1".
@@ -1746,6 +1752,42 @@ mod tests {
             Received::Dropped(Discard::SecondSource(7))
         );
         establish(&mut session, 9, addr(PEER));
+    }
+
+    #[test]
+    fn packets_the_buffer_threw_out_cost_the_call_its_rating() {
+        // two calls that received the same forty-eight packets from a clean
+        // network: one earpiece kept up with them, the other stopped pulling
+        // and the buffer pushed the oldest out to make room for the newest.
+        // RFC 3611 §4.7.1: loss and discard "have equal effect on the
+        // quality of the voice stream"
+        let g711 = Some(crate::emodel::codec_quality_model(
+            crate::emodel::CodecFamily::G711,
+        ));
+        let mut kept_up = session();
+        let mut stalled = session();
+        let next = establish(&mut kept_up, 7, addr(PEER));
+        establish(&mut stalled, 7, addr(PEER));
+        for step in 0..48_u16 {
+            let sequence = next + step;
+            kept_up.receive(&mut datagram(7, sequence, 8), addr(PEER), Duration::ZERO);
+            kept_up.pull(Activity::Speech);
+            stalled.receive(&mut datagram(7, sequence, 8), addr(PEER), Duration::ZERO);
+        }
+        while matches!(stalled.pull(Activity::Speech), Pull::Packet(_)) {}
+        assert!(stalled.quality().discarded_overflow >= 40);
+
+        let clean = kept_up.voip_metrics(g711).expect("a source");
+        let overflowed = stalled.voip_metrics(g711).expect("a source");
+        assert_eq!(overflowed.loss_rate, 0, "the network lost nothing");
+        assert!(overflowed.discard_rate > 128, "most of it was thrown out");
+        assert!(
+            overflowed.r_factor + 30 < clean.r_factor,
+            "R {} against {} for the same call heard whole",
+            overflowed.r_factor,
+            clean.r_factor
+        );
+        assert!(overflowed.mos_lq < clean.mos_lq);
     }
 
     #[test]

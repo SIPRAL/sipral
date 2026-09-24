@@ -637,6 +637,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **An earpiece whose clock runs fast no longer hears the drift as gaps.**
+  On a clean path the jitter buffer aims at one frame, and a buffer at one
+  frame has nothing below its target to fall to but empty: every frame the
+  earpiece's clock gained on the far end's was played as 20 ms of silence
+  wherever it fell, a word included, one every eighty seconds at 250 ppm.
+  A pause now never leaves fewer than two packets queued, so a fast
+  earpiece's slip takes the frame in hand and the next pause stretches it
+  back. A clean path pays one frame of delay for it, bought in a pause.
+- **The R factor and MOS-LQ count what the jitter buffer threw out.**
+  They were rated from the loss rate alone, so a call whose buffer
+  discarded most of what arrived still rated R 93 and MOS-LQ 4.4. RFC 3611
+  §4.7.1 gives loss and discard "equal effect on the quality of the voice
+  stream", and the E-model's packet loss is now the two together. What the
+  buffer throws out on a restart of the far end's stream or a change of
+  codec is now in the discard rate as well, and the RFC 3611 figures
+  outlive a change of codec as the buffer's own counters do.
 - **A flood of ICE checks can no longer grow a call's memory without bound.**
   Both ICE roles answer every Binding request that reaches the media port, a
   stranger's unsigned one included, and queued the answers for as long as

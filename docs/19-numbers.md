@@ -274,7 +274,8 @@ Read together:
   straight into it, as the tone cut off, and fails on any, so it stays red on the fast earpiece until
   the buffer changes. `docs/05-media.md` says so beside the buffer's design
   targets; making the stretch reachable at a one-frame target is the change
-  it asks for.
+  it asks for. That change, and what the same flow measured after it, is
+  the next section.
 - **The control is the count's own check.** One frame shrunk early in the
   control's call, and its buffer one frame shallower for it, balance to
   nothing: every frame the other two moved is accounted for by the same
@@ -299,7 +300,8 @@ and broke it on purpose to see it fail:
   earpiece's buffer sat at 1 960–1 980 ms at every report, 2 384 frames
   discarded for overflow, and the flow failed it at every report; the fast
   one failed on 1 896 cuts. Its R factor and MOS-LQ stayed at 93 and 4.4
-  throughout, overflow and all, which is worth a look of its own.
+  throughout, overflow and all: the ratings were computed from the loss
+  rate alone, and the next section has them counting discards.
 - **With the far end's audio dropped for five seconds** in the middle of a
   two-minute run at 2000 ppm, it failed on every call's skew. It also showed
   the measure counting that gap twice, once as the silence played and once
@@ -309,6 +311,63 @@ and broke it on purpose to see it fail:
   +47 619 ppm over the 5 250 frames that arrived, and failed every call on
   the tone as well: the gap began in a pause and ended in the tone, which
   counts.
+
+## 25 September 2026 — `0.0.1`, a frame in hand, and discards rated
+
+The two things the hour above left open, changed and measured again with
+the review's short run of the same flow: `scripts/lab.sh drift` with
+`SIPRAL_DRIFT_MS=180000 SIPRAL_DRIFT_REPORT_MS=30000 SIPRAL_DRIFT_PPM=2000`,
+and the same at 500 000 ppm for two minutes. Same machine, toolchain,
+Asterisk and tone as the hour; "before" is `209694c`, "after" is the commit
+that adds this section. The hour was not run again.
+
+**A pause keeps a frame in hand** (`docs/05-media.md`): a pause never
+leaves fewer than two packets queued, so a fast earpiece's slip takes the
+spare one and the next pause stretches it back, rather than the buffer
+running dry.
+
+| Three minutes at 2000 ppm | Slow, before | Slow, after | Control, before | Control, after | Fast, before | Fast, after |
+|---|---|---|---|---|---|---|
+| Skew measured | −2000.0 ppm | −2000.0 ppm | 0.0 ppm | 0.0 ppm | +2000.0 ppm | +2000.0 ppm |
+| Dropped from a pause (shrunk) | 17 | 17 | 0 | 0 | 0 | 0 |
+| Stretched into a pause | 0 | 0 | 0 | 0 | 0 | 17 |
+| Played as silence, the buffer run dry | 0 | 0 | 0 | 0 | 17 | 0 |
+| Of those, in the tone | 0 | 0 | 0 | 0 | 11 | 0 |
+| Buffer depth at every report, target 20 ms | 20 ms | 40 ms | 20 ms | 20 ms | 20 ms | 20 ms |
+| R factor, MOS-LQ | 93, 4.4 | 93, 4.4 | 93, 4.4 | 93, 4.4 | 93, 4.4 | 93, 4.4 |
+| Verdict | | | | | failed, 11 cuts | passed |
+
+Counted from ten seconds into the calls, as the flow counts; the control's
+frame in hand was bought before that. The depth is read wherever the report
+falls between an arrival and the pull that plays it, so it reads a frame
+either way with the phase of the two clocks; the slow earpiece's extra
+20 ms is the top of the dead band, where a slow clock sits until its next
+frame of drift is dropped. A first version of the change put the dead band
+on a single level, stretching below two and shrinking above two; on the
+same run it passed too, with no frame run dry, but the two skewed calls
+answered a pull landing either side of an arrival both ways, 56 frames
+shrunk and 39 stretched on the slow one for 17 frames of drift, 43 and 61
+on the fast one. The band is two packets wide above the frame in hand, as
+it is above any target, and the counts above are exactly the drift.
+
+**The ratings count what the buffer threw out.** R and MOS-LQ were rated
+from the loss rate alone; RFC 3611 §4.7.1 gives loss and discard "equal
+effect on the quality of the voice stream", and the E-model's packet loss
+is now the two together.
+
+| Two minutes at 500 000 ppm, slow earpiece | Before | After |
+|---|---|---|
+| Buffer depth at every report | 1 960–1 980 ms | 1 960–1 980 ms |
+| Discarded for overflow | 2 384 | 2 384 |
+| R factor, MOS-LQ, at every report | 93, 4.4 | 6–7, 1.0 |
+
+The control rated 93 and 4.4 in both runs, and so did the fast earpiece,
+which runs dry rather than discarding: a frame played as silence because
+nothing had arrived is not a packet lost or discarded, and RTCP-XR has no
+field for it. At 500 000 ppm the fast earpiece slips a frame every other
+pull, far more than a frame in hand per talk spurt can take, and it still
+fails on the tone: 2 750 frames run dry and 1 896 cuts before; 793
+stretched, 1 957 run dry and 1 774 cuts after.
 
 ## What would make these numbers worse
 

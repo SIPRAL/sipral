@@ -92,6 +92,26 @@ const SHRINK_HOLD: u32 = 150;
 /// for the whole call slowly stops describing the path at all.
 const BASE_WINDOW: u32 = 512;
 
+/// The fewest packets a pause leaves queued ahead of the playout point, the
+/// one about to be played included: one in hand, beyond the target of one a
+/// clean path gets.
+///
+/// The earpiece and the far end run on two clocks, and which of them is the
+/// faster is not known until a frame has slipped. When the earpiece is the
+/// slow one the slip shows as a packet more than the target, and a pause
+/// drops it. When it is the fast one the slip shows as a packet fewer — and
+/// at a target of one, a packet fewer is nothing at all, so the first sign
+/// of it is the buffer running dry and a frame of silence played wherever
+/// that falls, a word included. Stretching when the queue is below its
+/// target cannot help there, since below one is empty. Keeping one frame in
+/// hand is what lets a fast earpiece's slip be seen before it is a gap: the
+/// queue falls to one, and the next pause stretches it back to two. The
+/// frame in hand is the floor the pause's dead band sits on, so a clean
+/// path's delay is two or three frames where it was one or two. That frame
+/// is bought in a pause where nobody hears it being bought, and being a
+/// frame long is inaudible where being a frame short is a gap.
+const IN_HAND: u16 = 2;
+
 /// Times the same packet length must repeat before it is believed over the one
 /// the negotiation promised.
 const SPAN_STREAK: u8 = 3;
@@ -584,7 +604,9 @@ pub struct JitterBuffer {
     /// held packet is played (in [`Self::pull`]), `Lost` when a slot comes
     /// due empty or the window jumps clean past it (in [`Self::pull`] and
     /// [`Self::slide`]), and `Discarded` when a held-but-unplayed packet
-    /// is evicted by a window jump (`Self::slide`). A late or duplicate
+    /// is evicted by a window jump (`Self::slide`), passed over before
+    /// playout starts (`Self::pass_over`), or thrown out with the window by
+    /// [`Self::restart`] or [`Self::reformat`]. A late or duplicate
     /// arrival ([`Insert::Late`], [`Insert::Duplicate`]) contributes
     /// nothing: its sequence number was already resolved, or (duplicates)
     /// SS4.7.1 excludes it outright ("excluding duplicate packet
@@ -740,9 +762,15 @@ impl JitterBuffer {
 
         let queued = self.queued();
         if activity == Activity::Silence {
-            if queued > self.target.saturating_add(1) {
+            // the dead band is two packets wide above the floor, as it is
+            // above any target: an earpiece whose frames land near the edge
+            // of an arrival sees the queue go one either way from one pull
+            // to the next, and a band of one would answer each of those
+            // with a stretch or a shrink
+            let floor = self.target.max(IN_HAND);
+            if queued > floor.saturating_add(1) {
                 self.shorten();
-            } else if arrived > 0 && queued < self.target {
+            } else if arrived > 0 && queued < floor {
                 self.counts.stretched = self.counts.stretched.saturating_add(1);
                 return Pull::Stretch;
             }
@@ -798,6 +826,7 @@ impl JitterBuffer {
             .counts
             .discarded_overflow
             .saturating_add(u64::from(self.held));
+        self.discard_held();
         self.held = 0;
         self.arrived = 0;
         self.anchored = false;
@@ -819,7 +848,8 @@ impl JitterBuffer {
     /// a reception report that began again from zero would tell the far end
     /// that nothing had been lost since the beginning of a stream that is
     /// seconds old, and the call's own statistics would lose everything before
-    /// the re-negotiation.
+    /// the re-negotiation. The same goes for what RFC 3611 §4.7 reports about
+    /// the stream, which describes the RTP session rather than its format.
     pub fn reformat(&mut self, clock_rate: u32, config: &BufferConfig) {
         let mut counts = self.counts;
         // the same accounting `restart` does, for the same reason: what is in
@@ -828,8 +858,21 @@ impl JitterBuffer {
         counts.discarded_overflow = counts
             .discarded_overflow
             .saturating_add(u64::from(self.held));
+        self.discard_held();
+        let gmin = self.gmin;
         *self = Self::new(clock_rate, config);
         self.counts = counts;
+        self.gmin = gmin;
+    }
+
+    /// Tell the RFC 3611 §4.7 tracker that every packet held is being thrown
+    /// out unplayed. They arrived and the buffer dropped them, which is what
+    /// §4.7.1's discard rate counts, and the quality ratings are computed
+    /// from that rate as well as the loss.
+    fn discard_held(&mut self) {
+        for _ in 0..self.held {
+            self.gmin.observe(PacketOutcome::Discarded);
+        }
     }
 
     /// Everything measured about this stream.
@@ -1443,6 +1486,37 @@ mod tests {
     }
 
     #[test]
+    fn what_a_restart_or_a_new_format_throws_out_is_in_the_discard_rate() {
+        // RFC 3611 §4.7.1 counts every packet the buffer drops, for overflow
+        // or for anything else, in the discard rate: here eight played and
+        // eight thrown out, twice, is a half of what was expected
+        let mut buffer = buffer(20, 1);
+        for sequence in 0..16 {
+            insert(&mut buffer, sequence);
+        }
+        for _ in 0..8 {
+            pull(&mut buffer);
+        }
+        buffer.restart();
+        assert_eq!(buffer.quality().discarded_overflow, 8);
+        assert_eq!(buffer.burst_gap_metrics().discard_rate, 128);
+
+        for sequence in 100..116 {
+            insert(&mut buffer, sequence);
+        }
+        for _ in 0..8 {
+            pull(&mut buffer);
+        }
+        buffer.reformat(RATE, &config(20, 1));
+        assert_eq!(buffer.quality().discarded_overflow, 16);
+        assert_eq!(
+            buffer.burst_gap_metrics().discard_rate,
+            128,
+            "the stream's figures outlive its format, as its counters do"
+        );
+    }
+
+    #[test]
     fn the_configuration_is_clamped_to_something_a_window_can_be() {
         assert_eq!(JitterBuffer::new(RATE, &config(0, 0)).depth(), 1);
         assert_eq!(
@@ -1868,6 +1942,99 @@ mod tests {
         assert_eq!(pull(&mut buffer), Some(2));
         assert_eq!(pull(&mut buffer), Some(3));
         assert_eq!(buffer.quality().lost, 0);
+    }
+
+    /// What an earpiece whose clock is off by `skew_ppm` got from a far end
+    /// sending a packet every frame on a clean path, over `pulls` of its
+    /// frames: how many it played, and how many times the buffer had nothing
+    /// for it once playout had begun. The far end talks for sixty frames and
+    /// pauses for thirty, the lab's cadenced tone, and the earpiece tells the
+    /// buffer which of the two it is playing. Each pull lands up to three
+    /// milliseconds either side of its tick, as a device callback does, so
+    /// an arrival near a pull is sometimes before it and sometimes after.
+    fn played_against_a_skew(skew_ppm: i64, pulls: u32) -> (JitterBuffer, u32, u32) {
+        const FRAME_US: i64 = 20_000;
+        let mut buffer = buffer(100, 1);
+        let pull_every = FRAME_US * 1_000_000 / (1_000_000 + skew_ppm);
+        // half a frame out of step, so no arrival and pull ever coincide
+        let mut next_arrival = FRAME_US / 2 + 1;
+        let mut tick = FRAME_US;
+        let mut sequence = 0_u16;
+        let (mut played, mut dry, mut pulled) = (0_u32, 0_u32, 0_u32);
+        while pulled < pulls {
+            let wobble = (i64::from(pulled) * 7_919 % 7 - 3) * 1_000;
+            let next_pull = tick + wobble;
+            if next_arrival < next_pull {
+                let at = Duration::from_micros(u64::try_from(next_arrival).unwrap());
+                insert_at(&mut buffer, sequence, at);
+                sequence = sequence.wrapping_add(1);
+                next_arrival += FRAME_US;
+                continue;
+            }
+            let activity = if pulled % 90 < 60 {
+                Activity::Speech
+            } else {
+                Activity::Silence
+            };
+            match buffer.pull(activity) {
+                Pull::Packet(_) => played += 1,
+                Pull::Empty if played > 0 => dry += 1,
+                Pull::Conceal | Pull::Stretch | Pull::Empty => {}
+            }
+            pulled += 1;
+            tick += pull_every;
+        }
+        (buffer, played, dry)
+    }
+
+    #[test]
+    fn a_fast_earpiece_at_a_one_frame_target_is_stretched_and_never_runs_dry() {
+        // 5000 ppm fast: a frame slips every four seconds, about fifty in
+        // four minutes, each of which used to be a frame of silence played
+        // wherever it fell, since at a target of one the queue has nowhere
+        // below the target to fall to but empty
+        let (buffer, _, dry) = played_against_a_skew(5_000, 12_000);
+        let quality = buffer.quality();
+        assert_eq!(dry, 0, "the buffer ran dry {dry} times");
+        assert_eq!(buffer.target(), 1, "a clean path, and a target of one");
+        assert!(
+            (55..=62).contains(&quality.stretched),
+            "each frame of drift is stretched into a pause, plus the one in hand, got {}",
+            quality.stretched
+        );
+        assert_eq!(
+            quality.shrunk, 0,
+            "a pull either side of an arrival is not answered both ways"
+        );
+        assert_eq!(quality.lost, 0);
+    }
+
+    #[test]
+    fn a_slow_earpiece_at_a_one_frame_target_is_still_shrunk() {
+        let (buffer, _, dry) = played_against_a_skew(-5_000, 12_000);
+        let quality = buffer.quality();
+        assert_eq!(dry, 0);
+        assert!(
+            (55..=62).contains(&quality.shrunk),
+            "each frame of drift is dropped from a pause, got {}",
+            quality.shrunk
+        );
+        assert!(
+            quality.stretched <= 1,
+            "the frame in hand, and nothing stretched back and forth, got {}",
+            quality.stretched
+        );
+        assert!(quality.delay <= FRAME * 2, "got {:?}", quality.delay);
+    }
+
+    #[test]
+    fn a_true_earpiece_buys_its_frame_in_hand_once() {
+        let (buffer, played, dry) = played_against_a_skew(0, 12_000);
+        let quality = buffer.quality();
+        assert_eq!(dry, 0);
+        assert_eq!(quality.stretched, 1, "one frame in hand, bought in a pause");
+        assert_eq!(quality.shrunk, 0);
+        assert_eq!(played + 1, 12_000, "every other pull played a packet");
     }
 
     #[test]

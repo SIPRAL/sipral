@@ -286,8 +286,14 @@ verbatim — the state names (`c11`, `c13`, ...) match the appendix's own
 pseudocode so a reviewer can check the two side by side — fed by
 `playout::JitterBuffer` exactly once per sequence number as its fate is
 resolved: `Received` or `Lost` at `JitterBuffer::pull`, `Discarded` or
-`Lost` at a window jump in `JitterBuffer::slide`. `Gmin` is fixed at its
-RFC-recommended 16 for the life of a buffer (§4.7.2). Round-trip delay is
+`Lost` at a window jump in `JitterBuffer::slide` and when playout starts
+past packets it will not play, and `Discarded` for everything the window
+held when `JitterBuffer::restart` or `JitterBuffer::reformat` throws it out.
+Every packet the buffer counts in `Quality::discarded_overflow` is
+therefore in §4.7.1's discard rate. `Gmin` is fixed at its RFC-recommended
+16 for the life of the stream, a change of codec included (§4.7.2), and
+the tracker's counts outlive a change of codec the way the buffer's own
+counters do. Round-trip delay is
 this session's own `round_trip_time`; end-system delay is always `0`
 (§4.7.3's own fallback: this crate has no visibility into the sending
 side's encode-and-accumulate delay); jitter buffer sizing comes from
@@ -301,7 +307,12 @@ parameter this crate cannot observe (§7.7's own "R = 93.2" baseline at
 every default) and computes only what a call actually measured — the
 delay impairment `Id` from one-way delay, and the codec/loss impairment
 `Ie,eff` from the codec's G.113 Appendix I `Ie`/`Bpl` pair and the
-measured loss rate. `emodel::codec_quality_model` tabulates G.113 Table
+share of packets that never reached the decoder: the loss rate and the
+discard rate together, since §4.7.1 keeps the two apart only to say where
+the damage was done — "Both have equal effect on the quality of the voice
+stream". Before that was read, a slow earpiece whose buffer sat at two
+seconds and discarded thousands of packets for overflow still rated R 93
+and MOS-LQ 4.4 (`docs/19-numbers.md`). `emodel::codec_quality_model` tabulates G.113 Table
 I.4 for the one codec family it covers (G.711); the facade
 (`Codec::quality_model` in `sipral`) maps this crate's own codec catalogue
 onto it, `None` for G.722 and Opus, which G.113 does not tabulate — RFC
@@ -367,20 +378,29 @@ someone configured once. Design targets:
 - **Duplicates are dropped** on sequence number, cheaply.
 - **The buffer never grows without bound.** A stalled consumer discards, and
   reports it.
-- **A fast earpiece runs it dry rather than stretching a pause.** Measured,
-  not designed: `scripts/lab.sh drift` holds calls for an hour with the
-  earpiece's clock set off by a known skew (`docs/19-numbers.md`). A slow
-  earpiece is absorbed as intended, a frame dropped from a pause each time
-  the delay passes its target by one. A fast one never stretches: on a clean
-  path the target is one frame, and the pull that finds the next packet not
-  yet arrived is by construction a pull with nothing arrived since the last
-  one, the one case in which the stretch never fires, since it needs a packet
-  to have arrived since the last pull. The buffer runs dry instead, plays one
-  frame of silence wherever that falls — in a word as readily as in a pause —
-  and starts again from the next packet. Each frame of drift costs one such
-  frame: at 250 ppm, one every eighty seconds. The drift flow fails on every
-  one of them that cuts the tone off, so it stays red until the stretch can
-  fire at a one-frame target.
+- **A pause keeps a frame in hand, so either clock can be the fast one.**
+  The earpiece and the far end count out a second on two crystals, and
+  which is faster is not known until a frame has slipped. A slow earpiece
+  shows its slip as a packet more than the target, and a pause drops it. A
+  fast one shows it as a packet fewer, and at the one-frame target a clean
+  path gets, a packet fewer is none at all: the first sign of the slip would
+  be the buffer running dry and a frame of silence played wherever that
+  fell, in a word as readily as in a pause. A stretch below the target
+  cannot catch that, since below one is empty. So a pause never leaves fewer
+  than two packets queued, the one about to be played and one in hand: a
+  fast earpiece's slip takes the one in hand, and the next pause stretches
+  it back, where nobody hears it. The pause's dead band is two packets wide
+  above that floor, as it is above any target, so a pull that lands either
+  side of an arrival from one frame to the next is not answered with a
+  stretch and then a shrink; a clean path's queue therefore sits at two or
+  three packets where it sat at one or two. That frame of delay is bought in
+  a pause; being a frame long is inaudible, being a frame short is a gap.
+  Found by measurement: `scripts/lab.sh drift`, which holds calls with
+  each earpiece's clock set off by a known skew, heard a fast earpiece's
+  every frame of drift as a 20 ms gap before this, one every eighty seconds
+  at 250 ppm (`docs/19-numbers.md`). A skew fast enough to slip more than
+  one frame inside a single talk spurt still runs it dry; 2000 ppm slips one
+  every ten seconds.
 
 Measured against the exit criterion in [10-roadmap.md](10-roadmap.md): mean
 opinion score under simulated loss and jitter, compared side by side with a

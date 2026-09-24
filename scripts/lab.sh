@@ -47,10 +47,6 @@
 #                               SIPRAL_DRIFT_MS=180000
 #                               SIPRAL_DRIFT_REPORT_MS=30000
 #                               SIPRAL_DRIFT_PPM=2000 scripts/lab.sh drift
-#                               -- which fails for now on the fast
-#                               earpiece, whose buffer runs dry in the tone
-#                               where it should stretch a pause
-#                               (docs/05-media.md)
 #   scripts/lab.sh wasapi up    bring the lab up reachable from the LAN, for
 #                               a call carried on a Windows machine's real
 #                               WASAPI devices (interop/harness/src/wasapi.rs,
