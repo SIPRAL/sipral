@@ -44,6 +44,8 @@ mod table;
 mod tests;
 mod tokens;
 mod transport;
+#[cfg(test)]
+mod unreadable_tests;
 mod via;
 
 pub(crate) use table::Flow;

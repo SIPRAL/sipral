@@ -182,6 +182,10 @@ impl StatusCode {
     /// 503, "temporarily unable to process the request due to a temporary
     /// overloading" (§21.5.4).
     pub const SERVICE_UNAVAILABLE: Self = Self(503);
+    /// 513, "unable to process the request since the message length exceeded
+    /// its capabilities" (§21.5.14): the answer to a request longer than
+    /// [`crate::msg::Limits::max_message_bytes`].
+    pub const MESSAGE_TOO_LARGE: Self = Self(513);
     /// 504 Server Time-out.
     pub const SERVER_TIMEOUT: Self = Self(504);
 

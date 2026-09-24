@@ -32,7 +32,7 @@ use super::error::ParseError;
 use super::header::HeaderName;
 use super::message::OwnedMessage;
 use super::method::{Method, StatusCode, is_token_byte};
-use super::parse::{ParseMode, parse};
+use super::parse::{Limits, ParseMode, parse_with_limits};
 use super::span::ParseScratch;
 
 /// Why a message could not be written.
@@ -220,10 +220,23 @@ fn check(value: &[u8]) -> Result<(), BuildError> {
     Ok(())
 }
 
+/// Read back what was written, strictly, so that nothing leaves that this
+/// stack would not itself call a message.
+///
+/// One of the receive bounds is lifted for it: how long one value may be.
+/// That bound is there to limit what a stranger's field makes a reader walk,
+/// and a response has to carry the request's `From`, `To` and `Via` back as
+/// they arrived (§8.2.6.2) — including the one that was past it, when that is
+/// why the request is being refused. The message bound still holds.
 fn finish(out: Vec<u8>) -> Result<OwnedMessage, BuildError> {
     let bytes: Arc<[u8]> = Arc::from(out);
     let mut scratch = ParseScratch::new();
-    let raw = parse(&bytes, &mut scratch, ParseMode::Strict).map_err(BuildError::NotWellFormed)?;
+    let limits = Limits {
+        max_header_value_bytes: Limits::DEFAULT.max_message_bytes,
+        ..Limits::DEFAULT
+    };
+    let raw = parse_with_limits(&bytes, &mut scratch, ParseMode::Strict, limits)
+        .map_err(BuildError::NotWellFormed)?;
     Ok(OwnedMessage::adopt(Arc::clone(&bytes), &raw))
 }
 

@@ -1457,6 +1457,32 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// A request the parser refuses still gets an answer out of the ABI, the
+    /// way it would out of the core, and the status the caller gets back says
+    /// what was refused.
+    #[test]
+    fn a_request_past_a_parser_bound_is_answered_and_the_status_says_why() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let long = options("options-long").replace(
+            "Max-Forwards: 70\r\n",
+            &format!("Max-Forwards: 70\r\nSubject: {}\r\n", "s".repeat(20_000)),
+        );
+        assert_eq!(
+            feed(handle, REGISTRAR, long.as_bytes(), 1_000),
+            SipralStatus::InvalidArgument
+        );
+        assert!(last_error_text().contains("16384"), "{}", last_error_text());
+        let (answer, to, _) = take_one(handle);
+        assert!(
+            answer.starts_with(b"SIP/2.0 400 Subject Too Long (limit 16384 bytes)\r\n"),
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
+        assert_eq!(to, REGISTRAR);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     fn hand_in(handle: SipralHandle, data: *const u8, len: usize) -> SipralStatus {
         unsafe {
             sipral_stack_receive_datagram(

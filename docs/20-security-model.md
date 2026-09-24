@@ -45,9 +45,19 @@ something reads it (`docs/03-core-signalling.md`).
 
 **Bounds come first.** `msg::Limits` (`crates/sipral-core/src/msg/parse.rs:25`)
 caps the whole message at 64 KiB (`max_message_bytes: 65_535`), the header
-count at 128, and one header's value at 4 KiB — each an independent,
+count at 128, and one header's value at 16 KiB — each an independent,
 tunable ceiling checked before the byte count behind it is trusted for
-anything else. A second, separate `sdp::Limits`
+anything else. The value ceiling was 4 KiB until it refused a real shape of
+traffic: an INVITE with a 6,000-byte display name got no answer at all. It is
+sized now against the longest fields that legitimately travel on one line —
+a full RFC 8224 `Identity`, a long `History-Info` — and it costs no memory of
+its own, since a value is a span into the message rather than a copy. What
+a ceiling refuses is answered rather than dropped when it can be: a request
+whose `Via`, `From`, `To`, `Call-ID` and `CSeq` can still be read gets 513 or
+a 400 naming the bound, statelessly and no larger than the request itself,
+so it amplifies nothing a forged source address could aim; the rest is
+counted and recorded (`docs/03-core-signalling.md`, "Limits, and what a
+refused message gets"). A second, separate `sdp::Limits`
 (`crates/sipral-core/src/sdp/parse.rs:41`) does the same for a body once it
 is one: 16 KiB total, 2 KiB per line, 16 media blocks, 256 attributes overall
 and 64 per section. Neither is a courtesy default: both are sized against
@@ -63,7 +73,13 @@ buffer each time"), so a connection fed one byte at a time costs the same
 total work as one fed all at once, rather than the quadratic cost a naive
 rescan would pay. The accumulation buffer itself is held to `max_message_bytes`
 as it grows, not only once a message is complete, so a peer cannot hold an
-unbounded amount of "almost a message" in memory by never finishing it. There
+unbounded amount of "almost a message" in memory by never finishing it: a head
+that passes the bound without ending ends the connection, and a message whose
+declared body would pass it is refused as soon as its head is in and the body
+is discarded as it arrives rather than buffered. The one slack is a single
+read: several complete messages that arrive together may briefly sum past the
+bound, since each of them keeps it and each is taken off the front before
+anything more is read. There
 is no separate wall-clock or step-count budget inside the parser — the
 protection is entirely the fixed size ceilings above, which already bound the
 worst case to a small constant.
@@ -72,7 +88,8 @@ worst case to a small constant.
 not the way a sender writes it.** Two conflicting `Content-Length` headers is
 a parse error (the RFC 4475 `mcl01` case) rather than a choice between them; a
 declared length longer than what actually arrived is `BodyTruncated`, waited
-for on a stream and refused on a datagram; a declared length shorter than the
+for on a stream and refused on a datagram, with the 400 §18.3 asks of a
+request; a declared length shorter than the
 buffer cuts the body there and leaves the rest for whoever reads the next
 message — the classic smuggling shape, answered by never reading past the
 boundary the sender itself named. A message on a stream transport with no

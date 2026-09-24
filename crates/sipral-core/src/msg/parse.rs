@@ -4,6 +4,7 @@
 //! Locating a SIP message in a buffer, without copying any of it.
 
 use super::error::ParseError;
+use super::header::HeaderName;
 use super::message::{RawMessage, StartLine};
 use super::method::{Method, StatusCode, is_token_byte};
 use super::span::{HeaderSlot, ParseScratch, Span};
@@ -21,6 +22,10 @@ pub enum ParseMode {
 }
 
 /// Bounds that stop a hostile peer from making the parser do unbounded work.
+///
+/// A message past one of them is not silently lost: the endpoint answers a
+/// request it can still address with 400 or 513, and counts what it cannot
+/// (`docs/03-core-signalling.md`, "Limits, and what a refused message gets").
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Largest message accepted.
@@ -32,11 +37,26 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// The defaults: 64 KiB, 128 headers, 4 KiB per value.
+    /// The defaults: 64 KiB, 128 headers, 16 KiB per value.
+    ///
+    /// The message bound is the largest UDP payload there is, so no datagram
+    /// is refused for its size alone and a stream carries nothing a datagram
+    /// could not. The value bound is sized against the longest fields real
+    /// traffic carries on one line, not against a typical call: an RFC 8224
+    /// `Identity` carrying a full PASSporT with rich call data (RFC 9795),
+    /// icons and a jCard inline, runs to several kilobytes; a `History-Info`
+    /// (RFC 7044) that has been through a few dozen retargets, each entry
+    /// with its escaped `Reason`, comes to about as much; and a display name
+    /// is whatever the caller's switch put there. Sixteen kilobytes holds
+    /// each of those with room to spare while still being a quarter of the
+    /// message, so one field cannot claim all of it. Every value is a span
+    /// into the message buffer rather than a copy, so this bound costs no
+    /// memory of its own; what it limits is how much of one message any
+    /// single field's reader has to walk.
     pub const DEFAULT: Self = Self {
         max_message_bytes: 65_535,
         max_headers: 128,
-        max_header_value_bytes: 4_096,
+        max_header_value_bytes: 16_384,
     };
 }
 
@@ -172,6 +192,187 @@ pub fn parse_with_limits<'a>(
         headers: &scratch.slots,
         body,
     })
+}
+
+/// What a request the parser refused still says about where an answer goes:
+/// its request line and the five fields every response copies from it —
+/// `Via`, `From`, `To`, `Call-ID` and `CSeq` (RFC 3261 §8.2.6.2) — and
+/// nothing else.
+///
+/// For a message [`parse_with_limits`] refused, so that the refusal can be
+/// answered rather than left for the client to retransmit into until its
+/// timer gives up (§8.2: a UAS answers what it cannot process; §21.4.1 and
+/// §21.5.14 say with what). Every other field is passed over unread, which is
+/// what makes the answer possible when the one past a bound is one nobody
+/// needs to answer; a field the answer does copy is kept whole whatever its
+/// length, because an answer that changed it would answer nobody.
+///
+/// Bounded like the parser is: one pass over `buf`, no allocation beyond the
+/// index in `scratch`, and at most `max_fields` of the five kept. Returns
+/// `None` when `buf` does not start with a request line, and when more than
+/// `max_fields` of them are there, since an answer missing a `Via` would be
+/// routed to the wrong place. A field whose line holds a CR that ends no line
+/// is left out rather than copied, for the reason [`parse_with_limits`]
+/// refuses one: no header line can be written with it. Headers that never end
+/// are read as far as they go.
+#[must_use]
+pub fn salvage_request<'a>(
+    buf: &'a [u8],
+    scratch: &'a mut ParseScratch,
+    max_fields: u16,
+) -> Option<RawMessage<'a>> {
+    scratch.slots.clear();
+    let (line, mut pos) = read_line(buf, 0, ParseMode::Lenient)?;
+    if holds_a_lone_cr(buf, line) {
+        return None;
+    }
+    let start = parse_start_line(buf, line).ok()?;
+    if !matches!(start, StartLine::Request { .. }) {
+        return None;
+    }
+
+    while let Some((line, next)) = read_line(buf, pos, ParseMode::Lenient) {
+        pos = next;
+        if line.is_empty() {
+            break;
+        }
+        let mut end = line.end;
+        let mut writable = !holds_a_lone_cr(buf, line);
+        let mut whole = true;
+        while starts_with_ws(buf, pos) {
+            let Some((cont, after)) = read_line(buf, pos, ParseMode::Lenient) else {
+                whole = false;
+                break;
+            };
+            writable &= !holds_a_lone_cr(buf, cont);
+            end = cont.end;
+            pos = after;
+        }
+        if !whole {
+            break;
+        }
+        let Ok((name, value)) = split_header(buf, line) else {
+            continue;
+        };
+        let copied = HeaderName::from_bytes(name.slice(buf)).is_some_and(|field| {
+            matches!(
+                field,
+                HeaderName::Via
+                    | HeaderName::From
+                    | HeaderName::To
+                    | HeaderName::CallId
+                    | HeaderName::CSeq
+            )
+        });
+        if !copied || !writable {
+            continue;
+        }
+        if scratch.slots.len() >= usize::from(max_fields) {
+            return None;
+        }
+        scratch.slots.push(HeaderSlot {
+            name,
+            value: trim(
+                buf,
+                Span {
+                    start: value.start,
+                    end,
+                },
+            ),
+        });
+    }
+
+    Some(RawMessage {
+        buf,
+        start,
+        headers: &scratch.slots,
+        body: Span::empty(off(pos)),
+    })
+}
+
+/// Where a message's head ends and how long its body says it is, read the
+/// way [`parse_with_limits`] reads them, for a message that was refused for
+/// something else.
+///
+/// A stream is framed on nothing else (§18.3), so this is what decides
+/// whether a refused message can be passed over and the connection read on,
+/// or whether the framing is lost with it.
+///
+/// # Errors
+/// [`ParseError::UnterminatedHeaders`] while the head has not ended,
+/// [`ParseError::MissingContentLength`] when it names no length,
+/// [`ParseError::ConflictingContentLength`] when it names two, and
+/// [`ParseError::BadHeaderLine`] when the length it names is not a number.
+pub(crate) fn declared_length(buf: &[u8]) -> Result<(usize, u32), ParseError> {
+    let (_, mut pos) =
+        read_line(buf, 0, ParseMode::Lenient).ok_or(ParseError::UnterminatedHeaders)?;
+    let mut declared: Option<u32> = None;
+    loop {
+        let (line, next) =
+            read_line(buf, pos, ParseMode::Lenient).ok_or(ParseError::UnterminatedHeaders)?;
+        pos = next;
+        if line.is_empty() {
+            break;
+        }
+        let mut value_end = line.end;
+        while starts_with_ws(buf, pos) {
+            let (cont, after) =
+                read_line(buf, pos, ParseMode::Lenient).ok_or(ParseError::UnterminatedHeaders)?;
+            value_end = cont.end;
+            pos = after;
+        }
+        let Ok((name, value)) = split_header(buf, line) else {
+            continue;
+        };
+        if !is_content_length(name.slice(buf)) {
+            continue;
+        }
+        let value = trim(
+            buf,
+            Span {
+                start: value.start,
+                end: value_end,
+            },
+        );
+        let length =
+            parse_u32(value.slice(buf)).ok_or(ParseError::BadHeaderLine { at: name.start })?;
+        match declared {
+            Some(first) if first != length => {
+                return Err(ParseError::ConflictingContentLength {
+                    first,
+                    second: length,
+                });
+            }
+            _ => declared = Some(length),
+        }
+    }
+    let declared = declared.ok_or(ParseError::MissingContentLength)?;
+    Ok((pos, declared))
+}
+
+/// How long the value of the field whose name starts at `name_at` is, folds
+/// included and surrounding whitespace not: the number
+/// [`ParseError::HeaderValueTooLong`] measured against its bound.
+#[must_use]
+pub(crate) fn field_value_len(buf: &[u8], name_at: u32) -> Option<usize> {
+    let (line, mut pos) = read_line(buf, name_at as usize, ParseMode::Lenient)?;
+    let (_, value) = split_header(buf, line).ok()?;
+    let mut end = value.end;
+    while starts_with_ws(buf, pos) {
+        let (cont, after) = read_line(buf, pos, ParseMode::Lenient)?;
+        end = cont.end;
+        pos = after;
+    }
+    Some(
+        trim(
+            buf,
+            Span {
+                start: value.start,
+                end,
+            },
+        )
+        .len(),
+    )
 }
 
 fn parse_start_line(buf: &[u8], line: Span) -> Result<StartLine, ParseError> {
@@ -650,6 +851,66 @@ v=0\n";
             parse_with_limits(INVITE, &mut scratch, ParseMode::Strict, narrow),
             Err(ParseError::HeaderValueTooLong { .. })
         ));
+    }
+
+    #[test]
+    fn a_from_carrying_thousands_of_bytes_of_display_name_is_read() {
+        // the headless audit's INVITEs: display names of 6000 and 9000 bytes
+        // drew no answer at all, because the one field was past the bound on a
+        // single value and the whole request was refused
+        for length in [6_000, 9_000] {
+            let message = format!(
+                "INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1\r\n\
+From: \"{}\" <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n",
+                "a".repeat(length)
+            );
+            let mut scratch = ParseScratch::new();
+            let parsed = parse(message.as_bytes(), &mut scratch, ParseMode::Lenient);
+            assert!(parsed.is_ok(), "{length}: {:?}", parsed.err());
+        }
+    }
+
+    #[test]
+    fn a_refused_request_is_salvaged_down_to_what_an_answer_copies() {
+        use super::salvage_request;
+        use crate::msg::{HeaderError, HeaderName};
+        let request = b"OPTIONS sip:bob@example.com SIP/2.0\r\n\
+v: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK1\r\n\
+Via: SIP/2.0/UDP 192.0.2.2;branch=z9hG4bK2\r\n\
+not a header line\r\n\
+f: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Subject: kept out\r\n\
+Call-ID: one\rtwo\r\n\
+CSeq: 1\r\n OPTIONS\r\n\
+\r\n";
+        let mut scratch = ParseScratch::new();
+        let salvaged = salvage_request(request, &mut scratch, 16).expect("a request line");
+        assert_eq!(salvaged.method(), Some(Method::Options));
+        assert_eq!(salvaged.header_count(HeaderName::Via), 2);
+        assert_eq!(salvaged.header_count(HeaderName::Subject), 0);
+        assert!(salvaged.from().is_ok());
+        assert!(salvaged.to().is_ok());
+        assert_eq!(salvaged.cseq().map(|c| c.seq), Ok(1), "a fold is followed");
+        assert_eq!(
+            salvaged.call_id(),
+            Err(HeaderError::Missing),
+            "a lone CR could never be written back"
+        );
+
+        let mut scratch = ParseScratch::new();
+        assert!(
+            salvage_request(request, &mut scratch, 2).is_none(),
+            "an answer missing a Via would go to the wrong place"
+        );
+        let mut scratch = ParseScratch::new();
+        assert!(salvage_request(b"SIP/2.0 200 OK\r\nVia: x\r\n\r\n", &mut scratch, 16).is_none());
     }
 
     #[test]

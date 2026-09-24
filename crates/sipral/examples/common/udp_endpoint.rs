@@ -168,6 +168,11 @@ impl Endpoint {
 
     /// Read whatever SIP datagrams have arrived, non-blockingly. `true` when
     /// at least one did.
+    ///
+    /// A datagram the parser refused is said on standard error: the stack has
+    /// already answered it 400 or 513 when it could be addressed, and counted
+    /// it either way, but a line here is what an operator watching this
+    /// process sees without asking.
     pub(crate) fn read_sip(&mut self, now: Instant) -> bool {
         let mut arrived = false;
         loop {
@@ -175,7 +180,7 @@ impl Endpoint {
                 Ok((length, from)) => {
                     arrived = true;
                     let data = self.sip_inbox.get(..length).unwrap_or_default();
-                    let _ = self.agent.receive(
+                    let received = self.agent.receive(
                         Input::Datagram {
                             transport: self.transport,
                             remote: from,
@@ -184,6 +189,9 @@ impl Endpoint {
                         },
                         now,
                     );
+                    if let Err(error) = received {
+                        eprintln!("refused {length} bytes from {from}: {error}");
+                    }
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(_) => break,

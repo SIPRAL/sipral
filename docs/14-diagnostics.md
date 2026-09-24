@@ -63,8 +63,10 @@ table below. Nothing else moves, and nothing that already exists is touched.
 
 ## The vocabulary `sipral-core` emits
 
-Twenty-one codes, and every one of them is written at a decision site that
-existed before this document did.
+Twenty-three codes, every one of them written at the decision site it names.
+All but the two `unreadable` ones were written at sites that existed before
+this document did; those two came with the answer the endpoint now gives a
+message its parser refuses.
 
 | Code | The decision |
 |---|---|
@@ -77,6 +79,8 @@ existed before this document did.
 | `request.retransmitted` | A timer fired and the identical bytes went again. |
 | `request.refused.overload` | A stranger's request was answered 503 for want of room. |
 | `request.refused.dialog` | A peer already inside a dialog was answered 503 for want of room in that one dialog's own, smaller ceiling — distinct from `request.refused.overload`, which a request inside a dialog is never refused with. |
+| `request.refused.unreadable` | A request the parser refused — past a `msg::Limits` bound, or not well formed — was answered from the fields that could still be read: 513 past the message bound, 400 naming the fault otherwise. Carries **size and limit** when a bound on bytes refused it. |
+| `message.dropped.unreadable` | Bytes the parser refused that no answer could be written to — a response, an ACK, a request with no readable `Via`, `From`, `To`, `Call-ID` or `CSeq`, or a stream whose framing was lost with it. Dropped, and this is the trace. |
 | `response.sent` | A response went on the wire. |
 | `response.retransmitted` | A timer fired and the same response went again — which means the acknowledgement is not arriving. |
 | `transaction.unacknowledged` | §17.2.1, timer H: a final response was repeated for 64·T1 and never acknowledged. Nothing above hears about this; the record is the only place it exists. |

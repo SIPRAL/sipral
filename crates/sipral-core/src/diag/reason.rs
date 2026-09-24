@@ -75,6 +75,18 @@ pub enum Reason {
     /// [`Self::RequestRefusedWhenFull`], because a request inside a dialog is
     /// never refused for the endpoint-wide one.
     RequestRefusedByDialog,
+    /// A request the parser refused — past one of `msg::Limits`, or not
+    /// well formed enough to be read at all — was answered from the fields
+    /// that could still be recovered from it: 513 for one longer than the
+    /// message bound (RFC 3261 §21.5.14), 400 with the reason in the phrase
+    /// for anything else (§21.4.1). Carries the size and the limit when a
+    /// bound on bytes was what refused it.
+    RequestRefusedUnreadable,
+    /// Bytes the parser refused that no answer could be written to: a
+    /// response, an ACK, or a request whose `Via`, `From`, `To`, `Call-ID` or
+    /// `CSeq` could not be recovered. Dropped, and this entry is the trace of
+    /// it.
+    MessageDroppedUnreadable,
     /// A response went on the wire.
     ResponseSent,
     /// A retransmission timer fired and the same response went again, which
@@ -136,6 +148,8 @@ impl Reason {
             Self::RequestRefusedWhenFull => "request.refused.overload",
             Self::RequestRefusedAsMalformed => "request.refused.malformed",
             Self::RequestRefusedByDialog => "request.refused.dialog",
+            Self::RequestRefusedUnreadable => "request.refused.unreadable",
+            Self::MessageDroppedUnreadable => "message.dropped.unreadable",
             Self::ResponseSent => "response.sent",
             Self::ResponseRetransmitted => "response.retransmitted",
             Self::TransactionUnacknowledged => "transaction.unacknowledged",
@@ -167,7 +181,7 @@ mod tests {
 
     /// Every variant this crate has, so that the tests below cannot silently
     /// stop covering one that was added afterwards.
-    const ALL: [Reason; 25] = [
+    const ALL: [Reason; 27] = [
         Reason::TransportSelected,
         Reason::TransportPromotedBySize,
         Reason::TransportRefusedBySize,
@@ -178,6 +192,8 @@ mod tests {
         Reason::RequestRefusedWhenFull,
         Reason::RequestRefusedAsMalformed,
         Reason::RequestRefusedByDialog,
+        Reason::RequestRefusedUnreadable,
+        Reason::MessageDroppedUnreadable,
         Reason::ResponseSent,
         Reason::ResponseRetransmitted,
         Reason::TransactionUnacknowledged,

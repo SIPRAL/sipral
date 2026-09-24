@@ -109,6 +109,9 @@ pub struct Endpoint {
     /// because the number an operator wants is "how often has this happened",
     /// not "how often since somebody last looked".
     pub(super) refused: u64,
+    /// How many messages the parser refused, answered or not. Only ever
+    /// grows, for the same reason [`Endpoint::refused`] does.
+    pub(super) unreadable: u64,
     /// Calls let in under [`EndpointConfig::max_dialogs`] that have not opened
     /// their dialog yet.
     ///
@@ -170,6 +173,7 @@ impl Endpoint {
             dialogs_of: HashMap::new(),
             known: Known::new(),
             refused: 0,
+            unreadable: 0,
             admitted: HashSet::new(),
             unanswered: HashMap::new(),
             diag: Records::new(config.diagnostics),
@@ -182,8 +186,10 @@ impl Endpoint {
     /// [`ReceiveError`] when the transport is unknown or the bytes are not a
     /// message. Neither is a fault of this endpoint: a malformed datagram is
     /// the normal case on a public SIP port, and the caller logs it and
-    /// carries on. On a byte stream it is fatal to the connection, which the
-    /// endpoint has already forgotten by the time the error is returned.
+    /// carries on — a request among them has already been answered when it
+    /// could be ([`Endpoint::unreadable`]). On a byte stream only lost framing
+    /// is returned, and it is fatal to the connection, which the endpoint has
+    /// already forgotten by the time the error is returned.
     pub fn receive(&mut self, input: Input<'_>, now: Instant) -> Result<(), ReceiveError> {
         self.mark(now);
         match input {
@@ -354,6 +360,22 @@ impl Endpoint {
     #[must_use]
     pub const fn refused(&self) -> u64 {
         self.refused
+    }
+
+    /// How many messages arrived that the parser refused — past one of
+    /// [`EndpointConfig::limits`], or not a SIP message at all — whether or
+    /// not an answer could be written to them.
+    ///
+    /// A request is answered 400 or 513 whenever the fields a response is
+    /// built from can still be recovered, and each one that is also leaves a
+    /// `request.refused.unreadable` entry in [`Endpoint::endpoint_record`];
+    /// one that cannot be answered — a response, an ACK, a request with no
+    /// `Via` to send an answer to — leaves `message.dropped.unreadable`
+    /// instead. This is both, counted, for a caller that samples numbers
+    /// rather than reading records.
+    #[must_use]
+    pub const fn unreadable(&self) -> u64 {
+        self.unreadable
     }
 
     pub(crate) const fn store(&self) -> &Transactions {

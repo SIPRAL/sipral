@@ -29,13 +29,49 @@
 //! time: the search for the end of the headers resumes where it stopped, and
 //! once the body's length is known nothing is parsed again until that many
 //! bytes are actually there.
+//!
+//! A message the parser refuses does not cost the connection when its
+//! framing is still known — its head ended, and named exactly one
+//! `Content-Length`. It is handed out as [`Framed::Refused`], for the layer
+//! above to answer, and the stream reads on after it. One longer than
+//! [`Limits::max_message_bytes`] is handed out the same way the moment its
+//! head is in, and the rest of its body is passed over as it arrives without
+//! ever being held. Only framing that is lost — a head longer than the bound,
+//! or one that says nothing, or two different things, about where its body
+//! ends — is an error, and that one is final.
 
 use super::error::ParseError;
 use super::header::HeaderName;
 use super::message::RawMessage;
 use super::parse::Limits;
-use super::parse::{ParseMode, parse_with_limits};
+use super::parse::{ParseMode, declared_length, parse_with_limits};
 use super::span::ParseScratch;
+
+/// What [`StreamFramer::next_message`] found at the front of the stream.
+#[derive(Debug)]
+pub enum Framed<'a> {
+    /// A message, whole and inside every bound.
+    Message(RawMessage<'a>),
+    /// A message the parser refused, whose framing is still known: the
+    /// stream has already moved past it, and what comes after it is read as
+    /// usual.
+    ///
+    /// Only its head is handed out — the start line and the header fields,
+    /// empty line included — because that is all an answer is written from
+    /// (RFC 3261 §8.2.6.2), and because the body of one past
+    /// [`Limits::max_message_bytes`] is never held at all.
+    Refused {
+        /// The start line and the header fields.
+        head: &'a [u8],
+        /// How long the whole message is, body included, as its head
+        /// declares it.
+        length: usize,
+        /// Why the parser refused it: [`ParseError::MessageTooLarge`] for one
+        /// whose declared length is past the bound, whatever else is wrong
+        /// with it.
+        error: ParseError,
+    },
+}
 
 /// Reassembles a stream into messages.
 #[derive(Debug)]
@@ -53,6 +89,9 @@ pub struct StreamFramer {
     /// A CRLF that has been read as a pong and could still turn out to be the
     /// first half of a ping split between two reads.
     dangling: bool,
+    /// Body bytes of a message refused as longer than the bound that have not
+    /// arrived yet, and are to be passed over unread when they do.
+    discard: usize,
     limits: Limits,
 }
 
@@ -78,37 +117,51 @@ impl StreamFramer {
             pings: 0,
             pongs: 0,
             dangling: false,
+            discard: 0,
             limits,
         }
     }
 
     /// Take bytes off the transport.
     ///
+    /// Bytes still owed to the body of a message refused as too long are
+    /// passed over here, before anything is kept. What is kept may run past
+    /// the bound by what one read carried, while the head at the front of it
+    /// ends inside the bound: [`StreamFramer::next_message`] takes the
+    /// message off the front, or refuses it, before anything more is read.
+    ///
     /// # Errors
-    /// [`ParseError::MessageTooLarge`] when the message being assembled grows
-    /// past the bound. There is no recovering from that on a stream — the
-    /// framing is lost — so the caller closes the connection.
+    /// [`ParseError::MessageTooLarge`] when the head of the message being
+    /// assembled has grown past the bound without ending. There is no
+    /// recovering from that on a stream — nothing says where the message
+    /// ends — so the caller closes the connection.
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), ParseError> {
+        let skipped = self.discard.min(bytes.len());
+        self.discard -= skipped;
+        let bytes = bytes.get(skipped..).unwrap_or_default();
         self.compact();
         self.buf.extend_from_slice(bytes);
-        if self.pending() > self.limits.max_message_bytes as usize {
-            return Err(ParseError::MessageTooLarge {
-                limit: self.limits.max_message_bytes,
-            });
+        if self.pending() > self.limits.max_message_bytes as usize && !self.head_fits() {
+            return Err(self.too_large());
         }
         Ok(())
     }
 
     /// The next complete message, if one has arrived.
     ///
-    /// `Ok(None)` means "not yet"; call again after more bytes. An `Err` is
-    /// final: a stream whose framing is wrong cannot be resynchronised, so
+    /// `Ok(None)` means "not yet"; call again after more bytes. A message the
+    /// parser refuses is [`Framed::Refused`] rather than an error, as long as
+    /// where it ends is still known, and the call after it reads on. An `Err`
+    /// is final: a stream whose framing is wrong cannot be resynchronised, so
     /// the connection goes.
     ///
     /// # Errors
-    /// [`ParseError::MissingContentLength`] for a message that cannot be
-    /// framed, and whatever [`parse_with_limits`] refused otherwise.
-    pub fn next_message(&mut self, mode: ParseMode) -> Result<Option<RawMessage<'_>>, ParseError> {
+    /// [`ParseError::MissingContentLength`] or
+    /// [`ParseError::ConflictingContentLength`] for a message that cannot be
+    /// framed, [`ParseError::BadHeaderLine`] for a `Content-Length` that is
+    /// not a number, and [`ParseError::MessageTooLarge`] for a head that has
+    /// grown past the bound without ending.
+    pub fn next_message(&mut self, mode: ParseMode) -> Result<Option<Framed<'_>>, ParseError> {
         self.skip_keepalives();
 
         let ready = match self.need {
@@ -118,6 +171,11 @@ impl StreamFramer {
             None => self.headers_are_complete(),
         };
         if !ready {
+            // a head past the bound that never ended: what `push` refuses,
+            // left behind by the message that was in front of it
+            if self.need.is_none() && self.pending() > self.limits.max_message_bytes as usize {
+                return Err(self.too_large());
+            }
             return Ok(None);
         }
 
@@ -127,11 +185,17 @@ impl StreamFramer {
             start,
             scanned,
             need,
+            discard,
             limits,
             ..
         } = self;
         let bytes = buf.get(*start..).unwrap_or_default();
-        match parse_with_limits(bytes, scratch, mode, *limits) {
+        // the message at the front and nothing behind it: several can be
+        // queued in one read, and together they may pass a bound that each
+        // of them keeps
+        let bound = limits.max_message_bytes as usize;
+        let window = bytes.get(..bytes.len().min(bound)).unwrap_or_default();
+        let error = match parse_with_limits(window, scratch, mode, *limits) {
             Ok(message) => {
                 // presence, not value: the parser has already framed the body
                 // with it, and two that agree are its business, not ours
@@ -141,21 +205,42 @@ impl StreamFramer {
                 *start += message.len();
                 *scanned = *start;
                 *need = None;
-                Ok(Some(message))
+                return Ok(Some(Framed::Message(message)));
             }
-            Err(ParseError::BodyTruncated {
-                declared,
-                available,
-            }) => {
-                *need = Some(
-                    (*buf).len().saturating_sub(*start)
-                        + (declared as usize).saturating_sub(available as usize),
-                );
-                Ok(None)
+            Err(ParseError::UnterminatedHeaders) => return Ok(None),
+            Err(error) => error,
+        };
+
+        // refused, or not all here yet: either way the head says how long
+        // the message is, or the framing is lost with it
+        let (head_len, declared) = match declared_length(bytes) {
+            Ok(found) => found,
+            Err(ParseError::UnterminatedHeaders) => return Ok(None),
+            Err(lost) => return Err(lost),
+        };
+        let length = head_len.saturating_add(declared as usize);
+        let error = if length > bound {
+            ParseError::MessageTooLarge {
+                limit: limits.max_message_bytes,
             }
-            Err(ParseError::UnterminatedHeaders) => Ok(None),
-            Err(e) => Err(e),
-        }
+        } else if bytes.len() < length {
+            *need = Some(length);
+            return Ok(None);
+        } else {
+            error
+        };
+        let taken = length.min(bytes.len());
+        *discard = length - taken;
+        let from = *start;
+        *start += taken;
+        *scanned = *start;
+        *need = None;
+        let head = buf.get(from..from + head_len).unwrap_or_default();
+        Ok(Some(Framed::Refused {
+            head,
+            length,
+            error,
+        }))
     }
 
     /// Consume one keep-alive ping, if one arrived.
@@ -198,6 +283,20 @@ impl StreamFramer {
         self.pings = 0;
         self.pongs = 0;
         self.dangling = false;
+        self.discard = 0;
+    }
+
+    const fn too_large(&self) -> ParseError {
+        ParseError::MessageTooLarge {
+            limit: self.limits.max_message_bytes,
+        }
+    }
+
+    /// Whether the head of the message at the front has ended, and inside the
+    /// bound.
+    fn head_fits(&mut self) -> bool {
+        self.headers_are_complete()
+            && self.scanned.saturating_sub(self.start) < self.limits.max_message_bytes as usize
     }
 
     /// Drop the bytes of messages already handed out.
@@ -268,8 +367,28 @@ fn find_blank_line(window: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::StreamFramer;
-    use crate::msg::{Limits, Method, ParseError, ParseMode};
+    use super::{Framed, StreamFramer};
+    use crate::msg::{Limits, Method, ParseError, ParseMode, RawMessage};
+
+    /// The message a call handed out, which has to be one the parser took.
+    fn message(framed: Option<Framed<'_>>) -> RawMessage<'_> {
+        match framed {
+            Some(Framed::Message(message)) => message,
+            other => panic!("expected a message, got {other:?}"),
+        }
+    }
+
+    /// The head and the error of a message that was refused.
+    fn refused(framed: Option<Framed<'_>>) -> (Vec<u8>, usize, ParseError) {
+        match framed {
+            Some(Framed::Refused {
+                head,
+                length,
+                error,
+            }) => (head.to_vec(), length, error),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
 
     const INVITE: &[u8] = b"INVITE sip:bob@example.com SIP/2.0\r\n\
 Via: SIP/2.0/TCP 192.0.2.1:5060;branch=z9hG4bK1\r\n\
@@ -298,10 +417,7 @@ Content-Length: 0\r\n\
     fn a_whole_message_in_one_read() {
         let mut f = framer();
         f.push(INVITE).expect("pushed");
-        let m = f
-            .next_message(ParseMode::Strict)
-            .expect("no error")
-            .expect("a message");
+        let m = message(f.next_message(ParseMode::Strict).expect("no error"));
         assert_eq!(m.method(), Some(Method::Invite));
         assert_eq!(m.body(), b"v=0\n");
         assert_eq!(f.pending(), 0);
@@ -319,10 +435,7 @@ Content-Length: 0\r\n\
                 "cut at {cut} produced a message early"
             );
             f.push(INVITE.get(cut..).expect("tail")).expect("pushed");
-            let m = f
-                .next_message(ParseMode::Strict)
-                .expect("no error")
-                .expect("a message");
+            let m = message(f.next_message(ParseMode::Strict).expect("no error"));
             assert_eq!(m.method(), Some(Method::Invite));
             assert_eq!(m.body(), b"v=0\n");
         }
@@ -348,17 +461,11 @@ Content-Length: 0\r\n\
         f.push(&both).expect("pushed");
 
         assert_eq!(
-            f.next_message(ParseMode::Strict)
-                .expect("no error")
-                .expect("first")
-                .method(),
+            message(f.next_message(ParseMode::Strict).expect("no error")).method(),
             Some(Method::Invite)
         );
         assert_eq!(
-            f.next_message(ParseMode::Strict)
-                .expect("no error")
-                .expect("second")
-                .method(),
+            message(f.next_message(ParseMode::Strict).expect("no error")).method(),
             Some(Method::Bye)
         );
         assert!(
@@ -524,13 +631,31 @@ Via: SIP/2.0/TCP h;branch=z9hG4bK1\r\n\
     }
 
     #[test]
-    fn a_message_larger_than_the_bound_is_refused_as_it_arrives() {
+    fn a_head_that_passes_the_bound_without_ending_is_refused_as_it_arrives() {
         let mut f = StreamFramer::new(200);
-        let mut big = INVITE.to_vec();
+        let mut big = b"INVITE sip:bob@example.com SIP/2.0\r\nSubject: ".to_vec();
         big.extend(std::iter::repeat_n(b'x', 300));
         assert_eq!(
             f.push(&big),
             Err(ParseError::MessageTooLarge { limit: 200 })
+        );
+    }
+
+    #[test]
+    fn a_head_that_passes_the_bound_behind_a_message_that_kept_it_is_refused() {
+        let mut f = StreamFramer::new(300);
+        let mut two = BYE.to_vec();
+        two.extend_from_slice(b"INVITE sip:bob@example.com SIP/2.0\r\nSubject: ");
+        two.extend(std::iter::repeat_n(b'x', 400));
+        f.push(&two)
+            .expect("the head in front ends inside the bound");
+        assert_eq!(
+            message(f.next_message(ParseMode::Strict).expect("framed")).method(),
+            Some(Method::Bye)
+        );
+        assert_eq!(
+            f.next_message(ParseMode::Strict).err(),
+            Some(ParseError::MessageTooLarge { limit: 300 })
         );
     }
 
@@ -580,14 +705,32 @@ There is no way to know how many octets belong here.",
     }
 
     #[test]
-    fn a_malformed_start_line_is_an_error_the_connection_does_not_survive() {
+    fn a_malformed_start_line_with_a_length_is_refused_and_the_stream_reads_on() {
+        // where it ends is still known, so nothing about the next one is lost
         let mut f = framer();
-        f.push(b"NOT A SIP MESSAGE\r\nContent-Length: 0\r\n\r\n")
+        let mut both = b"NOT A SIP MESSAGE\r\nContent-Length: 0\r\n\r\n".to_vec();
+        both.extend_from_slice(BYE);
+        f.push(&both).expect("pushed");
+        let (_, _, error) = refused(f.next_message(ParseMode::Strict).expect("framed"));
+        assert!(
+            matches!(error, ParseError::BadStartLine { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            message(f.next_message(ParseMode::Strict).expect("framed")).method(),
+            Some(Method::Bye)
+        );
+    }
+
+    #[test]
+    fn a_refused_message_with_no_length_closes_the_connection() {
+        let mut f = framer();
+        f.push(b"NOT A SIP MESSAGE\r\nSubject: x\r\n\r\n")
             .expect("pushed");
-        assert!(matches!(
-            f.next_message(ParseMode::Strict),
-            Err(ParseError::BadStartLine { .. })
-        ));
+        assert_eq!(
+            f.next_message(ParseMode::Strict).err(),
+            Some(ParseError::MissingContentLength)
+        );
     }
 
     #[test]
@@ -613,24 +756,84 @@ There is no way to know how many octets belong here.",
         assert_eq!(f.pending(), 0);
         f.push(BYE).expect("pushed");
         assert_eq!(
-            f.next_message(ParseMode::Strict)
-                .expect("no error")
-                .expect("a message")
-                .method(),
+            message(f.next_message(ParseMode::Strict).expect("no error")).method(),
             Some(Method::Bye)
         );
     }
 
     #[test]
-    fn the_parser_bounds_are_carried_through() {
+    fn the_parser_bounds_are_carried_through_and_a_message_past_one_is_passed_over() {
         let mut f = StreamFramer::with_limits(Limits {
             max_headers: 2,
             ..Limits::DEFAULT
         });
-        f.push(INVITE).expect("pushed");
-        assert!(matches!(
-            f.next_message(ParseMode::Strict),
-            Err(ParseError::TooManyHeaders { .. })
-        ));
+        let mut both = INVITE.to_vec();
+        both.extend_from_slice(b"OPTIONS sip:b@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n");
+        f.push(&both).expect("pushed");
+        let (head, length, error) = refused(f.next_message(ParseMode::Strict).expect("framed"));
+        assert_eq!(error, ParseError::TooManyHeaders { limit: 2 });
+        assert_eq!(length, INVITE.len());
+        assert_eq!(head, INVITE.get(..INVITE.len() - 4).expect("the head"));
+        assert_eq!(
+            message(f.next_message(ParseMode::Strict).expect("framed")).method(),
+            Some(Method::Options)
+        );
+    }
+
+    #[test]
+    fn a_body_past_the_bound_is_refused_once_its_head_is_in_and_passed_over_unheld() {
+        let mut f = StreamFramer::new(1_024);
+        let head = b"MESSAGE sip:b@example.com SIP/2.0\r\n\
+Via: SIP/2.0/TCP h;branch=z9hG4bK1\r\n\
+Content-Length: 5000\r\n\
+\r\n";
+        let mut stream = head.to_vec();
+        stream.extend(std::iter::repeat_n(b'x', 5_000));
+        stream.extend_from_slice(BYE);
+
+        let mut refusals = Vec::new();
+        let mut after = Vec::new();
+        for piece in stream.chunks(700) {
+            f.push(piece).expect("the connection stays");
+            loop {
+                match f.next_message(ParseMode::Strict).expect("framed") {
+                    Some(Framed::Refused {
+                        head,
+                        length,
+                        error,
+                    }) => {
+                        refusals.push((head.to_vec(), length, error));
+                    }
+                    Some(Framed::Message(m)) => after.push(m.method().map(|m| m.to_string())),
+                    None => break,
+                }
+            }
+            assert!(f.pending() <= 1_024, "{} held", f.pending());
+        }
+        assert_eq!(
+            refusals,
+            vec![(
+                head.to_vec(),
+                head.len() + 5_000,
+                ParseError::MessageTooLarge { limit: 1_024 }
+            )]
+        );
+        assert_eq!(after, vec![Some("BYE".to_owned())]);
+    }
+
+    #[test]
+    fn several_messages_in_one_read_may_pass_the_bound_that_each_one_keeps() {
+        let mut f = StreamFramer::new(u32::try_from(BYE.len()).expect("small"));
+        let mut three = BYE.to_vec();
+        three.extend_from_slice(BYE);
+        three.extend_from_slice(BYE);
+        f.push(&three).expect("each head ends inside the bound");
+        for _ in 0..3 {
+            assert_eq!(
+                message(f.next_message(ParseMode::Strict).expect("framed")).method(),
+                Some(Method::Bye)
+            );
+        }
+        assert_eq!(f.pending(), 0);
     }
 }

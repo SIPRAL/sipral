@@ -34,6 +34,63 @@ that assumption: no recursion on untrusted input, every length checked, no
 panic path, bounded work per message. Fuzzing is a phase 1 exit criterion, not
 a phase 3 nicety.
 
+### Limits, and what a refused message gets
+
+`msg::Limits` bounds one message: 65,535 bytes in all, 128 header fields, and
+16,384 bytes in any one field's value. The message bound is the largest UDP
+payload there is, so no datagram is refused for its size alone. The value
+bound is sized for the longest fields real traffic puts on one line — an RFC
+8224 `Identity` carrying a full PASSporT with rich call data, a `History-Info`
+that has been through a few dozen retargets, a display name the caller's
+switch filled — with room to spare, and still a quarter of the message. It
+was 4,096 until an INVITE with a 6,000-byte display name was refused outright.
+All three are `EndpointConfig::limits`, and a deployment that wants them
+tighter sets them there.
+
+A message past a bound, or not well formed enough to parse, is never dropped
+without a trace. RFC 3261 §8.2 has a UAS answer what it cannot process rather
+than leave the client retransmitting until timer B or F gives up, so a request
+is answered — statelessly, from what can still be recovered of it — whenever
+its `Via`, `From`, `To`, `Call-ID` and `CSeq` can be read, which are the five
+fields every response copies (§8.2.6.2) and all an answer needs to reach the
+client and match its transaction:
+
+- **513 Message Too Large** (§21.5.14) for one longer than the message bound,
+  with the bound in the reason phrase: `Message Too Large (limit 65535 bytes)`.
+- **400 Bad Request** (§21.4.1) for everything else, with a reason phrase that
+  names the fault: `From Too Long (limit 16384 bytes)`, `Too Many Header
+  Fields (limit 128)`, `Content-Length Exceeds Message` (§18.3's own SHOULD
+  for a datagram shorter than its `Content-Length`), `Malformed Header Line`.
+
+The field that was too long can be one of the five — the display name in
+`From` is exactly where the 6,000 bytes above were — and it goes back whole,
+because a response that changed it would match nothing at the client. Inside
+a dialog the answer carries the dialog's own tags and the dialog stands;
+nothing about the call changes because one request in it could not be read.
+
+What cannot be answered is dropped: a response, an ACK (never answered,
+§17.1.1.3), a request whose five fields cannot all be read, or one whose
+request line cannot. Every refusal, answered or not, moves
+`Endpoint::unreadable`, and leaves an entry in the endpoint's diagnostic record
+— `request.refused.unreadable` for one that was answered,
+`message.dropped.unreadable` for one that was not, with the size and the bound
+when a bound on bytes was what refused it (`docs/14-diagnostics.md`). The
+datagram's own `receive` still returns `ReceiveError::Malformed`, which is the
+per-message signal to a caller that logs; `sipral_stack_receive_datagram`
+answers it as `SIPRAL_STATUS_INVALID_ARGUMENT` with the parser's reason.
+
+On a stream the same message costs the connection only when its framing is
+lost with it. The framer knows where a refused message ends as long as its
+head ended and named exactly one `Content-Length` (§18.3), and then it hands
+the head up to be answered and reads on after it — one oversized `Subject` on
+a trunk carrying a hundred calls over one TLS connection does not end the
+other ninety-nine. A message whose declared length is past the bound is
+answered 513 as soon as its head is in, and the rest of its body is passed over
+as it arrives without ever being held. Framing that is lost — a head past the
+bound that never ends, or one that names no length or two different ones — is
+the one refusal that is final: nothing says where the next message starts, the
+connection is retired, and `receive` returns the error.
+
 ### Serialization
 
 Deterministic byte-for-byte output, so tests can compare against fixtures.

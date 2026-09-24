@@ -30,8 +30,8 @@ use super::via;
 use crate::diag::{Decision, Direction, Reason, WireEvent};
 use crate::dialog::{CallId, Dialog, DialogKey, DialogState, Fork, Incoming};
 use crate::msg::{
-    HeaderName, Invalid, Method, OwnedMessage, ParseScratch, RawMessage, ResponseBuilder,
-    StatusCode, parse_with_limits,
+    Framed, HeaderName, Invalid, Method, OwnedMessage, ParseError, ParseScratch, RawMessage,
+    ResponseBuilder, StatusCode, field_value_len, parse_with_limits, salvage_request,
 };
 use crate::transaction::{
     AnyTransactionId, Client, DialogId, Effects, InviteClient, NonInviteClient, NonInviteServer,
@@ -113,10 +113,19 @@ impl Endpoint {
                 self.dispatch(&message, flow, advertised, now);
                 Ok(())
             }
-            Err(error) => Err(ReceiveError::Malformed(error)),
+            Err(error) => Err(error),
         };
         self.scratch = scratch;
-        outcome
+        outcome.map_err(|error| {
+            let arrival = Arrival {
+                transport,
+                remote,
+                local: Some(local),
+                protocol,
+            };
+            self.answer_unreadable(data, data.len(), error, arrival);
+            ReceiveError::Malformed(error)
+        })
     }
 
     pub(super) fn on_stream(
@@ -150,13 +159,39 @@ impl Endpoint {
         let mut outcome = framer.push(data).map_err(ReceiveError::Malformed);
         while outcome.is_ok() {
             match framer.next_message(mode) {
-                Ok(Some(message)) => {
+                Ok(Some(Framed::Message(message))) => {
                     let flow = Self::flow_for(&message, transport, remote, None, protocol);
                     self.dispatch(&message, flow, advertised, now);
+                }
+                // refused, and already passed over: the connection reads on
+                Ok(Some(Framed::Refused {
+                    head,
+                    length,
+                    error,
+                })) => {
+                    let arrival = Arrival {
+                        transport,
+                        remote,
+                        local: None,
+                        protocol,
+                    };
+                    self.answer_unreadable(head, length, error, arrival);
                 }
                 Ok(None) => break,
                 Err(error) => outcome = Err(ReceiveError::Malformed(error)),
             }
+        }
+        // framing lost: nothing says where the message ends, so nothing can be
+        // answered, and the connection goes below. Counted all the same
+        if let Err(ReceiveError::Malformed(error)) = outcome {
+            self.unreadable = self.unreadable.saturating_add(1);
+            let mut decision = Decision::of(Reason::MessageDroppedUnreadable)
+                .at_address(remote)
+                .over(protocol);
+            if let ParseError::MessageTooLarge { limit } = error {
+                decision = decision.measured(framer.pending(), limit);
+            }
+            self.note(None, decision);
         }
         // RFC 5626 5.4 makes answering a ping a MUST for whoever receives it,
         // and owes one CRLF per double-CRLF. It says nothing about how many
@@ -220,6 +255,87 @@ impl Endpoint {
             destination,
             source: local,
             protocol,
+        }
+    }
+
+    /// Answer what the parser refused, when an answer can be addressed, and
+    /// leave a trace of it either way.
+    ///
+    /// §8.2 has a UAS answer a request it cannot process instead of leaving
+    /// the client to retransmit into silence until timer B or F gives up:
+    /// §21.5.14's 513 for one longer than [`crate::msg::Limits::max_message_bytes`],
+    /// §21.4.1's 400 for anything else, with a reason phrase that names the
+    /// bound or the fault — a peer told `Subject Too Long (limit 16384 bytes)`
+    /// knows what to change, and one told `Bad Request` does not. The answer
+    /// is written from what [`salvage_request`] still recovers of it, and is
+    /// stateless for the reason [`Endpoint::refuse_as_malformed`] gives: there
+    /// is nothing worth remembering about a message this end could not read.
+    ///
+    /// Nothing is answered when the bytes are a response, an ACK (never
+    /// answered, §17.1.1.3), or a request whose `Via`, `From`, `To`,
+    /// `Call-ID` or `CSeq` cannot be read, since an answer without all five
+    /// reaches nobody who can match it (§8.2.6.2, §18.2.2). Either way the
+    /// count behind [`Endpoint::unreadable`] moves and the endpoint's record
+    /// says which of the two happened, on the endpoint's record rather than a
+    /// call's for the same reason overload refusals are: a stranger's garbage
+    /// must not push the calls this endpoint carries out of the set.
+    ///
+    /// `bytes` is what was refused — the whole datagram, or only the head of
+    /// a message on a stream — and `length` how long the whole message is.
+    fn answer_unreadable(
+        &mut self,
+        bytes: &[u8],
+        length: usize,
+        error: ParseError,
+        arrival: Arrival,
+    ) {
+        self.unreadable = self.unreadable.saturating_add(1);
+        let measure = match error {
+            ParseError::MessageTooLarge { limit } => Some((length, limit)),
+            ParseError::HeaderValueTooLong { name_at, limit } => {
+                field_value_len(bytes, name_at).map(|size| (size, limit))
+            }
+            _ => None,
+        };
+        let measured = |decision: Decision| match measure {
+            Some((size, limit)) => decision.measured(size, limit),
+            None => decision,
+        };
+
+        let mut scratch = ParseScratch::new();
+        let request = salvage_request(bytes, &mut scratch, self.config.limits.max_headers)
+            .filter(can_be_answered);
+        let Some(request) = request else {
+            let decision = Decision::of(Reason::MessageDroppedUnreadable)
+                .at_address(arrival.remote)
+                .over(arrival.protocol);
+            self.note(None, measured(decision));
+            return;
+        };
+
+        let flow = Self::flow_for(
+            &request,
+            arrival.transport,
+            arrival.remote,
+            arrival.local,
+            arrival.protocol,
+        );
+        let mut decision = Decision::of(Reason::RequestRefusedUnreadable)
+            .at_address(flow.destination)
+            .over(arrival.protocol);
+        if let Some(method) = request.method() {
+            decision = decision.caused_by(WireEvent::request(method, Direction::Inbound, length));
+        }
+        self.note(None, measured(decision));
+
+        let (status, phrase) = refusal(error, bytes);
+        let tag = self.mint_tag();
+        let built = ResponseBuilder::for_request(&request, status)
+            .to_tag(&tag)
+            .reason(phrase.as_bytes())
+            .build();
+        if let Ok(message) = built {
+            self.queue(flow.transmit(message.bytes()));
         }
     }
 
@@ -1789,6 +1905,74 @@ impl Endpoint {
             self.apply(effects, flow, transaction);
         }
     }
+}
+
+/// Where bytes the parser refused came from: what an answer to them is
+/// routed from, before their own `Via` has had its say.
+#[derive(Clone, Copy)]
+struct Arrival {
+    transport: super::TransportId,
+    remote: SocketAddr,
+    local: Option<SocketAddr>,
+    protocol: super::TransportProtocol,
+}
+
+/// Whether what [`salvage_request`] recovered is enough to answer: a request
+/// that is not an ACK, with the five fields every response copies all
+/// readable.
+fn can_be_answered(request: &RawMessage<'_>) -> bool {
+    request.method().is_some_and(|method| method != Method::Ack)
+        && request.top_via().is_ok()
+        && request.call_id().is_ok()
+        && request.cseq().is_ok()
+        && request.from().is_ok()
+        && request.to().is_ok()
+}
+
+/// The status a request the parser refused is answered with, and a reason
+/// phrase that says why (§21.4.1 asks a 400 to name the problem).
+fn refusal(error: ParseError, bytes: &[u8]) -> (StatusCode, String) {
+    let bad = |phrase: String| (StatusCode::BAD_REQUEST, phrase);
+    match error {
+        ParseError::MessageTooLarge { limit } => (
+            StatusCode::MESSAGE_TOO_LARGE,
+            format!("Message Too Large (limit {limit} bytes)"),
+        ),
+        ParseError::HeaderValueTooLong { name_at, limit } => bad(format!(
+            "{} Too Long (limit {limit} bytes)",
+            field_name(bytes, name_at)
+        )),
+        ParseError::TooManyHeaders { limit } => {
+            bad(format!("Too Many Header Fields (limit {limit})"))
+        }
+        ParseError::BodyTruncated { .. } => bad("Content-Length Exceeds Message".to_owned()),
+        ParseError::ConflictingContentLength { .. } => bad("Conflicting Content-Length".to_owned()),
+        ParseError::MissingContentLength => bad("Missing Content-Length".to_owned()),
+        ParseError::BadHeaderLine { .. } => bad("Malformed Header Line".to_owned()),
+        ParseError::UnterminatedHeaders => bad("Headers Not Terminated".to_owned()),
+        ParseError::BadStartLine { .. } => bad("Malformed Request Line".to_owned()),
+        ParseError::Empty => bad("Empty Message".to_owned()),
+    }
+}
+
+/// The name of the field starting at `at`, as the peer wrote it, when it can
+/// go in a reason phrase as it stands: short, and nothing in it the phrase's
+/// grammar would have to escape (§25.1). `Header` otherwise.
+fn field_name(bytes: &[u8], at: u32) -> &str {
+    const LONGEST: usize = 64;
+    let from = bytes.get(at as usize..).unwrap_or_default();
+    let end = from
+        .iter()
+        .position(|byte| matches!(byte, b':' | b' ' | b'\t'))
+        .unwrap_or(from.len());
+    let name = from.get(..end).unwrap_or_default();
+    let writable = name
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.!~*'+".contains(byte));
+    if name.is_empty() || name.len() > LONGEST || !writable {
+        return "Header";
+    }
+    core::str::from_utf8(name).unwrap_or("Header")
 }
 
 /// The tag we already put in `To`, read back off a request that carries it.

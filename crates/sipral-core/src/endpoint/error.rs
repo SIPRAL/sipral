@@ -30,11 +30,16 @@ pub enum ReceiveError {
     /// Stream bytes arrived on a transport that is not a byte stream, or a
     /// datagram on one that is.
     WrongKindOfTransport,
-    /// The bytes are not a SIP message.
+    /// The bytes are not a SIP message the parser would take.
     ///
-    /// On a datagram this costs one packet. On a byte stream it costs the
-    /// connection: framing that is wrong cannot be resynchronised, so the
-    /// endpoint forgets the transport and the caller should close it.
+    /// On a datagram this costs one packet, and a request among them has
+    /// already been answered 400 or 513 when it could be addressed
+    /// ([`super::Endpoint::unreadable`] counts both kinds). On a byte stream
+    /// it is returned only when the framing is lost with it, and then it
+    /// costs the connection: framing that is wrong cannot be resynchronised,
+    /// so the endpoint forgets the transport and the caller should close it.
+    /// A message on a stream whose end is still known is answered the same
+    /// way a datagram is, and the connection reads on without an error.
     Malformed(ParseError),
 }
 

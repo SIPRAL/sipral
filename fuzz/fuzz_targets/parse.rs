@@ -6,12 +6,15 @@
 //! The parser is the first code an attacker reaches, and the only guarantee it
 //! makes is that no input reaches a panic. Accessors are walked too, because a
 //! message that parses can still hold a field nobody can read, and reading it
-//! is what the stack does next.
+//! is what the stack does next. What the parser refuses is salvaged the way
+//! the endpoint salvages it to write an answer, and walked the same way.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sipral_core::msg::{Contacts, ParseMode, ParseScratch, RawMessage, parse};
+use sipral_core::msg::{
+    Contacts, Limits, ParseMode, ParseScratch, RawMessage, parse, salvage_request,
+};
 
 fuzz_target!(|data: &[u8]| {
     for mode in [ParseMode::Strict, ParseMode::Lenient] {
@@ -24,6 +27,13 @@ fuzz_target!(|data: &[u8]| {
             let owned = message.to_owned();
             assert!(owned.len() <= data.len());
             walk(&owned.as_raw());
+        } else {
+            let mut scratch = ParseScratch::new();
+            if let Some(salvaged) = salvage_request(data, &mut scratch, Limits::DEFAULT.max_headers)
+            {
+                assert!(salvaged.header_slots().len() <= usize::from(Limits::DEFAULT.max_headers));
+                walk(&salvaged);
+            }
         }
     }
 });

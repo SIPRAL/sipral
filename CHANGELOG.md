@@ -524,6 +524,24 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A request the parser refuses is answered, not dropped without a trace.**
+  An INVITE with a 6,000-byte display name got nothing back at all: one
+  field past the parser's bound on a single value, and the whole request was
+  discarded while the caller retransmitted into silence. A request past a
+  bound, or not well formed enough to parse, is now answered statelessly
+  from the `Via`, `From`, `To`, `Call-ID` and `CSeq` that can still be read
+  (RFC 3261 §8.2.6.2) — 513 when it is longer than the message bound, 400
+  otherwise, with a reason phrase naming the bound or the fault, such as
+  `From Too Long (limit 16384 bytes)` — including when the field past the
+  bound is one of those five, which goes back whole. What cannot be answered
+  (a response, an ACK, a request whose five fields cannot all be read) is
+  counted by `Endpoint::unreadable` and, like every refusal, recorded in the
+  endpoint's diagnostic record as `request.refused.unreadable` or
+  `message.dropped.unreadable`. On TCP and TLS a refused message no longer
+  costs the connection when its `Content-Length` still says where it ends:
+  it is answered and the stream reads on, and one whose body is past the
+  bound is answered 513 as soon as its head is in, the body passed over
+  unheld. The examples print each datagram the parser refused.
 - **A resume asked for while the hold was still on its way is no longer
   accepted and lost.** `hold` and `resume` compared the request against the
   hold state last agreed, which a hold whose re-INVITE had not been answered
@@ -637,6 +655,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **One header field's value may be 16 KiB, up from 4 KiB.**
+  `msg::Limits::DEFAULT.max_header_value_bytes` was tight for real traffic:
+  a full RFC 8224 `Identity` with rich call data, a long `History-Info`, or a
+  caller's display name of a few kilobytes all refused the request that
+  carried them. The message bound (64 KiB) and the header count (128) are
+  unchanged, and a value is a span into the message, so the new bound costs
+  no memory of its own. `StreamFramer::next_message` now returns `Framed`,
+  which is either the message or the head of one it refused and passed over.
 - **The licence documents say what they mean.** `LICENSE-COMMERCIAL.md` is
   now plainly a description that grants nothing on its own, with the licensor
   named by the signed agreement rather than by `AUTHORS`. It gains the rights a

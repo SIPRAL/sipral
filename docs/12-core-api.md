@@ -136,7 +136,7 @@ pub enum ParseMode { Lenient, Strict }
 pub struct Limits {
     pub max_message_bytes: u32,       // 65 535
     pub max_headers: u16,             // 128
-    pub max_header_value_bytes: u32,  // 4 096
+    pub max_header_value_bytes: u32,  // 16 384
 }
 
 pub fn parse<'a>(buf: &'a [u8], scratch: &'a mut ParseScratch, mode: ParseMode)
@@ -485,8 +485,12 @@ pub struct StreamFramer { /* buffer, its own scratch, cursor, limits */ }
 impl StreamFramer {
     pub fn new(max_message_bytes: u32) -> Self;
     pub fn with_limits(limits: Limits) -> Self;
+    /// `Err` only when the head in front has passed the bound without ending.
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), ParseError>;
-    pub fn next_message(&mut self, mode: ParseMode) -> Result<Option<RawMessage<'_>>, ParseError>;
+    /// `Err` only when the framing is lost; a message the parser refuses but
+    /// whose end is known comes out as `Framed::Refused`, and the stream
+    /// reads on past it.
+    pub fn next_message(&mut self, mode: ParseMode) -> Result<Option<Framed<'_>>, ParseError>;
     /// RFC 5626 §4.4.1: a double CRLF arrived and a single CRLF owes it an answer.
     pub fn take_ping(&mut self) -> bool;
     /// And the other half: a single CRLF arrived, so a ping of ours was answered.
@@ -494,6 +498,20 @@ impl StreamFramer {
     pub fn pending(&self) -> usize;
     pub fn reset(&mut self);
 }
+
+pub enum Framed<'a> {
+    Message(RawMessage<'a>),
+    /// The head only — what an answer is written from — and how long the
+    /// whole message said it was. A body past the bound is never held.
+    Refused { head: &'a [u8], length: usize, error: ParseError },
+}
+
+/// The request line and the five fields every response copies (`Via`,
+/// `From`, `To`, `Call-ID`, `CSeq`) out of a request the parser refused, so
+/// that the refusal can be answered 400 or 513 (docs/03, "Limits, and what a
+/// refused message gets"). One pass, no allocation beyond the index.
+pub fn salvage_request<'a>(buf: &'a [u8], scratch: &'a mut ParseScratch, max_fields: u16)
+    -> Option<RawMessage<'a>>;
 ```
 
 Bounds are configuration, and every one has a default that stops a hostile
@@ -976,6 +994,9 @@ impl Endpoint {
     /// How many requests have been refused with a 503 for want of room, for a
     /// caller that would rather sample a gauge than watch events go by.
     pub fn refused(&self) -> u64;
+    /// How many messages the parser refused, whether they were answered 400
+    /// or 513 or could not be answered at all; the record says which.
+    pub const fn unreadable(&self) -> u64;
 
     // -- the diagnostic record --------------------------------------------------
     /// What this endpoint decided about one call, in order, with a stable code
