@@ -3286,6 +3286,305 @@ fn keeping_every_branch_hangs_none_of_them_up() {
     assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
 }
 
+/// What the second phone a proxy forked the INVITE to describes: a session
+/// of its own, at an address of its own.
+const MOBILE_ANSWER: &[u8] = b"v=0\r\no=- 3 3 IN IP4 192.0.2.77\r\ns=-\r\n\
+c=IN IP4 192.0.2.77\r\nt=0 0\r\nm=audio 7000 RTP/AVP 0\r\n";
+
+/// A response from that second phone: its own tag, and its own `Contact`.
+fn from_the_mobile(request: &[u8], status: u16, reason: &str, body: Option<&[u8]>) -> Vec<u8> {
+    String::from_utf8(answered(request, status, reason, "mobile", body))
+        .expect("text")
+        .replace("<sip:bob@192.0.2.9>", "<sip:bob@192.0.2.77>")
+        .into_bytes()
+}
+
+/// The desk phone rings first and the mobile second, so the call placed is
+/// the desk's early dialog and the mobile is its sibling.
+fn rung_on_two_phones(
+    agent: &mut UserAgent,
+    invite: &[u8],
+    call: CallHandle,
+    now: Instant,
+) -> CallHandle {
+    deliver(agent, &answered(invite, 180, "Ringing", "desk", None), now);
+    deliver(agent, &from_the_mobile(invite, 180, "Ringing", None), now);
+    let sibling = events(agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::CallForked {
+                call: parent,
+                sibling,
+            } if parent == call => Some(sibling),
+            _ => None,
+        })
+        .expect("a proxy forked it");
+    transmits(agent);
+    sibling
+}
+
+fn confirmed_calls(said: &[UaEvent]) -> Vec<CallHandle> {
+    said.iter()
+        .filter_map(|event| match *event {
+            UaEvent::CallConfirmed { call, .. } => Some(call),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ended_calls(said: &[UaEvent]) -> Vec<(CallHandle, CallEndReason)> {
+    said.iter()
+        .filter_map(|event| match *event {
+            UaEvent::CallEnded { call, reason, .. } => Some((call, reason)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tagged(bytes: &[u8], tag: &str) -> bool {
+    text(bytes, HeaderName::To).contains(&format!("tag={tag}"))
+}
+
+#[test]
+fn a_second_branch_that_answers_first_is_the_branch_kept() {
+    // A proxy rang the desk and the mobile in parallel and the mobile was
+    // picked up. KeepFirst keeps the first branch that answers, whichever it
+    // is: the proxy has just forwarded that 2xx and is cancelling the desk,
+    // so hanging up the mobile here would lose the call outright
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    let ack = only(&out, "ACK ");
+    assert!(ack.starts_with(b"ACK sip:bob@192.0.2.77 "), "{out:?}");
+    assert!(
+        !out.iter().any(|bytes| bytes.starts_with(b"BYE ")),
+        "the branch that answered first was hung up"
+    );
+    let said = events(&mut agent);
+    assert_eq!(confirmed_calls(&said), vec![mobile], "{said:?}");
+    assert_eq!(
+        ended_calls(&said),
+        vec![(call, CallEndReason::ForkLost)],
+        "the desk that never answered is let go, and says why"
+    );
+    assert_eq!(agent.call_state(mobile), Some(CallState::Confirmed));
+    assert_eq!(agent.call_state(call), None);
+    assert_eq!(
+        agent.call_identity(mobile).map(|identity| identity.call_id),
+        Some(Box::from(header(&invite, HeaderName::CallId))),
+        "the branch kept is the call placed: same Call-ID, same parties"
+    );
+
+    // the desk answers anyway, too late: acknowledged, and then hung up
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "desk"), "{out:?}");
+    assert!(tagged(&only(&out, "BYE "), "desk"), "{out:?}");
+    assert!(
+        events(&mut agent).is_empty(),
+        "a branch already let go is news to nobody"
+    );
+    assert_eq!(
+        agent.call_state(mobile),
+        Some(CallState::Confirmed),
+        "the branch kept is untouched"
+    );
+
+    // and the branch kept is a call like any other: a hold goes to the
+    // mobile, in its dialog, from the session its 2xx described
+    agent.hold(mobile, t0).expect("the kept branch can be held");
+    let reinvite = sent(&mut agent);
+    assert!(
+        reinvite.starts_with(b"INVITE sip:bob@192.0.2.77 "),
+        "{}",
+        String::from_utf8_lossy(&reinvite)
+    );
+    assert!(tagged(&reinvite, "mobile"));
+    assert!(body_of(&reinvite).contains("a=sendonly"));
+}
+
+#[test]
+fn a_first_branch_that_answers_first_is_kept_and_its_siblings_let_go() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "desk"));
+    assert!(!out.iter().any(|bytes| bytes.starts_with(b"BYE ")));
+    let said = events(&mut agent);
+    assert_eq!(confirmed_calls(&said), vec![call]);
+    assert_eq!(ended_calls(&said), vec![(mobile, CallEndReason::ForkLost)]);
+
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "mobile"));
+    assert!(tagged(&only(&out, "BYE "), "mobile"));
+    assert!(events(&mut agent).is_empty());
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn two_answers_read_together_keep_the_one_that_arrived_first() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+
+    // both in before anything is written or reported
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    let acks: Vec<&Vec<u8>> = out
+        .iter()
+        .filter(|bytes| bytes.starts_with(b"ACK "))
+        .collect();
+    assert_eq!(acks.len(), 2, "every 2xx is acknowledged: {out:?}");
+    assert!(tagged(&only(&out, "BYE "), "desk"), "{out:?}");
+    let said = events(&mut agent);
+    assert_eq!(confirmed_calls(&said), vec![mobile], "{said:?}");
+    assert_eq!(ended_calls(&said), vec![(call, CallEndReason::ForkLost)]);
+    assert_eq!(agent.call_state(mobile), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_branch_that_answers_after_the_call_was_given_up_is_hung_up() {
+    // the CANCEL covers every branch at the proxy (§16.10), and a 2xx that
+    // crossed it on the mobile is acknowledged and hung up like one that
+    // crossed it on the desk: nothing is kept of a call the user put down
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+    agent.hangup(call, t0).expect("the CANCEL goes");
+    only(&transmits(&mut agent), "CANCEL ");
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "mobile"), "{out:?}");
+    assert!(tagged(&only(&out, "BYE "), "mobile"));
+    let said = events(&mut agent);
+    assert!(
+        confirmed_calls(&said).is_empty(),
+        "a call on its way down was reported up: {said:?}"
+    );
+    assert_eq!(
+        ended_calls(&said),
+        vec![(mobile, CallEndReason::LocalHangup)],
+        "a call hung up is not a fork lost"
+    );
+    // and the desk, which the proxy stopped ringing, goes when the window
+    // for answers closes (§13.2.2.4)
+    agent.handle_timeout(t0 + Duration::from_secs(40));
+    transmits(&mut agent);
+    assert!(agent.call_state(call).is_none());
+}
+
+#[test]
+fn a_transfer_answered_on_a_second_branch_is_reported_answered() {
+    // RFC 3515 §2.4.4: the transferor hears how the call it asked for went,
+    // and the mobile picking up is that call answered, not a 408
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (_call, placed, invite) = refer_taken(&mut agent, t0);
+    rung_on_two_phones(&mut agent, &invite, placed, t0);
+
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let said = notifies(&transmits(&mut agent));
+    assert!(
+        said.iter().any(|(state, body)| body.starts_with("SIP/2.0 200")
+            && state.starts_with("terminated")),
+        "the transferor is never told the target answered: {said:?}"
+    );
+    events(&mut agent);
+    // the answer window closing, with the desk long let go, says nothing new:
+    // what goes out then is the NOTIFYs already sent, unanswered in this test
+    agent.handle_timeout(t0 + Duration::from_secs(40));
+    let later = notifies(&transmits(&mut agent));
+    assert!(
+        later
+            .iter()
+            .all(|(_, body)| body.starts_with("SIP/2.0 1") || body.starts_with("SIP/2.0 200")),
+        "the desk that was let go reported the transfer failed: {later:?}"
+    );
+}
+
+#[test]
+fn a_consultation_answered_on_a_second_branch_is_still_the_consultation() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+    let second = agent
+        .consult(first, &outgoing(), t0)
+        .expect("the consultation INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, second, t0);
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    assert_eq!(agent.call_state(mobile), Some(CallState::Consulting));
+
+    agent
+        .transfer_to(first, mobile, t0)
+        .expect("the REFER goes");
+    let refer = sent(&mut agent);
+    let refer_to = String::from_utf8_lossy(&header(&refer, HeaderName::ReferTo)).into_owned();
+    assert!(refer_to.contains("%3Bto-tag%3Dmobile"), "{refer_to}");
+}
+
 // -- calls that come in ------------------------------------------------------
 
 #[test]

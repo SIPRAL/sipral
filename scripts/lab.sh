@@ -11,7 +11,9 @@
 #                               through each proxy and straight at Asterisk,
 #                               then phone to phone through the proxy, then
 #                               the same call over a link made bad
-#   scripts/lab.sh kamailio     one server only
+#   scripts/lab.sh kamailio     one server only; through the proxy, the run
+#                               also forks a call to two phones registered
+#                               as one user, the second answering first
 #   scripts/lab.sh opensips     the second proxy only
 #   scripts/lab.sh asterisk
 #   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
@@ -1418,6 +1420,12 @@ if [ "$WANT" = drift ]; then
         || fail "an hour of drift"
 fi
 
+# The Rust run through the proxy carries one flow more than the others: a call
+# Kamailio forks to two of the harness's own stacks registered as one user,
+# the second answering first (interop/harness/src/fork.rs, and the user
+# kamailio.cfg forks). The C run and the phone-to-phone and bad-network runs
+# name their own flows and do not carry it. The step keeps its title, which
+# scripts/interop-matrix.py reads the section by.
 if [ "$WANT" = all ] || [ "$WANT" = kamailio ]; then
     step "register, call, hold, resume, transfer -- through the proxy"
     flows kamailio proxy && pass "kamailio to freeswitch" || fail "kamailio to freeswitch"

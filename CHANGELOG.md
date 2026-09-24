@@ -653,6 +653,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A forked call answered first by a second phone is kept, not hung up.**
+  `ForkPolicy::KeepFirst` kept only the call placed and sent a BYE to any
+  sibling that answered, even when the call placed had not: a proxy ringing
+  a desk phone and a mobile in parallel forwards the mobile's 2xx and cancels
+  the desk, so the one phone that answered was hung up and the call was
+  lost. The first branch to answer is now the one kept, whichever it is; the
+  branches still ringing end at once as `ForkLost`, after the kept one's
+  `CallConfirmed`, and a 2xx from any other branch afterwards is acknowledged
+  and hung up without an event. A sibling kept carries on as the call: its
+  own session and dialog, the same `Call-ID` and parties, and the transfer it
+  was placed for or the consultation it is. A TURN relay the offer named
+  moves to it before the branch it waited with ends. A 2xx that crosses the
+  CANCEL of a call the user put down is no longer also reported up and
+  acknowledged a second time. Proven through Kamailio forking one user to
+  two registered stacks (`scripts/lab.sh kamailio`).
 - **An earpiece whose clock runs fast no longer hears the drift as gaps.**
   On a clean path the jitter buffer aims at one frame, and a buffer at one
   frame has nothing below its target to fall to but empty: every frame the

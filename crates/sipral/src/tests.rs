@@ -5750,7 +5750,7 @@ fn a_forked_branch_answered_and_kept_takes_the_relay_its_offer_named() {
 
 #[cfg(feature = "ice")]
 #[test]
-fn a_forked_branch_the_user_agent_hangs_up_leaves_the_relay_with_the_first() {
+fn a_second_branch_kept_because_it_answered_first_takes_the_relay() {
     use crate::relay::tests::SERVER;
 
     let catalog = CodecCatalog::with_order(&["PCMU"])
@@ -5758,15 +5758,70 @@ fn a_forked_branch_the_user_agent_hangs_up_leaves_the_relay_with_the_first() {
         .with_ice(crate::IcePolicy::Offered);
     let mut pair = Pair::new(catalog);
     let (call, answered) = rung_with_a_relay(&mut pair, crate::ForkPolicy::KeepFirst);
+    // the second phone picks up while the first still rings: KeepFirst keeps
+    // it, and the first branch ends without giving the relay back
     pair.caller
         .deliver(&from_another_branch(&answered), callee_sip(), pair.now);
     pair.caller.drain(pair.now, false);
+    let sibling = pair
+        .caller
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::CallForked { sibling, .. }) => Some(*sibling),
+            _ => None,
+        })
+        .expect("the 2xx came from a second dialog");
+    assert!(
+        pair.caller.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::CallEnded {
+                call: ended,
+                reason: crate::CallEndReason::ForkLost,
+                ..
+            }) if *ended == call
+        )),
+        "the first branch was not let go"
+    );
+    assert!(pair.caller.engine.session(sibling).is_some(), "media");
     let sent = sent_to_the_server(&mut pair.caller, pair.now);
     assert!(
-        sent.is_empty(),
-        "the losing branch took the relay: {sent:?}"
+        sent.contains(&sibling),
+        "the branch kept has no relay: {sent:?}"
+    );
+    assert!(
+        relays_given_back(&mut pair.caller).is_empty(),
+        "the relay went back with the branch that was let go"
     );
 
+    // the first phone answers after all: acknowledged and hung up, and the
+    // relay stays where it is
+    pair.caller.deliver(&answered, callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    let out = pair.caller.outbound();
+    assert!(out.iter().any(|datagram| datagram.starts_with(b"BYE ")));
+    assert!(pair.caller.engine.session(call).is_none());
+    assert!(relays_given_back(&mut pair.caller).is_empty());
+
+    pair.caller
+        .agent
+        .hangup(sibling, pair.now)
+        .expect("the BYE");
+    pair.caller.drain(pair.now, false);
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    assert_eq!(relays_given_back(&mut pair.caller), vec![(sibling, server)]);
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_branch_that_answers_after_one_was_kept_leaves_the_relay_where_it_is() {
+    use crate::relay::tests::SERVER;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let (call, answered) = rung_with_a_relay(&mut pair, crate::ForkPolicy::KeepFirst);
     // the first phone answers, and its session runs on the relay
     pair.caller.deliver(&answered, callee_sip(), pair.now);
     pair.caller.drain(pair.now, false);
@@ -5775,6 +5830,23 @@ fn a_forked_branch_the_user_agent_hangs_up_leaves_the_relay_with_the_first() {
         sent_to_the_server(&mut pair.caller, pair.now).contains(&call),
         "the branch kept has no relay"
     );
+
+    // a second phone answers too late: hung up, and never a call here
+    pair.caller
+        .deliver(&from_another_branch(&answered), callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    let out = pair.caller.outbound();
+    assert!(out.iter().any(|datagram| datagram.starts_with(b"BYE ")));
+    assert!(
+        !pair
+            .caller
+            .heard
+            .iter()
+            .any(|event| matches!(event, Event::Signalling(UaEvent::CallForked { .. }))),
+        "a branch that answered too late became a call"
+    );
+    assert!(relays_given_back(&mut pair.caller).is_empty());
+
     pair.caller.agent.hangup(call, pair.now).expect("the BYE");
     pair.caller.drain(pair.now, false);
     let server: SocketAddr = SERVER.parse().expect("an address");

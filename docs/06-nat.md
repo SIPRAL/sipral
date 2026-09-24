@@ -391,13 +391,16 @@ need none.
 A forked INVITE sent one offer, with one relayed candidate in it, to every
 branch, and one allocation stands behind that candidate: the server relays for
 the one client that holds it, so only one branch's agent can answer the checks
-it draws. The agent waits with the branch the call was placed on — the one
-`ForkPolicy::KeepFirst` keeps, so a branch the user agent is about to hang up
-never takes it — and moves to the first other branch that is answered and kept
-while that first branch has no session yet: two phones ringing, and the second
-picked up. A branch whose session opens while another already runs the relay
-— both answered under `ForkPolicy::KeepAll`, or early media on the first
-before the second answers — runs an agent rebuilt from the description,
+it draws. The agent waits with the branch the call was placed on, and moves to
+the first other branch that is answered and kept while that first branch has no
+session yet: two phones ringing, and the second picked up — which
+`ForkPolicy::KeepFirst` keeps, since it answered first. The user agent reports
+the branch kept before it ends the one the call was placed on with `ForkLost`,
+so the relay has moved before that ending could give it back, and a branch that
+answers after one was kept is hung up without ever becoming a call, so it never
+takes the relay either. A branch whose session opens while another already runs
+the relay — both answered under `ForkPolicy::KeepAll`, or early media on the
+first before the second answers — runs an agent rebuilt from the description,
 without the relay, and its checks towards the relayed candidate go unanswered;
 ICE finds the paths that need none. The offer cannot say otherwise: it left
 once, before anybody knew the INVITE would fork, and it was true for the branch

@@ -46,8 +46,8 @@ use sipral_core::transaction::{
 use crate::account::{Account, AccountId, Extra};
 use crate::agent::UserAgent;
 use crate::call::{
-    Call, CallEndReason, CallHandle, CallIdentity, CallState, Direction, ForkPolicy, OutgoingCall,
-    Refusal, RequestRefusal,
+    Call, CallEndReason, CallHandle, CallIdentity, CallState, Direction, ForkPolicy, KeptBranch,
+    OutgoingCall, Refusal, RequestRefusal,
 };
 use crate::error::UaError;
 use crate::event::UaEvent;
@@ -949,8 +949,7 @@ impl UserAgent {
                 ref response,
                 ..
             } => {
-                let call = self.branch(invite, Some(dialog))?;
-                self.on_answered(call, dialog, response, now);
+                self.on_established(invite, dialog, response, now);
                 None
             }
             Event::Failed {
@@ -1286,6 +1285,17 @@ impl UserAgent {
         invite: TransactionId<InviteClient>,
         dialog: Option<DialogId>,
     ) -> Option<CallHandle> {
+        // a branch other than the one kept has nothing left to report: the
+        // ones that were ringing ended when it was kept, and one heard of
+        // only now is not a call anybody will take
+        if let Some(dialog) = dialog
+            && self
+                .kept_branches
+                .get(&invite)
+                .is_some_and(|kept| kept.dialog != dialog)
+        {
+            return None;
+        }
         let call = self.by_invite.get(&invite).copied()?;
         let Some(dialog) = dialog else {
             // a 100, or a provisional with no tag to name a dialog by
@@ -1518,6 +1528,24 @@ impl UserAgent {
         self.report_transfer(call, status, now);
     }
 
+    /// A 2xx for one of our INVITEs, on whichever branch it came from. One on
+    /// a branch other than the one kept is let go before it can be minted a
+    /// call of its own.
+    fn on_established(
+        &mut self,
+        invite: TransactionId<InviteClient>,
+        dialog: DialogId,
+        response: &OwnedMessage,
+        now: Instant,
+    ) {
+        if self.let_go_late_branch(invite, dialog, now) {
+            return;
+        }
+        if let Some(call) = self.branch(invite, Some(dialog)) {
+            self.on_answered(call, dialog, response, now);
+        }
+    }
+
     /// A 2xx for one of our INVITEs.
     fn on_answered(
         &mut self,
@@ -1532,16 +1560,34 @@ impl UserAgent {
         if self.ack_parked_in(dialog) {
             return;
         }
-        self.note_session(call, response);
-        self.on_timer_answer(call, &response.as_raw(), now);
         let Some(held) = self.calls.get(&call) else {
             return;
         };
-        let (offered, forks, forked) = (
-            held.session.has_local(),
-            held.forks,
-            held.forked_from.is_some(),
-        );
+        // the 2xx a CANCEL lost its race to: `on_cancel_lost` has just
+        // acknowledged it and hung up, and a second pass would acknowledge it
+        // again and report up a call that is on its way down
+        if held.acknowledged {
+            return;
+        }
+        let (offered, forks, invite) = (held.session.has_local(), held.forks, held.invite);
+        // the user put the call down before any branch answered: whichever
+        // branch this is, nothing of it is kept
+        let giving_up = held.hangup_wanted
+            || invite
+                .and_then(|invite| self.by_invite.get(&invite))
+                .and_then(|placed| self.calls.get(placed))
+                .is_some_and(|placed| placed.hangup_wanted);
+        // the first branch to answer, under the policy that keeps one: the
+        // later ones never get here (`let_go_late_branch`)
+        let kept = match invite {
+            Some(invite) if forks == ForkPolicy::KeepFirst && !giving_up => {
+                self.keep_branch(call, invite, dialog, offered);
+                Some(invite)
+            }
+            _ => None,
+        };
+        self.note_session(call, response);
+        self.on_timer_answer(call, &response.as_raw(), now);
 
         // §13.2.2.4: the ACK goes now unless it has to carry an answer that
         // only the application has. A 2xx nobody acknowledges is retransmitted
@@ -1554,22 +1600,6 @@ impl UserAgent {
             held.state = held.up();
         }
 
-        // a branch that lost, under the policy that keeps one: acknowledged
-        // first, because §13.2.2.4 is not conditional, and hung up after
-        if forked && forks == ForkPolicy::KeepFirst {
-            self.events.push_back(UaEvent::CallConfirmed {
-                call,
-                response: Some(response.clone()),
-                answer_wanted: !acknowledged,
-            });
-            if acknowledged {
-                self.hang_up_by_itself(call, now);
-            } else {
-                self.finish(call, CallEndReason::ForkLost, None, None, now);
-            }
-            return;
-        }
-
         self.events.push_back(UaEvent::CallConfirmed {
             call,
             response: Some(response.clone()),
@@ -1577,10 +1607,111 @@ impl UserAgent {
         });
         // a call placed because of a REFER owes the referrer a last word
         self.report_transfer(call, StatusCode::OK, now);
+        // after the branch kept is reported up, so that whatever follows the
+        // call from one branch to another — the relay a description named,
+        // in the facade above — has somewhere to go before its old branch ends
+        if let Some(invite) = kept {
+            self.let_go_other_branches(call, invite, now);
+        }
         // a CANCEL that lost its race leaves the call up and the wish to end it
-        if self.calls.get(&call).is_some_and(|held| held.hangup_wanted) {
+        if giving_up {
             self.hang_up_by_itself(call, now);
         }
+    }
+
+    /// The first branch of a fork to answer is the one
+    /// [`ForkPolicy::KeepFirst`] keeps, and when it is not the call that was
+    /// placed it becomes that call: what belonged to the attempt rather than
+    /// to one of its dialogs — a transfer to report on, the call it is a
+    /// consultation for — moves onto it before the branch it came from ends.
+    fn keep_branch(
+        &mut self,
+        call: CallHandle,
+        invite: TransactionId<InviteClient>,
+        dialog: DialogId,
+        offered: bool,
+    ) {
+        self.kept_branches
+            .insert(invite, KeptBranch { dialog, offered });
+        let Some(placed) = self.calls.get(&call).and_then(|held| held.forked_from) else {
+            return;
+        };
+        // the INVITE names the call it placed, and that is this one now: the
+        // mapping stays when the branch it named ends
+        self.by_invite.insert(invite, call);
+        let (reporting_to, consulting_for) = self
+            .calls
+            .get_mut(&placed)
+            .map(|held| (held.reporting_to.take(), held.consulting_for.take()))
+            .unwrap_or_default();
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.reporting_to = reporting_to;
+            held.consulting_for = consulting_for;
+        }
+        for other in self.calls.values_mut() {
+            if other.consulting == Some(placed) {
+                other.consulting = Some(call);
+            }
+            if let Some(referred) = other.referred.as_mut()
+                && referred.placed == Some(placed)
+            {
+                referred.placed = Some(call);
+            }
+        }
+    }
+
+    /// Every branch of the INVITE but the one kept, over: they had not
+    /// answered, and the proxy that forked them is cancelling them (RFC 3261
+    /// §16.7 step 10). Their early dialogs stay with the core until the answer
+    /// window closes, and a 2xx that still arrives on one of them is
+    /// [`UserAgent::let_go_late_branch`]'s.
+    fn let_go_other_branches(
+        &mut self,
+        kept: CallHandle,
+        invite: TransactionId<InviteClient>,
+        now: Instant,
+    ) {
+        let others: Vec<CallHandle> = self
+            .calls
+            .iter()
+            .filter(|(handle, held)| **handle != kept && held.invite == Some(invite))
+            .map(|(handle, _)| *handle)
+            .collect();
+        for other in others {
+            self.finish(other, CallEndReason::ForkLost, None, None, now);
+        }
+    }
+
+    /// A 2xx on a branch other than the one [`ForkPolicy::KeepFirst`] kept.
+    /// `true` when it was one, and has been dealt with.
+    ///
+    /// §13.2.2.4 has every 2xx acknowledged whether it is wanted or not, and
+    /// then the dialog it confirmed is ended with a BYE. There is no call to
+    /// report it on: the branch ended when another was kept, or is heard of
+    /// only now. A 2xx that carries the offer, to an INVITE that carried
+    /// none, would need an answer in its ACK that only the application could
+    /// write, so it is left for its sender to give up on (§13.3.1.4).
+    fn let_go_late_branch(
+        &mut self,
+        invite: TransactionId<InviteClient>,
+        dialog: DialogId,
+        now: Instant,
+    ) -> bool {
+        let Some(kept) = self.kept_branches.get(&invite).copied() else {
+            return false;
+        };
+        if kept.dialog == dialog {
+            return false;
+        }
+        // the same 2xx again, while its ACK waits for a stream: the BYE is
+        // already waiting behind it
+        if self.ack_parked_in(dialog) {
+            return true;
+        }
+        if kept.offered && self.ack_by_itself(dialog, now) {
+            self.bye_by_itself(dialog, now);
+        }
+        true
     }
 
     /// Remember a request this layer sent inside a call.
@@ -2032,6 +2163,12 @@ impl UserAgent {
             _ => {
                 self.by_dtmf_info.remove(&transaction);
             }
+        }
+        // the answer window has closed (§13.2.2.4, RFC 6026 §7.2): the core
+        // passes up no 2xx for this INVITE from here on, so there is no late
+        // branch left to tell from the one kept
+        if let AnyTransactionId::InviteClient(invite) = transaction {
+            self.kept_branches.remove(&invite);
         }
         let AnyTransactionId::InviteServer(id) = transaction else {
             // the INVITE this end sent keeps its mapping until the call goes:

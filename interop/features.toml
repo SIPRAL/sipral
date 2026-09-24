@@ -25,8 +25,8 @@
 #
 # blocks, in the order they should print. A flow name is exactly what
 # `interop/harness` prints for it (`Flow::name()` in `interop/harness/src/main.rs`,
-# or the literal strings `main.rs` prints for "local conference" and "inbound,
-# narrowed"), before `scripts/interop-matrix.py` appends " (C ABI)" for the C
+# or the literal strings `main.rs` prints for "local conference", "inbound,
+# narrowed" and "forked, the second phone answering first"), before `scripts/interop-matrix.py` appends " (C ABI)" for the C
 # driver's own row -- that suffix is stripped again before the two are
 # compared, so one flow name here covers both drivers, and, for the four
 # `netem` rows, before the generator appends the impairment profile's own
@@ -103,6 +103,12 @@ name = "Message waiting indication"
 implemented = true
 unit_tested = true
 flows = ["message waiting indication"]
+
+[[feature]]
+name = "Forked call, the second phone answering first"
+implemented = true
+unit_tested = true
+flows = ["forked, the second phone answering first"]
 
 [[feature]]
 name = "Local conference (three-party mix)"

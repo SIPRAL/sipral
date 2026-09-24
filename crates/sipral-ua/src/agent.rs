@@ -38,7 +38,7 @@ use sipral_core::transaction::{
 
 use crate::account::{Account, AccountId};
 use crate::announce::{Announcement, Arrival, WINDOW};
-use crate::call::{Call, CallHandle, Refusal, RequestRefusal};
+use crate::call::{Call, CallHandle, KeptBranch, Refusal, RequestRefusal};
 use crate::error::UaError;
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::headers::HeadersFor;
@@ -83,6 +83,12 @@ pub struct UserAgent {
     pub(crate) by_invite: HashMap<TransactionId<InviteClient>, CallHandle>,
     pub(crate) by_server: HashMap<TransactionId<InviteServer>, CallHandle>,
     pub(crate) by_dialog: HashMap<DialogId, CallHandle>,
+    /// The branch [`crate::ForkPolicy::KeepFirst`] kept, for each INVITE of
+    /// ours a branch has answered, until the INVITE's transaction is retired:
+    /// the window in which another branch's 2xx can still arrive (§13.2.2.4)
+    /// and has to be acknowledged and hung up. Kept apart from the calls,
+    /// because every other branch is over by then and the one kept may be too.
+    pub(crate) kept_branches: HashMap<TransactionId<InviteClient>, KeptBranch>,
     /// The BYEs, CANCELs, PRACKs, REFERs and NOTIFYs a call has in flight, so
     /// that their answers are this layer's news rather than the application's.
     ///
@@ -241,6 +247,7 @@ impl UserAgent {
             by_invite: HashMap::new(),
             by_server: HashMap::new(),
             by_dialog: HashMap::new(),
+            kept_branches: HashMap::new(),
             by_request: HashMap::new(),
             account_of: HashMap::new(),
             by_dtmf_info: HashMap::new(),

@@ -125,8 +125,16 @@ impl core::fmt::Display for CallState {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ForkPolicy {
-    /// Keep the first branch that answers and hang up every later one with a
-    /// BYE. What a telephone does, and the default.
+    /// Keep the first branch that answers, whichever one it is — the call
+    /// placed or a sibling [`crate::UaEvent::CallForked`] announced — and
+    /// hang up every later one with a BYE. The branches still ringing when
+    /// one is kept end there and then with [`CallEndReason::ForkLost`], after
+    /// the kept one's [`crate::UaEvent::CallConfirmed`]; a 2xx from any of
+    /// them afterwards, or from a branch never heard of before, is
+    /// acknowledged and hung up without another event. A branch kept that is
+    /// not the call placed carries on as the call: a transfer it was placed
+    /// for, or the consultation it is, go with it. What a telephone does,
+    /// and the default.
     #[default]
     KeepFirst,
     /// Keep all of them. A conference bridge, a recorder, or anything that
@@ -149,8 +157,9 @@ pub enum CallEndReason {
     Cancelled,
     /// Nothing came back, or the transport died.
     Unreachable,
-    /// Another branch of the same fork was kept and this one was not
-    /// ([`ForkPolicy::KeepFirst`]).
+    /// Another branch of the same fork answered first and was kept, and this
+    /// one had not answered ([`ForkPolicy::KeepFirst`]). The call carries on
+    /// under the handle of the branch that was kept.
     ForkLost,
     /// The branch was still ringing when the answer window closed
     /// (§13.2.2.4), or the proxy told it another branch had won.
@@ -481,6 +490,18 @@ pub(crate) struct ContactContext {
     pub(crate) plain: Box<[u8]>,
 }
 
+/// The branch [`ForkPolicy::KeepFirst`] kept out of one INVITE's fork.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct KeptBranch {
+    /// Its dialog. A 2xx in any other dialog of the same INVITE is one this
+    /// end acknowledges and hangs up.
+    pub(crate) dialog: DialogId,
+    /// Whether the INVITE carried an offer. When it did not, a 2xx carries
+    /// the offer and its ACK has to carry an answer that only the
+    /// application could write, for a branch it is no longer told about.
+    pub(crate) offered: bool,
+}
+
 /// Who is on a call: the `From` and `To` of the request that opened it.
 ///
 /// Fixed for the call's whole life, whichever end placed it: the `From` and
@@ -674,11 +695,14 @@ impl Call {
             replaces: None,
             consulting_for: None,
             consulting: None,
-            placed: None,
+            // the request that opened every branch, which is the call the
+            // application placed whichever branch ends up being kept: its
+            // parties and `Call-ID`, and the session interval it asked for
+            placed: other.placed.clone(),
             invited: None,
-            id: None,
-            cseq: 1,
-            asked: None,
+            id: other.id.clone(),
+            cseq: other.cseq,
+            asked: other.asked,
             // the application labelled the call, and a branch of it is the call
             headers: other.headers.clone(),
         }

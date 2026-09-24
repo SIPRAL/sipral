@@ -39,6 +39,7 @@
 
 mod audio;
 mod drift;
+mod fork;
 mod ice_lite;
 mod ice_nat;
 mod join;
@@ -372,6 +373,22 @@ fn extra_flows(
             Ok(said) => println!("  pass  inbound, narrowed{said}"),
             Err(why) => {
                 println!("  FAIL  inbound, narrowed — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // one call forked by the proxy to two phones registered as one user, the
+    // second answering first (see `fork`): only through Kamailio, whose config
+    // forks that user and nobody else, and only in a run that names no flow
+    // or names this one — the phone-to-phone and bad-network runs also say
+    // "kamailio", and name their own flows
+    if server == "kamailio"
+        && (wanted.is_empty() || wanted.split(',').any(|name| name.trim() == "fork"))
+    {
+        match fork::run(server, remote) {
+            Ok(said) => println!("  pass  forked, the second phone answering first{said}"),
+            Err(why) => {
+                println!("  FAIL  forked, the second phone answering first — {why}");
                 failures += 1;
             }
         }

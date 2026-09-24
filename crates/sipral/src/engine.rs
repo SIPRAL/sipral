@@ -2311,12 +2311,14 @@ impl MediaEngine {
     /// one allocation stands behind that candidate: the server relays for the
     /// one client that holds it, so only one branch's agent can answer the
     /// checks the candidate draws. It waits with the branch the call was
-    /// placed on, which is the one [`ForkPolicy::KeepFirst`] keeps and so the
-    /// one whose early media runs on it, and goes to the first other branch
-    /// that is answered and kept before that one has opened a session — two
-    /// phones ringing and the second picked up. A branch the user agent is
-    /// already hanging up, the loser under `KeepFirst`, leaves it where it
-    /// is.
+    /// placed on, the one whose early media runs on it, and goes to the first
+    /// other branch that is answered and kept before that one has opened a
+    /// session — two phones ringing and the second picked up, which
+    /// [`ForkPolicy::KeepFirst`] keeps as surely as `KeepAll` does. The user
+    /// agent reports that branch up before it ends the one the call was
+    /// placed on, so the relay has moved by the time that ending would give
+    /// it back. A branch that answers after another was kept never becomes a
+    /// call, and a consultation is as up as a call.
     ///
     /// [`ForkPolicy::KeepFirst`]: sipral_ua::ForkPolicy::KeepFirst
     #[cfg(feature = "ice")]
@@ -2326,7 +2328,7 @@ impl MediaEngine {
         };
         if self.gathered.contains_key(&call)
             || self.sessions.contains_key(&call)
-            || agent.call_state(call) != Some(CallState::Confirmed)
+            || !agent.call_state(call).is_some_and(CallState::is_confirmed)
         {
             return;
         }
