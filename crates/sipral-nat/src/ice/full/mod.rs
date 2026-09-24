@@ -97,6 +97,23 @@ const MAX_SERVERS: usize = 8;
 /// remembers for later (RFC 8445 §7.3).
 const MAX_EARLY: usize = 32;
 
+/// The most datagrams an agent holds for [`IceAgent::poll_transmit`], and the
+/// most answers the facade's lite end holds for the same.
+///
+/// Every Binding request that reaches a candidate is answered, a stranger's
+/// unsigned one included (a 400 or a 401, RFC 8445 §7.3), so without a
+/// ceiling the queue is as long as the flood an application that is slow to
+/// drain it lets in. Past this many, the datagram being queued is dropped and
+/// counted in [`IceAgent::transmits_dropped`]; what is already queued stays
+/// and goes out in order. The new one gives way rather than the oldest
+/// because every datagram here is a STUN transaction's, and a lost one is what
+/// STUN retransmits for: the peer's check comes again, and the agent's own
+/// is sent again on its own timer (RFC 8489 §6.2.1). Two hundred and
+/// fifty-six is more than one pass of the agent queues of its own at the
+/// default pair limit, so an application that drains after every call, as it
+/// is told to, never reaches it.
+pub const TRANSMIT_CEILING: usize = 256;
+
 /// A TURN server to gather a relayed candidate from.
 #[derive(Clone, Debug)]
 pub struct TurnServer {
@@ -675,6 +692,8 @@ pub struct IceAgent {
     cursor: usize,
     concluded: Option<Instant>,
     outbox: VecDeque<Transmit>,
+    /// Datagrams [`TRANSMIT_CEILING`] kept out of `outbox`.
+    dropped: u64,
     events: VecDeque<IceEvent>,
 }
 
@@ -727,6 +746,7 @@ impl IceAgent {
             cursor: 0,
             concluded: None,
             outbox: VecDeque::new(),
+            dropped: 0,
             events: VecDeque::new(),
         })
     }
@@ -1015,9 +1035,23 @@ impl IceAgent {
     }
 
     /// The next datagram to send.
+    ///
+    /// Drain it to empty after every call that moves the agent. What waits
+    /// here is held to [`TRANSMIT_CEILING`], and what the ceiling kept out is
+    /// counted in [`Self::transmits_dropped`].
     #[must_use]
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
         self.outbox.pop_front()
+    }
+
+    /// How many datagrams this agent has dropped, since it was built, because
+    /// [`TRANSMIT_CEILING`] of them were already waiting to be taken. A count
+    /// that moves means the application is not draining
+    /// [`Self::poll_transmit`] as fast as datagrams arrive, or that somebody
+    /// is sending the port more checks than it can answer.
+    #[must_use]
+    pub const fn transmits_dropped(&self) -> u64 {
+        self.dropped
     }
 
     /// The next event.
@@ -1266,7 +1300,7 @@ impl IceAgent {
         };
         let source = local.socket;
         let Some(relay) = local.relay else {
-            self.outbox.push_back(Transmit {
+            self.queue(Transmit {
                 source,
                 destination,
                 data: data.to_vec(),
@@ -1286,12 +1320,25 @@ impl IceAgent {
             return false;
         }
         let server = entry.server;
-        self.outbox.push_back(Transmit {
+        self.queue(Transmit {
             source,
             destination: server,
             data: wrapped,
         });
         true
+    }
+
+    /// Put a datagram in the outbox, or drop and count it when
+    /// [`TRANSMIT_CEILING`] are already waiting.
+    ///
+    /// A dropped datagram still counts as sent to whatever queued it: to the
+    /// transaction it belongs to it is a datagram the network lost.
+    fn queue(&mut self, transmit: Transmit) {
+        if self.outbox.len() >= TRANSMIT_CEILING {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        self.outbox.push_back(transmit);
     }
 
     fn switch_role(&mut self, role: Role) {

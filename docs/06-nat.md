@@ -349,7 +349,8 @@ order a call meets it:
   FINGERPRINT. One that fails authentication is refused unsigned
   (RFC 8489 §9.1.3). The role rules are §7.3.1.1's: a lite end facing a full
   one starts controlled (§6.1.1), and a peer that claims the same role is
-  settled by the tiebreaker.
+  settled by the tiebreaker. The answers wait for `poll_transmit` under the
+  full role's ceiling and drop policy (below, "The outbox").
 - **The path.** The pair a check carrying USE-CANDIDATE arrives on is the
   media path (§7.3.2), and it is reported as `MediaEvent::PathChosen` —
   event 33, the one the full role uses — with the advertised address as its
@@ -476,6 +477,18 @@ What it does, in the order a session meets it:
 - **Bounds on the peer.** Remote candidates per stream (32), pairs (100), checks
   remembered from before the answer (32), cancelled transactions, and the
   pacing a peer may ask for. No input panics the agent.
+- **The outbox, and a flood nobody drains.** Every Binding request that
+  reaches a candidate is answered, a stranger's unsigned one with a 400, so
+  what waits for `poll_transmit` grows with whatever anybody sends the port
+  unless the application takes it. It is held to `TRANSMIT_CEILING`, 256
+  datagrams; past that the datagram being queued is dropped, what is already
+  queued goes out in order, and `IceAgent::transmits_dropped` counts it. The
+  newest gives way rather than the oldest because every datagram there
+  belongs to a STUN transaction, to which a dropped one is a lost one: the
+  peer's check comes again, and the agent's own is retransmitted on its own
+  timer. An application that drains after every call, as it is told to, never
+  reaches the ceiling. The facade's lite end holds its answers to the same
+  ceiling, and `MediaSession::ice_transmits_dropped` reads either count.
 
 - **What a datagram comes back as.** `Received::Data` answers with a position
   in the datagram that was handed in, not with a borrow of it. A borrow would

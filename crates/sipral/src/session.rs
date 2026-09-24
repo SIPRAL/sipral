@@ -1766,6 +1766,27 @@ impl MediaSession {
             .map(|pair| (pair.local, pair.remote))
     }
 
+    /// How many of the ICE agent's own datagrams — checks, consent requests,
+    /// keepalives, answers to the peer's checks — were dropped because
+    /// `sipral_nat::ice::TRANSMIT_CEILING` of them were already waiting for
+    /// [`MediaSession::poll_transmit`]. Zero on a call not using ICE.
+    ///
+    /// Every check that reaches the media port is answered, a stranger's
+    /// unsigned one included, so a queue nobody drains would grow with
+    /// whatever anybody sends it. It stops at the ceiling instead, and the
+    /// datagram that would have gone past it is the one dropped: to the STUN
+    /// transaction it belongs to that is a lost datagram, which it
+    /// retransmits. A count that moves on a working call means the
+    /// application drains less often than it is told to, or that the port is
+    /// being flooded.
+    #[cfg(feature = "ice")]
+    #[must_use]
+    pub fn ice_transmits_dropped(&self) -> u64 {
+        self.ice
+            .as_ref()
+            .map_or(0, crate::ice::Ice::transmits_dropped)
+    }
+
     /// Carry what the call's descriptions now say about ICE onto the running
     /// agent: the credentials a restart gave it. See [`crate::ice::Ice::follow`].
     #[cfg(feature = "ice")]

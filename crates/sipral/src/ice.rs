@@ -99,7 +99,8 @@ use sipral_core::auth::KeySource;
 #[cfg(feature = "ice")]
 use sipral_nat::ice::{
     Candidate, CandidateType, ComponentId, Credentials, IceAgent, IceConfig, IceEvent, LiteAgent,
-    Received, RemoteIce, Role, Route, SelectedPair, SendError, StreamId, Transmit,
+    Received, RemoteIce, Role, Route, SelectedPair, SendError, StreamId, TRANSMIT_CEILING,
+    Transmit,
 };
 #[cfg(feature = "ice")]
 use sipral_nat::stun::TransactionId;
@@ -446,6 +447,7 @@ impl LocalIce {
                     ),
                     advertised,
                     outbox: VecDeque::new(),
+                    dropped: 0,
                     selected: None,
                     news: None,
                 })),
@@ -558,8 +560,11 @@ struct Lite {
     /// The host candidate this end advertised: the socket's address, or the
     /// public one a one-to-one NAT forwards to it.
     advertised: SocketAddr,
-    /// Answers to checks, each to the address its check came from.
+    /// Answers to checks, each to the address its check came from, held to
+    /// [`TRANSMIT_CEILING`] exactly as the full agent holds its own.
     outbox: VecDeque<(SocketAddr, Vec<u8>)>,
+    /// Answers the ceiling kept out of `outbox`.
+    dropped: u64,
     /// The pair the peer nominated, as the media path.
     selected: Option<SelectedPair>,
     /// A nomination the session has not been told about yet.
@@ -678,7 +683,16 @@ impl Ice {
                     lite.agent
                         .handle_binding_request(ComponentId::RTP, self.local, from, data)
                 {
-                    lite.outbox.push_back((from, reply));
+                    // every check is answered, a stranger's unsigned one
+                    // included, so the ceiling is what keeps a flood the
+                    // application is slow to drain out of memory. The answer
+                    // being queued gives way, as the full agent's does: to
+                    // the peer it is a lost datagram, and it checks again
+                    if lite.outbox.len() < TRANSMIT_CEILING {
+                        lite.outbox.push_back((from, reply));
+                    } else {
+                        lite.dropped = lite.dropped.saturating_add(1);
+                    }
                 }
                 if let Some(pair) = lite.agent.valid_pair(ComponentId::RTP) {
                     let chosen = SelectedPair {
@@ -739,6 +753,16 @@ impl Ice {
     /// The bytes [`Ice::take_probe`] last took.
     pub(crate) fn probe(&self) -> &[u8] {
         &self.probe
+    }
+
+    /// How many of the agent's own datagrams were dropped because
+    /// [`TRANSMIT_CEILING`] of them were already waiting for
+    /// [`Ice::take_probe`].
+    pub(crate) fn transmits_dropped(&self) -> u64 {
+        match &self.running {
+            Running::Full(full) => full.agent.transmits_dropped(),
+            Running::Lite(lite) => lite.dropped,
+        }
     }
 
     /// The next thing about the path the session has to act on.

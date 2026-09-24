@@ -533,7 +533,12 @@ default is `Off`, so a deployment that has not asked for ICE is where it was.
 much smaller surface — no checklist, no timers, nothing sent but answers —
 behind the same authenticator (`ice/server.rs`, which the `ice` target
 reaches through the full agent), with nothing past it but a nomination. It has
-no fuzz target of its own.
+no fuzz target of its own. Both roles answer every check, a stranger's
+unsigned one included, so what they queue for the application to send is
+held to `TRANSMIT_CEILING` (256, `crates/sipral-nat/src/ice/full/mod.rs`):
+past it the answer being queued is dropped and counted, and a flood the
+application is slow to drain costs 256 short answers' worth of memory rather
+than whatever the flood is (`docs/06-nat.md`, "The outbox").
 
 The STUN Binding client is reachable now too, on a stack configured with
 `SIPRAL_NAT_STUN`, and what it believes goes into every `Contact` and every

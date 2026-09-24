@@ -10,7 +10,8 @@ use super::sim_tests::{STUN_SERVER, TURN_SERVER, address};
 use super::{agent, config, credentials};
 use crate::ice::{
     Candidate, CandidateType, ComponentId, Credentials, Foundation, IceAgent, IceConfig, IceError,
-    IceEvent, IceState, PairState, Received, RemoteIce, Role, StreamId, Transmit, pair_priority,
+    IceEvent, IceState, PairState, Received, RemoteIce, Role, StreamId, TRANSMIT_CEILING, Transmit,
+    pair_priority,
 };
 use crate::stun::{
     AttributeType, Class, Integrity, Message, MessageBuilder, Method, TransactionId, error_code,
@@ -504,6 +505,71 @@ fn a_flood_of_sources_is_held_to_the_remote_candidate_and_pair_limits() {
         drain(&mut agent);
         assert!(agent.checks.len() <= 16, "{}", agent.checks.len());
     }
+}
+
+/// A Binding request anybody who can reach the port can send: no USERNAME,
+/// nothing signing it, which the agent answers 400 (RFC 8445 §7.3).
+fn unsigned_request(index: u32) -> Vec<u8> {
+    let mut id = [0x5a_u8; 12];
+    id[..4].copy_from_slice(&index.to_be_bytes());
+    let mut builder = MessageBuilder::new(Class::Request, Method::BINDING, TransactionId::new(id));
+    builder.add_fingerprint().expect("fingerprint");
+    builder.finish()
+}
+
+#[test]
+fn a_flood_nobody_drains_is_held_to_the_outbox_ceiling_and_counted() {
+    let (mut agent, stream, _ids, now) = gathered(Role::Controlling, config(false, false));
+    agent
+        .set_remote(stream, &from_peer(Vec::new()), now)
+        .expect("the answer");
+    drain(&mut agent);
+    let flood = 10_000_u32;
+    for index in 0..flood {
+        let source = SocketAddr::new(
+            "203.0.113.9".parse().expect("ip"),
+            10_000 + u16::try_from(index % 50_000).expect("fits"),
+        );
+        agent.handle_datagram(address(LOCAL), source, &unsigned_request(index), now);
+    }
+    let queued = drain(&mut agent);
+    assert_eq!(
+        queued.len(),
+        TRANSMIT_CEILING,
+        "the outbox grew past its ceiling"
+    );
+    let dropped = u64::from(flood) - u64::try_from(TRANSMIT_CEILING).expect("fits");
+    assert!(queued.iter().all(|transmit| {
+        Message::parse(&transmit.data).is_ok_and(|message| {
+            message.error_code().map(|error| error.code()) == Some(error_code::BAD_REQUEST)
+        })
+    }));
+    assert_eq!(agent.transmits_dropped(), dropped);
+
+    // a drained agent has room again: the peer's own check is answered
+    agent.handle_datagram(
+        address(LOCAL),
+        address(PEER),
+        &check_from_peer(3, Some(PEER_PRIORITY), false),
+        now,
+    );
+    let answered = drain(&mut agent);
+    assert!(answered.iter().any(|transmit| {
+        transmit.destination == address(PEER)
+            && Message::parse(&transmit.data).is_ok_and(|message| message.class() == Class::Success)
+    }));
+    assert_eq!(agent.transmits_dropped(), dropped);
+}
+
+#[test]
+fn a_flood_the_caller_drains_as_it_goes_loses_nothing() {
+    let (mut agent, _stream, _ids, now) = gathered(Role::Controlling, config(false, false));
+    drain(&mut agent);
+    for index in 0..2_000_u32 {
+        agent.handle_datagram(address(LOCAL), address(PEER), &unsigned_request(index), now);
+        assert_eq!(drain(&mut agent).len(), 1);
+    }
+    assert_eq!(agent.transmits_dropped(), 0);
 }
 
 /// A nominating check from a controlling peer under this USERNAME, signed

@@ -5608,6 +5608,69 @@ fn two_lite_ends_carry_the_call_on_their_default_candidates() {
     assert_eq!(sent.destination, caller_media());
 }
 
+/// Send `count` unsigned Binding requests, from a stranger, to one call's
+/// media port without taking anything back, then drain the session and say
+/// how many answers it had queued and how many it dropped.
+#[cfg(feature = "ice")]
+fn flood_media_port(pair: &mut Pair, remote: CallHandle, count: u32) -> (usize, u64) {
+    use sipral_nat::stun::{Class, MessageBuilder, Method, TransactionId};
+    let mut session = pair.callee.engine.session(remote).expect("media");
+    while session.poll_transmit(pair.now).is_some() {}
+    let stranger: SocketAddr = "203.0.113.66:40066".parse().expect("an address");
+    for index in 0..count {
+        let mut id = [0x5a_u8; 12];
+        id[..4].copy_from_slice(&index.to_be_bytes());
+        let mut builder =
+            MessageBuilder::new(Class::Request, Method::BINDING, TransactionId::new(id));
+        builder.add_fingerprint().expect("a fingerprint");
+        let mut datagram = builder.finish();
+        assert_eq!(
+            session.receive(&mut datagram, stranger, pair.now),
+            Arrival::Check
+        );
+    }
+    let mut queued = 0;
+    while let Some(datagram) = session.poll_transmit(pair.now) {
+        assert_eq!(datagram.destination, stranger);
+        queued += 1;
+    }
+    (queued, session.ice_transmits_dropped())
+}
+
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn a_flood_of_checks_nobody_drains_holds_the_lite_end_to_its_ceiling() {
+    let (mut pair, call, remote) = lite_call();
+    let (queued, dropped) = flood_media_port(&mut pair, remote, 5_000);
+    assert_eq!(queued, sipral_nat::ice::TRANSMIT_CEILING);
+    assert_eq!(
+        dropped,
+        5_000 - u64::try_from(sipral_nat::ice::TRANSMIT_CEILING).expect("fits")
+    );
+    // and the real peer, checking once the queue is drained, is answered and
+    // gets its path
+    pair.check_paths(call, remote);
+    assert_eq!(
+        paths_chosen(&pair.callee),
+        vec![(callee_media(), caller_media())]
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_flood_of_checks_nobody_drains_holds_the_full_agent_to_its_ceiling() {
+    let (mut pair, call, remote) = ice_call();
+    let (queued, dropped) = flood_media_port(&mut pair, remote, 5_000);
+    assert_eq!(queued, sipral_nat::ice::TRANSMIT_CEILING);
+    assert_eq!(
+        dropped,
+        5_000 - u64::try_from(sipral_nat::ice::TRANSMIT_CEILING).expect("fits")
+    );
+    pair.check_paths(call, remote);
+    let session = pair.callee.engine.session(remote).expect("media");
+    assert_eq!(session.ice_path(), Some((callee_media(), caller_media())));
+}
+
 #[cfg(feature = "ice")]
 #[test]
 fn nothing_goes_out_on_a_call_whose_checks_have_not_finished() {

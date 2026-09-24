@@ -581,6 +581,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A flood of ICE checks can no longer grow a call's memory without bound.**
+  Both ICE roles answer every Binding request that reaches the media port, a
+  stranger's unsigned one included, and queued the answers for as long as
+  the application left them there. What waits to be sent is now held to
+  `sipral_nat::ice::TRANSMIT_CEILING`, 256 datagrams, in the full agent and
+  in the lite end alike; past it the datagram being queued is dropped, which
+  a STUN transaction treats as a lost one and retransmits, and the drop is
+  counted in `IceAgent::transmits_dropped` and
+  `MediaSession::ice_transmits_dropped`.
 - **A request the parser refuses is answered, not dropped without a trace.**
   An INVITE with a 6,000-byte display name got nothing back at all: one
   field past the parser's bound on a single value, and the whole request was

@@ -222,7 +222,7 @@ impl IceAgent {
             BindingProgress::Transmit => {
                 let data = entry.client.datagram().to_vec();
                 if let Some(source) = self.bases.get(base).map(|entry| entry.address) {
-                    self.outbox.push_back(Transmit {
+                    self.queue(Transmit {
                         source,
                         destination: server,
                         data,
@@ -390,7 +390,7 @@ impl IceAgent {
                 return;
             };
             if let Some(data) = entry.client.poll_transmit() {
-                self.outbox.push_back(Transmit {
+                self.queue(Transmit {
                     source,
                     destination: server,
                     data,
@@ -705,7 +705,7 @@ impl IceAgent {
         ) else {
             return;
         };
-        self.outbox.push_back(Transmit {
+        self.queue(Transmit {
             source,
             destination: server,
             data,
