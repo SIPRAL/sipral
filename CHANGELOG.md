@@ -48,7 +48,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   buffer depth, frames shrunk, stretched, concealed and played as silence
   for want of a packet, and the skew those come to, and it fails if a call
   ends early, a buffer grows past 250 ms, audio stops, or the measured skew
-  is more than a quarter of the run's skew from the one given.
+  is more than a quarter of the run's skew from the one given. The first
+  full hour is in `docs/19-numbers.md`: no buffer ever deeper than its
+  20 ms target, a slow earpiece's drift shrunk out of pauses, and a fast
+  one's heard as a 20 ms gap every eighty seconds or so, since at a
+  one-frame target the buffer runs dry before it would stretch a pause.
 - **A hundred calls' worth of signalling, measured and tested.**
   `crates/sipral-ffi/tests/signalling_load.rs` puts two stacks — a user agent
   and a media engine each — on either end of a hundred concurrent calls with

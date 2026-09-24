@@ -37,8 +37,11 @@ delay and loss under impaired links are the lab's
 (`scripts/lab.sh`, `docs/11-testing.md`); a call's own R factor and mean
 opinion score come from RTCP-XR on a real call (`docs/05-media.md`).
 
-**Not measured yet:** an hour-long call's drift, and the same load on a
-mobile processor.
+**Measured in the lab, and recorded here:** an hour on a call, and what the
+jitter buffer did about two clocks for all of it (`scripts/lab.sh drift`,
+below).
+
+**Not measured yet:** the same load on a mobile processor.
 
 ## 23 September 2026 — `0.0.1`
 
@@ -174,6 +177,80 @@ Read together:
 What a real peer adds — a proxy's and a PBX's own processing, and the
 network — is not in these figures; a hundred calls through the lab's
 Kamailio to FreeSWITCH or to Asterisk has not been run.
+
+## 24 September 2026 — `0.0.1`, an hour on a call
+
+`scripts/lab.sh drift`, at `70aeba6`: three calls to Asterisk's echo
+extension held for sixty minutes, a report every five
+(`interop/harness/src/drift.rs`, `docs/11-testing.md`). The lab's two ends
+read one host's clock, so a call there drifts by nothing, and a drift
+measured against nothing proves nothing: each call's earpiece plays on a
+clock of its own instead, 250 ppm slow, true, or 250 ppm fast, against the
+clock its microphone and the network run on. The echo returns audio at the
+pace it was sent, so each call's jitter buffer faces exactly the skew its
+earpiece was given, and the true one is the control. The skew is then read
+back out of what the buffer did — frames played that never arrived, less
+frames that arrived and were never played, over the frames played — and set
+beside the one given.
+
+The Linux x86-64 lab machine, an Intel Xeon E5-2698 v4 at 2.2 GHz, Debian
+13; the harness built with `rustc 1.95.0` in `rust:1.95-trixie`, release
+profile, and run in a `debian:trixie-slim` container on the lab network
+against Asterisk 22.10.1. G.711, 20 ms frames, the lab's cadenced tone
+(1.2 s on, 0.6 s off). The flow passed.
+
+| After an hour | Earpiece 250 ppm slow | Control | Earpiece 250 ppm fast |
+|---|---|---|---|
+| Frames played | 179 456 | 179 500 | 179 545 |
+| Skew measured | −245.2 ppm | 0.0 ppm | +250.6 ppm |
+| Frames of drift absorbed | 44 (44.9 due) | 0 | 45 (44.9 due) |
+| Dropped from a pause (shrunk) | 44 | 0 | 0 |
+| Stretched into a pause | 0 | 0 | 0 |
+| Played as silence, the buffer run dry | 0 | 0 | 44 |
+| Concealed, discarded late, discarded for overflow | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| Buffer depth at every report, target 20 ms | 20 ms | 0–20 ms | 0 ms |
+| Jitter at every report | 0–1 ms | 0–1 ms | 0–1 ms |
+| Audible frames per report, 9 665–10 003 due | 9 670–10 020 | 9 670–10 020 | 9 671–10 020 |
+| R factor, MOS-LQ, at every report | 93, 4.4 | 93, 4.4 | 93, 4.4 |
+| Session changes, stalls | 0, 0 | 0, 0 | 0, 0 |
+
+The skew each call measured, report by report, settles as the frames add
+up — a frame of drift is five minutes at 250 ppm, so the first report is a
+whole frame from exact: −206.9, −237.3, −247.3 and −235.3 ppm for the slow
+earpiece at five, ten, fifteen and twenty minutes, and +206.9, +237.2,
++247.1 and +252.0 for the fast one, both within 8 ppm of the given skew for
+the last half hour. The shrunk and run-dry counts climbed by three or four
+every five minutes, as 250 ppm of fifteen thousand frames says they should.
+
+Read together:
+
+- **The buffer never grew.** None of the three was ever deeper than its
+  20 ms target at any report, an hour in, and nothing was discarded for
+  overflow. A buffer that was not correcting 250 ppm would hold 900 ms more
+  by the end.
+- **A slow earpiece is absorbed where nobody hears it.** Every frame of its
+  drift was shrunk, which the buffer only does in a pause, and the audible
+  count stayed with the cadence throughout.
+- **A fast one is not.** Not one frame was stretched into a pause. With a
+  clean path the target is one frame, and the stretch only happens when a
+  packet has arrived since the last pull and the buffer holds less than its
+  target — which, at a target of one, is a buffer holding nothing although
+  something arrived. So the buffer runs dry instead, plays one frame of
+  silence wherever that falls, in the tone as readily as in a pause, and
+  starts again from the next packet: at 250 ppm, one 20 ms gap every eighty
+  seconds or so. The mean opinion score does not see it — RTCP-XR counts
+  loss and discard, and nothing was lost or discarded — and neither did the
+  audible-frame check, which a single frame in five minutes does not move.
+  `docs/05-media.md` says so beside the buffer's design targets; making the
+  stretch reachable at a one-frame target is the change it asks for.
+- **The control is the count's own check.** One frame shrunk early in the
+  control's call, and its buffer one frame shallower for it, balance to
+  nothing: every frame the other two moved is accounted for by the same
+  count.
+
+A three-minute run at 2000 ppm on the same machine, the review length
+`docs/11-testing.md` gives, measured −2004.0 and +1996.0 ppm: 17 frames each
+way, the fast earpiece's all run dry.
 
 ## What would make these numbers worse
 

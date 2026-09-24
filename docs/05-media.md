@@ -367,6 +367,17 @@ someone configured once. Design targets:
 - **Duplicates are dropped** on sequence number, cheaply.
 - **The buffer never grows without bound.** A stalled consumer discards, and
   reports it.
+- **A fast earpiece runs it dry rather than stretching a pause.** Measured,
+  not designed: `scripts/lab.sh drift` holds calls for an hour with the
+  earpiece's clock set off by a known skew (`docs/19-numbers.md`). A slow
+  earpiece is absorbed as intended, a frame dropped from a pause each time
+  the delay passes its target by one. A fast one never stretches: on a clean
+  path the target is one frame, and the pull that finds the next packet not
+  yet arrived is by construction a pull with nothing arrived since the last
+  one, which is the one case the stretch waits for. The buffer runs dry
+  instead, plays one frame of silence wherever that falls — in a word as
+  readily as in a pause — and starts again from the next packet. Each frame
+  of drift costs one such frame: at 250 ppm, one every eighty seconds.
 
 Measured against the exit criterion in [10-roadmap.md](10-roadmap.md): mean
 opinion score under simulated loss and jitter, compared side by side with a
