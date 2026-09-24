@@ -368,7 +368,10 @@ C ABI phone rung for longer than that, is the case not covered yet.
 
 Not done yet: TURN over TCP or TLS to the server, for the network that lets
 nothing out but 443. The client has the framing; the agent's datagram model
-does not carry a stream.
+does not carry a stream. And a forked INVITE: one allocation serves one agent,
+which stays with the branch the call was placed on, so a second branch a proxy
+forks off runs an agent rebuilt from the description, without the relay its
+offer named, and finds only the paths that need none.
 
 ### Proven in the lab
 

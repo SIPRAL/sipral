@@ -610,7 +610,17 @@ Refresh with a lifetime of zero that gives it back when the call ends comes
 out of `sipral_stack_poll_farewell` with the call's other farewells, to be
 sent from the call's own socket. A call that does not use ICE — its policy is
 `SIPRAL_ICE_OFF`, or the peer answered without it — gives the relay back the
-same way as soon as that is known.
+same way as soon as that is known. A call whose configuration is refused before
+the stack is reached, and a transfer refused for its destination or its
+headers, leave the relay on its socket; a call the user agent refuses after
+the relay has gone into its description — a `Replaces` among the headers of an
+accepted transfer, say — has no call to give it back for, and the allocation
+lapses at the server in the lifetime it was granted: the socket is named again
+with `sipral_stack_nat_map` for a relay of its own. A relay nobody takes is
+given back when the socket is spent by a call that did not take it, and is
+otherwise kept, refreshed, until the stack is destroyed, which gives nothing
+back: there is no call to name a socket's relay unwanted short of describing a
+call on it.
 
 ## Media across the boundary
 

@@ -271,10 +271,15 @@ impl CallMedia {
     ///
     /// A call that cannot use it — its catalogue offers no ICE, or only the
     /// lite role, or the relay is of the other address family — gives it
-    /// back at once, the same way. So does a call the user agent refuses to
-    /// place, except that [`MediaEngine::place_with`] has no call to send the
-    /// farewell for then: that allocation lapses at the server instead, in
-    /// the lifetime it was granted.
+    /// back at once, the same way. A description that is refused gives it
+    /// back only when there is a call to send the farewell for:
+    /// [`MediaEngine::place_with`] and [`MediaEngine::accept_transfer_with`]
+    /// refused by the user agent have none, and neither has
+    /// [`MediaEngine::ring_with`] or [`MediaEngine::answer_with`] refused
+    /// before it describes anything — a call already described, a handle
+    /// that names no call. That allocation lapses at the server instead, in
+    /// the lifetime it was granted, and the socket needs a relay of its own
+    /// again for the next call.
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn relay(mut self, relay: crate::Relay) -> Self {
