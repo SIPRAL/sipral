@@ -314,10 +314,14 @@ wait_for() {
     local service="$1" phrase="$2" required="${3:-required}" profile="${4:-}" tries=0
     local -a compose_profile=()
     [ -n "$profile" ] && compose_profile=(--profile "$profile")
+    # grep reads the whole log rather than stopping at the first match (-q):
+    # under pipefail, a grep that leaves early kills the writer with SIGPIPE,
+    # which fails the pipeline for every log longer than one pipe buffer --
+    # coturn's, with the relay step's --verbose, among them
     while [ "$tries" -lt 45 ]; do
         if ( cd interop && docker compose ${compose_profile[@]+"${compose_profile[@]}"} \
                 logs --no-color "$service" 2>/dev/null ) \
-            | grep -qF "$phrase"; then
+            | grep -F "$phrase" >/dev/null; then
             pass "$service: $phrase"
             return 0
         fi
