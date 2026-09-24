@@ -477,8 +477,9 @@ python_agent() {
 }
 
 # org.sipral.idiomatic's own headless agent, bindings/kotlin/examples/Agent.kt,
-# on a JVM (`eclipse-temurin`, the JDK variant -- its own `jni.h` is what the
-# container compiles the shim against). Kotlin has no build tool in this tree
+# on a JVM (`interop/kotlin`: `eclipse-temurin`'s JDK, whose own `jni.h` the
+# container compiles the shim against, plus the compiler, built once and
+# reused). Kotlin has no build tool in this tree
 # (`bindings/kotlin/README.md`), so the classes are compiled once with
 # `kotlinc` wherever this is run from and handed to this step as a jar,
 # exactly the way `SIPRAL_HARNESS_C` above is a binary built elsewhere rather
@@ -493,6 +494,8 @@ kotlin_agent() {
         && [ -n "${KOTLIN_COROUTINES_JAR:-}" ] || return 0
     [ -n "$HARNESS_C" ] || return 0
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    docker build -q -t sipral-lab-kotlin interop/kotlin >/dev/null 2>&1 \
+        || { printf '  could not build interop/kotlin\n'; return 1; }
     docker rm -f "$KOTLIN_AGENT_NAME" >/dev/null 2>&1
     docker run -d --name "$KOTLIN_AGENT_NAME" --network sipral-interop_lab \
         -e SIPRAL_AOR=sip:labuser-agent-kotlin@asterisk \
@@ -504,11 +507,8 @@ kotlin_agent() {
         -v "$KOTLIN_AGENT_JAR:/kotlin/sipral-kotlin.jar:ro" \
         -v "$KOTLIN_STDLIB_JAR:/kotlin/kotlin-stdlib.jar:ro" \
         -v "$KOTLIN_COROUTINES_JAR:/kotlin/kotlinx-coroutines.jar:ro" \
-        eclipse-temurin:21-jdk sh -c '
+        sipral-lab-kotlin sh -c '
             set -e
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get -qq update >/dev/null 2>&1
-            apt-get -qq install -y gcc >/dev/null 2>&1
             cc -std=c11 -Wall -shared -fPIC \
                 -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" -I/sipral-include \
                 -o /tmp/libsipral_jni.so \
