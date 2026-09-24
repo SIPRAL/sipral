@@ -70,9 +70,15 @@ nothing about the call changes because one request in it could not be read.
 
 What cannot be answered is dropped: a response, an ACK (never answered,
 §17.1.1.3), a request whose five fields cannot all be read, or one whose
-request line cannot. Every refusal, answered or not, moves
-`Endpoint::unreadable`, and leaves an entry in the endpoint's diagnostic record
-— `request.refused.unreadable` for one that was answered,
+request line cannot. So is one whose top `Via` is itself past the value
+bound, or holds a CR that ends no line: that `Via` routes the answer
+(§18.2.2), and a field the parser refused, or would have, does not get to say
+where this end sends anything — nor does the `Via` below one left out. An
+answer that would come out past the message bound — the copied fields, the
+longer status line and the tag added up — is dropped too. Every refusal,
+answered or not, moves `Endpoint::unreadable`, and leaves an entry in the
+endpoint's diagnostic record — `request.refused.unreadable` for one that was
+answered,
 `message.dropped.unreadable` for one that was not, with the size and the bound
 when a bound on bytes was what refused it (`docs/14-diagnostics.md`). The
 datagram's own `receive` still returns `ReceiveError::Malformed`, which is the

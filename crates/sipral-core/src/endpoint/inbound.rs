@@ -302,14 +302,28 @@ impl Endpoint {
             None => decision,
         };
 
+        let dropped = Decision::of(Reason::MessageDroppedUnreadable)
+            .at_address(arrival.remote)
+            .over(arrival.protocol);
         let mut scratch = ParseScratch::new();
+        let value_bound = self.config.limits.max_header_value_bytes as usize;
         let request = salvage_request(bytes, &mut scratch, self.config.limits.max_headers)
-            .filter(can_be_answered);
+            .filter(|request| can_be_answered(request, value_bound));
         let Some(request) = request else {
-            let decision = Decision::of(Reason::MessageDroppedUnreadable)
-                .at_address(arrival.remote)
-                .over(arrival.protocol);
-            self.note(None, measured(decision));
+            self.note(None, measured(dropped));
+            return;
+        };
+
+        let (status, phrase) = refusal(error, bytes);
+        let tag = self.mint_tag();
+        let built = ResponseBuilder::for_request(&request, status)
+            .to_tag(&tag)
+            .reason(phrase.as_bytes())
+            .build();
+        // the copied fields, a longer status line and a tag can pass the
+        // message bound the builder still holds an answer to: nothing to send
+        let Ok(message) = built else {
+            self.note(None, measured(dropped));
             return;
         };
 
@@ -327,16 +341,7 @@ impl Endpoint {
             decision = decision.caused_by(WireEvent::request(method, Direction::Inbound, length));
         }
         self.note(None, measured(decision));
-
-        let (status, phrase) = refusal(error, bytes);
-        let tag = self.mint_tag();
-        let built = ResponseBuilder::for_request(&request, status)
-            .to_tag(&tag)
-            .reason(phrase.as_bytes())
-            .build();
-        if let Ok(message) = built {
-            self.queue(flow.transmit(message.bytes()));
-        }
+        self.queue(flow.transmit(message.bytes()));
     }
 
     fn dispatch(
@@ -1919,9 +1924,18 @@ struct Arrival {
 
 /// Whether what [`salvage_request`] recovered is enough to answer: a request
 /// that is not an ACK, with the five fields every response copies all
-/// readable.
-fn can_be_answered(request: &RawMessage<'_>) -> bool {
+/// readable, and a top `Via` inside the bound on one value.
+///
+/// The top `Via` is what routes the answer (§18.2.2) — its `maddr`, its port —
+/// and one past the bound is a field the parser refused, or would have had it
+/// got that far: nothing read from it decides where this end sends anything.
+/// The other four go back whole whatever their length, since they only have
+/// to match.
+fn can_be_answered(request: &RawMessage<'_>, value_bound: usize) -> bool {
     request.method().is_some_and(|method| method != Method::Ack)
+        && request
+            .header(HeaderName::Via)
+            .is_some_and(|top| top.len() <= value_bound)
         && request.top_via().is_ok()
         && request.call_id().is_ok()
         && request.cseq().is_ok()

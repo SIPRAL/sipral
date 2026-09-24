@@ -399,6 +399,184 @@ Subject: {}\r\n\
     assert_eq!(dropped.address, Some(peer()));
 }
 
+/// An OPTIONS whose head begins with `head` — its `Via` lines, and whatever
+/// else a test puts in front of them — and then the other four fields an
+/// answer copies.
+fn options(head: &str) -> Vec<u8> {
+    format!(
+        "OPTIONS sip:alice@192.0.2.1 SIP/2.0\r\n\
+{head}\
+From: <sip:bob@example.com>;tag=1\r\n\
+To: <sip:alice@192.0.2.1>\r\n\
+Call-ID: via-refused\r\n\
+CSeq: 1 OPTIONS\r\n\
+Content-Length: 0\r\n\
+\r\n"
+    )
+    .into_bytes()
+}
+
+/// A field line whose value is one byte past the bound.
+fn past_the_bound(name: &str) -> String {
+    format!(
+        "{name}: {}\r\n",
+        "x".repeat(Limits::DEFAULT.max_header_value_bytes as usize + 1)
+    )
+}
+
+/// A top `Via` past the bound, with a `maddr` and a port of its own choosing.
+fn a_via_past_the_bound() -> String {
+    let via = "Via: SIP/2.0/UDP 192.0.2.9:5099;branch=z9hG4bKvia1;maddr=198.51.100.7;x=";
+    let pad = Limits::DEFAULT.max_header_value_bytes as usize + 1 - (via.len() - "Via: ".len());
+    format!("{via}{}\r\n", "v".repeat(pad))
+}
+
+/// That a refusal went nowhere, and left its trace.
+fn dropped_unanswered(endpoint: &mut Endpoint) {
+    let out = transmits(endpoint);
+    assert!(
+        out.is_empty(),
+        "answered to {:?}",
+        out.iter().map(|t| t.destination).collect::<Vec<_>>()
+    );
+    assert_eq!(endpoint.unreadable(), 1);
+    let decisions = endpoint_decisions(endpoint);
+    one_of(&decisions, "message.dropped.unreadable");
+    assert!(
+        decisions
+            .iter()
+            .all(|decision| decision.reason.as_str() != "request.refused.unreadable")
+    );
+}
+
+#[test]
+fn a_via_past_the_bound_routes_no_answer() {
+    // the one field the answer is routed by is the one the parser refused:
+    // its `maddr` and its port are a stranger's say, read past every bound
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let refused = arrive(&mut endpoint, &options(&a_via_past_the_bound()), t0);
+    assert!(
+        matches!(
+            refused,
+            Err(ReceiveError::Malformed(ParseError::HeaderValueTooLong {
+                name_at: 37,
+                ..
+            }))
+        ),
+        "{refused:?}"
+    );
+    dropped_unanswered(&mut endpoint);
+}
+
+#[test]
+fn a_via_the_parser_never_reached_is_held_to_the_same_bound() {
+    // refused for a field in front of it, so the parser never measured it
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let head = format!("{}{}", past_the_bound("Subject"), a_via_past_the_bound());
+    let _ = arrive(&mut endpoint, &options(&head), t0);
+    dropped_unanswered(&mut endpoint);
+}
+
+#[test]
+fn a_via_left_out_for_a_lone_cr_takes_the_answer_with_it() {
+    // without the top `Via` the next one down would route the answer, to an
+    // address that hop never asked to be answered at
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let _ = arrive(
+        &mut endpoint,
+        &options(
+            "Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKcr1\r;rport\r\n\
+Via: SIP/2.0/UDP 203.0.113.4:5070;branch=z9hG4bKcr2;maddr=198.51.100.7\r\n",
+        ),
+        t0,
+    );
+    dropped_unanswered(&mut endpoint);
+}
+
+#[test]
+fn an_answer_that_cannot_be_written_is_recorded_as_dropped_not_as_sent() {
+    // a request at the message bound whose `From` is past the value bound:
+    // the answer carries that `From` back, a longer status line and a tag,
+    // and passes the message bound the builder still holds it to. Nothing
+    // goes out, and the record must not say it did
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let bound = Limits::DEFAULT.max_message_bytes as usize;
+    let shape = |name: usize| {
+        String::from_utf8(options(
+            "Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKfull1;rport\r\n",
+        ))
+        .expect("text")
+        .replace(
+            "From: <sip:bob@example.com>",
+            &format!("From: \"{}\" <sip:bob@example.com>", "a".repeat(name)),
+        )
+    };
+    let request = shape(bound - shape(0).len());
+    assert_eq!(request.len(), bound);
+    let refused = arrive(&mut endpoint, request.as_bytes(), t0);
+    assert!(
+        matches!(
+            refused,
+            Err(ReceiveError::Malformed(
+                ParseError::HeaderValueTooLong { .. }
+            ))
+        ),
+        "{refused:?}"
+    );
+    dropped_unanswered(&mut endpoint);
+}
+
+#[test]
+fn the_smallest_answerable_request_gets_back_under_two_and_a_half_times_its_size() {
+    // a forged source address aims the answer at whoever owns it. The answer
+    // is the request's own five fields plus a status line, a tag and a
+    // `Content-Length`, so only a request of little else than those comes
+    // back larger, and this one is as little as can be answered: compact
+    // names, one bad line, 66 bytes answered with 156
+    // (`docs/20-security-model.md`)
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let request = b"A a:b SIP/2.0\r\n\
+v:SIP/2.0/UDP a\r\n\
+f:a:b\r\n\
+t:a:b\r\n\
+i:c\r\n\
+CSeq:1 A\r\n\
+x\r\n\
+\r\n";
+    assert!(arrive(&mut endpoint, request, t0).is_err());
+    let answer = sent(&mut endpoint);
+    assert_eq!(status_of(&answer).0, Some(StatusCode::BAD_REQUEST));
+    assert!(
+        2 * answer.len() < 5 * request.len(),
+        "{} bytes answered with {}",
+        request.len(),
+        answer.len()
+    );
+}
+
+#[test]
+fn a_via_inside_the_bound_still_routes_the_answer_as_section_18_2_2_says() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let head = format!(
+        "Via: SIP/2.0/UDP 192.0.2.9:5070;branch=z9hG4bKok1\r\n{}",
+        past_the_bound("Subject")
+    );
+    let _ = arrive(&mut endpoint, &options(&head), t0);
+    let out = transmits(&mut endpoint);
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        out.first().map(|t| t.destination),
+        Some("192.0.2.9:5070".parse().expect("an address")),
+        "the source's address, sent-by's port"
+    );
+}
+
 #[test]
 fn a_refused_request_on_a_stream_is_answered_and_the_connection_reads_on() {
     let t0 = Instant::now();

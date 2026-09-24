@@ -213,8 +213,14 @@ pub fn parse_with_limits<'a>(
 /// `max_fields` of them are there, since an answer missing a `Via` would be
 /// routed to the wrong place. A field whose line holds a CR that ends no line
 /// is left out rather than copied, for the reason [`parse_with_limits`]
-/// refuses one: no header line can be written with it. Headers that never end
-/// are read as far as they go.
+/// refuses one: no header line can be written with it. A `Via` like that is
+/// `None` for the same reason as a missing one: the `Via` below it would
+/// route the answer. Headers that never end are read as far as they go.
+///
+/// A field kept whole is kept past every bound, and that includes the `Via`
+/// an answer is routed by: whoever answers from this decides whether a top
+/// `Via` longer than [`Limits::max_header_value_bytes`] gets a say in where
+/// the answer goes (the endpoint's answer does not).
 #[must_use]
 pub fn salvage_request<'a>(
     buf: &'a [u8],
@@ -254,7 +260,8 @@ pub fn salvage_request<'a>(
         let Ok((name, value)) = split_header(buf, line) else {
             continue;
         };
-        let copied = HeaderName::from_bytes(name.slice(buf)).is_some_and(|field| {
+        let field = HeaderName::from_bytes(name.slice(buf));
+        let copied = field.is_some_and(|field| {
             matches!(
                 field,
                 HeaderName::Via
@@ -264,7 +271,15 @@ pub fn salvage_request<'a>(
                     | HeaderName::CSeq
             )
         });
-        if !copied || !writable {
+        if !copied {
+            continue;
+        }
+        if !writable {
+            // a `Via` left out moves the one below it to the top, and the
+            // answer would go where that hop's `Via` says instead
+            if field == Some(HeaderName::Via) {
+                return None;
+            }
             continue;
         }
         if scratch.slots.len() >= usize::from(max_fields) {

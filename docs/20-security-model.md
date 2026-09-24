@@ -54,10 +54,16 @@ a full RFC 8224 `Identity`, a long `History-Info` — and it costs no memory of
 its own, since a value is a span into the message rather than a copy. What
 a ceiling refuses is answered rather than dropped when it can be: a request
 whose `Via`, `From`, `To`, `Call-ID` and `CSeq` can still be read gets 513 or
-a 400 naming the bound, statelessly and no larger than the request itself,
-so it amplifies nothing a forged source address could aim; the rest is
-counted and recorded (`docs/03-core-signalling.md`, "Limits, and what a
-refused message gets"). A second, separate `sdp::Limits`
+a 400 naming the bound, statelessly; the rest is counted and recorded
+(`docs/03-core-signalling.md`, "Limits, and what a refused message gets").
+The answer is those five fields as they came plus a status line, a tag and a
+`Content-Length`, so a forged source address gets back about what was sent
+for any request carrying more than the five, and under two and a half times
+it for the smallest one that can be answered at all — 66 bytes, every name
+compact, answered with 156. Where the answer goes is never read from a field
+past a bound: a request whose top `Via` is longer than the value bound, or
+whose `Via` had to be left out, is not answered, since that `Via`'s `maddr`
+and port would decide where the answer lands. A second, separate `sdp::Limits`
 (`crates/sipral-core/src/sdp/parse.rs:41`) does the same for a body once it
 is one: 16 KiB total, 2 KiB per line, 16 media blocks, 256 attributes overall
 and 64 per section. Neither is a courtesy default: both are sized against

@@ -534,14 +534,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   otherwise, with a reason phrase naming the bound or the fault, such as
   `From Too Long (limit 16384 bytes)` — including when the field past the
   bound is one of those five, which goes back whole. What cannot be answered
-  (a response, an ACK, a request whose five fields cannot all be read) is
-  counted by `Endpoint::unreadable` and, like every refusal, recorded in the
-  endpoint's diagnostic record as `request.refused.unreadable` or
-  `message.dropped.unreadable`. On TCP and TLS a refused message no longer
-  costs the connection when its `Content-Length` still says where it ends:
-  it is answered and the stream reads on, and one whose body is past the
-  bound is answered 513 as soon as its head is in, the body passed over
-  unheld. The examples print each datagram the parser refused.
+  (a response, an ACK, a request whose five fields cannot all be read, or
+  one whose top `Via` is itself past the bound, since that `Via` would say
+  where the answer goes) is counted by `Endpoint::unreadable` and, like
+  every refusal, recorded in the endpoint's diagnostic record as
+  `request.refused.unreadable` or `message.dropped.unreadable`. On TCP and
+  TLS a refused message no longer costs the connection when its
+  `Content-Length` still says where it ends: it is answered and the stream
+  reads on, and one whose body is past the bound is answered 513 as soon as
+  its head is in, the body passed over unheld. The examples print each
+  datagram the parser refused.
 - **The reference headless agent reads audio frames of any length the
   session agreed.** It bounded every frame by the control message limit, so
   48 kHz frames longer than 85 ms ended its connection as malformed; it now
