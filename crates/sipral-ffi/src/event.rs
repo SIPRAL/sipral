@@ -41,7 +41,7 @@ use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
 use crate::names::Names;
-use crate::nat::SipralNatEvent;
+use crate::nat::{SipralNatEvent, SipralNatRelayEvent};
 use crate::subscription::{SipralSubscriptionState, named_end, named_state};
 
 /// Declare the event number space, once.
@@ -466,6 +466,17 @@ event_kinds! {
         /// no STUN at all. `account` and `call` are `SIPRAL_HANDLE_NONE`:
         /// a socket is neither.
         39 = NatMapping, c"nat mapping";
+        /// A TURN server allocated a relay for a media socket
+        /// `sipral_stack_nat_map` named, or gave none (RFC 8656). Only on a
+        /// stack created with a `turn_server`.
+        ///
+        /// `payload.relay` says which socket and what it came to. Allocated,
+        /// it is the moment a call can be placed, rung or answered on the
+        /// socket with the relay as its relayed ICE candidate — before it,
+        /// that is `SIPRAL_STATUS_WRONG_STATE`, as it is while the STUN
+        /// answer is awaited. Failed, the call goes without one. `account`
+        /// and `call` are `SIPRAL_HANDLE_NONE`: a socket is neither.
+        40 = NatRelay, c"nat relay";
     }
 }
 
@@ -527,6 +538,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::QualityReportSent, "media"),
     (SipralEventKind::MediaUnjoined, "media"),
     (SipralEventKind::NatMapping, "nat"),
+    (SipralEventKind::NatRelay, "relay"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1115,6 +1127,8 @@ record! {
         pub message: SipralMessageEvent,
         /// For [`SipralEventKind::NatMapping`].
         pub nat: SipralNatEvent,
+        /// For [`SipralEventKind::NatRelay`].
+        pub relay: SipralNatRelayEvent,
     }
 }
 
@@ -1275,6 +1289,14 @@ pub(crate) fn started(stack: SipralHandle) -> SipralEvent {
 #[cfg(feature = "stun")]
 pub(crate) fn nat_mapping(stack: SipralHandle, payload: SipralNatEvent) -> SipralEvent {
     SipralEvent::of(stack, SipralEventKind::NatMapping, payload!(nat: payload))
+}
+
+/// What a TURN server said about one media socket's relay, as C reads it.
+/// The pointers in `payload` point into text the caller keeps beside the
+/// event.
+#[cfg(all(feature = "stun", feature = "ice"))]
+pub(crate) fn nat_relay(stack: SipralHandle, payload: SipralNatRelayEvent) -> SipralEvent {
+    SipralEvent::of(stack, SipralEventKind::NatRelay, payload!(relay: payload))
 }
 
 /// Everything one translation needs to reach.
@@ -2573,7 +2595,8 @@ mod tests {
         assert_eq!(SipralEventKind::QualityReportSent as u32, 37);
         assert_eq!(SipralEventKind::MediaUnjoined as u32, 38);
         assert_eq!(SipralEventKind::NatMapping as u32, 39);
-        assert_eq!(SipralEventKind::ALL.len(), 38, "and there are no others");
+        assert_eq!(SipralEventKind::NatRelay as u32, 40);
+        assert_eq!(SipralEventKind::ALL.len(), 39, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2642,7 +2665,8 @@ mod tests {
         );
         assert_eq!(name(38).as_deref(), Some("media unjoined"), "38 is live");
         assert_eq!(name(39).as_deref(), Some("nat mapping"), "39 is live");
-        assert_eq!(name(40), None, "past the last kind");
+        assert_eq!(name(40).as_deref(), Some("nat relay"), "40 is live");
+        assert_eq!(name(41), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

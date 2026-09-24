@@ -21,7 +21,10 @@
 #                               from the harness and from Asterisk, answered
 #                               by the headless agent as an ICE-lite endpoint;
 #                               then two stacks behind two NATs completing
-#                               full ICE on what coturn told them
+#                               full ICE on what coturn told them, then the
+#                               same two with the path between them blocked,
+#                               through a relay on coturn as a TURN server
+#   scripts/lab.sh turn         only that last, relayed, step
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -1097,58 +1100,93 @@ ice_lite_asterisk() {
 # caller fails a path that does not end at the callee's NAT.
 ICE_CALLEE_NAME=sipral-lab-ice-callee
 ice_nat_flow() {
+    nat_pair_up -f compose.yaml || return 1
+    printf '  caller behind %s, callee behind %s (%s outside), STUN at %s:3478\n' \
+        "$NAT_PAIR_GATEWAY" "$NAT_PAIR_GATEWAY2" "$NAT_PAIR_OUTSIDE2" "$NAT_PAIR_COTURN"
+    nat_pair_call
+    local status=$?
+    nat_pair_down -f compose.yaml
+    return "$status"
+}
+
+# coturn and the two NATs, up, with their addresses read into NAT_PAIR_*:
+# the compose files to layer are the arguments, which is how the relay step
+# below puts interop/turn's override over the lab's own coturn.
+nat_pair_up() {
     local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
-    local natbox natbox2 coturn gateway gateway2 outside2 stun callee callee_status
-    local status=0 tries=0
-    ( cd interop && docker compose --profile nat up -d --build coturn natbox natbox2 ) >/dev/null 2>&1 \
+    ( cd interop && docker compose "$@" --profile nat up -d --build coturn natbox natbox2 ) >/dev/null 2>&1 \
         || { printf '  could not start coturn and the two NATs\n'; return 1; }
     wait_for natbox "nat: masquerading out of" required nat || return 1
     wait_for natbox2 "nat: masquerading out of" required nat || return 1
     wait_for coturn "Listener address to use" optional nat || true
 
-    natbox=$(cd interop && docker compose --profile nat ps -q natbox)
-    natbox2=$(cd interop && docker compose --profile nat ps -q natbox2)
+    NAT_PAIR_BOX=$(cd interop && docker compose --profile nat ps -q natbox)
+    NAT_PAIR_BOX2=$(cd interop && docker compose --profile nat ps -q natbox2)
+    local coturn
     coturn=$(cd interop && docker compose --profile nat ps -q coturn)
-    gateway=$(docker inspect -f \
+    NAT_PAIR_GATEWAY=$(docker inspect -f \
         "{{with index .NetworkSettings.Networks \"${project}_inside\"}}{{.IPAddress}}{{end}}" \
-        "$natbox")
-    gateway2=$(docker inspect -f \
+        "$NAT_PAIR_BOX")
+    NAT_PAIR_GATEWAY2=$(docker inspect -f \
         "{{with index .NetworkSettings.Networks \"${project}_inside2\"}}{{.IPAddress}}{{end}}" \
-        "$natbox2")
-    outside2=$(docker inspect -f \
+        "$NAT_PAIR_BOX2")
+    NAT_PAIR_OUTSIDE=$(docker inspect -f \
         "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
-        "$natbox2")
-    stun=$(docker inspect -f \
+        "$NAT_PAIR_BOX")
+    NAT_PAIR_OUTSIDE2=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
+        "$NAT_PAIR_BOX2")
+    NAT_PAIR_COTURN=$(docker inspect -f \
         "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
         "$coturn")
-    if [ -z "$gateway" ] || [ -z "$gateway2" ] || [ -z "$outside2" ] || [ -z "$stun" ]; then
-        printf '  could not read the addresses: NATs %s and %s (%s outside), coturn %s\n' \
-            "${gateway:-?}" "${gateway2:-?}" "${outside2:-?}" "${stun:-?}"
-        ( cd interop && docker compose --profile nat rm -sf coturn natbox natbox2 ) >/dev/null 2>&1
+    if [ -z "$NAT_PAIR_GATEWAY" ] || [ -z "$NAT_PAIR_GATEWAY2" ] || [ -z "$NAT_PAIR_OUTSIDE" ] \
+        || [ -z "$NAT_PAIR_OUTSIDE2" ] || [ -z "$NAT_PAIR_COTURN" ]; then
+        printf '  could not read the addresses: NATs %s and %s (%s and %s outside), coturn %s\n' \
+            "${NAT_PAIR_GATEWAY:-?}" "${NAT_PAIR_GATEWAY2:-?}" "${NAT_PAIR_OUTSIDE:-?}" \
+            "${NAT_PAIR_OUTSIDE2:-?}" "${NAT_PAIR_COTURN:-?}"
+        nat_pair_down "$@"
         return 1
     fi
-    printf '  caller behind %s, callee behind %s (%s outside), STUN at %s:3478\n' \
-        "$gateway" "$gateway2" "$outside2" "$stun"
+}
 
+nat_pair_down() {
+    ( cd interop && docker compose "$@" --profile nat rm -sf coturn natbox natbox2 ) >/dev/null 2>&1
+}
+
+# One call across the pair nat_pair_up started: the Rust harness as callee
+# on `inside2` behind natbox2 and as caller on `inside` behind natbox, both
+# requiring ICE, with the arguments as extra `docker run` options for both
+# (the relay step's TURN server and credential; expanded as ${1+"$@"}, since
+# bash 3.2 calls a bare "$@" with no arguments unbound under `set -u`). The
+# callee's NAT forwards its SIP port -- signalling is not what this proves --
+# and nothing else. Both halves' output is printed; the status is 0 only
+# when both passed.
+nat_pair_call() {
+    local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    local callee callee_status status=0 tries=0
     docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
     docker run -d --name "$ICE_CALLEE_NAME" --network "${project}_inside2" \
         --cap-add NET_ADMIN \
         -e SIPRAL_FLOWS=iceanswer \
-        -e "SIPRAL_STUN_SERVER=$stun:3478" \
-        -e "SIPRAL_CONTACT=$outside2:5060" \
+        -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+        -e "SIPRAL_CONTACT=$NAT_PAIR_OUTSIDE2:5060" \
+        ${1+"$@"} \
         -v "$HARNESS:/harness:ro" \
         sipral-lab-nat sh -c "
-            ip route replace default via $gateway2 || exit 1
-            exec /harness $stun 3478 callee" >/dev/null \
+            ip route replace default via $NAT_PAIR_GATEWAY2 || exit 1
+            exec /harness $NAT_PAIR_COTURN 3478 callee" >/dev/null \
         || status=1
     callee=$(docker inspect -f \
         "{{with index .NetworkSettings.Networks \"${project}_inside2\"}}{{.IPAddress}}{{end}}" \
         "$ICE_CALLEE_NAME" 2>/dev/null)
     # the forward: SIP arriving at the second NAT from the lab network goes
-    # to the callee, and only SIP
+    # to the callee, and only SIP. Replaced rather than added, so a second
+    # call across the same pair forwards to its own callee and not to the
+    # first one's address as well
     if [ "$status" -eq 0 ] && [ -n "$callee" ]; then
-        docker exec "$natbox2" sh -c "
-            lab=\$(ip -o route get $stun | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p')
+        docker exec "$NAT_PAIR_BOX2" sh -c "
+            lab=\$(ip -o route get $NAT_PAIR_COTURN | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p')
+            iptables -t nat -F PREROUTING
             iptables -t nat -I PREROUTING -i \"\$lab\" -p udp --dport 5060 \
                 -j DNAT --to-destination $callee:5060" \
             || { printf '  could not forward SIP to the callee\n'; status=1; }
@@ -1172,19 +1210,86 @@ ice_nat_flow() {
         docker run --rm --network "${project}_inside" \
             --cap-add NET_ADMIN \
             -e SIPRAL_FLOWS=icenat \
-            -e "SIPRAL_STUN_SERVER=$stun:3478" \
+            -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+            ${1+"$@"} \
             -v "$HARNESS:/harness:ro" \
             sipral-lab-nat sh -c "
-                ip route replace default via $gateway || exit 1
-                exec /harness $outside2 5060 callee"
+                ip route replace default via $NAT_PAIR_GATEWAY || exit 1
+                exec /harness $NAT_PAIR_OUTSIDE2 5060 callee"
         status=$?
     fi
-    callee_status=$(timeout 30 docker wait "$ICE_CALLEE_NAME" 2>/dev/null || echo 1)
+    callee_status=$(timeout 90 docker wait "$ICE_CALLEE_NAME" 2>/dev/null || echo 1)
     docker logs "$ICE_CALLEE_NAME" 2>&1 | sed 's/^/    callee  /'
     docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
-    ( cd interop && docker compose --profile nat rm -sf coturn natbox natbox2 ) >/dev/null 2>&1
     [ "$status" -eq 0 ] || return 1
     [ "$callee_status" = 0 ] || { printf '  the callee did not pass\n'; return 1; }
+}
+
+# 8.5.5's relay step: the same two stacks behind the same two NATs, told
+# this time to drop every datagram between them but SIP -- natbox and natbox2
+# forward nothing addressed to the other's outside address, or from it,
+# unless it is port 5060 -- so that neither host candidates (no route) nor
+# server-reflexive ones (dropped) connect, and coturn turned into a TURN
+# server with long-term credentials by interop/turn's override, which no
+# other step sees. First the block is proved: the call from the step above,
+# STUN and nothing else, has to find no path. Then each end allocates a
+# relay (interop/harness/src/ice_nat.rs, `SIPRAL_TURN_*`), and the call has
+# to complete with the tone crossing through coturn both ways, the caller
+# failing a path that does not go through it. Last, coturn's own log has to
+# show both allocations given back when the call ended rather than left to
+# lapse.
+ice_turn_flow() {
+    local status=0 allocations deleted said
+    SIPRAL_TURN_USER=sipral-lab
+    SIPRAL_TURN_PASSWORD=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    export SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD
+    nat_pair_up -f compose.yaml -f turn/compose.override.yaml || return 1
+    printf '  caller behind %s (%s outside), callee behind %s (%s outside), TURN at %s:3478\n' \
+        "$NAT_PAIR_GATEWAY" "$NAT_PAIR_OUTSIDE" "$NAT_PAIR_GATEWAY2" "$NAT_PAIR_OUTSIDE2" \
+        "$NAT_PAIR_COTURN"
+    docker exec "$NAT_PAIR_BOX" sh -c "
+        iptables -I FORWARD -d $NAT_PAIR_OUTSIDE2 -p udp ! --dport 5060 -j DROP
+        iptables -I FORWARD -s $NAT_PAIR_OUTSIDE2 -p udp ! --sport 5060 -j DROP" \
+        && docker exec "$NAT_PAIR_BOX2" sh -c "
+        iptables -I FORWARD -s $NAT_PAIR_OUTSIDE -p udp ! --dport 5060 -j DROP
+        iptables -I FORWARD -d $NAT_PAIR_OUTSIDE -p udp ! --sport 5060 -j DROP" \
+        || { printf '  could not block the path between the two NATs\n'; status=1; }
+
+    if [ "$status" -eq 0 ]; then
+        printf '  without TURN: the call has to find no path\n'
+        if nat_pair_call; then
+            printf '  the call connected with the path between the NATs blocked: the block does not hold\n'
+            status=1
+        fi
+    fi
+    if [ "$status" -eq 0 ]; then
+        printf '  with TURN: the call has to go through coturn\n'
+        nat_pair_call \
+            -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
+            -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
+            -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
+            || status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+        # what coturn --verbose writes for an allocation made ("allocation
+        # new") and for one a Refresh with a lifetime of zero took down
+        # ("allocation refreshed ... lifetime=0"); the latter has to be as
+        # many as the former, both relays given back rather than lapsing.
+        # The permissions and the channel ("lifetime updated") are printed
+        # beside them, which is where the relayed path shows
+        said=$( (cd interop && docker compose --profile nat logs --no-color coturn) 2>/dev/null )
+        printf '%s\n' "$said" | grep 'allocation new,\|allocation refreshed,\|lifetime updated' \
+            | tail -40 | sed 's/^/    coturn  /'
+        allocations=$(printf '%s\n' "$said" | grep -c 'allocation new,')
+        deleted=$(printf '%s\n' "$said" | grep -c 'allocation refreshed,.*lifetime=0 ')
+        printf '  coturn: %s allocation(s), %s given back\n' "$allocations" "$deleted"
+        if [ "$allocations" -lt 2 ] || [ "$deleted" -lt "$allocations" ]; then
+            status=1
+        fi
+    fi
+    nat_pair_down -f compose.yaml -f turn/compose.override.yaml
+    unset SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD
+    return "$status"
 }
 
 # The same call again, over a link deliberately made bad in both directions.
@@ -1415,6 +1520,12 @@ if [ "$WANT" = all ] || [ "$WANT" = ice ]; then
     step "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them"
     ice_nat_flow && pass "the call found its path through both NATs, and the tone crossed it both ways" \
         || fail "full ICE through two NATs"
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = ice ] || [ "$WANT" = turn ]; then
+    step "full ICE through a relay -- the path between the two NATs blocked, coturn as TURN"
+    ice_turn_flow && pass "no path without TURN; with it, the call went through coturn and both relays were given back" \
+        || fail "full ICE through a TURN relay"
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = netem ]; then

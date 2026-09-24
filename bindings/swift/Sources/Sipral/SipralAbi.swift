@@ -706,6 +706,17 @@ public enum SipralEventKind: UInt32, Sendable {
     /// no STUN at all. `account` and `call` are `SIPRAL_HANDLE_NONE`:
     /// a socket is neither.
     case natMapping = 39
+    /// A TURN server allocated a relay for a media socket
+    /// `sipral_stack_nat_map` named, or gave none (RFC 8656). Only on a
+    /// stack created with a `turn_server`.
+    ///
+    /// `payload.relay` says which socket and what it came to. Allocated,
+    /// it is the moment a call can be placed, rung or answered on the
+    /// socket with the relay as its relayed ICE candidate — before it,
+    /// that is `SIPRAL_STATUS_WRONG_STATE`, as it is while the STUN
+    /// answer is awaited. Failed, the call goes without one. `account`
+    /// and `call` are `SIPRAL_HANDLE_NONE`: a socket is neither.
+    case natRelay = 40
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -951,6 +962,20 @@ public enum SipralNatMapping: UInt32, Sendable {
     /// have been with `SIPRAL_NAT_OFF`; a signalling socket asks again at
     /// its next refresh.
     case unanswered = 3
+}
+
+/// What a media socket's relay came to. Names for
+/// `sipral_nat_relay_event_t::outcome`.
+public enum SipralNatRelay: UInt32, Sendable {
+    /// The TURN server allocated a relay for the socket: `relayed` is
+    /// the address it relays from. A call placed, rung or answered on
+    /// the socket from now on offers it as its relayed ICE candidate.
+    case allocated = 1
+    /// There is no relay for the socket: the server refused (`code` says
+    /// with what), did not answer in thirty-nine and a half seconds, or
+    /// took back an allocation it had made. A call on the socket goes
+    /// without one, and ICE finds what path it can on the rest.
+    case failed = 2
 }
 
 /// Where a subscription is. Names for
@@ -3479,7 +3504,17 @@ public enum Sipral {
     /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
     /// for a call this stack was running media on, and keep calling until
     /// `out_packet` comes back with a `len` of zero. A call whose media never
-    /// ran leaves nothing here at all.
+    /// ran leaves nothing here, but for one thing.
+    ///
+    /// A call given a relay on a TURN server (`turn_server` on the stack's
+    /// configuration) gives it back through here too: the Refresh with a
+    /// lifetime of zero that RFC 8656 §8 deletes an allocation with,
+    /// addressed to the TURN server, from the same socket. It is queued when
+    /// the call ends, whether or not its media ever ran, and earlier when the
+    /// call turns out not to use the relay at all — its ICE policy is off, or
+    /// the far end answered without ICE — so polling here after every
+    /// `sipral_stack_poll`, not only the ones that ended a call, gives the
+    /// relay back sooner.
     ///
     /// Safety
     ///

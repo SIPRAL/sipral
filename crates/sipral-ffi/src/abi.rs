@@ -579,6 +579,7 @@ pub const SURFACE: Surface = Surface {
         crate::lifecycle::SipralRecovery::ABI,
         crate::nat::SipralNat::ABI,
         crate::nat::SipralNatMapping::ABI,
+        crate::nat::SipralNatRelay::ABI,
         crate::subscription::SipralSubscriptionState::ABI,
         crate::subscription::SipralSubscriptionEnd::ABI,
         crate::subscription::SipralDialogPhase::ABI,
@@ -614,6 +615,7 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralResolveEvent::ABI,
         crate::event::SipralMessageEvent::ABI,
         crate::nat::SipralNatEvent::ABI,
+        crate::nat::SipralNatRelayEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -917,6 +919,7 @@ mod tests {
             "SipralResolveEvent",
             "SipralMessageEvent",
             "SipralNatEvent",
+            "SipralNatRelayEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

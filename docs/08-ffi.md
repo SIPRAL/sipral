@@ -580,6 +580,38 @@ of `sipral_stack_poll_transmit` would be sent from the SIP socket by every loop
 that ignores `source` on a request — every one written so far — and would
 learn the SIP socket's mapping instead, silently.
 
+**`turn_server`, `turn_username` and `turn_password`** (task 8.5.5, appended
+at the tail after `stun_server`; `MIN_SIZE` unmoved) add a TURN server
+(RFC 8656) to the same path: with them, every media socket
+`sipral_stack_nat_map` names is also given a relay on that server, and the
+call placed, rung or answered on the socket offers it as its relayed ICE
+candidate. They need `SIPRAL_NAT_STUN` — the relay rides on the media-socket
+calls above, and the server may be the same address as `stun_server`, as one
+coturn usually is — and all three together; anything else is
+`SIPRAL_STATUS_INVALID_ARGUMENT`, and a build without `SIPRAL_FEATURE_ICE`,
+the only thing that can use a relay, answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+The password is copied into memory overwritten when the stack is destroyed,
+and it is in no event and no error text.
+
+Nothing new to call. The Allocate and its authenticated second attempt come
+out of `sipral_stack_poll_stun` after the Binding request, and the answers go
+back through `sipral_stack_receive_stun`, which hands each to the transaction
+it answers even when one server answers both. What the server said arrives as
+`SIPRAL_EVENT_KIND_NAT_RELAY` (40), with `payload.relay` naming the socket,
+the relayed address and the mapped one for `SIPRAL_NAT_RELAY_ALLOCATED`, or
+the server's error code (401, 486, 508; zero for no answer) and a reason for
+`SIPRAL_NAT_RELAY_FAILED`. A call on the socket before that event is
+`SIPRAL_STATUS_WRONG_STATE`, as it is before the mapping; after a failure it
+goes without a relay. Until its call the socket keeps its allocation alive
+through the same queue. From the call on the relay is the call's: its
+permissions, channel and refreshes go out through
+`sipral_media_poll_transmit` with the rest of the media path, and the
+Refresh with a lifetime of zero that gives it back when the call ends comes
+out of `sipral_stack_poll_farewell` with the call's other farewells, to be
+sent from the call's own socket. A call that does not use ICE — its policy is
+`SIPRAL_ICE_OFF`, or the peer answered without it — gives the relay back the
+same way as soon as that is known.
+
 ## Media across the boundary
 
 The ABI is built over `crates/sipral`, the facade that joins signalling to

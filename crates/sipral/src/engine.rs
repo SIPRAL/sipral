@@ -220,7 +220,10 @@ impl Managed {
 /// about the other too — a consultation leg to a gateway that only speaks
 /// one codec is also a call whose render delay and device belong to that
 /// gateway's headset, not to whatever the primary call is using.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Not `Clone`: it can carry a [`Relay`](crate::Relay), which is an
+/// allocation on a server, and one call is all it can serve.
+#[derive(Debug)]
 pub struct CallMedia {
     /// What to offer, in what order.
     pub catalog: CodecCatalog,
@@ -229,6 +232,10 @@ pub struct CallMedia {
     /// Where the call's media socket appears from outside, when that is not
     /// where it is bound — see [`CallMedia::public_address`].
     pub public: Option<SocketAddr>,
+    /// A relay on a TURN server, allocated from the call's media socket —
+    /// see [`CallMedia::relay`].
+    #[cfg(feature = "ice")]
+    pub relay: Option<crate::Relay>,
 }
 
 impl CallMedia {
@@ -239,7 +246,40 @@ impl CallMedia {
             catalog,
             config,
             public: None,
+            #[cfg(feature = "ice")]
+            relay: None,
         }
+    }
+
+    /// Give the call a relay on a TURN server, allocated from its media
+    /// socket with [`Relays`](crate::Relays) before the call.
+    ///
+    /// Under an [`IcePolicy`](crate::IcePolicy) that offers full ICE, the
+    /// relay is the call's relayed candidate (RFC 8445 §5.1.1.2), and the
+    /// server-reflexive address the Allocate response named goes beside it —
+    /// and into `c=` and `m=`, as [`CallMedia::public_address`] would put it,
+    /// when the call was not given one of those. ICE uses the relay only
+    /// when no cheaper pair answers. From the moment the call is described
+    /// the allocation is the call's agent's: it installs the permissions and
+    /// binds the channel the media needs, keeps the allocation and the NAT
+    /// binding under it alive, and gives it back to the server (a Refresh
+    /// with a lifetime of zero, RFC 8656 §8) when the call ends, ICE settles
+    /// on another pair, or the peer turns out to do no ICE at all. What that
+    /// sends comes out of [`MediaEngine::poll_transmit`] while the call is
+    /// being set up and [`MediaEngine::poll_farewell`] once it is over, for
+    /// the socket the relay was allocated from.
+    ///
+    /// A call that cannot use it — its catalogue offers no ICE, or only the
+    /// lite role, or the relay is of the other address family — gives it
+    /// back at once, the same way. So does a call the user agent refuses to
+    /// place, except that [`MediaEngine::place_with`] has no call to send the
+    /// farewell for then: that allocation lapses at the server instead, in
+    /// the lifetime it was granted.
+    #[cfg(feature = "ice")]
+    #[must_use]
+    pub fn relay(mut self, relay: crate::Relay) -> Self {
+        self.relay = Some(relay);
+        self
     }
 
     /// Describe the call's media socket by the address it appears at from
@@ -336,6 +376,30 @@ pub struct MediaEngine {
     /// lasts, and a renewal here must not take it away from under the call.
     #[cfg(feature = "dtls")]
     identity: Option<Arc<Identity>>,
+    /// The ICE agents of calls that were described with a relay
+    /// ([`CallMedia::relay`]) and have no session yet, waiting for the
+    /// negotiation to settle.
+    ///
+    /// Kept here rather than rebuilt from [`Managed::ice`] when the session
+    /// opens, the way every other call's agent is: the allocation inside it
+    /// is state on the TURN server, and nothing written into a description
+    /// can make it again. Driven by [`MediaEngine::handle_timeout`] and
+    /// [`MediaEngine::poll_transmit`] while it waits, so that the NAT binding
+    /// towards the server outlives a phone that rings for a minute.
+    #[cfg(feature = "ice")]
+    gathered: BTreeMap<CallHandle, crate::ice::Ice>,
+}
+
+/// What a call's first description left of the relay it was given.
+#[cfg(feature = "ice")]
+enum Kept {
+    /// The agent that holds it, for the session to run.
+    Agent(crate::ice::Ice),
+    /// The relay itself, which this call cannot use: its catalogue offers no
+    /// ICE, or only the lite role, or the relay is of the other address
+    /// family. It goes back to the server at once. Boxed, since it carries a
+    /// whole TURN client and the agent beside it is boxed already.
+    Unused(Box<crate::relay::Relay>),
 }
 
 impl MediaEngine {
@@ -371,6 +435,8 @@ impl MediaEngine {
             keys: KeySource::new(media_seed),
             #[cfg(feature = "dtls")]
             identity: None,
+            #[cfg(feature = "ice")]
+            gathered: BTreeMap::new(),
         }
     }
 
@@ -389,6 +455,17 @@ impl MediaEngine {
     #[must_use]
     pub fn mappings(&mut self, server: SocketAddr) -> crate::Mappings {
         crate::Mappings::new(server, self.keys.block())
+    }
+
+    /// Relays on the TURN server at `server`, which knows this end by
+    /// `username` and `password`, whose transaction ids are drawn from this
+    /// engine's own generator — for the reason [`MediaEngine::mappings`]
+    /// gives, which a forged Allocate response naming a relay of an
+    /// attacker's choosing makes no weaker.
+    #[cfg(feature = "ice")]
+    #[must_use]
+    pub fn relays(&mut self, server: SocketAddr, username: &str, password: &str) -> crate::Relays {
+        crate::Relays::new(server, username, password, self.keys.block())
     }
 
     /// The key and certificate this stack presents, making one if there is
@@ -606,6 +683,93 @@ impl MediaEngine {
         .map(Some)
     }
 
+    /// What a call's first description says about ICE, when the call was
+    /// given a relay: [`MediaEngine::ice_lines`], with the relayed candidate
+    /// among the ones drawn, and what is left of the relay for
+    /// [`MediaEngine::keep`] to put away once the call has a handle.
+    ///
+    /// The relay is taken into a full agent only when the call will run one:
+    /// a catalogue that offers ICE in the full role, a call that has not
+    /// already drawn its candidates, and a relay of the socket's own address
+    /// family. Anything else hands it back as [`Kept::Unused`].
+    ///
+    /// # Errors
+    ///
+    /// As [`MediaEngine::ice_lines`].
+    #[cfg(feature = "ice")]
+    #[allow(clippy::too_many_arguments)]
+    fn first_ice(
+        &mut self,
+        call: Option<CallHandle>,
+        catalog: &CodecCatalog,
+        address: SocketAddr,
+        public: Option<SocketAddr>,
+        relay: Option<crate::Relay>,
+        we_are_offerer: bool,
+        now: Instant,
+    ) -> Result<(Option<crate::ice::LocalIce>, Option<Kept>), MediaError> {
+        let Some(relay) = relay else {
+            return Ok((
+                self.ice_lines(call, catalog, address, public, we_are_offerer, now)?,
+                None,
+            ));
+        };
+        let drawn = call
+            .and_then(|call| self.calls.get(&call))
+            .is_some_and(|managed| managed.ice.is_some());
+        let usable = catalog.ice().offers()
+            && !catalog.ice().lite()
+            && !drawn
+            && relay
+                .relayed()
+                .is_some_and(|relayed| relayed.is_ipv4() == address.is_ipv4());
+        if !usable {
+            return Ok((
+                self.ice_lines(call, catalog, address, public, we_are_offerer, now)?,
+                Some(Kept::Unused(Box::new(relay))),
+            ));
+        }
+        let (local, ice) = crate::ice::LocalIce::draw_relayed(
+            &mut self.keys,
+            address,
+            public,
+            relay,
+            we_are_offerer,
+            now,
+        )?;
+        Ok((Some(local), Some(Kept::Agent(ice))))
+    }
+
+    /// Put away what a call's first description left of its relay: the
+    /// agent until the session opens, or the relay's farewell at once.
+    #[cfg(feature = "ice")]
+    fn keep(&mut self, call: CallHandle, kept: Option<Kept>, now: Instant) {
+        match kept {
+            Some(Kept::Agent(ice)) => {
+                self.gathered.insert(call, ice);
+            }
+            Some(Kept::Unused(relay)) => {
+                let server = relay.server();
+                for payload in relay.release(now) {
+                    self.farewells.push_back((call, server, payload));
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Give back the relay a call's waiting agent holds, among the call's
+    /// farewells: for a call that ended before its session opened, and for
+    /// one whose peer turned out to do no ICE.
+    #[cfg(feature = "ice")]
+    fn let_go(&mut self, call: CallHandle, now: Instant) {
+        if let Some(mut ice) = self.gathered.remove(&call) {
+            for (destination, payload) in ice.release(now) {
+                self.farewells.push_back((call, destination, payload));
+            }
+        }
+    }
+
     /// What this call says about ICE in its answer to a re-offer: what
     /// [`MediaEngine::ice_lines`] says, unless the offer is an ICE restart
     /// and this end is lite.
@@ -718,6 +882,34 @@ impl MediaEngine {
         plan: &MediaPlan,
         now: Instant,
     ) -> Result<Option<crate::ice::Ice>, MediaError> {
+        // a call described with a relay kept the agent that holds it; any
+        // way out of here that does not run it gives the relay back, since a
+        // stream on `c=`/`m=` and symmetric RTP has no use for one
+        let mut held = self.gathered.remove(&call);
+        let built = self.build_ice(call, plan, &mut held, now);
+        if let Some(mut unused) = held {
+            for (destination, payload) in unused.release(now) {
+                self.farewells.push_back((call, destination, payload));
+            }
+        }
+        built
+    }
+
+    /// [`MediaEngine::ice_for`]'s decision, running `held` when the call has
+    /// one and taking it out of the option only when it is the agent
+    /// returned.
+    ///
+    /// # Errors
+    ///
+    /// As [`MediaEngine::ice_for`].
+    #[cfg(feature = "ice")]
+    fn build_ice(
+        &mut self,
+        call: CallHandle,
+        plan: &MediaPlan,
+        held: &mut Option<crate::ice::Ice>,
+        now: Instant,
+    ) -> Result<Option<crate::ice::Ice>, MediaError> {
         let Some(managed) = self.calls.get(&call) else {
             return Ok(None);
         };
@@ -767,9 +959,16 @@ impl MediaEngine {
         if matches!(plan.rtcp, RtcpPlan::SeparatePort { .. }) {
             return Err(MediaError::IceNeedsRtcpMux);
         }
-        let seed = self.keys.block();
-        let mut ice = local.agent(address, seed, now)?;
-        ice.set_remote(&peer, now)?;
+        let mut ice = if let Some(ice) = held.take() {
+            ice
+        } else {
+            let seed = self.keys.block();
+            local.agent(address, seed, now)?
+        };
+        if let Err(error) = ice.set_remote(&peer, now) {
+            *held = Some(ice);
+            return Err(error);
+        }
         Ok(Some(ice))
     }
 
@@ -826,6 +1025,14 @@ impl MediaEngine {
             let mut slot = share::lock(held);
             if let Some(datagram) = slot.session.poll_transmit(now) {
                 return Some((*call, datagram.destination, datagram.payload.to_vec()));
+            }
+        }
+        // a call described with a relay and still waiting for its session:
+        // the keepalives that hold the NAT binding towards the TURN server
+        #[cfg(feature = "ice")]
+        for (call, ice) in &mut self.gathered {
+            if let Some(destination) = ice.take_probe() {
+                return Some((*call, destination, ice.probe().to_vec()));
             }
         }
         None
@@ -977,13 +1184,20 @@ impl MediaEngine {
             catalog,
             config,
             public,
+            #[cfg(feature = "ice")]
+            relay,
         } = media;
+        #[cfg(feature = "ice")]
+        let public = public.or_else(|| relay.as_ref().and_then(crate::Relay::mapped));
         let catalog = CallMedia::offering(catalog, public);
         let (identity, session_id) = draw(agent);
         // drawn after the identity, so that the same call placed with and
         // without SDES starts from the same SSRC and the same sequence number
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
+        #[cfg(feature = "ice")]
+        let (ice, kept) = self.first_ice(None, &catalog, local, public, relay, true, now)?;
+        #[cfg(not(feature = "ice"))]
         let ice = self.ice_lines(None, &catalog, local, public, true, now)?;
         let described = public.unwrap_or(local);
         let mut offer = write_offer(
@@ -998,6 +1212,8 @@ impl MediaEngine {
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
         let call = agent.call(account, &placing, now)?;
+        #[cfg(feature = "ice")]
+        self.keep(call, kept, now);
         self.calls.insert(
             call,
             Managed {
@@ -1073,11 +1289,18 @@ impl MediaEngine {
             catalog,
             config,
             public,
+            #[cfg(feature = "ice")]
+            relay,
         } = media;
+        #[cfg(feature = "ice")]
+        let public = public.or_else(|| relay.as_ref().and_then(crate::Relay::mapped));
         let catalog = CallMedia::offering(catalog, public);
         let (identity, session_id) = draw(agent);
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
+        #[cfg(feature = "ice")]
+        let (ice, kept) = self.first_ice(None, &catalog, local, public, relay, true, now)?;
+        #[cfg(not(feature = "ice"))]
         let ice = self.ice_lines(None, &catalog, local, public, true, now)?;
         let described = public.unwrap_or(local);
         let mut offer = write_offer(
@@ -1091,6 +1314,8 @@ impl MediaEngine {
         describe_ice(&mut offer, ice.as_ref(), None);
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let new = agent.accept_transfer(call, Some(Arc::from(offer.to_bytes())), extra, now)?;
+        #[cfg(feature = "ice")]
+        self.keep(new, kept, now);
         self.calls.insert(
             new,
             Managed {
@@ -1191,7 +1416,11 @@ impl MediaEngine {
             catalog,
             config,
             public,
+            #[cfg(feature = "ice")]
+            relay,
         } = media;
+        #[cfg(feature = "ice")]
+        let public = public.or_else(|| relay.as_ref().and_then(crate::Relay::mapped));
         let catalog = CallMedia::offering(catalog, public);
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         if managed.rung_with_media || agent.has_described(call) {
@@ -1212,6 +1441,14 @@ impl MediaEngine {
         }
         let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Answering, Some(&offer), None, now)?;
+        #[cfg(feature = "ice")]
+        let ice = {
+            let (ice, kept) =
+                self.first_ice(Some(call), &catalog, local, public, relay, false, now)?;
+            self.keep(call, kept, now);
+            ice
+        };
+        #[cfg(not(feature = "ice"))]
         let ice = self.ice_lines(Some(call), &catalog, local, public, false, now)?;
         let mut description = write_answer(
             &catalog,
@@ -1313,13 +1550,25 @@ impl MediaEngine {
     ) -> Result<(), MediaError> {
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         if managed.rung_with_media {
+            // the call was described when it rang, relay and all; a second
+            // one handed in here has nothing to be and goes back
+            #[cfg(feature = "ice")]
+            self.keep(
+                call,
+                media.relay.map(|relay| Kept::Unused(Box::new(relay))),
+                now,
+            );
             return self.answer_after_ring(agent, call, now);
         }
         let CallMedia {
             catalog,
             config,
             public,
+            #[cfg(feature = "ice")]
+            relay,
         } = media;
+        #[cfg(feature = "ice")]
+        let public = public.or_else(|| relay.as_ref().and_then(crate::Relay::mapped));
         let catalog = CallMedia::offering(catalog, public);
         let described = public.unwrap_or(local);
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
@@ -1338,6 +1587,21 @@ impl MediaEngine {
             Side::Offering
         };
         let dtls = self.dtls_lines(&catalog, side, offered.as_ref(), None, now)?;
+        #[cfg(feature = "ice")]
+        let ice = {
+            let (ice, kept) = self.first_ice(
+                Some(call),
+                &catalog,
+                local,
+                public,
+                relay,
+                offered.is_none(),
+                now,
+            )?;
+            self.keep(call, kept, now);
+            ice
+        };
+        #[cfg(not(feature = "ice"))]
         let ice = self.ice_lines(Some(call), &catalog, local, public, offered.is_none(), now)?;
         let mut description = match offered.as_ref() {
             Some(offer) => write_answer(
@@ -1557,16 +1821,34 @@ impl MediaEngine {
         for held in self.sessions.values() {
             share::lock(held).session.handle_timeout(now);
         }
+        // and the agents of calls described with a relay that have no
+        // session yet: the keepalive towards the TURN server is on their
+        // clock, and what it sends comes out of `poll_transmit`
+        #[cfg(feature = "ice")]
+        for ice in self.gathered.values_mut() {
+            ice.top_up();
+            ice.handle_timeout(now);
+        }
     }
 
     /// When to call [`MediaEngine::handle_timeout`] or
     /// [`MediaEngine::poll_rtcp`], if nothing arrives first.
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
-        self.sessions
+        let sessions = self
+            .sessions
             .values()
             .filter_map(|held| share::lock(held).session.poll_timeout())
-            .min()
+            .min();
+        #[cfg(feature = "ice")]
+        let waiting = self
+            .gathered
+            .values()
+            .filter_map(crate::ice::Ice::deadline)
+            .min();
+        #[cfg(not(feature = "ice"))]
+        let waiting = None;
+        [sessions, waiting].into_iter().flatten().min()
     }
 
     /// The RTCP goodbye of a call that has ended (RFC 3550 §6.6).
@@ -1584,6 +1866,12 @@ impl MediaEngine {
     /// One at a time, like every other poll here. A caller loops until it
     /// answers `None`, and should do so after draining events — a goodbye that
     /// is never polled is a far end left waiting out its own timeout.
+    ///
+    /// A call given a relay ([`CallMedia::relay`]) gives it back here too:
+    /// the Refresh with a lifetime of zero that deletes the allocation (RFC
+    /// 8656 §8), addressed to the TURN server, when the call ends — whether
+    /// or not its session ever opened — or as soon as the call is known not
+    /// to use it.
     #[must_use]
     pub fn poll_farewell(&mut self) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
         self.farewells.pop_front()
@@ -1972,6 +2260,11 @@ impl MediaEngine {
             self.events.push_back((partner, MediaEvent::Unjoined));
         }
         self.calls.remove(&call);
+        // a call that ends before its session opened — cancelled while it
+        // rang, refused, never answered — still holds the relay it was
+        // described with, and the server would hold it for minutes more
+        #[cfg(feature = "ice")]
+        self.let_go(call, now);
         let Some(held) = self.sessions.remove(&call) else {
             return;
         };
@@ -2009,6 +2302,13 @@ impl MediaEngine {
                 self.farewells
                     .push_back((call, datagram.destination, datagram.payload.to_vec()));
             }
+        }
+        // and last, because the goodbyes above may have left through it: the
+        // relay goes back to its server (RFC 8656 §8), rather than holding a
+        // port and the account's quota there until its lifetime runs out
+        #[cfg(feature = "ice")]
+        for (destination, payload) in session.release_relays(now) {
+            self.farewells.push_back((call, destination, payload));
         }
         // Best effort, and never fatal: a call that has already ended is
         // not going to un-end because a collector could not be reached.

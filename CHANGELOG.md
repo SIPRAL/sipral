@@ -20,6 +20,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   offers and answers and no SID frames from this end — and
   `sipral_stack_settings_t::g729_annex_b` reads it back, both appended at
   their struct's tail.
+- **A call can be relayed through a TURN server.** `sipral::Relays`
+  allocates a relay (RFC 8656) on a TURN server for a media socket before
+  its call, with the long-term credential the server knows this end by, and
+  `CallMedia::relay` hands it to the call: under a full ICE policy it is the
+  call's relayed candidate, beside the host and server-reflexive ones, and
+  ICE uses it only when nothing cheaper answers. From then on the call's
+  agent installs the permissions and binds the channel the media needs,
+  keeps the allocation and the NAT binding under it alive, and gives it
+  back with a Refresh of lifetime zero when the call ends, when ICE settles
+  on another pair, or when the peer answers without ICE. Over the C ABI,
+  `turn_server`, `turn_username` and `turn_password` on
+  `sipral_stack_config_t` do the same for every socket
+  `sipral_stack_nat_map` names, through the calls that already carry its
+  STUN request, and `SIPRAL_EVENT_KIND_NAT_RELAY` (40) says what the server
+  gave. The password is in no `Debug`, no event and no error text, and is
+  overwritten when it is dropped. `scripts/lab.sh turn` proves it: two
+  stacks behind two NATs that drop everything between them but SIP fail to
+  connect without a relay, and with one the call completes through coturn
+  and both allocations are given back.
 - **`crates/sipral-aec-webrtc` ships its own licence texts.** It sits outside
   the workspace `tools/license-gen` generates `THIRD-PARTY-LICENSES.txt`
   from, so nothing it links — the three `webrtc-audio-processing` crates,
@@ -885,6 +904,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **`CallMedia` is no longer `Clone` or `PartialEq`.** It can carry a relay
+  on a TURN server, which is an allocation one call holds, not a value two
+  calls can share or be compared by; build one per call with
+  `CallMedia::new`.
 - **One header field's value may be 16 KiB, up from 4 KiB.**
   `msg::Limits::DEFAULT.max_header_value_bytes` was tight for real traffic:
   a full RFC 8224 `Identity` with rich call data, a long `History-Info`, or a

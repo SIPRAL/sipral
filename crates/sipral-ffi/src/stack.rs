@@ -439,6 +439,38 @@ record! {
         /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
         /// unmoved.
         pub g729_annex_b: u32,
+        /// A TURN server (RFC 8656) to allocate a relay on for every media
+        /// socket `sipral_stack_nat_map` names, as `host:port`: an address,
+        /// not a name. The relay becomes the relayed ICE candidate of the call
+        /// placed, rung or answered on that socket — the path of last resort,
+        /// used only when no cheaper pair answers — and goes back to the
+        /// server when the call ends. See [`crate::nat`].
+        ///
+        /// Optional, and only with `SIPRAL_NAT_STUN`, since it rides on the
+        /// same media-socket calls; it may be the same address as
+        /// `stun_server`. `turn_username` and `turn_password` are then
+        /// required: a TURN server that hands out relays to anyone is one
+        /// somebody else is already using. `SIPRAL_STATUS_NOT_SUPPORTED` in
+        /// a build without `SIPRAL_FEATURE_ICE`, which is the only thing that
+        /// can use a relay. Copied; the caller's buffer is its own again when
+        /// this returns.
+        ///
+        /// Appended at the tail (task 8.5.5), with the five below; the pinned
+        /// `MIN_SIZE` is unmoved.
+        pub turn_server: *const c_char,
+        /// How many bytes of it.
+        pub turn_server_len: usize,
+        /// The user name of the long-term credential the TURN server knows
+        /// this end by (RFC 8489 §9.2).
+        pub turn_username: *const c_char,
+        /// How many bytes of it.
+        pub turn_username_len: usize,
+        /// Its password. Copied into memory that is overwritten when the
+        /// stack is destroyed, and never written to a log, an event or an
+        /// error text.
+        pub turn_password: *const c_char,
+        /// How many bytes of it.
+        pub turn_password_len: usize,
     }
 }
 
@@ -1237,6 +1269,9 @@ pub(crate) unsafe fn create_on(
     let timers = timers_for(speaks.protocol(), &config)?;
     let media = media_for(&config)?;
     let stun_server = unsafe { crate::nat::configured(&config) }?;
+    // borrowed from the caller until `Nat::start` below copies it into the
+    // one place it is kept
+    let turn_server = unsafe { crate::nat::turn_configured(&config) }?;
     let mut endpoint = EndpointConfig::default();
     endpoint.timers = timers;
 
@@ -1307,6 +1342,7 @@ pub(crate) unsafe fn create_on(
     crate::nat::Nat::start(
         &mut state,
         stun_server,
+        turn_server,
         TRANSPORT,
         speaks.protocol(),
         local,
@@ -2132,6 +2168,12 @@ pub(crate) mod tests {
             stun_server: ptr::null(),
             stun_server_len: 0,
             g729_annex_b: 0,
+            turn_server: ptr::null(),
+            turn_server_len: 0,
+            turn_username: ptr::null(),
+            turn_username_len: 0,
+            turn_password: ptr::null(),
+            turn_password_len: 0,
         }
     }
 

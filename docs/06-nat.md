@@ -76,7 +76,7 @@ chosen for it rather than for the general case.
 |---|---|---|
 | ICE, in any role | **off** | **143 bytes** per candidate, at a floor of one, plus a round of checks before the first audio packet |
 | STUN | off | one 28-byte Binding request per socket (the header and FINGERPRINT), again every 25 s on the signalling socket; nothing on a request |
-| TURN | off | a 4-byte channel header per media packet |
+| TURN | off | a 4-byte channel header per media packet on a relayed pair, 36 bytes of Send indication until the channel is bound; one more candidate line; an Allocate (two round trips) before the offer |
 
 The 143 is measured, not estimated, and pinned by
 `what_declaring_ice_costs_on_the_wire` in `crates/sipral-nat/src/ice/sdp.rs` so
@@ -100,15 +100,17 @@ the default is still the table above. The switch decides what an offer
 carries; the feature `ice` decides whether the agent is compiled in at all,
 and `Capabilities::ice` says which before a call is placed.
 
-What the switch turns on is a host candidate, and a server-reflexive one
-beside it when the call's media socket was mapped by STUN first (below). The
-agent itself is configured with no STUN and no TURN server. That cut is what
-keeps an offer a single pass of work — with no server to wait for, gathering
-finishes before the call that started it returns — so neither the Rust API nor
-the C ABI grew a two-phase description to accommodate it. The reflexive
-candidate costs one more 143-byte line; it does not cost a second question to
-the server, because it is the answer the stack already has for the `c=` line a
-peer without ICE reads.
+What the switch turns on is a host candidate, a server-reflexive one beside it
+when the call's media socket was mapped by STUN first (below), and a relayed
+one when the socket was given a relay on a TURN server first ([TURN](#turn)).
+The agent itself is configured with no STUN and no TURN server. That cut is
+what keeps an offer a single pass of work — with no server to wait for,
+gathering finishes before the call that started it returns — so neither the
+Rust API nor the C ABI grew a two-phase description to accommodate it. The
+reflexive candidate costs one more 143-byte line; it does not cost a second
+question to the server, because it is the answer the stack already has for the
+`c=` line a peer without ICE reads. The relayed one is asked for before the
+call in the same way, from the same socket.
 
 **A peer that does not do ICE is not a peer that loses its call.** Three
 conditions each drop the agent and leave the stream on `c=`/`m=` and symmetric
@@ -295,8 +297,95 @@ dropped, with the password's own best effort — no volatile write without
 `unsafe`, and a move leaves the bytes it moved from — and neither it nor the
 password reaches a `Debug`.
 
-Nothing in the facade reaches it yet: the agent the facade builds names no
-TURN server.
+### Joined to a call
+
+The facade reaches it the way it reaches STUN: the application asks before the
+call, from the socket the call will use, and hands the answer to the call.
+`sipral::Relays` allocates a relay on one TURN server for each media socket it
+is given — `MediaEngine::relays` draws its transaction ids from the engine's
+own generator, since a guessed id is a forged Allocate response naming a relay
+of the attacker's choosing — the application's socket sends what it hands back
+and hands in what arrives, and `CallMedia::relay` gives the finished
+allocation to the call. The C ABI does the same with `turn_server`,
+`turn_username` and `turn_password` beside `stun_server`: every socket
+`sipral_stack_nat_map` names gets a relay too, through the same two calls
+that carry its Binding request, and `SIPRAL_EVENT_KIND_NAT_RELAY` says what
+the server gave (`docs/08-ffi.md`). One coturn is usually both servers, from
+one address; a Binding answer goes to the mapping and every other answer to
+the relay.
+
+Before the call, and not by the agent while it gathers, for the reason the
+reflexive candidate above is: an Allocate under long-term credentials is two
+round trips, the first answered 401, and an agent that ran them would hold the
+offer until they came back — the two-phase description the STUN step avoided,
+and still avoids. An application that allocates when it binds the socket, while
+the user is still dialling, has the relay when the offer is written.
+
+Under a full `IcePolicy` the relay is the call's relayed candidate
+(`IceAgent::add_relayed`), with the server-reflexive address the Allocate
+response named beside it; that address also goes into `c=` and `m=` when the
+call was not given a STUN answer, since it is the same answer from the same
+socket. The relayed address is never the default candidate, although RFC 8445
+§5.1.4 recommends it: a peer that does no ICE drops the agent — the fallback
+above — and with it every permission the relay would need before anything the
+peer sent reached this end, so `c=` naming the relay would hand that peer an
+address that delivers nothing. ICE ranks a relayed candidate last (type
+preference 0), and uses it only when nothing cheaper answers.
+
+From the description on the allocation is the agent's, exactly as one it had
+gathered: a permission for every address among the peer's candidates as soon
+as they arrive, a channel bound for the pair it uses (Send indications until
+the binding is confirmed), the allocation, the permissions and the channel
+refreshed before they lapse, and a Binding indication towards the server every
+Tr so that the NAT binding under all of it survives. It is given back — a
+Refresh with a lifetime of zero (RFC 8656 §8) — three seconds after ICE
+concludes on a pair that does not use it (RFC 8445 §8.3.1), when the call
+ends, and at once when the call cannot use it: a peer that answered without
+ICE, a catalogue that offers none, the lite role. A relay left to lapse holds a
+port and the account's quota on the server for up to ten minutes, and a user
+whose quota is a handful of allocations cannot place the next call until then.
+What the giving back sends leaves among the call's farewells
+(`MediaEngine::poll_farewell`, `sipral_stack_poll_farewell`), from the call's
+own socket.
+
+The credential is a `LongTermCredentials` from the moment it is read: its
+password is overwritten when it is dropped, with the same best effort as the
+derived key, and no `Debug`, event or error text carries it. The C ABI reads it
+out of the caller's configuration once, straight into that.
+
+Between the call being described and its session opening — a caller waiting
+for the 200, a callee ringing — the agent that holds the relay waits in the
+engine rather than being rebuilt from the description, as every other call's
+agent is: an allocation is state on a server, and nothing written down can
+make it again. `MediaEngine::handle_timeout` and `MediaEngine::poll_transmit`
+drive it while it waits, so a Rust application that polls them keeps the NAT
+binding towards the server alive through a long ring. The C ABI drives its
+timer too but has no queue that sends from a call's socket before the call's
+media handle exists, so there its Binding indications wait with it and leave
+when the session opens. The allocation itself lasts ten minutes and outlives
+any ring; a NAT that drops an idle binding after thirty seconds, in front of a
+C ABI phone rung for longer than that, is the case not covered yet.
+
+Not done yet: TURN over TCP or TLS to the server, for the network that lets
+nothing out but 443. The client has the framing; the agent's datagram model
+does not carry a stream.
+
+### Proven in the lab
+
+`scripts/lab.sh turn`, and the `ice` word after the step above, puts the two
+stacks of that step behind the same two NATs and tells each NAT to drop every
+datagram to or from the other's outside address that is not SIP: host
+candidates have no route and server-reflexive ones are dropped, so only a path
+through a third party can connect. coturn becomes a TURN server with long-term
+credentials for that step alone (`interop/turn/compose.override.yaml`, a user
+and a password drawn for the run, so none is written down). The same call
+without TURN has to find no path, and finds none; that is what proves the
+block holds. With a relay allocated on each end, the call completes with the
+tone crossing both ways, the caller failing any path that does not go through
+coturn, and coturn's own log has to show both allocations given back with a
+Refresh of lifetime zero by the time the call has ended, rather than left to
+lapse. The path ICE chose and what the relay cost the call's start are under
+[What ICE costs a call's start, measured](#what-ice-costs-a-calls-start-measured).
 
 ## ICE-lite
 
@@ -565,12 +654,26 @@ from the offer to `MediaEvent::PathChosen` is the audio a call does not have
 at its start. The lab harness prints it on every ICE flow, twice: from the
 moment `place_with` wrote the offer, and from the answer arriving. Measured on
 the lab VM (Debian 13, 32 cores, Docker bridges, no impairment), 24 September
-2026, six runs of the lite flow and four of the two-NAT one:
+2026, six runs of the lite flow, four of the two-NAT one and three of the
+relayed one:
 
 | Peer | Offer to path | Answer to path |
 |---|---|---|
 | ICE-lite (`headless-socket-agent --ice-lite`), same network | 66–70 ms | 57–59 ms |
 | Full, each end behind a NAT of its own | 1115–1116 ms | 1112–1113 ms |
+| Full, the two NATs blocking each other, through a TURN relay | 1117–1118 ms | 1112–1115 ms |
+
+The relayed call chose the same path all three times: the caller's
+server-reflexive candidate to the callee's relayed one, so the audio crossed
+coturn once, on a channel bound on the callee's allocation — one relay is all
+a path needs, and ICE ranks a pair with one relayed end above a pair with two.
+The caller's own relay carried nothing and was given back. The relay adds
+nothing measurable to ICE's own start-up, for the reason below; what it adds
+is the Allocate, two round trips before the offer — 6 ms on this bridge on
+every run at both ends, and twice the round trip to the TURN server on a real
+network. The harness allocates just before it places the call, so there it is
+added to the call's start; an application that allocates when it binds the
+socket, while the user is still dialling, pays it before anyone is waiting.
 
 The two differ by one setting, not by the network. Against a lite peer there
 is one pair, and a controlling agent nominates it as soon as its check comes

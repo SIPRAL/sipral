@@ -2252,7 +2252,17 @@ entry! {
     /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
     /// for a call this stack was running media on, and keep calling until
     /// `out_packet` comes back with a `len` of zero. A call whose media never
-    /// ran leaves nothing here at all.
+    /// ran leaves nothing here, but for one thing.
+    ///
+    /// A call given a relay on a TURN server (`turn_server` on the stack's
+    /// configuration) gives it back through here too: the Refresh with a
+    /// lifetime of zero that RFC 8656 §8 deletes an allocation with,
+    /// addressed to the TURN server, from the same socket. It is queued when
+    /// the call ends, whether or not its media ever ran, and earlier when the
+    /// call turns out not to use the relay at all — its ICE policy is off, or
+    /// the far end answered without ICE — so polling here after every
+    /// `sipral_stack_poll`, not only the ones that ended a call, gives the
+    /// relay back sooner.
     ///
     /// # Safety
     ///

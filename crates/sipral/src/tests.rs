@@ -5134,6 +5134,159 @@ fn a_call_that_requires_ice_refuses_the_peer_that_has_none_rather_than_falling_b
     assert_eq!(failed, vec![&MediaError::IceRequired]);
 }
 
+/// A relay allocated for the caller's media socket, against a TURN server
+/// that asks for no credential (`crate::relay::tests::answer`).
+#[cfg(feature = "ice")]
+fn relay_for_the_caller(pair: &mut Pair) -> crate::Relay {
+    use crate::relay::tests::{SERVER, answer};
+
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    let mut relays = pair.caller.engine.relays(server, "alice", "correct horse");
+    relays.allocate(caller_media(), pair.now);
+    while let Some(request) = relays.poll_transmit() {
+        let reply = answer(&request.payload).expect("an answer");
+        assert!(relays.receive(request.local, request.destination, &reply, pair.now));
+    }
+    relays.take(caller_media()).expect("the relay")
+}
+
+/// Place the caller's call with a relay for its media socket, and take it all
+/// the way to confirmed.
+#[cfg(feature = "ice")]
+fn place_with_a_relay(pair: &mut Pair, catalog: CodecCatalog) -> CallHandle {
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let relay = relay_for_the_caller(pair);
+    let media = CallMedia::new(catalog, MediaConfig::default()).relay(relay);
+    let placed = pair
+        .caller
+        .engine
+        .place_with(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            media,
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    placed
+}
+
+/// Every Refresh of lifetime zero among a stack's farewells, and the call and
+/// address each one went for.
+#[cfg(feature = "ice")]
+fn relays_given_back(stack: &mut Stack) -> Vec<(CallHandle, SocketAddr)> {
+    std::iter::from_fn(|| stack.engine.poll_farewell())
+        .filter(|(_, _, payload)| crate::relay::tests::refresh_lifetime(payload) == Some(0))
+        .map(|(call, destination, _)| (call, destination))
+        .collect()
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_relay_is_offered_beside_the_host_candidate_and_given_back_when_the_call_ends() {
+    use crate::relay::tests::{MAPPED, RELAYED, SERVER};
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let call = place_with_a_relay(&mut pair, catalog);
+    let remote = pair.callee.call().expect("the callee's side of the call");
+
+    let offer = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw an offer")
+        .to_string();
+    // RFC 8839 §5.1: a relayed candidate names the mapped address the
+    // Allocate returned as its related address
+    assert!(
+        offer.contains("198.51.100.9 50000 typ relay raddr 203.0.113.7 rport 41002"),
+        "{offer}"
+    );
+    assert!(offer.contains("192.0.2.1 40000 typ host"), "{offer}");
+    assert!(offer.contains("typ srflx"), "{offer}");
+    // and what the server saw is what a peer without ICE is told, as
+    // `CallMedia::public_address` would have put it
+    assert!(offer.contains("c=IN IP4 203.0.113.7\r\n"), "{offer}");
+    assert!(offer.contains("m=audio 41002 "), "{offer}");
+    assert_eq!(MAPPED, "203.0.113.7:41002");
+    assert_eq!(RELAYED, "198.51.100.9:50000");
+
+    // the two ends reach each other directly here, so ICE settles on the
+    // host pair and the relay carries nothing
+    pair.check_paths(call, remote);
+    let path = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .ice_path()
+        .expect("a path");
+    assert_eq!(path, (caller_media(), callee_media()));
+
+    pair.caller
+        .agent
+        .hangup(call, pair.now)
+        .expect("the hangup");
+    pair.settle();
+    pair.caller.drain(pair.now, false);
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    assert_eq!(
+        relays_given_back(&mut pair.caller),
+        vec![(call, server)],
+        "the allocation goes back with the call rather than lapsing"
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_relay_a_call_without_ice_cannot_use_goes_back_at_once() {
+    use crate::relay::tests::SERVER;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog.clone());
+    let call = place_with_a_relay(&mut pair, catalog);
+    let offer = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw an offer")
+        .to_string();
+    assert!(!offer.contains("a=candidate"), "{offer}");
+    assert!(offer.contains("c=IN IP4 203.0.113.7\r\n"), "{offer}");
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    assert_eq!(relays_given_back(&mut pair.caller), vec![(call, server)]);
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_relay_goes_back_when_the_peer_answers_without_ice() {
+    use crate::relay::tests::SERVER;
+
+    let mine = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let theirs = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::asymmetric(mine.clone(), theirs);
+    let call = place_with_a_relay(&mut pair, mine);
+    // the fallback: a session on `c=`/`m=` and symmetric RTP, and no agent
+    // to keep the allocation for
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .ice_path()
+            .is_none()
+    );
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    assert_eq!(relays_given_back(&mut pair.caller), vec![(call, server)]);
+}
+
 #[cfg(feature = "ice")]
 #[test]
 fn a_hold_does_not_withdraw_ice_from_a_call_that_had_it() {

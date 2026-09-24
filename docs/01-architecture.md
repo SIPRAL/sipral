@@ -269,13 +269,15 @@ state carried across, described in full in
 Sipral crate of its own, the same way `sipral-ua` and the media crates still
 do not name each other; only the facade's manifest grows an edge.
 
-What is still not joined is the rest of `sipral-nat`: the lite ICE agent and
-the TURN client. The RFC 7983 demultiplexing rule, the full agent and the STUN
-Binding client are — the last through `sipral::Mappings`, which asks where
+All of `sipral-nat` is joined now. The RFC 7983 demultiplexing rule, the full
+agent, the lite one behind `IcePolicy::Lite`, the STUN Binding client and the
+TURN client are — the STUN client through `sipral::Mappings`, which asks where
 each socket appears from and hands the answer to `UserAgent::readdress` for the
 `Contact` and to `CallMedia::public_address` for `c=`, `m=` and the reflexive
-candidate. The mapping crosses `sipral-ua` as a `SocketAddr`; `sipral-ua` still
-names no NAT crate.
+candidate, and the TURN client through `sipral::Relays`, which allocates a
+relay from a media socket before its call and hands it to `CallMedia::relay`,
+where the full agent takes it over as the relayed candidate. The mapping
+crosses `sipral-ua` as a `SocketAddr`; `sipral-ua` still names no NAT crate.
 
 ## What is not in the tree
 

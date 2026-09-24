@@ -151,6 +151,8 @@ mod nat;
 mod payloads;
 mod pipeline;
 mod record;
+#[cfg(feature = "ice")]
+mod relay;
 mod session;
 mod share;
 mod stats;
@@ -178,12 +180,18 @@ pub use keying::SrtpPolicy;
 #[cfg(feature = "stun")]
 pub use nat::{DEFAULT_REFRESH, Keep, MappingEvent, MappingState, Mappings, StunDatagram};
 pub use record::RecordingSink;
+#[cfg(feature = "ice")]
+pub use relay::{Relay, RelayDatagram, RelayEvent, Relays};
 pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback};
 pub use share::{SessionGuard, SessionShare, SessionUnavailable};
 /// Why a STUN transaction ended without an address, as
 /// [`MappingEvent::Unanswered`] reports it.
 #[cfg(feature = "stun")]
 pub use sipral_nat::stun::Failure as StunFailure;
+/// Why a TURN server gave no relay, or took one back, as
+/// [`RelayEvent::Failed`] reports it.
+#[cfg(feature = "ice")]
+pub use sipral_nat::turn::TurnError as TurnFailure;
 pub use stats::StreamStatistics;
 
 /// What the negotiation produces and consumes, from the layer that owns the

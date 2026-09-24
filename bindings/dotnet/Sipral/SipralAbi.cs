@@ -988,6 +988,19 @@ public enum SipralEventKind : uint
     /// a socket is neither.
     /// </summary>
     NatMapping = 39,
+    /// <summary>
+    /// A TURN server allocated a relay for a media socket
+    /// `sipral_stack_nat_map` named, or gave none (RFC 8656). Only on a
+    /// stack created with a `turn_server`.
+    ///
+    /// `payload.relay` says which socket and what it came to. Allocated,
+    /// it is the moment a call can be placed, rung or answered on the
+    /// socket with the relay as its relayed ICE candidate — before it,
+    /// that is `SIPRAL_STATUS_WRONG_STATE`, as it is while the STUN
+    /// answer is awaited. Failed, the call goes without one. `account`
+    /// and `call` are `SIPRAL_HANDLE_NONE`: a socket is neither.
+    /// </summary>
+    NatRelay = 40,
 }
 
 /// <summary>
@@ -1399,6 +1412,27 @@ public enum SipralNatMapping : uint
     /// its next refresh.
     /// </summary>
     Unanswered = 3,
+}
+
+/// <summary>
+/// What a media socket's relay came to. Names for
+/// `sipral_nat_relay_event_t::outcome`.
+/// </summary>
+public enum SipralNatRelay : uint
+{
+    /// <summary>
+    /// The TURN server allocated a relay for the socket: `relayed` is
+    /// the address it relays from. A call placed, rung or answered on
+    /// the socket from now on offers it as its relayed ICE candidate.
+    /// </summary>
+    Allocated = 1,
+    /// <summary>
+    /// There is no relay for the socket: the server refused (`code` says
+    /// with what), did not answer in thirty-nine and a half seconds, or
+    /// took back an allocation it had made. A call on the socket goes
+    /// without one, and ICE finds what path it can on the rest.
+    /// </summary>
+    Failed = 2,
 }
 
 /// <summary>
@@ -2238,6 +2272,50 @@ public struct SipralStackConfig
     /// unmoved.
     /// </summary>
     public uint G729AnnexB;
+    /// <summary>
+    /// A TURN server (RFC 8656) to allocate a relay on for every media
+    /// socket `sipral_stack_nat_map` names, as `host:port`: an address,
+    /// not a name. The relay becomes the relayed ICE candidate of the call
+    /// placed, rung or answered on that socket — the path of last resort,
+    /// used only when no cheaper pair answers — and goes back to the
+    /// server when the call ends. See crate::nat.
+    ///
+    /// Optional, and only with `SIPRAL_NAT_STUN`, since it rides on the
+    /// same media-socket calls; it may be the same address as
+    /// `stun_server`. `turn_username` and `turn_password` are then
+    /// required: a TURN server that hands out relays to anyone is one
+    /// somebody else is already using. `SIPRAL_STATUS_NOT_SUPPORTED` in
+    /// a build without `SIPRAL_FEATURE_ICE`, which is the only thing that
+    /// can use a relay. Copied; the caller's buffer is its own again when
+    /// this returns.
+    ///
+    /// Appended at the tail (task 8.5.5), with the five below; the pinned
+    /// `MIN_SIZE` is unmoved.
+    /// </summary>
+    public IntPtr TurnServer;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TurnServerLen;
+    /// <summary>
+    /// The user name of the long-term credential the TURN server knows
+    /// this end by (RFC 8489 §9.2).
+    /// </summary>
+    public IntPtr TurnUsername;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TurnUsernameLen;
+    /// <summary>
+    /// Its password. Copied into memory that is overwritten when the
+    /// stack is destroyed, and never written to a log, an event or an
+    /// error text.
+    /// </summary>
+    public IntPtr TurnPassword;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TurnPasswordLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -3996,6 +4074,66 @@ public struct SipralNatEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.NatRelay
+/// carries.
+///
+/// The addresses and the reason are text, not NUL-terminated, and the
+/// library's: valid for as long as the callback runs. Nothing of the
+/// credential is in any of them.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralNatRelayEvent
+{
+    /// <summary>
+    /// A SipralNatRelay.
+    /// </summary>
+    public uint Outcome;
+    /// <summary>
+    /// For `SIPRAL_NAT_RELAY_FAILED`, the STUN error code the server
+    /// refused with — 401 for a credential it does not accept, 486 for a
+    /// user at its allocation quota, 508 for a server with nothing left —
+    /// and zero when there was none: no answer at all, or an answer this
+    /// end could not accept. Zero for `SIPRAL_NAT_RELAY_ALLOCATED`.
+    /// </summary>
+    public uint Code;
+    /// <summary>
+    /// The media socket, as `sipral_stack_nat_map` named it.
+    /// </summary>
+    public IntPtr Local;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint LocalLen;
+    /// <summary>
+    /// The relayed address, `host:port`. Empty for
+    /// `SIPRAL_NAT_RELAY_FAILED`.
+    /// </summary>
+    public IntPtr Relayed;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint RelayedLen;
+    /// <summary>
+    /// Where the server saw the socket from, when it said. Empty
+    /// otherwise.
+    /// </summary>
+    public IntPtr Mapped;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint MappedLen;
+    /// <summary>
+    /// Why there is no relay, in English, for a log. Empty for
+    /// `SIPRAL_NAT_RELAY_ALLOCATED`.
+    /// </summary>
+    public IntPtr Reason;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ReasonLen;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -4065,6 +4203,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralNatEvent Nat;
+    /// <summary>
+    /// For SipralEventKind.NatRelay.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralNatRelayEvent Relay;
 }
 
 /// <summary>
@@ -6926,7 +7069,17 @@ public static class Sipral
     /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
     /// for a call this stack was running media on, and keep calling until
     /// `out_packet` comes back with a `len` of zero. A call whose media never
-    /// ran leaves nothing here at all.
+    /// ran leaves nothing here, but for one thing.
+    ///
+    /// A call given a relay on a TURN server (`turn_server` on the stack's
+    /// configuration) gives it back through here too: the Refresh with a
+    /// lifetime of zero that RFC 8656 §8 deletes an allocation with,
+    /// addressed to the TURN server, from the same socket. It is queued when
+    /// the call ends, whether or not its media ever ran, and earlier when the
+    /// call turns out not to use the relay at all — its ICE policy is off, or
+    /// the far end answered without ICE — so polling here after every
+    /// `sipral_stack_poll`, not only the ones that ended a call, gives the
+    /// relay back sooner.
     ///
     /// Safety
     ///

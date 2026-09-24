@@ -25,6 +25,18 @@
 //! `MediaEvent::PathChosen`, and from the answer to it. The second is what
 //! ICE adds to a call's start; the first includes the INVITE's own round
 //! trip. `docs/06-nat.md` quotes both.
+//!
+//! # Through a relay
+//!
+//! With `SIPRAL_TURN_SERVER`, `SIPRAL_TURN_USER` and `SIPRAL_TURN_PASSWORD`
+//! set, each end also allocates a relay on that TURN server for its media
+//! socket before the call (`sipral::Relays`) and hands it to the call
+//! (`CallMedia::relay`). `scripts/lab.sh ice` runs that with the two NATs
+//! told to drop everything between them but SIP, so the server-reflexive
+//! pair the step above found is gone and the relay is the one path left: the
+//! caller then fails a path that does not go through the TURN server, and
+//! prints how long the allocation took, which is what TURN adds to a call's
+//! start before the offer can be written.
 
 use std::env;
 use std::io::Write as _;
@@ -33,7 +45,7 @@ use std::time::{Duration, Instant};
 
 use sipral::{
     Account, CallMedia, Event, IcePolicy, Keep, MappingEvent, Mappings, MediaConfig, OutgoingCall,
-    UaEvent,
+    Relay, RelayEvent, Relays, UaEvent,
 };
 
 use crate::audio::Media;
@@ -103,17 +115,113 @@ fn map(
     }
 }
 
-/// A media socket bound, and where it appears from outside: its address for
-/// the call, and its server-reflexive one.
+/// The TURN server both ends allocate on, and the credential it knows them
+/// by, when `SIPRAL_TURN_SERVER` names one.
+///
+/// # Errors
+/// A server that is not an address, or one named without a credential.
+fn turn_server() -> Result<Option<(SocketAddr, String, String)>, String> {
+    let Ok(server) = env::var("SIPRAL_TURN_SERVER") else {
+        return Ok(None);
+    };
+    let server = server
+        .parse()
+        .map_err(|_| "SIPRAL_TURN_SERVER does not name an address".to_owned())?;
+    let (Ok(user), Ok(password)) = (
+        env::var("SIPRAL_TURN_USER"),
+        env::var("SIPRAL_TURN_PASSWORD"),
+    ) else {
+        return Err(
+            "SIPRAL_TURN_SERVER needs SIPRAL_TURN_USER and SIPRAL_TURN_PASSWORD".to_owned(),
+        );
+    };
+    Ok(Some((server, user, password)))
+}
+
+/// A relay for `media`'s socket, known to the call as `local`, allocated on
+/// the TURN server `turn` names, and how long the allocation took.
+///
+/// # Errors
+/// When the server refuses or does not answer.
+fn relay(
+    media: &mut Media,
+    (server, user, password): &(SocketAddr, String, String),
+    local: SocketAddr,
+    seed: [u8; 32],
+) -> Result<(Relay, Duration), String> {
+    let started = Instant::now();
+    let mut relays = Relays::new(*server, user, password, seed);
+    relays.allocate(local, started);
+    loop {
+        let now = Instant::now();
+        while let Some(datagram) = relays.poll_transmit() {
+            media.send(datagram.destination, &datagram.payload);
+        }
+        media.receive_relay(&mut relays, local, now);
+        // one socket, so the first event is the only one there will be
+        match relays.poll_event() {
+            Some(RelayEvent::Allocated { .. }) => {
+                let took = now.saturating_duration_since(started);
+                let relay = relays
+                    .take(local)
+                    .ok_or_else(|| "an allocation reported and not there".to_owned())?;
+                return Ok((relay, took));
+            }
+            Some(RelayEvent::Failed { failure, .. }) => {
+                return Err(format!("{server} gave no relay: {failure}"));
+            }
+            None => {}
+        }
+        if now > started + MAPPING_PATIENCE {
+            return Err(format!("{server} never answered the Allocate"));
+        }
+        if relays.poll_timeout().is_some_and(|due| due <= now) {
+            relays.handle_timeout(now);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// A relay handed to a call, and how long its allocation took.
+type Allocated = Option<(Relay, Duration)>;
+
+/// A media socket bound, where it appears from outside — its address for the
+/// call and its server-reflexive one — and, with a TURN server named, a relay
+/// for it and how long that took.
 fn mapped_media(
     toward: SocketAddr,
     stun: SocketAddr,
     seed: [u8; 32],
-) -> Result<(Media, SocketAddr, SocketAddr), String> {
+) -> Result<(Media, SocketAddr, SocketAddr, Allocated), String> {
     let mut media = Media::bind(Instant::now())?;
     let local = SocketAddr::new(route_to(toward), media.port()?);
     let public = map(&mut media, stun, local, seed)?;
-    Ok((media, local, public))
+    let relayed = match turn_server()? {
+        Some(turn) => {
+            let mut other = seed;
+            other[0] ^= 0x5a;
+            Some(relay(&mut media, &turn, local, other)?)
+        }
+        None => None,
+    };
+    Ok((media, local, public, relayed))
+}
+
+/// `media` with the relay, when there is one, and what to say about it.
+fn with_relay(media: CallMedia, relayed: Allocated) -> (CallMedia, String) {
+    match relayed {
+        Some((relay, took)) => {
+            let said = format!(
+                ", relay {} allocated in {} ms",
+                relay
+                    .relayed()
+                    .map_or_else(|| "?".to_owned(), |address| address.to_string()),
+                took.as_millis()
+            );
+            (media.relay(relay), said)
+        }
+        None => (media, String::new()),
+    }
 }
 
 /// The calling side: map the media socket, place a call that requires ICE at
@@ -139,7 +247,12 @@ pub(crate) fn call(target: &str, remote: SocketAddr) -> Result<String, String> {
         endpoint.transport,
         remote,
     ));
-    let (media, local, public) = mapped_media(remote, stun, [193; 32])?;
+    let (media, local, public, relayed) = mapped_media(remote, stun, [193; 32])?;
+    let turn = turn_server()?.map(|(server, ..)| server);
+    let (described, allocated) = with_relay(
+        CallMedia::new(required, MediaConfig::default()).public_address(public),
+        relayed,
+    );
     let outgoing = OutgoingCall::new(uri(&format!("sip:{target}@{remote}"))?)
         .to_address(endpoint.transport, remote);
     let offered = Instant::now();
@@ -150,7 +263,7 @@ pub(crate) fn call(target: &str, remote: SocketAddr) -> Result<String, String> {
             account,
             outgoing,
             local,
-            CallMedia::new(required, MediaConfig::default()).public_address(public),
+            described,
             offered,
         )
         .map_err(|error| error.to_string())?;
@@ -162,17 +275,33 @@ pub(crate) fn call(target: &str, remote: SocketAddr) -> Result<String, String> {
         .map(Media::heard)
         .unwrap_or_default();
     let said = verdict(&seen, heard)?;
-    // the one address on the callee's side this end can reach is its NAT's:
-    // a path anywhere else went round the NAT rather than through it
-    if let Some((_, far, _)) = seen.chosen
-        && far.ip() != remote.ip()
-    {
-        return Err(format!(
-            "the path ends at {far}, which is not the callee's NAT at {}",
-            remote.ip()
-        ));
+    match (turn, seen.chosen) {
+        // with the direct path blocked, a path that does not go through the
+        // TURN server at one end or the other is one the block let through,
+        // and proves nothing about the relay
+        (Some(server), Some((near, far, _)))
+            if near.ip() != server.ip() && far.ip() != server.ip() =>
+        {
+            return Err(format!(
+                "the path {near} -> {far} does not go through the TURN server at {}",
+                server.ip()
+            ));
+        }
+        // the one address on the callee's side this end can reach is its
+        // NAT's: a path anywhere else went round the NAT rather than
+        // through it
+        (None, Some((_, far, _))) if far.ip() != remote.ip() => {
+            return Err(format!(
+                "the path ends at {far}, which is not the callee's NAT at {}",
+                remote.ip()
+            ));
+        }
+        // no path at all is `verdict`'s to refuse, and it already has
+        _ => {}
     }
-    Ok(format!("{said}; this end at {local}, mapped to {public}"))
+    Ok(format!(
+        "{said}; this end at {local}, mapped to {public}{allocated}"
+    ))
 }
 
 /// The answering side: bind SIP where the NAT in front of it forwards
@@ -201,9 +330,13 @@ pub(crate) fn answer(stun_hint: SocketAddr) -> Result<String, String> {
         endpoint.transport,
         stun,
     ));
-    let (media, local, public) = mapped_media(stun, stun, [211; 32])?;
+    let (media, local, public, relayed) = mapped_media(stun, stun, [211; 32])?;
+    let (described, allocated) = with_relay(
+        CallMedia::new(required, MediaConfig::default()).public_address(public),
+        relayed,
+    );
     println!(
-        "waiting for the call on {}, media at {local}, mapped to {public}",
+        "waiting for the call on {}, media at {local}, mapped to {public}{allocated}",
         endpoint.local
     );
     let _ = std::io::stdout().flush();
@@ -232,13 +365,7 @@ pub(crate) fn answer(stun_hint: SocketAddr) -> Result<String, String> {
     endpoint.media.insert(call, media);
     endpoint
         .engine
-        .answer_with(
-            &mut endpoint.agent,
-            call,
-            local,
-            CallMedia::new(required, MediaConfig::default()).public_address(public),
-            answered,
-        )
+        .answer_with(&mut endpoint.agent, call, local, described, answered)
         .map_err(|error| format!("could not answer: {error}"))?;
     let seen = drive(&mut endpoint, call, answered, false);
     let heard = endpoint
@@ -247,5 +374,7 @@ pub(crate) fn answer(stun_hint: SocketAddr) -> Result<String, String> {
         .map(Media::heard)
         .unwrap_or_default();
     let said = verdict(&seen, heard)?;
-    Ok(format!("{said}; this end at {local}, mapped to {public}"))
+    Ok(format!(
+        "{said}; this end at {local}, mapped to {public}{allocated}"
+    ))
 }

@@ -163,7 +163,10 @@ and each is cheaper before the ABI carries it than after:
   headless profile is wired too: `IcePolicy::Lite`, only in a build with
   `headless`, answers a full peer's checks and carries the audio on the pair
   it nominates, proven in process and in the lab against the harness and
-  Asterisk (`docs/06-nat.md#ice-lite`). TURN is not wired yet;
+  Asterisk (`docs/06-nat.md#ice-lite`). TURN is wired too: `sipral::Relays`
+  and `turn_server` allocate a relay for a media socket before its call, and
+  the full agent carries it as the relayed candidate, proven in the lab
+  between two NATs that let nothing else through (`docs/06-nat.md#turn`);
 - **early media on the answering side**, so a stack that answers can speak
   before 200 OK through its own engine rather than through a second one.
   *Built* (task 8.4.9): `MediaEngine::ring`/`ring_with`, and
@@ -413,11 +416,12 @@ after it. What is left is platform work, and platform work needs the platform.
   conflicts, restarts, consent freshness (RFC 7675). *The agent is written*,
   tested over a simulated network and reached from a call through
   `IcePolicy`; the lab proves two stacks behind two NATs finding each other on
-  STUN's reflexive candidates, with the start-up cost measured
+  STUN's reflexive candidates and, with the path between them blocked,
+  through a relay on a TURN server, with the start-up cost of both measured
   (`docs/06-nat.md`), and Asterisk's own ICE against the lite role. What is
-  left is TURN — a relay in the lab, and the facade asking one — and an ICE
-  restart in the full role, which the facade still answers with the
-  credentials the running agent holds. Off by default for a desktop
+  left is TURN over TCP and TLS, for the network that lets nothing out but
+  443, and an ICE restart in the full role, which the facade still answers
+  with the credentials the running agent holds. Off by default for a desktop
   softphone, where it only adds setup time; on for a phone on a carrier-grade
   NAT, and lite on a public server.
 

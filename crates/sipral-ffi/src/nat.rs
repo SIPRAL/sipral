@@ -137,6 +137,62 @@ record! {
     }
 }
 
+codes! {
+    /// What a media socket's relay came to. Names for
+    /// `sipral_nat_relay_event_t::outcome`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralNatRelay: u32 {
+        /// The TURN server allocated a relay for the socket: `relayed` is
+        /// the address it relays from. A call placed, rung or answered on
+        /// the socket from now on offers it as its relayed ICE candidate.
+        Allocated = 1,
+        /// There is no relay for the socket: the server refused (`code` says
+        /// with what), did not answer in thirty-nine and a half seconds, or
+        /// took back an allocation it had made. A call on the socket goes
+        /// without one, and ICE finds what path it can on the rest.
+        Failed = 2,
+    }
+}
+
+record! {
+    /// What a [`SipralEventKind::NatRelay`](crate::event::SipralEventKind::NatRelay)
+    /// carries.
+    ///
+    /// The addresses and the reason are text, not NUL-terminated, and the
+    /// library's: valid for as long as the callback runs. Nothing of the
+    /// credential is in any of them.
+    #[derive(Clone, Copy)]
+    pub struct SipralNatRelayEvent {
+        /// A [`SipralNatRelay`].
+        pub outcome: u32,
+        /// For `SIPRAL_NAT_RELAY_FAILED`, the STUN error code the server
+        /// refused with — 401 for a credential it does not accept, 486 for a
+        /// user at its allocation quota, 508 for a server with nothing left —
+        /// and zero when there was none: no answer at all, or an answer this
+        /// end could not accept. Zero for `SIPRAL_NAT_RELAY_ALLOCATED`.
+        pub code: u32,
+        /// The media socket, as `sipral_stack_nat_map` named it.
+        pub local: *const c_char,
+        /// How many bytes of it.
+        pub local_len: usize,
+        /// The relayed address, `host:port`. Empty for
+        /// `SIPRAL_NAT_RELAY_FAILED`.
+        pub relayed: *const c_char,
+        /// How many bytes of it.
+        pub relayed_len: usize,
+        /// Where the server saw the socket from, when it said. Empty
+        /// otherwise.
+        pub mapped: *const c_char,
+        /// How many bytes of it.
+        pub mapped_len: usize,
+        /// Why there is no relay, in English, for a log. Empty for
+        /// `SIPRAL_NAT_RELAY_ALLOCATED`.
+        pub reason: *const c_char,
+        /// How many bytes of it.
+        pub reason_len: usize,
+    }
+}
+
 /// The server a stack's configuration asks, or `None` for one that asks
 /// nobody.
 ///
@@ -173,6 +229,119 @@ pub(crate) unsafe fn configured(config: &SipralStackConfig) -> Result<Option<Soc
             format!("nat is {other}, and nat is 0 for the default, 1 for off or 2 for STUN"),
         )),
     }
+}
+
+/// The TURN server a stack's configuration names, and the credential it
+/// knows this end by — or `None` for a stack that names none.
+///
+/// The two strings are the caller's, borrowed for as long as the
+/// configuration is: [`Nat::start`] copies them into the one place they are
+/// kept, whose password is overwritten when it is dropped, and nothing else
+/// holds a copy.
+///
+/// # Safety
+///
+/// `config.turn_server`, `config.turn_username` and `config.turn_password`
+/// must each be readable for the length beside it.
+pub(crate) unsafe fn turn_configured<'a>(
+    config: &SipralStackConfig,
+) -> Result<Option<Turn<'a>>, Fail> {
+    let server = unsafe { text(config.turn_server, config.turn_server_len, "turn_server") }?;
+    let username = unsafe {
+        text(
+            config.turn_username,
+            config.turn_username_len,
+            "turn_username",
+        )
+    }?;
+    // read as bytes and checked here rather than by `text`, whose refusal
+    // names the offset of what it refused: a password's shape is not
+    // something an error text should describe
+    let password = unsafe {
+        crate::text::bytes(
+            config.turn_password.cast::<u8>(),
+            config.turn_password_len,
+            "turn_password",
+        )
+    }?;
+    let Some(server) = server else {
+        return if username.is_some() || password.is_some() {
+            Err(fail(
+                SipralStatus::InvalidArgument,
+                "turn_username or turn_password is set and turn_server names no server to use \
+                 them with",
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    if config.nat != SipralNat::Stun as u32 {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "turn_server names a server and nat is not SIPRAL_NAT_STUN: a relay is allocated for \
+             the media sockets sipral_stack_nat_map names, which is SIPRAL_NAT_STUN's",
+        ));
+    }
+    let Ok(address) = server.parse::<SocketAddr>() else {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "turn_server is {server:?}, which is not an address and a port; resolving a name \
+                 is the application's, as it is for stun_server"
+            ),
+        ));
+    };
+    let password = password.and_then(|raw| std::str::from_utf8(raw).ok());
+    let (Some(username), Some(password)) = (username, password) else {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "turn_server needs turn_username and turn_password, the password as UTF-8: a TURN \
+             server that relays for anyone is one somebody else is already using",
+        ));
+    };
+    relaying(Turn {
+        server: address,
+        username,
+        password,
+    })
+}
+
+/// The relay a call described on a media socket takes: a
+/// [`sipral::Relay`], in a build with ICE to use one, and a type with no
+/// values in a build without.
+#[cfg(feature = "ice")]
+pub(crate) type HeldRelay = Option<sipral::Relay>;
+
+/// The relay a call described on a media socket takes: never one, without
+/// ICE.
+#[cfg(not(feature = "ice"))]
+pub(crate) type HeldRelay = Option<core::convert::Infallible>;
+
+/// A TURN server and the credential it knows this end by, borrowed from the
+/// caller's configuration.
+#[derive(Clone, Copy)]
+// read only where there is STUN to name media sockets with and ICE to hand
+// a relay to: a build without either refuses the configuration first
+#[cfg_attr(not(all(feature = "stun", feature = "ice")), allow(dead_code))]
+pub(crate) struct Turn<'a> {
+    server: SocketAddr,
+    username: &'a str,
+    password: &'a str,
+}
+
+#[cfg(feature = "ice")]
+#[allow(clippy::unnecessary_wraps)]
+const fn relaying(turn: Turn<'_>) -> Result<Option<Turn<'_>>, Fail> {
+    Ok(Some(turn))
+}
+
+#[cfg(not(feature = "ice"))]
+fn relaying(_turn: Turn<'_>) -> Result<Option<Turn<'_>>, Fail> {
+    Err(fail(
+        SipralStatus::NotSupported,
+        "turn_server names a relay and this build has no ICE to use one with: \
+         SIPRAL_FEATURE_ICE is clear in sipral_capabilities",
+    ))
 }
 
 #[cfg(feature = "stun")]
@@ -215,6 +384,16 @@ struct Active {
     /// Requests for a media socket, on their way out through
     /// [`sipral_stack_poll_stun`].
     media_out: VecDeque<sipral::StunDatagram>,
+    /// The relays on the TURN server the configuration named, one per
+    /// media socket, until each is handed to its call.
+    #[cfg(feature = "ice")]
+    relays: Option<sipral::Relays>,
+    /// Requests for the TURN server, on their way out through
+    /// [`sipral_stack_poll_stun`] after the STUN ones. Not superseded the
+    /// way a Binding request is: an Allocate after its 401 is a different
+    /// request, not a newer copy of the first.
+    #[cfg(feature = "ice")]
+    relay_out: VecDeque<sipral::StunDatagram>,
 }
 
 /// The text one event's three addresses are read from, and the event.
@@ -223,10 +402,13 @@ pub(crate) type Raised = (SipralEvent, String);
 #[cfg(feature = "stun")]
 impl Nat {
     /// Start asking, when the configuration named a server: the signalling
-    /// socket the stack was created with is the first one kept mapped.
+    /// socket the stack was created with is the first one kept mapped. With
+    /// a TURN server named too, every media socket named later is given a
+    /// relay on it as well.
     pub(crate) fn start(
         state: &mut StackState,
         server: Option<SocketAddr>,
+        turn: Option<Turn<'_>>,
         transport: TransportId,
         protocol: TransportProtocol,
         local: SocketAddr,
@@ -236,11 +418,23 @@ impl Nat {
             return;
         };
         let mappings = state.engine.mappings(server);
+        #[cfg(feature = "ice")]
+        let relays = turn.map(|turn| {
+            state
+                .engine
+                .relays(turn.server, turn.username, turn.password)
+        });
+        #[cfg(not(feature = "ice"))]
+        let _ = turn;
         state.nat.active = Some(Active {
             mappings,
             signalling: HashMap::new(),
             signalling_out: VecDeque::new(),
             media_out: VecDeque::new(),
+            #[cfg(feature = "ice")]
+            relays,
+            #[cfg(feature = "ice")]
+            relay_out: VecDeque::new(),
         });
         Self::bound(state, transport, protocol, local, now);
     }
@@ -341,7 +535,17 @@ impl Nat {
         let Some(active) = state.nat.active.as_mut() else {
             return false;
         };
-        let taken = active.mappings.receive(local, from, data, now);
+        // the relays first: a coturn is usually the STUN server too, from
+        // the same address, and `Mappings` takes whatever its server sends
+        // on a socket it asked about. `Relays` leaves Binding answers alone
+        #[cfg(feature = "ice")]
+        let relayed = active
+            .relays
+            .as_mut()
+            .is_some_and(|relays| relays.receive(local, from, data, now));
+        #[cfg(not(feature = "ice"))]
+        let relayed = false;
+        let taken = relayed || active.mappings.receive(local, from, data, now);
         active.sort();
         taken
     }
@@ -350,17 +554,28 @@ impl Nat {
     pub(crate) fn handle_timeout(state: &mut StackState, now: Instant) {
         if let Some(active) = state.nat.active.as_mut() {
             active.mappings.handle_timeout(now);
+            #[cfg(feature = "ice")]
+            if let Some(relays) = active.relays.as_mut() {
+                relays.handle_timeout(now);
+            }
             active.sort();
         }
     }
 
     /// When a transaction next has something to do.
     pub(crate) fn poll_timeout(state: &StackState) -> Option<Instant> {
-        state
-            .nat
-            .active
+        let active = state.nat.active.as_ref()?;
+        #[cfg(feature = "ice")]
+        let relays = active
+            .relays
             .as_ref()
-            .and_then(|active| active.mappings.poll_timeout())
+            .and_then(sipral::Relays::poll_timeout);
+        #[cfg(not(feature = "ice"))]
+        let relays = None;
+        [active.mappings.poll_timeout(), relays]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// What was learned since the last poll, as events, with every account
@@ -410,6 +625,17 @@ impl Nat {
             raised.push(event(
                 stack, mapping, transport, accounts, local, public, previous,
             ));
+        }
+        #[cfg(feature = "ice")]
+        if let Some(relays) = state
+            .nat
+            .active
+            .as_mut()
+            .and_then(|active| active.relays.as_mut())
+        {
+            while let Some(said) = relays.poll_event() {
+                raised.push(relay_event(stack, said));
+            }
         }
         raised
     }
@@ -463,16 +689,65 @@ impl Nat {
         }
     }
 
+    /// The relay a call described on the media socket `local` takes, which
+    /// is then the call's: the relayed ICE candidate (see
+    /// [`sipral::CallMedia::relay`]).
+    ///
+    /// `None` for a stack with no TURN server, a socket nobody named, and a
+    /// socket the server gave no relay — described without one, and ICE
+    /// finds what path it can. A socket still waiting for its relay is
+    /// refused, for the reason [`Nat::public_for`] refuses one still waiting
+    /// for its mapping.
+    #[cfg(feature = "ice")]
+    pub(crate) fn relay_for(state: &mut StackState, local: SocketAddr) -> Result<HeldRelay, Fail> {
+        let Some(relays) = state
+            .nat
+            .active
+            .as_mut()
+            .and_then(|active| active.relays.as_mut())
+        else {
+            return Ok(None);
+        };
+        if relays.pending(local) {
+            return Err(fail(
+                SipralStatus::WrongState,
+                format!(
+                    "the TURN server has not answered for {local} yet: wait for \
+                     SIPRAL_EVENT_KIND_NAT_RELAY about it"
+                ),
+            ));
+        }
+        Ok(relays.take(local))
+    }
+
+    /// Without ICE no relay was ever allocated, so there is none to take.
+    #[cfg(not(feature = "ice"))]
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) const fn relay_for(
+        _state: &mut StackState,
+        _local: SocketAddr,
+    ) -> Result<HeldRelay, Fail> {
+        Ok(None)
+    }
+
     /// A call was described on `local`, and the mapping is spent: the next
     /// call on the same socket is mapped again, since nothing kept this one
-    /// open in between.
-    pub(crate) fn spent(state: &mut StackState, local: SocketAddr) {
+    /// open in between. A relay the call did not take — a call already
+    /// described when it rang — goes back to the server.
+    pub(crate) fn spent(state: &mut StackState, local: SocketAddr, now: Instant) {
         if let Some(active) = state.nat.active.as_mut()
             && !active.signalling.contains_key(&local)
         {
             active.mappings.forget(local);
             active.media_out.retain(|request| request.local != local);
+            #[cfg(feature = "ice")]
+            if let Some(relays) = active.relays.as_mut() {
+                relays.release(local, now);
+            }
+            active.sort();
         }
+        #[cfg(not(feature = "ice"))]
+        let _ = now;
     }
 
     fn map_media(state: &mut StackState, local: SocketAddr, now: Instant) -> Result<(), Fail> {
@@ -489,6 +764,10 @@ impl Nat {
             ));
         }
         active.mappings.map(local, sipral::Keep::Once, now);
+        #[cfg(feature = "ice")]
+        if let Some(relays) = active.relays.as_mut() {
+            relays.allocate(local, now);
+        }
         active.sort();
         Ok(())
     }
@@ -501,9 +780,17 @@ impl Nat {
             return Ok(None);
         };
         active.sort();
-        match active.media_out.front() {
+        #[cfg(feature = "ice")]
+        let queue = if active.media_out.is_empty() {
+            &mut active.relay_out
+        } else {
+            &mut active.media_out
+        };
+        #[cfg(not(feature = "ice"))]
+        let queue = &mut active.media_out;
+        match queue.front() {
             Some(front) if front.payload.len() > room => Err(front.payload.len()),
-            Some(_) => Ok(active.media_out.pop_front()),
+            Some(_) => Ok(queue.pop_front()),
             None => Ok(None),
         }
     }
@@ -524,8 +811,8 @@ impl Nat {
         Err(fail(
             SipralStatus::InvalidArgument,
             format!(
-                "not an answer from the STUN server this stack asks, for a socket it asked about: \
-                 from {from}, on {local}"
+                "not an answer from the STUN or TURN server this stack asks, for a socket it \
+                 asked about: from {from}, on {local}"
             ),
         ))
     }
@@ -557,6 +844,16 @@ impl Active {
                 self.media_out.push_back(request);
             }
         }
+        #[cfg(feature = "ice")]
+        if let Some(relays) = self.relays.as_mut() {
+            while let Some(request) = relays.poll_transmit() {
+                self.relay_out.push_back(sipral::StunDatagram {
+                    local: request.local,
+                    destination: request.destination,
+                    payload: request.payload,
+                });
+            }
+        }
     }
 }
 
@@ -568,6 +865,7 @@ impl Nat {
     pub(crate) const fn start(
         _state: &mut StackState,
         _server: Option<SocketAddr>,
+        _turn: Option<Turn<'_>>,
         _transport: TransportId,
         _protocol: TransportProtocol,
         _local: SocketAddr,
@@ -630,7 +928,16 @@ impl Nat {
         Ok(None)
     }
 
-    pub(crate) const fn spent(_state: &mut StackState, _local: SocketAddr) {}
+    pub(crate) const fn spent(_state: &mut StackState, _local: SocketAddr, _now: Instant) {}
+
+    /// Without STUN a stack names no media socket, so none has a relay.
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) const fn relay_for(
+        _state: &mut StackState,
+        _local: SocketAddr,
+    ) -> Result<HeldRelay, Fail> {
+        Ok(None)
+    }
 
     fn map_media(_state: &mut StackState, _local: SocketAddr, _now: Instant) -> Result<(), Fail> {
         Err(not_asking())
@@ -707,6 +1014,90 @@ fn event(
         previous_len: previous.len(),
     };
     (crate::event::nat_mapping(stack, payload), text)
+}
+
+/// One relay event, and the text its addresses and reason point into, laid
+/// out the way [`event`] lays out a mapping's.
+#[cfg(all(feature = "stun", feature = "ice"))]
+fn relay_event(stack: SipralHandle, said: sipral::RelayEvent) -> Raised {
+    let (outcome, code, local, relayed, mapped, reason) = match said {
+        sipral::RelayEvent::Allocated {
+            local,
+            relayed,
+            mapped,
+        } => (
+            SipralNatRelay::Allocated,
+            0,
+            local,
+            relayed.to_string(),
+            mapped
+                .map(|address| address.to_string())
+                .unwrap_or_default(),
+            String::new(),
+        ),
+        sipral::RelayEvent::Failed { local, failure } => (
+            SipralNatRelay::Failed,
+            refusal_code(failure),
+            local,
+            String::new(),
+            String::new(),
+            failure.to_string(),
+        ),
+    };
+    let local = local.to_string();
+    let text = format!("{local}{relayed}{mapped}{reason}");
+    let base = text.as_ptr().cast::<c_char>();
+    let piece = |offset: usize, len: usize| -> *const c_char {
+        if len == 0 {
+            std::ptr::null()
+        } else {
+            base.wrapping_add(offset)
+        }
+    };
+    let at_mapped = local.len() + relayed.len();
+    let payload = SipralNatRelayEvent {
+        outcome: outcome as u32,
+        code,
+        local: piece(0, local.len()),
+        local_len: local.len(),
+        relayed: piece(local.len(), relayed.len()),
+        relayed_len: relayed.len(),
+        mapped: piece(at_mapped, mapped.len()),
+        mapped_len: mapped.len(),
+        reason: piece(at_mapped + mapped.len(), reason.len()),
+        reason_len: reason.len(),
+    };
+    (crate::event::nat_relay(stack, payload), text)
+}
+
+/// The STUN error code a relay failure stands for, or zero for a failure no
+/// server answered with (RFC 8656 §19, RFC 8489 §14.8).
+#[cfg(all(feature = "stun", feature = "ice"))]
+fn refusal_code(failure: sipral::TurnFailure) -> u32 {
+    use sipral::TurnFailure;
+    match failure {
+        TurnFailure::Alternate(_) => 300,
+        TurnFailure::Forbidden => 403,
+        TurnFailure::Unauthenticated => 401,
+        TurnFailure::UnknownAttribute => 420,
+        TurnFailure::AllocationMismatch => 437,
+        TurnFailure::AddressFamilyNotSupported => 440,
+        TurnFailure::WrongCredentials => 441,
+        TurnFailure::UnsupportedTransport => 442,
+        TurnFailure::PeerAddressFamilyMismatch => 443,
+        TurnFailure::QuotaReached => 486,
+        TurnFailure::InsufficientCapacity => 508,
+        TurnFailure::Rejected { code } => u32::from(code),
+        TurnFailure::TimedOut
+        | TurnFailure::IntegrityViolated
+        | TurnFailure::StaleNonceLoop
+        | TurnFailure::BidDown
+        | TurnFailure::UnsupportedPasswordAlgorithm
+        | TurnFailure::Malformed
+        | TurnFailure::FamilyMismatch
+        | TurnFailure::ChannelOutOfSync
+        | TurnFailure::Oversized => 0,
+    }
 }
 
 entry! {
@@ -887,6 +1278,8 @@ mod tests {
     use std::net::{IpAddr, SocketAddr};
     use std::ptr;
 
+    #[cfg(feature = "ice")]
+    use super::SipralNatRelay;
     use super::{
         SipralNat, SipralNatMapping, sipral_stack_nat_map, sipral_stack_poll_stun,
         sipral_stack_receive_stun,
@@ -953,7 +1346,43 @@ mod tests {
             };
             MAPPED.with(|all| all.borrow_mut().push(mapped));
         }
+        #[cfg(feature = "ice")]
+        if seen.kind == SipralEventKind::NatRelay {
+            let payload = unsafe { seen.payload.relay };
+            let relayed = RelaySaid {
+                outcome: payload.outcome,
+                code: payload.code,
+                local: piece(payload.local, payload.local_len),
+                relayed: piece(payload.relayed, payload.relayed_len),
+                mapped: piece(payload.mapped, payload.mapped_len),
+                reason: piece(payload.reason, payload.reason_len),
+            };
+            RELAYED.with(|all| all.borrow_mut().push(relayed));
+        }
         unsafe { record(event, user_data) };
+    }
+
+    /// What one `SIPRAL_EVENT_KIND_NAT_RELAY` said, copied out inside the
+    /// callback.
+    #[cfg(feature = "ice")]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RelaySaid {
+        outcome: u32,
+        code: u32,
+        local: String,
+        relayed: String,
+        mapped: String,
+        reason: String,
+    }
+
+    #[cfg(feature = "ice")]
+    thread_local! {
+        static RELAYED: RefCell<Vec<RelaySaid>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(feature = "ice")]
+    fn relayed() -> Vec<RelaySaid> {
+        RELAYED.with(|all| std::mem::take(&mut *all.borrow_mut()))
     }
 
     fn mapped() -> Vec<Mapped> {
@@ -1533,5 +1962,188 @@ mod tests {
         let status =
             unsafe { sipral_stack_nat_map(stack, BIND.as_ptr().cast::<c_char>(), BIND.len(), 0) };
         assert_eq!(status, SipralStatus::InvalidArgument);
+    }
+
+    /// Where the TURN server relays the media socket from, in these tests.
+    #[cfg(feature = "ice")]
+    const RELAYED_AT: &str = "198.51.100.1:50000";
+
+    /// A stack that asks `SERVER` for mappings and for relays, as one coturn
+    /// answering both usually is.
+    #[cfg(feature = "ice")]
+    fn relaying(observed: &mut Observed) -> SipralStackConfig {
+        let mut settings = asking(observed);
+        (settings.turn_server, settings.turn_server_len) = as_text(SERVER);
+        (settings.turn_username, settings.turn_username_len) = as_text("alice");
+        (settings.turn_password, settings.turn_password_len) = as_text("correct horse");
+        settings
+    }
+
+    /// A TURN server's success response to `request`, written out from RFC
+    /// 8656 §7.3 and RFC 8489 §14.2: the request's own method and id, and
+    /// for an Allocate the relayed address, the mapped one and ten minutes.
+    #[cfg(feature = "ice")]
+    fn turn_answer(request: &[u8], relayed: &str, seen: &str) -> Vec<u8> {
+        const COOKIE: u32 = 0x2112_a442;
+        let xor = |kind: u16, address: &str| -> Vec<u8> {
+            let address: SocketAddr = address.parse().expect("an address");
+            let IpAddr::V4(ip) = address.ip() else {
+                panic!("these tests are IPv4");
+            };
+            let mut out = kind.to_be_bytes().to_vec();
+            out.extend_from_slice(&[0x00, 0x08, 0x00, 0x01]);
+            let port = address.port() ^ u16::try_from(COOKIE >> 16).expect("sixteen bits");
+            out.extend_from_slice(&port.to_be_bytes());
+            out.extend_from_slice(&(u32::from(ip) ^ COOKIE).to_be_bytes());
+            out
+        };
+        let method = u16::from_be_bytes([request[0], request[1]]) & 0x3eef;
+        let mut body = Vec::new();
+        if method == 0x0003 {
+            body.extend(xor(0x0016, relayed));
+            body.extend(xor(0x0020, seen));
+            body.extend_from_slice(&[0x00, 0x0d, 0x00, 0x04]);
+            body.extend_from_slice(&600_u32.to_be_bytes());
+        }
+        let mut out = (method | 0x0100).to_be_bytes().to_vec();
+        out.extend_from_slice(&u16::try_from(body.len()).expect("short").to_be_bytes());
+        out.extend_from_slice(request.get(4..20).expect("a whole STUN header"));
+        out.extend(body);
+        out
+    }
+
+    /// Whether `request` is a TURN Allocate (RFC 8656 §7.1).
+    #[cfg(feature = "ice")]
+    fn is_allocate(request: &[u8]) -> bool {
+        is_stun(request) && request.get(..2) == Some(&[0x00, 0x03][..])
+    }
+
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_turn_server_needs_stun_and_a_credential() {
+        let mut observed = Observed::default();
+        let mut no_stun = relaying(&mut observed);
+        no_stun.nat = SipralNat::Off as u32;
+        (no_stun.stun_server, no_stun.stun_server_len) = (ptr::null(), 0);
+        assert_eq!(create(&no_stun).0, SipralStatus::InvalidArgument);
+        assert!(last_error_text().contains("SIPRAL_NAT_STUN"));
+
+        let mut no_password = relaying(&mut observed);
+        (no_password.turn_password, no_password.turn_password_len) = (ptr::null(), 0);
+        assert_eq!(create(&no_password).0, SipralStatus::InvalidArgument);
+        assert!(last_error_text().contains("turn_password"));
+
+        let mut no_server = relaying(&mut observed);
+        (no_server.turn_server, no_server.turn_server_len) = (ptr::null(), 0);
+        assert_eq!(create(&no_server).0, SipralStatus::InvalidArgument);
+
+        let mut named = relaying(&mut observed);
+        (named.turn_server, named.turn_server_len) = as_text("turn.example.com:3478");
+        assert_eq!(create(&named).0, SipralStatus::InvalidArgument);
+        // and the password is in none of what was said about any of them
+        assert!(!last_error_text().contains("correct horse"));
+    }
+
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_media_socket_gets_a_relay_and_the_call_on_it_offers_it_as_a_candidate() {
+        let mut observed = Observed::default();
+        let _ = mapped();
+        let _ = relayed();
+        let (status, stack) = create(&relaying(&mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        let _ = poll(stack, 5);
+        let _ = mapped();
+
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let out = stun_out(stack);
+        assert_eq!(out.len(), 2, "a Binding request and an Allocate");
+        assert!(!is_allocate(&out[0].0));
+        assert!(is_allocate(&out[1].0));
+        assert_eq!(out[1].1, SERVER);
+        assert_eq!(out[1].2, MEDIA);
+
+        // the STUN answer alone is not enough: the relay is on its way
+        assert_eq!(
+            on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 20),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 20);
+        let mut ice = managed_config();
+        ice.ice = crate::media::SipralIce::Offered as u32;
+        let (status, _) = place(stack, account, &ice, 25);
+        assert_eq!(status, SipralStatus::WrongState);
+        assert!(last_error_text().contains("TURN server has not answered"));
+
+        // the same server answers both, and each answer reaches its own
+        assert_eq!(
+            on_media_socket(
+                stack,
+                &turn_answer(&out[1].0, RELAYED_AT, MEDIA_PUBLIC),
+                SERVER,
+                30
+            ),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = poll(stack, 30);
+        let said = relayed();
+        assert_eq!(
+            said,
+            vec![RelaySaid {
+                outcome: SipralNatRelay::Allocated as u32,
+                code: 0,
+                local: MEDIA.to_owned(),
+                relayed: RELAYED_AT.to_owned(),
+                mapped: MEDIA_PUBLIC.to_owned(),
+                reason: String::new(),
+            }]
+        );
+
+        let (status, _) = place(stack, account, &ice, 40);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let out = signalling_out(stack);
+        let invite = out
+            .iter()
+            .find(|(message, _)| message.starts_with(b"INVITE "))
+            .expect("the INVITE");
+        let text = String::from_utf8_lossy(&invite.0).into_owned();
+        assert!(
+            text.contains("198.51.100.1 50000 typ relay raddr 203.0.113.7 rport 41002"),
+            "{text}"
+        );
+        assert!(text.contains("c=IN IP4 203.0.113.7\r\n"), "{text}");
+    }
+
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_relay_the_server_refused_is_said_with_its_code_and_no_credential() {
+        let mut observed = Observed::default();
+        let _ = relayed();
+        let (status, stack) = create(&relaying(&mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let out = stun_out(stack);
+        let allocate = &out[1].0;
+        // 486, Allocation Quota Reached (RFC 8656 §19), with no credential
+        // asked for first: the error class of the Allocate method
+        let mut refusal = vec![0x01, 0x13, 0x00, 0x08];
+        refusal.extend_from_slice(allocate.get(4..20).expect("a whole header"));
+        refusal.extend_from_slice(&[0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x04, 86]);
+        assert_eq!(
+            on_media_socket(stack, &refusal, SERVER, 20),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 20);
+        let said = relayed();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].outcome, SipralNatRelay::Failed as u32);
+        assert_eq!(said[0].code, 486);
+        assert!(said[0].relayed.is_empty());
+        assert!(!said[0].reason.is_empty());
+        assert!(!said[0].reason.contains("correct horse"));
     }
 }

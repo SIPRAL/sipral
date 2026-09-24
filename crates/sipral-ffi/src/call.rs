@@ -356,14 +356,17 @@ unsafe fn codec_order(config: &SipralCallConfig) -> Result<Option<Vec<&str>>, Fa
 /// stack asked a STUN server about it ([`crate::nat`]): a call described by
 /// it is never the stack's own catalogue untouched, because the description
 /// names another address and asks for multiplexing.
+///
+/// `relay` is the relay a TURN server allocated for the socket, when the
+/// stack names one ([`crate::nat`]): the call's relayed ICE candidate.
 fn call_media(
     state: &StackState,
-    public: Option<SocketAddr>,
+    (public, relay): (Option<SocketAddr>, crate::nat::HeldRelay),
     srtp: Option<SrtpPolicy>,
     ice: Option<IcePolicy>,
     codecs: Option<&[&str]>,
 ) -> Result<Option<CallMedia>, Fail> {
-    if srtp.is_none() && ice.is_none() && codecs.is_none() && public.is_none() {
+    if srtp.is_none() && ice.is_none() && codecs.is_none() && public.is_none() && relay.is_none() {
         return Ok(None);
     }
     let mut catalog = state.engine.catalog().clone();
@@ -378,11 +381,45 @@ fn call_media(
     if let Some(policy) = ice {
         catalog = catalog.with_ice(policy);
     }
-    let media = CallMedia::new(catalog, state.media_config());
-    Ok(Some(match public {
+    Ok(Some(dressed(
+        CallMedia::new(catalog, state.media_config()),
+        (public, relay),
+    )))
+}
+
+/// `media`, described by the public address and given the relay the stack
+/// learned for its socket, when it learned either.
+fn dressed(
+    media: CallMedia,
+    (public, relay): (Option<SocketAddr>, crate::nat::HeldRelay),
+) -> CallMedia {
+    let media = match public {
         Some(public) => media.public_address(public),
         None => media,
-    }))
+    };
+    #[cfg(feature = "ice")]
+    let media = match relay {
+        Some(relay) => media.relay(relay),
+        None => media,
+    };
+    #[cfg(not(feature = "ice"))]
+    if let Some(never) = relay {
+        match never {}
+    }
+    media
+}
+
+/// Where a call on the media socket `local` is described as being, and the
+/// relay it takes: [`crate::nat::Nat::public_for`] and
+/// [`crate::nat::Nat::relay_for`], asked in that order so that a socket still
+/// waiting for its STUN answer is refused before its relay is taken.
+fn outside(
+    state: &mut StackState,
+    local: SocketAddr,
+) -> Result<(Option<SocketAddr>, crate::nat::HeldRelay), Fail> {
+    let public = crate::nat::Nat::public_for(state, local)?;
+    let relay = crate::nat::Nat::relay_for(state, local)?;
+    Ok((public, relay))
 }
 
 /// Where `config` sends the INVITE, other than the account's own address, and
@@ -520,8 +557,8 @@ entry! {
             let outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
             let placed = match media {
                 Some(local) => {
-                    let public = crate::nat::Nat::public_for(state, local)?;
-                    let placed = match call_media(state, public, srtp, ice, codecs.as_deref())? {
+                    let outside = outside(state, local)?;
+                    let placed = match call_media(state, outside, srtp, ice, codecs.as_deref())? {
                         // the stack's own catalogue, untouched: this is what
                         // `srtp` and `codecs` both unspecified on the call
                         // have to mean
@@ -538,7 +575,7 @@ entry! {
                         ),
                     }
                     .map_err(|error| media_failed(&error))?;
-                    crate::nat::Nat::spent(state, local);
+                    crate::nat::Nat::spent(state, local, now);
                     state.manage(placed);
                     placed
                 }
@@ -650,8 +687,8 @@ entry! {
         let codecs = unsafe { codec_order(&config) }?;
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            let public = crate::nat::Nat::public_for(state, local)?;
-            match call_media(state, public, srtp, ice, codecs.as_deref())? {
+            let outside = outside(state, local)?;
+            match call_media(state, outside, srtp, ice, codecs.as_deref())? {
                 // the stack's own catalogue, untouched: this is what `srtp`
                 // and `codecs` both unspecified on the call have to mean
                 None => state.engine.ring(&mut state.agent, id, local, now),
@@ -660,7 +697,7 @@ entry! {
                     .ring_with(&mut state.agent, id, local, media, now),
             }
             .map_err(|error| media_failed(&error))?;
-            crate::nat::Nat::spent(state, local);
+            crate::nat::Nat::spent(state, local, now);
             state.manage(id);
             Ok(())
         })
@@ -733,17 +770,20 @@ entry! {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             // a call already rung with media keeps the description its 183
-            // carried, so its socket's mapping is not asked about again
-            let public = if state.agent.has_described(id) {
-                None
+            // carried, so its socket's mapping is not asked about again, and
+            // a relay waiting on the socket goes back when it is spent below
+            let (public, relay) = if state.agent.has_described(id) {
+                (None, None)
             } else {
-                crate::nat::Nat::public_for(state, local)?
+                outside(state, local)?
             };
             let catalog = state.engine.call_catalog(id).cloned();
-            match (public, catalog) {
-                (Some(public), Some(catalog)) => {
-                    let media =
-                        CallMedia::new(catalog, state.media_config()).public_address(public);
+            match catalog {
+                Some(catalog) if public.is_some() || relay.is_some() => {
+                    let media = dressed(
+                        CallMedia::new(catalog, state.media_config()),
+                        (public, relay),
+                    );
                     state
                         .engine
                         .answer_with(&mut state.agent, id, local, media, now)
@@ -751,7 +791,7 @@ entry! {
                 _ => state.engine.answer(&mut state.agent, id, local, now),
             }
             .map_err(|error| media_failed(&error))?;
-            crate::nat::Nat::spent(state, local);
+            crate::nat::Nat::spent(state, local, now);
             state.manage(id);
             Ok(())
         })
@@ -1418,6 +1458,12 @@ entry! {
         let codecs = unsafe { codec_order(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
+            // asked before the headers below borrow the stack's own
+            // User-Agent, since taking a relay is a change to the stack
+            let outside = match media {
+                Some(local) => Some(outside(state, local)?),
+                None => None,
+            };
             let (destination, forks) = unsafe { destination_and_forks(state, &config) }?;
             let mut headers = Vec::new();
             if let Some(ref named) = state.user_agent {
@@ -1437,9 +1483,8 @@ entry! {
                 forks,
                 headers: &headers,
             };
-            let placed = if let Some(local) = media {
-                let public = crate::nat::Nat::public_for(state, local)?;
-                let placed = match call_media(state, public, srtp, ice, codecs.as_deref())? {
+            let placed = if let (Some(local), Some(outside)) = (media, outside) {
+                let placed = match call_media(state, outside, srtp, ice, codecs.as_deref())? {
                     // the stack's own catalogue, untouched: this is what
                     // `srtp` and `codecs` both unspecified on the call have
                     // to mean
@@ -1456,7 +1501,7 @@ entry! {
                     ),
                 }
                 .map_err(|error| media_failed(&error))?;
-                crate::nat::Nat::spent(state, local);
+                crate::nat::Nat::spent(state, local, now);
                 state.manage(placed);
                 placed
             } else {

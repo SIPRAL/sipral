@@ -233,6 +233,21 @@ impl Media {
         }
     }
 
+    /// The same for a relay being allocated on the socket
+    /// (`crate::ice_nat`'s TURN step): what the TURN server says goes to
+    /// `relays`, as having arrived on `local`.
+    pub(crate) fn receive_relay(
+        &mut self,
+        relays: &mut sipral::Relays,
+        local: SocketAddr,
+        now: Instant,
+    ) {
+        while let Ok((length, from)) = self.socket.recv_from(&mut self.inbox) {
+            let data = self.inbox.get(..length).unwrap_or_default();
+            let _ = relays.receive(local, from, data, now);
+        }
+    }
+
     /// The receiving half of [`Media::turn`] alone, for a caller that drives
     /// the sending half itself.
     ///

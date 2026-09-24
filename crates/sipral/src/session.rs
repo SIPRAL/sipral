@@ -1790,6 +1790,16 @@ impl MediaSession {
             .map_or(0, crate::ice::Ice::transmits_dropped)
     }
 
+    /// Give back the relays this call's agent holds, for a call that has
+    /// ended: what to send, and where. See [`crate::ice::Ice::release`].
+    #[cfg(feature = "ice")]
+    pub(crate) fn release_relays(&mut self, now: Instant) -> Vec<(SocketAddr, Vec<u8>)> {
+        self.ice
+            .as_mut()
+            .map(|ice| ice.release(now))
+            .unwrap_or_default()
+    }
+
     /// Carry what the call's descriptions now say about ICE onto the running
     /// agent: the credentials a restart gave it. See [`crate::ice::Ice::follow`].
     #[cfg(feature = "ice")]

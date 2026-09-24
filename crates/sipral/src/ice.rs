@@ -45,7 +45,13 @@
 //! socket before the call, for the `c=` line a peer without ICE reads — the
 //! same server, the same question, asked once — and
 //! [`IceAgent::add_server_reflexive`] is how that answer becomes a candidate.
-//! TURN is the step after this one, and `docs/06-nat.md` says why it waits.
+//! A relayed candidate comes the same way: the application allocates on its
+//! TURN server from the same socket before the call ([`crate::Relays`]), and
+//! [`CallMedia::relay`](crate::CallMedia::relay) hands the allocation over.
+//! [`IceAgent::add_relayed`] takes it into the agent, which from then on
+//! keeps it as one it had gathered itself, and a call that has one keeps the
+//! agent it drew rather than rebuilding it — an allocation is live state on
+//! a server, not something gathering produces again.
 //!
 //! **No fallback that is silent.** A peer that does not do ICE, a peer whose
 //! candidates are unusable, and a description an ALG rewrote on the way are
@@ -342,6 +348,61 @@ impl LocalIce {
             candidates,
             lite: false,
         })
+    }
+
+    /// Draw a call's credentials and tiebreaker in the full role, as
+    /// [`LocalIce::draw`] does, and gather its candidates with the relayed
+    /// one `relay` stands for beside the host and server-reflexive ones.
+    ///
+    /// The agent that gathered them is handed back with them and is the one
+    /// the call runs: the allocation inside it is live state on a server,
+    /// and [`LocalIce::agent`] cannot make another one out of what was
+    /// written down.
+    ///
+    /// # Errors
+    ///
+    /// As [`LocalIce::draw`], and [`MediaError::Ice`] for a relay of an
+    /// address family other than `address`'s, which the engine does not hand
+    /// in.
+    pub(crate) fn draw_relayed(
+        keys: &mut KeySource,
+        address: SocketAddr,
+        public: Option<SocketAddr>,
+        relay: crate::relay::Relay,
+        we_are_offerer: bool,
+        now: Instant,
+    ) -> Result<(Self, Ice), MediaError> {
+        let credentials = draw_credentials(keys)?;
+        let tiebreaker = u64::from_be_bytes(keys.block()[..8].try_into().unwrap_or([0; 8]));
+        let role = Role::initial_full(we_are_offerer, false);
+        let (mut agent, stream) = new_agent(&credentials, role, tiebreaker, address, public, now)?;
+        let (server, client) = relay.into_parts();
+        agent
+            .add_relayed(stream, ComponentId::RTP, address, server, client, now)
+            .map_err(MediaError::Ice)?;
+        let candidates = agent.local_candidates(stream);
+        let mut ice = Ice {
+            local: address,
+            out: Vec::new(),
+            probe: Vec::new(),
+            running: Running::Full(Box::new(Full {
+                agent,
+                stream,
+                keys: KeySource::new(keys.block()),
+            })),
+        };
+        ice.top_up();
+        Ok((
+            Self {
+                credentials,
+                role,
+                tiebreaker,
+                public,
+                candidates,
+                lite: false,
+            },
+            ice,
+        ))
     }
 
     /// The same call's ICE after an ICE restart the peer asked for: new
@@ -835,6 +896,30 @@ impl Ice {
             }
         };
         Ok((destination, &self.out))
+    }
+
+    /// Give every relay this call holds back to its server, and hand over
+    /// what that takes to send: the Refresh with a lifetime of zero RFC 8656
+    /// §8 deletes an allocation with, each with where it goes.
+    ///
+    /// For the end of a call, and for a call that turned out not to use ICE
+    /// at all. Anything else the agent still had queued goes with them — it
+    /// was going to the same places from the same socket — and nothing waits
+    /// for an answer. A lite end holds no relay and has nothing to give back.
+    pub(crate) fn release(&mut self, now: Instant) -> Vec<(SocketAddr, Vec<u8>)> {
+        self.top_up();
+        let Running::Full(full) = &mut self.running else {
+            return Vec::new();
+        };
+        full.agent.release_relays(now);
+        let mut out = Vec::new();
+        while let Some(Transmit {
+            destination, data, ..
+        }) = full.agent.poll_transmit()
+        {
+            out.push((destination, data));
+        }
+        out
     }
 
     /// The pair the agent selected, once it has one.

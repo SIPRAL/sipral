@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# Turns the lab's coturn from a STUN server into a TURN server, for
+# scripts/lab.sh's relay step alone: the call between two stacks behind two
+# NATs that are told to drop everything between them but SIP, so that the
+# relay is the one path left. Applied with `-f`, on top of ../compose.yaml,
+# and taken off again when that step is over, so every other flow meets the
+# STUN-only coturn compose.yaml describes.
+#
+# Long-term credentials (RFC 8489 §9.2), which is what a TURN server on the
+# open Internet asks for and what the stack's client is written against: the
+# first Allocate goes out bare and is answered 401. The user name and the
+# password are the step's own, drawn fresh for every run and handed in
+# through the environment, so no credential for this server is written down
+# anywhere. The relayed ports are a small range of their own, and
+# `--verbose` is what makes coturn log each allocation, refresh and deletion,
+# which is how the step sees the allocation given back when the call ends.
+services:
+  coturn:
+    command:
+      - -n
+      - --listening-port=3478
+      - --no-tls
+      - --lt-cred-mech
+      - --realm=lab.sipral.test
+      - --user=${SIPRAL_TURN_USER:?the relay step names the user}:${SIPRAL_TURN_PASSWORD:?the relay step draws the password}
+      - --min-port=49152
+      - --max-port=49251
+      - --verbose
+      - --log-file=stdout
+      - --simple-log

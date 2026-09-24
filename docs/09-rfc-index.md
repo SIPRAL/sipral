@@ -91,9 +91,9 @@ by no call yet.
 |---|---|---|---|
 | 8489 | STUN | sipral-nat, sipral, sipral-ua | phase 2; done — the Binding client reached through `sipral::Mappings` and `SIPRAL_NAT_STUN`, its answer in the `Contact` and in `c=`/`m=` |
 | 5389 | STUN, previous version, for compatibility | sipral-nat | phase 2; the same client, which reads a server that has not moved |
-| 8656 | TURN | sipral-nat | phase 2; written, not linked |
+| 8656 | TURN | sipral-nat, sipral | phase 4; over UDP, a relay allocated before the call by `sipral::Relays` (`turn_server` in the C ABI) and taken over by the full ICE agent as the relayed candidate; TCP and TLS to the server written in the client, not carried by the agent |
 | 8445 | ICE, lite role | sipral-nat | phase 2; written, not linked |
-| 8445 | ICE, full role: gathering, checks, nomination, role conflicts, restarts. Off by default on a desktop | sipral-nat, sipral | phase 4; a host candidate, and a server-reflexive one from the stack's own STUN mapping of the socket; the agent asks no STUN or TURN server itself |
+| 8445 | ICE, full role: gathering, checks, nomination, role conflicts, restarts. Off by default on a desktop | sipral-nat, sipral | phase 4; a host candidate, a server-reflexive one from the stack's own STUN mapping of the socket, and a relayed one from a TURN allocation made before the call; the agent asks no server itself before the offer |
 | 7675 | STUN consent freshness, for a session ICE established | sipral-nat, sipral | phase 4 |
 | 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2; written, not linked |
 | 8863 | ICE patiently awaiting connectivity: a checklist with nothing left to check is waited on, not failed | sipral-nat, sipral | phase 4 |
