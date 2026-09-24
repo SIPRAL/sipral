@@ -77,7 +77,16 @@ class SipralCall internal constructor(
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
-    /** Every event this call's handle names, decoded whole, in order. */
+    /**
+     * Every event this call's handle names, decoded whole, in order.
+     *
+     * Bounded at 4096 unread events per collector, `DROP_OLDEST`: a
+     * collector more than 4096 events behind the poll thread silently loses
+     * its oldest unread ones rather than block delivery or grow without
+     * bound -- the same trade-off [SipralClient.events] documents, and for
+     * the same reason. Keep per-event work in a `collect` short (as
+     * [digits] and `Agent.kt`'s own handling both do).
+     */
     val events: SharedFlow<SipralEvent> = eventsFlow
 
     /**

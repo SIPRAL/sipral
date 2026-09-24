@@ -319,11 +319,12 @@ private suspend fun everything(): String {
         assertEquals(SipralStatus.STALE_HANDLE, staleMedia.status)
         callB.close()
 
-        // Closing the client while its event channels may still hold
-        // buffered events (both calls' `events`/`digits` Flows are
-        // unbounded Kotlin channels, never drained to empty above) must not
-        // crash and must not touch the handle again: the stack handle is
-        // stale afterward the same way the media handle already was.
+        // Closing the client while its event flows may still hold buffered
+        // events (both calls' `events`/`digits`, each a SharedFlow with
+        // extraBufferCapacity = 4096 and DROP_OLDEST, never drained to
+        // empty above) must not crash and must not touch the handle again:
+        // the stack handle is stale afterward the same way the media
+        // handle already was.
         val stackHandle = clientA.handle
         clientA.close()
         val staleStack = assertFailsWith<SipralException> { Sipral.stackPoll(stackHandle, clientA.nowMs()) }

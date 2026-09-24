@@ -118,6 +118,13 @@ client, say, not the one the action caused. `SharedFlow<SipralEvent>.awaitNext`
 before running its `action`, the same order `SipralAccount.registerAndWait`
 and `SipralCall.waitConfirmed`/`waitEnded` already keep.
 
+That `extraBufferCapacity` is 4096 events, with `onBufferOverflow =
+DROP_OLDEST`: it does not make a slow collector see everything, only lets
+it lag up to 4096 events behind before its oldest unread ones start being
+silently discarded to make room for new ones -- no exception, no signal,
+delivery never blocks the poll thread and the buffer never grows past that.
+A collector meant to see every event keeps its own per-event work short.
+
 ```kotlin
 val (call, incoming) = client.events.awaitNext(SipralEventKind.INCOMING_CALL) {
     peer.placeCall(peerAccount, target = "sip:alice@example.com")

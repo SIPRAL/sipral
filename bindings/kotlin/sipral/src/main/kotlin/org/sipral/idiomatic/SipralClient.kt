@@ -68,7 +68,20 @@ class SipralClient private constructor(
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
-    /** Every event this stack's listener heard, in the order it heard them. */
+    /**
+     * Every event this stack's listener heard, in the order it heard them.
+     *
+     * Bounded, not unbounded: at most 4096 unread events are kept per
+     * collector's own lag behind the poll thread. `DROP_OLDEST` means a
+     * collector that falls more than 4096 events behind -- doing real work
+     * per event, or simply not reading for a while -- has its oldest unread
+     * events silently discarded to make room, with no exception and no
+     * signal that anything was dropped; it never blocks the poll thread and
+     * never grows without bound. A collector that intends to see every
+     * event has to keep its own per-event work short, or hand events off to
+     * something else (a channel, a queue) rather than do the work inline in
+     * `collect`.
+     */
     val events: SharedFlow<SipralEvent> = eventsFlow
 
     private val calls = ConcurrentHashMap<Long, SipralCall>()

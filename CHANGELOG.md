@@ -920,6 +920,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   delay: a check arriving inside it still forms a peer-reflexive pair and
   connects the call.
 
+- **`SipralClient.events`, `SipralCall.events` and `digits` document what
+  their buffer actually guarantees.** A stale comment in `IdiomaticCheck.kt`
+  called them "unbounded Kotlin channels"; they are a `SharedFlow` with
+  `extraBufferCapacity = 4096` and `onBufferOverflow = DROP_OLDEST`, which
+  is bounded, not unbounded, and does not mean a slow collector sees
+  everything -- past 4096 events of lag, its oldest unread ones are
+  silently dropped to make room, with no exception and no signal. The KDoc
+  on both flows and `bindings/kotlin/README.md` now say so directly, found
+  while reproducing the ordering bug above and checking, as its own review
+  asked, whether a live collector under a burst load could still lose
+  events: a slow one can, once it falls behind by more than the buffer
+  holds. No behaviour changed.
+
 ### Fixed
 
 - **A pause at the start of a DTLS-SRTP call no longer costs half a second of
