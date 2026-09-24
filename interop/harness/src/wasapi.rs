@@ -203,8 +203,18 @@ fn is_vb_cable_endpoint(name: &str) -> bool {
 /// recognises — or, when `id_env` names one, exactly that endpoint,
 /// unchecked against the machine's own list.
 ///
+/// More than one endpoint can match the rule at once — this lab's own test
+/// machine has both the free edition's cable and an unused paid edition's
+/// extra render endpoint installed side by side, "CABLE In 16 Ch" among
+/// them, and both carry "vb-audio" in their name — so a tie among them is
+/// broken by which one, if only one, Windows' own "default communications"
+/// setting already names for this direction: the same choice a person
+/// setting this machine up by hand would reach for, and already recorded
+/// for [`Device::is_default`] to read rather than guessed at here.
+///
 /// # Errors
-/// No such endpoint, more than one, or the list itself could not be read;
+/// No endpoint matches, more than one matches and no single one of those is
+/// the communications default either, or the list itself could not be read;
 /// every error names every endpoint this machine actually has in that
 /// direction, so the fix is legible from the failure alone, without a
 /// separate `-ListDevices` run.
@@ -217,7 +227,7 @@ fn find_endpoint(direction: Direction, id_env: &str, name_env: &str) -> Result<D
     let all =
         sipral_io_wasapi::devices().map_err(|error| format!("cannot list endpoints: {error}"))?;
     let wanted = env::var(name_env).ok().filter(|name| !name.is_empty());
-    let matches = |device: &&Device| {
+    let rule = |device: &&Device| {
         device.direction == direction
             && match &wanted {
                 Some(substring) => device
@@ -227,24 +237,27 @@ fn find_endpoint(direction: Direction, id_env: &str, name_env: &str) -> Result<D
                 None => is_vb_cable_endpoint(&device.name),
             }
     };
-    let mut matching = all.iter().filter(matches);
-    let Some(first) = matching.next() else {
+    let matching: Vec<&Device> = all.iter().filter(rule).collect();
+    let chosen = match matching.as_slice() {
+        [] => None,
+        [only] => Some(*only),
+        several => {
+            let mut defaults = several.iter().copied().filter(|device| device.is_default);
+            match (defaults.next(), defaults.next()) {
+                (Some(only_default), None) => Some(only_default),
+                _ => None,
+            }
+        }
+    };
+    let Some(chosen) = chosen else {
         return Err(format!(
-            "no {direction} endpoint {} — set {id_env} (or {name_env}) to the one to use; \
-             this machine's {direction} endpoints:\n{}",
+            "no single {direction} endpoint {} — set {id_env} (or {name_env}) to the one to \
+             use; this machine's {direction} endpoints:\n{}",
             rule_description(wanted.as_deref()),
             list_endpoints(&all, direction),
         ));
     };
-    if matching.next().is_some() {
-        return Err(format!(
-            "more than one {direction} endpoint {} — set {id_env} (or {name_env}) to the one \
-             to use; this machine's {direction} endpoints:\n{}",
-            rule_description(wanted.as_deref()),
-            list_endpoints(&all, direction),
-        ));
-    }
-    Ok(first.id.clone())
+    Ok(chosen.id.clone())
 }
 
 /// The clause an error names for why an endpoint was or was not picked.
