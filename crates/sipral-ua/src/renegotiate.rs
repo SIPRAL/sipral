@@ -93,8 +93,11 @@ struct Asked {
 /// What this agent will answer, advertised so that the far end knows an UPDATE
 /// is worth sending (RFC 3311 §4).
 ///
-/// It lists what is answered here and nothing more.
-pub(crate) const ALLOW: &[u8] = b"INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, PRACK, REFER, NOTIFY";
+/// It lists what is answered here and nothing more: MESSAGE outside a dialog
+/// and INFO inside one are handled too (RFC 3428, RFC 6086), so they are
+/// listed with the rest.
+pub(crate) const ALLOW: &[u8] =
+    b"INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, PRACK, REFER, NOTIFY, MESSAGE, INFO";
 
 /// §14.1 and RFC 3311 §5.3: the wait for the end that generated the `Call-ID`,
 /// in milliseconds.

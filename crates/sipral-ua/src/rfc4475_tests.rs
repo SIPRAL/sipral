@@ -736,7 +736,8 @@ fn a_method_this_agent_knows_but_does_not_take_outside_a_dialog_is_405_with_allo
         assert_eq!(
             allow,
             [
-                "INVITE", "ACK", "CANCEL", "BYE", "OPTIONS", "UPDATE", "PRACK", "REFER", "NOTIFY"
+                "INVITE", "ACK", "CANCEL", "BYE", "OPTIONS", "UPDATE", "PRACK", "REFER", "NOTIFY",
+                "MESSAGE", "INFO"
             ],
             "{method}"
         );
