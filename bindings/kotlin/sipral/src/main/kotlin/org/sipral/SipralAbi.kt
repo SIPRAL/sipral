@@ -7453,7 +7453,12 @@ object Sipral {
      * dropped. With a TURN server configured, its relay goes back to the
      * server: a Refresh with a lifetime of zero (RFC 8656 §8), waiting in
      * sipral_stack_poll_stun when this returns, to be sent from the
-     * socket like everything else there. Without this the stack keeps the
+     * socket like everything else there. A socket whose Allocate was sent
+     * and not answered yet asks nothing more, but the server may have
+     * allocated all the same: the answer, handed in through
+     * sipral_stack_receive_stun as before, is taken for up to the forty
+     * seconds the request would have waited, and an allocation it reports
+     * is given back the same way. Without this the stack keeps the
      * allocation refreshed for as long as it lives, and after
      * `sipral_stack_destroy`, which sends nothing, the server holds it — a
      * port and a share of the account's quota — until its lifetime runs

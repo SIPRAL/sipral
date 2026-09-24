@@ -630,8 +630,12 @@ socket named with `sipral_stack_nat_map` that will carry no call after all
 says so: it is no longer asked about every twenty-five seconds, a request for
 it still queued is dropped, and its relay goes back to the server — a Refresh
 with a lifetime of zero, waiting in `sipral_stack_poll_stun` when the call
-returns. Without it the stack keeps the allocation refreshed for as long as it
-lives. A socket a call was described on was spent by that call already, and a
+returns. A socket whose Allocate was sent and not yet answered asks nothing
+more, but the server may have allocated all the same: its answer, handed in
+through `sipral_stack_receive_stun` as before, is still taken for the forty
+seconds the request would have waited, and an allocation it reports is given
+back the same way. Without it the stack keeps the allocation refreshed for as
+long as it lives. A socket a call was described on was spent by that call already, and a
 socket never named is nothing to give back; both are `SIPRAL_STATUS_OK` with
 nothing done. `SIPRAL_STATUS_WRONG_STATE` on a stack without
 `SIPRAL_NAT_STUN`, `SIPRAL_STATUS_INVALID_ARGUMENT` for a signalling socket.

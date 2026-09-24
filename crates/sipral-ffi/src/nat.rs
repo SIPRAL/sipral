@@ -775,7 +775,7 @@ impl Nat {
     /// call after all: it is no longer kept mapped, and its relay goes back
     /// to the server.
     fn unmap(state: &mut StackState, local: SocketAddr, now: Instant) -> Result<(), Fail> {
-        let Some(active) = state.nat.active.as_ref() else {
+        let Some(active) = state.nat.active.as_mut() else {
             return Err(not_asking());
         };
         if active.signalling.contains_key(&local) {
@@ -786,6 +786,15 @@ impl Nat {
                      long as it is bound"
                 ),
             ));
+        }
+        // what the socket's relay still had queued asks for what nobody
+        // wants now: an Allocate not yet sent allocates nothing, and a
+        // keepalive or a refresh keeps nothing. Only while the socket is
+        // still named: once a call was described on it, what waits there is
+        // that call's
+        #[cfg(feature = "ice")]
+        if active.mappings.state(local).is_some() {
+            active.relay_out.retain(|queued| queued.local != local);
         }
         Self::spent(state, local, now);
         Ok(())
@@ -1220,7 +1229,12 @@ entry! {
     /// dropped. With a TURN server configured, its relay goes back to the
     /// server: a Refresh with a lifetime of zero (RFC 8656 §8), waiting in
     /// [`sipral_stack_poll_stun`] when this returns, to be sent from the
-    /// socket like everything else there. Without this the stack keeps the
+    /// socket like everything else there. A socket whose Allocate was sent
+    /// and not answered yet asks nothing more, but the server may have
+    /// allocated all the same: the answer, handed in through
+    /// [`sipral_stack_receive_stun`] as before, is taken for up to the forty
+    /// seconds the request would have waited, and an allocation it reports
+    /// is given back the same way. Without this the stack keeps the
     /// allocation refreshed for as long as it lives, and after
     /// `sipral_stack_destroy`, which sends nothing, the server holds it — a
     /// port and a share of the account's quota — until its lifetime runs
@@ -2482,6 +2496,143 @@ mod tests {
         );
     }
 
+    /// A socket unmapped while its Allocate is still on its way: the server
+    /// allocates all the same when the request reaches it, and the answer is
+    /// what says so, so the relay goes back when that answer arrives rather
+    /// than being held on the server for its whole lifetime.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_socket_unmapped_before_its_relay_is_answered_gives_it_back_on_the_answer() {
+        let mut observed = Observed::default();
+        let _ = mapped();
+        let _ = relayed();
+        let (status, stack) = create(&relaying(&mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = signalling_out(stack);
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let out = stun_out(stack);
+        assert_eq!(out.len(), 2, "a Binding request and an Allocate");
+        let allocate = out
+            .iter()
+            .find(|(request, ..)| is_allocate(request))
+            .expect("the Allocate")
+            .0
+            .clone();
+
+        assert_eq!(unmap(stack, MEDIA, 20), SipralStatus::Ok);
+        assert!(stun_out(stack).is_empty(), "nothing allocated yet");
+        assert_eq!(
+            on_media_socket(
+                stack,
+                &turn_answer(&allocate, RELAYED_AT, MEDIA_PUBLIC),
+                SERVER,
+                30
+            ),
+            SipralStatus::Ok,
+            "the server's answer is the stack's: {}",
+            last_error_text()
+        );
+        let out = stun_out(stack);
+        assert!(
+            out.iter().any(|(request, destination, source)| {
+                refresh_lifetime(request) == Some(0) && destination == SERVER && source == MEDIA
+            }),
+            "the allocation the answer names was left on the server: {out:?}"
+        );
+        let _ = poll(stack, 40);
+        assert!(relayed().is_empty(), "a socket unmapped hears nothing more");
+        // and nothing more is sent for it
+        for at in [30_000, 60_000, 600_000] {
+            let _ = poll(stack, at);
+            assert!(stun_out(stack).is_empty(), "at {at} ms");
+        }
+
+        // named and unmapped before anything was taken out to send: nothing
+        // at all leaves for it, the Allocate included
+        assert_eq!(map_media(stack, 600_010), SipralStatus::Ok);
+        assert_eq!(unmap(stack, MEDIA, 600_020), SipralStatus::Ok);
+        assert!(stun_out(stack).is_empty(), "a request nobody wants went");
+    }
+
+    /// Unmapping the socket a call is ringing on touches nothing of the
+    /// call's: its relay is the call's, kept alive and given back when the
+    /// call ends, and unmapping after that is as harmless.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn unmapping_the_socket_of_a_call_leaves_the_call_its_relay() {
+        let mut observed = Observed::default();
+        let _ = mapped();
+        let _ = relayed();
+        let (status, stack) = create(&relaying(&mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        relay_on_the_socket(stack, 10);
+        let mut ice = managed_config();
+        ice.ice = crate::media::SipralIce::Offered as u32;
+        let (status, call) = place(stack, account, &ice, 20);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = signalling_out(stack)
+            .into_iter()
+            .find(|(message, _)| message.starts_with(b"INVITE "))
+            .expect("the INVITE")
+            .0;
+        crate::call::tests::deliver(stack, &crate::call::tests::ringing(&invite), 30);
+        // a keepalive of the call's waits in the queue when the socket is
+        // unmapped: asked for with no room to take it, it stays there
+        let _ = poll(stack, 15_100);
+        let _ = signalling_out(stack);
+        let mut buffers = Buffers::new();
+        let mut cramped = buffers.transmit();
+        cramped.capacity = 4;
+        assert_ne!(
+            unsafe { sipral_stack_poll_stun(stack, &raw mut cramped) },
+            SipralStatus::Ok,
+            "a keepalive fits in four bytes"
+        );
+        assert_eq!(unmap(stack, MEDIA, 15_110), SipralStatus::Ok);
+        let out = stun_out(stack);
+        assert!(
+            out.iter()
+                .any(|(request, ..)| request.get(..2) == Some(&[0x00, 0x11][..])),
+            "the call's keepalive was dropped: {out:?}"
+        );
+        assert!(
+            out.iter()
+                .all(|(request, ..)| refresh_lifetime(request) != Some(0)),
+            "the call's relay was given back under it: {out:?}"
+        );
+
+        crate::call::tests::deliver(
+            stack,
+            &crate::call::tests::answered_with(&invite, 486, "Busy Here"),
+            20_000,
+        );
+        let _ = poll(stack, 20_000);
+        let mut buffers = crate::media::tests::Buffers::new();
+        let mut given_back = 0;
+        loop {
+            let mut from_call = SIPRAL_HANDLE_NONE;
+            let mut packet = buffers.packet();
+            let status = unsafe {
+                crate::media::sipral_stack_poll_farewell(stack, &raw mut from_call, &raw mut packet)
+            };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if packet.len == 0 {
+                break;
+            }
+            assert_eq!(from_call, call);
+            let (payload, destination) = buffers.taken(&packet);
+            if destination == SERVER && refresh_lifetime(&payload) == Some(0) {
+                given_back += 1;
+            }
+        }
+        assert_eq!(given_back, 1, "given back once, by the call");
+        assert_eq!(unmap(stack, MEDIA, 20_010), SipralStatus::Ok);
+        let _ = poll(stack, 20_020);
+        assert!(stun_out(stack).is_empty(), "nothing given back twice");
+    }
+
     #[test]
     fn unmapping_needs_a_stack_that_asks_and_a_media_socket() {
         let mut observed = Observed::default();
@@ -2693,5 +2844,74 @@ mod tests {
             given_back |= destination == SERVER && refresh_lifetime(&payload) == Some(0);
         }
         assert!(given_back, "the relay was lost while the phone rang");
+    }
+
+    /// The same ring, driven only by the deadline `sipral_stack_poll` names,
+    /// as an application that sleeps until then does: every keepalive
+    /// leaves within its fifteen seconds of the last, and the refresh before
+    /// the allocation's ten minutes are up.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_ringing_call_is_woken_in_time_for_its_keepalives_and_its_refresh() {
+        let mut observed = Observed::default();
+        let _ = mapped();
+        let _ = relayed();
+        let (status, stack) = create(&relaying(&mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        relay_on_the_socket(stack, 10);
+        let mut ice = managed_config();
+        ice.ice = crate::media::SipralIce::Offered as u32;
+        let (status, _call) = place(stack, account, &ice, 20);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = signalling_out(stack)
+            .into_iter()
+            .find(|(message, _)| message.starts_with(b"INVITE "))
+            .expect("the INVITE")
+            .0;
+        crate::call::tests::deliver(stack, &crate::call::tests::ringing(&invite), 30);
+
+        let mut at = 30;
+        let mut last_to_server = 10;
+        let mut refreshed_at = Vec::new();
+        while at < 1_300_000 {
+            let result = poll(stack, at);
+            let _ = signalling_out(stack);
+            for (request, destination, source) in stun_out(stack) {
+                assert_eq!((destination.as_str(), source.as_str()), (SERVER, MEDIA));
+                assert!(
+                    at - last_to_server <= 15_050,
+                    "nothing went to the TURN server between {last_to_server} and {at} ms"
+                );
+                last_to_server = at;
+                if request.get(..2) == Some(&[0x00, 0x04][..]) {
+                    refreshed_at.push(at);
+                    assert_eq!(
+                        on_media_socket(
+                            stack,
+                            &turn_answer(&request, RELAYED_AT, MEDIA_PUBLIC),
+                            SERVER,
+                            at
+                        ),
+                        SipralStatus::Ok,
+                        "{}",
+                        last_error_text()
+                    );
+                }
+            }
+            assert_eq!(result.has_deadline, 1, "nothing to wake for at {at} ms");
+            at += result.next_poll_in_ms.max(1);
+        }
+        assert!(
+            refreshed_at.len() >= 2,
+            "the allocation is refreshed every nine minutes: {refreshed_at:?}"
+        );
+        // allocated at 10 ms for ten minutes, and refreshed a minute before
+        // they are up
+        assert!(
+            (530_000..=540_100).contains(&refreshed_at[0]),
+            "the first refresh left at {refreshed_at:?} ms"
+        );
     }
 }

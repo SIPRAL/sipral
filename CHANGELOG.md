@@ -52,7 +52,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   INVITE the relay moves to the branch that is answered and kept while the
   first still rings. `sipral_stack_nat_unmap` gives back the relay of a
   socket that will carry no call, which until now was kept for as long as
-  the stack lived and left to lapse after it was destroyed.
+  the stack lived and left to lapse after it was destroyed; one released
+  while its Allocate is still unanswered (`Relays::release`) is given back
+  when the answer arrives, where it used to be forgotten and left allocated.
 - **An hour on a call, and what the jitter buffer did for all of it.**
   `scripts/lab.sh drift` — not part of a run that names nothing, since it
   takes an hour — holds three calls to Asterisk's echo for sixty minutes,

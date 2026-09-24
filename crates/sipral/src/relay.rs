@@ -123,6 +123,11 @@ pub struct Relays {
     credentials: LongTermCredentials,
     keys: KeySource,
     sockets: BTreeMap<SocketAddr, Pending>,
+    /// Sockets released while their Allocate was still on its way: the
+    /// server allocates when the request reaches it, and only its answer says
+    /// so, so the client waits here for that answer to give the allocation
+    /// back ([`Relays::release`]).
+    leaving: BTreeMap<SocketAddr, TurnClient>,
     outbox: VecDeque<RelayDatagram>,
     events: VecDeque<RelayEvent>,
 }
@@ -144,6 +149,7 @@ impl Relays {
             credentials: LongTermCredentials::new(username, password),
             keys: KeySource::new(seed),
             sockets: BTreeMap::new(),
+            leaving: BTreeMap::new(),
             outbox: VecDeque::new(),
             events: VecDeque::new(),
         }
@@ -163,6 +169,19 @@ impl Relays {
     /// [`TurnError::AddressFamilyNotSupported`].
     pub fn allocate(&mut self, local: SocketAddr, now: Instant) {
         if self.sockets.contains_key(&local) {
+            return;
+        }
+        // released while its Allocate was on its way, and wanted again: that
+        // request is the one the server is answering, and a second one from
+        // the same socket would be refused as a mismatch (RFC 8656 §7.2)
+        if let Some(client) = self.leaving.remove(&local) {
+            self.sockets.insert(
+                local,
+                Pending {
+                    client,
+                    keepalive_at: None,
+                },
+            );
             return;
         }
         if local.is_ipv4() != self.server.is_ipv4() {
@@ -222,7 +241,7 @@ impl Relays {
             return false;
         }
         let Some(pending) = self.sockets.get_mut(&local) else {
-            return false;
+            return self.receive_leaving(local, data, now);
         };
         top_up(&mut self.keys, &mut pending.client);
         let input = pending.client.handle_input(data, now);
@@ -250,11 +269,12 @@ impl Relays {
     /// up, a refresh, or a keepalive.
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
-        self.sockets
+        let waiting = self
+            .sockets
             .values()
-            .flat_map(|pending| [pending.client.deadline(), pending.keepalive_at])
-            .flatten()
-            .min()
+            .flat_map(|pending| [pending.client.deadline(), pending.keepalive_at]);
+        let leaving = self.leaving.values().map(TurnClient::deadline);
+        waiting.chain(leaving).flatten().min()
     }
 
     /// Take the passing of time.
@@ -288,6 +308,48 @@ impl Relays {
             }
             self.drain(local, now);
         }
+        // a released socket's Allocate is not sent again, since nothing wants
+        // what it asks for: its answer is waited for only as long as the
+        // transaction would have waited, and then there is none coming
+        self.leaving.retain(|_, client| {
+            if client.deadline().is_some_and(|at| at <= now) {
+                client.handle_timeout(now);
+                while client.poll_transmit().is_some() {}
+            }
+            let closed = std::iter::from_fn(|| client.poll_event())
+                .any(|event| matches!(event, Event::Closed(_)));
+            !closed && client.deadline().is_some()
+        });
+    }
+
+    /// The answer to the Allocate of a socket released while it was on its
+    /// way, and whether it was one: an allocation it reports goes straight
+    /// back to the server, and the client is done either way — a refusal, a
+    /// 401 included, allocated nothing, and a request sent again after one
+    /// would ask for what nobody wants.
+    fn receive_leaving(&mut self, local: SocketAddr, data: &[u8], now: Instant) -> bool {
+        let Some(client) = self.leaving.get_mut(&local) else {
+            return false;
+        };
+        top_up(&mut self.keys, client);
+        if client.handle_input(data, now) == Input::Foreign {
+            return false;
+        }
+        let Some(mut client) = self.leaving.remove(&local) else {
+            return false;
+        };
+        while client.poll_transmit().is_some() {}
+        if client.is_allocated() {
+            let _unallocated = client.delete(now);
+            while let Some(payload) = client.poll_transmit() {
+                self.outbox.push_back(RelayDatagram {
+                    local,
+                    destination: self.server,
+                    payload,
+                });
+            }
+        }
+        true
     }
 
     /// Whether `local` has asked for a relay and the server has not said yet.
@@ -365,22 +427,30 @@ impl Relays {
 
     /// Give `local`'s relay back to the server, for a socket that will not
     /// carry a call after all: a Refresh with a lifetime of zero, sent from
-    /// [`Relays::poll_transmit`]. A socket still waiting for its answer is
-    /// simply forgotten.
+    /// [`Relays::poll_transmit`]. A socket still waiting for its answer asks
+    /// nothing more, but the request already sent may have allocated all
+    /// the same: its answer, handed in through [`Relays::receive`] like any
+    /// other, still gives such an allocation back, and is waited for as long
+    /// as the transaction would have waited. [`Relays::allocate`] on the
+    /// socket before then takes up that request again.
     pub fn release(&mut self, local: SocketAddr, now: Instant) {
         let Some(mut pending) = self.sockets.remove(&local) else {
             return;
         };
-        if pending.client.is_allocated() {
-            top_up(&mut self.keys, &mut pending.client);
-            let _unallocated = pending.client.delete(now);
-            while let Some(payload) = pending.client.poll_transmit() {
-                self.outbox.push_back(RelayDatagram {
-                    local,
-                    destination: self.server,
-                    payload,
-                });
+        if !pending.client.is_allocated() {
+            if pending.client.deadline().is_some() {
+                self.leaving.insert(local, pending.client);
             }
+            return;
+        }
+        top_up(&mut self.keys, &mut pending.client);
+        let _unallocated = pending.client.delete(now);
+        while let Some(payload) = pending.client.poll_transmit() {
+            self.outbox.push_back(RelayDatagram {
+                local,
+                destination: self.server,
+                payload,
+            });
         }
     }
 
@@ -701,6 +771,73 @@ pub(crate) mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(refresh_lifetime(&sent[0].payload), Some(0));
         assert!(relays.take(at(MEDIA)).is_none());
+    }
+
+    #[test]
+    fn a_relay_released_before_its_answer_is_given_back_when_the_answer_comes() {
+        let now = Instant::now();
+        let mut relays = Relays::new(at(SERVER), "alice", "correct horse", [10; 32]);
+        relays.allocate(at(MEDIA), now);
+        let request = drain(&mut relays).remove(0);
+        relays.release(at(MEDIA), now);
+        assert!(drain(&mut relays).is_empty(), "nothing allocated yet");
+
+        let reply = answer(&request.payload).expect("an answer");
+        assert!(relays.receive(at(MEDIA), at(SERVER), &reply, now));
+        let sent = drain(&mut relays);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(refresh_lifetime(&sent[0].payload), Some(0));
+        assert_eq!(
+            (sent[0].local, sent[0].destination),
+            (at(MEDIA), at(SERVER))
+        );
+        assert!(
+            events(&mut relays).is_empty(),
+            "a socket let go hears nothing"
+        );
+        assert!(relays.take(at(MEDIA)).is_none());
+        assert_eq!(relays.poll_timeout(), None, "nothing left to wait for");
+        assert!(
+            !relays.receive(at(MEDIA), at(SERVER), &reply, now),
+            "answered once"
+        );
+    }
+
+    #[test]
+    fn a_relay_released_and_never_answered_is_forgotten_without_asking_again() {
+        let mut now = Instant::now();
+        let mut relays = Relays::new(at(SERVER), "alice", "correct horse", [11; 32]);
+        relays.allocate(at(MEDIA), now);
+        let _ = drain(&mut relays);
+        relays.release(at(MEDIA), now);
+        let mut rounds = 0;
+        while let Some(due) = relays.poll_timeout() {
+            rounds += 1;
+            assert!(rounds < 32, "still waiting at {:?}", due - now);
+            now = due;
+            relays.handle_timeout(now);
+            assert!(drain(&mut relays).is_empty(), "the Allocate went again");
+        }
+        assert!(events(&mut relays).is_empty());
+    }
+
+    #[test]
+    fn a_relay_released_and_wanted_again_before_its_answer_is_the_same_request() {
+        let now = Instant::now();
+        let mut relays = Relays::new(at(SERVER), "alice", "correct horse", [12; 32]);
+        relays.allocate(at(MEDIA), now);
+        let request = drain(&mut relays).remove(0);
+        relays.release(at(MEDIA), now);
+        relays.allocate(at(MEDIA), now);
+        assert!(
+            drain(&mut relays).is_empty(),
+            "a second Allocate from the same socket would be a mismatch"
+        );
+        assert!(relays.pending(at(MEDIA)));
+        let reply = answer(&request.payload).expect("an answer");
+        assert!(relays.receive(at(MEDIA), at(SERVER), &reply, now));
+        assert!(drain(&mut relays).is_empty(), "nothing given back");
+        assert!(relays.take(at(MEDIA)).is_some(), "the socket's relay");
     }
 
     #[test]
