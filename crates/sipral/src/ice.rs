@@ -98,9 +98,9 @@ use std::time::Instant;
 use sipral_core::auth::KeySource;
 #[cfg(feature = "ice")]
 use sipral_nat::ice::{
-    Candidate, CandidateType, ComponentId, Credentials, IceAgent, IceConfig, IceEvent, LiteAgent,
-    Received, RemoteIce, Role, Route, SelectedPair, SendError, StreamId, TRANSMIT_CEILING,
-    Transmit,
+    Candidate, CandidateType, CheckAnswer, ComponentId, Credentials, IceAgent, IceConfig, IceEvent,
+    LiteAgent, REFUSAL_CEILING, Received, RemoteIce, Role, Route, SelectedPair, SendError,
+    StreamId, TRANSMIT_CEILING, Transmit,
 };
 #[cfg(feature = "ice")]
 use sipral_nat::stun::TransactionId;
@@ -561,7 +561,8 @@ struct Lite {
     /// public one a one-to-one NAT forwards to it.
     advertised: SocketAddr,
     /// Answers to checks, each to the address its check came from, held to
-    /// [`TRANSMIT_CEILING`] exactly as the full agent holds its own.
+    /// [`TRANSMIT_CEILING`], and a stranger's refusals to
+    /// [`REFUSAL_CEILING`], exactly as the full agent holds its own.
     outbox: VecDeque<(SocketAddr, Vec<u8>)>,
     /// Answers the ceiling kept out of `outbox`.
     dropped: u64,
@@ -679,16 +680,22 @@ impl Ice {
                 if sipral_nat::classify(data) != sipral_nat::Demux::Stun {
                     return Taken::Data(0..data.len());
                 }
-                if let Some(reply) =
+                if let Some(answer) =
                     lite.agent
-                        .handle_binding_request(ComponentId::RTP, self.local, from, data)
+                        .answer_binding_request(ComponentId::RTP, self.local, from, data)
                 {
                     // every check is answered, a stranger's unsigned one
                     // included, so the ceiling is what keeps a flood the
                     // application is slow to drain out of memory. The answer
                     // being queued gives way, as the full agent's does: to
-                    // the peer it is a lost datagram, and it checks again
-                    if lite.outbox.len() < TRANSMIT_CEILING {
+                    // the peer it is a lost datagram, and it checks again.
+                    // A stranger's refusals stop at half of it, so the
+                    // peer's nomination and consent checks still find room
+                    let (reply, ceiling) = match answer {
+                        CheckAnswer::Signed(reply) => (reply, TRANSMIT_CEILING),
+                        CheckAnswer::Refused(reply) => (reply, REFUSAL_CEILING),
+                    };
+                    if lite.outbox.len() < ceiling {
                         lite.outbox.push_back((from, reply));
                     } else {
                         lite.dropped = lite.dropped.saturating_add(1);

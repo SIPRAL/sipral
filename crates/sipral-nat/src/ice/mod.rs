@@ -30,15 +30,15 @@ mod full;
 mod sdp;
 mod server;
 
-pub use agent::{LiteAgent, Role, ValidPair};
+pub use agent::{CheckAnswer, LiteAgent, Role, ValidPair};
 pub use candidate::{
     Candidate, CandidateType, ComponentId, Foundation, HostAddresses, candidate_priority, gather,
 };
 pub use checklist::{PairState, pair_priority};
 pub use full::{
     CONSENT_EXPIRY, Credentials, DEFAULT_CONSENT_INTERVAL, DEFAULT_KEEPALIVE, DEFAULT_MAX_PAIRS,
-    DEFAULT_TA, IceAgent, IceConfig, IceError, IceEvent, IceState, Received, Route, SelectedPair,
-    SendError, StreamId, TRANSMIT_CEILING, Transmit, TurnServer,
+    DEFAULT_TA, IceAgent, IceConfig, IceError, IceEvent, IceState, REFUSAL_CEILING, Received,
+    Route, SelectedPair, SendError, StreamId, TRANSMIT_CEILING, Transmit, TurnServer,
 };
 pub use sdp::{
     RemoteIce, ice_mismatch, parse_remote, write_media, write_pacing, write_session, write_stream,

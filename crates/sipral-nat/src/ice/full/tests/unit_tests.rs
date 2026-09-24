@@ -10,8 +10,8 @@ use super::sim_tests::{STUN_SERVER, TURN_SERVER, address};
 use super::{agent, config, credentials};
 use crate::ice::{
     Candidate, CandidateType, ComponentId, Credentials, Foundation, IceAgent, IceConfig, IceError,
-    IceEvent, IceState, PairState, Received, RemoteIce, Role, StreamId, TRANSMIT_CEILING, Transmit,
-    pair_priority,
+    IceEvent, IceState, PairState, REFUSAL_CEILING, Received, RemoteIce, Role, StreamId,
+    TRANSMIT_CEILING, Transmit, pair_priority,
 };
 use crate::stun::{
     AttributeType, Class, Integrity, Message, MessageBuilder, Method, TransactionId, error_code,
@@ -535,10 +535,10 @@ fn a_flood_nobody_drains_is_held_to_the_outbox_ceiling_and_counted() {
     let queued = drain(&mut agent);
     assert_eq!(
         queued.len(),
-        TRANSMIT_CEILING,
-        "the outbox grew past its ceiling"
+        REFUSAL_CEILING,
+        "a stranger's refusals grew past their share of the outbox"
     );
-    let dropped = u64::from(flood) - u64::try_from(TRANSMIT_CEILING).expect("fits");
+    let dropped = u64::from(flood) - u64::try_from(REFUSAL_CEILING).expect("fits");
     assert!(queued.iter().all(|transmit| {
         Message::parse(&transmit.data).is_ok_and(|message| {
             message.error_code().map(|error| error.code()) == Some(error_code::BAD_REQUEST)
@@ -570,6 +570,72 @@ fn a_flood_the_caller_drains_as_it_goes_loses_nothing() {
         assert_eq!(drain(&mut agent).len(), 1);
     }
     assert_eq!(agent.transmits_dropped(), 0);
+}
+
+#[test]
+fn a_strangers_flood_nobody_drains_leaves_room_for_the_peer_and_the_agent() {
+    let (mut agent, stream, _ids, now) = gathered(Role::Controlling, config(false, false));
+    agent
+        .set_remote(stream, &from_peer(Vec::new()), now)
+        .expect("the answer");
+    drain(&mut agent);
+    for index in 0..10_000_u32 {
+        let source = SocketAddr::new(
+            "203.0.113.9".parse().expect("ip"),
+            10_000 + u16::try_from(index % 50_000).expect("fits"),
+        );
+        agent.handle_datagram(address(LOCAL), source, &unsigned_request(index), now);
+    }
+    // the peer's check lands behind the flood, with nothing drained: its
+    // answer and the triggered check back, sent on the agent's next tick,
+    // are the call's own traffic, and a stranger's refusals must not have
+    // taken their room
+    agent.handle_datagram(
+        address(LOCAL),
+        address(PEER),
+        &check_from_peer(3, Some(PEER_PRIORITY), false),
+        now,
+    );
+    let tick = agent.deadline().expect("a triggered check to send");
+    agent.handle_timeout(tick);
+    let queued = drain(&mut agent);
+    let to_peer = |class: Class| {
+        queued.iter().any(|transmit| {
+            transmit.destination == address(PEER)
+                && Message::parse(&transmit.data).is_ok_and(|message| message.class() == class)
+        })
+    };
+    assert!(to_peer(Class::Success), "the peer's check went unanswered");
+    assert!(to_peer(Class::Request), "the triggered check was dropped");
+}
+
+#[test]
+fn the_peers_own_checks_nobody_drains_are_held_to_the_whole_ceiling() {
+    let (mut agent, stream, _ids, now) = gathered(Role::Controlling, config(false, false));
+    agent
+        .set_remote(stream, &from_peer(Vec::new()), now)
+        .expect("the answer");
+    drain(&mut agent);
+    let checks = 2_000_u32;
+    for index in 0..checks {
+        let id = u8::try_from(index % 256).expect("fits");
+        agent.handle_datagram(
+            address(LOCAL),
+            address(PEER),
+            &check_from_peer(id, Some(PEER_PRIORITY), false),
+            now,
+        );
+    }
+    let queued = drain(&mut agent);
+    assert_eq!(
+        queued.len(),
+        TRANSMIT_CEILING,
+        "the outbox grew past its ceiling"
+    );
+    assert!(agent.transmits_dropped() > 0);
+    assert!(queued.iter().any(|transmit| {
+        Message::parse(&transmit.data).is_ok_and(|message| message.class() == Class::Success)
+    }));
 }
 
 /// A nominating check from a controlling peer under this USERNAME, signed

@@ -5608,15 +5608,25 @@ fn two_lite_ends_carry_the_call_on_their_default_candidates() {
     assert_eq!(sent.destination, caller_media());
 }
 
-/// Send `count` unsigned Binding requests, from a stranger, to one call's
-/// media port without taking anything back, then drain the session and say
-/// how many answers it had queued and how many it dropped.
+/// Where [`flood_media_port`]'s requests come from.
 #[cfg(feature = "ice")]
-fn flood_media_port(pair: &mut Pair, remote: CallHandle, count: u32) -> (usize, u64) {
+fn stranger() -> SocketAddr {
+    "203.0.113.66:40066".parse().expect("an address")
+}
+
+/// Send `count` unsigned Binding requests, from a stranger, to one call's
+/// media port without taking anything back, then `behind` if there is one,
+/// then drain the session: what it had queued, and how many it dropped.
+#[cfg(feature = "ice")]
+fn flood_media_port(
+    pair: &mut Pair,
+    remote: CallHandle,
+    count: u32,
+    behind: Option<(SocketAddr, &[u8])>,
+) -> (Vec<(SocketAddr, Vec<u8>)>, u64) {
     use sipral_nat::stun::{Class, MessageBuilder, Method, TransactionId};
     let mut session = pair.callee.engine.session(remote).expect("media");
     while session.poll_transmit(pair.now).is_some() {}
-    let stranger: SocketAddr = "203.0.113.66:40066".parse().expect("an address");
     for index in 0..count {
         let mut id = [0x5a_u8; 12];
         id[..4].copy_from_slice(&index.to_be_bytes());
@@ -5625,14 +5635,20 @@ fn flood_media_port(pair: &mut Pair, remote: CallHandle, count: u32) -> (usize, 
         builder.add_fingerprint().expect("a fingerprint");
         let mut datagram = builder.finish();
         assert_eq!(
-            session.receive(&mut datagram, stranger, pair.now),
+            session.receive(&mut datagram, stranger(), pair.now),
             Arrival::Check
         );
     }
-    let mut queued = 0;
+    if let Some((from, check)) = behind {
+        let mut datagram = check.to_vec();
+        assert_eq!(
+            session.receive(&mut datagram, from, pair.now),
+            Arrival::Check
+        );
+    }
+    let mut queued = Vec::new();
     while let Some(datagram) = session.poll_transmit(pair.now) {
-        assert_eq!(datagram.destination, stranger);
-        queued += 1;
+        queued.push((datagram.destination, datagram.payload.to_vec()));
     }
     (queued, session.ice_transmits_dropped())
 }
@@ -5641,11 +5657,12 @@ fn flood_media_port(pair: &mut Pair, remote: CallHandle, count: u32) -> (usize, 
 #[test]
 fn a_flood_of_checks_nobody_drains_holds_the_lite_end_to_its_ceiling() {
     let (mut pair, call, remote) = lite_call();
-    let (queued, dropped) = flood_media_port(&mut pair, remote, 5_000);
-    assert_eq!(queued, sipral_nat::ice::TRANSMIT_CEILING);
+    let (queued, dropped) = flood_media_port(&mut pair, remote, 5_000, None);
+    assert_eq!(queued.len(), sipral_nat::ice::REFUSAL_CEILING);
+    assert!(queued.iter().all(|(to, _)| *to == stranger()));
     assert_eq!(
         dropped,
-        5_000 - u64::try_from(sipral_nat::ice::TRANSMIT_CEILING).expect("fits")
+        5_000 - u64::try_from(sipral_nat::ice::REFUSAL_CEILING).expect("fits")
     );
     // and the real peer, checking once the queue is drained, is answered and
     // gets its path
@@ -5660,15 +5677,75 @@ fn a_flood_of_checks_nobody_drains_holds_the_lite_end_to_its_ceiling() {
 #[test]
 fn a_flood_of_checks_nobody_drains_holds_the_full_agent_to_its_ceiling() {
     let (mut pair, call, remote) = ice_call();
-    let (queued, dropped) = flood_media_port(&mut pair, remote, 5_000);
-    assert_eq!(queued, sipral_nat::ice::TRANSMIT_CEILING);
+    let (queued, dropped) = flood_media_port(&mut pair, remote, 5_000, None);
+    assert_eq!(queued.len(), sipral_nat::ice::REFUSAL_CEILING);
+    assert!(queued.iter().all(|(to, _)| *to == stranger()));
     assert_eq!(
         dropped,
-        5_000 - u64::try_from(sipral_nat::ice::TRANSMIT_CEILING).expect("fits")
+        5_000 - u64::try_from(sipral_nat::ice::REFUSAL_CEILING).expect("fits")
     );
     pair.check_paths(call, remote);
     let session = pair.callee.engine.session(remote).expect("media");
     assert_eq!(session.ice_path(), Some((callee_media(), caller_media())));
+}
+
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn a_consent_check_behind_a_strangers_flood_is_still_answered_by_the_lite_end() {
+    let (mut pair, call, remote) = lite_call();
+    pair.check_paths(call, remote);
+    let answer = pair.caller.answer_received().expect("the answer");
+    let (ufrag, pwd) = (
+        ice_value(&answer, "ice-ufrag").expect("a fragment"),
+        ice_value(&answer, "ice-pwd").expect("a password"),
+    );
+    // the peer's consent check lands behind the flood, with nothing
+    // drained: a stranger's refusals must not have taken its answer's room,
+    // or thirty seconds of that ends the peer's consent (RFC 7675 §5.1)
+    let consent = check_to_lite(&ufrag, &pwd, 9, false);
+    let (queued, _) = flood_media_port(
+        &mut pair,
+        remote,
+        5_000,
+        Some((caller_media(), consent.as_slice())),
+    );
+    let answered = queued.iter().any(|(to, bytes)| {
+        *to == caller_media()
+            && sipral_nat::stun::Message::parse(bytes)
+                .is_ok_and(|message| message.class() == sipral_nat::stun::Class::Success)
+    });
+    assert!(answered, "the peer's consent check went unanswered");
+}
+
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn signed_checks_nobody_drains_hold_the_lite_end_to_the_whole_ceiling() {
+    let (mut pair, call, remote) = lite_call();
+    pair.check_paths(call, remote);
+    let answer = pair.caller.answer_received().expect("the answer");
+    let (ufrag, pwd) = (
+        ice_value(&answer, "ice-ufrag").expect("a fragment"),
+        ice_value(&answer, "ice-pwd").expect("a password"),
+    );
+    let mut session = pair.callee.engine.session(remote).expect("media");
+    while session.poll_transmit(pair.now).is_some() {}
+    for index in 0..1_000_u32 {
+        let id = u8::try_from(index % 256).expect("fits");
+        let mut datagram = check_to_lite(&ufrag, &pwd, id, false);
+        assert_eq!(
+            session.receive(&mut datagram, caller_media(), pair.now),
+            Arrival::Check
+        );
+    }
+    let mut queued = 0;
+    while session.poll_transmit(pair.now).is_some() {
+        queued += 1;
+    }
+    assert_eq!(queued, sipral_nat::ice::TRANSMIT_CEILING);
+    assert_eq!(
+        session.ice_transmits_dropped(),
+        1_000 - u64::try_from(sipral_nat::ice::TRANSMIT_CEILING).expect("fits")
+    );
 }
 
 #[cfg(feature = "ice")]

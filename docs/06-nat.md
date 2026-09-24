@@ -483,12 +483,19 @@ What it does, in the order a session meets it:
   unless the application takes it. It is held to `TRANSMIT_CEILING`, 256
   datagrams; past that the datagram being queued is dropped, what is already
   queued goes out in order, and `IceAgent::transmits_dropped` counts it. The
-  newest gives way rather than the oldest because every datagram there
-  belongs to a STUN transaction, to which a dropped one is a lost one: the
-  peer's check comes again, and the agent's own is retransmitted on its own
-  timer. An application that drains after every call, as it is told to, never
-  reaches the ceiling. The facade's lite end holds its answers to the same
-  ceiling, and `MediaSession::ice_transmits_dropped` reads either count.
+  newest gives way rather than the oldest because every datagram there is
+  sent again anyway: the peer's check comes again, the agent's own checks
+  are retransmitted on their timer, and a consent check or a keepalive, sent
+  once, is followed by the next. The refusals of requests that failed
+  authentication — all a stranger can make it write — stop earlier, at
+  `REFUSAL_CEILING`, half of it, so a flood that lands while the application
+  is slow to drain never takes the room the call's own datagrams need: the
+  answers carrying the peer's nomination and consent, and the agent's own
+  checks and consent requests. An application that drains after every call,
+  as it is told to, never reaches either. The facade's lite end holds its
+  answers to the same two ceilings, telling a stranger's refusal from a
+  signed answer by `LiteAgent::answer_binding_request`, and
+  `MediaSession::ice_transmits_dropped` reads either count.
 
 - **What a datagram comes back as.** `Received::Data` answers with a position
   in the datagram that was handed in, not with a borrow of it. A borrow would

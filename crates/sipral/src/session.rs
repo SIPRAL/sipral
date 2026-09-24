@@ -1769,16 +1769,19 @@ impl MediaSession {
     /// How many of the ICE agent's own datagrams — checks, consent requests,
     /// keepalives, answers to the peer's checks — were dropped because
     /// `sipral_nat::ice::TRANSMIT_CEILING` of them were already waiting for
-    /// [`MediaSession::poll_transmit`]. Zero on a call not using ICE.
+    /// [`MediaSession::poll_transmit`], or were refusals of checks that failed
+    /// authentication once `sipral_nat::ice::REFUSAL_CEILING` were. Zero on a
+    /// call not using ICE.
     ///
     /// Every check that reaches the media port is answered, a stranger's
     /// unsigned one included, so a queue nobody drains would grow with
     /// whatever anybody sends it. It stops at the ceiling instead, and the
     /// datagram that would have gone past it is the one dropped: to the STUN
     /// transaction it belongs to that is a lost datagram, which it
-    /// retransmits. A count that moves on a working call means the
-    /// application drains less often than it is told to, or that the port is
-    /// being flooded.
+    /// retransmits. A stranger's refusals stop at half the ceiling, so a
+    /// flood of them leaves room for the peer's checks and the agent's own. A
+    /// count that moves on a working call means the application drains less
+    /// often than it is told to, or that the port is being flooded.
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn ice_transmits_dropped(&self) -> u64 {

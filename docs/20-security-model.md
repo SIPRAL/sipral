@@ -540,7 +540,10 @@ unsigned one included, so what they queue for the application to send is
 held to `TRANSMIT_CEILING` (256, `crates/sipral-nat/src/ice/full/mod.rs`):
 past it the answer being queued is dropped and counted, and a flood the
 application is slow to drain costs 256 short answers' worth of memory rather
-than whatever the flood is (`docs/06-nat.md`, "The outbox").
+than whatever the flood is. A stranger's refusals stop at `REFUSAL_CEILING`,
+half of that, so the flood cannot crowd out the answers to the peer's own
+checks, which carry its nomination and its consent (`docs/06-nat.md`, "The
+outbox").
 
 The STUN Binding client is reachable now too, on a stack configured with
 `SIPRAL_NAT_STUN`, and what it believes goes into every `Contact` and every

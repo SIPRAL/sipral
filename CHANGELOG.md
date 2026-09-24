@@ -597,7 +597,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   in the lite end alike; past it the datagram being queued is dropped, which
   a STUN transaction treats as a lost one and retransmits, and the drop is
   counted in `IceAgent::transmits_dropped` and
-  `MediaSession::ice_transmits_dropped`.
+  `MediaSession::ice_transmits_dropped`. Refusals of checks that failed
+  authentication stop at half of it, `REFUSAL_CEILING`, so a flood cannot
+  crowd out the answers to the peer's own checks and consent requests.
 - **A request outside a dialog that nothing here takes is answered at
   once.** A SUBSCRIBE, a PUBLISH, a stray BYE or a method nobody defined
   reached the application as `UaEvent::Unclaimed`, and through the C ABI

@@ -44,7 +44,7 @@ impl IceAgent {
         let accepted = match server::authenticate(message, credentials.ufrag.as_bytes(), key) {
             Verdict::Ignore => return,
             Verdict::Refuse(reply) => {
-                self.transmit(local, from, &reply);
+                self.transmit_refusal(local, from, &reply);
                 return;
             }
             Verdict::Accept(accepted) => accepted,

@@ -106,13 +106,30 @@ const MAX_EARLY: usize = 32;
 /// drain it lets in. Past this many, the datagram being queued is dropped and
 /// counted in [`IceAgent::transmits_dropped`]; what is already queued stays
 /// and goes out in order. The new one gives way rather than the oldest
-/// because every datagram here is a STUN transaction's, and a lost one is what
-/// STUN retransmits for: the peer's check comes again, and the agent's own
-/// is sent again on its own timer (RFC 8489 §6.2.1). Two hundred and
-/// fifty-six is more than one pass of the agent queues of its own at the
-/// default pair limit, so an application that drains after every call, as it
-/// is told to, never reaches it.
+/// because every datagram here is a STUN transaction's or is sent again
+/// later anyway: a check the peer gets no answer to comes again, the agent's
+/// own checks are retransmitted on their timer (RFC 8489 §6.2.1), and a
+/// consent check or a keepalive, sent once, is followed by the next one.
+/// Two hundred and fifty-six is more than one pass of the agent queues of
+/// its own at the default pair limit, so an application that drains after
+/// every call, as it is told to, never reaches it.
+///
+/// A stranger's refusals never fill it: they stop at [`REFUSAL_CEILING`],
+/// and the rest is kept for the call's own traffic.
 pub const TRANSMIT_CEILING: usize = 256;
+
+/// The most of [`TRANSMIT_CEILING`] that refusals of requests which failed
+/// authentication may take — the unsigned 400s and 401s anybody who can reach
+/// the port can have written.
+///
+/// Past it such a refusal is dropped and counted in
+/// [`IceAgent::transmits_dropped`], while the other half stays open to what
+/// the call cannot do without: the answers to the peer's checks, which carry
+/// its nomination and its consent, and the agent's own checks and consent
+/// requests. Without the split, a flood that arrived while the application
+/// was slow to drain took every slot, and the call's own datagrams were the
+/// ones dropped until it did — for a consent check, sent once, a lost one.
+pub const REFUSAL_CEILING: usize = TRANSMIT_CEILING / 2;
 
 /// A TURN server to gather a relayed candidate from.
 #[derive(Clone, Debug)]
@@ -1339,6 +1356,17 @@ impl IceAgent {
             return;
         }
         self.outbox.push_back(transmit);
+    }
+
+    /// [`Self::transmit`] for the refusal of a request that failed
+    /// authentication, which is dropped and counted instead once
+    /// [`REFUSAL_CEILING`] datagrams are already waiting.
+    fn transmit_refusal(&mut self, via: usize, destination: SocketAddr, data: &[u8]) {
+        if self.outbox.len() >= REFUSAL_CEILING {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        self.transmit(via, destination, data);
     }
 
     fn switch_role(&mut self, role: Role) {

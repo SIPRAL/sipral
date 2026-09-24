@@ -72,6 +72,30 @@ pub struct ValidPair {
     pub remote: SocketAddr,
 }
 
+/// What a lite agent sends back for a Binding request, told apart by whether
+/// the request authenticated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckAnswer {
+    /// The answer to a request signed with this session's credential, or
+    /// with the one a restart replaced: a success, or a signed error. The
+    /// peer's nomination and its consent both wait on one of these.
+    Signed(Vec<u8>),
+    /// The unsigned refusal of a request that failed authentication
+    /// (RFC 8489 §9.1.3), which anybody who can reach the port can have
+    /// written. A caller holding answers under a ceiling drops these first.
+    Refused(Vec<u8>),
+}
+
+impl CheckAnswer {
+    /// The datagram to send back, whichever answer it is.
+    #[must_use]
+    pub fn into_datagram(self) -> Vec<u8> {
+        match self {
+            Self::Signed(datagram) | Self::Refused(datagram) => datagram,
+        }
+    }
+}
+
 /// A lite ICE agent for one data stream.
 ///
 /// What it keeps is exactly what §7.3.2 gives it to keep: the local
@@ -178,6 +202,21 @@ impl LiteAgent {
         peer: SocketAddr,
         datagram: &[u8],
     ) -> Option<Vec<u8>> {
+        self.answer_binding_request(component, local, peer, datagram)
+            .map(CheckAnswer::into_datagram)
+    }
+
+    /// [`Self::handle_binding_request`], saying as well whether the answer
+    /// went to a request that authenticated: a caller that holds answers
+    /// under a ceiling keeps room for those by dropping a stranger's
+    /// refusals first.
+    pub fn answer_binding_request(
+        &mut self,
+        component: ComponentId,
+        local: SocketAddr,
+        peer: SocketAddr,
+        datagram: &[u8],
+    ) -> Option<CheckAnswer> {
         let message = Message::parse(datagram).ok()?;
         let (sha256, current) = match server::authenticate(
             &message,
@@ -192,7 +231,7 @@ impl LiteAgent {
                 server::authenticate(&message, ufrag.as_bytes(), pwd.as_bytes())
             }) {
                 Some(Verdict::Accept(accepted)) => (accepted.sha256, false),
-                _ => return Some(reply),
+                _ => return Some(CheckAnswer::Refused(reply)),
             },
         };
         let key = if current {
@@ -212,7 +251,8 @@ impl LiteAgent {
                 b"role conflict",
                 key.as_bytes(),
                 sha256,
-            );
+            )
+            .map(CheckAnswer::Signed);
         }
 
         if current && message.use_candidate() && self.role == Role::Controlled {
@@ -220,7 +260,7 @@ impl LiteAgent {
             self.previous = None;
         }
 
-        server::success(&message, peer, key.as_bytes(), sha256)
+        server::success(&message, peer, key.as_bytes(), sha256).map(CheckAnswer::Signed)
     }
 
     /// Record the peer's nomination as the pair for this component (RFC 8445
