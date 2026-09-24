@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# Gives the lab's Asterisk one endpoint with ICE on, for scripts/lab.sh's
+# ICE-lite step alone: Asterisk's own ICE, as the full agent, calling the
+# headless application answering as an ICE-lite endpoint. Applied with `-f`,
+# on top of ../compose.yaml, and taken off again as soon as that step is
+# over, so every other flow meets Asterisk exactly as compose.yaml describes
+# it. pjsip.conf's own last line includes this path, empty by default.
+services:
+  asterisk:
+    volumes:
+      - ./ice/pjsip_local.conf:/etc/asterisk/pjsip_local.conf:ro

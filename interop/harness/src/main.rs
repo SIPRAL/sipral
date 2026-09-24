@@ -38,6 +38,7 @@
 )]
 
 mod audio;
+mod ice_lite;
 mod join;
 #[cfg(test)]
 mod local;
@@ -300,7 +301,7 @@ fn main() -> ExitCode {
             }
         }
     }
-    failures += extra_flows(&server, remote, &user, &pass, &wanted);
+    failures += extra_flows(&server, remote, (&user, &pass), &extension, &wanted);
 
     if failures == 0 {
         println!("every flow passed");
@@ -318,8 +319,26 @@ fn main() -> ExitCode {
 /// inline.
 ///
 /// Returns how many of them failed.
-fn extra_flows(server: &str, remote: SocketAddr, user: &str, pass: &str, wanted: &str) -> u32 {
+fn extra_flows(
+    server: &str,
+    remote: SocketAddr,
+    (user, pass): (&str, &str),
+    extension: &str,
+    wanted: &str,
+) -> u32 {
     let mut failures = 0;
+    // a call that requires ICE, straight at the peer `server` names rather
+    // than through a registrar: only when named, since only
+    // `scripts/lab.sh`'s ICE steps start a peer for it (see `ice_lite`)
+    if wanted.split(',').any(|name| name.trim() == "icelite") {
+        match ice_lite::run(extension, remote) {
+            Ok(said) => println!("  pass  ICE required, against {server}{said}"),
+            Err(why) => {
+                println!("  FAIL  ICE required, against {server} — {why}");
+                failures += 1;
+            }
+        }
+    }
     // only when a second account is named: it needs two registrations on the
     // same server, and one of them has to have been left with a wide codec list
     if let (Ok(wide_user), Ok(wide_pass)) =

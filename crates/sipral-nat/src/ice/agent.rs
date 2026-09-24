@@ -78,12 +78,19 @@ pub struct ValidPair {
 /// credentials it was built with, its role, and a valid pair per component
 /// once one has been nominated. No checklist, no timers, no candidate list —
 /// a lite agent runs no state machine because RFC 8445 does not give it one.
+///
+/// The one thing it holds beyond that is the credential of the session a
+/// restart replaced, and only until the peer nominates under the new one:
+/// see [`LiteAgent::restart`].
 pub struct LiteAgent {
     local_ufrag: String,
     local_pwd: String,
     role: Role,
     tiebreaker: u64,
     valid: Vec<(ComponentId, ValidPair)>,
+    /// The username fragment and password before the last restart, while the
+    /// pair they selected is still the one carrying media.
+    previous: Option<(String, String)>,
 }
 
 impl LiteAgent {
@@ -104,7 +111,27 @@ impl LiteAgent {
             role,
             tiebreaker,
             valid: Vec::new(),
+            previous: None,
         }
+    }
+
+    /// Start a new ICE session under new credentials (RFC 8445 §9).
+    ///
+    /// A lite agent restarts because its peer did: RFC 8839 §4.4.2.1 makes
+    /// an answerer that accepts a restart "change the SDP "ice-pwd" and
+    /// "ice-ufrag" attribute values", and these are the new ones. The pair
+    /// the old session selected stays selected — §9 has media keep flowing on
+    /// it until the new session selects one — so the old credentials are
+    /// kept too, and a check signed with them is still answered: that is the
+    /// peer's consent check on the pair still in use (RFC 7675), and refusing
+    /// it would withdraw consent from the audio the restart was meant to
+    /// keep. They are forgotten the moment the peer nominates under the new
+    /// ones. A nomination under the old credentials is answered and not
+    /// followed: that session is over.
+    pub fn restart(&mut self, local_ufrag: String, local_pwd: String) {
+        let old_ufrag = core::mem::replace(&mut self.local_ufrag, local_ufrag);
+        let old_pwd = core::mem::replace(&mut self.local_pwd, local_pwd);
+        self.previous = Some((old_ufrag, old_pwd));
     }
 
     /// This agent's username fragment, for `a=ice-ufrag`.
@@ -152,14 +179,28 @@ impl LiteAgent {
         datagram: &[u8],
     ) -> Option<Vec<u8>> {
         let message = Message::parse(datagram).ok()?;
-        let accepted = match server::authenticate(
+        let (sha256, current) = match server::authenticate(
             &message,
             self.local_ufrag.as_bytes(),
             self.local_pwd.as_bytes(),
         ) {
             Verdict::Ignore => return None,
-            Verdict::Refuse(reply) => return Some(reply),
-            Verdict::Accept(accepted) => accepted,
+            Verdict::Accept(accepted) => (accepted.sha256, true),
+            // not this session's credential; the one a restart replaced
+            // answers for the pair it selected until the new one selects
+            Verdict::Refuse(reply) => match self.previous.as_ref().map(|(ufrag, pwd)| {
+                server::authenticate(&message, ufrag.as_bytes(), pwd.as_bytes())
+            }) {
+                Some(Verdict::Accept(accepted)) => (accepted.sha256, false),
+                _ => return Some(reply),
+            },
+        };
+        let key = if current {
+            self.local_pwd.clone()
+        } else {
+            self.previous
+                .as_ref()
+                .map_or_else(String::new, |(_, pwd)| pwd.clone())
         };
 
         // Past this point the request is authenticated, so a response may be
@@ -169,16 +210,17 @@ impl LiteAgent {
                 &message,
                 error_code::ROLE_CONFLICT,
                 b"role conflict",
-                self.local_pwd.as_bytes(),
-                accepted.sha256,
+                key.as_bytes(),
+                sha256,
             );
         }
 
-        if message.use_candidate() && self.role == Role::Controlled {
+        if current && message.use_candidate() && self.role == Role::Controlled {
             self.nominate(component, local, peer);
+            self.previous = None;
         }
 
-        server::success(&message, peer, self.local_pwd.as_bytes(), accepted.sha256)
+        server::success(&message, peer, key.as_bytes(), sha256)
     }
 
     /// Record the peer's nomination as the pair for this component (RFC 8445
@@ -234,17 +276,107 @@ mod tests {
     /// A connectivity check, signed the way SS7.2.2 describes: USERNAME
     /// first, then whatever the caller wants to add, then the credential.
     fn check(build: impl FnOnce(&mut MessageBuilder)) -> Vec<u8> {
+        check_as(LOCAL_UFRAG, LOCAL_PWD, build)
+    }
+
+    /// The same, against whichever credential the agent is holding.
+    fn check_as(ufrag: &str, pwd: &str, build: impl FnOnce(&mut MessageBuilder)) -> Vec<u8> {
         let mut builder = MessageBuilder::new(Class::Request, Method::BINDING, txn(7));
-        let username = format!("{LOCAL_UFRAG}:{PEER_UFRAG}");
+        let username = format!("{ufrag}:{PEER_UFRAG}");
         builder
             .add(AttributeType::USERNAME, username.as_bytes())
             .expect("username fits");
         build(&mut builder);
         builder
-            .add_message_integrity(LOCAL_PWD.as_bytes())
+            .add_message_integrity(pwd.as_bytes())
             .expect("integrity");
         builder.add_fingerprint().expect("fingerprint");
         builder.finish()
+    }
+
+    fn nominating(builder: &mut MessageBuilder) {
+        builder
+            .add_flag(AttributeType::USE_CANDIDATE)
+            .expect("use-candidate");
+    }
+
+    const NEW_UFRAG: &str = "NEWFRAG";
+    const NEW_PWD: &str = "NEWPASSNEWPASSNEWPASSNE";
+
+    #[test]
+    fn a_restart_answers_the_new_credential_and_keeps_the_old_pair() {
+        let mut agent = agent(Role::Controlled);
+        agent.handle_binding_request(ComponentId::RTP, local(), peer(), &check(nominating));
+        agent.restart(NEW_UFRAG.to_owned(), NEW_PWD.to_owned());
+        assert_eq!(agent.local_ufrag(), NEW_UFRAG);
+        assert_eq!(agent.local_pwd(), NEW_PWD);
+        // RFC 8445 SS9: the old session's pair carries the media until the
+        // new session selects one
+        assert_eq!(
+            agent
+                .valid_pair(ComponentId::RTP)
+                .expect("still selected")
+                .remote,
+            peer()
+        );
+        let response = agent
+            .handle_binding_request(
+                ComponentId::RTP,
+                local(),
+                peer(),
+                &check_as(NEW_UFRAG, NEW_PWD, |_| {}),
+            )
+            .expect("a reply");
+        let message = parsed(&response);
+        assert_eq!(message.class(), Class::Success);
+        assert_eq!(
+            message.verify_integrity(NEW_PWD.as_bytes()),
+            crate::stun::Integrity::Valid
+        );
+    }
+
+    #[test]
+    fn the_old_credential_still_answers_consent_until_the_new_session_nominates() {
+        let mut agent = agent(Role::Controlled);
+        agent.handle_binding_request(ComponentId::RTP, local(), peer(), &check(nominating));
+        agent.restart(NEW_UFRAG.to_owned(), NEW_PWD.to_owned());
+
+        // a consent check on the pair still in use (RFC 7675), under the old
+        // credential, signed back with the old password
+        let response = agent
+            .handle_binding_request(ComponentId::RTP, local(), peer(), &check(|_| {}))
+            .expect("a reply");
+        let message = parsed(&response);
+        assert_eq!(message.class(), Class::Success);
+        assert_eq!(
+            message.verify_integrity(LOCAL_PWD.as_bytes()),
+            crate::stun::Integrity::Valid
+        );
+
+        // and a nomination under it is answered and not followed: that
+        // session is over
+        let moved = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 55_000);
+        agent.handle_binding_request(ComponentId::RTP, local(), moved, &check(nominating));
+        assert_eq!(
+            agent.valid_pair(ComponentId::RTP).expect("selected").remote,
+            peer()
+        );
+
+        // the new session nominates, and the old credential is gone
+        agent.handle_binding_request(
+            ComponentId::RTP,
+            local(),
+            moved,
+            &check_as(NEW_UFRAG, NEW_PWD, nominating),
+        );
+        assert_eq!(
+            agent.valid_pair(ComponentId::RTP).expect("selected").remote,
+            moved
+        );
+        let refused = agent
+            .handle_binding_request(ComponentId::RTP, local(), peer(), &check(|_| {}))
+            .expect("an error reply");
+        assert_eq!(error_code_of(&refused), error_code::UNAUTHENTICATED);
     }
 
     fn parsed(datagram: &[u8]) -> Message<'_> {

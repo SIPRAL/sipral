@@ -17,6 +17,9 @@
 #   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
 #   scripts/lab.sh nat          only the call from behind a NAT, with STUN
 #                               against coturn, through the C ABI
+#   scripts/lab.sh ice          only the ICE steps: a call that requires ICE,
+#                               from the harness and from Asterisk, answered
+#                               by the headless agent as an ICE-lite endpoint
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -913,6 +916,156 @@ nat_flow() {
     return "$status"
 }
 
+# 8.5.5's ICE-lite steps: the headless application answering as an ICE-lite
+# endpoint (`headless-socket-agent --ice-lite`, sipral::IcePolicy::Lite),
+# with the reference agent behind its socket echoing what it hears. The lab
+# network stands in for the public Internet here: every container on it
+# reaches every other at the address it is bound to, which is the one
+# property RFC 8445 Appendix A asks of a lite host.
+#
+# Two containers again, started the way headless_socket_agent starts them.
+# SIPRAL_LITE_REGISTER, when set, is the account the application registers
+# at Asterisk; without it the application is dialled directly.
+ICE_APP_NAME=sipral-lab-icelite-app
+ICE_CLIENT_NAME=sipral-lab-icelite-agent
+start_lite_agent() {
+    local account="$1" app_beside client_beside tries
+    app_beside=$(cd "$(dirname "$HEADLESS_APP")" && pwd)
+    client_beside=$(cd "$(dirname "$HEADLESS_CLIENT")" && pwd)
+    docker rm -f "$ICE_APP_NAME" "$ICE_CLIENT_NAME" >/dev/null 2>&1
+    docker run -d --name "$ICE_APP_NAME" --network sipral-interop_lab \
+        -e "SIPRAL_LITE_REGISTER=$account" \
+        -v "$app_beside:/sipral:ro" \
+        debian:trixie-slim sh -c '
+            own=$(hostname -i)
+            if [ -n "$SIPRAL_LITE_REGISTER" ]; then
+                address=$(getent hosts asterisk | cut -d" " -f1)
+                exec /sipral/headless-socket-agent --ice-lite \
+                    --host "$own" --port 5060 --socket 0.0.0.0:7001 \
+                    --register "$SIPRAL_LITE_REGISTER@asterisk" \
+                    --registrar "$address:5060" --pass labpass
+            fi
+            exec /sipral/headless-socket-agent --ice-lite \
+                --host "$own" --port 5060 --socket 0.0.0.0:7001' >/dev/null \
+        || { printf '  could not start the application container\n'; return 1; }
+    tries=0
+    until docker logs "$ICE_APP_NAME" 2>&1 | grep -q '^waiting for the agent'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$ICE_APP_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 30 ]; then
+            printf '  the application never came up\n'
+            docker logs "$ICE_APP_NAME" 2>&1 | tail -20
+            docker rm -f "$ICE_APP_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 1
+    done
+    docker run -d --name "$ICE_CLIENT_NAME" --network sipral-interop_lab \
+        -v "$client_beside:/sipral:ro" \
+        debian:trixie-slim /sipral/agent --addr "$ICE_APP_NAME:7001" >/dev/null \
+        || { printf '  could not start the agent container\n'; stop_lite_agent; return 1; }
+    tries=0
+    until docker logs "$ICE_APP_NAME" 2>&1 | grep -q '^agent connected'; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 30 ]; then
+            printf '  the agent never connected\n'
+            stop_lite_agent
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+# What both containers said, and both gone. Prints the application's log a
+# second time on its own, bare, for the caller to judge.
+stop_lite_agent() {
+    docker logs "$ICE_CLIENT_NAME" 2>&1 | sed 's/^/    agent  /'
+    docker logs "$ICE_APP_NAME" 2>&1 | sed 's/^/    app    /'
+    docker rm -f "$ICE_APP_NAME" "$ICE_CLIENT_NAME" >/dev/null 2>&1
+}
+
+# Wait for the application to report its call over, then keep its log.
+lite_agent_log() {
+    local tries=0
+    until docker logs "$ICE_APP_NAME" 2>&1 | grep -q '^ended '; do
+        tries=$((tries + 1))
+        [ "$tries" -ge "$1" ] && break
+        sleep 1
+    done
+    docker logs "$ICE_APP_NAME" 2>&1
+}
+
+# The first half: the Rust harness, as the full agent a WebRTC gateway would
+# be, calls the application directly under IcePolicy::Required
+# (interop/harness/src/ice_lite.rs). A lite end that did nothing -- no
+# `a=ice-lite`, no candidate, no answer to a check -- fails it on the
+# harness's side with IceRequired or with no path, never with audio; the
+# application's own "path chosen" line is the other side of the same pair.
+ice_lite_flow() {
+    local address status app_log
+    start_lite_agent "" || return 1
+    address=$(docker inspect -f \
+        '{{with index .NetworkSettings.Networks "sipral-interop_lab"}}{{.IPAddress}}{{end}}' \
+        "$ICE_APP_NAME")
+    docker run --rm --network sipral-interop_lab \
+        -e SIPRAL_FLOWS=icelite \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim /harness "$address" 5060 agent
+    status=$?
+    app_log=$(lite_agent_log 10)
+    stop_lite_agent
+    [ "$status" -eq 0 ] || return 1
+    printf '%s\n' "$app_log" | grep -q '^path chosen ' \
+        || { printf '  the lite end never took a nominated pair\n'; return 1; }
+    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+        || { printf '  the lite end sent no audio on the pair\n'; return 1; }
+}
+
+# The second half: Asterisk's own ICE (res_pjsip's ice_support) as the full
+# agent, calling the application registered on an endpoint that has it on.
+# That endpoint lives in interop/ice/pjsip_local.conf, mounted by
+# interop/ice/compose.override.yaml over the empty default only for this
+# step, so no other flow ever meets an Asterisk that offers ICE; Asterisk is
+# put back as it was afterwards, whatever happened.
+ice_lite_asterisk() {
+    local app_log status=0 tries
+    ( cd interop && docker compose -f compose.yaml -f ice/compose.override.yaml up -d asterisk ) \
+        >/dev/null 2>&1 || { printf '  could not restart Asterisk with the ICE endpoint\n'; return 1; }
+    wait_for asterisk "Asterisk Ready" || status=1
+    if [ "$status" -eq 0 ] && start_lite_agent labuser-agent-ice; then
+        tries=0
+        until ( cd interop && docker compose exec -T asterisk \
+                asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-ice; do
+            tries=$((tries + 1))
+            if [ "$tries" -ge 30 ]; then
+                printf '  the application never registered\n'
+                status=1
+                break
+            fi
+            sleep 2
+        done
+        if [ "$status" -eq 0 ]; then
+            ( cd interop && docker compose exec -T asterisk asterisk -rx \
+                "channel originate PJSIP/labuser-agent-ice extension s@agent-call" ) >/dev/null 2>&1
+            app_log=$(lite_agent_log 30)
+        fi
+        stop_lite_agent
+    else
+        status=1
+    fi
+    ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
+    wait_for asterisk "Asterisk Ready" >/dev/null || true
+    [ "$status" -eq 0 ] || return 1
+    printf '%s\n' "$app_log" | grep -q '^path chosen ' \
+        || { printf '  Asterisk never nominated a pair on the lite end\n'; return 1; }
+    printf '%s\n' "$app_log" | grep -q '^dtmf #' \
+        || { printf '  it never heard the "#" the dialplan sends\n'; return 1; }
+    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_received=[1-9]' \
+        || { printf '  it heard no audio\n'; return 1; }
+    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+        || { printf '  it sent no audio back\n'; return 1; }
+}
+
 # The same call again, over a link deliberately made bad in both directions.
 #
 # netem only ever shapes egress. That used to be enough on the strength of a
@@ -1122,6 +1275,21 @@ if [ "$WANT" = all ] || [ "$WANT" = nat ]; then
         fail "behind a NAT: there is no C harness to run it with"
     else
         printf '  note  no C harness, so the flow behind a NAT is skipped with the other C flows\n'
+    fi
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = ice ]; then
+    step "ICE-lite -- a call that requires ICE, placed at the headless agent answering as lite"
+    if [ -n "$HEADLESS_APP" ] && [ -n "$HEADLESS_CLIENT" ]; then
+        ice_lite_flow && pass "the full caller chose a path on the lite end, and the tone came back on it" \
+            || fail "ICE-lite, from the harness"
+        step "ICE-lite -- Asterisk's own ICE calling the headless agent"
+        ice_lite_asterisk && pass "Asterisk nominated a pair on the lite end, and audio crossed it both ways" \
+            || fail "ICE-lite, from Asterisk"
+    elif [ "$WANT" = ice ]; then
+        fail "ICE-lite: the socket-framed agent was not built, so there is no lite end to call"
+    else
+        printf '  note  no socket-framed agent, so the ICE-lite steps are skipped with its own\n'
     fi
 fi
 

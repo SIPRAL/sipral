@@ -527,6 +527,11 @@ authenticator refuses anything not signed under the short-term credential
 (`stun/message.rs`, `constant_time_eq`); what has not happened is a person
 reading the checklist and nomination machinery with an attacker's eye. The
 default is `Off`, so a deployment that has not asked for ICE is where it was.
+`IcePolicy::Lite`, on a headless build, puts the lite agent there instead: a
+much smaller surface — no checklist, no timers, nothing sent but answers —
+behind the same authenticator (`ice/server.rs`, which the `ice` target
+reaches through the full agent), with nothing past it but a nomination. It has
+no fuzz target of its own.
 
 The STUN Binding client is reachable now too, on a stack configured with
 `SIPRAL_NAT_STUN`, and what it believes goes into every `Contact` and every

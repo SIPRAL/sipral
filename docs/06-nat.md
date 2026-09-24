@@ -312,6 +312,76 @@ candidate", so a host with several public addresses advertises one per family
 and no more. That constraint, and the one about NAT, are why this role belongs
 to the headless build and not to the softphone.
 
+It is reached from a call as `IcePolicy::Lite`, and that value exists only in
+a build with both `ice` and `headless`: the softphone's build, and the C ABI
+built on it, cannot name it, so the rule in the table is kept by the compiler
+rather than by a default somebody could change. Nothing turns it on but the
+application asking, per call or on the engine's catalogue;
+`headless-socket-agent --ice-lite` is the reference. What it does, in the
+order a call meets it:
+
+- **The description.** `a=ice-lite` at session level (RFC 8839 §4.2.1.4) and
+  no `a=ice-pacing` (§4.3.1 forbids a lite end one); a username fragment and
+  a password drawn per call from the media engine's key source, as the full
+  role draws them; and one host candidate. The candidate is the address the
+  media socket is bound to, or `CallMedia::public_address` for a server behind
+  a one-to-one NAT — which is most clouds — where the public address is
+  forwarded to the host unchanged and is, to every peer, the host's own. It
+  is a host candidate even then, with no related address: a lite end has no
+  other kind to write (§5.2). The same §5.1.1.1 refusals as the full role
+  apply to it, so a loopback or link-local address is refused by name rather
+  than advertised. One component, as in the full role: a peer that offers
+  ICE without `a=rtcp-mux` leaves RTCP a component with no candidate, and the
+  call's media fails with `MediaError::IceNeedsRtcpMux` rather than running
+  half checked — which is why the lab's Asterisk endpoint sets `rtcp_mux`.
+- **Answering a peer without ICE.** An offer that carries no ICE is answered
+  with none — "the answerer MUST NOT include any ICE-related SDP attributes in
+  the answer" (§4.3.2), which now holds for every policy — and the call runs
+  on `c=`/`m=` and symmetric RTP, as the full role's fallback does. A peer
+  that is lite too is the same fallback: neither end checks, and RFC 8445
+  §6.1.1 leaves both on the default candidates.
+- **Checks.** Every STUN request on the media socket is authenticated with
+  the call's short-term credential — USERNAME names this end's fragment first,
+  MESSAGE-INTEGRITY (or its SHA-256 form) is verified under this end's
+  password, FINGERPRINT is required — and answered with XOR-MAPPED-ADDRESS,
+  signed the way the request was. One that fails is refused unsigned
+  (RFC 8489 §9.1.3). The role rules are §7.3.1.1's: a lite end facing a full
+  one starts controlled (§6.1.1), and a peer that claims the same role is
+  settled by the tiebreaker.
+- **The path.** The pair a check carrying USE-CANDIDATE arrives on is the
+  media path (§7.3.2), and it is reported as `MediaEvent::PathChosen` —
+  event 33, the one the full role uses — with the advertised address as its
+  local half. Nothing is sent before there is one (§12.1): a frame captured
+  earlier is not sent anywhere. A later nomination moves the path, and the
+  session's latches with it, as a full agent's re-selection does.
+- **Consent.** RFC 7675 needs nothing of a lite end but answers: "No changes
+  are required to ICE-lite implementations in order to respond to consent
+  checks, as they are processed as normal ICE connectivity checks" (§1).
+  They are answered like any other check. A lite end has no consent of its
+  own to lose, so it has no timer: it asks the application to wake it for
+  nothing, and spends no transaction id.
+- **Restart.** A re-offer whose `ice-ufrag` and `ice-pwd` both changed is an
+  ICE restart (§4.4.1.1.1). The user agent hands it up rather than answering
+  it from a copy of the last description, and the answer carries new
+  credentials of this end's own, as §4.4.2.1 requires of an answerer that
+  accepts one; the candidate stays what it was (§4.4.1.3). The pair already
+  selected keeps carrying the audio, and checks under the old credentials on
+  it — the peer's consent checks — go on being answered, until the peer
+  nominates under the new ones (RFC 8445 §9).
+
+Proven three ways. `sipral-nat`'s own tests drive the lite agent through
+authentication, role conflicts, nomination and a restart. In process, a
+facade under `IcePolicy::Required` calls one under `IcePolicy::Lite`
+(`crates/sipral/src/tests.rs`): the full end opens a stream only because the
+answer said `a=ice-lite` and carried a candidate, both ends report the pair
+the full end nominated, audio crosses it both ways, and a restart moves it.
+And in the lab (`scripts/lab.sh ice`): the interop harness, as the full agent
+a WebRTC gateway would be, places a call that requires ICE straight at
+`headless-socket-agent --ice-lite` and the reference agent's echo comes back
+on the chosen pair; then Asterisk's own ICE (`ice_support=yes` on an endpoint
+of its own, in `interop/ice/`, mounted only for that step) calls the same
+agent registered to it.
+
 ## ICE, full role
 
 RFC 8445 in the full role, RFC 7675 for consent freshness, and the SDP side
@@ -423,8 +493,11 @@ What it does, in the order a session meets it:
   ever, on a call that was never going to carry a packet.
 
 Not done yet: TURN over TCP or TLS (the TURN client has the framing; the
-agent's datagram model does not carry it), and `a=remote-candidates` (RFC 8839
-§4.4.1.2.2). The second is not written because nothing yet writes an offer it
+agent's datagram model does not carry it), a restart from the facade in the
+full role — a peer's restart offer reaches the engine, and its answer keeps
+the credentials the running agent holds, since answering with new ones the
+agent does not would stop the checks it depends on — and
+`a=remote-candidates` (RFC 8839 §4.4.1.2.2). The second is not written because nothing yet writes an offer it
 would go in: it belongs in the updated offer a controlling agent sends after
 nomination, when the selected pair differs from the default candidate pair.
 With a reflexive candidate that can now happen in address — `c=` names the

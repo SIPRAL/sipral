@@ -22,6 +22,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the integrity check are reached, and asserts that every control message
   parses, every range indexes its datagram and no input raises events
   without end.
+- **A headless agent on a public server can answer as an ICE-lite endpoint.**
+  `IcePolicy::Lite`, which exists only in a build with `headless`, writes
+  `a=ice-lite`, fresh credentials and one host candidate — the socket's own
+  address, or `CallMedia::public_address` behind a one-to-one NAT — answers a
+  full peer's connectivity and consent checks under the call's short-term
+  credential, and carries the audio on the pair that peer nominates,
+  reported as `MediaEvent::PathChosen`. A peer's ICE restart is answered with
+  new credentials while the old pair keeps the audio until the new one is
+  nominated, and an offer without ICE is now answered without any ICE
+  attributes, for every policy. `headless-socket-agent --ice-lite [--public
+  ip]` turns it on, and `scripts/lab.sh ice` proves it against the interop
+  harness requiring ICE and against Asterisk's own ICE.
+
 - **The Kotlin binding carries an event's whole payload, not just its head.**
   The generator now flattens every arm `sipral_event_payload_t` declares
   across JNI, and `SipralEvent.payload` reads them back as one instance of

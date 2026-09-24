@@ -40,13 +40,13 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "ice")]
+use crate::ice::{PathNews, Taken};
 use sipral_core::sdp::{CryptoPolicy, Direction, Keying, MediaPlan, RtcpPlan};
 use sipral_media::comfort_noise::{ComfortNoise, Generator, PAYLOAD_TYPE as COMFORT_NOISE};
 use sipral_media::g711::Law;
 use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
-#[cfg(feature = "ice")]
-use sipral_nat::ice::{IceEvent, Received as IceReceived};
 use sipral_rtp::srtp::{Master, Policy, Rekeyed};
 use sipral_rtp::{
     Activity, BufferConfig, BuildError, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
@@ -795,15 +795,15 @@ impl MediaSession {
         let taken = ice.handle_datagram(from, datagram, now);
         self.drain_ice(now);
         match taken {
-            IceReceived::Consumed => Err(Arrival::Check),
-            IceReceived::Foreign => Err(Arrival::Dropped(Discard::ForeignAddress)),
+            Taken::Consumed => Err(Arrival::Check),
+            Taken::Foreign => Err(Arrival::Dropped(Discard::ForeignAddress)),
             // `range` indexes the datagram that was handed in, so the `None`
             // arm is unreachable: it would be `sipral-nat` reporting a
             // position in a buffer it was not given. It is written rather
             // than unwrapped because a panic on the media path is worse than
             // a dropped packet, and the fuzz target `ice` asserts the range
             // indexes the datagram precisely so this stays unreachable.
-            IceReceived::Data { range, .. } => datagram.get_mut(range).ok_or(Arrival::Check),
+            Taken::Data(range) => datagram.get_mut(range).ok_or(Arrival::Check),
         }
     }
 
@@ -819,19 +819,16 @@ impl MediaSession {
         };
         let mut lost = false;
         let mut selected = None;
-        while let Some(event) = ice.poll_event() {
-            match event {
-                IceEvent::Selected { pair, .. } => selected = Some(pair),
+        while let Some(news) = ice.poll_news() {
+            match news {
+                PathNews::Selected(pair) => selected = Some(pair),
                 // RFC 7675 §5: nothing more may be sent on that pair, and the
                 // same credentials may not be used on it again. This stack
                 // has no re-offer of its own yet, so the only remedy an
                 // application has is to end the call — which is what the
                 // event's own documentation says, rather than leaving it to
                 // be worked out from the silence
-                IceEvent::ConsentLost { .. } | IceEvent::Failed | IceEvent::StreamFailed { .. } => {
-                    lost = true;
-                }
-                IceEvent::GatheringComplete | IceEvent::Completed | IceEvent::RoleChanged(_) => {}
+                PathNews::Lost => lost = true,
             }
         }
         if let Some(pair) = selected {
@@ -1710,6 +1707,15 @@ impl MediaSession {
             .as_ref()?
             .selected_pair()
             .map(|pair| (pair.local, pair.remote))
+    }
+
+    /// Carry what the call's descriptions now say about ICE onto the running
+    /// agent: the credentials a restart gave it. See [`crate::ice::Ice::follow`].
+    #[cfg(feature = "ice")]
+    pub(crate) fn follow_ice(&mut self, local: Option<&crate::ice::LocalIce>) {
+        if let (Some(ice), Some(local)) = (self.ice.as_mut(), local) {
+            ice.follow(local);
+        }
     }
 
     /// Whether inbound audio is currently considered stopped.

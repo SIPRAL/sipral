@@ -223,6 +223,34 @@ and reads or writes DTMF and call state as plain Rust values instead of JSON.
 That is the in-process path the socket path is built the same way as, not a
 second implementation of it.
 
+## On a public server: ICE-lite
+
+An agent answering a WebRTC gateway, or any peer that will send media only on
+a path it has checked, has to speak ICE. On a server with a public address it
+does not need the whole of it: it is the ICE-lite endpoint RFC 8445 describes,
+which advertises where it is, answers the checks the full peer sends, and
+carries the audio on the pair that peer nominates. `sipral::IcePolicy::Lite`
+is that, on a call's codec catalogue, and it exists only in a build with
+`headless` (and `ice`) — the softphone's build cannot turn it on, because
+behind a NAT it is worse than no ICE at all. `docs/06-nat.md#ice-lite` has
+what it does on the wire, and why.
+
+It is off unless the application asks. `headless-socket-agent --ice-lite`
+asks, and answers every call with it; `--public ip` is for a server behind a
+one-to-one NAT, where the address to advertise is not the one the socket is
+bound to. What an application has to add to its loop is what it already does
+for a DTLS-SRTP call: after handing a datagram to `MediaSession::receive`,
+send whatever `MediaSession::poll_transmit` hands back, from the same socket
+— that is where the answers to the peer's checks come from. The call has no
+audio going out until the peer nominates a pair, and `MediaEvent::PathChosen`
+says when it has; a peer that does no ICE gets its call on the signalled
+address as before.
+
+The lab proves it both ways (`scripts/lab.sh ice`): a call that requires ICE,
+placed straight at the agent by the interop harness acting as the full peer,
+with the reference agent's echo coming back on the chosen pair; and Asterisk's
+own ICE calling the agent registered to it.
+
 ## What it does not do
 
 No speech recognition, no synthesis, no turn detection, no agent logic. Those

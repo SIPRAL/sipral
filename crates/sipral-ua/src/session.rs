@@ -245,11 +245,29 @@ impl Session {
     /// that followed failed at the end that asked for the hold — a hold that
     /// never reached its media, and on the wire an answer that had withdrawn
     /// the key or the certificate.
+    ///
+    /// Nor an ICE restart: an offer whose `a=ice-ufrag` or `a=ice-pwd` moved
+    /// (RFC 8839 §4.4.1.1.1) needs an answer with new credentials of this
+    /// end's own (§4.4.2.1), which this layer does not draw and would
+    /// otherwise answer with the old ones copied from the last description.
     pub(crate) fn is_same_media(&self, offer: &SessionDescription) -> bool {
         let Some(previous) = self.remote.as_ref() else {
             return false;
         };
+        let credentials = |description: &SessionDescription, media: &MediaDescription| {
+            ["ice-ufrag", "ice-pwd"].map(|name| {
+                media
+                    .attribute(name)
+                    .or_else(|| description.attribute(name))
+                    .and_then(|attribute| attribute.value.clone())
+            })
+        };
         previous.media.len() == offer.media.len()
+            && previous
+                .media
+                .iter()
+                .zip(&offer.media)
+                .all(|(before, now)| credentials(previous, before) == credentials(offer, now))
             && previous
                 .media
                 .iter()
@@ -628,6 +646,35 @@ mod tests {
         };
         let session = negotiated(secured(40_000, "UDP/TLS/RTP/SAVP", dtls()));
         assert!(!session.is_same_media(&secured(40_000, "UDP/TLS/RTP/SAVP", dtls())));
+    }
+
+    /// An ICE restart goes up: its answer needs new credentials of this
+    /// end's own (RFC 8839 §4.4.2.1), and a copy of the last description
+    /// would answer it with the old ones. The same credentials again — a hold
+    /// on a call using ICE — stay here.
+    #[test]
+    fn an_ice_restart_is_not_the_same_media() {
+        let ice = |ufrag: &str, pwd: &str| {
+            vec![
+                Attribute::with_value("ice-ufrag", ufrag),
+                Attribute::with_value("ice-pwd", pwd),
+            ]
+        };
+        let session = negotiated(secured(
+            40_000,
+            "RTP/AVP",
+            ice("abcd", "abcdefghijklmnopqrstuv"),
+        ));
+        assert!(session.is_same_media(&secured(
+            40_000,
+            "RTP/AVP",
+            ice("abcd", "abcdefghijklmnopqrstuv")
+        )));
+        assert!(!session.is_same_media(&secured(
+            40_000,
+            "RTP/AVP",
+            ice("wxyz", "zyxwvutsrqponmlkjihgfe")
+        )));
     }
 
     /// A peer that writes the profile in lower case has not changed it.

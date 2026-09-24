@@ -595,7 +595,80 @@ impl MediaEngine {
         {
             return Ok(Some(existing));
         }
-        crate::ice::LocalIce::draw(&mut self.keys, address, public, we_are_offerer, now).map(Some)
+        crate::ice::LocalIce::draw(
+            &mut self.keys,
+            address,
+            public,
+            we_are_offerer,
+            catalog.ice().lite(),
+            now,
+        )
+        .map(Some)
+    }
+
+    /// What this call says about ICE in its answer to a re-offer: what
+    /// [`MediaEngine::ice_lines`] says, unless the offer is an ICE restart
+    /// and this end is lite.
+    ///
+    /// RFC 8839 §4.4.1.1.1 signals a restart by a change of both `ice-ufrag`
+    /// and `ice-pwd`, and §4.4.2.1 has an answerer that accepts one "change
+    /// the SDP "ice-pwd" and "ice-ufrag" attribute values". A lite end
+    /// follows it, keeping the pair it has until the peer nominates under the
+    /// new ones ([`sipral_nat::ice::LiteAgent::restart`]). The full role does
+    /// not restart from here yet: answering it with new credentials the
+    /// running agent does not hold would stop the checks it depends on, so
+    /// its answer keeps the ones it has.
+    ///
+    /// # Errors
+    ///
+    /// As [`MediaEngine::ice_lines`].
+    #[cfg(feature = "ice")]
+    fn reoffer_ice(
+        &mut self,
+        call: CallHandle,
+        catalog: &CodecCatalog,
+        (address, public): (SocketAddr, Option<SocketAddr>),
+        offer: &SessionDescription,
+        now: Instant,
+    ) -> Result<Option<crate::ice::LocalIce>, MediaError> {
+        let Some(held) = self.ice_lines(Some(call), catalog, address, public, false, now)? else {
+            return Ok(None);
+        };
+        if !held.is_lite() {
+            return Ok(Some(held));
+        }
+        let credentials = |description: &SessionDescription| {
+            description
+                .media
+                .iter()
+                .find(|media| !media.is_rejected())
+                .and_then(|stream| sipral_nat::ice::parse_remote(description, stream))
+                .map(|remote| (remote.ufrag, remote.pwd))
+        };
+        let before = self
+            .calls
+            .get(&call)
+            .and_then(|managed| managed.remote.as_ref())
+            .and_then(credentials);
+        match (before, credentials(offer)) {
+            (Some(before), Some(offered)) if before.0 != offered.0 && before.1 != offered.1 => {
+                held.restarted(&mut self.keys).map(Some)
+            }
+            _ => Ok(Some(held)),
+        }
+    }
+
+    /// Without the feature there is no restart to follow.
+    #[cfg(not(feature = "ice"))]
+    fn reoffer_ice(
+        &mut self,
+        call: CallHandle,
+        catalog: &CodecCatalog,
+        (address, public): (SocketAddr, Option<SocketAddr>),
+        _offer: &SessionDescription,
+        now: Instant,
+    ) -> Result<Option<crate::ice::LocalIce>, MediaError> {
+        self.ice_lines(Some(call), catalog, address, public, false, now)
     }
 
     /// Without the feature there is nothing to gather and no attribute to
@@ -675,7 +748,12 @@ impl MediaEngine {
             return refuse(());
         };
         let muxed = matches!(plan.rtcp, RtcpPlan::Muxed | RtcpPlan::Off);
-        if peer.mismatch
+        // two lite ends: neither checks, so there is no pair to wait for, and
+        // RFC 8445 §6.1.1 leaves both on the default candidates — which is
+        // `c=`/`m=` and symmetric RTP here, the same fallback as a peer that
+        // does no ICE at all
+        if (local.is_lite() && peer.lite)
+            || peer.mismatch
             || peer.candidates.is_empty()
             || sipral_nat::ice::ice_mismatch(remote, stream, &peer, muxed)
         {
@@ -916,7 +994,7 @@ impl MediaEngine {
             keys,
             keyed(dtls.as_ref()),
         );
-        describe_ice(&mut offer, ice.as_ref());
+        describe_ice(&mut offer, ice.as_ref(), None);
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
         let call = agent.call(account, &placing, now)?;
@@ -1010,7 +1088,7 @@ impl MediaEngine {
             keys,
             keyed(dtls.as_ref()),
         );
-        describe_ice(&mut offer, ice.as_ref());
+        describe_ice(&mut offer, ice.as_ref(), None);
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let new = agent.accept_transfer(call, Some(Arc::from(offer.to_bytes())), extra, now)?;
         self.calls.insert(
@@ -1144,7 +1222,7 @@ impl MediaEngine {
             keys.as_ref(),
             keyed(dtls.as_ref()),
         )?;
-        describe_ice(&mut description, ice.as_ref());
+        describe_ice(&mut description, ice.as_ref(), Some(&offer));
         let bytes = description.to_bytes();
         agent.ring(call, Some(Arc::from(bytes)), now)?;
         #[cfg(feature = "dtls")]
@@ -1261,10 +1339,10 @@ impl MediaEngine {
         };
         let dtls = self.dtls_lines(&catalog, side, offered.as_ref(), None, now)?;
         let ice = self.ice_lines(Some(call), &catalog, local, public, offered.is_none(), now)?;
-        let mut description = match offered {
+        let mut description = match offered.as_ref() {
             Some(offer) => write_answer(
                 &catalog,
-                &offer,
+                offer,
                 described,
                 session_id,
                 version,
@@ -1280,7 +1358,7 @@ impl MediaEngine {
                 keyed(dtls.as_ref()),
             ),
         };
-        describe_ice(&mut description, ice.as_ref());
+        describe_ice(&mut description, ice.as_ref(), offered.as_ref());
         let bytes = description.to_bytes();
         agent.answer(call, Some(Arc::from(bytes)), now)?;
         #[cfg(feature = "dtls")]
@@ -1809,7 +1887,7 @@ impl MediaEngine {
                 return;
             }
         };
-        let ice = match self.ice_lines(Some(call), &catalog, address, public, false, now) {
+        let ice = match self.reoffer_ice(call, &catalog, (address, public), &offer, now) {
             Ok(ice) => ice,
             Err(error) => {
                 self.events.push_back((call, MediaEvent::Failed(error)));
@@ -1842,7 +1920,7 @@ impl MediaEngine {
             Ok(mut answer) => {
                 // RFC 8839 §4.4: an answer that left the attributes out is a
                 // peer reading that ICE has been withdrawn mid-session
-                describe_ice(&mut answer, ice.as_ref());
+                describe_ice(&mut answer, ice.as_ref(), Some(&offer));
                 // the plan this answer would settle, read the way `settle`
                 // will read it: a running stream cannot change the kind of
                 // keying it runs under, so a re-offer asking for that is
@@ -2001,9 +2079,16 @@ impl MediaEngine {
             .map_or_else(Vec::new, |stream| managed.catalog.candidates(stream, codec));
         #[cfg(feature = "dtls")]
         let ours = setup_in(local);
+        #[cfg(feature = "ice")]
+        let settled_ice = managed.ice.clone();
         let running = self.sessions.get(&call).map(Arc::clone);
         if let Some(held) = running {
             let mut slot = share::lock(&held);
+            // a restart this end's answer accepted: the running agent takes
+            // up the credentials that answer carried, before anything the
+            // peer signs with them arrives
+            #[cfg(feature = "ice")]
+            slot.session.follow_ice(settled_ice.as_ref());
             // an answer that took the other role asks for a new association
             // this end does not start, the way a moved certificate does, and
             // is refused the same way: by name, before anything is adopted,
@@ -2396,11 +2481,31 @@ fn fingerprints_in(description: &SessionDescription) -> Vec<String> {
 /// would not survive it.
 ///
 /// One stream, because this facade describes one: [`write_answer`] says why.
+///
+/// A lite end writes `a=ice-lite` at session level where a full one writes
+/// its pacing: RFC 8839 §4.2.1.4 requires the first of a lite implementation,
+/// and §4.3.1 forbids it the second. `answering` is the offer when the
+/// description is an answer, and an offer that did not mention ICE is
+/// answered without it — "the answerer MUST NOT include any ICE-related SDP
+/// attributes in the answer" (§4.3.2); the call then runs on `c=`/`m=`, as
+/// [`MediaEngine::ice_for`] decides for such a peer anyway.
 #[cfg(feature = "ice")]
-fn describe_ice(description: &mut SessionDescription, local: Option<&crate::ice::LocalIce>) {
+fn describe_ice(
+    description: &mut SessionDescription,
+    local: Option<&crate::ice::LocalIce>,
+    answering: Option<&SessionDescription>,
+) {
     let Some(local) = local else {
         return;
     };
+    if let Some(offer) = answering
+        && !offer
+            .media
+            .iter()
+            .any(|stream| sipral_nat::ice::parse_remote(offer, stream).is_some())
+    {
+        return;
+    }
     let Some(stream) = description
         .media
         .iter_mut()
@@ -2409,9 +2514,13 @@ fn describe_ice(description: &mut SessionDescription, local: Option<&crate::ice:
         return;
     };
     sipral_nat::ice::write_stream(stream, local.credentials(), local.candidates());
-    // the Ta this agent proposes, which `IceConfig::default` is built with
-    // and `crate::ice` does not move
-    sipral_nat::ice::write_pacing(description, sipral_nat::ice::DEFAULT_TA);
+    if local.is_lite() {
+        sipral_nat::ice::write_session(description);
+    } else {
+        // the Ta this agent proposes, which `IceConfig::default` is built with
+        // and `crate::ice` does not move
+        sipral_nat::ice::write_pacing(description, sipral_nat::ice::DEFAULT_TA);
+    }
 }
 
 /// Without the feature there is no agent, so there is nothing to write.
@@ -2419,6 +2528,7 @@ fn describe_ice(description: &mut SessionDescription, local: Option<&crate::ice:
 const fn describe_ice(
     _description: &mut SessionDescription,
     _local: Option<&crate::ice::LocalIce>,
+    _answering: Option<&SessionDescription>,
 ) {
 }
 

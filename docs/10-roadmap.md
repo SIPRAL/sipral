@@ -160,7 +160,10 @@ and each is cheaper before the ABI carries it than after:
   `c=` and `m=` — and in a server-reflexive ICE candidate when ICE is on.
   `SIPRAL_NAT_STUN` and `stun_server` carry it across the C ABI, and the lab
   proves it through a NAT against coturn and Asterisk. ICE-lite for the
-  headless profile and TURN are not wired yet;
+  headless profile is wired too: `IcePolicy::Lite`, only in a build with
+  `headless`, answers a full peer's checks and carries the audio on the pair
+  it nominates, proven in process and in the lab against the harness and
+  Asterisk (`docs/06-nat.md#ice-lite`). TURN is not wired yet;
 - **early media on the answering side**, so a stack that answers can speak
   before 200 OK through its own engine rather than through a second one.
   *Built* (task 8.4.9): `MediaEngine::ring`/`ring_with`, and

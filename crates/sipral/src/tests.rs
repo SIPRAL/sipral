@@ -4663,6 +4663,329 @@ fn a_hold_does_not_withdraw_ice_from_a_call_that_had_it() {
     }
 }
 
+/// A caller that will carry no audio on a path ICE did not check, and a
+/// headless agent answering it as a lite endpoint.
+#[cfg(all(feature = "ice", feature = "headless"))]
+fn lite_call() -> (Pair, CallHandle, CallHandle) {
+    let full = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Required);
+    let lite = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Lite);
+    let mut pair = Pair::asymmetric(full, lite);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    (pair, call, remote)
+}
+
+/// Every `PathChosen` a stack has reported.
+#[cfg(all(feature = "ice", feature = "headless"))]
+fn paths_chosen(stack: &Stack) -> Vec<(SocketAddr, SocketAddr)> {
+    stack
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::PathChosen { local, remote } => Some((*local, *remote)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A connectivity check to a lite agent, as a full one signs it (RFC 8445
+/// §7.2.2): USERNAME is the lite end's fragment and then the checker's, and
+/// the lite end's password is the key.
+#[cfg(all(feature = "ice", feature = "headless"))]
+fn check_to_lite(ufrag: &str, pwd: &str, id: u8, nominate: bool) -> Vec<u8> {
+    use sipral_nat::stun::{AttributeType, Class, MessageBuilder, Method, TransactionId};
+    let mut builder = MessageBuilder::new(
+        Class::Request,
+        Method::BINDING,
+        TransactionId::new([id; 12]),
+    );
+    builder
+        .add(AttributeType::USERNAME, format!("{ufrag}:full").as_bytes())
+        .expect("a username");
+    builder
+        .add_u64(AttributeType::ICE_CONTROLLING, 7)
+        .expect("the role");
+    if nominate {
+        builder
+            .add_flag(AttributeType::USE_CANDIDATE)
+            .expect("a nomination");
+    }
+    builder
+        .add_message_integrity(pwd.as_bytes())
+        .expect("a key");
+    builder.add_fingerprint().expect("a fingerprint");
+    builder.finish()
+}
+
+/// Hand a check to the lite end of `pair` and read back what it answered.
+#[cfg(all(feature = "ice", feature = "headless"))]
+fn ask_lite(pair: &mut Pair, remote: CallHandle, from: SocketAddr, check: &[u8]) -> Vec<u8> {
+    let mut datagram = check.to_vec();
+    let arrival =
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .receive(&mut datagram, from, pair.now);
+    assert_eq!(arrival, Arrival::Check, "a check is the agent's, not RTP");
+    let (_, destination, answer) = pair
+        .callee
+        .engine
+        .poll_transmit(pair.now)
+        .expect("the lite end answers a check");
+    assert_eq!(
+        destination, from,
+        "an answer goes back where its check came from"
+    );
+    pair.callee.drain(pair.now, true);
+    answer
+}
+
+/// An ICE attribute's value on a description's one stream.
+#[cfg(all(feature = "ice", feature = "headless"))]
+fn ice_value(description: &SessionDescription, name: &str) -> Option<String> {
+    one_stream(description)
+        .attribute(name)
+        .and_then(|attribute| attribute.value.clone())
+}
+
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn a_full_caller_checks_a_lite_agent_and_the_audio_crosses_on_the_pair_it_nominated() {
+    let (mut pair, call, remote) = lite_call();
+
+    // what makes the far end lite on the wire: `a=ice-lite` at session
+    // level, credentials and one host candidate on the stream, and no
+    // pacing, which RFC 8839 §4.3.1 forbids a lite end
+    let answer = pair
+        .caller
+        .answer_received()
+        .expect("the caller saw the answer");
+    assert!(answer.attribute("ice-lite").is_some(), "{answer}");
+    assert!(answer.attribute("ice-pacing").is_none(), "{answer}");
+    let stream = one_stream(&answer);
+    assert!(stream.attribute("ice-ufrag").is_some() && stream.attribute("ice-pwd").is_some());
+    let candidates: Vec<&str> = stream
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == "candidate")
+        .filter_map(|attribute| attribute.value.as_deref())
+        .collect();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert!(
+        candidates[0].contains("typ host") && candidates[0].contains("192.0.2.2 40002"),
+        "{}",
+        candidates[0]
+    );
+
+    // the caller requires ICE, so the lite answer is what let it open a
+    // stream at all; and the lite end sends nothing before it is nominated
+    let mut lite = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("the lite end's media");
+    assert!(lite.ice_path().is_none());
+    let frame = vec![100_i16; lite.frame_samples()];
+    assert!(
+        lite.capture(&frame, pair.now)
+            .expect("refused, not broken")
+            .is_none(),
+        "a lite end sent audio before a pair was nominated"
+    );
+    drop(lite);
+
+    let crossed = pair.check_paths(call, remote);
+    assert!(crossed > 0, "nothing was checked");
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").ice_path(),
+        Some((caller_media(), callee_media()))
+    );
+    assert_eq!(
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .ice_path(),
+        Some((callee_media(), caller_media())),
+        "the lite end took the pair the caller nominated"
+    );
+    assert_eq!(
+        paths_chosen(&pair.callee),
+        vec![(callee_media(), caller_media())]
+    );
+
+    // and audio both ways, the lite end's on the nominated pair
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert!(
+        loudness(&played) > 4_000,
+        "the tone reached the lite end at {}",
+        loudness(&played)
+    );
+    let mut lite = pair.callee.engine.session(remote).expect("media");
+    let sent = lite
+        .capture(&samples, pair.now)
+        .expect("the frame encodes")
+        .expect("a nominated lite end sends");
+    assert_eq!(sent.destination, caller_media());
+}
+
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn a_lite_agent_answers_a_peer_without_ice_without_any_and_still_gets_its_audio() {
+    // RFC 8839 §4.3.2: "the answerer MUST NOT include any ICE-related SDP
+    // attributes in the answer" to an offer that had none — a PBX that does
+    // no ICE is the commonest peer a headless agent has
+    let plain = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let lite = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Lite);
+    let mut pair = Pair::asymmetric(plain, lite);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    let answer = pair
+        .caller
+        .answer_received()
+        .expect("the caller saw the answer");
+    assert!(answer.attribute("ice-lite").is_none(), "{answer}");
+    assert!(ice_value(&answer, "ice-ufrag").is_none(), "{answer}");
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert!(
+        loudness(&played) > 4_000,
+        "the tone came back at {}",
+        loudness(&played)
+    );
+}
+
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn an_ice_restart_gives_the_lite_agent_new_credentials_and_the_old_pair_holds_until_the_new_nomination()
+ {
+    let (mut pair, call, remote) = lite_call();
+    pair.check_paths(call, remote);
+    let answer = pair.caller.answer_received().expect("the first answer");
+    let (old_ufrag, old_pwd) = (
+        ice_value(&answer, "ice-ufrag").expect("a fragment"),
+        ice_value(&answer, "ice-pwd").expect("a password"),
+    );
+
+    // the caller restarts: the same description with both of its
+    // credentials changed (RFC 8839 §4.4.1.1.1)
+    let mut offer = pair
+        .callee
+        .offer_received()
+        .expect("the caller's own description, as it arrived");
+    offer.origin.version += 1;
+    let stream = offer
+        .media
+        .iter_mut()
+        .find(|media| !media.is_rejected())
+        .expect("a stream");
+    for attribute in &mut stream.attributes {
+        match attribute.name.as_str() {
+            "ice-ufrag" => attribute.value = Some("rstr".to_owned()),
+            "ice-pwd" => attribute.value = Some("restartrestartrestart12".to_owned()),
+            _ => {}
+        }
+    }
+    pair.caller
+        .agent
+        .reoffer(call, &offer.to_bytes(), pair.now)
+        .expect("a confirmed call can be re-offered");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+
+    // read off the session change, not off the INVITE that opened the call
+    let (restarted, offered) = last_described(&pair.callee).expect("the callee answered");
+    assert_eq!(ice_value(&offered, "ice-ufrag").as_deref(), Some("rstr"));
+    let new_ufrag = ice_value(&restarted, "ice-ufrag").expect("a fragment");
+    let new_pwd = ice_value(&restarted, "ice-pwd").expect("a password");
+    assert_ne!(
+        new_ufrag, old_ufrag,
+        "RFC 8839 §4.4.2.1: the answerer changes both"
+    );
+    assert_ne!(
+        new_pwd, old_pwd,
+        "RFC 8839 §4.4.2.1: the answerer changes both"
+    );
+    assert!(restarted.attribute("ice-lite").is_some(), "{restarted}");
+
+    // RFC 8445 §9: the old pair carries the media until the new session
+    // selects, and its consent check under the old credentials is answered
+    assert_eq!(
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .ice_path(),
+        Some((callee_media(), caller_media()))
+    );
+    let consent = ask_lite(
+        &mut pair,
+        remote,
+        caller_media(),
+        &check_to_lite(&old_ufrag, &old_pwd, 1, false),
+    );
+    let consent = sipral_nat::stun::Message::parse(&consent).expect("a STUN answer");
+    assert_eq!(consent.class(), sipral_nat::stun::Class::Success);
+    assert_eq!(
+        consent.verify_integrity(old_pwd.as_bytes()),
+        sipral_nat::stun::Integrity::Valid
+    );
+
+    // the new session nominates another path, and the audio moves to it
+    let moved: SocketAddr = "192.0.2.1:40010".parse().expect("an address");
+    let nominated = ask_lite(
+        &mut pair,
+        remote,
+        moved,
+        &check_to_lite(&new_ufrag, &new_pwd, 2, true),
+    );
+    let nominated = sipral_nat::stun::Message::parse(&nominated).expect("a STUN answer");
+    assert_eq!(nominated.class(), sipral_nat::stun::Class::Success);
+    assert_eq!(
+        nominated.verify_integrity(new_pwd.as_bytes()),
+        sipral_nat::stun::Integrity::Valid
+    );
+    assert_eq!(
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .ice_path(),
+        Some((callee_media(), moved))
+    );
+    assert_eq!(
+        paths_chosen(&pair.callee),
+        vec![(callee_media(), caller_media()), (callee_media(), moved)]
+    );
+    let mut lite = pair.callee.engine.session(remote).expect("media");
+    let frame = vec![100_i16; lite.frame_samples()];
+    let sent = lite
+        .capture(&frame, pair.now)
+        .expect("the frame encodes")
+        .expect("a nominated lite end sends");
+    assert_eq!(sent.destination, moved);
+}
+
 #[cfg(feature = "ice")]
 #[test]
 fn nothing_goes_out_on_a_call_whose_checks_have_not_finished() {

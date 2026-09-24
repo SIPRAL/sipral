@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
-//! ICE in the full role, joined to a call.
+//! ICE in the full role, and in the lite role for a headless agent on a
+//! public address, joined to a call.
 //!
 //! `sipral-nat` has RFC 8445's agent — gathering, checklists, pacing,
 //! nomination, role conflicts, restarts, keepalives and consent — and until
@@ -53,9 +54,41 @@
 //! this module existed. RFC 8445 §2.6 requires it, and without it switching
 //! ICE on would turn a working call against an Asterisk with `ice_support=no`
 //! — the default — into a call with no audio.
+//!
+//! # The lite role
+//!
+//! [`IcePolicy::Lite`] is the other half of `docs/06-nat.md`'s table: a
+//! headless agent on a server whose address the world can reach, answering a
+//! full-ICE peer — a WebRTC gateway, typically — that will not send media
+//! anywhere it has not checked. RFC 8445 Appendix A limits the role to
+//! exactly that host, which is why the policy exists only in a build with the
+//! `headless` feature: the softphone's build cannot name it, so a softphone
+//! behind a NAT cannot advertise it by mistake.
+//!
+//! A lite end writes `a=ice-lite`, its credentials and one host candidate —
+//! the address the socket is bound to, or the public address a one-to-one NAT
+//! in front of it forwards, which is what most clouds give a server — and
+//! then answers checks: authenticated with its short-term credential, signed
+//! back with it, `FINGERPRINT` on both, and the role rules of RFC 8445 §6.1.1
+//! and §7.3.1.1, under which a lite end facing a full one is always the
+//! controlled side. The pair a check with `USE-CANDIDATE` arrives on is the
+//! media path (§7.3.2), reported as [`MediaEvent::PathChosen`] exactly as a
+//! full agent's selection is, and nothing leaves before there is one. A
+//! consent check (RFC 7675) is an ordinary check to this end, and is
+//! answered the same way. A re-offer that changes the peer's credentials is
+//! an ICE restart: the answer carries new credentials of this end's own
+//! (RFC 8839 §4.4.2.1), and the pair already selected carries the audio, and
+//! goes on answering checks under the old ones, until the peer nominates
+//! under the new.
+//!
+//! [`MediaEvent::PathChosen`]: crate::MediaEvent::PathChosen
 
 #[cfg(feature = "ice")]
+use std::collections::VecDeque;
+#[cfg(feature = "ice")]
 use std::net::SocketAddr;
+#[cfg(feature = "ice")]
+use std::ops::Range;
 #[cfg(feature = "ice")]
 use std::time::Instant;
 
@@ -63,8 +96,8 @@ use std::time::Instant;
 use sipral_core::auth::KeySource;
 #[cfg(feature = "ice")]
 use sipral_nat::ice::{
-    Candidate, ComponentId, Credentials, IceAgent, IceConfig, IceEvent, RemoteIce, Role, Route,
-    SelectedPair, SendError, StreamId, Transmit,
+    Candidate, CandidateType, ComponentId, Credentials, IceAgent, IceConfig, IceEvent, LiteAgent,
+    Received, RemoteIce, Role, Route, SelectedPair, SendError, StreamId, Transmit,
 };
 #[cfg(feature = "ice")]
 use sipral_nat::stun::TransactionId;
@@ -111,6 +144,24 @@ pub enum IcePolicy {
     /// nothing checked.
     #[cfg(feature = "ice")]
     Required,
+    /// Be an ICE-lite endpoint (RFC 8445 §2.5): write `a=ice-lite` and a host
+    /// candidate, answer the connectivity checks a full peer sends, and put
+    /// the audio on the pair it nominates.
+    ///
+    /// Only for a host that is always reachable at the address it advertises
+    /// — the socket's own, or [`CallMedia::public_address`] for one behind a
+    /// one-to-one NAT — which is the headless agent on a server, and never a
+    /// softphone: RFC 8445 Appendix A says ICE "will not function when a lite
+    /// implementation is placed behind a NAT", and the peer, told this end is
+    /// lite, stops doing the work that would have found another path. So it
+    /// exists only with the `headless` feature, and nothing turns it on but
+    /// the application asking. A peer that does no ICE, or is lite itself,
+    /// gets the call on `c=`/`m=` and symmetric RTP, as under
+    /// [`IcePolicy::Offered`].
+    ///
+    /// [`CallMedia::public_address`]: crate::CallMedia::public_address
+    #[cfg(all(feature = "ice", feature = "headless"))]
+    Lite,
 }
 
 impl IcePolicy {
@@ -121,6 +172,19 @@ impl IcePolicy {
             Self::Off => false,
             #[cfg(feature = "ice")]
             Self::Offered | Self::Required => true,
+            #[cfg(all(feature = "ice", feature = "headless"))]
+            Self::Lite => true,
+        }
+    }
+
+    /// Whether this end is the lite implementation.
+    #[cfg(feature = "ice")]
+    #[must_use]
+    pub(crate) const fn lite(self) -> bool {
+        match self {
+            #[cfg(feature = "headless")]
+            Self::Lite => true,
+            Self::Off | Self::Offered | Self::Required => false,
         }
     }
 
@@ -138,6 +202,8 @@ impl IcePolicy {
             Self::Required => true,
             #[cfg(feature = "ice")]
             Self::Offered => false,
+            #[cfg(feature = "headless")]
+            Self::Lite => false,
             Self::Off => false,
         }
     }
@@ -193,9 +259,12 @@ pub(crate) struct LocalIce {
     tiebreaker: u64,
     /// The address the socket appears at from outside, when the call was
     /// given one: its server-reflexive candidate, kept so that the agent
-    /// rebuilt at [`LocalIce::agent`] holds it too.
+    /// rebuilt at [`LocalIce::agent`] holds it too. For a lite end it is the
+    /// host candidate instead, a one-to-one NAT's public address.
     public: Option<SocketAddr>,
     candidates: Vec<Candidate>,
+    /// Whether this end is the lite implementation ([`IcePolicy::Lite`]).
+    lite: bool,
 }
 
 #[cfg(feature = "ice")]
@@ -210,6 +279,15 @@ impl LocalIce {
     /// given one: a server-reflexive candidate beside the host one, and the
     /// default candidate RFC 8839 §4.2.1.2 wants in `c=` and `m=`.
     ///
+    /// `lite` draws for [`IcePolicy::Lite`]: the role is the controlled one
+    /// (§6.1.1 gives a lite end no other against a full peer), and the one
+    /// candidate is a host candidate for `public` when there is one and for
+    /// `address` when there is not. On a server behind a one-to-one NAT the
+    /// public address *is* the host's address as far as any peer is
+    /// concerned — the NAT forwards it unchanged, which is what makes the
+    /// host fit for the role at all — and a lite end has no reflexive
+    /// candidate to put it in (RFC 8445 §5.2 gives it host candidates only).
+    ///
     /// # Errors
     ///
     /// [`MediaError::Ice`] when the address the application bound is one RFC
@@ -220,31 +298,34 @@ impl LocalIce {
         address: SocketAddr,
         public: Option<SocketAddr>,
         we_are_offerer: bool,
+        lite: bool,
         now: Instant,
     ) -> Result<Self, MediaError> {
-        let block = keys.block();
-        let chars: Vec<u8> = block
-            .iter()
-            .take(UFRAG_CHARS + PWD_CHARS)
-            // six bits index sixty-four characters, so `get` cannot answer
-            // `None`; it is written rather than indexed because a panic while
-            // a call is being described is worse than any credential
-            .map(|byte| {
-                ICE_CHARS
-                    .get(usize::from(byte & 0x3F))
-                    .copied()
-                    .unwrap_or(b'A')
-            })
-            .collect();
-        let (ufrag, pwd) = chars.split_at(UFRAG_CHARS);
-        // both halves are `ice-char`s by construction, so the only way
-        // `Credentials::new` refuses them is a length this file got wrong
-        let credentials = Credentials::new(
-            core::str::from_utf8(ufrag).unwrap_or_default(),
-            core::str::from_utf8(pwd).unwrap_or_default(),
-        )
-        .map_err(MediaError::Ice)?;
+        let credentials = draw_credentials(keys)?;
         let tiebreaker = u64::from_be_bytes(keys.block()[..8].try_into().unwrap_or([0; 8]));
+        if lite {
+            // the same gathering, and so the same §5.1.1.1 refusals, as the
+            // full role's, on the one address a peer is to reach; nothing
+            // else of that agent is kept
+            let advertised = public.unwrap_or(address);
+            let (agent, stream) = new_agent(
+                &credentials,
+                Role::Controlled,
+                tiebreaker,
+                advertised,
+                None,
+                now,
+            )?;
+            let candidates = agent.local_candidates(stream);
+            return Ok(Self {
+                credentials,
+                role: Role::Controlled,
+                tiebreaker,
+                public,
+                candidates,
+                lite: true,
+            });
+        }
         // a peer that is lite is not known until its description arrives, and
         // the agent moves the role itself when it is
         let role = Role::initial_full(we_are_offerer, false);
@@ -256,9 +337,61 @@ impl LocalIce {
             tiebreaker,
             public,
             candidates,
+            lite: false,
         })
     }
 
+    /// The same call's ICE after an ICE restart the peer asked for: new
+    /// credentials of this end's own, which RFC 8839 §4.4.2.1 requires of an
+    /// answerer that accepts one, and everything else as it was — a lite end
+    /// "MUST NOT add additional host candidates in a subsequent offer"
+    /// (§4.4.1.3), and has no other kind to add.
+    ///
+    /// # Errors
+    ///
+    /// As [`LocalIce::draw`].
+    pub(crate) fn restarted(&self, keys: &mut KeySource) -> Result<Self, MediaError> {
+        Ok(Self {
+            credentials: draw_credentials(keys)?,
+            ..self.clone()
+        })
+    }
+
+    /// Whether this end is the lite implementation.
+    pub(crate) const fn is_lite(&self) -> bool {
+        self.lite
+    }
+}
+
+/// A username fragment and a password, drawn from `keys`.
+#[cfg(feature = "ice")]
+fn draw_credentials(keys: &mut KeySource) -> Result<Credentials, MediaError> {
+    let block = keys.block();
+    let chars: Vec<u8> = block
+        .iter()
+        .take(UFRAG_CHARS + PWD_CHARS)
+        // six bits index sixty-four characters, so `get` cannot answer
+        // `None`; it is written rather than indexed because a panic while
+        // a call is being described is worse than any credential
+        .map(|byte| {
+            ICE_CHARS
+                .get(usize::from(byte & 0x3F))
+                .copied()
+                .unwrap_or(b'A')
+        })
+        .collect();
+    let (ufrag, pwd) = chars.split_at(UFRAG_CHARS);
+    // both halves are `ice-char`s by construction, so the only way
+    // `Credentials::new` refuses them is a length this file got wrong
+    Credentials::new(
+        core::str::from_utf8(ufrag).unwrap_or_default(),
+        core::str::from_utf8(pwd).unwrap_or_default(),
+    )
+    .map_err(MediaError::Ice)
+}
+
+#[cfg(feature = "ice")]
+impl LocalIce {
     /// The credentials to write into a description.
     pub(crate) const fn credentials(&self) -> &Credentials {
         &self.credentials
@@ -287,12 +420,35 @@ impl LocalIce {
     /// # Errors
     ///
     /// As [`LocalIce::draw`].
+    ///
+    /// A lite end is built from the credentials alone: it has no checklist to
+    /// rebuild, sends nothing of its own, and so spends no transaction id.
     pub(crate) fn agent(
         &self,
         address: SocketAddr,
         seed: [u8; 32],
         now: Instant,
     ) -> Result<Ice, MediaError> {
+        if self.lite {
+            let advertised = self.public.unwrap_or(address);
+            return Ok(Ice {
+                local: address,
+                out: Vec::new(),
+                probe: Vec::new(),
+                running: Running::Lite(Box::new(Lite {
+                    agent: LiteAgent::new(
+                        self.credentials.ufrag().to_owned(),
+                        self.credentials.pwd().to_owned(),
+                        self.role,
+                        self.tiebreaker,
+                    ),
+                    advertised,
+                    outbox: VecDeque::new(),
+                    selected: None,
+                    news: None,
+                })),
+            });
+        }
         let (agent, stream) = new_agent(
             &self.credentials,
             self.role,
@@ -302,12 +458,14 @@ impl LocalIce {
             now,
         )?;
         let mut ice = Ice {
-            agent,
-            stream,
             local: address,
-            keys: KeySource::new(seed),
             out: Vec::new(),
             probe: Vec::new(),
+            running: Running::Full(Box::new(Full {
+                agent,
+                stream,
+                keys: KeySource::new(seed),
+            })),
         };
         ice.top_up();
         Ok(ice)
@@ -353,30 +511,86 @@ fn new_agent(
 /// one thing a running checklist must never do is appear in a log.
 #[cfg(feature = "ice")]
 pub(crate) struct Ice {
+    /// The socket the application bound for this call, which is what every
+    /// datagram handed to the agent arrived on.
+    local: SocketAddr,
+    /// Where application data goes once it is ready for the pair, held rather
+    /// than allocated per frame. With a relayed pair it is the frame with the
+    /// channel header in front of it; without one it is the frame.
+    out: Vec<u8>,
+    /// The agent's own datagram — a check, a consent request, a keepalive, a
+    /// lite end's answer to a check — held for as long as the caller borrows
+    /// it.
+    probe: Vec<u8>,
+    running: Running,
+}
+
+/// Which of the two roles this call plays.
+#[cfg(feature = "ice")]
+enum Running {
+    // both boxed: the two are hundreds of bytes apart, and a session that is
+    // not using ICE — most of them — holds neither
+    Full(Box<Full>),
+    Lite(Box<Lite>),
+}
+
+/// The full role: RFC 8445's whole agent.
+#[cfg(feature = "ice")]
+struct Full {
     agent: IceAgent,
     /// The one stream this call has. `add_stream` names it, and nothing here
     /// ever adds a second: one audio stream per call is what the facade
     /// describes, and `write_answer` says why.
     stream: StreamId,
-    /// The socket the application bound for this call, which is what every
-    /// datagram handed to the agent arrived on.
-    local: SocketAddr,
     /// Where this call's transaction ids come from: a stream of its own,
     /// seeded from the engine's, so that a session can keep the agent's pool
     /// full on the media thread without reaching the engine for every id.
     keys: KeySource,
-    /// Where [`IceAgent::send`] puts application data, held rather than
-    /// allocated per frame. With a relayed pair it is the frame with the
-    /// channel header in front of it; without one it is the frame.
-    out: Vec<u8>,
-    /// The agent's own datagram — a check, a consent request, a keepalive —
-    /// held for as long as the caller borrows it.
-    probe: Vec<u8>,
+}
+
+/// The lite role: a STUN server on the media socket and the pair the peer
+/// nominated, and nothing else — no checklist, no timer, no transaction id.
+#[cfg(feature = "ice")]
+struct Lite {
+    agent: LiteAgent,
+    /// The host candidate this end advertised: the socket's address, or the
+    /// public one a one-to-one NAT forwards to it.
+    advertised: SocketAddr,
+    /// Answers to checks, each to the address its check came from.
+    outbox: VecDeque<(SocketAddr, Vec<u8>)>,
+    /// The pair the peer nominated, as the media path.
+    selected: Option<SelectedPair>,
+    /// A nomination the session has not been told about yet.
+    news: Option<SelectedPair>,
+}
+
+/// What a datagram handed to [`Ice::handle_datagram`] turned out to be.
+#[cfg(feature = "ice")]
+pub(crate) enum Taken {
+    /// Application data, at this position in the datagram.
+    Data(Range<usize>),
+    /// ICE's own traffic, already dealt with.
+    Consumed,
+    /// Not on the socket the agent was given.
+    Foreign,
+}
+
+/// What the session has to act on.
+#[cfg(feature = "ice")]
+pub(crate) enum PathNews {
+    /// A pair was selected, or a later one replaced it.
+    Selected(SelectedPair),
+    /// Nothing may be sent on this call's path any more: consent was lost or
+    /// the checks failed.
+    Lost,
 }
 
 #[cfg(feature = "ice")]
 impl Ice {
     /// Give the agent what the peer said, and say whether ICE is on.
+    ///
+    /// A lite end has nothing to do with it: it signs every answer with its
+    /// own password and checks nothing of its own.
     ///
     /// # Errors
     ///
@@ -387,9 +601,30 @@ impl Ice {
         remote: &RemoteIce,
         now: Instant,
     ) -> Result<(), MediaError> {
-        self.agent
-            .set_remote(self.stream, remote, now)
-            .map_err(MediaError::Ice)
+        match &mut self.running {
+            Running::Full(full) => full
+                .agent
+                .set_remote(full.stream, remote, now)
+                .map_err(MediaError::Ice),
+            Running::Lite(_) => Ok(()),
+        }
+    }
+
+    /// Take up the credentials a restart gave this call, when they are not
+    /// the ones the running agent holds.
+    ///
+    /// Only the lite role restarts here, and only because the peer did: the
+    /// answer that accepted the restart already carried `local`'s new
+    /// credentials, and the peer's checks from now on are signed with them.
+    pub(crate) fn follow(&mut self, local: &LocalIce) {
+        if let Running::Lite(lite) = &mut self.running
+            && lite.agent.local_ufrag() != local.credentials().ufrag()
+        {
+            lite.agent.restart(
+                local.credentials().ufrag().to_owned(),
+                local.credentials().pwd().to_owned(),
+            );
+        }
     }
 
     /// Top the agent's pool of transaction ids up from a cryptographic
@@ -401,39 +636,81 @@ impl Ice {
     /// while consent runs out on a call that was working. The only way not to
     /// have that happen is to keep the pool full.
     pub(crate) fn top_up(&mut self) {
-        let mut wanted = self.agent.transaction_ids_wanted();
+        let Running::Full(full) = &mut self.running else {
+            return;
+        };
+        let mut wanted = full.agent.transaction_ids_wanted();
         while wanted > 0 {
             // a block is thirty-two bytes and an id is twelve, so two ids come
             // out of each one and the last eight bytes are not stretched into
             // a third
-            let block = self.keys.block();
+            let block = full.keys.block();
             for chunk in block.chunks_exact(12).take(wanted.min(2)) {
                 let mut id = [0_u8; 12];
                 id.copy_from_slice(chunk);
-                self.agent.supply_transaction_id(TransactionId::new(id));
+                full.agent.supply_transaction_id(TransactionId::new(id));
                 wanted -= 1;
             }
         }
     }
 
     /// Hand in a datagram that arrived on the media socket.
-    pub(crate) fn handle_datagram(
-        &mut self,
-        from: SocketAddr,
-        data: &[u8],
-        now: Instant,
-    ) -> sipral_nat::ice::Received {
-        self.agent.handle_datagram(self.local, from, data, now)
+    ///
+    /// A lite end answers a check and reads nothing else: anything that is
+    /// not STUN is application data, from wherever it came, exactly as the
+    /// full agent treats it — receiving is allowed on any candidate (RFC 8445
+    /// §12.2), and the session's own latch follows the pair once one is
+    /// nominated.
+    pub(crate) fn handle_datagram(&mut self, from: SocketAddr, data: &[u8], now: Instant) -> Taken {
+        match &mut self.running {
+            Running::Full(full) => match full.agent.handle_datagram(self.local, from, data, now) {
+                Received::Data { range, .. } => Taken::Data(range),
+                Received::Consumed => Taken::Consumed,
+                Received::Foreign => Taken::Foreign,
+            },
+            Running::Lite(lite) => {
+                if sipral_nat::classify(data) != sipral_nat::Demux::Stun {
+                    return Taken::Data(0..data.len());
+                }
+                if let Some(reply) =
+                    lite.agent
+                        .handle_binding_request(ComponentId::RTP, self.local, from, data)
+                {
+                    lite.outbox.push_back((from, reply));
+                }
+                if let Some(pair) = lite.agent.valid_pair(ComponentId::RTP) {
+                    let chosen = SelectedPair {
+                        local: lite.advertised,
+                        local_kind: CandidateType::Host,
+                        remote: pair.remote,
+                        // a lite end never learns what kind of candidate the
+                        // peer checked from; the address is what the path is
+                        remote_kind: CandidateType::Host,
+                    };
+                    if lite.selected.map(|held| held.remote) != Some(chosen.remote) {
+                        lite.selected = Some(chosen);
+                        lite.news = Some(chosen);
+                    }
+                }
+                Taken::Consumed
+            }
+        }
     }
 
-    /// Take the passing of time.
+    /// Take the passing of time. A lite end has no timer.
     pub(crate) fn handle_timeout(&mut self, now: Instant) {
-        self.agent.handle_timeout(now);
+        if let Running::Full(full) = &mut self.running {
+            full.agent.handle_timeout(now);
+        }
     }
 
-    /// When the agent next has something to do.
+    /// When the agent next has something to do: never, for a lite end, which
+    /// only ever answers.
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.agent.deadline()
+        match &self.running {
+            Running::Full(full) => full.agent.deadline(),
+            Running::Lite(_) => None,
+        }
     }
 
     /// Take the agent's own next datagram, and say where it goes.
@@ -444,9 +721,15 @@ impl Ice {
     /// and ends the mutable borrow, where a borrow of the bytes would hold it
     /// open for as long as the datagram lives.
     pub(crate) fn take_probe(&mut self) -> Option<SocketAddr> {
-        let Transmit {
-            destination, data, ..
-        } = self.agent.poll_transmit()?;
+        let (destination, data) = match &mut self.running {
+            Running::Full(full) => {
+                let Transmit {
+                    destination, data, ..
+                } = full.agent.poll_transmit()?;
+                (destination, data)
+            }
+            Running::Lite(lite) => lite.outbox.pop_front()?,
+        };
         self.probe = data;
         Some(destination)
     }
@@ -456,9 +739,24 @@ impl Ice {
         &self.probe
     }
 
-    /// The agent's next event.
-    pub(crate) fn poll_event(&mut self) -> Option<IceEvent> {
-        self.agent.poll_event()
+    /// The next thing about the path the session has to act on.
+    pub(crate) fn poll_news(&mut self) -> Option<PathNews> {
+        match &mut self.running {
+            Running::Full(full) => loop {
+                match full.agent.poll_event()? {
+                    IceEvent::Selected { pair, .. } => return Some(PathNews::Selected(pair)),
+                    // RFC 7675 §5: nothing more may be sent on that pair, and
+                    // the same credentials may not be used on it again
+                    IceEvent::ConsentLost { .. }
+                    | IceEvent::Failed
+                    | IceEvent::StreamFailed { .. } => return Some(PathNews::Lost),
+                    IceEvent::GatheringComplete
+                    | IceEvent::Completed
+                    | IceEvent::RoleChanged(_) => {}
+                }
+            },
+            Running::Lite(lite) => lite.news.take().map(PathNews::Selected),
+        }
     }
 
     /// Where a datagram for this stream would go, without sending one.
@@ -468,7 +766,13 @@ impl Ice {
     /// by trying: by then it has built a frame it would have to throw away,
     /// or taken a handshake record out of a flight it cannot put back.
     pub(crate) fn route(&self) -> Option<Route> {
-        self.agent.route(self.stream, ComponentId::RTP).ok()
+        match &self.running {
+            Running::Full(full) => full.agent.route(full.stream, ComponentId::RTP).ok(),
+            Running::Lite(lite) => lite.selected.map(|pair| Route {
+                source: self.local,
+                destination: pair.remote,
+            }),
+        }
     }
 
     /// Wrap a datagram for the pair the agent picked and say where it goes.
@@ -476,22 +780,36 @@ impl Ice {
     /// # Errors
     ///
     /// [`SendError`] when there is no pair to send on, consent is gone, or a
-    /// relay refused the data.
+    /// relay refused the data. A lite end has only the first of the three:
+    /// until the peer nominates a pair there is nowhere it may send (RFC 8445
+    /// §12.1), and a lite end has no consent of its own to lose.
     pub(crate) fn send(
         &mut self,
         data: &[u8],
         now: Instant,
     ) -> Result<(SocketAddr, &[u8]), SendError> {
         self.out.clear();
-        let route = self
-            .agent
-            .send(self.stream, ComponentId::RTP, data, &mut self.out, now)?;
-        Ok((route.destination, &self.out))
+        let destination = match &mut self.running {
+            Running::Full(full) => {
+                full.agent
+                    .send(full.stream, ComponentId::RTP, data, &mut self.out, now)?
+                    .destination
+            }
+            Running::Lite(lite) => {
+                let pair = lite.selected.ok_or(SendError::NoRoute)?;
+                self.out.extend_from_slice(data);
+                pair.remote
+            }
+        };
+        Ok((destination, &self.out))
     }
 
     /// The pair the agent selected, once it has one.
     pub(crate) fn selected_pair(&self) -> Option<SelectedPair> {
-        self.agent.selected_pair(self.stream, ComponentId::RTP)
+        match &self.running {
+            Running::Full(full) => full.agent.selected_pair(full.stream, ComponentId::RTP),
+            Running::Lite(lite) => lite.selected,
+        }
     }
 
     /// The candidates this agent will advertise for its stream.
@@ -499,10 +817,14 @@ impl Ice {
     /// Only a test asks: what goes into a description comes from
     /// [`LocalIce::candidates`], which is what makes the second and every
     /// later description of a call say what the first one did. This is how
-    /// that equality is checked.
+    /// that equality is checked. A lite end has no agent that gathered
+    /// anything, so there is nothing of it to compare.
     #[cfg(test)]
     pub(crate) fn local_candidates(&self) -> Vec<Candidate> {
-        self.agent.local_candidates(self.stream)
+        match &self.running {
+            Running::Full(full) => full.agent.local_candidates(full.stream),
+            Running::Lite(_) => Vec::new(),
+        }
     }
 }
 
@@ -517,10 +839,13 @@ impl Ice {
 #[cfg(feature = "ice")]
 impl core::fmt::Debug for Ice {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Ice")
-            .field("local", &self.local)
-            .field("state", &self.agent.state())
-            .finish_non_exhaustive()
+        let mut out = f.debug_struct("Ice");
+        out.field("local", &self.local);
+        match &self.running {
+            Running::Full(full) => out.field("state", &full.agent.state()),
+            Running::Lite(lite) => out.field("lite", &lite.selected),
+        };
+        out.finish_non_exhaustive()
     }
 }
 
@@ -544,6 +869,7 @@ mod tests {
             address(),
             None,
             true,
+            false,
             Instant::now(),
         )
         .expect("an ordinary address gathers")
@@ -596,6 +922,7 @@ mod tests {
             address(),
             Some(public),
             true,
+            false,
             now,
         )
         .expect("an ordinary address gathers");
@@ -620,10 +947,72 @@ mod tests {
             address(),
             Some(address()),
             true,
+            false,
             Instant::now(),
         )
         .expect("an ordinary address gathers");
         assert_eq!(ice.candidates().len(), 1);
+    }
+
+    #[test]
+    fn a_lite_end_offers_one_host_candidate_on_the_address_a_peer_reaches() {
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("a literal address");
+        // bound to its own address: that is the candidate
+        let bound = LocalIce::draw(
+            &mut KeySource::new([7; 32]),
+            address(),
+            None,
+            false,
+            true,
+            Instant::now(),
+        )
+        .expect("an ordinary address gathers");
+        assert!(bound.is_lite());
+        assert_eq!(bound.candidates().len(), 1);
+        assert_eq!(bound.candidates()[0].kind, CandidateType::Host);
+        assert_eq!(bound.candidates()[0].address, address());
+        // behind a one-to-one NAT: the public address is the host candidate,
+        // and there is no reflexive one beside it (RFC 8445 §5.2)
+        let forwarded = LocalIce::draw(
+            &mut KeySource::new([7; 32]),
+            address(),
+            Some(public),
+            false,
+            true,
+            Instant::now(),
+        )
+        .expect("a public address gathers");
+        assert_eq!(forwarded.candidates().len(), 1);
+        assert_eq!(forwarded.candidates()[0].kind, CandidateType::Host);
+        assert_eq!(forwarded.candidates()[0].address, public);
+        assert_eq!(forwarded.candidates()[0].related, None);
+        // and a restart changes the credentials and nothing else
+        let restarted = forwarded
+            .restarted(&mut KeySource::new([8; 32]))
+            .expect("a restart draws");
+        assert_ne!(
+            restarted.credentials().ufrag(),
+            forwarded.credentials().ufrag()
+        );
+        assert_ne!(restarted.credentials().pwd(), forwarded.credentials().pwd());
+        assert_eq!(restarted.candidates(), forwarded.candidates());
+        assert!(restarted.is_lite());
+    }
+
+    #[test]
+    fn a_lite_end_refuses_an_address_no_peer_could_reach() {
+        let loopback = "127.0.0.1:40000".parse().expect("a literal address");
+        assert!(
+            LocalIce::draw(
+                &mut KeySource::new([4; 32]),
+                loopback,
+                None,
+                false,
+                true,
+                Instant::now(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -634,6 +1023,7 @@ mod tests {
             loopback,
             None,
             true,
+            false,
             Instant::now(),
         );
         assert!(

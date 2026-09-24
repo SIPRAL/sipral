@@ -39,6 +39,14 @@
 //! — `--register user@domain --registrar ip:port --pass secret` — which is
 //! how the interop lab runs it behind Asterisk.
 //!
+//! `--ice-lite` answers as an ICE-lite endpoint (`sipral::IcePolicy::Lite`,
+//! `docs/06-nat.md`): the deployment for a server with a public address, and
+//! the one a full-ICE peer such as a WebRTC gateway needs before it will send
+//! it any audio. The candidate is the media socket's own address, or
+//! `--public ip` for a server behind a one-to-one NAT, where that is the
+//! address the NAT forwards unchanged to this host. Once the peer nominates
+//! a pair it prints `path chosen <local> -> <remote>`.
+//!
 //! The socket's own audio is fixed at 16 kHz; the codec catalogue is G.711
 //! only, so every call is 8 kHz regardless of which law is chosen, and
 //! `HeadlessSession` resamples between the two both ways — proving that seam
@@ -68,8 +76,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sipral::{
-    Account, CallHandle, CodecCatalog, Credentials, EndpointConfig, Event, MediaConfig,
-    MediaEngine, MediaError, MediaEvent, StatusCode, UaEvent, Uri, UserAgent, WallClock,
+    Account, CallHandle, CallMedia, CodecCatalog, Credentials, EndpointConfig, Event, IcePolicy,
+    MediaConfig, MediaEngine, MediaError, MediaEvent, StatusCode, UaEvent, Uri, UserAgent,
+    WallClock,
 };
 use sipral_core::msg::HeaderName;
 use sipral_headless::{
@@ -133,11 +142,32 @@ struct Registration {
     pass: String,
 }
 
+/// How a call is answered: the codecs, and — with `--ice-lite` — as an
+/// ICE-lite endpoint, advertised at the socket's address or at `--public`.
+struct Answering {
+    catalog: CodecCatalog,
+    public: Option<std::net::IpAddr>,
+}
+
+impl Answering {
+    /// What one call is answered with, on the media socket bound at `local`.
+    /// A one-to-one NAT keeps the port, so the public address takes the
+    /// socket's own.
+    fn media(&self, local: SocketAddr) -> CallMedia {
+        let media = CallMedia::new(self.catalog.clone(), MediaConfig::default());
+        match self.public {
+            Some(ip) => media.public_address(SocketAddr::new(ip, local.port())),
+            None => media,
+        }
+    }
+}
+
 struct Args {
     host: std::net::IpAddr,
     port: u16,
     socket: SocketAddr,
     registration: Option<Registration>,
+    answering: Answering,
 }
 
 fn args() -> Args {
@@ -147,6 +177,8 @@ fn args() -> Args {
     let mut register: Option<(String, String)> = None;
     let mut registrar: Option<SocketAddr> = None;
     let mut pass = String::new();
+    let mut ice_lite = false;
+    let mut public = None;
     let mut it = env::args().skip(1);
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -173,9 +205,16 @@ fn args() -> Args {
             }
             "--registrar" => registrar = it.next().and_then(|t| t.parse().ok()),
             "--pass" => pass = it.next().unwrap_or_default(),
+            "--ice-lite" => ice_lite = true,
+            "--public" => public = it.next().and_then(|t| t.parse().ok()),
             _ => {}
         }
     }
+    let catalog = if ice_lite {
+        codecs().with_ice(IcePolicy::Lite)
+    } else {
+        codecs()
+    };
     let registration = register
         .zip(registrar)
         .map(|((user, domain), registrar)| Registration {
@@ -189,6 +228,7 @@ fn args() -> Args {
         port,
         socket,
         registration,
+        answering: Answering { catalog, public },
     }
 }
 
@@ -354,6 +394,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         port,
         socket: socket_addr,
         registration,
+        answering,
     } = args();
     let now = Instant::now();
     let agent = UserAgent::new(EndpointConfig::default(), entropy::seed()?)?;
@@ -424,7 +465,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut agent_up,
                 &mut out.control,
                 &event,
-                (turn, to_agent.audio_dropped),
+                (turn, to_agent.audio_dropped, &answering),
             );
         }
 
@@ -532,6 +573,11 @@ fn drive_bridge(
         let datagram = inbox.get_mut(..length).unwrap_or_default();
         let _ = media.receive(datagram, from, turn);
     }
+    // the session's own datagrams — an ICE-lite end's answers to the peer's
+    // checks among them — go out on the same socket, whatever the tick
+    while let Some(datagram) = media.poll_transmit(turn) {
+        let _ = active.rtp.send_to(datagram.payload, datagram.destination);
+    }
     if !agent_up || turn < *next_tick {
         return;
     }
@@ -616,7 +662,7 @@ fn open_bridge(
     endpoint: &mut Endpoint,
     bridge: &mut Option<Bridge>,
     out: &mut Vec<u8>,
-    call: CallHandle,
+    (call, answering): (CallHandle, &Answering),
     now: Instant,
 ) {
     let call_id = format!("{call:?}");
@@ -694,10 +740,13 @@ fn open_bridge(
         }),
         out,
     );
-    match endpoint
-        .engine
-        .answer(&mut endpoint.agent, call, local, now)
-    {
+    match endpoint.engine.answer_with(
+        &mut endpoint.agent,
+        call,
+        local,
+        answering.media(local),
+        now,
+    ) {
         Ok(()) => println!("answered {call_id}"),
         // the engine sent nothing: an offer that cannot be answered is
         // RFC 3261 §21.4.26's 488, and anything else this end's own 500
@@ -722,14 +771,22 @@ fn handle_event(
     agent_up: &mut bool,
     out: &mut Vec<u8>,
     event: &Event,
-    (now, audio_dropped): (Instant, u64),
+    (now, audio_dropped, answering): (Instant, u64, &Answering),
 ) {
     match event {
         Event::Signalling(UaEvent::IncomingCall { call, .. })
             if bridge.as_ref().is_none_or(|b| b.ended) =>
         {
-            open_bridge(endpoint, bridge, out, *call, now);
+            open_bridge(endpoint, bridge, out, (*call, answering), now);
         }
+        Event::Media {
+            event: MediaEvent::PathChosen { local, remote },
+            ..
+        } => println!("path chosen {local} -> {remote}"),
+        Event::Media {
+            event: MediaEvent::Failed(error),
+            ..
+        } => println!("media failed: {error}"),
         // A second call while one is already bridged: this binary only
         // ever drives one `Bridge` at a time (its own doc comment says so),
         // so it declines rather than leaving the caller ringing forever.

@@ -169,10 +169,11 @@ required-features = ["headless"]
 # `examples/headless-socket-agent.rs` names `sipral-headless` and this
 # crate's own `HeadlessSession`, both behind `headless`; without this,
 # `cargo build --examples` fails on every build that left the feature out,
-# `cargo test --workspace` among them.
+# `cargo test --workspace` among them. It names `IcePolicy::Lite` too, for
+# `--ice-lite`, which exists only with `ice` beside `headless`.
 [[example]]
 name = "headless-socket-agent"
-required-features = ["headless"]
+required-features = ["headless", "ice"]
 
 [lints]
 workspace = true
