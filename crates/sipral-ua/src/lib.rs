@@ -40,6 +40,7 @@
 )]
 
 mod account;
+mod admission;
 mod agent;
 mod announce;
 #[cfg(test)]
@@ -69,6 +70,8 @@ mod reliable;
 mod renegotiate;
 #[cfg(test)]
 mod replay_tests;
+#[cfg(test)]
+mod rfc4475_tests;
 #[cfg(feature = "reference-loop")]
 mod runtime;
 mod screening;

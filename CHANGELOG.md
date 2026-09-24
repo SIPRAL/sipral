@@ -659,6 +659,33 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   an answer that differs is `MappingEvent::Moved` (`SIPRAL_NAT_MAPPING_MOVED`
   with `signalling` zero), and `sipral_stack_poll_stun` never holds more than
   one request per socket for an application that leaves it alone.
+- **A request from a peer that predates RFC 3261 is matched rather than
+  dropped, or confused with the next one.** A request whose `From` carried
+  no tag -- legal in RFC 2543, and one RFC 3261 §12.1.1 says a UAS "MUST be
+  prepared to receive" -- could not be keyed to a transaction and was
+  dropped without any answer, so RFC 4475's `inv2543` was never heard. It is
+  now matched as a tag of null, and so is the dialog it opens. A `Via`
+  branch that is the magic cookie and nothing else (RFC 4475 §3.2.1) was
+  taken as a unique identifier, which made every such request from one
+  sender the same transaction and answered the second from the first; it
+  now takes the RFC 2543 rule instead. An INVITE that names no `Contact`
+  (RFC 3261 §8.1.1.8) is answered `400 Missing Contact` rather than handed up,
+  rung and answered into a dialog that could never be reached.
+- **A user agent answers what RFC 3261 §8.2 says a UAS answers, before the
+  application is asked.** A REGISTER was handed to the application, and
+  through the C ABI nothing ever answered it until the endpoint's own 408 at
+  32 seconds; it is now answered 405 with `Allow`. A Request-URI scheme other
+  than `sip`, `sips` or `tel` was answered like any other (an OPTIONS got a
+  200); it is now 416. An INVITE whose body is not `application/sdp` (and not
+  marked `handling=optional`), or is content-coded, rang like any other; it
+  is now 415 with `Accept` or `Accept-Encoding`. An INVITE whose `Accept`
+  rules out `application/sdp` is now 406, since its answer would have to
+  carry one. Every message of RFC 4475 §3.2 to §3.4 is now fed to a user agent
+  in the test suite and held to what the RFC says goes back on the wire.
+- **An answered call that was addressed to no account names a `Contact`.**
+  The 180 and the 200 for an INVITE that matched no account carried an
+  empty `Contact` field, which is not a SIP message at all; they now name the
+  address and transport the INVITE arrived on.
 - **A resume asked for while the hold was still on its way is no longer
   accepted and lost.** `hold` and `resume` compared the request against the
   hold state last agreed, which a hold whose re-INVITE had not been answered

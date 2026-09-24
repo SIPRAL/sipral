@@ -46,7 +46,7 @@
 //!   its own, not a UAC that respells itself mid-dialog.
 
 use super::super::msg::HostRef;
-use super::super::msg::{HeaderError, HeaderName, Method, RawMessage, ViaRef};
+use super::super::msg::{HeaderError, HeaderName, MAGIC_COOKIE, Method, RawMessage, ViaRef};
 
 /// The key a client transaction is found by.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -99,7 +99,11 @@ pub(crate) enum ServerKey {
     /// The peer predates RFC 3261 and its branch says nothing.
     Legacy {
         request_uri: Box<[u8]>,
-        from_tag: Box<[u8]>,
+        /// `None` for a peer that sent none: RFC 2543 did not require one,
+        /// and §12.1.1 has a UAS "prepared to receive a request without a
+        /// tag in the From field, in which case the tag is considered to
+        /// have a value of null".
+        from_tag: Option<Box<[u8]>>,
         call_id: Box<[u8]>,
         cseq: u32,
         method: Box<[u8]>,
@@ -240,7 +244,15 @@ impl ServerKey {
         let via = request.top_via()?;
         let method: Box<[u8]> = method.as_str().as_bytes().into();
 
-        if via.has_magic_cookie() {
+        // the cookie promises a branch "unique across space and time"
+        // (§8.1.1.7), and the cookie alone keeps no such promise: every
+        // request its sender makes the same way would share it. RFC 4475
+        // §3.2.1 offers "the RFC 2543-style transaction identifier" as the
+        // alternative to refusing one, and that is the rule below
+        let identified = via
+            .branch()
+            .is_some_and(|branch| branch.len() > MAGIC_COOKIE.len());
+        if via.has_magic_cookie() && identified {
             return Ok(Self::Rfc3261 {
                 branch: branch_of(&via)?,
                 sent_by: sent_by_of(&via),
@@ -263,11 +275,7 @@ impl ServerKey {
                 .request_uri_bytes()
                 .ok_or(HeaderError::Malformed("not a request"))?
                 .into(),
-            from_tag: from
-                .tag()
-                .ok_or(HeaderError::Malformed("no From tag to match on"))?
-                .into_owned()
-                .into(),
+            from_tag: from.tag().map(|tag| tag.into_owned().into()),
             call_id: request.call_id()?.into(),
             // "CSeq number (not the method)", so that an ACK matches the
             // INVITE it acknowledges
@@ -733,5 +741,72 @@ Content-Length: 0\r\n\
         assert!(with(bare, ClientKey::for_request).is_err());
         // but the old rule does not need one
         assert!(with(bare, ServerKey::for_request).is_ok());
+    }
+
+    #[test]
+    fn a_request_with_no_from_tag_is_keyed_the_old_way_rather_than_dropped() {
+        // RFC 4475 §3.4.1 (inv2543): no branch and no From tag, both legal in
+        // RFC 2543, and §12.1.1 has a UAS "prepared to receive a request
+        // without a tag in the From field"
+        let old = b"INVITE sip:UserB@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP iftgw.example.com\r\n\
+From: <sip:+13035551111@ift.client.example.net;user=phone>\r\n\
+To: sip:+16505552222@ss1.example.net;user=phone\r\n\
+Call-ID: inv2543.1717@ift.client.example.com\r\n\
+CSeq: 56 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let key = with(old, ServerKey::for_request).expect("the old rule keys it");
+        // and the ACK for its final response, which carries none either, finds it
+        let ack = b"ACK sip:UserB@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP iftgw.example.com\r\n\
+From: <sip:+13035551111@ift.client.example.net;user=phone>\r\n\
+To: sip:+16505552222@ss1.example.net;user=phone;tag=b1\r\n\
+Call-ID: inv2543.1717@ift.client.example.com\r\n\
+CSeq: 56 ACK\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        assert_eq!(with(ack, ServerKey::for_request).expect("a key"), key);
+        // while a request that did carry a tag is a different transaction
+        let tagged = b"INVITE sip:UserB@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP iftgw.example.com\r\n\
+From: <sip:+13035551111@ift.client.example.net;user=phone>;tag=x\r\n\
+To: sip:+16505552222@ss1.example.net;user=phone\r\n\
+Call-ID: inv2543.1717@ift.client.example.com\r\n\
+CSeq: 56 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        assert_ne!(with(tagged, ServerKey::for_request).expect("a key"), key);
+    }
+
+    #[test]
+    fn a_branch_that_is_only_the_magic_cookie_identifies_nothing() {
+        // RFC 4475 §3.2.1 (badbranch): the cookie with no identifier behind
+        // it. Keyed on the branch, every such request from one sent-by would
+        // be one transaction, and the second would be answered from the
+        // first; the RFC's alternative to a 400 is the RFC 2543 rule
+        let request = |call_id: &str, seq: u32| {
+            format!(
+                "OPTIONS sip:user@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK\r\n\
+Max-Forwards: 3\r\n\
+From: sip:caller@example.org;tag=33242\r\n\
+To: sip:user@example.com\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: {seq} OPTIONS\r\n\
+Content-Length: 0\r\n\
+\r\n"
+            )
+            .into_bytes()
+        };
+        let first = with(&request("badbranch.1", 8), ServerKey::for_request).expect("a key");
+        let second = with(&request("badbranch.2", 9), ServerKey::for_request).expect("a key");
+        assert!(matches!(first, ServerKey::Legacy { .. }), "{first:?}");
+        assert_ne!(first, second, "two requests were made one transaction");
+        // a retransmission is still the same one
+        assert_eq!(
+            with(&request("badbranch.1", 8), ServerKey::for_request).expect("a key"),
+            first
+        );
     }
 }

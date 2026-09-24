@@ -9,7 +9,31 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use sipral_core::endpoint::TransportProtocol;
 use sipral_core::msg::{Uri, UriScheme};
+
+/// `<sip:address>`, with the `transport` parameter a stream or a WebSocket
+/// needs, for a call that arrived for no account and so has no configured
+/// `Contact` of its own.
+///
+/// §12.1.1 has a UAS put a `Contact` on every response that establishes a
+/// dialog, and §8.1.1.8 gives it one shape: a SIP URI at which this end can
+/// be reached. The address the INVITE arrived on is the one such address this
+/// end is sure of. A `transport` parameter says how, since a far end that
+/// reached this one over TCP or TLS would otherwise send its next request
+/// over UDP (§19.1.2 makes UDP the default for `sip:`).
+pub(crate) fn contact_for_arrival(address: SocketAddr, protocol: TransportProtocol) -> Box<[u8]> {
+    // the `transport-param` tokens are the `Via` ones in lower case: `tcp`
+    // and `tls` in §25.1, `ws` and `wss` in RFC 7118 §5.2
+    let parameter = if protocol == TransportProtocol::Udp {
+        String::new()
+    } else {
+        format!(";transport={}", protocol.as_str().to_ascii_lowercase())
+    };
+    format!("<sip:{address}{parameter}>")
+        .into_bytes()
+        .into_boxed_slice()
+}
 
 /// `contact` with its host and port replaced by `address`, or `None` for a
 /// URI that is not `sip:` or `sips:`.
@@ -88,9 +112,10 @@ fn hostport_span(text: &str) -> Option<(usize, usize)> {
 mod tests {
     use std::net::SocketAddr;
 
+    use sipral_core::endpoint::TransportProtocol;
     use sipral_core::msg::Uri;
 
-    use super::{contact_at, contact_names};
+    use super::{contact_at, contact_for_arrival, contact_names};
 
     fn uri(text: &str) -> Uri {
         Uri::parse_str(text).expect("a URI")
@@ -120,6 +145,45 @@ mod tests {
         )
         .expect("sips");
         assert_eq!(moved.as_str(), "sips:bob@[2001:db8::9]:6000");
+    }
+
+    #[test]
+    fn a_contact_for_an_arrival_names_the_address_and_how_it_was_reached() {
+        let cases = [
+            (
+                "192.0.2.1:5060",
+                TransportProtocol::Udp,
+                "<sip:192.0.2.1:5060>",
+            ),
+            (
+                "192.0.2.1:5060",
+                TransportProtocol::Tcp,
+                "<sip:192.0.2.1:5060;transport=tcp>",
+            ),
+            (
+                "[2001:db8::1]:5061",
+                TransportProtocol::Tls,
+                "<sip:[2001:db8::1]:5061;transport=tls>",
+            ),
+            (
+                "192.0.2.1:8443",
+                TransportProtocol::Wss,
+                "<sip:192.0.2.1:8443;transport=wss>",
+            ),
+        ];
+        for (address, protocol, expected) in cases {
+            let written = contact_for_arrival(at(address), protocol);
+            assert_eq!(
+                String::from_utf8_lossy(&written),
+                expected,
+                "{address} over {protocol:?}"
+            );
+            // and it reads back as the URI it says it is
+            let inner = written
+                .get(1..written.len() - 1)
+                .expect("the brackets are there");
+            assert!(Uri::parse(inner).is_ok(), "{expected}");
+        }
     }
 
     #[test]

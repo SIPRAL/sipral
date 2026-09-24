@@ -174,6 +174,18 @@ from their group's — `insuf`, `multi01` and `mcl01` sit in the application
 section but their RFC text asks for a 400 outright — with the reason written
 beside them in the manifest.
 
+The semantic cases, and those three, are also fed whole to a user agent in
+`crates/sipral-ua/src/rfc4475_tests.rs`, over the transport each one's `Via`
+names, and what goes back on the wire is held to the RFC's paragraph for it:
+416 for the two Request-URI schemes, 405 for the five REGISTERs (this stack is
+not a registrar), 420 for `bext01`, 415 for `invut`, 406 for `sdp01`, 400 for
+`multi01` and for `inv2543` (it names no `Contact`), 200 for `zeromf` and
+`badbranch`, and nothing at all for `bcast`. Two fall short of the RFC and the
+tests say so rather than hide it: `insuf` is dropped rather than answered 400,
+because a response copies the three fields it lacks, and `mcl01` is refused to
+the caller of `receive` rather than answered, because its framing is known to
+be wrong before any field of it is read.
+
 `scripts/check.sh` verifies every file's hash, so the corpus cannot drift, and
 `crates/sipral-core/tests/rfc4475.rs` reads the manifest rather than repeating
 it. The hash check runs near the top of the gate, before anything is built.

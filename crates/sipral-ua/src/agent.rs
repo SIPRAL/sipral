@@ -795,6 +795,10 @@ impl UserAgent {
     /// something the application has already seen.
     fn on_core_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         let event = self.on_screening_event(event, now)?;
+        // §8.2.1 and §8.2.2.1 come before §8.2.2.3 in the order §8.2 asks
+        // them: a method this agent does not implement, or a Request-URI it
+        // can never be, is refused before its Require is read
+        let event = self.on_admission_event(event, now)?;
         // Screening first, so a scanner that writes a Require header still
         // meets the rate limiter. Then this, before every handler that acts on
         // a request -- OPTIONS included, which used to answer 200 to anything

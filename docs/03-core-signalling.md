@@ -262,7 +262,16 @@ falls back to §17.2.3's field-by-field match, one rule for the INVITE that
 created the transaction, one for the ACK that follows it, one for every
 other method; `crates/sipral-core/src/transaction/matching.rs` documents
 which fields each of the three compares and the two simplifications made
-deliberately rather than silently. §8.2.2.2 is the other side of the same
+deliberately rather than silently. A branch that is the cookie and nothing
+after it (RFC 4475 §3.2.1) takes the same fallback, since it identifies
+nothing and every request its sender writes the same way would otherwise be
+one transaction. A `From` with no tag is matched as a tag of null rather than
+refused (§12.1.1: a UAS "MUST be prepared to receive a request without a tag
+in the From field"), and a dialog opened by such a request has a remote tag
+of null. What such a peer usually also leaves out cannot be made up for: an
+INVITE that names no `Contact` gives a dialog no remote target (§8.1.1.8,
+§12.1.1), so it is answered `400 Missing Contact` on a transaction of its
+own rather than rung and answered into a dialog nobody could reach. §8.2.2.2 is the other side of the same
 fallback's absence: a request with no `To` tag whose `From` tag, `Call-ID`
 and `CSeq` already belong to a transaction it does not itself match by
 §17.2.3 has reached this end by a second path, almost always a fork, and is

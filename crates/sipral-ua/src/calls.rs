@@ -1104,6 +1104,49 @@ impl UserAgent {
         self.hang_up_by_itself(call, now);
     }
 
+    /// §8.2.2.3 and then §8.2.3, for an INVITE that would open a call: a
+    /// `Require` this agent cannot honour is refused 420 before anything else
+    /// looks at the request, then a body it cannot read or an `Accept` that
+    /// rules out the session description every answer carries. `true` when
+    /// the INVITE was refused.
+    fn refuse_unreadable(
+        &mut self,
+        transaction: TransactionId<InviteServer>,
+        request: &RawMessage<'_>,
+        account_wants_gruu: bool,
+        now: Instant,
+    ) -> bool {
+        let missing = crate::reliable::unsupported(request, account_wants_gruu);
+        if !missing.is_empty() {
+            self.refuse_extension(transaction, &missing, now);
+            return true;
+        }
+        let Some(refusal) = crate::admission::content_refusal(request) else {
+            return false;
+        };
+        self.endpoint
+            .respond_invite(transaction, &refusal, now)
+            .ok();
+        true
+    }
+
+    /// The `Contact` a call that arrived for `account` answers with.
+    ///
+    /// An INVITE addressed to no account still arrives (the event says why),
+    /// and answering it still needs a `Contact`: the address it arrived on is
+    /// the one this end is sure of.
+    fn answering_contact(&self, account: Option<AccountId>) -> Box<[u8]> {
+        account
+            .and_then(|id| self.accounts.get(&id))
+            .map(Account::contact_value)
+            .or_else(|| {
+                self.guard.arrival().map(|(address, protocol)| {
+                    crate::contact::contact_for_arrival(address, protocol)
+                })
+            })
+            .unwrap_or_else(|| Box::from(&b""[..]))
+    }
+
     /// A request the far end sent inside a call, or one that starts one.
     fn on_incoming(&mut self, event: Event, now: Instant) -> Option<Event> {
         match event {
@@ -1121,11 +1164,7 @@ impl UserAgent {
                 // RFC 4028 §9: an interval below the floor is refused with the
                 // floor, and the far end asks again. There is no policy in it,
                 // so the application is not troubled with it
-                // §8.2.2.3: a Require this agent cannot honour is refused
-                // before anything else looks at the request
-                let missing = crate::reliable::unsupported(&request.as_raw(), account_wants_gruu);
-                if !missing.is_empty() {
-                    self.refuse_extension(transaction, &missing, now);
+                if self.refuse_unreadable(transaction, &request.as_raw(), account_wants_gruu, now) {
                     return None;
                 }
                 // RFC 3891 §3: a Replaces names one of this end's own calls,
@@ -1161,9 +1200,7 @@ impl UserAgent {
                     .ok()
                     .and_then(|to| Uri::parse(to.uri_bytes()).ok())
                     .map_or_else(|| Box::from(&b""[..]), |uri| bracketed(&uri));
-                let plain = account
-                    .and_then(|id| self.accounts.get(&id))
-                    .map_or_else(|| Box::from(&b""[..]), Account::contact_value);
+                let plain = self.answering_contact(account);
                 let source = self.guard.source();
                 let call = self.keep(Call::incoming(account, transaction, from, plain));
                 if let Some(held) = self.calls.get_mut(&call) {

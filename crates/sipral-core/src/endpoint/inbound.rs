@@ -30,8 +30,8 @@ use super::via;
 use crate::diag::{Decision, Direction, Reason, WireEvent};
 use crate::dialog::{CallId, Dialog, DialogKey, DialogState, Fork, Incoming};
 use crate::msg::{
-    Framed, HeaderName, Invalid, Method, OwnedMessage, ParseError, ParseScratch, RawMessage,
-    ResponseBuilder, StatusCode, field_value_len, parse_with_limits, salvage_request,
+    Contacts, Framed, HeaderName, Invalid, Method, OwnedMessage, ParseError, ParseScratch,
+    RawMessage, ResponseBuilder, StatusCode, field_value_len, parse_with_limits, salvage_request,
 };
 use crate::transaction::{
     AnyTransactionId, Client, DialogId, Effects, InviteClient, NonInviteClient, NonInviteServer,
@@ -952,6 +952,19 @@ impl Endpoint {
             self.refuse_merged_invite(request, flow, now);
             return;
         }
+        // §8.1.1.8: "The Contact header field MUST be present and contain
+        // exactly one SIP or SIPS URI in any request that can result in the
+        // establishment of a dialog", and §12.1.1 takes the dialog's remote
+        // target from nowhere else. An INVITE without one could be rung and
+        // answered, and its 2xx would open no dialog for the ACK or a BYE to
+        // find: the caller would hear a call connect that this end never
+        // held. RFC 2543 did not require the field (RFC 4475 §3.4.1's
+        // inv2543 has none), and a refusal that says so is the answer that
+        // leaves both ends knowing where they stand
+        if existing.is_none() && !names_a_contact(request) {
+            self.refuse_uncontactable_invite(request, flow, now);
+            return;
+        }
 
         let timers = self.config.timers;
         let Ok((id, effects)) = self
@@ -1007,6 +1020,42 @@ impl Endpoint {
         self.remember_tag(AnyTransactionId::InviteServer(id), tag.clone());
         let owned = request.to_owned();
         let Ok(message) = assemble_response(&owned, StatusCode::LOOP_DETECTED, Some(&tag)) else {
+            return;
+        };
+        let Some(entry) = self.transactions.invite_server_mut(id) else {
+            return;
+        };
+        let effects = entry.machine.respond(message, now);
+        self.apply(effects, flow, AnyTransactionId::InviteServer(id));
+    }
+
+    /// §8.1.1.8: answer an INVITE that names no `Contact` with a 400 that
+    /// says so, on a transaction of its own so that its retransmissions are
+    /// answered from it rather than refused afresh.
+    fn refuse_uncontactable_invite(&mut self, request: &RawMessage<'_>, flow: Flow, now: Instant) {
+        let timers = self.config.timers;
+        let Ok((id, effects)) = self
+            .transactions
+            .start_invite_server(request, flow, timers, now)
+        else {
+            return;
+        };
+        self.apply(effects, flow, AnyTransactionId::InviteServer(id));
+        let tag = self.mint_tag();
+        self.remember_tag(AnyTransactionId::InviteServer(id), tag.clone());
+        let decision = Decision::of(Reason::RequestRefusedAsMalformed)
+            .at_address(flow.destination)
+            .caused_by(WireEvent::request(
+                Method::Invite,
+                Direction::Inbound,
+                request.as_bytes().len(),
+            ));
+        self.note(None, decision);
+        let Ok(message) = ResponseBuilder::for_request(request, StatusCode::BAD_REQUEST)
+            .to_tag(&tag)
+            .reason(b"Missing Contact")
+            .build()
+        else {
             return;
         };
         let Some(entry) = self.transactions.invite_server_mut(id) else {
@@ -1997,4 +2046,14 @@ fn key_tag(request: &RawMessage<'_>) -> Box<[u8]> {
         .and_then(|to| to.tag())
         .map(|tag| Box::from(tag.as_ref()))
         .unwrap_or_default()
+}
+
+/// Whether a request names somewhere a dialog it opens could send to: a
+/// `Contact` with an address in it. `*` is REGISTER's alone (§10.2.2) and
+/// names nowhere.
+fn names_a_contact(request: &RawMessage<'_>) -> bool {
+    match request.contact() {
+        Ok(Contacts::Addrs(mut addrs)) => addrs.next().is_some_and(|addr| addr.is_ok()),
+        Ok(Contacts::Star) | Err(_) => false,
+    }
 }

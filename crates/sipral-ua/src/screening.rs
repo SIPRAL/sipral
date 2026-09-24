@@ -40,7 +40,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use sipral_core::endpoint::{Event, Input, OutgoingResponse, TransportId};
+use sipral_core::endpoint::{Event, Input, OutgoingResponse, TransportId, TransportProtocol};
 use sipral_core::msg::{HeaderName, OwnedMessage, StatusCode};
 
 use crate::agent::UserAgent;
@@ -552,6 +552,14 @@ pub(crate) struct Guard {
     /// transports the application opened, which is not something a stranger
     /// can grow.
     connected: HashMap<TransportId, SocketAddr>,
+    /// This end of the bytes being worked through, and what carried them.
+    /// Set beside `source`, and for the same kind of reader: an INVITE
+    /// addressed to no account still needs a `Contact` naming where this end
+    /// can be reached, and this is the one address that is true of it.
+    arrival: Option<(SocketAddr, TransportProtocol)>,
+    /// Each bound transport's own address and protocol, for the bytes that
+    /// arrive on a stream with neither on them. Bounded as `connected` is.
+    bound: HashMap<TransportId, (SocketAddr, TransportProtocol)>,
 }
 
 impl fmt::Debug for Guard {
@@ -572,6 +580,32 @@ impl fmt::Debug for Guard {
 impl Guard {
     /// Bytes have arrived, or a transport has come or gone.
     pub(crate) fn arrived(&mut self, input: &Input<'_>) {
+        self.arrival = match *input {
+            Input::Datagram {
+                transport, local, ..
+            } => {
+                let protocol = self
+                    .bound
+                    .get(&transport)
+                    .map_or(TransportProtocol::Udp, |&(_, protocol)| protocol);
+                Some((local, protocol))
+            }
+            Input::StreamData { transport, .. } => self.bound.get(&transport).copied(),
+            Input::TransportBound {
+                transport,
+                protocol,
+                local,
+                ..
+            } => {
+                self.bound.insert(transport, (local, protocol));
+                None
+            }
+            Input::StreamClosed { transport } | Input::TransportFailed { transport, .. } => {
+                self.bound.remove(&transport);
+                None
+            }
+            _ => None,
+        };
         self.source = match *input {
             Input::Datagram { remote, .. } => Some(remote),
             Input::StreamData { transport, .. } => self.connected.get(&transport).copied(),
@@ -598,6 +632,12 @@ impl Guard {
     /// naming its far end.
     pub(crate) const fn source(&self) -> Option<SocketAddr> {
         self.source
+    }
+
+    /// Where on this end the bytes being worked through arrived, and over
+    /// what. `None` between arrivals and for a transport never bound.
+    pub(crate) const fn arrival(&self) -> Option<(SocketAddr, TransportProtocol)> {
+        self.arrival
     }
 
     /// What the application says about an INVITE whose `Replaces` names one
