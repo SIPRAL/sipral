@@ -706,11 +706,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   different Call-IDs, tags and branches every time.
 - **`interop/harness-c/main.c` builds again on the interop lab's own host.**
   It read its run seed through `getentropy`, unconditionally including
-  `<sys/random.h>` for it — glibc 2.25 and newer only, older than the
-  lab host's own glibc — so the host-side `cc` build `scripts/lab.sh` falls
-  back to when no prebuilt C harness is given failed to compile. It reads
-  `/dev/urandom` directly now, the same fallback the file already had for a
-  `getentropy` call that failed at run time.
+  `<sys/random.h>` for it — glibc 2.25 and newer only, older than the lab
+  host's own glibc — so the host-side `cc` build that `scripts/lab.sh` falls
+  back to when no prebuilt C harness is given failed to compile there. It
+  reads `/dev/urandom` directly now, the same fallback the file already had
+  for a `getentropy` call that failed at run time.
 - **The interop harnesses no longer send the same Call-ID and tags on two
   runs of the same flow.** Both drivers seeded every flow's stack from a
   fixed pattern, one constant per flow, with no platform entropy — enough
