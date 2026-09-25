@@ -3936,20 +3936,32 @@ public enum Sipral {
     /// Hand over a datagram that arrived on a media socket
     /// sipral_stack_nat_map named, before a call has media on it.
     ///
-    /// That includes a call already placed, rung or answered on the socket
-    /// with its relay, until its media handle exists: the TURN server's
-    /// answers to what the call sent through sipral_stack_poll_stun come
-    /// in here, and a refresh left unanswered loses the relay.
+    /// That includes a call already placed, rung or answered on the socket,
+    /// until its media handle exists: everything arriving on the socket
+    /// still comes in here, and the call takes what is its own. The TURN
+    /// server's answers to what a call with a relay sent through
+    /// sipral_stack_poll_stun — a refresh left unanswered loses the
+    /// relay. The far end's first connectivity checks on a call using ICE,
+    /// which start with its answer and can arrive before the 200 is read:
+    /// one signed with the password the call's description gave out is kept,
+    /// up to sixteen for the socket, and answered by the call's agent when
+    /// its session opens (RFC 8445 §7.3). And once the session is open, in
+    /// the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
+    /// `sipral_call_media`, anything at all, which goes to the session as
+    /// through `sipral_media_receive`. From the media handle on, the socket's
+    /// datagrams go to `sipral_media_receive` instead.
     ///
     /// `to` is the socket it arrived on, as `local` was given there; `from`
     /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN
-    /// server's answer, which is then the stack's and nobody else's;
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else — early media from
-    /// a far end, a datagram from a stranger, an answer from any address but
-    /// the server's — which costs that one datagram and nothing more. Only
-    /// the server's own address is believed, and only an answer to a request
-    /// this stack sent: that is the whole defence against a forged answer
-    /// naming an address of the attacker's choosing as this end's own.
+    /// server's answer, which is then the stack's and nobody else's, or the
+    /// call's as above; `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else —
+    /// early media before the session opens, a datagram from a stranger, a
+    /// check nobody can authenticate, an answer from any address but the
+    /// server's, a datagram the session dropped — which costs that one
+    /// datagram and nothing more. Only the server's own address is believed,
+    /// and only an answer to a request this stack sent: that is the whole
+    /// defence against a forged answer naming an address of the attacker's
+    /// choosing as this end's own.
     ///
     /// Safety
     ///

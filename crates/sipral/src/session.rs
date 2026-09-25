@@ -779,6 +779,8 @@ impl MediaSession {
         if is_rtcp(datagram) {
             return self.receive_control(datagram, from, now);
         }
+        #[cfg(feature = "ice")]
+        self.follow_before_selection();
         let elapsed = self.elapsed(now);
         match self.rtp.receive(datagram, from, elapsed) {
             Received::Queued => {
@@ -788,6 +790,29 @@ impl MediaSession {
             Received::Dropped(Discard::NotKeyed) => Arrival::NotKeyed,
             Received::Dropped(why) => Arrival::Dropped(why),
         }
+    }
+
+    /// Let RTP's latch follow the far end until ICE has selected a pair.
+    ///
+    /// Before the selection the far end may send on any pair its own checks
+    /// have found valid, and moves to a better one as they find it (RFC 8445
+    /// §12.1), while this end receives on any of them (§12.2). The latch
+    /// closes on the first packet that arrives, so the far end's audio was
+    /// refused from its second pair on — through the caller's relay first,
+    /// say, and then straight from its own — until the selection opened the
+    /// latch again, which on a regular nomination is up to a second later,
+    /// `nomination_wait`. So until then a packet from another address that
+    /// passes everything else moves the latch rather than being refused
+    /// ([`RtpSession::set_following`]); from the selection on it holds,
+    /// armed as [`MediaSession::drain_ice`] leaves it, on the chosen path. A
+    /// call not using ICE keeps symmetric RTP's rule as it always was.
+    #[cfg(feature = "ice")]
+    fn follow_before_selection(&mut self) {
+        let unselected = self
+            .ice
+            .as_ref()
+            .is_some_and(|ice| ice.selected_pair().is_none());
+        self.rtp.set_following(unselected);
     }
 
     /// Let the agent have the datagram first, and give back what is left for
@@ -1798,6 +1823,13 @@ impl MediaSession {
             .as_mut()
             .map(|ice| ice.release(now))
             .unwrap_or_default()
+    }
+
+    /// Whether this session runs an ICE agent, which is what a connectivity
+    /// check handed to [`MediaSession::receive`] reaches.
+    #[cfg(feature = "ice")]
+    pub(crate) const fn runs_ice(&self) -> bool {
+        self.ice.is_some()
     }
 
     /// Carry what the call's descriptions now say about ICE onto the running

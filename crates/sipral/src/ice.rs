@@ -109,7 +109,7 @@ use sipral_nat::ice::{
     StreamId, TRANSMIT_CEILING, Transmit,
 };
 #[cfg(feature = "ice")]
-use sipral_nat::stun::TransactionId;
+use sipral_nat::stun::{Class, Integrity, Message, Method, TransactionId};
 
 #[cfg(feature = "ice")]
 use crate::error::MediaError;
@@ -470,6 +470,40 @@ impl LocalIce {
     /// The candidates to write into a description.
     pub(crate) fn candidates(&self) -> &[Candidate] {
         &self.candidates
+    }
+
+    /// Whether `data` is a connectivity check the far end sent this call: a
+    /// Binding request whose `USERNAME` is this call's fragment, a colon and
+    /// one of the far end's (RFC 8445 §7.2.2), signed with this call's
+    /// password (RFC 8445 §7.2.2, RFC 8489 §9.1).
+    ///
+    /// What lets a check be kept for the call before the agent that answers
+    /// it exists: nobody who has not read this call's description can make
+    /// one, so nobody else can fill what keeps them. The agent authenticates
+    /// it again when it gets it, with everything else it checks.
+    pub(crate) fn is_check_for(&self, data: &[u8]) -> bool {
+        let Ok(message) = Message::parse(data) else {
+            return false;
+        };
+        if message.class() != Class::Request || message.method() != Method::BINDING {
+            return false;
+        }
+        let ufrag = self.credentials.ufrag().as_bytes();
+        let names_this_call = message.username().is_some_and(|username| {
+            username
+                .strip_prefix(ufrag)
+                .and_then(|rest| rest.strip_prefix(b":"))
+                .is_some_and(|theirs| !theirs.is_empty())
+        });
+        if !names_this_call {
+            return false;
+        }
+        let key = self.credentials.pwd().as_bytes();
+        match message.verify_integrity_sha256(key) {
+            Integrity::Valid => true,
+            Integrity::Invalid => false,
+            Integrity::Absent => message.verify_integrity(key) == Integrity::Valid,
+        }
     }
 
     /// The agent this call runs, built from what was written down.

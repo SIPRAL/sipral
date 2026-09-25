@@ -5078,6 +5078,55 @@ fn two_stacks_check_each_other_and_the_tone_crosses_on_the_pair_they_chose() {
     );
 }
 
+/// One PCMU packet as the far end puts it on the wire: RFC 3550 §5.1's
+/// header, version 2, payload type 0, and twenty milliseconds of silence.
+#[cfg(feature = "ice")]
+fn far_end_packet(sequence: u16) -> Vec<u8> {
+    let mut packet = vec![0x80, 0x00];
+    packet.extend_from_slice(&sequence.to_be_bytes());
+    packet.extend_from_slice(&(u32::from(sequence) * 160).to_be_bytes());
+    packet.extend_from_slice(&0x5eed_0001_u32.to_be_bytes());
+    packet.extend_from_slice(&[0xff; 160]);
+    packet
+}
+
+/// Before either end has chosen a pair, the far end sends on whichever pair
+/// its own checks found valid first and moves to a better one as they find
+/// it (RFC 8445 §12.1): through this end's relay, say — where every packet
+/// arrives from the TURN server — and then straight from its own relayed
+/// address. This end receives on any pair (§12.2). RTP's latch closed on the
+/// first of the two used to refuse every packet from the second as foreign
+/// until the selection reopened it, up to `nomination_wait` later: the lab's
+/// relayed call through the C ABI lost a second of the callee's audio that
+/// way, every call.
+#[cfg(feature = "ice")]
+#[test]
+fn before_a_pair_is_chosen_the_far_end_is_heard_on_whichever_pair_it_moves_to() {
+    let (mut pair, call, _) = ice_call();
+    let now = pair.now;
+    let mut session = pair.caller.engine.session(call).expect("media");
+    assert!(session.ice_path().is_none(), "no pair is chosen yet");
+    let through_the_relay: SocketAddr = "198.51.100.9:3478".parse().expect("an address");
+    let straight: SocketAddr = "198.51.100.9:49207".parse().expect("an address");
+
+    for sequence in 0..3 {
+        let mut packet = far_end_packet(sequence);
+        let _ = session.receive(&mut packet, through_the_relay, now);
+    }
+    let heard: Vec<Arrival> = (3..10)
+        .map(|sequence| {
+            let mut packet = far_end_packet(sequence);
+            session.receive(&mut packet, straight, now)
+        })
+        .collect();
+    assert!(
+        heard
+            .iter()
+            .all(|arrival| matches!(arrival, Arrival::Queued)),
+        "the far end's audio on the pair it moved to: {heard:?}"
+    );
+}
+
 #[cfg(feature = "ice")]
 #[test]
 fn a_peer_that_does_not_do_ice_still_gets_its_audio() {

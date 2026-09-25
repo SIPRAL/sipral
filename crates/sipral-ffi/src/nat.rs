@@ -870,18 +870,20 @@ impl Nat {
         if Self::intercept(state, local, from, data, now) {
             return Ok(());
         }
-        // the answers to what a call waiting on the socket sent through
-        // `sipral_stack_poll_stun`: its refresh above all, which keeps the
-        // allocation for a phone that rings longer than its lifetime
-        #[cfg(feature = "ice")]
-        if state.engine.receive_waiting(local, from, data, now) {
+        // then the call described on the socket, which the application has
+        // no media handle for yet: the answers to what its relay sent through
+        // `sipral_stack_poll_stun`, its refresh above all, which keeps the
+        // allocation for a phone that rings longer than its lifetime; and the
+        // far end's first connectivity checks, which start with its answer
+        // and would otherwise be lost to the call's agent
+        if state.engine.receive_early(local, from, data, now) {
             return Ok(());
         }
         Err(fail(
             SipralStatus::InvalidArgument,
             format!(
                 "not an answer from the STUN or TURN server this stack asks, for a socket it \
-                 asked about or a call waiting on it: from {from}, on {local}"
+                 asked about, nor anything the call on that socket takes: from {from}, on {local}"
             ),
         ))
     }
@@ -1363,20 +1365,32 @@ entry! {
     /// Hand over a datagram that arrived on a media socket
     /// [`sipral_stack_nat_map`] named, before a call has media on it.
     ///
-    /// That includes a call already placed, rung or answered on the socket
-    /// with its relay, until its media handle exists: the TURN server's
-    /// answers to what the call sent through [`sipral_stack_poll_stun`] come
-    /// in here, and a refresh left unanswered loses the relay.
+    /// That includes a call already placed, rung or answered on the socket,
+    /// until its media handle exists: everything arriving on the socket
+    /// still comes in here, and the call takes what is its own. The TURN
+    /// server's answers to what a call with a relay sent through
+    /// [`sipral_stack_poll_stun`] — a refresh left unanswered loses the
+    /// relay. The far end's first connectivity checks on a call using ICE,
+    /// which start with its answer and can arrive before the 200 is read:
+    /// one signed with the password the call's description gave out is kept,
+    /// up to sixteen for the socket, and answered by the call's agent when
+    /// its session opens (RFC 8445 §7.3). And once the session is open, in
+    /// the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
+    /// `sipral_call_media`, anything at all, which goes to the session as
+    /// through `sipral_media_receive`. From the media handle on, the socket's
+    /// datagrams go to `sipral_media_receive` instead.
     ///
     /// `to` is the socket it arrived on, as `local` was given there; `from`
     /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN
-    /// server's answer, which is then the stack's and nobody else's;
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else — early media from
-    /// a far end, a datagram from a stranger, an answer from any address but
-    /// the server's — which costs that one datagram and nothing more. Only
-    /// the server's own address is believed, and only an answer to a request
-    /// this stack sent: that is the whole defence against a forged answer
-    /// naming an address of the attacker's choosing as this end's own.
+    /// server's answer, which is then the stack's and nobody else's, or the
+    /// call's as above; `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else —
+    /// early media before the session opens, a datagram from a stranger, a
+    /// check nobody can authenticate, an answer from any address but the
+    /// server's, a datagram the session dropped — which costs that one
+    /// datagram and nothing more. Only the server's own address is believed,
+    /// and only an answer to a request this stack sent: that is the whole
+    /// defence against a forged answer naming an address of the attacker's
+    /// choosing as this end's own.
     ///
     /// # Safety
     ///
@@ -2912,6 +2926,260 @@ mod tests {
         assert!(
             (530_000..=540_100).contains(&refreshed_at[0]),
             "the first refresh left at {refreshed_at:?} ms"
+        );
+    }
+
+    /// The far end's ICE credentials, in the answer below and in every check
+    /// it sends.
+    #[cfg(feature = "ice")]
+    const PEER_UFRAG: &str = "farend";
+    #[cfg(feature = "ice")]
+    const PEER_PWD: &str = "farendpasswordfarendpassword";
+    /// The far end's one candidate, which is also where its checks come from.
+    #[cfg(feature = "ice")]
+    const PEER_CHECKS_FROM: &str = crate::call::tests::PEER_MEDIA;
+
+    /// An answer that agrees to ICE: the far end's credentials, `a=rtcp-mux`
+    /// back, and one host candidate that is also its default destination.
+    #[cfg(feature = "ice")]
+    fn ice_answer() -> Vec<u8> {
+        format!(
+            "v=0\r\n\
+             o=bob 1 1 IN IP4 203.0.113.5\r\n\
+             s=-\r\n\
+             c=IN IP4 203.0.113.5\r\n\
+             t=0 0\r\n\
+             m=audio 41000 RTP/AVP 0\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtcp-mux\r\n\
+             a=ice-ufrag:{PEER_UFRAG}\r\n\
+             a=ice-pwd:{PEER_PWD}\r\n\
+             a=candidate:1 1 UDP 2130706431 203.0.113.5 41000 typ host\r\n\
+             a=sendrecv\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// The value of one `a=` attribute in a message's description.
+    #[cfg(feature = "ice")]
+    fn attribute(message: &str, name: &str) -> String {
+        message
+            .split("\r\n")
+            .find_map(|line| line.strip_prefix(&format!("a={name}:")))
+            .unwrap_or_else(|| panic!("no a={name} in {message}"))
+            .to_owned()
+    }
+
+    /// The far end's connectivity check towards this end's socket (RFC 8445
+    /// §7.2.2): `USERNAME` is this end's fragment, a colon and the far end's,
+    /// and it is signed with the password this end's offer gave out.
+    #[cfg(feature = "ice")]
+    fn check(ufrag: &str, pwd: &str, id: [u8; 12]) -> Vec<u8> {
+        use sipral_nat::stun::{AttributeType, Class, MessageBuilder, Method, TransactionId};
+        let mut builder =
+            MessageBuilder::new(Class::Request, Method::BINDING, TransactionId::new(id));
+        builder
+            .add(
+                AttributeType::USERNAME,
+                format!("{ufrag}:{PEER_UFRAG}").as_bytes(),
+            )
+            .expect("room for USERNAME");
+        builder
+            .add_u32(AttributeType::PRIORITY, 0x6e00_01ff)
+            .expect("room for PRIORITY");
+        builder
+            .add_u64(AttributeType::ICE_CONTROLLED, 7)
+            .expect("room for ICE-CONTROLLED");
+        builder
+            .add_message_integrity(pwd.as_bytes())
+            .expect("room for MESSAGE-INTEGRITY");
+        builder.add_fingerprint().expect("room for FINGERPRINT");
+        builder.finish()
+    }
+
+    /// A stack that asks, a mapping for the media socket, and a call placed
+    /// on it that offers ICE: the stack, the account, the call, the INVITE,
+    /// and this end's ICE fragment and password as the INVITE gave them out.
+    #[cfg(feature = "ice")]
+    fn ice_call(observed: &mut Observed) -> (SipralHandle, SipralHandle, Vec<u8>, String, String) {
+        let stack = asking_stack(observed);
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let out = stun_out(stack);
+        assert_eq!(
+            on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 20),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 20);
+        let _ = mapped();
+        let mut offering = managed_config();
+        offering.ice = crate::media::SipralIce::Offered as u32;
+        let (status, call) = place(stack, account, &offering, 30);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = signalling_out(stack)
+            .into_iter()
+            .find(|(message, _)| message.starts_with(b"INVITE "))
+            .expect("the INVITE")
+            .0;
+        let text = String::from_utf8_lossy(&invite).into_owned();
+        let ufrag = attribute(&text, "ice-ufrag");
+        let pwd = attribute(&text, "ice-pwd");
+        (stack, call, invite, ufrag, pwd)
+    }
+
+    /// Everything `sipral_media_poll_transmit` hands out, with where it goes.
+    #[cfg(feature = "ice")]
+    fn media_out(media: SipralHandle, now_ms: u64) -> Vec<(Vec<u8>, String)> {
+        let mut data = vec![0_u8; crate::media::SIPRAL_MEDIA_PACKET_BYTES];
+        let mut destination: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
+        let mut all = Vec::new();
+        loop {
+            let mut packet = crate::media::SipralMediaPacket {
+                size: size_of::<crate::media::SipralMediaPacket>(),
+                data: data.as_mut_ptr(),
+                capacity: data.len(),
+                len: 0,
+                destination: destination.as_mut_ptr(),
+                destination_capacity: destination.len(),
+                destination_len: 0,
+            };
+            let status =
+                unsafe { crate::media::sipral_media_poll_transmit(media, now_ms, &raw mut packet) };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if packet.len == 0 {
+                return all;
+            }
+            let to = unsafe { CStr::from_ptr(destination.as_ptr()) }
+                .to_string_lossy()
+                .into_owned();
+            all.push((data.get(..packet.len).unwrap_or_default().to_vec(), to));
+        }
+    }
+
+    /// Everything the call's media handle hands out over the third of a
+    /// second from `from_ms`, the stack polled every twenty milliseconds the
+    /// way a loop polls it: a triggered check waits for its turn on the
+    /// pacing timer.
+    #[cfg(feature = "ice")]
+    fn media_over(
+        stack: SipralHandle,
+        media: SipralHandle,
+        from_ms: u64,
+    ) -> Vec<(Vec<u8>, String)> {
+        let mut sent = media_out(media, from_ms);
+        for at in (from_ms..from_ms + 340).step_by(20) {
+            let _ = poll(stack, at);
+            sent.extend(media_out(media, at));
+        }
+        sent
+    }
+
+    /// The media handle of a call whose session has opened.
+    #[cfg(feature = "ice")]
+    fn media_of(stack: SipralHandle, call: SipralHandle) -> SipralHandle {
+        let mut media = SIPRAL_HANDLE_NONE;
+        let status = unsafe { crate::media::sipral_call_media(stack, call, &raw mut media) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        media
+    }
+
+    /// Whether `sent` holds this end's answer to the check `id`, a Binding
+    /// success response (RFC 8489 §6.3.1), sent back where the check came
+    /// from; and whether it holds a check of this end's own towards there,
+    /// the triggered check RFC 8445 §7.3.1.4 runs on the same pair.
+    #[cfg(feature = "ice")]
+    fn answered_and_triggered(sent: &[(Vec<u8>, String)], id: [u8; 12]) -> (bool, bool) {
+        let answered = sent.iter().any(|(message, to)| {
+            to == PEER_CHECKS_FROM
+                && message.get(..2) == Some(&[0x01, 0x01][..])
+                && message.get(8..20) == Some(&id[..])
+        });
+        let triggered = sent.iter().any(|(message, to)| {
+            to == PEER_CHECKS_FROM && message.get(..2) == Some(&[0x00, 0x01][..])
+        });
+        (answered, triggered)
+    }
+
+    /// The far end starts checking the moment it sends its answer, and its
+    /// first checks can reach this end's socket before the 200 does. The
+    /// application has no media handle to give them to, and hands them in
+    /// here, as it hands in everything that arrives on the socket until then:
+    /// the stack keeps each one it can authenticate for the call described
+    /// on that socket, and the call's agent answers it and checks back once
+    /// its session opens (RFC 8445 §7.3), rather than the pair waiting for
+    /// the far end's next retransmission while early audio is refused.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_check_that_arrives_before_the_answer_is_answered_once_the_call_has_media() {
+        let mut observed = Observed::default();
+        let (stack, call, invite, ufrag, pwd) = ice_call(&mut observed);
+
+        // signed with any other password, it is nobody's: refused, and kept
+        // for no call
+        let forged = check(&ufrag, "notthepasswordthisendgaveout", [9; 12]);
+        assert_eq!(
+            on_media_socket(stack, &forged, PEER_CHECKS_FROM, 40),
+            SipralStatus::InvalidArgument
+        );
+        let early = [7_u8; 12];
+        assert_eq!(
+            on_media_socket(stack, &check(&ufrag, &pwd, early), PEER_CHECKS_FROM, 40),
+            SipralStatus::Ok,
+            "a check for the call on this socket: {}",
+            last_error_text()
+        );
+
+        crate::call::tests::deliver(
+            stack,
+            &crate::call::tests::accepted(&invite, &ice_answer(), true),
+            50,
+        );
+        let _ = poll(stack, 50);
+        let media = media_of(stack, call);
+        let sent = media_over(stack, media, 50);
+        assert_eq!(
+            answered_and_triggered(&sent, early),
+            (true, true),
+            "the check kept before the answer reached the call's agent: {sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|(message, _)| message.get(8..20) == Some(&[9; 12][..])),
+            "the forged one was kept after all: {sent:?}"
+        );
+    }
+
+    /// Between the session opening and the application taking its media
+    /// handle — the poll that raised `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
+    /// the `sipral_call_media` after it — what arrives on the socket still
+    /// comes in here, and the call's session takes it.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_check_that_arrives_before_the_media_handle_is_answered_through_it() {
+        let mut observed = Observed::default();
+        let (stack, call, invite, ufrag, pwd) = ice_call(&mut observed);
+        crate::call::tests::deliver(
+            stack,
+            &crate::call::tests::accepted(&invite, &ice_answer(), true),
+            50,
+        );
+        let _ = poll(stack, 50);
+
+        let early = [5_u8; 12];
+        assert_eq!(
+            on_media_socket(stack, &check(&ufrag, &pwd, early), PEER_CHECKS_FROM, 60),
+            SipralStatus::Ok,
+            "a check for the call whose session is open: {}",
+            last_error_text()
+        );
+        let media = media_of(stack, call);
+        let sent = media_over(stack, media, 60);
+        assert_eq!(
+            answered_and_triggered(&sent, early),
+            (true, true),
+            "the check reached the call's agent: {sent:?}"
         );
     }
 }

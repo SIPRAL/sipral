@@ -617,6 +617,12 @@ struct endpoint {
     unsigned received;
     unsigned audible;
     unsigned refused;
+    /* `FLOW_ICE_NAT`: what arrived on the media socket after the call was
+     * placed and before its media handle existed -- all of it handed to
+     * `sipral_stack_receive_stun`, as docs/08-ffi.md asks -- and how much of
+     * that the library refused */
+    unsigned early;
+    unsigned early_refused;
 
     struct seen seen;
 };
@@ -910,13 +916,18 @@ static void run_media(struct endpoint *end, uint64_t now)
 
 /* The RTP socket's own STUN exchange, before the call it is for has media:
  * send what the stack asks from the socket it names, and hand back whatever
- * arrives on it. `FLOW_NAT` only; on every other flow nothing is asked. */
+ * arrives on it -- the servers' answers, and once the call is placed, what
+ * the far end sends before this end holds the call's media handle, its first
+ * connectivity checks among them, which the library keeps for the call.
+ * `FLOW_NAT` and `FLOW_ICE_NAT` only; on every other flow nothing is asked,
+ * and nothing is read from the socket until the media handle exists. */
 static void run_stun(struct endpoint *end, uint64_t now)
 {
     static uint8_t in[DATAGRAM];
     static uint8_t out[DATAGRAM];
     static char destination[SIPRAL_ADDRESS_BYTES];
     static char source[SIPRAL_ADDRESS_BYTES];
+    sipral_status_t taken;
 
     if (!end->mapping_media || end->media != SIPRAL_HANDLE_NONE) {
         return;
@@ -956,10 +967,17 @@ static void run_stun(struct endpoint *end, uint64_t now)
         if (address_text(&from, from_text, sizeof from_text) != 0) {
             continue;
         }
-        /* anything but the server's answer is refused, one datagram's worth */
-        (void)sipral_stack_receive_stun(end->stack, in, (size_t)got, from_text,
-                                        strlen(from_text), end->rtp_address,
-                                        strlen(end->rtp_address), now);
+        /* anything that is neither a server's answer nor the call's is
+         * refused, one datagram's worth */
+        taken = sipral_stack_receive_stun(end->stack, in, (size_t)got, from_text,
+                                          strlen(from_text), end->rtp_address,
+                                          strlen(end->rtp_address), now);
+        if (end->call != SIPRAL_HANDLE_NONE) {
+            end->early++;
+            if (taken != SIPRAL_STATUS_OK) {
+                end->early_refused++;
+            }
+        }
     }
 }
 
@@ -2381,6 +2399,9 @@ static int flow_ice_nat(struct endpoint *end, const char *server, const char *ex
            (unsigned)(end->seen.path_chosen_at_ms > end->seen.confirmed_at_ms
                           ? end->seen.path_chosen_at_ms - end->seen.confirmed_at_ms
                           : 0u));
+    printf("  ice   %u datagram(s) on the media socket before its media handle, %u of them "
+           "refused\n",
+           end->early, end->early_refused);
 
     status = sipral_call_hangup(end->stack, end->call, now_ms());
     if (status != SIPRAL_STATUS_OK) {

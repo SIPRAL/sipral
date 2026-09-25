@@ -105,6 +105,17 @@ const TELEPHONE_EVENT: &str = "telephone-event";
 /// RFC 3389 comfort noise, likewise.
 const COMFORT_NOISE: &str = "CN";
 
+/// How many of the far end's connectivity checks one socket keeps while the
+/// call described on it has no session yet ([`MediaEngine::receive_early`]).
+///
+/// A peer paces its checks at one per Ta, fifty milliseconds unless both ends
+/// agree on less (RFC 8445 §14.2), and starts them when it sends its answer,
+/// so what reaches the socket before that answer is read is a handful: this
+/// holds most of a second of them, and one more is refused like any other
+/// datagram the socket did not expect.
+#[cfg(feature = "ice")]
+const EARLY_CHECKS: usize = 16;
+
 /// What this engine knows about one call.
 #[derive(Clone, Debug)]
 struct Managed {
@@ -410,6 +421,13 @@ pub struct MediaEngine {
     /// towards the server outlives a phone that rings for a minute.
     #[cfg(feature = "ice")]
     gathered: BTreeMap<CallHandle, crate::ice::Ice>,
+    /// The far end's connectivity checks that reached a socket a call was
+    /// described on before that call's session opened, by the socket, each
+    /// with where it came from: what [`MediaEngine::receive_early`] kept for
+    /// the agent the session opens with, which answers them then (RFC 8445
+    /// §7.3).
+    #[cfg(feature = "ice")]
+    early: BTreeMap<SocketAddr, Vec<(SocketAddr, Vec<u8>)>>,
     /// Relays handed to descriptions that were refused before there was a
     /// call to hold them, whole and live on their servers, waiting for
     /// [`MediaEngine::poll_returned_relay`].
@@ -511,6 +529,8 @@ impl MediaEngine {
             identity: None,
             #[cfg(feature = "ice")]
             gathered: BTreeMap::new(),
+            #[cfg(feature = "ice")]
+            early: BTreeMap::new(),
             #[cfg(feature = "ice")]
             returned: VecDeque::new(),
             #[cfg(feature = "ice")]
@@ -2136,6 +2156,127 @@ impl MediaEngine {
         false
     }
 
+    /// Hand in a datagram that arrived on `local`, the socket a call was
+    /// described on, from `from`, before the application reads that socket
+    /// through the call's own session, and say whether the call took it.
+    ///
+    /// For an application that reads a call's socket before it holds the
+    /// call's [`SessionShare`] — the C ABI's loop, which hands everything
+    /// arriving on a media socket to the stack until the call's media handle
+    /// exists, since a relay's refresh is answered there. The far end starts
+    /// its connectivity checks the moment it sends its answer, so the first
+    /// of them can reach this end's socket before the answer does, or between
+    /// the session opening and the application taking its share. Refused
+    /// there, they are gone: the far end sends a check again no sooner than
+    /// half a second later (RFC 8445 §14.3), and until one gets through, or
+    /// this end's own checks get round to the pair, the far end has no pair
+    /// proved to send its audio on. Kept, they are answered as RFC 8445 §7.3
+    /// asks of a check that arrives before the agent has the peer's
+    /// candidates.
+    ///
+    /// In this order, the first that takes it:
+    ///
+    /// - the agent of a call described there with a relay and still waiting
+    ///   for its session, as [`MediaEngine::receive_waiting`] — which answers
+    ///   the far end's checks itself, as well as its TURN server;
+    /// - the session of a call described there that has one: everything goes
+    ///   to it, audio and checks alike, exactly as through the share, and
+    ///   `false` is a datagram the session dropped;
+    /// - a call described there using ICE that has no session yet: a Binding
+    ///   request whose `USERNAME` names this call's fragment and whose
+    ///   `MESSAGE-INTEGRITY` checks out under the password its description
+    ///   gave out is kept, up to sixteen for the socket, and handed to the
+    ///   session's agent the moment the session opens, which answers it and
+    ///   checks back on the same pair. Anything else is not the call's.
+    ///
+    /// `false` leaves the datagram for whoever else the socket answers to —
+    /// a [`Mappings`](crate::Mappings) or a [`Relays`](crate::Relays)
+    /// transaction — and is otherwise a datagram nobody wanted.
+    pub fn receive_early(
+        &mut self,
+        local: SocketAddr,
+        from: SocketAddr,
+        data: &[u8],
+        now: Instant,
+    ) -> bool {
+        #[cfg(feature = "ice")]
+        if self.receive_waiting(local, from, data, now) {
+            return true;
+        }
+        let open = self.calls.iter().find_map(|(call, managed)| {
+            (managed.address == Some(local))
+                .then(|| self.sessions.get(call))
+                .flatten()
+        });
+        if let Some(held) = open {
+            let mut datagram = data.to_vec();
+            let arrival = share::lock(held).session.receive(&mut datagram, from, now);
+            return !matches!(
+                arrival,
+                crate::session::Arrival::Dropped(_) | crate::session::Arrival::ControlRefused
+            );
+        }
+        #[cfg(feature = "ice")]
+        {
+            self.keep_early(local, from, data)
+        }
+        #[cfg(not(feature = "ice"))]
+        {
+            false
+        }
+    }
+
+    /// Keep a connectivity check for the call described on `local` that has
+    /// no session yet, when it is one ([`MediaEngine::receive_early`]).
+    #[cfg(feature = "ice")]
+    fn keep_early(&mut self, local: SocketAddr, from: SocketAddr, data: &[u8]) -> bool {
+        let for_a_call = self.calls.iter().any(|(call, managed)| {
+            managed.address == Some(local)
+                && !self.sessions.contains_key(call)
+                && managed
+                    .ice
+                    .as_ref()
+                    .is_some_and(|ice| ice.is_check_for(data))
+        });
+        if !for_a_call {
+            return false;
+        }
+        let kept = self.early.entry(local).or_default();
+        if kept.len() >= EARLY_CHECKS {
+            return false;
+        }
+        kept.push((from, data.to_vec()));
+        true
+    }
+
+    /// Hand a session that has just opened the checks kept for its socket
+    /// before it did, when it runs ICE; the kept checks go either way, since
+    /// they were for this session or for nobody.
+    #[cfg(feature = "ice")]
+    fn replay_early(&mut self, call: CallHandle, now: Instant) {
+        let Some(address) = self.calls.get(&call).and_then(|managed| managed.address) else {
+            return;
+        };
+        let Some(kept) = self.early.remove(&address) else {
+            return;
+        };
+        let Some(held) = self.sessions.get(&call) else {
+            return;
+        };
+        let mut slot = share::lock(held);
+        if !slot.session.runs_ice() {
+            return;
+        }
+        for (from, mut datagram) in kept {
+            let _ = slot.session.receive(&mut datagram, from, now);
+        }
+    }
+
+    /// Without the feature no check was kept.
+    #[cfg(not(feature = "ice"))]
+    #[allow(clippy::unused_self)]
+    const fn replay_early(&mut self, _call: CallHandle, _now: Instant) {}
+
     /// A control datagram that is due, the call to send it for, and where it
     /// goes.
     ///
@@ -2567,7 +2708,20 @@ impl MediaEngine {
             self.joins.remove(&partner);
             self.events.push_back((partner, MediaEvent::Unjoined));
         }
-        self.calls.remove(&call);
+        let address = self.calls.remove(&call).and_then(|managed| managed.address);
+        // checks kept for a socket no call is described on any more were for
+        // the call that just ended, or for nobody
+        #[cfg(feature = "ice")]
+        if let Some(address) = address
+            && !self
+                .calls
+                .values()
+                .any(|managed| managed.address == Some(address))
+        {
+            self.early.remove(&address);
+        }
+        #[cfg(not(feature = "ice"))]
+        let _ = address;
         // a call that ends before its session opened — cancelled while it
         // rang, refused, never answered — still holds the relay it was
         // described with, and the server would hold it for minutes more
@@ -2824,6 +2978,9 @@ impl MediaEngine {
                     }
                 };
                 self.events.push_back((call, event));
+                if !replacing {
+                    self.replay_early(call, now);
+                }
             }
             Err(error) => self.fail(call, error),
         }

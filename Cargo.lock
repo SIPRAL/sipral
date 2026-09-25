@@ -903,6 +903,7 @@ version = "0.0.1"
 dependencies = [
  "sipral",
  "sipral-core",
+ "sipral-nat",
  "sipral-ua",
 ]
 

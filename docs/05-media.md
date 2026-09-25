@@ -65,7 +65,9 @@ source it latched onto.
 
 **Symmetric RTP always.** Send from the port we receive on, and latch onto the
 source address of the first valid packet. This single behaviour, together with
-`rport`, is what makes most NAT traversal unnecessary.
+`rport`, is what makes most NAT traversal unnecessary. On a call using ICE the
+latch follows the far end until a pair is selected, and holds from then on
+(`docs/06-nat.md`, ICE in the full role).
 
 Validation before anything else: version, payload type in the negotiated set,
 plausible SSRC, length. The one widening of that set is G.711's other law: a

@@ -71,6 +71,13 @@ sipral = { path = "../sipral", version = "0.0.1", default-features = false }
 sipral-core.workspace = true
 sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
 
+[dev-dependencies]
+# the far end's connectivity checks, signed with the password this end's offer
+# gave out, for the tests of what reaches a call's socket before its media
+# handle does. The same STUN code the facade already links, so nothing new
+# enters the build.
+sipral-nat = { path = "../sipral-nat", version = "0.0.1" }
+
 [lints.rust]
 unsafe_code = "allow"
 missing_docs = "warn"

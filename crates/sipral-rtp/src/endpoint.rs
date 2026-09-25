@@ -277,6 +277,11 @@ struct Inbound {
     accepted: PayloadTypes,
     signalled: SocketAddr,
     latch: Option<SocketAddr>,
+    /// Whether the latch follows the far end rather than holding: a packet
+    /// from another address is taken, and moves the latch there, once it has
+    /// passed everything a packet from the latched address would have to.
+    /// See [`RtpSession::set_following`].
+    following: bool,
     /// Where RTCP is heard from, latched the way `latch` is but only onto a
     /// host this session already had reason to expect. Separate because
     /// RFC 3550 §11 puts RTCP on its own port, so the port differs from the
@@ -368,6 +373,7 @@ impl RtpSession {
                 accepted: config.accepted,
                 signalled: config.remote,
                 latch: None,
+                following: false,
                 rtcp_latch: None,
                 source: None,
                 rtcp_source: None,
@@ -563,7 +569,7 @@ impl RtpSession {
     /// here reads a clock of its own, so a caller that does not care about
     /// RTCP may pass anything monotonic.
     pub fn receive(&mut self, datagram: &mut [u8], from: SocketAddr, now: Duration) -> Received {
-        if self.inbound.latch.is_some_and(|latched| latched != from) {
+        if !self.inbound.following && self.inbound.latch.is_some_and(|latched| latched != from) {
             return Received::Dropped(Discard::ForeignAddress);
         }
 
@@ -603,8 +609,10 @@ impl RtpSession {
         // The other half of the rule matters as much: after latching, a packet
         // from any other address is dropped rather than merged, which is the
         // first thing this function does. Merging is how someone who can guess
-        // a port gets their audio into the call.
-        if self.inbound.latch.is_none() {
+        // a port gets their audio into the call. A stream told to follow
+        // (`set_following`) moves the latch here instead, and only here: a
+        // packet that failed the checks above never moves it
+        if self.inbound.latch.is_none() || self.inbound.following {
             self.inbound.latch = Some(from);
         }
 
@@ -891,6 +899,20 @@ impl RtpSession {
         self.inbound.signalled = remote;
         self.inbound.latch = None;
         self.inbound.rtcp_latch = None;
+    }
+
+    /// Let the latch follow the far end, or hold it again.
+    ///
+    /// While following, a packet from an address other than the latched one
+    /// is not refused for that: it is checked like any other — SRTP, shape,
+    /// payload type — and moves the latch to its address once it has passed.
+    /// For a far end that may legitimately send from more than one address
+    /// before anything has settled which one it will keep: an ICE agent's,
+    /// which sends on any pair its checks have proved until a pair is
+    /// selected (RFC 8445 §12.1). Held again, the latch stays where the last
+    /// packet put it. A stream starts out holding.
+    pub fn set_following(&mut self, following: bool) {
+        self.inbound.following = following;
     }
 
     /// Listen to a different synchronization source, for a far end that has
@@ -1730,6 +1752,44 @@ mod tests {
             session.receive(&mut datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Queued
         );
+    }
+
+    #[test]
+    fn a_following_latch_moves_with_the_far_end_and_holds_again_when_told() {
+        let mut session = session();
+        let next = establish(&mut session, 7, addr(PEER));
+        session.set_following(true);
+
+        // the same source from another address is taken, and moves the latch
+        assert_eq!(
+            session.receive(&mut datagram(7, next, 8), addr(IMPOSTOR), Duration::ZERO),
+            Received::Queued
+        );
+        assert_eq!(session.latched(), Some(addr(IMPOSTOR)));
+        // but only a packet that passed: one with a payload type nobody
+        // agreed to leaves it where it is
+        assert_eq!(
+            session.receive(&mut datagram(7, next + 1, 99), addr(PEER), Duration::ZERO),
+            Received::Dropped(Discard::PayloadType(99))
+        );
+        assert_eq!(session.latched(), Some(addr(IMPOSTOR)));
+        assert_eq!(
+            session.receive(&mut datagram(7, next + 1, 8), addr(PEER), Duration::ZERO),
+            Received::Queued
+        );
+        assert_eq!(session.latched(), Some(addr(PEER)));
+
+        // held again, the latch stays where the last packet put it
+        session.set_following(false);
+        assert_eq!(
+            session.receive(
+                &mut datagram(7, next + 2, 8),
+                addr(IMPOSTOR),
+                Duration::ZERO
+            ),
+            Received::Dropped(Discard::ForeignAddress)
+        );
+        assert_eq!(session.latched(), Some(addr(PEER)));
     }
 
     #[test]

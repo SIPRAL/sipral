@@ -133,7 +133,9 @@ pair the agent selects, symmetric RTP's and the DTLS-SRTP handshake's alike:
 the agent has already checked that path with a signed transaction, and a latch
 is the poor version of the same question — leaving either armed on the old
 address would cut the audio, or the handshake, for good the first time a
-mid-call re-selection moved the pair.
+mid-call re-selection moved the pair. Before the first selection RTP's latch
+does not hold at all, for the reason under [ICE, full role](#ice-full-role):
+the far end may send on any pair it has proved.
 
 The handshake's latch still does its own work on every call that is not using
 ICE, which is most of them. A DTLS-SRTP handshake is authenticated by a
@@ -384,7 +386,9 @@ server's answers from that socket. The C ABI uses the queue the socket's relay
 used before the call: until the call's media handle exists, what the agent
 sends comes out of `sipral_stack_poll_stun` and the server's answers go back
 through `sipral_stack_receive_stun`, which is what an application already does
-with a named socket that has no media handle. An answer to the refresh that
+with a named socket that has no media handle; the waiting agent answers the
+peer's first checks from there too, as `MediaEngine::receive_early` does for
+a call without a relay (below, under the full role). An answer to the refresh that
 never arrives loses the relay, and the call goes on with the candidates that
 need none.
 
@@ -645,6 +649,38 @@ What it does, in the order a session meets it:
   to stay Running for the life of the call with `deadline()` answering `None`,
   so a caller that slept until the agent next had something to do slept for
   ever, on a call that was never going to carry a packet.
+- **Checks that arrive before the session.** The peer starts checking the
+  moment it sends its answer, so its first checks can reach this end's socket
+  before the answer does, when a call's agent does not exist yet — a call
+  without a relay builds it when the session opens. An application that
+  reads the socket only through the session loses nothing: they wait in the
+  socket. One that reads it earlier, as the C ABI's loop does for a socket
+  named for STUN, hands them to `MediaEngine::receive_early`, which keeps a
+  Binding request whose `USERNAME` names the call's fragment and whose
+  `MESSAGE-INTEGRITY` checks out under the call's password — sixteen per
+  socket, since nobody without the call's description can make one — and
+  hands them to the agent the moment the session opens; the agent answers
+  each and checks back on its pair (RFC 8445 §7.3). Dropped instead, each
+  costs the pair the peer's next retransmission, half a second or more away
+  (§14.3).
+- **Receiving before the selection.** Until a pair is selected, each end
+  sends on the best pair its own checks have proved valid (§12.1), and moves
+  when they prove a better one; each receives on any pair (§12.2). The
+  session's RTP latch — symmetric RTP's rule that, once a packet has arrived,
+  one from any other address is refused — would close on the first of those
+  and refuse the far end's audio from the second, until the selection opened
+  it again, which on a regular nomination is up to `nomination_wait` later.
+  The lab's relayed call through the C ABI lost about a second of the
+  callee's audio to exactly that on every run: its first packets came through
+  the caller's own relay, from the TURN server's address, and the rest
+  straight from the callee's relayed address. So until the selection the
+  latch follows the far end to whichever address its audio comes from
+  (`RtpSession::set_following`) — moved only by a packet that has passed
+  everything a packet from the latched address must, SRTP's authentication
+  first on a secured call — and from the selection on it holds again, on the
+  chosen path. On the lab VM on 25 September 2026 the same call refused 49
+  packets before and 1 after, the one the stream's probation takes; the Rust
+  caller in the same step got 197 of the callee's 198 back.
 
 Not done yet: TURN over TCP or TLS (the TURN client has the framing; the
 agent's datagram model does not carry it), a restart from the facade in the
@@ -689,9 +725,10 @@ first, which is exactly what two agents checking each other at once produce
 
 ### What ICE costs a call's start, measured
 
-Nothing goes out on a call using ICE until a pair is selected, so the time
-from the offer to `MediaEvent::PathChosen` is the audio a call does not have
-at its start. The lab harness prints it on every ICE flow, twice: from the
+Nothing goes out on a call using ICE until its checks have proved a pair, and
+a pair is only certain to carry the call once it is selected, so the time from
+the offer to `MediaEvent::PathChosen` is the most audio a call can lose at its
+start. The lab harness prints it on every ICE flow, twice: from the
 moment `place_with` wrote the offer, and from the answer arriving. Measured on
 the lab VM (Debian 13, 32 cores, Docker bridges, no impairment), 24 September
 2026, seven runs of the lite flow, five of the two-NAT one and six of the

@@ -570,9 +570,30 @@ binding open and an answer minutes old may name a mapping that is gone, so the
 loop keeps sending and handing in for it; an answer that differs arrives as
 `SIPRAL_NAT_MAPPING_MOVED`, and the queue never holds more than one request per
 socket. `sipral_stack_receive_stun` answers `SIPRAL_STATUS_INVALID_ARGUMENT`
-for anything that is not the configured server's answer to a request this stack
-sent, which costs that datagram and nothing more. The answer is spent by the
-call it describes.
+for anything that is neither the configured server's answer to a request this
+stack sent nor, once a call is described on the socket, the call's (below),
+which costs that datagram and nothing more. The answer is spent by the call it
+describes.
+
+**Until the call's media handle exists, everything arriving on its socket
+still goes to `sipral_stack_receive_stun`,** and the call takes what is its
+own. The far end starts its ICE connectivity checks the moment it sends its
+answer, so on a call using ICE the first of them can reach the socket before
+the 200 is read, or in the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
+the `sipral_call_media` after it. Refused, they would be lost: the far end
+checks again no sooner than half a second later (RFC 8445 §14.3). So a check
+signed with the password the call's own description gave out, for the call
+described on that socket, is kept — up to sixteen for the socket — and handed
+to the call's agent when its session opens, which answers it and checks back
+on the same pair as RFC 8445 §7.3 asks of a check that arrives before the
+peer's candidates; once the session is open, the datagram goes to it exactly
+as through `sipral_media_receive`. Both are `SIPRAL_STATUS_OK`, and a
+datagram the session drops is `SIPRAL_STATUS_INVALID_ARGUMENT`. A check nobody
+can authenticate is refused like any other stranger's datagram. From the media
+handle on, the socket's datagrams go to `sipral_media_receive` and nowhere
+else. A loop that does not read the socket at all until the media handle
+exists loses nothing either — what arrives waits in the socket — but it cannot
+do that on a socket with a relay, whose refresh is answered here.
 
 Three entry points rather than a second use of the two signalling ones,
 because a media socket is not a transport: a STUN request for it that came out

@@ -444,7 +444,14 @@ this end directly rather than through the line's own proxy.
   checks have chosen a pair, the latch follows the pair and the agent's
   signed transaction is what says whose datagram this is. On every call that
   has not, which is every call at the default policy, the latch is still the
-  whole of the answer.
+  whole of the answer. RTP's own latch is the one thing ICE loosens: until a
+  pair is selected it follows the far end rather than holding, because the
+  far end may send on any pair it has proved (RFC 8445 §12.1) and a latch
+  that held refused a second of its audio. A packet moves it only after
+  passing SRTP's authentication, so on a secured call nobody without the keys
+  can; on a call in clear, anybody who can reach the socket before the
+  selection can have a packet played, which is no more than the first packet
+  of any call in clear could always do.
 
 ## The unsafe surface
 
