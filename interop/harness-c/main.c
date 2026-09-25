@@ -3483,7 +3483,7 @@ int main(int argc, char **argv)
     {
         const char *pinned = getenv("SIPRAL_HARNESS_SEED");
         char hex[65];
-        if (pinned != NULL && pinned[0] != '\0') {
+        if (pinned != NULL) {
             if (parse_hex_seed(pinned, g_run_seed) != 0) {
                 printf("SIPRAL_HARNESS_SEED is not 64 hex digits: %s\n", pinned);
                 return 1;
