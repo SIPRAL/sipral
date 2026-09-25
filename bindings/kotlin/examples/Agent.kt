@@ -20,11 +20,14 @@ import java.net.InetSocketAddress
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
 import org.sipral.SipralEventKind
+import org.sipral.SipralStreamStats
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.digitOf
@@ -55,53 +58,68 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
     val talking = launch {
         media.frames.collect { frame -> media.sendAudio(frame) }
     }
-    // Read while the call is still up: once the BYE is answered the stack
-    // ends the call's media on its own poll thread, and a
-    // sipral_media_statistics call after that answers that the media has
-    // ended rather than with numbers -- bindings/python/examples/agent.py's
-    // own comment on the same race, and its own fix, which this mirrors:
-    // read the numbers right before hangup() rather than after it.
-    var stats: org.sipral.SipralStreamStats? = null
+
+    // Kept fresh at a steady interval rather than read once when the call
+    // is seen to be over: once the BYE is answered the stack tears this
+    // call's media down on its own poll thread, so by the time either
+    // collector below notices the call has ended, `statistics()` can
+    // already answer WRONG_STATE (docs/08-ffi.md, `sipral_media_statistics`:
+    // "the end-of-call record arrives instead as
+    // SIPRAL_EVENT_KIND_MEDIA_STATISTICS ... because by then the stream is
+    // gone"). A read that lands mid-teardown is skipped, not fatal --
+    // `stats` just keeps the last good reading, at most one interval stale.
+    // Cheap enough for this rate: the same doc calls it fit "at the frame
+    // rate of a user interface".
+    var stats: SipralStreamStats? = null
+    val polling = launch {
+        while (isActive) {
+            stats = try {
+                media.statistics()
+            } catch (_: Exception) {
+                stats
+            }
+            delay(200)
+        }
+    }
+
     val hangingUp = launch {
         call.digits.collect { event ->
             val digit = digitOf(event) ?: return@collect
             println("dtmf $digit")
             if (digit == '#') {
-                // Read while the call is still up. Once the BYE is answered
-                // the stack ends the call's media on its own poll thread,
-                // and a statistics() call after that answers that the media
-                // has ended rather than with numbers -- Agent.kt's own
-                // Python equivalent has the same race and the same fix.
+                // One last read while the call is still certainly up, for
+                // the freshest number this path can give.
                 stats = try {
                     media.statistics()
                 } catch (_: Exception) {
-                    null
+                    stats
                 }
                 call.hangup()
                 return@collect
             }
         }
     }
-    val ending = launch { call.waitEnded(60_000) }
+    // No cap: scripts/lab.sh always ends this call itself, either through
+    // the digit handler above or by the far end hanging up on its own, and
+    // a fixed wait here would end a call that outlives it -- cutting short
+    // a phone's own hang-up is this agent's bug to avoid, not the far
+    // end's. bindings/python/examples/agent.py's own wait_for_remote_hangup
+    // is the same shape, with the same absence of a cap.
+    val ending = launch {
+        if (!call.ended) {
+            call.events.first { it.kind == SipralEventKind.CALL_ENDED.value.toLong() }
+        }
+    }
 
     select<Unit> {
         hangingUp.onJoin { }
         ending.onJoin { }
     }
     talking.cancel()
+    polling.cancel()
     hangingUp.cancel()
     ending.cancel()
 
-    // The far end can also hang up first, with no third digit ever sent;
-    // that path has not read the numbers yet, and this is its last chance
-    // to -- the media handle is not released until close() below.
-    if (stats == null) {
-        stats = try {
-            media.statistics()
-        } catch (_: Exception) {
-            null
-        }
-    }
     call.close()
     println(
         "ended ${call.handle.toString(16)} " +

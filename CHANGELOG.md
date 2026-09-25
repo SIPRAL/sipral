@@ -699,6 +699,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   delivered and left unanswered, as `sipral_ua::Runtime` already leaves it
   for a literal address. Found calling through the lab's Asterisk from the
   iOS Simulator (`docs/15-mobile.md`).
+- **The example agents no longer cut a call short, or print -1 packets, when
+  the far end hangs up.** `bindings/kotlin/examples/Agent.kt` hung every call
+  up 60 seconds after answering — `waitEnded(60_000)` timing out and
+  `close()` sending its own BYE over a phone's own hang-up — for no reason
+  `scripts/lab.sh` needs; the cap is gone, matching `agent.py` and the .NET
+  sample, which never had one. Separately, all three read the call's final
+  statistics only once the far end had already ended it, racing the moment
+  `sipral_media_statistics` starts answering `WRONG_STATE` (its own numbers
+  arrive with `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` instead) — printing -1 in
+  Kotlin and .NET, an empty record in Python. All three now poll the numbers
+  every 200 ms while the call is up, so what `ended` prints is real either
+  way, not a race against teardown.
 - **The Android sample's screen no longer sits under the status bar.** An
   application targeting Android 15 is drawn edge to edge, and the sample's
   first field and heading were under the clock, with the status bar's white

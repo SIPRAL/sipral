@@ -61,18 +61,39 @@ async def run_call(call: Call) -> None:
 
     stats: dict[str, object] = {}
 
+    async def poll_statistics() -> None:
+        # Kept fresh at a steady interval, not read once after the call is
+        # seen to have ended: once the far end's BYE is answered the stack
+        # tears this call's media down on its own poll thread, so by the
+        # time either task below notices the call is over,
+        # `call.media.statistics()` can already answer with the ABI's
+        # WRONG_STATE (docs/08-ffi.md: `sipral_media_statistics`'s
+        # end-of-call record "arrives instead as
+        # SIPRAL_EVENT_KIND_MEDIA_STATISTICS ... because by then the stream
+        # is gone"). A read that lands mid-teardown is skipped, not fatal --
+        # `stats` just keeps its last good reading, at most one interval
+        # stale. Cheap enough for this rate: the same doc calls it fit "at
+        # the frame rate of a user interface".
+        nonlocal stats
+        while True:
+            try:
+                stats = call.media.statistics()
+            except SipralError:
+                pass
+            await asyncio.sleep(0.2)
+
     async def listen_for_hangup() -> None:
         nonlocal stats
         while True:
             digit = await call.dtmf.get()
             print("dtmf", digit)
             if digit == "#":
-                # Read while the call is still up. Once the BYE is answered
-                # the stack ends the call's media on its own poll thread, and
-                # a `sipral_media_statistics` call after that answers that the
-                # media has ended rather than with numbers -- which on a busy
-                # machine can happen before this coroutine runs again.
-                stats = call.media.statistics()
+                # One last read while the call is still certainly up, for
+                # the freshest number this path can give.
+                try:
+                    stats = call.media.statistics()
+                except SipralError:
+                    pass
                 call.hangup()
                 return
 
@@ -85,22 +106,16 @@ async def run_call(call: Call) -> None:
             await call.events.get()
 
     talking = asyncio.create_task(talk())
+    polling = asyncio.create_task(poll_statistics())
     hanging_up = asyncio.create_task(listen_for_hangup())
     ending = asyncio.create_task(wait_for_remote_hangup())
     try:
         await asyncio.wait({hanging_up, ending}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         talking.cancel()
+        polling.cancel()
         hanging_up.cancel()
         ending.cancel()
-        # A far end that hung up first has already ended the media, so
-        # there may be no numbers left to read; and `call.close()` releases
-        # the media handle, so whatever is read has to be read before it.
-        if not stats and call.media is not None:
-            try:
-                stats = call.media.statistics()
-            except SipralError:
-                pass
         call.close()
         print(f"ended {call.handle:x}: {stats}")
 

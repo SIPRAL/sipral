@@ -68,6 +68,36 @@ async Task RunCallAsync(Call call, int tag)
         }
     });
 
+    // Kept fresh at a steady interval, not read once after the call is seen
+    // to have ended: once the far end's BYE is answered the stack tears
+    // this call's media down on its own poll thread, so by the time either
+    // task below notices the call is over, a statistics call can already
+    // answer with the ABI's WRONG_STATE (docs/08-ffi.md:
+    // sipral_media_statistics's end-of-call record "arrives instead as
+    // SIPRAL_EVENT_KIND_MEDIA_STATISTICS ... because by then the stream is
+    // gone"). A read that lands mid-teardown is skipped, not fatal --
+    // `stats` just keeps its last good reading, at most one interval stale.
+    var polling = Task.Run(async () =>
+    {
+        try
+        {
+            while (true)
+            {
+                try
+                {
+                    stats = media.Statistics();
+                }
+                catch (SipralException)
+                {
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(200), stop.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    });
+
     var hangingUp = Task.Run(async () =>
     {
         await foreach (var digit in call.Dtmf.WithCancellation(stop.Token))
@@ -75,10 +105,8 @@ async Task RunCallAsync(Call call, int tag)
             Console.WriteLine($"dtmf {digit}");
             if (digit == '#')
             {
-                // Read while the call is still up: once the BYE is answered
-                // the stack ends this call's media on its own poll thread,
-                // and a statistics call after that answers that the media
-                // has ended rather than with numbers.
+                // One last read while the call is still certainly up, for
+                // the freshest number this path can give.
                 try
                 {
                     stats = media.Statistics();
@@ -105,18 +133,8 @@ async Task RunCallAsync(Call call, int tag)
 
     await Task.WhenAny(hangingUp, endingRemotely);
     stop.Cancel();
-    await Task.WhenAll(talking, hangingUp, endingRemotely).ContinueWith(_ => { });
+    await Task.WhenAll(talking, polling, hangingUp, endingRemotely).ContinueWith(_ => { });
 
-    if (stats is null)
-    {
-        try
-        {
-            stats = media.Statistics();
-        }
-        catch (SipralException)
-        {
-        }
-    }
     call.Close();
     Console.WriteLine(
         $"ended {tag:x}: packets_received={stats?.PacketsReceived ?? 0} " +
