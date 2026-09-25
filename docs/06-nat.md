@@ -14,15 +14,17 @@ Most of the NAT problem in SIP telephony is solved before ICE is reached:
 2. **Symmetric RTP with latching** (RFC 7362 describes the technique from the
    media relay's side; an endpoint applies the same rule). Send from the receive
    port, learn the peer's real address from the first valid packet.
-3. **Keepalive** frequent enough to hold the binding: double-CRLF or `OPTIONS`
-   on signalling, and RTP itself on media once flowing.
+3. **Keepalive** frequent enough to hold the binding: a double-CRLF every 25 s
+   on a stream transport (`EndpointConfig::keepalive_interval`); on UDP, the
+   STUN Binding refresh when STUN is on, otherwise only the registration's own
+   refreshes; and RTP itself once media flows.
 4. **STUN** where the local address must be known before media starts.
 5. **TURN** as the relay of last resort.
 
-Steps 1 to 3 cover the large majority of carrier and PBX paths, and they are in
-phase 1. Step 4 is in the facade and the C ABI, off unless asked for — *STUN,
-from a softphone behind a NAT* below. Step 5 waits for a phone to prove it on
-(phase 4).
+Steps 1 to 3 are in phase 1. Steps 4 and 5 are in the facade and the C ABI, off
+unless asked for: see *STUN, from a softphone behind a NAT* and *TURN* below.
+A relay is used only as a call's relayed ICE candidate, and TURN over TCP or
+TLS is not done yet.
 
 That is a deliberate ordering, not a refusal. Full ICE — gathering, checks,
 nomination, role conflicts, restarts, consent — is written on top of the pieces
@@ -74,7 +76,7 @@ chosen for it rather than for the general case.
 
 | Mechanism | Default | On the wire if turned on |
 |---|---|---|
-| ICE, in any role | **off** | **143 bytes** per candidate, at a floor of one, plus a round of checks before the first audio packet |
+| ICE, in any role | **off** | **143 bytes** for the ICE attributes with one candidate (ice-lite, credentials, options and the candidate line), and one candidate line more per extra candidate, plus a round of checks before the first audio packet |
 | STUN | off | one 28-byte Binding request per socket (the header and FINGERPRINT), again every 25 s on the signalling socket; nothing on a request |
 | TURN | off | a 4-byte channel header per media packet on a relayed pair, 36 bytes of Send indication until the channel is bound; one more candidate line; an Allocate (two round trips) before the offer |
 
@@ -82,8 +84,9 @@ The 143 is measured, not estimated, and pinned by
 `what_declaring_ice_costs_on_the_wire` in `crates/sipral-nat/src/ice/sdp.rs` so
 that this table cannot quietly stop being true. It is the floor: one address,
 one component, one candidate. A laptop with Wi-Fi, Ethernet and a VPN, offering
-RTP and RTCP with a reflexive candidate for each, writes nine of those lines,
-and an offer that carried them would no longer fit the 1300-byte datagram floor
+RTP and RTCP with a reflexive candidate for each, writes 143 plus eight more
+candidate lines, and an offer that carried them would no longer fit the
+1300-byte datagram floor
 RFC 3261 §18.1.1 sets. That is not hypothetical: a request that outgrew its path
 and was silently dropped by a NAT is the most expensive failure this project has
 a record of, and NAT-traversal attributes were four hundred of the bytes that did
@@ -107,7 +110,8 @@ The agent itself is configured with no STUN and no TURN server. That cut is
 what keeps an offer a single pass of work — with no server to wait for,
 gathering finishes before the call that started it returns — so neither the
 Rust API nor the C ABI grew a two-phase description to accommodate it. The
-reflexive candidate costs one more 143-byte line; it does not cost a second
+reflexive candidate costs one more candidate line (tens of bytes, its related
+address included); it does not cost a second
 question to the server, because it is the answer the stack already has for the
 `c=` line a peer without ICE reads. The relayed one is asked for before the
 call in the same way, from the same socket.
@@ -174,8 +178,9 @@ told. STUN is for the far end that does not: a registrar with no NAT helper
 that sends the INVITE to the `Contact` it holds, a peer that sends its audio
 to `c=` and nowhere else. For those this end has to write its public address
 in the first place, and a Binding request from the socket in question is how
-it learns it. Off by default everywhere; on with `SIPRAL_NAT_STUN` and a
-`stun_server` in `sipral_stack_config_t`, or with `sipral::Mappings` from Rust.
+it learns it. Off by default everywhere; on with `nat = SIPRAL_NAT_STUN` and a
+`stun_server` (an `ip:port`, not a name) in `sipral_stack_config_t`, or with
+`sipral::Mappings` from Rust.
 `Capabilities::stun` and `SIPRAL_FEATURE_STUN` say whether the build has it.
 
 The decisions, and why each one is what it is:
@@ -285,8 +290,9 @@ RFC 8656. Allocate, refresh, permissions, channel binding for the data path
 because the 4-byte channel header beats the 36-byte Send indication on every
 packet.
 
-TCP and TLS to the TURN server where UDP is blocked, which is the case this
-whole component exists for: a corporate network that lets nothing out but 443.
+TCP and TLS to the TURN server, for a corporate network that lets nothing out
+but 443, is what this component is ultimately for. `TurnClient` has the
+framing, but no call can use it yet (see "Not done yet" below).
 
 `TurnClient` is not told the server's address, so whoever holds it hands in
 only what came from there: ChannelData and Data indications carry no proof of
@@ -314,7 +320,9 @@ allocation to the call. The C ABI does the same with `turn_server`,
 that carry its Binding request, and `SIPRAL_EVENT_KIND_NAT_RELAY` says what
 the server gave (`docs/08-ffi.md`). One coturn is usually both servers, from
 one address; a Binding answer goes to the mapping and every other answer to
-the relay.
+the relay. `turn_server` is accepted only together with `SIPRAL_NAT_STUN`,
+needs `turn_username` and `turn_password`, and is refused with
+`SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
 
 Before the call, and not by the agent while it gathers, for the reason the
 reflexive candidate above is: an Allocate under long-term credentials is two

@@ -31,6 +31,7 @@ pub struct MediaPlan {
     pub dtmf: Option<u8>,           // telephone-event payload type, when agreed
     pub rtcp: RtcpPlan,             // muxed, a second port, or off
     pub keying: Option<Keying>,     // SDES material, or a DTLS fingerprint
+    pub voip_metrics_xr: bool,      // whether this stream should send RFC 3611 XR reports
 }
 
 /// And back the other way, before an offer is written: what this build can
@@ -41,6 +42,7 @@ pub struct MediaCapabilities {
     pub dtmf: bool,
     pub rtcp_mux: bool,
     pub srtp: SrtpSupport,
+    pub voip_metrics_xr: bool,      // whether to ask the peer for RFC 3611 XR reports
 }
 ```
 
@@ -142,8 +144,8 @@ includes the very first report: `MediaSession::open` draws from it before
 handing the constructor a fixed number, so the first interval is randomised
 exactly like every later one and two calls opened from the same catalogue do
 not schedule their first report at the same point in it.
-The one number that scaling starts from is fixed: `RTCP_BANDWIDTH` in
-`sipral::session`, five hundred octets per second — five percent of a
+The one number that scaling starts from is `MediaConfig::rtcp_bandwidth`,
+five hundred octets per second by default — five percent of a
 two-party narrowband call's roughly ten-kilo-octet-a-second wire rate, which
 is also small enough that the five-second §6.2 floor, not the
 bandwidth-derived figure, is what actually sets the cadence for a call this
@@ -218,14 +220,12 @@ places, plainly:
 
 1. §6.2 sizes the RTCP bandwidth as a fraction of the session's own bandwidth
    — the bit rate the negotiated codec actually uses. This stack does not read
-   that back out of the negotiation: `RTCP_BANDWIDTH` is one constant, sized
-   for a 64 kbit/s codec (G.711, or G.722 at the same bit rate), not derived
-   per call from `MediaPlan::codec` — so not re-derived when Opus, the default
-   build's first choice, is negotiated at whatever rate its encoder runs — nor
-   from a negotiated `b=AS`, `b=RS` or `b=RR`; of those, only `b=RS:0` together
-   with `b=RR:0` is read, and only as "off". A stream running at a very
-   different rate would need a bandwidth figure of its own, and nothing here
-   computes one automatically.
+   that back out of the negotiation: the default is sized for a 64 kbit/s
+   codec and is not derived per call from `MediaPlan::codec` or from a
+   negotiated `b=AS`/`b=RS`/`b=RR`; of those, only `b=RS:0` together with
+   `b=RR:0` is read, and only as "off". An application running a stream at a
+   very different rate sets `MediaConfig::rtcp_bandwidth` itself, per call,
+   through `place_with`/`answer_with`.
 2. §6.2 counts the UDP and IP headers in every bandwidth and packet-size
    figure, and §6.3.1 defines `avg_rtcp_size` to include them. The sizes
    `IntervalTimer` averages do not: `RtpSession::rtcp_receive` hands
@@ -258,7 +258,7 @@ places, plainly:
    report clears `Outbound::sent_since_report`: a stream that falls silent
    sends RRs one interval sooner than §6.4 says.
 
-### RTCP XR and voice quality reports (task 8.6.9)
+### RTCP XR and voice quality reports
 
 RFC 3611 defines the Extended Report packet type (§2, `rtcp::XR` = 207 in
 the compound) and the VoIP Metrics Report Block it carries (§4.7):
@@ -485,10 +485,10 @@ length the other refuses; a digit *received* by INFO shares only the ceiling
 no floor of its own. The hundred-millisecond default a length of zero asks
 for is shared the same way sending's bounds are — `sipral_ua::dtmf`'s own
 `DEFAULT_DTMF_MS`, which `sipral::DEFAULT_DIGIT` reads rather than keeping a
-copy of the same number (8.3.11-bis).
+copy of the same number.
 
-**The other way a digit crosses, and where the two meet.** 8.3.11 gives
-`sipral-ua` its own INFO-based DTMF (`docs/04-ua.md`), sent and received
+**The other way a digit crosses, and where the two meet.** `sipral-ua` has
+its own INFO-based DTMF (`docs/04-ua.md`), sent and received
 without ever touching the media path this crate owns. What `sipral-ua`
 raises for an incoming one is `UaEvent::DtmfReceived`, not a `MediaEvent` —
 that layer has no media of its own to make one of. This crate is what joins
@@ -500,8 +500,8 @@ the media events already are — so the `UaEvent` itself is never forwarded as
 carried it; everything else about the event — `digit`, `event`, `held` — reads
 the same regardless, with `held` at `None` for the one INFO body that carries
 no duration at all (`application/dtmf`) — not `Duration::ZERO`, which stays
-what a peer sending the other body actually said with its own `Duration=0`
-(8.3.11-ter). An application that only ever watched `MediaEvent::DigitReceived`
+what a peer sending the other body actually said with its own `Duration=0`.
+An application that only ever watched `MediaEvent::DigitReceived`
 for RFC 4733 keeps working unchanged: the new member is additive, and nothing
 changes what was already there.
 
@@ -901,7 +901,7 @@ client and never sent a ClientHello, and the plan later certificates are
 compared against was left with nothing in it, so a certificate that went away
 in one re-offer came back as another in the next without being refused.
 
-## Ringing with media (task 8.4.9)
+## Ringing with media
 
 `MediaEngine::ring` and `MediaEngine::ring_with` are `MediaEngine::place` and
 `MediaEngine::place_with`'s mirror on the other side of the call: an incoming
@@ -978,7 +978,7 @@ place SRTP on an incoming call's own terms was still missing after 8.4.6:
 stack describes the media of had no way to choose anything but the stack's
 SRTP policy until it could ring with one first.
 
-## Transfers with media (task 8.4.4)
+## Transfers with media
 
 `MediaEngine::accept_transfer` and `MediaEngine::accept_transfer_with` are
 `MediaEngine::place` and `MediaEngine::place_with`'s mirror for the call a
@@ -1014,7 +1014,7 @@ other poll here, alongside the handle of the call that has ended. A goodbye
 that is never polled is a far end left to wait out its own timeout.
 
 Across the C ABI this is `sipral_stack_poll_farewell(stack, out_call,
-out_packet)` (task 8.4.21), a stack-level call rather than one more of the
+out_packet)`, a stack-level call rather than one more of the
 four on a media handle: by the time there is a goodbye to hand over, the call
 it belonged to has already ended, its media handle already answers
 `SIPRAL_STATUS_WRONG_STATE`, and only the stack still knows the call was ever
@@ -1679,12 +1679,11 @@ links this crate, whether or not the same binary also ships
 works in `f32` normalised to `[-1.0, 1.0]`. And the two libraries cut a
 frame at different lengths: this one fixes its own at ten milliseconds,
 fixed by the library itself and not configurable, while a call's frame is
-whatever its codec cuts — twenty milliseconds for every codec this stack
-negotiates today, which divides evenly into two. `WebrtcAec::process`
-documents both conversions and what it does with a frame that is not a
-whole multiple of ten milliseconds, which no codec here produces but which
-nothing stops an application's own `Processor` implementation from being
-asked to.
+whatever its catalogue cuts: twenty milliseconds by default, but
+`CodecCatalog::with_frame_length` can set any whole millisecond for G.711
+and G.722, so `WebrtcAec::process` can be handed a frame that is not a
+multiple of ten milliseconds. `WebrtcAec::process` documents both
+conversions and what it does with such a frame.
 
 **Measured**, with `crates/sipral-aec-webrtc/examples/erle.rs`: a broadband
 synthetic far end (three tones summed under a slow amplitude envelope, not
@@ -1692,9 +1691,10 @@ a single sine, which an adaptive filter converges on for reasons special to
 a pure tone) fed back as the near end at a quarter its own level — about
 -12 dB, a plausible direct acoustic coupling from a laptop's own
 loudspeaker into its own microphone — with no delay, since the delay a real
-device adds is exactly what `sipral::Echo`'s own alignment already removes
-before a processor is ever reached. Run at 16 kHz, 20 ms frames, over the
-last six of eight seconds once AEC3 has had time to adapt: **36.1 dB of
+device adds is exactly what `MediaSession::set_render_delay`'s own alignment
+already removes before a processor is ever reached. Run at 16 kHz, 20 ms
+frames, over the last six of eight seconds once AEC3 has had time to adapt:
+**36.1 dB of
 echo return loss enhancement** — the echo's energy falls by a factor of
 about 4,000. The figure is this synthetic signal's, not a room's or a
 device's, and moves with both; `docs/11-testing.md` is where a real-device
@@ -1974,7 +1974,8 @@ from either one's dialog, this still looks like an ordinary two-party call —
 and this stack sends no `Refer-To` and opens no third dialog. `MediaEngine`'s
 own module doc calls itself "the join" for a different reason entirely (the
 seam between signalling and media); this is a second, unrelated use of the
-word, and `crate::join`'s own doc comment says so before anything else.
+word, and the source of `crates/sipral/src/join.rs` says so before anything
+else.
 
 `MediaEngine::join` refuses a pair whose two sessions do not share a sample
 rate and a frame length (`MediaError::JoinIncompatible`). Nothing in the
@@ -1987,8 +1988,9 @@ are otherwise fixed for its whole life (D6, above) — not on every frame.
 ### Levels
 
 Every sum the mixer forms is two sources at half scale apiece, which is the
-reasoning `crate::record::Recorder` (this crate's own call recorder) already
-carries for the same problem: two full-scale sources summed at unity is a
+reasoning the facade's call recorder (`crates/sipral/src/record.rs`, reached
+through `MediaSession::start_recording`) already carries for the same
+problem: two full-scale sources summed at unity is a
 sum that does not fit in the sixteen bits a sample has, and a mixer that let
 it clip could never undo the clip afterwards. Halved first, the loudest two
 sources can ever sum to is full scale, never past it, at the cost of six

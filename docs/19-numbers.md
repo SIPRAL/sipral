@@ -81,7 +81,7 @@ is a regression, not this machine's figure.
 ## 24 September 2026 — `0.0.1`, signalling
 
 `crates/sipral-ffi/tests/signalling_load.rs`, run by `scripts/bench.sh`. Two
-stacks, each a user agent and a media engine — what one `sipral_stack_new`
+stacks, each a user agent and a media engine — what one `sipral_stack_create`
 holds — call each other in one process with no network between them, a
 hundred calls at once and then a thousand. Every call goes the way a call on
 a PBX goes: the INVITE is challenged with a 401, sent again with digest

@@ -111,20 +111,13 @@ start line's method, `From`/`To`, `Contact`, `Route`/`Record-Route`, the
 authentication headers — is checked at once and named on failure. It is
 exhaustively tested against the RFC 4475 corpus
 (`crates/sipral-core/tests/rfc4475.rs`) and against both fuzz targets that
-touch a whole message (`fuzz/fuzz_targets/parse.rs`, `framer.rs`). **It is not
-called from the live receive path.** `Endpoint::dispatch`
-(`crates/sipral-core/src/endpoint/inbound.rs`) routes a message straight to its
-handler once framing has succeeded, and each handler reads the one or two
-fields it needs through the same accessors `validate` calls — so a field
-`validate` would have named is instead read lazily, and a `HeaderError` from
-it is handled locally, almost always by dropping the message rather than by
-building a 400. That is weaker than "a malformed request draws a 400" reads
-as a blanket claim: what actually happens to a message that frames correctly
-but fails one field is ad hoc per call site, and mostly silent. Nothing about
-this is a memory-safety or availability problem — the parser still never
-panics and never does unbounded work on the field itself — but it is a real
-gap between what `validate` proves in a test and what the dispatcher does with
-a live message, and it is worth closing rather than assuming closed.
+touch a whole message (`fuzz/fuzz_targets/parse.rs`, `framer.rs`).
+`Endpoint::on_request` (`crates/sipral-core/src/endpoint/inbound.rs`) calls it
+on every request, before the retransmission check and before any transaction
+is matched. A request that fails it is answered with a stateless 400 whose
+reason phrase names the field (`Bad <field>`, RFC 3261 §8.2.x), and the
+refusal is noted in the diagnostic record. An ACK that fails it is dropped,
+since nothing answers an ACK.
 
 **Fuzzing covers the doors an attacker's bytes come through.** Twenty-nine
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
@@ -166,7 +159,7 @@ more of the agent than several hundred thousand random runs did.
 in `crates/sipral-ua/src/screening.rs`. First, a token bucket keyed by source
 address, not address and port — changing a port costs an attacker nothing,
 while the address is what they must own to hear an answer back. The default
-(`Rate::DEFAULT`, `screening.rs:189`) is a burst of ten and one more every two
+(`Rate::default()`, `screening.rs:189`) is a burst of ten and one more every two
 seconds, deliberately loose, because in most deployments every legitimate call
 already arrives from the one address the phone registered with. The table of
 watched sources is a fixed 64 entries (`const WATCHED: usize = 64`,
@@ -268,16 +261,18 @@ account of what the stack decided (`docs/14-diagnostics.md`) — holds neither
 seed and no key material of any kind; it is deliberately a different artefact
 from a replay recording, with a different, narrower, safety promise.
 
-**Nothing that holds key material derives `Debug`.** Six types —
+**Nothing that holds key material derives `Debug`.** Seven types —
 `KeySalt` (`crates/sipral-core/src/sdp/crypto.rs`), `Attribute` and `KeyLine`
 (`crates/sipral-core/src/sdp/session.rs`), `Push`
 (`crates/sipral-ua/src/account.rs`, the RFC 8599 wake-up token, the same shape
-of secret), and the two ends of ICE's short-term credential, `Credentials`
+of secret), the two ends of ICE's short-term credential, `Credentials`
 (`crates/sipral-nat/src/ice/full/mod.rs`) and `RemoteIce`
-(`crates/sipral-nat/src/ice/sdp.rs`) — each has a hand-written `Debug` that
-prints `<redacted>` in place of the material and nothing derived, and
-`KeySalt` additionally zeroises on `Drop`. `scripts/check.sh` asserts both
-properties for exactly these six named types: no `#[derive(..., Debug, ...)]`
+(`crates/sipral-nat/src/ice/sdp.rs`), and `Ice` (`crates/sipral/src/ice.rs`),
+the facade's own copy of a call's ICE credentials — each has a hand-written
+`Debug` that prints `<redacted>` in place of the material and nothing
+derived, and `KeySalt` additionally zeroises on `Drop`. `scripts/check.sh`
+asserts both properties for exactly these seven named types: no
+`#[derive(..., Debug, ...)]`
 immediately above the struct, and a hand-written `impl fmt::Debug for` it
 somewhere in the file — so a future edit that adds the derive back, or removes
 the hand-written impl without noticing, fails the gate rather than shipping a
@@ -333,9 +328,8 @@ computes and formats an outgoing `Authorization`, and nothing compares a
 received response against an expected one, because nothing here ever issues
 the challenge a response would answer. That is a correct absence for what this
 crate is, not an oversight, but it has a real consequence stated in the
-tree's own words: "this stack answers challenges without ever issuing one, so
-there is no authenticated peer to compare against"
-(`crates/sipral-ua/src/transfer.rs`).
+tree's own words: "This stack answers challenges and issues none, so it has
+no authenticated peer to compare" (`crates/sipral-ua/src/transfer.rs`).
 
 **REFER.** `on_refer` (`crates/sipral-ua/src/transfer.rs`) requires a REFER to
 match an existing dialog and to carry exactly one `Refer-To`; it does not, and
@@ -469,7 +463,7 @@ this end directly rather than through the line's own proxy.
 
 ## The unsafe surface
 
-`unsafe_code = "deny"` at the workspace root (`Cargo.toml:25`) is overridden
+`unsafe_code = "deny"` at the workspace root (`Cargo.toml:30`) is overridden
 in exactly four crates, each in its own manifest: `sipral-ffi`,
 `sipral-io-coreaudio`, `sipral-io-wasapi`, `sipral-io-pipewire`
 (`unsafe_code = "allow"` in each crate's `[lints.rust]`). Everything else in the workspace is denied `unsafe`
@@ -577,14 +571,12 @@ and RFC 8489 §16 says so — which moves this end's `Contact` and `c=` somewher
 the attacker chose; what that buys is calls and audio that do not arrive, the
 same as dropping the packets would.
 
-The TURN client (`crates/sipral-nat/src/turn/client.rs`, 2,893 lines) is still
-reachable from nothing: the agent is configured with no TURN server. That
-reading has to happen before the step that adds one.
-
-**`RawMessage::validate`'s absence from the live dispatch path**, described
-above under parsing, is a gap in wiring rather than in reading: the code that
-would close it already exists and is already tested, and taking it from a
-test-only call to a production one is what remains.
+The TURN client (`crates/sipral-nat/src/turn/client.rs`, about 3,000 lines) is
+reachable now, on a stack given a `turn_server` (C ABI) or a `sipral::Relays`
+(Rust). It talks to a configured server under a long-term credential, and the
+ICE agent uses the allocation as the call's relayed candidate. The `turn` and
+`turn_client` fuzz targets cover its framing and state machine. A person's
+adversarial reading of it is still owed.
 
 **Everything upstream of this layer is the application's.** No identity
 verification beyond source address and dialog matching exists anywhere in

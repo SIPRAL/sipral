@@ -40,6 +40,10 @@ touching the protocol. Nothing here opens a socket, for the reason
 +--------+--------+----------------+
 ```
 
+`length` is an unsigned 16-bit count of payload bytes in big-endian (network)
+order, not counting the 3-byte header. The PCM inside an audio frame is
+little-endian regardless, so the two fields use two different byte orders.
+
 Audio payload is signed 16-bit little-endian PCM, mono, at the session rate
 declared when the session opens: 8000, 16000, 24000 or 48000 Hz. Frame duration
 is fixed per session, default 20 ms, and the same in both directions. It is
@@ -57,10 +61,26 @@ Raw PCM rather than an encoded format is deliberate. The agent side is a speech
 model, and every transcode between it and the network costs latency and quality
 for no benefit. Sipral does the codec work once, at the RTP edge.
 
-**Control messages** on the same socket, as JSON, distinguished by `kind`:
-session open and its parameters, incoming call with the caller identity,
-answer, reject, hangup, DTMF received, DTMF send, call state changes, transfer,
-voice activity, and an error channel.
+**Control messages** on the same socket, as a JSON object in the payload, told
+apart by the frame's kind byte: session open and its parameters, incoming call
+with the caller identity, answer, reject, hangup, DTMF received, DTMF send,
+call state changes, transfer, barge-in, voice activity, and an error channel.
+
+| Kind | Name | Fields |
+|---|---|---|
+| 0 | Audio | PCM, not JSON |
+| 1 | SessionOpen | `sample_rate`, `frame_duration_ms?` |
+| 2 | IncomingCall | `call_id`, `caller`, `display_name?` |
+| 3 | Answer | `call_id` |
+| 4 | Reject | `call_id`, `reason?` |
+| 5 | Hangup | `call_id`, `reason?` |
+| 6 | DtmfReceived | `call_id`, `digit`, `duration_ms?` |
+| 7 | DtmfSend | `call_id`, `digit`, `duration_ms?` |
+| 8 | CallState | `call_id`, `state: ringing\|answered\|ended`, `reason?` when ended |
+| 9 | Transfer | `call_id`, `target` |
+| 10 | BargeIn | `call_id` |
+| 11 | Error | `call_id?`, `code`, `message` — `code` one of `protocol_violation`, `frame_too_large`, `invalid_audio_frame`, `unknown_call`, `session_not_open`, `internal`, or a vendor string |
+| 12 | VoiceActivity | `call_id`, `speaking` |
 
 Control and audio share a socket so ordering between "the caller stopped
 speaking" and the frames around it is preserved. A separate control channel
@@ -115,8 +135,9 @@ drop always takes the **oldest** frame a queue is holding rather than refusing
 the one that just arrived — a stale frame is worse to deliver than a recent
 one to have skipped, in both directions. Each queue counts how many frames it
 has had to evict this way, on its own session, so an application that wants to
-know its agent is falling behind reads the number rather than parsing an error
-off every frame it sends. A queue opened with zero capacity — legal, if
+know its agent is falling behind reads the number, `Session::capture_dropped`
+and `Session::playback_dropped`, rather than parsing an error off every frame
+it sends. A queue opened with zero capacity — legal, if
 useless — drops every frame offered to it the same way, since there is no
 older frame in it to make room by.
 
@@ -134,12 +155,13 @@ depends on both `sipral-ua` and a media pipeline, so it is the one crate that
 can depend on this one too without pulling either into a build that does not
 want it — `sipral-headless` remains a leaf with nothing under it, so this is
 one more edge pointing down, not a cycle. It sits behind its own `headless`
-Cargo feature, off by default like `dtls` and `ice`: a softphone build that
-never answers a call from an agent framework links none of this.
+Cargo feature, off by default, unlike `opus`, `dtls`, `ice` and `stun`, which
+are on: a softphone build that never answers a call from an agent framework
+links none of this.
 
 `sipral::HeadlessSession` (`crates/sipral/src/headless.rs`) is what a call
 looks like once this protocol's session is paired with one: it owns a
-[`Session`](crate::Session) exactly as before, plus what pairing it with a
+`sipral_headless::Session` exactly as before, plus what pairing it with a
 live [`MediaSession`](../crates/sipral/src/session.rs) needs and this crate
 has no way to supply on its own —
 
@@ -163,16 +185,25 @@ has no way to supply on its own —
   is resampled to the socket's rate, which is fixed for the session: a codec
   change never restarts the detector, whose hangover would otherwise be lost
   and the next quiet frame of a word read as its end. A transition becomes
-  the [`VoiceActivity`](crate::VoiceActivity) message above.
+  the `sipral_headless::VoiceActivity` message above.
 - **DTMF.** A digit `sipral::MediaEvent::DigitReceived` reports becomes
-  [`DtmfReceived`](crate::DtmfReceived) for the sixteen keys this protocol's
-  own [`DtmfDigit`](crate::DtmfDigit) names; a `DtmfSend` off the socket
+  `sipral_headless::DtmfReceived` for the sixteen keys this protocol's
+  own `sipral_headless::DtmfDigit` names; a `DtmfSend` off the socket
   becomes a call to `MediaSession::send_dtmf`.
 - **Call state.** `sipral_ua::UaEvent::IncomingCall`, `CallConfirmed` and
   `CallEnded` become this protocol's own three-state
-  [`CallState`](crate::CallState) — session-local `Held` still has no wire
-  counterpart, for the reason [`SessionState`](crate::SessionState)'s own
+  `sipral_headless::CallState` — session-local `Held` still has no wire
+  counterpart, for the reason `sipral_headless::SessionState`'s own
   documentation gives.
+
+**Try it.** SIP side:
+`cargo run -p sipral --example headless-socket-agent --features headless -- --host 127.0.0.1 --port 5070 --socket 0.0.0.0:7001`
+(`crates/sipral/examples/headless-socket-agent.rs`; add
+`--register user@domain --registrar ip:port --pass secret` to register,
+`--ice-lite [--public ip]` for ICE-lite). Agent side:
+`cargo run -p sipral-headless --example agent -- --addr 127.0.0.1:7001`
+(`crates/sipral-headless/examples/agent.rs`), which echoes audio. The socket
+is TCP, one call at a time, at 16 kHz.
 
 What crosses the seam is PCM, in `i16`, and the handful of facts above —
 never a `MediaSession`, an `RtpSession` or a socket of any kind, which is
@@ -182,8 +213,8 @@ application driving both ends on a real socket paces the two exactly as
 paces `MediaSession` against a UDP one: on the media tick, decode this call's
 audio, hand it to `HeadlessSession::hear`, and write whatever whole frames
 that produced onto the socket as this crate's own audio frames (kind 0); read
-what the socket offers back with [`Decoder`](crate::Decoder), push it onto
-[`Session::push_playback`](crate::Session::push_playback), and let
+what the socket offers back with `sipral_headless::Decoder`, push it onto
+`sipral_headless::Session::push_playback`, and let
 `HeadlessSession::speak` turn it into the next frame `MediaSession::capture`
 sends as RTP. `speak` hands `capture` a frame on every tick, one of silence
 while the agent has nothing queued: that call is where the RTP timestamp

@@ -14,6 +14,10 @@ support ticket that it does nothing. Both live in `crates/sipral/src/counters.rs
 and `crates/sipral/src/capabilities.rs`, carried across the C ABI by
 `crates/sipral-ffi/src/counters.rs` and `crates/sipral-ffi/src/capabilities.rs`.
 
+D3, D8, B1, B2 and B5 are requirement ids from
+[13-client-requirements.md](13-client-requirements.md), which says what each
+one asks for.
+
 ## D3: health counters
 
 `sipral::MediaEngine::counters` returns a `sipral::Counters` — a struct
@@ -53,18 +57,20 @@ because C has no tuple struct to nest one `struct` inside another for free
 and a longer field name costs nothing a binding was not already going to
 spend regrouping them.
 
-Two members of `sipral_counters_t` are not one of these, and have no
-`sipral::Counters` field behind them: `events_dropped` and
-`farewells_dropped`, both from task 8.4.21 — the second closing a gap its own
-review left open — each appended at the struct's tail when it was added.
-Neither comes from `MediaEngine::poll_event` — both count
-something about the C ABI's own queues rather than about a call or a
-registration, and both are fed by `crates/sipral-ffi/src/stack.rs` rather
-than by anything the facade drains: `events_dropped` from the outbox a slow
-callback can leave full, `farewells_dropped` from the RTCP goodbyes queued
-for `sipral_stack_poll_farewell`, which an application that never calls it
-leaves to grow unless something bounds it. `docs/08-ffi.md` says what each
-one counts and why the queue behind it has a ceiling at all.
+Six members of `sipral_counters_t` have no `sipral::Counters` field behind
+them, each appended at the struct's tail when it was added. `events_dropped`
+and `farewells_dropped` count the C ABI's own queues, as above: neither comes
+from `MediaEngine::poll_event` — both are fed by `crates/sipral-ffi/src/stack.rs`
+rather than by anything the facade drains — `events_dropped` from the outbox a
+slow callback can leave full, `farewells_dropped` from the RTCP goodbyes
+queued for `sipral_stack_poll_farewell`, which an application that never
+calls it leaves to grow unless something bounds it. `docs/08-ffi.md` says
+what each one counts and why the queue behind it has a ceiling at all.
+`screened_refused_by_policy`, `screened_refused_by_rate`,
+`screened_refused_by_crowding` and `screened_refused_by_replaces` count
+INVITEs refused before the application ever saw them, read from
+`sipral_ua::UserAgent::refusals`; a Rust caller reads that method directly
+rather than going through a counter meant for the C ABI.
 
 ### Counters are monotonic, gauges are not — in the type, not only here
 
