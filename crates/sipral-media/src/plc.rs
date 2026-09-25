@@ -1156,6 +1156,48 @@ mod tests {
         10.0 * (signal / error.max(1.0)).log10()
     }
 
+    /// The same ten millisecond loss pattern as
+    /// [`one_ten_millisecond_frame_between_two_gaps_keeps_the_voice_pitch`],
+    /// but with [`reset`](Concealer::reset) called first, so no pitch is
+    /// carried across the gap and the widened window alone has to do the
+    /// work: this is the shape a stretch or a silence gap leaves behind it,
+    /// the far end resuming into a call the concealer has no memory of yet.
+    /// A search still halved into window and lag range reaches only 133 Hz
+    /// and down, scoring -5 dB worst and -3 dB mean on these voices; the
+    /// window shrinking first reaches every one of them, worst -2.5, mean
+    /// 8.3, even with no period carried over to help.
+    #[test]
+    fn a_short_history_with_no_pitch_known_still_reaches_low_voices() {
+        const SHORT: usize = 80;
+        let mut scores = Vec::new();
+        for hertz in (110..=178).step_by(4) {
+            let period = f64::from(g711::CLOCK_RATE) / f64::from(hertz);
+            let mut concealer = Concealer::new();
+            let mut sent = 0;
+            for _ in 0..10 {
+                concealer.received(&mut spoken(sent..sent + SHORT, period));
+                sent += SHORT;
+            }
+            concealer.reset();
+            concealer.received(&mut spoken(sent..sent + SHORT, period));
+            sent += SHORT;
+            let mut patch = vec![0_i16; SHORT];
+            assert_eq!(concealer.conceal(&mut patch), Concealment::Extended);
+            let score = snr(&spoken(sent..sent + SHORT, period), &patch);
+            scores.push((hertz, score));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let mean = scores.iter().map(|(_, score)| score).sum::<f64>() / scores.len() as f64;
+        let worst = scores
+            .iter()
+            .map(|(_, score)| *score)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            worst >= -3.5 && mean >= 5.0,
+            "worst {worst:.1} dB, mean {mean:.1} dB: {scores:?}"
+        );
+    }
+
     /// Ten millisecond frames, which G.711 is offered at as readily as
     /// twenty: one lost, one received, one lost. The frame that ended the
     /// first gap is all the history there is when the second opens, eighty
