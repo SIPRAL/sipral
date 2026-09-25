@@ -63,7 +63,7 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
     // is seen to be over: once the BYE is answered the stack tears this
     // call's media down on its own poll thread, so by the time either
     // collector below notices the call has ended, `statistics()` can
-    // already answer WRONG_STATE (docs/08-ffi.md, `sipral_media_statistics`:
+    // already answer WRONG_STATE (bindings/c/include/sipral.h, `sipral_media_statistics`:
     // "the end-of-call record arrives instead as
     // SIPRAL_EVENT_KIND_MEDIA_STATISTICS ... because by then the stream is
     // gone"). A read that lands mid-teardown is skipped, not fatal --

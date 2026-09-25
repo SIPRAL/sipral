@@ -67,7 +67,7 @@ async def run_call(call: Call) -> None:
         # tears this call's media down on its own poll thread, so by the
         # time either task below notices the call is over,
         # `call.media.statistics()` can already answer with the ABI's
-        # WRONG_STATE (docs/08-ffi.md: `sipral_media_statistics`'s
+        # WRONG_STATE (bindings/c/include/sipral.h: `sipral_media_statistics`'s
         # end-of-call record "arrives instead as
         # SIPRAL_EVENT_KIND_MEDIA_STATISTICS ... because by then the stream
         # is gone"). A read that lands mid-teardown is skipped, not fatal --
