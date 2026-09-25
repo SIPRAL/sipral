@@ -656,6 +656,15 @@ public sealed class SipralStack : IDisposable
             catch (SocketException)
             {
             }
+            catch (ObjectDisposedException)
+            {
+                // `sock` was still `_stunSockets[sourceText]` at the lock
+                // above, but `Call.Close`/`ForgetMediaSocket` on another
+                // thread can remove it from that dictionary and dispose
+                // it right after this thread let go of `_natLock` — the
+                // same race the `Run` loop's own catches guard against,
+                // one step later.
+            }
         }
     }
 
@@ -747,6 +756,21 @@ public sealed class SipralStack : IDisposable
                     }
                     catch (SocketException)
                     {
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // `sock` was still in `checkRead` because
+                        // `Socket.Select` found it ready before this loop
+                        // began, but `Call.Close`/`SipralStack.Dispose` can
+                        // dispose the very same media socket from an
+                        // application thread with no lock between that
+                        // return and this `ReceiveFrom` — the same race
+                        // the `ObjectDisposedException` catch around
+                        // `Socket.Select` above guards, one step later.
+                        // `_stunSockets`/`_natWaiters` are already cleared
+                        // for it by then (`ReleaseStunSocket` runs before
+                        // the socket is disposed), so there is nothing
+                        // left here to clean up.
                     }
                 }
             }
