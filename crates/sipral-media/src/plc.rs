@@ -142,9 +142,20 @@ impl Concealer {
     /// cross-faded with the extension that was being played, in place, because
     /// splicing two waveforms that were never in phase clicks. The frame is
     /// then remembered as the material for the next gap.
+    ///
+    /// The first frame after a gap starts the history again rather than
+    /// joining it. What was remembered before the gap is no longer next to
+    /// it in time — the gap's own samples are never remembered, below — and
+    /// a history joined across one reads as periodic where it is not: after
+    /// four lost frames of the lab's 350 + 440 Hz tone, whose period is five
+    /// frames, the frame that ended the gap matched the one before the gap
+    /// exactly, one frame back in the history, and the next gap repeated it
+    /// as a one-frame period, opening on its first sample instead of the one
+    /// after its last — a jump of up to the tone's whole amplitude.
     pub fn received(&mut self, frame: &mut [i16]) {
         if let Some(mut gap) = self.gap.take() {
             gap.blend_into(frame);
+            self.history.filled = 0;
         }
         self.history.push(frame);
     }
@@ -173,7 +184,11 @@ impl Concealer {
         }
     }
 
-    /// Forget the stream: a new call, or a codec change mid-call.
+    /// Forget the stream: a new call, a codec change mid-call, or a hole in
+    /// it this concealer was not asked to fill — silence played while a
+    /// jitter buffer refilled, say — after which the history before it is no
+    /// longer next to what comes, for the reason
+    /// [`received`](Self::received) gives.
     pub fn reset(&mut self) {
         self.history.filled = 0;
         self.gap = None;
@@ -682,6 +697,96 @@ mod tests {
         assert!(resumed.iter().skip(OVERLAP).all(|sample| *sample == 20_000));
         assert_eq!(concealer.pitch_period(), None);
         assert_eq!(concealer.gap_samples(), 0);
+    }
+
+    /// The shape the lab's audio gate caught on a lossy link: four frames of
+    /// the 350 + 440 Hz tone lost, one received, one more lost. The tone's
+    /// period is five frames, so the frame that ended the first gap matched
+    /// the one before it exactly, one frame back in a history joined across
+    /// the gap, and the second gap repeated that frame as a one-frame period:
+    /// it opened on the frame's first sample, not on the one after its last.
+    /// The lab measured a jump of 6 396 against a tone whose steepest step is
+    /// 3 027; every phase of the tone is tried here, and none may open further
+    /// from the last sample than the tone itself ever moves in one.
+    #[test]
+    fn a_gap_after_a_gap_continues_the_tone_and_not_the_history() {
+        let rate = f64::from(g711::CLOCK_RATE);
+        let (low, high) = (
+            2.0 * core::f64::consts::PI * 350.0 / rate,
+            2.0 * core::f64::consts::PI * 440.0 / rate,
+        );
+        let amplitude = 4_900.0;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        let lab = |n: usize, phase: f64| {
+            (amplitude * ((low * n as f64 + phase).sin() + (high * n as f64 + 2.0 * phase).sin()))
+                .round() as i16
+        };
+        let frame = |start: usize, phase: f64| -> Vec<i16> {
+            (start..start + FRAME).map(|n| lab(n, phase)).collect()
+        };
+        let steepest = 2.0 * amplitude * ((low / 2.0).sin() + (high / 2.0).sin());
+
+        for step in 0..40 {
+            let phase = f64::from(step) * core::f64::consts::TAU / 40.0;
+            let mut concealer = Concealer::new();
+            let mut sent = 0;
+            for _ in 0..10 {
+                concealer.received(&mut frame(sent, phase));
+                sent += FRAME;
+            }
+            for _ in 0..4 {
+                concealer.conceal(&mut vec![0_i16; FRAME]);
+                sent += FRAME;
+            }
+            let mut resumed = frame(sent, phase);
+            concealer.received(&mut resumed);
+            let last = f64::from(*resumed.last().unwrap());
+
+            let mut next = vec![0_i16; FRAME];
+            assert_eq!(concealer.conceal(&mut next), Concealment::Extended);
+            let jump = (f64::from(next[0]) - last).abs();
+            assert!(
+                jump <= steepest + 100.0,
+                "at phase {phase:.2} the second gap opened {jump:.0} away from the last \
+                 sample, against a steepest step of {steepest:.0}"
+            );
+        }
+    }
+
+    /// After a gap that ran out, the frame that ends it fades in from
+    /// silence; with a period of exactly one frame, a history joined across
+    /// the gap handed that fade to the next gap as the period to repeat, and
+    /// the extension opened on the silence the fade began with.
+    #[test]
+    fn a_gap_after_a_faded_resume_continues_what_was_received() {
+        let period = FRAME;
+        let peak = 8_000;
+        let mut concealer = Concealer::new();
+        let mut sent = prime(&mut concealer, 10, period, peak);
+
+        let mut patch = vec![0_i16; FRAME];
+        for _ in 0..4 {
+            concealer.conceal(&mut patch);
+            sent += FRAME;
+        }
+        assert_eq!(
+            concealer.conceal(&mut vec![0_i16; FRAME]),
+            Concealment::Exhausted
+        );
+        sent += FRAME;
+
+        let mut resumed = tone(sent..sent + FRAME, period, peak);
+        concealer.received(&mut resumed);
+        let last = i32::from(*resumed.last().unwrap());
+
+        let mut next = vec![0_i16; FRAME];
+        assert_eq!(concealer.conceal(&mut next), Concealment::Extended);
+        // the triangle's own step is 2 * peak * 2 / period, 200 here
+        let jump = (i32::from(next[0]) - last).abs();
+        assert!(
+            jump <= 400,
+            "the next gap opened {jump} away from the last sample"
+        );
     }
 
     #[test]

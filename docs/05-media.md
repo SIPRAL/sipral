@@ -445,7 +445,12 @@ Loss on a real mobile network is not exceptional. Concealment is per codec:
 - G.711 has neither. Pitch-based waveform extension for short gaps, with
   amplitude decay into silence for long ones, and a smoothed cross-fade when the
   stream resumes. Bounded: past a few frames, concealment sounds worse than
-  comfort noise.
+  comfort noise. The pitch is only ever estimated over audio that is
+  contiguous in time: the frame after a hole — frames concealed, or
+  silence or comfort noise played while the jitter buffer had nothing —
+  starts the history again, since a history joined across a hole can look
+  periodic where the signal is not, and the next gap would repeat that
+  false period with a click at its first sample.
 
 ### DTMF
 

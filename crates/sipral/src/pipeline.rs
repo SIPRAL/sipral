@@ -307,6 +307,20 @@ impl Coder {
         matches!(&self.kind, Kind::Celp(pair) if pair.1.in_pause())
     }
 
+    /// A frame was played that this coder neither decoded nor concealed —
+    /// silence while the jitter buffer refills, or comfort noise — so the
+    /// waveform concealer's history ends here: the next frame it is given
+    /// is not next to the last one in time, and a history joined across the
+    /// hole can look periodic where the audio is not. A gap it had open ends
+    /// here too, since what was played after it was not its extension.
+    /// G.729 and Opus keep their decoders' own state, which is theirs to
+    /// carry across a pause.
+    pub(crate) fn interrupted(&mut self) {
+        if let Kind::Companded(_, concealer) | Kind::Wideband(_, concealer) = &mut self.kind {
+            concealer.reset();
+        }
+    }
+
     /// Fill a frame the far end did not send, when it did not send it
     /// because it is in a pause: G.729's comfort noise, carried on from the
     /// last SID frame (B.4.4). `None` for every other case — another codec,

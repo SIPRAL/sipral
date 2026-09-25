@@ -659,6 +659,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A loss right after a long one, or after the jitter buffer ran dry, no
+  longer clicks on G.711.** The
+  concealer kept the audio from before a hole in the stream — frames it
+  concealed, or silence played while the jitter buffer ran dry and
+  refilled — and joined the next frame that arrived straight onto it, as if
+  nothing had been missed. A history joined that way can look periodic
+  where the signal is not: after four missing frames of a tone whose period
+  is five, the frame after the hole matched the one before it exactly, and
+  a loss one frame later repeated it as a one-frame period, opening on its
+  first sample instead of continuing from its last. On the lab's lossy
+  links that was a jump of 6 396 and of 7 992 on a tone whose steepest step
+  is about 3 000. The history now starts again at the frame after any hole,
+  concealed or silent, so a pitch is only ever estimated over audio that is
+  contiguous in time.
 - **An ICE call hears the far end before a pair is chosen.** Until the
   controlling end nominates — up to `nomination_wait`, a second, after its
   first valid pair — the far end sends on whichever pair its own checks

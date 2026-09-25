@@ -1295,6 +1295,7 @@ impl MediaSession {
                     noise.received(described);
                 }
                 noise.fill(room);
+                coder.interrupted();
                 Playback::ComfortNoise
             }
             Pull::Packet(frame) if frame.payload_type == payload_type => {
@@ -1344,7 +1345,10 @@ impl MediaSession {
                     conceal(coder, room)
                 }
             }
+            // nothing the coder decoded or concealed is played, so its
+            // concealer's history stops here (`Coder::interrupted`)
             Pull::Empty => {
+                coder.interrupted();
                 if coder.pause(room).is_some() {
                     Playback::ComfortNoise
                 } else if noise.is_silent() {

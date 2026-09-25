@@ -3127,6 +3127,97 @@ fn a_lost_packet_is_played_as_concealment_rather_than_as_a_gap() {
     assert!(quality.lost > 0, "the loss was not counted");
 }
 
+/// A burst of loss longer than the jitter buffer's delay is played as
+/// silence, not concealment: the buffer runs dry and waits to fill again.
+/// The concealer never saw those frames go by, and kept the audio from
+/// before them as if the frame after them came straight on. On the lab's
+/// 350 + 440 Hz tone, whose period is five frames, a hole of four made the
+/// two sides of the join match exactly one frame apart, and the next packet
+/// lost was concealed by repeating the frame before it as a one-frame
+/// period: it opened on that frame's first sample instead of continuing
+/// from its last, a jump the lab's audio gate measured at 7 992 on a tone
+/// whose steepest step is 2 998. Every splice into concealment here, over
+/// holes of three to six frames and ten phases of the tone, must step no
+/// further than the tone itself does.
+#[test]
+fn a_loss_after_the_buffer_ran_dry_continues_the_audio_and_not_what_came_before_it() {
+    let rate = 8_000.0;
+    let (low, high) = (
+        2.0 * core::f64::consts::PI * 350.0 / rate,
+        2.0 * core::f64::consts::PI * 440.0 / rate,
+    );
+    let amplitude = 4_900.0;
+    let steepest = 2.0 * amplitude * ((low / 2.0).sin() + (high / 2.0).sin());
+    let offer = "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+    let answer = "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+
+    let mut splices = 0;
+    for hole in 3..=6_usize {
+        for step in 0..10_u32 {
+            let phase = f64::from(step) * core::f64::consts::TAU / 10.0;
+            let now = Instant::now();
+            let (ours, theirs) = plan_pair(offer, answer);
+            let mut sender = session(&theirs, &ours, now);
+            let mut receiver = session(&ours, &theirs, now);
+            let mut at = now;
+            let mut played = vec![0_i16; 160];
+            let mut previous: Option<(Playback, i16)> = None;
+            let mut silent = 0;
+
+            for index in 0..60_usize {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                let samples: Vec<i16> = (index * 160..(index + 1) * 160)
+                    .map(|n| {
+                        let n = n as f64;
+                        (amplitude * ((low * n + phase).sin() + (high * n + 2.0 * phase).sin()))
+                            .round() as i16
+                    })
+                    .collect();
+                let datagram = sender
+                    .capture(&samples, at)
+                    .expect("it encodes")
+                    .map(|out| out.payload.to_vec());
+                // a hole of `hole` packets, then one packet, then one more lost
+                let lost = (20..20 + hole).contains(&index) || index == 21 + hole;
+                if let Some(mut datagram) = datagram
+                    && !lost
+                {
+                    receiver.receive(
+                        &mut datagram,
+                        "192.0.2.2:40002".parse().expect("an address"),
+                        at,
+                    );
+                }
+                let outcome = receiver.playback(&mut played);
+                if outcome == Playback::Silence && index > 10 {
+                    silent += 1;
+                }
+                if outcome == Playback::Concealed
+                    && let Some((Playback::Packet, last)) = previous
+                {
+                    splices += 1;
+                    let jump = (f64::from(played[0]) - f64::from(last)).abs();
+                    assert!(
+                        jump <= steepest + 400.0,
+                        "a hole of {hole} and phase {phase:.2}: the concealment opened \
+                         {jump:.0} away from the last sample played, against a steepest \
+                         step of {steepest:.0}"
+                    );
+                }
+                previous = Some((outcome, played[159]));
+                at += TICK;
+            }
+            assert!(silent > 0, "a hole of {hole} never ran the buffer dry");
+        }
+    }
+    assert!(
+        splices >= 40,
+        "only {splices} splices into concealment were checked"
+    );
+}
+
 /// A far end that is not this stack answers an offer of G.729 on its static
 /// number alone, with no `a=rtpmap`, and says `annexb=yes` although the
 /// offer said no: the call still runs on G.729, the tone crosses, and each
