@@ -31,10 +31,18 @@ signalling travels on, and a background thread that drains
 is decoded synchronously, on that poll thread, into a `Sendable`
 `SipralEvent` before anything crosses — `sipral_event_t`'s pointers are only
 valid for the length of the callback that carries them (`docs/08-ffi.md`,
-"Signalling across the boundary") — and fed into an `AsyncStream<SipralEvent>`,
-`stack.events`. `Call.events` is the same stream narrowed to one call's own
-handle, and `Call.dtmf` narrows further still, to an `AsyncStream<Character>`
-of just the digits from `SipralEventKind.digitReceived`.
+"Signalling across the boundary") — and handed to every stream a caller has
+asked for. Streams are asked for, not stored: `stack.events()`,
+`call.events()` (one call's own events), `call.dtmf()` (an
+`AsyncStream<Character>` of just the digits from
+`SipralEventKind.digitReceived`) and `media.frames()` each return a new
+`AsyncStream`, and every one gets every item from then on, in order — so
+`CallKitBridge`, a UI and a recorder can all read the same call. Nothing
+raised before a stream is taken reaches it: take it first, then act. A
+reader that falls behind drops its own oldest items (past
+`Call.eventBuffer`, 4096 events or digits; past `Media.frameBuffer`, 50
+frames, unless `frames(bufferingNewest:)` asks for another number), and a
+call's streams finish right after its `callEnded`.
 
 `Account` (`stack.addAccount`) registers and carries `sipral_account_announce`/
 `refreshBinding` for `docs/15-mobile.md`'s C2 push sequence. `Call`
@@ -43,7 +51,7 @@ sends DTMF and hangs up; `Call.media` mints a `Media` once
 `SipralEventKind.mediaStarted` says the session is up. `Media` runs on a
 thread of its own, paced at the call's own frame rate (`docs/08-ffi.md`, "A
 call's media has a handle of its own"): `sendAudio([Int16])` queues 16-bit
-mono PCM out, `media.frames` is an `AsyncStream<[Int16]>` of what came back,
+mono PCM out, `media.frames()` is an `AsyncStream<[Int16]>` of what came back,
 and `media.statistics()` is `sipral_stream_stats_t`.
 
 `CallKitBridge` and `PushKitBridge` run `docs/15-mobile.md`'s "C2" sequence —
@@ -128,11 +136,14 @@ try account.register()
 // sockets default to 127.0.0.1, so name an address the registrar can reach.
 
 let call = try stack.placeCall(account: account, target: "sip:bob@example.invalid", mediaHost: "192.0.2.10")
-for await event in call.events {
+let events = call.events()                 // take it at once: nothing earlier is replayed
+for await event in events {
     if event.kind == .mediaStarted { break }
 }
-call.media?.sendAudio(pcmSamples)          // 16-bit mono, one call at a time
-for await frame in call.media!.frames {
+let media = call.media!
+let frames = media.frames()                // before sending, so the first reply is not missed
+media.sendAudio(pcmSamples)                // 16-bit mono, one call at a time
+for await frame in frames {
     // the far end's own audio, one frame per item
 }
 
@@ -144,11 +155,13 @@ call.close()
 ```
 
 An incoming call has no `Call` until the application decides what to do
-with it: read `SipralEventKind.incomingCall` off `stack.events` and call
-`stack.answerCall(event)` or `stack.rejectCall(event)`. Under CallKit, take
-it with `stack.takeIncomingCall(event)` instead, which hands over the `Call`
-still ringing: bind that into `CallKitBridge`, and CallKit's
-`CXAnswerCallAction` is what answers it.
+with it: read `SipralEventKind.incomingCall` off `stack.events()` and call
+`stack.answerCall(event)` or `stack.rejectCall(event)`. To see everything
+the call does from its answer on, take it with
+`stack.takeIncomingCall(event)`, which hands over the `Call` still ringing,
+then its `events()`, then `answer()`. Under CallKit, bind the ringing `Call`
+into `CallKitBridge` instead, and CallKit's `CXAnswerCallAction` is what
+answers it.
 
 ## Samples
 

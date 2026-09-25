@@ -564,16 +564,17 @@ routable from the lab, so the `c=` Asterisk sends to reaches it, where the
 emulator's does not.
 
 **What ran, on the iOS 26.5 simulator (iPhone 17, arm64) under Xcode 26.6.**
-With none of the variables set, sixteen tests ran: fourteen passed — the
-in-process loopback calls, `DialogFlowTests`, the bridges against a
-recording provider and `CallKitAdapter` against CallKit's own action
-classes — and the two `HostPeerCallTests` were skipped, each saying why.
-Earlier, the call to `SipralLabAgent` on the Mac was up 60 ms after the
-INVITE; the simulator end counted 31 RTP packets sent and 29 received at the
-moment it read its statistics, heard 25 frames of its own tone come back,
-and was hung up by the agent's BYE. The agent's own log showed it answered,
-the ACK arrived (the call read `confirmed`), `#` came in, and 40 packets
-sent and 39 received by the time it hung up. The x86_64 simulator slice and
+With `SIPRAL_PEER` naming `SipralLabAgent` on the Mac, thirty-one tests
+ran: thirty passed — the in-process loopback calls (two readers of one call
+among them), the event broadcaster's own tests, `DialogFlowTests`, the
+bridges against a recording provider, `CallKitAdapter` against CallKit's
+own action classes, and the call to the agent — and the one that waits for
+a call through a registrar was skipped, saying why. The call to the agent
+was up 119 ms after the INVITE; the simulator end counted 38 RTP packets
+sent and 34 received at the moment it read its statistics, heard 25 frames
+of its own tone come back, and was hung up by the agent's BYE. The agent's
+own log showed it answered, the ACK arrived (the call read `confirmed`),
+`#` came in, and 44 packets sent and 45 received by the time it hung up. The x86_64 simulator slice and
 the device slice link the same test bundle; neither was run.
 
 **What the simulator cannot show.** Its `callservicesd` turns away every

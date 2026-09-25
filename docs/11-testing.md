@@ -900,8 +900,8 @@ The Swift suite also runs on the iOS Simulator, outside the gate: against
 the XCFramework's simulator slice, from the distribution package
 `scripts/package/xcframework.sh` prints, with `xcodebuild test` on a
 simulator device made for the run. `docs/15-mobile.md`, "The Swift package on
-iOS", has the commands and what the last runs showed: sixteen tests on iOS
-26.5, and the two that need a peer outside the process run on their own —
+iOS", has the commands and what the last runs showed: thirty-one tests on
+iOS 26.5, and the two that need a peer outside the process run on their own —
 a call from the simulator to `SipralLabAgent` on the Mac, and, through the
 lab's Asterisk published by `scripts/lab.sh wasapi up`, a registration and
 a call both ways, with REGISTER, INVITE, ACK, BYE and RTP seen at the
