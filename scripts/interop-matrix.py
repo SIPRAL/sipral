@@ -60,9 +60,36 @@ FLOW_SECTIONS = {
     "the same, through the C ABI -- straight at Asterisk": ("asterisk", "c"),
     "phone to phone -- baresip through the proxy": ("baresip", "rust"),
     "the same, through the C ABI -- baresip through the proxy": ("baresip", "c"),
+    "behind a NAT -- STUN against coturn, then register and call Asterisk, in C": ("nat_stun", "c"),
+    "ICE-lite -- a call that requires ICE, placed at the headless agent answering as lite": (
+        "ice_lite",
+        "rust",
+    ),
+    "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them": ("full_ice", "rust"),
 }
-AGENT_SECTION = "the Python example agent, called by Asterisk"
+# Sections shaped like an example agent's own transcript rather than the
+# harness's flow output: nobody here prints a "pass"/"FAIL" line of the shape
+# FLOW_PASS_RE/FLOW_FAIL_RE read, only lab.sh's own closing `ok`/`FAIL` line,
+# because the agent (or, for ICE-lite, Asterisk itself) is the one placing or
+# answering the call rather than the harness driving a flow. One dict, in the
+# order lab.sh prints them, each mapped to the peer that called or was
+# called and the flow name this file reports the result under -- a name this
+# file invents, the way "Python agent example" already was before this dict
+# existed, since none of these sections prints one in the shape a feature's
+# `flows` entry expects.
+AGENT_SECTIONS = {
+    "the Python example agent, called by Asterisk": ("asterisk", "Python agent example"),
+    "the socket-framed agent, called by Asterisk": ("asterisk", "headless socket agent example"),
+    "the Swift binding's example agent, called by Asterisk": ("asterisk", "Swift agent example"),
+    "the Kotlin idiomatic-layer agent, called by Asterisk": ("asterisk", "Kotlin agent example"),
+    "the .NET sample agent, called by Asterisk": ("asterisk", ".NET agent example"),
+    "ICE-lite -- Asterisk's own ICE calling the headless agent": (
+        "asterisk",
+        "ICE-lite, Asterisk's ICE calling in",
+    ),
+}
 NETEM_SECTION = "the same call, over a bad network"
+TURN_RELAY_SECTION = "full ICE through a relay -- the path between the two NATs blocked, coturn as TURN"
 STOP_SECTION = "the capture"
 
 # What each row's "Peer" column reads, and which of the versions read_versions()
@@ -75,6 +102,9 @@ PEER_LABELS = {
     "opensips": "OpenSIPS \u2192 FreeSWITCH",
     "asterisk": "Asterisk",
     "baresip": "baresip (phone to phone, via Kamailio)",
+    "nat_stun": "Asterisk, from behind a NAT (STUN)",
+    "ice_lite": "headless agent (ICE-lite)",
+    "full_ice": "sipral, self-to-self (each behind its own NAT)",
 }
 
 # Named by the owner (root CLAUDE.md, intern/TASKS.md 8.6.8): every peer worth
@@ -124,14 +154,28 @@ def md_cell(text: str) -> str:
 
 
 def split_flow_line(text: str) -> tuple[str, str | None]:
-    """Splits 'flow name   (stats)' into (name, stats), stats being None when
-    there is none. Lazy on the name so the split lands at the first run of
-    three spaces before '(' rather than consuming into the stats text --
-    correct as long as no flow name itself contains that run, which none do.
+    """Splits 'flow name   (stats)[; trailing text]' into (name, stats),
+    stats being None when there is no parenthesized block at all. The split
+    lands at the first run of three spaces before '(' -- correct as long as
+    no flow name itself contains that run, which none do. Stats can nest
+    parentheses of their own ("300 frame(s) mixed, ..."), so the *last* ')'
+    in the line, not the first, is the real close; the two ICE-through-NATs
+    flows also print a clause after that close ("...audible); this end at
+    172.19.0.3:57095, mapped to ..."), which is neither name nor stats and
+    nothing here needs, since a passing flow's stats are never rendered
+    (render_result() reads `detail` only for a fail, and split_flow_line is
+    never called for one -- FLOW_FAIL_RE's own em-dash line carries the
+    reason directly).
     """
-    m = re.match(r"^(.*?)(?:\s{3}\((.*)\))?$", text)
-    assert m is not None
-    return m.group(1), m.group(2)
+    marker = "   ("
+    idx = text.find(marker)
+    if idx == -1:
+        return text, None
+    name = text[:idx]
+    close = text.rfind(")")
+    if close <= idx:
+        return name, text[idx + len(marker) :]
+    return name, text[idx + len(marker) : close]
 
 
 def split_sections(text: str) -> list[tuple[str, list[str]]]:
@@ -141,7 +185,7 @@ def split_sections(text: str) -> list[tuple[str, list[str]]]:
     run the raw container log tail) is not part of any section and is
     dropped.
     """
-    headers = set(FLOW_SECTIONS) | {AGENT_SECTION, NETEM_SECTION}
+    headers = set(FLOW_SECTIONS) | set(AGENT_SECTIONS) | {NETEM_SECTION, TURN_RELAY_SECTION}
     sections: list[tuple[str, list[str]]] = []
     header: str | None = None
     body: list[str] = []
@@ -202,26 +246,38 @@ def base_flow_name(flow: str) -> str:
 
 
 def parse_agent_section(
-    lines: list[str], versions: dict[str, str], date: str, rows: list[Row]
+    lines: list[str], peer_key: str, flow_label: str, versions: dict[str, str], date: str, rows: list[Row]
 ) -> None:
+    """The *last* `ok`/`FAIL` line in the section is its verdict, not the
+    first: the ICE-lite section where Asterisk calls in prints an earlier,
+    unrelated `ok` (a container-readiness note carried over from the step
+    before it, "asterisk: Asterisk Ready") ahead of the agent's own
+    transcript, and only the closing line is the result this row reports.
+    Every other section in AGENT_SECTIONS has exactly one such line, so
+    taking the last is the same as taking the only one there.
+    """
+    found: tuple[str, str] | None = None
     for line in lines:
         m = LAB_SH_LINE_RE.match(line)
         if not m:
             continue
         result = "pass" if line.lstrip().startswith("ok") else "fail"
-        rows.append(
-            Row(
-                "asterisk",
-                PEER_LABELS["asterisk"],
-                versions["asterisk"],
-                "Python agent example",
-                result,
-                None if result == "pass" else m.group(1),
-                date,
-            )
-        )
+        found = (result, m.group(1))
+    if found is None:
+        print(f"warning: the {flow_label!r} section had no closing ok/FAIL line", file=sys.stderr)
         return
-    print("warning: the Python agent section had no closing ok/FAIL line", file=sys.stderr)
+    result, detail = found
+    rows.append(
+        Row(
+            peer_key,
+            PEER_LABELS[peer_key],
+            peer_version_label(peer_key, versions),
+            flow_label,
+            result,
+            None if result == "pass" else detail,
+            date,
+        )
+    )
 
 
 def impairment_profiles() -> list[str]:
@@ -291,6 +347,64 @@ def parse_netem_section(
             )
 
 
+# The five runs TURN_RELAY_SECTION prints, each under its own literal marker
+# line lab.sh prints before it -- a closed, ordered list for the same reason
+# FLOW_SECTIONS's own headers are one: a marker whose wording changes is a
+# marker this file has to be told about too. All five print the identical
+# flow name ("full ICE through two NATs, calling"), since it is the same
+# harness flow run five ways, so the qualifier here is what tells the five
+# rows apart in the Results table -- and it is also what keeps the two
+# "blocked without TURN" runs, which are *meant* to fail (proving the block
+# holds before TURN is offered), out of every feature's `flows` list: a
+# passing TURN relay must never read "partial" because of a negative test
+# that worked.
+TURN_RELAY_BLOCKS = {
+    "  without TURN: the call has to find no path": ("rust", "blocked without TURN"),
+    "  with TURN: the call has to go through coturn": ("rust", "via TURN"),
+    "  without TURN, through the C ABI: the call has to find no path": ("c", "blocked without TURN"),
+    "  with TURN, through the C ABI: the call has to go through coturn": ("c", "via TURN"),
+    "  with TURN at the C caller alone: the call has to go through its own relay": (
+        "c",
+        "via TURN, caller relay only",
+    ),
+}
+
+
+def parse_turn_relay_section(lines: list[str], versions: dict[str, str], date: str, rows: list[Row]) -> None:
+    blocks: list[tuple[str, list[str]]] = []
+    current: str | None = None
+    body: list[str] = []
+    for line in lines:
+        if line in TURN_RELAY_BLOCKS:
+            if current is not None:
+                blocks.append((current, body))
+            current, body = line, []
+        elif current is not None:
+            body.append(line)
+    if current is not None:
+        blocks.append((current, body))
+
+    version = peer_version_label("full_ice", versions)
+    for marker, block in blocks:
+        driver, qualifier = TURN_RELAY_BLOCKS[marker]
+        flows = parse_flow_lines(block)
+        if not flows:
+            print(f"warning: TURN relay run {marker!r} had no flow results", file=sys.stderr)
+            continue
+        for name, result, detail in flows:
+            rows.append(
+                Row(
+                    "full_ice",
+                    PEER_LABELS["full_ice"],
+                    version,
+                    with_driver(f"{name}, {qualifier}", driver),
+                    result,
+                    detail,
+                    date,
+                )
+            )
+
+
 def read_versions(root: Path) -> dict[str, str]:
     """Peer versions, read from the same files that pin them for the lab
     itself rather than kept here a second time: interop/compose.yaml's own
@@ -332,6 +446,14 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         return v("asterisk")
     if peer_key == "baresip":
         return f"{v('baresip')} (baresip) / {v('kamailio')} (proxy)"
+    if peer_key == "nat_stun":
+        return v("asterisk")
+    if peer_key in ("ice_lite", "full_ice"):
+        # Neither is a third-party peer with a version of its own to read
+        # off compose.yaml or a Dockerfile -- both are this stack calling
+        # itself, or being called by the same Asterisk container already
+        # versioned above.
+        return "n/a"
     raise ValueError(peer_key)
 
 
@@ -357,10 +479,13 @@ def parse_log(text: str, versions: dict[str, str], date: str) -> list[Row]:
                         date,
                     )
                 )
-        elif header == AGENT_SECTION:
-            parse_agent_section(body, versions, date, rows)
+        elif header in AGENT_SECTIONS:
+            peer_key, flow_label = AGENT_SECTIONS[header]
+            parse_agent_section(body, peer_key, flow_label, versions, date, rows)
         elif header == NETEM_SECTION:
             parse_netem_section(body, versions, date, rows)
+        elif header == TURN_RELAY_SECTION:
+            parse_turn_relay_section(body, versions, date, rows)
     return rows
 
 

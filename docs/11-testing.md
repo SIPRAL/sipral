@@ -597,6 +597,10 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | DTLS-SRTP, held and resumed (C ABI) | pass | 2026-09-25 |
 | Asterisk | 22.10.1 | local conference (C ABI) | pass | 2026-09-25 |
 | Asterisk | 22.10.1 | Python agent example | pass | 2026-09-25 |
+| Asterisk | 22.10.1 | headless socket agent example | pass | 2026-09-25 |
+| Asterisk | 22.10.1 | Swift agent example | pass | 2026-09-25 |
+| Asterisk | 22.10.1 | Kotlin agent example | pass | 2026-09-25 |
+| Asterisk | 22.10.1 | .NET agent example | pass | 2026-09-25 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | call | pass | 2026-09-25 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | hold and resume | pass | 2026-09-25 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | SRTP, phone to phone | pass | 2026-09-25 |
@@ -605,6 +609,15 @@ the generator itself — never the block, which the next run overwrites.
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | hold and resume (C ABI) | pass | 2026-09-25 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | SRTP, phone to phone (C ABI) | pass | 2026-09-25 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | DTLS-SRTP, phone to phone (C ABI) | pass | 2026-09-25 |
+| Asterisk, from behind a NAT (STUN) | 22.10.1 | behind a NAT, through STUN (C ABI) | pass | 2026-09-25 |
+| headless agent (ICE-lite) | n/a | ICE required, against 172.18.0.5 | pass | 2026-09-25 |
+| Asterisk | 22.10.1 | ICE-lite, Asterisk's ICE calling in | pass | 2026-09-25 |
+| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling | pass | 2026-09-25 |
+| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, blocked without TURN | fail (no path was ever chosen (0 sent, 0 back): the far end answered no check) | 2026-09-25 |
+| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN | pass | 2026-09-25 |
+| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, blocked without TURN (C ABI) | fail (no path was ever chosen (0 sent, 0 back): the far end answered no check) | 2026-09-25 |
+| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN (C ABI) | pass | 2026-09-25 |
+| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN, caller relay only (C ABI) | pass | 2026-09-25 |
 | Kamailio → FreeSWITCH | 6.1.4 | register, over a bad link (lossy) | pass | 2026-09-25 |
 | Kamailio → FreeSWITCH | 6.1.4 | call, over a bad link (lossy) | pass | 2026-09-25 |
 | Kamailio → FreeSWITCH | 6.1.4 | register, over a bad link (mobile) | pass | 2026-09-25 |
@@ -643,7 +656,17 @@ the generator itself — never the block, which the next run overwrites.
 | Narrowed inbound offer | yes | yes | not yet |
 | Python binding | yes | yes | yes |
 | Bad-network resilience (audio quality gate) | yes | yes | yes |
-| ICE (RFC 8445, full agent role) | yes | yes | n/a |
+| STUN (RFC 5389), from behind a NAT | yes | yes | yes |
+| ICE-lite (RFC 8445 §2.5), harness and Asterisk | yes | yes | yes |
+| ICE (RFC 8445, full agent role) | yes | yes | yes |
+| TURN relay (RFC 8656) | yes | yes | yes |
+| G.729 Annex B (SID/DTX) | yes | yes | n/a |
+| Headless socket agent | yes | yes | yes |
+| Swift binding | yes | yes | yes |
+| Kotlin binding | yes | yes | yes |
+| .NET binding | yes | yes | yes |
+| PipeWire audio backend | yes | yes | n/a |
+| WASAPI audio backend | yes | yes | n/a |
 
 <!-- END GENERATED interop-matrix -->
 

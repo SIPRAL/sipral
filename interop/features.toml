@@ -146,7 +146,70 @@ flows = [
 ]
 
 [[feature]]
+name = "STUN (RFC 5389), from behind a NAT"
+implemented = true
+unit_tested = true
+flows = ["behind a NAT, through STUN"]
+
+[[feature]]
+name = "ICE-lite (RFC 8445 §2.5), harness and Asterisk"
+implemented = true
+unit_tested = true
+flows = ["ICE required, against 172.18.0.5", "ICE-lite, Asterisk's ICE calling in"]
+
+[[feature]]
 name = "ICE (RFC 8445, full agent role)"
+implemented = true
+unit_tested = true
+flows = ["full ICE through two NATs, calling"]
+
+[[feature]]
+name = "TURN relay (RFC 8656)"
+implemented = true
+unit_tested = true
+flows = [
+    "full ICE through two NATs, calling, via TURN",
+    "full ICE through two NATs, calling, via TURN, caller relay only",
+]
+
+[[feature]]
+name = "G.729 Annex B (SID/DTX)"
+implemented = true
+unit_tested = true
+flows = []
+
+[[feature]]
+name = "Headless socket agent"
+implemented = true
+unit_tested = true
+flows = ["headless socket agent example"]
+
+[[feature]]
+name = "Swift binding"
+implemented = true
+unit_tested = true
+flows = ["Swift agent example"]
+
+[[feature]]
+name = "Kotlin binding"
+implemented = true
+unit_tested = true
+flows = ["Kotlin agent example"]
+
+[[feature]]
+name = ".NET binding"
+implemented = true
+unit_tested = true
+flows = [".NET agent example"]
+
+[[feature]]
+name = "PipeWire audio backend"
+implemented = true
+unit_tested = true
+flows = []
+
+[[feature]]
+name = "WASAPI audio backend"
 implemented = true
 unit_tested = true
 flows = []
