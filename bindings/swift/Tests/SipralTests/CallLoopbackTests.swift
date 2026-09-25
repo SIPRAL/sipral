@@ -391,6 +391,44 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertThrowsError(try aliceCall.hangup())
     }
 
+    /// The caller cancels (CANCEL) before the callee ever takes the call:
+    /// `takeIncomingCall` must not hand back a `Call` that can never end.
+    /// Reproduces `intern/rapoarte/2026-09-25-review-day.json`'s "swift"
+    /// finding on `SipralStack.takeIncomingCall`.
+    func testTakeIncomingCallOnAHandleThatEndedBeforeItWasTakenThrowsAndCleansUp() async throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+
+        let aliceAccount = try alice.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress
+        )
+        _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
+
+        let bobEvents = Recorder(bob.events())
+        let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+
+        let incoming = await bobEvents.first(within: 5) { $0.kind == .incomingCall }
+        let event = try XCTUnwrap(incoming, "no incoming call arrived")
+
+        // Alice gives up before bob ever calls takeIncomingCall: bob's
+        // stack raises callEnded for this handle with no Call registered
+        // to receive it, exactly the gap the finding describes.
+        try aliceCall.hangup()
+        aliceCall.close()
+        let ended = await bobEvents.first(within: 5) { $0.kind == .callEnded && $0.call == event.call }
+        XCTAssertNotNil(ended, "bob's stack must have observed the call end before takeIncomingCall runs")
+
+        XCTAssertThrowsError(try bob.takeIncomingCall(event)) { error in
+            guard let sipralError = error as? SipralError else {
+                XCTFail("expected a SipralError, got \(error)")
+                return
+            }
+            XCTAssertEqual(sipralError.status, .staleHandle)
+        }
+        XCTAssertNil(bob.callFor(event.call), "a Call minted on a dead handle must not stay registered")
+    }
+
     /// `Call.close()`'s own doc comment promises "idempotent, and safe to
     /// call regardless of how the call ended" -- two callers racing to close
     /// the same call, such as a `CALL_ENDED` handler and a user action

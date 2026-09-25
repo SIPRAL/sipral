@@ -675,6 +675,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **An incoming call the caller gave up on before it was taken no longer
+  leaves a call that can never end.** `SipralStack.takeIncomingCall` (and
+  `answerCall`, which calls it) minted and registered a `Call` for a
+  handle whose `CALL_ENDED` had already been raised to nobody — no `Call`
+  existed yet to receive it — so its event and DTMF streams never
+  finished, `ended` stayed false, and a `CallKitBridge` bound to it never
+  reported the call ended. It now reads the handle's state right after
+  registering it and closes and throws on a stale one, instead of handing
+  back a call nothing can ever end. `SipralSampleMac`'s `AppModel.answer`
+  no longer leaves that call as the current one when `answer()` then
+  throws: it detaches and closes it, rather than leaving hangup, hold and
+  DTMF doing nothing, silently, against a ghost call.
 - **The interop harnesses no longer send the same Call-ID and tags on two
   runs of the same flow.** Both drivers seeded every flow's stack from a
   fixed pattern, one constant per flow, with no platform entropy — enough
@@ -727,14 +739,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   Kotlin and .NET, an empty record in Python, zeros in the Swift
   `SipralLabAgent`. All four now poll the numbers every 200 ms while the call
   is up, so what `ended` prints is real either way, not a race against
-  teardown.
+  teardown. Removing the cap left `Agent.kt`'s own wait for the end hand-rolled
+  as `if (!call.ended) call.events.first { CALL_ENDED }`, a check-then-subscribe
+  race against the delivery thread: a `CALL_ENDED` landing between the read and
+  the subscribe was missed outright, and with no cap left the call's handler then
+  hung forever. It calls `waitEnded(Long.MAX_VALUE)` instead, which subscribes
+  before it reads `ended`.
 - **The Android sample's screen no longer sits under the status bar.** An
   application targeting Android 15 is drawn edge to edge, and the sample's
   first field and heading were under the clock, with the status bar's white
   icons over a light screen. It now keeps its content clear of the system
   bars and the keyboard, and the icons are dark. Found running the APK on an
   Android 16 emulator, where it also placed, held, resumed and hung up a
-  call through the telecom framework (`docs/15-mobile.md`).
+  call through the telecom framework (`docs/15-mobile.md`). The no-argument
+  `enableEdgeToEdge()` this drew on picks icon colour from the *system's*
+  dark-mode setting, not from the sample's own screen, which is
+  unconditionally light — so the icons stayed dark only as long as the
+  device itself was in light mode, and turned white, invisible over the
+  same light screen, in system dark mode. Both bars now ask for `light`
+  style explicitly, regardless of the system setting.
 - **A call answered twice is no longer broken by the second answer.** The
   INVITE's server transaction stays for 32 seconds after its 200 OK (RFC
   6026), and an answer through it in that time — an application answering

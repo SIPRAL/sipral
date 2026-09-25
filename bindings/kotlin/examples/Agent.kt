@@ -20,7 +20,6 @@ import java.net.InetSocketAddress
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -105,10 +104,15 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
     // a phone's own hang-up is this agent's bug to avoid, not the far
     // end's. bindings/python/examples/agent.py's own wait_for_remote_hangup
     // is the same shape, with the same absence of a cap.
+    //
+    // waitEnded, not a hand-rolled `if (!call.ended) events.first { ... }`:
+    // that check-then-subscribe shape has a real gap between reading
+    // `ended` and the flow subscribing, where a CALL_ENDED delivered on
+    // the poll thread is missed outright (replay = 0), and with no cap
+    // left the miss hangs forever. waitEnded subscribes UNDISPATCHED
+    // before it reads `ended`, closing that gap.
     val ending = launch {
-        if (!call.ended) {
-            call.events.first { it.kind == SipralEventKind.CALL_ENDED.value.toLong() }
-        }
+        call.waitEnded(Long.MAX_VALUE)
     }
 
     select<Unit> {

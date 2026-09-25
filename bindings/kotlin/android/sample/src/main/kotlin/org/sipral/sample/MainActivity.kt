@@ -4,9 +4,11 @@
 package org.sipral.sample
 
 import android.Manifest
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -50,9 +52,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Edge to edge on every release, not only from Android 15 on, and
-        // with the status bar's icons dark over this light screen rather
-        // than the platform's white ones.
-        enableEdgeToEdge()
+        // with the status and navigation bars' icons dark over this light
+        // screen rather than the platform's white ones. The no-argument
+        // form picks icon colour from the system's dark-mode setting
+        // (`SystemBarStyle.auto`), not from this app's content, which is
+        // unconditionally light (`MaterialTheme` here takes no colour
+        // scheme, so it is always `lightColorScheme()`): in system dark
+        // mode that leaves white icons over a light window. `light` style
+        // is used explicitly instead, for both bars.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.light(
+                scrim = Color.argb(0xe6, 0xff, 0xff, 0xff),
+                darkScrim = Color.argb(0x80, 0x1b, 0x1b, 0x1b),
+            ),
+        )
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {

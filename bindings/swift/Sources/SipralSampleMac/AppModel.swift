@@ -97,14 +97,29 @@ final class AppModel {
 
     func answer(_ event: SipralEvent) {
         guard let stack else { return }
+        var attachedCall: Call?
         do {
             // Attached before it is answered, so that its reader is there
             // for the first event the answer brings.
             let call = try stack.takeIncomingCall(event)
             attach(call)
+            attachedCall = call
             try call.answer()
         } catch {
             append("answer failed: \(error)")
+            // A failed answer must not leave the call it just attached as
+            // the current one: nothing on it will ever succeed again, and
+            // left in place it is a ghost call -- hangup, hold and DTMF do
+            // nothing, silently, and its media socket and event reader
+            // never close. Only the call this attempt attached is touched;
+            // takeIncomingCall failing outright leaves attachedCall nil.
+            if let attachedCall, self.call === attachedCall {
+                callEventTask?.cancel()
+                callEventTask = nil
+                self.call = nil
+                callState = nil
+            }
+            attachedCall?.close()
         }
     }
 

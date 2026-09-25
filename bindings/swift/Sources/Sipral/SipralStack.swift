@@ -265,6 +265,23 @@ public final class SipralStack: @unchecked Sendable {
         let mediaSocket = try UDPSocket(host: mediaHost, port: mediaPort)
         let call = Call(stack: self, handle: event.call, mediaSocket: mediaSocket)
         registerCall(call)
+
+        // The caller can have given up (CANCEL) between the poll thread
+        // raising `incomingCall` and this running: its `callEnded` then
+        // reached no `Call`, since none was registered yet, and this
+        // handle is dead. A `Call` minted on it here would never observe
+        // that end -- its streams would never finish, `ended` would stay
+        // false, and a `CallKitBridge` bound to it would never report it
+        // ended -- so the handle's liveness is checked right away. Any
+        // failure to confirm it, stale handle or otherwise, closes and
+        // forgets the call rather than handing back one this stack cannot
+        // vouch for.
+        do {
+            _ = try call.state
+        } catch {
+            call.close()
+            throw error
+        }
         return call
     }
 
