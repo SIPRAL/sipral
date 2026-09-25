@@ -467,8 +467,17 @@ Asterisk sends its audio to the `c=` address 10.0.2.16, so the phone hears
 nothing while Asterisk hears the phone. `rewrite_contact` and
 `rtp_symmetric` on `labuser-mobile` are the settings a registrar facing
 phones behind NATs is configured with (`docs/06-nat.md`, "The order that
-matters"); STUN (`SIPRAL_NAT_STUN`) is the answer for one that is not, and
-the sample does not offer it yet. The NAT's mapping is not kept open by
+matters"); STUN (`SIPRAL_NAT_STUN`) is the answer for one that is not. The
+sample's account screen takes a STUN server (and a TURN server, with ICE
+offered when one is given), passed to `SipralClient.open`. On a later run the
+emulator asked a STUN server on the lab machine, through its own NAT and the
+VPN's, and was answered: the lab machine saw the Binding request and every
+REGISTER after it come from one public address and port, the one the answer
+names, so a `Contact` written from the answer is the address the registrar
+can reach. The REGISTERs' content was not captured, and Asterisk had been
+taken down by then and answered none of them, so the binding it stores and
+an incoming call on `labuser` with STUN are still to be shown;
+`NatTests.swift` and `NatCheck.kt` show the `Contact` and `c=` on the wire. The NAT's mapping is not kept open by
 anything but the phone's own traffic, since UDP has no keepalive here and
 the registration refreshes once an hour: a call to a phone left idle longer
 than its NAT keeps a mapping is not something this run tested.

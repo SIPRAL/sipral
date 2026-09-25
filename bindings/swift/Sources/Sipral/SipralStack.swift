@@ -262,6 +262,12 @@ public final class SipralStack: @unchecked Sendable {
     /// the poll thread's next pass, and an answer quicker than the caller
     /// is to take the stream is not replayed to it -- `Call.state`,
     /// `Call.media` and `Call.ended` still say where the call got to.
+    ///
+    /// With a `stunServer`, the media socket is first asked where it appears
+    /// from, and this returns once the server has answered -- or has not,
+    /// five and a half seconds on; with a TURN server, once the relay is
+    /// allocated or refused as well. `takeIncomingCall` waits the same way.
+    /// `ice` overrides the stack's own ICE policy for this call.
     public func placeCall(
         account: Account,
         target: String,
