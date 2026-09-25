@@ -1594,11 +1594,11 @@ endpoint keeps it — the same choice the Swift and .NET packages make, and
 the one `sipral_ua::Runtime` makes for a literal address. Answering with
 the far end's `Contact` as a literal would move the rest of the call onto
 it, and behind a registrar reached through a port mapping or a NAT the BYE
-would then go where nothing answers. `sipral_stack_poll_farewell`'s own goodbye is drained on the same
-poll thread and sent through the ending call's own media socket, to the
-last address that socket actually heard from, since nothing in this ABI
-hands an address back for it any other way (`docs/08-ffi.md`, "A call
-that ends owes the far end an RTCP BYE").
+would then go where nothing answers. `sipral_stack_poll_farewell`'s own
+goodbye is drained on the same poll thread and sent through the ending
+call's own media socket, to the last address that socket actually heard
+from, since nothing in this ABI hands an address back for it any other way
+(`docs/08-ffi.md`, "A call that ends owes the far end an RTCP BYE").
 
 An ordinary `SIPRAL_STATUS_BUSY` — another thread calling `Call.answer` or
 `Account.register` while the poll thread is between two polls, both told
