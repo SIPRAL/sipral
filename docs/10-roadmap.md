@@ -366,11 +366,12 @@ property through before it reaches C.
 - the artefacts each platform consumes, built locally: an `.xcframework`, an
   AAR with the shared object for each Android ABI, a NuGet with native runtimes,
   wheels — with publishing left to a person, and each of them built without
-  the `opus` feature or published as two variants labelled clearly enough that
-  nobody ships the wrong one without noticing, because a binary somebody
-  downloads instead of compiling is the one place the default would put
-  libopus into a product quietly (`05-media.md`). *Built* locally by
-  `scripts/package/*.sh`; publishing is left to a person;
+  the `opus` feature unless `--with-opus` asks for the second variant, whose
+  name says it carries libopus so that nobody ships the wrong one without
+  noticing, because a binary somebody downloads instead of compiling is the
+  one place the default would put libopus into a product quietly
+  (`05-media.md`). *Built* locally by `scripts/package/*.sh`; publishing is
+  left to a person;
 - `sipral-io-pipewire` for Linux desktops over `libpipewire` (MIT; ALSA and
   PulseAudio client libraries are LGPL and stay out), on a `sipral-io-common`
   crate holding what the two device crates currently duplicate. *Built*:

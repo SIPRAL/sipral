@@ -12,6 +12,17 @@
 #   scripts/package/xcframework.sh --out DIR --dry-run   same, minus the zip
 #                                                         and checksum a host
 #                                                         would publish
+#   ... --with-opus                                       the variant that
+#                                                         carries libopus
+#
+# Without --with-opus the library is built without sipral-ffi's `opus`
+# feature and every other default kept (features.sh says why and how);
+# with it, the zip is CSipral-opus.xcframework.zip and the distribution
+# Package.swift says what it carries. The XCFramework inside keeps the name
+# CSipral either way, because a binaryTarget's artefact is found by the
+# target's own name. Which variant came out is checked, not assumed: the
+# macOS archive is read for libopus's own symbols, which have to be absent
+# from the one and present in the other.
 #
 # Every slice is built by this machine's own Rust toolchain, `lipo`d where a
 # platform needs two architectures, and handed to `xcodebuild
@@ -27,18 +38,22 @@ ROOT="$PWD"
 OUT=""
 DRY_RUN=0
 PUBLISH=0
+WITH_OPUS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --publish) PUBLISH=1; shift ;;
+        --with-opus) WITH_OPUS=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 if [ -z "$OUT" ]; then
-    printf 'usage: xcframework.sh --out DIR [--dry-run] [--publish]\n' >&2
+    printf 'usage: xcframework.sh --out DIR [--dry-run] [--publish] [--with-opus]\n' >&2
     exit 2
 fi
+. "$ROOT/scripts/package/features.sh"
+package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
@@ -89,7 +104,7 @@ if [ "$FAIL" -ne 0 ]; then
     exit 1
 fi
 
-step "building $CRATE, release, per target"
+step "building $CRATE, release, per target, $VARIANT_LABEL (features $FFI_FEATURES)"
 # libopus's C sources compile, for arm64 Apple targets, with calls to
 # ___chkstk_darwin -- part of the arm64 Darwin ABI for a frame over a page,
 # not a bug in the C -- which lives in Apple's own compiler-rt and links
@@ -107,10 +122,10 @@ rustflags_for() {
 for t in "${all_triples[@]}"; do
     extra_rustflags="$(rustflags_for "$t")"
     if env RUSTFLAGS="${RUSTFLAGS:-} $extra_rustflags" \
-        cargo build --release -p "$CRATE" --target "$t" >"$STAGE/build-$t.log" 2>&1; then
-        pass "cargo build --release -p $CRATE --target $t"
+        cargo build --release -p "$CRATE" "${FFI_FEATURE_ARGS[@]}" --target "$t" >"$STAGE/build-$t.log" 2>&1; then
+        pass "cargo build --release -p $CRATE ${FFI_FEATURE_ARGS[*]} --target $t"
     else
-        fail "cargo build --release -p $CRATE --target $t:"
+        fail "cargo build --release -p $CRATE ${FFI_FEATURE_ARGS[*]} --target $t:"
         tail -30 "$STAGE/build-$t.log" | sed 's/^/        /'
     fi
 done
@@ -177,12 +192,44 @@ if [ "$slice_count" -eq "${#SLICES[@]}" ]; then
 else
     fail "$slice_count platform slices in the xcframework, ${#SLICES[@]} were built"
 fi
+
+# libopus's own C symbols, read out of the macOS archive the XCFramework now
+# holds, the same way scripts/check.sh reads the C ABI's debug build:
+# nm-classic without `-g`, because libopus is built with hidden visibility,
+# and `_opus_` at the start of the name, because the Rust `opus` crate's
+# mangled names say nothing about whether the C library is in the file. A
+# static archive keeps its symbols under the release profile's `strip`,
+# which only a linked library loses them to. The archive's own `_sipral_`
+# entry points are counted too, so that an nm that read nothing is not taken
+# for an archive with no libopus in it.
+MACOS_ARCHIVE=$(find "$XCFRAMEWORK" -path '*macos*' -name "$LIBNAME" | head -1)
+if [ -z "$MACOS_ARCHIVE" ]; then
+    fail "no macOS $LIBNAME inside $XCFRAMEWORK to read for libopus"
+else
+    symbols=$(xcrun nm-classic -U -arch arm64 "$MACOS_ARCHIVE" 2>/dev/null | awk '{print $NF}')
+    entry_points=$(printf '%s\n' "$symbols" | grep -c '^_sipral_' || true)
+    opus_symbols=$(printf '%s\n' "$symbols" | grep -c '^_opus_' || true)
+    if [ "$entry_points" -eq 0 ]; then
+        fail "nm read no _sipral_ entry point out of the macOS archive, so nothing was checked for libopus"
+    elif [ "$WITH_OPUS" -eq 0 ] && [ "$opus_symbols" -eq 0 ]; then
+        pass "no opus symbol in the macOS archive (nm, $entry_points _sipral_ entry points read)"
+    elif [ "$WITH_OPUS" -eq 0 ]; then
+        fail "the macOS archive links $opus_symbols opus symbols, in the build meant to be without libopus"
+    elif [ "$opus_symbols" -gt 0 ]; then
+        pass "$opus_symbols opus symbols in the macOS archive, as --with-opus asked (nm)"
+    else
+        fail "--with-opus, and not a single opus symbol in the macOS archive"
+    fi
+fi
+
 step "the distribution Package.swift"
 SPM="$OUT/spm"
 rm -rf "$SPM"
 mkdir -p "$SPM/Sources/Sipral"
 cp "$ROOT/bindings/swift/Sources/Sipral/SipralAbi.swift" "$SPM/Sources/Sipral/"
-cat >"$SPM/Package.swift" <<'EOF'
+# Unquoted, for the one line that names the variant; nothing else in it
+# expands.
+cat >"$SPM/Package.swift" <<EOF
 // swift-tools-version: 5.9
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
@@ -192,6 +239,9 @@ cat >"$SPM/Package.swift" <<'EOF'
 // bindings/Package.swift's source target. SipralAbi.swift is copied in
 // unchanged from bindings/swift/Sources/Sipral: it depends on nothing but
 // CSipral's module, whether that module comes from source or from here.
+//
+// Variant: $VARIANT_LABEL.
+// sipral-ffi features: $FFI_FEATURES.
 //
 // The binaryTarget's path is local, which is what a package still under
 // development at 0.0.1, with nowhere public to host a zip yet, can commit to.
@@ -224,15 +274,15 @@ fi
 
 if [ "$DRY_RUN" -eq 0 ]; then
     step "zip and checksum, for a remote binaryTarget"
-    ZIP="$OUT/CSipral.xcframework.zip"
+    ZIP="$OUT/CSipral$VARIANT_SUFFIX.xcframework.zip"
     rm -f "$ZIP"
     ( cd "$OUT" && ditto -c -k --sequesterRsrc --keepParent CSipral.xcframework "$ZIP" ) \
-        && pass "CSipral.xcframework.zip written" || fail "ditto -c -k, CSipral.xcframework"
+        && pass "$(basename "$ZIP") written" || fail "ditto -c -k, CSipral.xcframework"
     if [ -f "$ZIP" ]; then
         CHECKSUM=$(xcrun --toolchain default swift package compute-checksum "$ZIP" 2>"$STAGE/checksum.log")
         if [ -n "$CHECKSUM" ]; then
             pass "checksum: $CHECKSUM"
-            printf '%s\n' "$CHECKSUM" >"$OUT/CSipral.xcframework.zip.checksum"
+            printf '%s\n' "$CHECKSUM" >"$ZIP.checksum"
         else
             fail "swift package compute-checksum, $ZIP:"
             tail -10 "$STAGE/checksum.log" | sed 's/^/        /'
@@ -245,10 +295,10 @@ if [ "$PUBLISH" -eq 1 ]; then
     printf '  not run: nothing under bindings/ ships to a registry before the ABI\n'
     printf '  freezes (docs/08-ffi.md), and this repo has no public host for the zip\n'
     printf '  yet. What the owner runs once both exist: tag this commit, upload\n'
-    printf '  %s to that release, and point spm/Package.swift'"'"'s\n' "$(basename "$OUT")/CSipral.xcframework.zip"
+    printf '  %s to that release, and point spm/Package.swift'"'"'s\n' "$(basename "$OUT")/CSipral$VARIANT_SUFFIX.xcframework.zip"
     printf '  binaryTarget at the release URL with the checksum printed above.\n'
 fi
 
 printf '\n'
-[ "$FAIL" -eq 0 ] && { printf 'xcframework.sh: done, %s\n' "$OUT"; exit 0; }
+[ "$FAIL" -eq 0 ] && { printf 'xcframework.sh: done, %s, %s\n' "$OUT" "$VARIANT_LABEL"; exit 0; }
 printf 'xcframework.sh: failed\n'; exit 1

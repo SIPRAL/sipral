@@ -121,7 +121,9 @@ no patent; see `LICENSE-COMMERCIAL.md`.
 Opus is therefore built behind a feature rather than linked unconditionally, so
 that a product which cannot take that exposure can ship G.711 and G.722 and
 link nothing. The feature is on by default, because for everyone else Opus is
-the codec worth having.
+the codec worth having. The packaged artefacts `scripts/package/` builds are
+the exception: they leave it out unless built with `--with-opus`, and the
+variant that carries libopus says so in its name (`docs/05-media.md`).
 
 ### AES
 

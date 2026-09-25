@@ -11,6 +11,15 @@
 #   scripts/package/wheels.sh --out DIR --manylinux [--dry-run] [--publish]
 #       linux-x64, manylinux_2_28: needs Docker, re-execs this script inside
 #       quay.io/pypa/manylinux_2_28_x86_64
+#   ... --with-opus
+#       either of the above, as the variant that carries libopus
+#
+# Without --with-opus the native is built without sipral-ffi's `opus`
+# feature and every other default kept (features.sh says why and how). With
+# it, the wheel is the distribution `sipral-opus` instead of `sipral`
+# (sipral_opus-<version>-...whl, `Name: sipral-opus` in its METADATA), the
+# same `sipral` package inside, so that the two cannot be told apart only by
+# their contents.
 #
 # bindings/python/sipral is loaded as it is committed: sipral/_sipral_cffi.py
 # already looks for the native library beside the package
@@ -42,6 +51,7 @@ OUT=""
 DRY_RUN=0
 PUBLISH=0
 MANYLINUX=0
+WITH_OPUS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
@@ -49,12 +59,15 @@ while [ $# -gt 0 ]; do
         --publish) PUBLISH=1; shift ;;
         --manylinux) MANYLINUX=1; shift ;;
         --inside-manylinux) MANYLINUX=2; shift ;; # internal: this run is already inside the container
+        --with-opus) WITH_OPUS=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
-[ -z "$OUT" ] && { printf 'usage: wheels.sh --out DIR [--dry-run] [--publish] [--manylinux]\n' >&2; exit 2; }
+[ -z "$OUT" ] && { printf 'usage: wheels.sh --out DIR [--dry-run] [--publish] [--manylinux] [--with-opus]\n' >&2; exit 2; }
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
+. "$ROOT/scripts/package/features.sh"
+package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
 
 if [ "$MANYLINUX" -eq 1 ]; then
     step "manylinux_2_28_x86_64, via Docker"
@@ -62,6 +75,7 @@ if [ "$MANYLINUX" -eq 1 ]; then
     args=(--out /out --inside-manylinux)
     [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
     [ "$PUBLISH" -eq 1 ] && args+=(--publish)
+    [ "$WITH_OPUS" -eq 1 ] && args+=(--with-opus)
     # The image carries no Rust: rustup, pinned to rust-toolchain.toml's own
     # channel, is installed once inside this disposable container rather
     # than assumed or left to whatever "stable" would resolve to.
@@ -117,11 +131,11 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
-step "building sipral-ffi, release"
-if cargo build --release -p sipral-ffi --target "$RUST_TRIPLE" >"$STAGE/build.log" 2>&1; then
-    pass "cargo build --release -p sipral-ffi --target $RUST_TRIPLE"
+step "building sipral-ffi, release, $VARIANT_LABEL (features $FFI_FEATURES)"
+if cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$RUST_TRIPLE" >"$STAGE/build.log" 2>&1; then
+    pass "cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $RUST_TRIPLE"
 else
-    fail "cargo build --release -p sipral-ffi --target $RUST_TRIPLE:"
+    fail "cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $RUST_TRIPLE:"
     tail -30 "$STAGE/build.log" | sed 's/^/        /'
     printf '\nwheels.sh: failed\n'; exit 1
 fi
@@ -181,6 +195,27 @@ else
 fi
 [ "$FAIL" -ne 0 ] && { printf '\nwheels.sh: failed\n'; exit 1; }
 
+# The variant with libopus is its own distribution, sipral-opus: `wheel pack`
+# names the file after the .dist-info directory, and pip reads the name out
+# of METADATA, so both change and nothing else does. The package inside is
+# still `sipral`, imported the same way.
+DIST_INFO=$(dirname "$WHEEL_METADATA")
+DIST_NAME="sipral"
+if [ "$WITH_OPUS" -eq 1 ]; then
+    DIST_NAME="sipral-opus"
+    dist_version=$(basename "$DIST_INFO" .dist-info)
+    dist_version="${dist_version#sipral-}"
+    if grep -q '^Name: sipral$' "$DIST_INFO/METADATA" \
+        && sed 's/^Name: sipral$/Name: sipral-opus/' "$DIST_INFO/METADATA" >"$DIST_INFO/METADATA.new" \
+        && mv "$DIST_INFO/METADATA.new" "$DIST_INFO/METADATA" \
+        && mv "$DIST_INFO" "$DISTDIR/sipral_opus-$dist_version.dist-info"; then
+        pass "renamed sipral-opus $dist_version, for the variant that carries libopus"
+    else
+        fail "could not rename $(basename "$DIST_INFO") to the sipral-opus distribution"
+    fi
+fi
+[ "$FAIL" -ne 0 ] && { printf '\nwheels.sh: failed\n'; exit 1; }
+
 REPACKED="$STAGE/repacked"
 mkdir -p "$REPACKED"
 "$VENV_PY" -m wheel pack "$DISTDIR" --dest-dir "$REPACKED" >"$STAGE/pack.log" 2>&1 \
@@ -206,10 +241,21 @@ else
 fi
 [ "$FAIL" -ne 0 ] && { printf '\nwheels.sh: failed\n'; exit 1; }
 
-FINAL=$(find "$OUT" -maxdepth 1 -name '*.whl' | head -1)
+# By distribution and tag, so that a wheel of the other variant left in the
+# same directory is never the one checked or named.
+FINAL=$(find "$OUT" -maxdepth 1 -name "${DIST_NAME//-/_}-*-$TAG.whl" | head -1)
 step "structure"
 if [ -n "$FINAL" ]; then
     listing=$("$VENV_PY" -m zipfile -l "$FINAL" 2>/dev/null)
+    named=$("$VENV_PY" -c 'import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+m = [n for n in z.namelist() if n.endswith(".dist-info/METADATA")]
+print(next((l[6:] for l in z.read(m[0]).decode().splitlines() if l.startswith("Name: ")), "") if m else "")' "$FINAL" 2>/dev/null)
+    if [ "$named" = "$DIST_NAME" ]; then
+        pass "$(basename "$FINAL") is the distribution $DIST_NAME, $VARIANT_LABEL"
+    else
+        fail "$(basename "$FINAL") names itself '$named' in METADATA, not $DIST_NAME"
+    fi
     if printf '%s\n' "$listing" | grep -q "sipral/$NATIVE"; then
         pass "$(basename "$FINAL") carries sipral/$NATIVE"
     else
@@ -244,5 +290,5 @@ if [ "$PUBLISH" -eq 1 ]; then
 fi
 
 printf '\n'
-[ "$FAIL" -eq 0 ] && { printf 'wheels.sh: done, %s\n' "${FINAL:-$OUT}"; exit 0; }
+[ "$FAIL" -eq 0 ] && { printf 'wheels.sh: done, %s, %s\n' "${FINAL:-$OUT}" "$VARIANT_LABEL"; exit 0; }
 printf 'wheels.sh: failed\n'; exit 1

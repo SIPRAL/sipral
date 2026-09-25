@@ -19,9 +19,17 @@
 # that, the helper's unit tests run, and every artefact Gradle resolved for
 # the helper, the sample and those tests is held to deny.toml's licences.
 #
-#   scripts/package/android.sh --out DIR --accept-android-sdk-licenses
+#   scripts/package/android.sh --out DIR --accept-android-sdk-licenses [--with-opus]
 #
-# needs Docker, and nothing else on the host. The flag is not a formality:
+# Without --with-opus the natives are built without sipral-ffi's `opus`
+# feature and every other default kept (scripts/package/features.sh says why
+# and how); with it, aar.sh builds the variant that carries libopus, and the
+# two artefacts that carry natives are sipral-opus.aar and
+# sipral-sample-opus.apk. The local Maven repository the helper and the
+# sample build against keeps the coordinate org.sipral:sipral either way,
+# with the variant named in its POM's description.
+#
+# It needs Docker, and nothing else on the host. The flag is not a formality:
 # the image installs Android SDK packages, which are under the Android SDK
 # licence (developer.android.com/studio/terms), and passing it is the person
 # running this accepting that licence -- this script never accepts it on
@@ -43,7 +51,7 @@ fail() { printf '  FAIL  %s\n' "$1"; FAIL=1; }
 step() { printf '\n%s\n' "$1"; }
 
 usage() {
-    printf 'usage: android.sh --out DIR --accept-android-sdk-licenses\n' >&2
+    printf 'usage: android.sh --out DIR --accept-android-sdk-licenses [--with-opus]\n' >&2
     exit 2
 }
 
@@ -56,17 +64,28 @@ fi
 OUT=""
 ACCEPTED=0
 IMAGE="sipral-android-build"
+WITH_OPUS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
         --accept-android-sdk-licenses) ACCEPTED=1; shift ;;
         --image) IMAGE="$2"; shift 2 ;;
+        --with-opus) WITH_OPUS=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; usage ;;
     esac
 done
 [ -z "$OUT" ] && usage
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
+. "$ROOT/scripts/package/features.sh"
+package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
+# What aar.sh is told, and the names of the two artefacts that carry natives.
+# Expanded as ${VARIANT_ARGS[@]+...}: bash 3.2 under `set -u` calls an empty
+# array unbound.
+VARIANT_ARGS=()
+[ "$WITH_OPUS" -eq 1 ] && VARIANT_ARGS=(--with-opus)
+AAR_NAME="sipral$VARIANT_SUFFIX.aar"
+APK_NAME="sipral-sample$VARIANT_SUFFIX.apk"
 
 VERSION=$(awk -F'"' '/^\[workspace.package\]/{p=1} p && /^version = /{print $2; exit}' "$ROOT/Cargo.toml")
 ABIS=(arm64-v8a armeabi-v7a x86_64)
@@ -104,7 +123,7 @@ if [ "$MODE" = "host" ]; then
         -v sipral-android-gradle:/cache/gradle \
         -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-}" \
         "$IMAGE" \
-        bash /src/scripts/package/android.sh inside --out /out
+        bash /src/scripts/package/android.sh inside --out /out ${VARIANT_ARGS[@]+"${VARIANT_ARGS[@]}"}
     exit $?
 fi
 
@@ -133,30 +152,32 @@ mkdir -p /cache/cargo/registry
 ln -sfn /cache/cargo/registry "$CARGO_HOME/registry"
 export GRADLE_USER_HOME=/cache/gradle
 
-step "sipral.aar"
+step "$AAR_NAME, $VARIANT_LABEL"
 rm -rf "$OUT/natives" "$OUT/aar"
-if scripts/package/aar.sh collect-natives --out "$OUT/natives" >"$OUT/collect-natives.out" 2>&1; then
+if scripts/package/aar.sh collect-natives --out "$OUT/natives" ${VARIANT_ARGS[@]+"${VARIANT_ARGS[@]}"} \
+    >"$OUT/collect-natives.out" 2>&1; then
     pass "aar.sh collect-natives"
 else
     fail "aar.sh collect-natives:"
     sed 's/^/        /' "$OUT/collect-natives.out"
     printf '\nandroid.sh: failed\n'; exit 1
 fi
-if scripts/package/aar.sh assemble --out "$OUT/aar" --natives "$OUT/natives" >"$OUT/assemble.out" 2>&1; then
+if scripts/package/aar.sh assemble --out "$OUT/aar" --natives "$OUT/natives" ${VARIANT_ARGS[@]+"${VARIANT_ARGS[@]}"} \
+    >"$OUT/assemble.out" 2>&1; then
     pass "aar.sh assemble"
 else
     fail "aar.sh assemble:"
     sed 's/^/        /' "$OUT/assemble.out"
     printf '\nandroid.sh: failed\n'; exit 1
 fi
-cp "$OUT/aar/sipral.aar" "$OUT/sipral.aar"
+cp "$OUT/aar/$AAR_NAME" "$OUT/$AAR_NAME"
 
 # A Maven layout for Gradle to resolve org.sipral:sipral from, with the POM
 # naming what an AAR cannot carry inside itself.
 REPO="$OUT/maven/org/sipral/sipral/$VERSION"
 rm -rf "$OUT/maven"
 mkdir -p "$REPO"
-cp "$OUT/sipral.aar" "$REPO/sipral-$VERSION.aar"
+cp "$OUT/$AAR_NAME" "$REPO/sipral-$VERSION.aar"
 cat >"$REPO/sipral-$VERSION.pom" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">
@@ -165,6 +186,7 @@ cat >"$REPO/sipral-$VERSION.pom" <<EOF
   <artifactId>sipral</artifactId>
   <version>$VERSION</version>
   <packaging>aar</packaging>
+  <description>$AAR_NAME, $VARIANT_LABEL</description>
   <dependencies>
     <dependency>
       <groupId>org.jetbrains.kotlinx</groupId>
@@ -215,7 +237,7 @@ else
     printf '\nandroid.sh: failed\n'; exit 1
 fi
 cp telecom/build/outputs/aar/telecom-release.aar "$OUT/sipral-telecom.aar"
-cp sample/build/outputs/apk/debug/sample-debug.apk "$OUT/sipral-sample.apk"
+cp sample/build/outputs/apk/debug/sample-debug.apk "$OUT/$APK_NAME"
 
 # The connection's callbacks, on the JVM (telecom/src/test). What ran is
 # read out of the results, because a test task that found nothing to run
@@ -383,16 +405,16 @@ check_natives() {
     done
 }
 
-step "sipral.aar"
+step "$AAR_NAME"
 X=/tmp/unpacked
 rm -rf "$X" && mkdir -p "$X/sipral" "$X/telecom" "$X/apk"
-unzip -q "$OUT/sipral.aar" -d "$X/sipral"
+unzip -q "$OUT/$AAR_NAME" -d "$X/sipral"
 for entry in AndroidManifest.xml classes.jar proguard.txt; do
-    [ -s "$X/sipral/$entry" ] && pass "sipral.aar carries $entry" || fail "sipral.aar is missing $entry"
+    [ -s "$X/sipral/$entry" ] && pass "$AAR_NAME carries $entry" || fail "$AAR_NAME is missing $entry"
 done
-check_natives "sipral.aar" "$X/sipral" jni
+check_natives "$AAR_NAME" "$X/sipral" jni
 declared=$(unzip -Z1 "$X/sipral/classes.jar" | grep -c '\.class$')
-pass "sipral.aar: classes.jar holds $declared classes"
+pass "$AAR_NAME: classes.jar holds $declared classes"
 # Every `external fun` the Kotlin side declares, against what the shim
 # exports, so that a native method nothing implements is found here rather
 # than as an UnsatisfiedLinkError on a phone.
@@ -408,9 +430,9 @@ unresolved=$(comm -23 <(printf '%s\n' "$expected_symbols") <(printf '%s\n' "$exp
 if [ -z "$expected_symbols" ]; then
     fail "no external fun found in bindings/kotlin/sipral/src/main/kotlin, so nothing was compared"
 elif [ -z "$unresolved" ]; then
-    pass "sipral.aar: every one of $(printf '%s\n' "$expected_symbols" | wc -l) external funs has its JNI symbol"
+    pass "$AAR_NAME: every one of $(printf '%s\n' "$expected_symbols" | wc -l) external funs has its JNI symbol"
 else
-    fail "sipral.aar: external funs with no JNI symbol in libsipral_jni.so:"
+    fail "$AAR_NAME: external funs with no JNI symbol in libsipral_jni.so:"
     printf '        %s\n' $unresolved
 fi
 
@@ -433,31 +455,31 @@ grep -q 'android.permission.BIND_TELECOM_CONNECTION_SERVICE' "$manifest" \
 grep -q 'android.permission.MANAGE_OWN_CALLS' "$manifest" \
     && pass "sipral-telecom.aar: MANAGE_OWN_CALLS" || fail "sipral-telecom.aar: MANAGE_OWN_CALLS is not requested"
 
-step "sipral-sample.apk"
-unzip -q "$OUT/sipral-sample.apk" -d "$X/apk"
-check_natives "sipral-sample.apk" "$X/apk" lib
+step "$APK_NAME"
+unzip -q "$OUT/$APK_NAME" -d "$X/apk"
+check_natives "$APK_NAME" "$X/apk" lib
 dexes=$(ls "$X/apk"/classes*.dex 2>/dev/null | wc -l)
-[ "$dexes" -gt 0 ] && pass "sipral-sample.apk: $dexes dex file(s)" || fail "sipral-sample.apk carries no dex"
-classes=$("$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" dex packages --defined-only "$OUT/sipral-sample.apk" 2>/dev/null \
+[ "$dexes" -gt 0 ] && pass "$APK_NAME: $dexes dex file(s)" || fail "$APK_NAME carries no dex"
+classes=$("$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" dex packages --defined-only "$OUT/$APK_NAME" 2>/dev/null \
     | awk '$1 == "C" {print $NF}')
 for class in org.sipral.telecom.TelecomBridge org.sipral.idiomatic.SipralClient org.sipral.SipralEventListeners \
     org.sipral.android.telecom.SipralConnectionService org.sipral.sample.MainActivity; do
     printf '%s\n' "$classes" | grep -x "$class" >/dev/null \
-        && pass "sipral-sample.apk: $class" || fail "sipral-sample.apk is missing $class"
+        && pass "$APK_NAME: $class" || fail "$APK_NAME is missing $class"
 done
-badging=$("$BUILD_TOOLS/aapt2" dump badging "$OUT/sipral-sample.apk" 2>/dev/null)
+badging=$("$BUILD_TOOLS/aapt2" dump badging "$OUT/$APK_NAME" 2>/dev/null)
 for permission in android.permission.MANAGE_OWN_CALLS android.permission.RECORD_AUDIO; do
     printf '%s\n' "$badging" | grep "uses-permission: name='$permission'" >/dev/null \
-        && pass "sipral-sample.apk: $permission" || fail "sipral-sample.apk does not request $permission"
+        && pass "$APK_NAME: $permission" || fail "$APK_NAME does not request $permission"
 done
 printf '%s\n' "$badging" | grep -x "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'" >/dev/null \
-    && pass "sipral-sample.apk: native code for arm64-v8a, armeabi-v7a and x86_64" \
-    || fail "sipral-sample.apk: $(printf '%s\n' "$badging" | grep native-code)"
+    && pass "$APK_NAME: native code for arm64-v8a, armeabi-v7a and x86_64" \
+    || fail "$APK_NAME: $(printf '%s\n' "$badging" | grep native-code)"
 
 printf '\n'
 if [ "$FAIL" -eq 0 ]; then
-    printf 'android.sh: done\n'
-    printf '  %s\n' "$OUT/sipral.aar" "$OUT/sipral-telecom.aar" "$OUT/sipral-sample.apk"
+    printf 'android.sh: done, %s\n' "$VARIANT_LABEL"
+    printf '  %s\n' "$OUT/$AAR_NAME" "$OUT/sipral-telecom.aar" "$OUT/$APK_NAME"
     exit 0
 fi
 printf 'android.sh: failed\n'; exit 1

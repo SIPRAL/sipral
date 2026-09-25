@@ -30,6 +30,16 @@
 #       directory it still creates is what a machine without that RID's
 #       toolchain can honestly prove -- the pack logic and the layout, not a
 #       native nothing here built.
+#
+# Both take --with-opus, for the variant that carries libopus. Without it,
+# collect builds without sipral-ffi's `opus` feature and every other default
+# kept (features.sh says why and how), and writes the feature list it built
+# with to DIR/<rid>/sipral-ffi.features beside each native; a native placed
+# by hand carries that file too, holding the same list. pack refuses a staged
+# native whose list is missing or is not the one its own --with-opus (or its
+# absence) asks for, so the two halves cannot mix variants, and packs the
+# variant with libopus under its own package ID, Sipral.Opus, rather than
+# Sipral.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -72,8 +82,8 @@ CMD="${1:-}"
 [ $# -ge 1 ] && shift
 case "$CMD" in
     collect|pack) ;;
-    *) printf 'usage: nuget.sh collect --out DIR [--rid RID ...]\n' >&2
-       printf '       nuget.sh pack --out DIR --staging DIR [--rid RID ...] [--dry-run] [--publish]\n' >&2
+    *) printf 'usage: nuget.sh collect --out DIR [--rid RID ...] [--with-opus]\n' >&2
+       printf '       nuget.sh pack --out DIR --staging DIR [--rid RID ...] [--dry-run] [--publish] [--with-opus]\n' >&2
        exit 2 ;;
 esac
 
@@ -81,6 +91,7 @@ OUT=""
 STAGING=""
 DRY_RUN=0
 PUBLISH=0
+WITH_OPUS=0
 RIDS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -89,6 +100,7 @@ while [ $# -gt 0 ]; do
         --rid) RIDS+=("$2"); shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --publish) PUBLISH=1; shift ;;
+        --with-opus) WITH_OPUS=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -96,9 +108,13 @@ done
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 [ "${#RIDS[@]}" -eq 0 ] && RIDS=("${ALL_RIDS[@]}")
+. "$ROOT/scripts/package/features.sh"
+package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
+PACKAGE_ID="Sipral"
+[ "$WITH_OPUS" -eq 1 ] && PACKAGE_ID="Sipral.Opus"
 
 if [ "$CMD" = "collect" ]; then
-    step "collecting on $(uname -sm)"
+    step "collecting on $(uname -sm), $VARIANT_LABEL (features $FFI_FEATURES)"
     HOST_OS="$(uname -s)"
 
     for rid in "${RIDS[@]}"; do
@@ -112,13 +128,15 @@ if [ "$CMD" = "collect" ]; then
                 if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
                     fail "$rid: $triple not installed (rustup target add $triple)"; continue
                 fi
-                if cargo build --release -p sipral-ffi --target "$triple" \
+                rm -f "$OUT/$rid/$FEATURES_MARKER"
+                if cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$triple" \
                     >"$OUT/.build-$rid.log" 2>&1; then
                     mkdir -p "$OUT/$rid"
                     cp "$ROOT/target/$triple/release/$(cargo_artifact_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")"
-                    pass "$rid: cargo build --release -p sipral-ffi --target $triple"
+                    printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
+                    pass "$rid: cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
                 else
-                    fail "$rid: cargo build --release -p sipral-ffi --target $triple:"
+                    fail "$rid: cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple:"
                     tail -20 "$OUT/.build-$rid.log" | sed 's/^/        /'
                 fi
                 ;;
@@ -130,20 +148,23 @@ if [ "$CMD" = "collect" ]; then
                     fail "$rid: docker not found, and rust:1.95-trixie is how this build matches rust-toolchain.toml"
                     continue
                 fi
+                rm -f "$OUT/$rid/$FEATURES_MARKER"
                 if docker run --rm -v "$ROOT:/work:ro" -v "$OUT:/out" -w /work \
                     -e CARGO_TARGET_DIR=/tmp/target \
                     rust:1.95-trixie \
-                    sh -c "apt-get update -qq && apt-get install -qq -y --no-install-recommends cmake >/dev/null && cargo build --release -p sipral-ffi --target $triple && mkdir -p /out/$rid && cp /tmp/target/$triple/release/$(cargo_artifact_of "$rid") /out/$rid/$(native_name_of "$rid")" \
+                    sh -c "apt-get update -qq && apt-get install -qq -y --no-install-recommends cmake >/dev/null && cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple && mkdir -p /out/$rid && cp /tmp/target/$triple/release/$(cargo_artifact_of "$rid") /out/$rid/$(native_name_of "$rid") && echo $FFI_FEATURES >/out/$rid/$FEATURES_MARKER" \
                     >"$OUT/.build-$rid.log" 2>&1; then
-                    pass "$rid: docker run rust:1.95-trixie, cargo build --release -p sipral-ffi --target $triple"
+                    pass "$rid: docker run rust:1.95-trixie, cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
                 else
                     fail "$rid: docker build failed:"
                     tail -20 "$OUT/.build-$rid.log" | sed 's/^/        /'
                 fi
                 ;;
             win-x64|win-arm64)
-                note "$rid: not built by this subcommand; build with cargo on a Windows host and place"
-                note "         the result at $OUT/$rid/$(native_name_of "$rid")"
+                note "$rid: not built by this subcommand; on a Windows host run"
+                note "         cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple,"
+                note "         place the result at $OUT/$rid/$(native_name_of "$rid")"
+                note "         and the line $FFI_FEATURES at $OUT/$rid/$FEATURES_MARKER"
                 ;;
         esac
     done
@@ -164,7 +185,7 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/proj"
 cp -R "$ROOT/bindings/dotnet/Sipral/." "$STAGE/proj/"
 
-step "runtimes, from $STAGING"
+step "runtimes, from $STAGING, for $PACKAGE_ID, $VARIANT_LABEL"
 ITEMS=""
 populated=0
 for rid in "${RIDS[@]}"; do
@@ -172,7 +193,12 @@ for rid in "${RIDS[@]}"; do
     src="$STAGING/$rid/$native"
     dest_dir="$STAGE/proj/runtimes/$rid/native"
     mkdir -p "$dest_dir"
-    if [ -f "$src" ]; then
+    built_with=$(cat "$STAGING/$rid/$FEATURES_MARKER" 2>/dev/null)
+    if [ -f "$src" ] && [ "$built_with" != "$FFI_FEATURES" ]; then
+        # Even under --dry-run: a native of the other variant in this
+        # package is the one mistake the package ID exists to prevent.
+        fail "$rid: $native was built with features '${built_with:-(no $FEATURES_MARKER beside it)}', not '$FFI_FEATURES' ($VARIANT_LABEL)"
+    elif [ -f "$src" ]; then
         cp "$src" "$dest_dir/$native"
         size=$(stat -f%z "$src" 2>/dev/null || stat -c%s "$src" 2>/dev/null)
         pass "$rid: $native ($size bytes)"
@@ -201,14 +227,15 @@ if [ -n "$ITEMS" ]; then
 fi
 
 step "dotnet pack"
-if dotnet pack "$STAGE/proj/Sipral.csproj" -c Release -o "$OUT" >"$STAGE/pack.log" 2>&1; then
-    pass "dotnet pack -c Release"
+if dotnet pack "$STAGE/proj/Sipral.csproj" -c Release -p:PackageId="$PACKAGE_ID" -o "$OUT" >"$STAGE/pack.log" 2>&1; then
+    pass "dotnet pack -c Release -p:PackageId=$PACKAGE_ID"
 else
-    fail "dotnet pack -c Release:"
+    fail "dotnet pack -c Release -p:PackageId=$PACKAGE_ID:"
     tail -30 "$STAGE/pack.log" | sed 's/^/        /'
 fi
 
-NUPKG=$(find "$OUT" -maxdepth 1 -name 'Sipral.*.nupkg' | head -1)
+# A version, then .nupkg: `Sipral.*` alone would also match Sipral.Opus's.
+NUPKG=$(find "$OUT" -maxdepth 1 -name "$PACKAGE_ID.[0-9]*.nupkg" | head -1)
 if [ -n "$NUPKG" ]; then
     step "structure"
     listing=$(unzip -l "$NUPKG" 2>/dev/null)
@@ -223,16 +250,16 @@ if [ -n "$NUPKG" ]; then
         fi
     done
 else
-    fail "no Sipral.*.nupkg landed in $OUT"
+    fail "no $PACKAGE_ID.<version>.nupkg landed in $OUT"
 fi
 
 if [ "$PUBLISH" -eq 1 ]; then
     step "publish"
     printf '  not run: nothing ships to NuGet before the ABI freezes (docs/08-ffi.md).\n'
-    printf '  What the owner runs once it has: dotnet nuget push %s\n' "${NUPKG:-$OUT/Sipral.*.nupkg}"
+    printf '  What the owner runs once it has: dotnet nuget push %s\n' "${NUPKG:-$OUT/$PACKAGE_ID.<version>.nupkg}"
     printf '  --source https://api.nuget.org/v3/index.json --api-key <key>\n'
 fi
 
 printf '\n'
-[ "$FAIL" -eq 0 ] && { printf 'nuget.sh pack: done, %s\n' "$OUT"; exit 0; }
+[ "$FAIL" -eq 0 ] && { printf 'nuget.sh pack: done, %s, %s\n' "${NUPKG:-$OUT}" "$VARIANT_LABEL"; exit 0; }
 printf 'nuget.sh pack: failed\n'; exit 1

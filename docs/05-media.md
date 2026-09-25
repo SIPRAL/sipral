@@ -1510,11 +1510,15 @@ On by default, because a default decides only for whoever did not choose, and
 whoever did not choose is either an open-source user or a licensee who
 configures the build anyway. The one place where leaving it on would put the
 codec into a product quietly is the precompiled artefacts — the binaries
-somebody downloads instead of compiling — and there are none: nothing in this
-tree packages, signs or publishes one yet. When that work happens the default
-there is off, or two variants labelled clearly enough that nobody ships the
-wrong one without noticing. It is written down where the packaging is — the
-artefact bullet of phase 3 in `docs/10-roadmap.md` — and not decided here.
+somebody downloads instead of compiling — so there the default is off. Every
+script under `scripts/package/` builds `sipral-ffi` without `opus` and with
+every other default kept, reading that list out of the crate's own
+`Cargo.toml`. The variant with libopus is built only when `--with-opus` asks
+for it, and its name says so: `CSipral-opus.xcframework.zip`, the wheel
+distribution `sipral-opus`, the NuGet package `Sipral.Opus`,
+`sipral-opus.aar`. The halves that pack natives built elsewhere refuse ones
+built for the other variant, and `scripts/check.sh` reads the XCFramework it
+packages for libopus's own symbols and fails on any.
 
 A build without it offers G.722 and the two G.711 laws — and G.729 where an
 order names it, as every build does — and it needs no cmake

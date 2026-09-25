@@ -1533,6 +1533,30 @@ pkg_run() {
 pkg_run "xcframework.sh --dry-run" \
     scripts/package/xcframework.sh --out "$PKG_WORK/xcframework" --dry-run
 
+# What the scripts build by default is the artefact without libopus
+# (docs/05-media.md): read out of the macOS archive the XCFramework above
+# carries, the same way as the C ABI's own no-default-features build earlier
+# -- libopus's `_opus_` C symbols, with nm-classic and without `-g`. The
+# archive is static, so the release profile's `strip` has not emptied it the
+# way it empties a linked library, and its `_sipral_` entry points are
+# counted so that an nm that read nothing is not taken for a clean archive.
+PKG_ARCHIVE=$(find "$PKG_WORK/xcframework/CSipral.xcframework" -path '*macos*' -name 'libsipral_ffi.a' 2>/dev/null | head -1)
+if [ -z "$PKG_ARCHIVE" ]; then
+    fail "no macOS libsipral_ffi.a in the packaged XCFramework, so nothing was read for libopus"
+else
+    symbols=$(xcrun nm-classic -U -arch arm64 "$PKG_ARCHIVE" 2>/dev/null | awk '{print $NF}')
+    entry_points=$(printf '%s\n' "$symbols" | grep -c '^_sipral_' || true)
+    linked=$(printf '%s\n' "$symbols" | grep '^_opus_' || true)
+    if [ "$entry_points" -eq 0 ]; then
+        fail "nm read no _sipral_ entry point out of the packaged macOS archive, so nothing was checked"
+    elif [ -n "$linked" ]; then
+        fail "the packaged XCFramework links opus symbols, and the default package is meant to be without libopus:"
+        printf '%s\n' "$linked" | head -5 | sed 's/^/        /'
+    else
+        pass "no opus symbol in the packaged XCFramework's macOS archive (nm, default package)"
+    fi
+fi
+
 pkg_run "wheels.sh --dry-run" \
     scripts/package/wheels.sh --out "$PKG_WORK/wheels" --dry-run
 

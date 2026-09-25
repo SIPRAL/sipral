@@ -41,6 +41,14 @@
 # collect-natives is the only half that needs another machine's toolchain;
 # assemble runs anywhere kotlinc does, including with no natives at all
 # under --dry-run.
+#
+# Both take --with-opus, for the variant that carries libopus. Without it,
+# collect-natives builds without sipral-ffi's `opus` feature and every other
+# default kept (features.sh says why and how), and writes the list it built
+# with to DIR/sipral-ffi.features; assemble refuses natives whose list is
+# missing or is not the one its own --with-opus (or its absence) asks for,
+# and writes the variant with libopus as sipral-opus.aar rather than
+# sipral.aar.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -85,8 +93,8 @@ CMD="${1:-}"
 [ $# -ge 1 ] && shift
 case "$CMD" in
     collect-natives|assemble) ;;
-    *) printf 'usage: aar.sh collect-natives --out DIR\n' >&2
-       printf '       aar.sh assemble --out DIR --natives DIR [--dry-run] [--publish]\n' >&2
+    *) printf 'usage: aar.sh collect-natives --out DIR [--with-opus]\n' >&2
+       printf '       aar.sh assemble --out DIR --natives DIR [--dry-run] [--publish] [--with-opus]\n' >&2
        exit 2 ;;
 esac
 
@@ -94,25 +102,29 @@ OUT=""
 NATIVES=""
 DRY_RUN=0
 PUBLISH=0
+WITH_OPUS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
         --natives) NATIVES="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --publish) PUBLISH=1; shift ;;
+        --with-opus) WITH_OPUS=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 [ -z "$OUT" ] && { printf '%s needs --out DIR\n' "$CMD" >&2; exit 2; }
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
+. "$ROOT/scripts/package/features.sh"
+package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
 
 MIN_SDK="21" # matches AndroidManifest.xml's minSdkVersion, below, and the
              # platform cargo-ndk is told to build against: the floor the
              # NDK's 64-bit ABIs (arm64-v8a, x86_64) require regardless.
 
 if [ "$CMD" = "collect-natives" ]; then
-    step "collect-natives, with the NDK at ${ANDROID_NDK_HOME:-(unset)}"
+    step "collect-natives, with the NDK at ${ANDROID_NDK_HOME:-(unset)}, $VARIANT_LABEL (features $FFI_FEATURES)"
     # The NDK is not fetched here: it comes with the Android SDK licence,
     # which is accepted once, by whoever builds the image
     # (bindings/kotlin/android/Dockerfile), and not on every run of a
@@ -124,9 +136,11 @@ if [ "$CMD" = "collect-natives" ]; then
     fi
     command -v cargo-ndk >/dev/null 2>&1 || { fail "cargo-ndk not found (cargo install cargo-ndk --locked)"; printf '\naar.sh: failed\n'; exit 1; }
 
+    rm -f "$OUT/$FEATURES_MARKER"
     if cargo ndk --platform "$MIN_SDK" -t arm64-v8a -t armeabi-v7a -t x86_64 -o "$OUT/jni" \
-        build --release -p sipral-ffi >"$OUT/collect-natives.log" 2>&1; then
-        pass "cargo ndk build --release -p sipral-ffi"
+        build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" >"$OUT/collect-natives.log" 2>&1; then
+        printf '%s\n' "$FFI_FEATURES" >"$OUT/$FEATURES_MARKER"
+        pass "cargo ndk build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]}"
     else
         fail "cargo ndk build:"
         tail -40 "$OUT/collect-natives.log" | sed 's/^/        /'
@@ -252,7 +266,17 @@ cat >"$STAGE/aar/proguard.txt" <<'EOF'
 EOF
 pass "proguard.txt"
 
-step "natives, from $NATIVES"
+step "natives, from $NATIVES, $VARIANT_LABEL"
+# Only when a native is staged at all, so that --dry-run over an empty
+# directory still proves the layout; and then even under --dry-run, because
+# natives of the other variant under this archive's name are the one mistake
+# the name exists to prevent.
+staged=$(find "$NATIVES/jni" -name '*.so' 2>/dev/null | head -1)
+built_with=$(cat "$NATIVES/$FEATURES_MARKER" 2>/dev/null)
+if [ -n "$staged" ] && [ "$built_with" != "$FFI_FEATURES" ]; then
+    fail "the natives in $NATIVES were built with features '${built_with:-(no $FEATURES_MARKER beside them)}', not '$FFI_FEATURES'"
+    printf '\naar.sh: failed\n'; exit 1
+fi
 populated=0
 for abi in "${ABIS[@]}"; do
     dest="$STAGE/aar/jni/$abi"
@@ -290,9 +314,9 @@ done
 [ "$populated" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && { fail "no ABI had its natives staged"; printf '\naar.sh: failed\n'; exit 1; }
 
 step "the archive"
-AAR="$OUT/sipral.aar"
+AAR="$OUT/sipral$VARIANT_SUFFIX.aar"
 rm -f "$AAR"
-( cd "$STAGE/aar" && zip -qr "$AAR" . ) && pass "sipral.aar" || fail "zip -qr sipral.aar"
+( cd "$STAGE/aar" && zip -qr "$AAR" . ) && pass "$(basename "$AAR")" || fail "zip -qr $(basename "$AAR")"
 
 if [ -f "$AAR" ]; then
     listing=$(unzip -l "$AAR" 2>/dev/null)
@@ -327,5 +351,5 @@ if [ "$PUBLISH" -eq 1 ]; then
 fi
 
 printf '\n'
-[ "$FAIL" -eq 0 ] && { printf 'aar.sh assemble: done, %s\n' "$AAR"; exit 0; }
+[ "$FAIL" -eq 0 ] && { printf 'aar.sh assemble: done, %s, %s\n' "$AAR" "$VARIANT_LABEL"; exit 0; }
 printf 'aar.sh assemble: failed\n'; exit 1
