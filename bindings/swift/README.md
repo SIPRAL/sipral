@@ -85,6 +85,29 @@ skips both with a stated reason where SwiftPM cannot read the manifest at
 all (the Command Line Tools alone ship no `PackageDescription` module; a
 full Xcode does).
 
+`bindings/Package.swift` is the macOS and Linux package: it links
+`target/release`. For iOS, `scripts/package/xcframework.sh --out DIR`
+builds `DIR/CSipral.xcframework` (macOS, iOS device, iOS Simulator) and
+prints `DIR/spm/Package.swift` over it, carrying this whole module and its
+test suite on a `binaryTarget`. An application depends on `DIR/spm`; the
+suite runs on a simulator from there:
+
+```sh
+UDID=$(xcrun simctl create sipral-test "iPhone 17" com.apple.CoreSimulator.SimRuntime.iOS-26-5)
+cd DIR/spm && xcodebuild test -scheme Sipral -destination "platform=iOS Simulator,id=$UDID"
+xcrun simctl delete "$UDID"
+```
+
+`Tests/SipralTests/HostPeerCallTests.swift` makes a call out of the process
+— to a peer, or through a registrar — and is skipped, with the reason, unless
+`SIPRAL_PEER` names one as `host:port`; `SIPRAL_REGISTRAR`, `SIPRAL_AOR`,
+`SIPRAL_AUTH_USER`, `SIPRAL_AUTH_PASSWORD`, `SIPRAL_TARGET` and
+`SIPRAL_WAIT_INCOMING_SECONDS` say the rest (the file's own comment says
+how). `xcodebuild` hands the test process every `TEST_RUNNER_<NAME>` it is
+given as `<NAME>`. `docs/15-mobile.md`, "The Swift package on iOS", has what
+ran on the iOS 26.5 simulator, against a peer on the same Mac and through
+the lab's Asterisk.
+
 ## Use
 
 ```swift
@@ -122,7 +145,10 @@ call.close()
 
 An incoming call has no `Call` until the application decides what to do
 with it: read `SipralEventKind.incomingCall` off `stack.events` and call
-`stack.answerCall(event)` or `stack.rejectCall(event)`.
+`stack.answerCall(event)` or `stack.rejectCall(event)`. Under CallKit, take
+it with `stack.takeIncomingCall(event)` instead, which hands over the `Call`
+still ringing: bind that into `CallKitBridge`, and CallKit's
+`CXAnswerCallAction` is what answers it.
 
 ## Samples
 
@@ -140,14 +166,18 @@ layer it sits on through `swift test` instead.
 
 ## What is not here
 
-The iOS platform component: `CallKitAdapter` and `PushKitAdapter` are
-compiled only where `CallKit`/`PushKit` actually work, and are not
-unit-tested here — what would be tested is `CXProvider`/`PKPushRegistry`
-themselves, which need a device or the simulator's telephony stack, not
-anything this package adds in front of them; `CallKitBridge` and
-`PushKitBridge`, the sequence that matters, are tested against a recording
-`CallKitProviding` instead. `AVAudioSession` category and interruption
-handling beyond what `SipralSampleMac`'s own `AudioBridge.swift` does; a DNS
-resolver for `SipralEventKind.resolveNeeded` beyond treating the host as a
-literal address (`SipralStack.resolve`), the same gap
+CallKit and PushKit delivered by the system: `CallKitAdapter` and
+`PushKitAdapter` are compiled only where `CallKit`/`PushKit` actually work,
+and `Tests/SipralTests/CallKitAdapterTests.swift` drives the adapter with
+CallKit's own action classes on iOS — but the iOS 26.5 simulator refuses
+every third-party `CXProvider`, so `reportNewIncomingCall` never completes
+there, and it registers no VoIP push without an `aps-environment`
+entitlement. The incoming-call screen and a real VoIP push need a device and
+its provisioning. `CallKitBridge` and `PushKitBridge`, the sequence that
+matters, are tested against a recording `CallKitProviding` on every
+platform. `AVAudioSession` category and interruption handling beyond what
+`SipralSampleMac`'s own `AudioBridge.swift` does. A DNS resolver for
+`SipralEventKind.resolveNeeded`: the event is delivered and left unanswered,
+so that a dialog stays on the path its INVITE took; an application with a
+real lookup answers it through `Sipral.stackResolved` — the same gap
 `bindings/python/README.md` states for its own layer.
