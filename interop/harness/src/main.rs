@@ -111,6 +111,7 @@ fn seconds_from(name: &str, fallback: u64) -> Duration {
 /// distinct per-flow constants equal (`a != b` implies `a ^ r != b ^ r` for
 /// the same `r`), so the ABI's requirement that the two seeds differ still
 /// holds after folding.
+///
 /// Set once by `main`, before the first flow runs, and read by every
 /// [`folded_seed`]/[`folded_media_seed`] after that — a run-scoped global
 /// rather than a parameter threaded through [`run`], since it is the same
@@ -170,12 +171,23 @@ fn xor32(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
 /// seed rather than a panic — like `catalog`'s own fallback — and is never
 /// actually taken.
 fn folded_seed(flow: Flow) -> [u8; 32] {
-    xor32(seed(flow), RUN_SEED.get().copied().unwrap_or([0; 32]))
+    run_folded(seed(flow))
 }
 
 /// [`media_seed`], folded the same way [`folded_seed`] folds [`seed`].
 fn folded_media_seed(flow: Flow) -> [u8; 32] {
-    xor32(media_seed(flow), RUN_SEED.get().copied().unwrap_or([0; 32]))
+    run_folded(media_seed(flow))
+}
+
+/// Any fixed 32-octet pattern, folded with this run's own entropy
+/// ([`RUN_SEED`]). The steps outside the flow table — `fork`, `join`,
+/// `pair`, `drift`, `ice_lite`, `ice_nat`, `wasapi` — each bind their
+/// endpoints from constants of their own, and without this every run of one
+/// of them would mint the same `Call-ID`, tags and branches as the run
+/// before it. Distinct constants stay distinct after folding, for the reason
+/// [`RUN_SEED`] gives.
+pub(crate) fn run_folded(constant: [u8; 32]) -> [u8; 32] {
+    xor32(constant, RUN_SEED.get().copied().unwrap_or([0; 32]))
 }
 
 /// How long to wait for the far end to become transferable before asking

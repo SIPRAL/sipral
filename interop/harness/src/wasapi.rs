@@ -63,7 +63,7 @@ use sipral_media::resample::Resampler;
 
 use crate::audio::{AUDIBLE, loudness, tone};
 use crate::join::give_back;
-use crate::{Endpoint, catalog, place_call, uri};
+use crate::{Endpoint, catalog, place_call, run_folded, uri};
 
 /// `interop/asterisk/extensions.conf`'s `Answer(); Echo();`, the same
 /// extension `pipewire.rs` calls.
@@ -346,8 +346,14 @@ fn run(server: &str, remote: SocketAddr, user: &str, pass: &str) -> Result<Strin
     let now = Instant::now();
     // distinct from every seed the other flows use (`pipewire.rs` included),
     // so no two of them mint the same branch
-    let mut endpoint = Endpoint::bind([181; 32], [187; 32], bind_addr, catalog(), now)
-        .map_err(|error| format!("cannot bind: {error}"))?;
+    let mut endpoint = Endpoint::bind(
+        run_folded([181; 32]),
+        run_folded([187; 32]),
+        bind_addr,
+        catalog(),
+        now,
+    )
+    .map_err(|error| format!("cannot bind: {error}"))?;
     let account = endpoint.account(user, pass, server, remote)?;
     let target = uri(&format!("sip:{ECHO_EXTENSION}@{server}"))?;
 

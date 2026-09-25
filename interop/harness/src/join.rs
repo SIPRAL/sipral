@@ -57,7 +57,7 @@ use std::time::{Duration, Instant};
 use sipral::{CallHandle, CallMedia, Event, MediaConfig, MediaEvent, OutgoingCall, UaEvent};
 
 use crate::audio::{AUDIBLE, in_spurt, loudness};
-use crate::{Endpoint, catalog, place_call, uri};
+use crate::{Endpoint, catalog, place_call, run_folded, uri};
 
 /// How long the flow may take before it is a failure.
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -125,10 +125,17 @@ pub(crate) fn run(
     let bind_addr = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
     // distinct from every seed `main.rs`'s own `seed`/`media_seed` and
-    // `pair.rs`'s own `run` already use, so that two runs of this flow's own
-    // stack never mint the same branch as another flow's
-    let mut endpoint = Endpoint::bind([151; 32], [163; 32], bind_addr, catalog(), now)
-        .map_err(|error| format!("cannot bind: {error}"))?;
+    // `pair.rs`'s own `run` already use, so that this flow's stack never
+    // mints the same branch as another flow's in the same run; `run_folded`
+    // is what keeps one run of it from minting the last run's
+    let mut endpoint = Endpoint::bind(
+        run_folded([151; 32]),
+        run_folded([163; 32]),
+        bind_addr,
+        catalog(),
+        now,
+    )
+    .map_err(|error| format!("cannot bind: {error}"))?;
     let account = endpoint.account(user, pass, server, remote)?;
 
     let mut tone_leg = Leg::default();

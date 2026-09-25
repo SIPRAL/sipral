@@ -726,7 +726,10 @@ freezing the ABI** (`10-roadmap.md`, `08-ffi.md`).
 
 Both drivers seed every flow's stack with a pattern fixed per flow — `seed`/
 `media_seed` in `interop/harness/src/main.rs`, `seeds_for` in
-`interop/harness-c/main.c` — folded by XOR with thirty-two bytes of entropy
+`interop/harness-c/main.c`, and the Rust driver's steps outside the flow
+table (`fork`, `join`, `pair`, `drift`, `ice_lite`, `ice_nat`, `pipewire`,
+`wasapi`) with constants of their own through `run_folded` — folded by XOR
+with thirty-two bytes of entropy
 drawn fresh from the operating system once per run and printed at its start
 (`seed: <64 hex digits>`), so two runs of the same flow never mint the same
 `Call-ID`, `From` tag or first branch: a server that still held the previous

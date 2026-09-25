@@ -46,7 +46,7 @@ use sipral_io_pipewire::{
 
 use crate::audio::{AUDIBLE, in_spurt, loudness, tone};
 use crate::join::give_back;
-use crate::{Endpoint, catalog, place_call, uri};
+use crate::{Endpoint, catalog, place_call, run_folded, uri};
 
 /// The room's mouth: the sink the tone is played into.
 const MOUTH: &str = "sipral-mouth";
@@ -176,7 +176,8 @@ fn run(server: &str, remote: SocketAddr, user: &str, pass: &str) -> Result<Strin
     let now = Instant::now();
     // distinct from every seed the other flows use, so no two of them mint
     // the same branch
-    let mut endpoint = Endpoint::bind([191; 32], [197; 32], bind_addr, catalog(), now)
+    let (seed, media_seed) = (run_folded([191; 32]), run_folded([197; 32]));
+    let mut endpoint = Endpoint::bind(seed, media_seed, bind_addr, catalog(), now)
         .map_err(|error| format!("cannot bind: {error}"))?;
     let account = endpoint.account(user, pass, server, remote)?;
     let target = uri(&format!("sip:{ECHO_EXTENSION}@{server}"))?;

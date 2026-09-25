@@ -29,7 +29,7 @@ use sipral::{
 use sipral_core::sdp;
 
 use crate::audio::Media;
-use crate::{Endpoint, advertised, catalog, place_call, uri};
+use crate::{Endpoint, advertised, catalog, place_call, run_folded, uri};
 
 /// How long the pair may take before it is a failure.
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -220,10 +220,22 @@ pub(crate) fn run(
     let bind = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
 
-    let mut answering_endpoint = Endpoint::bind([71; 32], [171; 32], bind, catalog(), now)
-        .map_err(|error| format!("cannot bind the callee: {error}"))?;
-    let mut dialling_endpoint = Endpoint::bind([73; 32], [173; 32], bind, catalog(), now)
-        .map_err(|error| format!("cannot bind the caller: {error}"))?;
+    let mut answering_endpoint = Endpoint::bind(
+        run_folded([71; 32]),
+        run_folded([171; 32]),
+        bind,
+        catalog(),
+        now,
+    )
+    .map_err(|error| format!("cannot bind the callee: {error}"))?;
+    let mut dialling_endpoint = Endpoint::bind(
+        run_folded([73; 32]),
+        run_folded([173; 32]),
+        bind,
+        catalog(),
+        now,
+    )
+    .map_err(|error| format!("cannot bind the caller: {error}"))?;
 
     let answering_id = account(
         &mut answering_endpoint,

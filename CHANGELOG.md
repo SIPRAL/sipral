@@ -685,7 +685,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   Merged, reproduced running two of the Rust harness's own `call` flow at
   once against the lab's Kamailio. Both harnesses now draw a fresh
   thirty-two-byte seed from the operating system once per run and fold it
-  into the per-flow pattern, so flows of one run still differ from each
+  into the per-flow pattern — and into the constants the Rust harness's
+  fork, join, pair, drift, ICE, PipeWire and WASAPI steps bind with — so
+  flows of one run still differ from each
   other and two runs never mint the same branch; `SIPRAL_HARNESS_SEED` (64
   hex digits) pins it so a failing run can be repeated exactly, printed at
   the start of every run either way.

@@ -50,7 +50,7 @@ use sipral::{
 
 use crate::audio::Media;
 use crate::ice_lite::{drive, verdict};
-use crate::{Endpoint, catalog, route_to, uri};
+use crate::{Endpoint, catalog, route_to, run_folded, uri};
 
 /// How long a mapping is waited for: longer than `Mappings`' own five and a
 /// half seconds, so that it is the one that gives up and says why.
@@ -234,8 +234,8 @@ pub(crate) fn call(target: &str, remote: SocketAddr) -> Result<String, String> {
     let stun = stun_server()?;
     let required = catalog().with_ice(IcePolicy::Required);
     let mut endpoint = Endpoint::bind(
-        [181; 32],
-        [191; 32],
+        run_folded([181; 32]),
+        run_folded([191; 32]),
         SocketAddr::new(route_to(remote), 0),
         required.clone(),
         Instant::now(),
@@ -247,7 +247,7 @@ pub(crate) fn call(target: &str, remote: SocketAddr) -> Result<String, String> {
         endpoint.transport,
         remote,
     ));
-    let (media, local, public, relayed) = mapped_media(remote, stun, [193; 32])?;
+    let (media, local, public, relayed) = mapped_media(remote, stun, run_folded([193; 32]))?;
     let turn = turn_server()?.map(|(server, ..)| server);
     let (described, allocated) = with_relay(
         CallMedia::new(required, MediaConfig::default()).public_address(public),
@@ -317,8 +317,8 @@ pub(crate) fn answer(stun_hint: SocketAddr) -> Result<String, String> {
         .map_err(|_| "SIPRAL_CONTACT does not name the forwarded address".to_owned())?;
     let required = catalog().with_ice(IcePolicy::Required);
     let mut endpoint = Endpoint::bind(
-        [197; 32],
-        [199; 32],
+        run_folded([197; 32]),
+        run_folded([199; 32]),
         SocketAddr::new(route_to(stun_hint), 5060),
         required.clone(),
         Instant::now(),
@@ -330,7 +330,7 @@ pub(crate) fn answer(stun_hint: SocketAddr) -> Result<String, String> {
         endpoint.transport,
         stun,
     ));
-    let (media, local, public, relayed) = mapped_media(stun, stun, [211; 32])?;
+    let (media, local, public, relayed) = mapped_media(stun, stun, run_folded([211; 32]))?;
     let (described, allocated) = with_relay(
         CallMedia::new(required, MediaConfig::default()).public_address(public),
         relayed,

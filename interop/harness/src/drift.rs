@@ -64,7 +64,7 @@ use sipral::{
 };
 
 use crate::audio::Heard;
-use crate::{Endpoint, catalog, place_call, uri};
+use crate::{Endpoint, catalog, place_call, run_folded, uri};
 
 /// `interop/asterisk/extensions.conf`'s echo: `Answer(); Echo();`.
 const ECHO_EXTENSION: &str = "9008";
@@ -169,8 +169,14 @@ pub(crate) fn run(
     let bind_addr = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
     // seeds no other flow in this table uses
-    let mut endpoint = Endpoint::bind([239; 32], [241; 32], bind_addr, catalog(), now)
-        .map_err(|error| format!("cannot bind: {error}"))?;
+    let mut endpoint = Endpoint::bind(
+        run_folded([239; 32]),
+        run_folded([241; 32]),
+        bind_addr,
+        catalog(),
+        now,
+    )
+    .map_err(|error| format!("cannot bind: {error}"))?;
     let account = endpoint.account(user, pass, server, remote)?;
     let target = uri(&format!("sip:{ECHO_EXTENSION}@{server}"))?;
     let mut legs = [Leg::new(-ppm), Leg::new(0), Leg::new(ppm)];

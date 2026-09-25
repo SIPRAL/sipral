@@ -29,7 +29,7 @@ use sipral::{
 };
 
 use crate::audio::Heard;
-use crate::{Endpoint, catalog, place_call, route_to, uri};
+use crate::{Endpoint, catalog, place_call, route_to, run_folded, uri};
 
 /// How long the flow may take before it is a failure.
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -63,8 +63,8 @@ pub(crate) fn run(target: &str, remote: SocketAddr) -> Result<String, String> {
     let now = Instant::now();
     let required = catalog().with_ice(IcePolicy::Required);
     let mut endpoint = Endpoint::bind(
-        [173; 32],
-        [179; 32],
+        run_folded([173; 32]),
+        run_folded([179; 32]),
         SocketAddr::new(route_to(remote), 0),
         required.clone(),
         now,

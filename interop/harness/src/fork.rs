@@ -26,7 +26,7 @@ use sipral::{
 };
 
 use crate::join::give_back;
-use crate::{Endpoint, catalog, place_call, uri};
+use crate::{Endpoint, catalog, place_call, run_folded, uri};
 
 /// How long the whole flow may take before it is a failure.
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -249,8 +249,14 @@ pub(crate) fn run(server: &str, remote: SocketAddr) -> Result<String, String> {
     let bind = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
     let phone = |name, seed: u8, rings_after, answers_after| -> Result<Phone, String> {
-        let mut endpoint = Endpoint::bind([seed; 32], [seed ^ 0x5a; 32], bind, catalog(), now)
-            .map_err(|error| format!("cannot bind the {name}: {error}"))?;
+        let mut endpoint = Endpoint::bind(
+            run_folded([seed; 32]),
+            run_folded([seed ^ 0x5a; 32]),
+            bind,
+            catalog(),
+            now,
+        )
+        .map_err(|error| format!("cannot bind the {name}: {error}"))?;
         let account = endpoint.account(FORK_USER, FORK_PASS, server, remote)?;
         Ok(Phone {
             name,
@@ -275,8 +281,14 @@ pub(crate) fn run(server: &str, remote: SocketAddr) -> Result<String, String> {
         MOBILE_RINGS_AFTER,
         Some(MOBILE_ANSWERS_AFTER),
     )?;
-    let mut caller_endpoint = Endpoint::bind([163; 32], [167; 32], bind, catalog(), now)
-        .map_err(|error| format!("cannot bind the caller: {error}"))?;
+    let mut caller_endpoint = Endpoint::bind(
+        run_folded([163; 32]),
+        run_folded([167; 32]),
+        bind,
+        catalog(),
+        now,
+    )
+    .map_err(|error| format!("cannot bind the caller: {error}"))?;
     // the proxy relays an INVITE without asking who sent it, so the caller
     // needs an account to place the call from and no binding
     let caller_account = caller_endpoint.account("labuser", "labpass", server, remote)?;
