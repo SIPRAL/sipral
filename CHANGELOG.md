@@ -38,8 +38,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   overwritten when it is dropped. `scripts/lab.sh turn` proves it: two
   stacks behind two NATs that drop everything between them but SIP fail to
   connect without a relay, and with one the call completes through coturn
-  and both allocations are given back — placed once from Rust and once from
-  C, through `sipral_stack_config_t` and nothing else.
+  and both allocations are given back — placed from Rust, and from C
+  through `sipral_stack_config_t` and nothing else, once with the C end's
+  own relay the only path the audio has.
 - **A relay is kept, or given back, wherever the call around it goes.** A
   description refused before it left — a call or transfer the user agent
   will not place, a ring or an answer refused — hands its relay back whole

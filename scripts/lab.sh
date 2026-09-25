@@ -1184,10 +1184,18 @@ nat_pair_down() {
 # and nothing else. Both halves' output is printed; the status is 0 only
 # when both passed. NAT_PAIR_CALLER=c, set for the call, places it from the
 # C harness instead (interop/harness-c's own FLOW_ICE_NAT, the same flow key
-# and the same variables), with the Rust harness still answering.
+# and the same variables), with the Rust harness still answering; with
+# NAT_PAIR_CALLER_TURN=1 as well, that caller alone is given the relay
+# step's TURN server and credential.
 nat_pair_call() {
     local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
     local callee callee_status status=0 tries=0 beside
+    local -a caller_only=()
+    if [ -n "${NAT_PAIR_CALLER_TURN:-}" ]; then
+        caller_only=(-e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478"
+            -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER"
+            -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD")
+    fi
     docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
     docker run -d --name "$ICE_CALLEE_NAME" --network "${project}_inside2" \
         --cap-add NET_ADMIN \
@@ -1237,6 +1245,7 @@ nat_pair_call() {
             -e SIPRAL_FLOWS=icenat \
             -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
             ${1+"$@"} \
+            ${caller_only[@]+"${caller_only[@]}"} \
             -e LD_LIBRARY_PATH=/lib-sipral \
             -v "$HARNESS_C:/harness-c:ro" \
             -v "$beside:/lib-sipral:ro" \
@@ -1281,10 +1290,12 @@ nat_pair_call() {
 # relay through the C ABI): the TURN server, user and password set through
 # sipral_stack_config_t, the relay seen as SIPRAL_EVENT_KIND_NAT_RELAY, the
 # path judged by where the library addresses the audio, and the Refresh of
-# lifetime zero read off sipral_stack_poll_farewell -- with the Rust harness
+# lifetime zero read off whichever queue hands it out -- with the Rust harness
 # still answering, so the relay is proved from both drivers on every run of
 # the word. Without TURN that call has to find no path too, and coturn's log
 # has to count its two allocations as given back on top of the first two.
+# Last, the C caller alone is given TURN: the only path left runs through its
+# own relay, and its one allocation has to be given back as well.
 ice_turn_flow() {
     local status=0
     SIPRAL_TURN_USER=sipral-lab
@@ -1344,6 +1355,17 @@ ice_turn_flow() {
         fi
         if [ "$status" -eq 0 ]; then
             turn_given_back 4 || status=1
+        fi
+        # with both ends relayed, ICE settles on the callee's relay and the
+        # caller's own goes back unused; with the caller's alone, the block
+        # leaves no path but through it, so the tone crosses what the C ABI
+        # wraps and unwraps for the TURN server itself
+        if [ "$status" -eq 0 ]; then
+            printf '  with TURN at the C caller alone: the call has to go through its own relay\n'
+            NAT_PAIR_CALLER=c NAT_PAIR_CALLER_TURN=1 nat_pair_call || status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            turn_given_back 5 || status=1
         fi
     fi
     nat_pair_down -f compose.yaml -f turn/compose.override.yaml
