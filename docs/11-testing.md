@@ -724,6 +724,22 @@ change that would stop an integrator's program building fails at the moment it
 is made. **This is the phase-1 exit criterion and the precondition for
 freezing the ABI** (`10-roadmap.md`, `08-ffi.md`).
 
+Both drivers seed every flow's stack with a pattern fixed per flow — `seed`/
+`media_seed` in `interop/harness/src/main.rs`, `seeds_for` in
+`interop/harness-c/main.c` — folded by XOR with thirty-two bytes of entropy
+drawn fresh from the operating system once per run and printed at its start
+(`seed: <64 hex digits>`), so two runs of the same flow never mint the same
+`Call-ID`, `From` tag or first branch: a server that still held the previous
+run's transaction or dialog otherwise read the new one as the same request
+arrived twice and answered 482 Request Merged. `SIPRAL_HARNESS_SEED`, the
+same 64 hex digits, pins the run seed instead of drawing one, so a run that
+hit a failure can be repeated exactly; the per-flow pattern is unaffected,
+so flows within a repeated run still differ from each other the way they
+always did. The harnesses' own unit tests keep the fixed pattern with no
+run seed folded in, through `interop/harness/src/main.rs`'s own
+`tests::scripted`, since what they want is the reproducible pattern rather
+than a fresh one on every `cargo test`.
+
 It runs the same fifteen flows the Rust driver runs, against the same
 servers, the two phone-to-phone ones against baresip among them, and the
 G.729 call among those on Asterisk — its codec chosen by the call's own

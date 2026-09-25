@@ -39,6 +39,11 @@
  * this one was built for the lab. 200809 is the edition all four are in.
  */
 #define _POSIX_C_SOURCE 200809L
+/* `getentropy` is not POSIX -- glibc gates it behind this (or `_GNU_SOURCE`)
+ * rather than exposing it whenever `_POSIX_C_SOURCE` alone is defined, and
+ * macOS's own `<sys/random.h>` wants nothing extra, so defining it costs
+ * that platform nothing. */
+#define _DEFAULT_SOURCE 1
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -47,6 +52,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
@@ -1171,16 +1177,98 @@ static int mailbox_counted(const struct endpoint *end)
 
 /* -- opening and closing an end ------------------------------------------- */
 
-/* The entropy a flow's stack is given.
+/* This run's own entropy, drawn once by `main` before the flow loop and read
+ * by every `seeds_for` after that -- a run-scoped global rather than a
+ * parameter threaded through `open_endpoint`, for the same reason
+ * `trouble` above is one. All zero until `run_entropy` or a parsed
+ * `SIPRAL_HARNESS_SEED` fills it. */
+static uint8_t g_run_seed[32];
+
+/* Thirty-two octets from the operating system: `getentropy`, falling back to
+ * `/dev/urandom` for a libc old enough, or minimal enough, not to have it.
+ * Zero on success, -1 if neither worked, `out` left alone. */
+static int run_entropy(uint8_t out[32])
+{
+    FILE *urandom;
+    size_t got;
+    if (getentropy(out, 32) == 0) {
+        return 0;
+    }
+    urandom = fopen("/dev/urandom", "rb");
+    if (urandom == NULL) {
+        return -1;
+    }
+    got = fread(out, 1, 32, urandom);
+    (void)fclose(urandom);
+    return got == 32 ? 0 : -1;
+}
+
+/* One hex digit, either case; -1 for anything else, so a caller can tell a
+ * malformed pair from a genuine zero rather than have `sscanf`'s own
+ * variable-width match silently accept one. */
+static int hex_nibble(char digit, unsigned *out)
+{
+    if (digit >= '0' && digit <= '9') {
+        *out = (unsigned)(digit - '0');
+        return 0;
+    }
+    if (digit >= 'a' && digit <= 'f') {
+        *out = (unsigned)(digit - 'a' + 10);
+        return 0;
+    }
+    if (digit >= 'A' && digit <= 'F') {
+        *out = (unsigned)(digit - 'A' + 10);
+        return 0;
+    }
+    return -1;
+}
+
+/* `SIPRAL_HARNESS_SEED`: 64 hex digits, or nothing parsed and -1. */
+static int parse_hex_seed(const char *text, uint8_t out[32])
+{
+    size_t index;
+    if (text == NULL || strlen(text) != 64u) {
+        return -1;
+    }
+    for (index = 0; index < 32u; index++) {
+        unsigned high, low;
+        if (hex_nibble(text[index * 2u], &high) != 0
+            || hex_nibble(text[index * 2u + 1u], &low) != 0) {
+            return -1;
+        }
+        out[index] = (uint8_t)((high << 4u) | low);
+    }
+    return 0;
+}
+
+static void seed_hex(const uint8_t seed[32], char out[65])
+{
+    size_t index;
+    for (index = 0; index < 32u; index++) {
+        (void)snprintf(out + index * 2u, 3, "%02x", seed[index]);
+    }
+}
+
+/* The entropy a flow's stack is given: a fixed pattern per flow, folded by
+ * XOR with this run's own entropy (`g_run_seed`, drawn once by `main`).
  *
- * Fixed patterns rather than platform entropy, because this is a lab and a
- * harness whose failures did not reproduce would be worth less than no
- * harness. The two seeds differ from each other because the ABI refuses them
- * equal, and `docs/20-security-model.md` says why.
+ * The pattern alone -- fixed, no platform entropy -- is what it was before
+ * `main` started drawing `g_run_seed`: reproducible within a run, but the
+ * same on every run, so two runs of the same flow sent the same `Call-ID`,
+ * the same `From` tag and the same first branch. RFC 3261 §8.1.1.4 wants a
+ * `Call-ID` globally unique and §19.3 wants tags random; a proxy that still
+ * held the previous run's transaction or dialog answered the new one 482
+ * Request Merged, which is what happened running two of this harness's own
+ * `call` flow at once against the lab's Kamailio. XOR cannot undo the
+ * per-flow variation `which` already gives two flows of one run: `a != b`
+ * implies `a ^ r != b ^ r` for the same `r`, so the two still differ, and the
+ * ABI's requirement that the signalling and media seeds differ from each
+ * other (`docs/20-security-model.md` says why) survives folding the same
+ * way.
  *
- * `which` varies them **per flow**, and that is not decoration. A stack's
- * `Call-ID` for its registration is drawn from the signalling seed once per
- * boot cycle (RFC 3261 §10.2), so six flows from one seed are six
+ * `which` still varies them **per flow**, and that is not decoration. A
+ * stack's `Call-ID` for its registration is drawn from the signalling seed
+ * once per boot cycle (RFC 3261 §10.2), so six flows from one seed are six
  * registrations that call themselves the same dialogue with a CSeq that
  * starts again from one -- and a registrar that has seen the first refuses
  * the rest as out of order. What that looks like from here is every other
@@ -1191,8 +1279,9 @@ static void seeds_for(unsigned which, uint8_t signalling[32], uint8_t media[32])
 {
     unsigned index;
     for (index = 0; index < 32u; index++) {
-        signalling[index] = (uint8_t)(0x11u + index * 7u + which * 29u);
-        media[index] = (uint8_t)(0xF1u - index * 5u + which * 37u);
+        signalling[index] =
+            (uint8_t)((0x11u + index * 7u + which * 29u) ^ g_run_seed[index]);
+        media[index] = (uint8_t)((0xF1u - index * 5u + which * 37u) ^ g_run_seed[index]);
     }
 }
 
@@ -3385,6 +3474,27 @@ int main(int argc, char **argv)
     }
     printf("lab: %s:%u at %s, extension %s, as %s\n", server, (unsigned)port,
            remote_text, extension, user);
+
+    /* `g_run_seed`, once, before the loop below ever calls `seeds_for`:
+     * pinned by `SIPRAL_HARNESS_SEED` (64 hex digits) so a failing run can be
+     * repeated exactly, or drawn fresh from the OS otherwise. Printed either
+     * way, so a run that is not pinned can still be told apart from the one
+     * before it. */
+    {
+        const char *pinned = getenv("SIPRAL_HARNESS_SEED");
+        char hex[65];
+        if (pinned != NULL && pinned[0] != '\0') {
+            if (parse_hex_seed(pinned, g_run_seed) != 0) {
+                printf("SIPRAL_HARNESS_SEED is not 64 hex digits: %s\n", pinned);
+                return 1;
+            }
+        } else if (run_entropy(g_run_seed) != 0) {
+            printf("cannot draw a run seed from the OS\n");
+            return 1;
+        }
+        seed_hex(g_run_seed, hex);
+        printf("seed: %s\n", hex);
+    }
 
     for (which = 0; which < (int)FLOW_COUNT; which++) {
         struct endpoint end;

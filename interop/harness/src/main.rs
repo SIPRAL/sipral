@@ -54,9 +54,11 @@ mod wasapi;
 
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Write as _;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::process::ExitCode;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sipral::{
@@ -94,6 +96,86 @@ fn seconds_from(name: &str, fallback: u64) -> Duration {
             .and_then(|text| text.parse().ok())
             .unwrap_or(fallback),
     )
+}
+
+/// Thirty-two octets of entropy for this run of the binary, drawn from the
+/// operating system the way `crates/sipral/examples/common/entropy.rs`
+/// draws a call agent's own — `SIPRAL_HARNESS_SEED` pins it instead, as 64
+/// hex digits, so a run that hit a failure can be repeated exactly.
+///
+/// [`seed`] and [`media_seed`] are a *per-flow* constant, so that flows of
+/// one run never mint the same branch or Call-ID as each other; they carry
+/// nothing that varies between two runs of the same flow, and RFC 3261
+/// §8.1.1.4 wants a Call-ID globally unique. [`folded_seed`]/
+/// [`folded_media_seed`] XOR this run seed into them, which cannot make two
+/// distinct per-flow constants equal (`a != b` implies `a ^ r != b ^ r` for
+/// the same `r`), so the ABI's requirement that the two seeds differ still
+/// holds after folding.
+/// Set once by `main`, before the first flow runs, and read by every
+/// [`folded_seed`]/[`folded_media_seed`] after that — a run-scoped global
+/// rather than a parameter threaded through [`run`], since it is the same
+/// for every flow this process drives and `run`'s own argument list already
+/// names everything that varies between them.
+static RUN_SEED: OnceLock<[u8; 32]> = OnceLock::new();
+
+fn run_seed() -> Result<[u8; 32], String> {
+    match env::var("SIPRAL_HARNESS_SEED") {
+        Ok(text) => parse_hex_seed(&text)
+            .ok_or_else(|| format!("SIPRAL_HARNESS_SEED is not 64 hex digits: {text:?}")),
+        Err(env::VarError::NotPresent) => {
+            let mut drawn = [0u8; 32];
+            getrandom::getrandom(&mut drawn)
+                .map_err(|error| format!("cannot draw a run seed from the OS: {error}"))?;
+            Ok(drawn)
+        }
+        Err(error) => Err(format!("SIPRAL_HARNESS_SEED: {error}")),
+    }
+}
+
+fn parse_hex_seed(text: &str) -> Option<[u8; 32]> {
+    let text = text.trim();
+    if text.len() != 64 {
+        return None;
+    }
+    let mut seed = [0u8; 32];
+    for (byte, pair) in seed.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(seed)
+}
+
+fn seed_hex(seed: [u8; 32]) -> String {
+    let mut text = String::with_capacity(64);
+    for byte in seed {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
+}
+
+fn xor32(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (slot, (x, y)) in out.iter_mut().zip(a.iter().zip(b.iter())) {
+        *slot = x ^ y;
+    }
+    out
+}
+
+/// [`seed`], folded with this run's own entropy ([`RUN_SEED`]): what [`run`]
+/// actually binds every flow's endpoint with. [`seed`] alone is what the
+/// harness's own unit tests use, through `tests::scripted`, since they want
+/// the fixed pattern rather than a fresh one every time they run.
+///
+/// `main` sets `RUN_SEED` before the loop that calls [`run`] even starts;
+/// the all-zero fallback exists so a bug in that ordering is a predictable
+/// seed rather than a panic — like `catalog`'s own fallback — and is never
+/// actually taken.
+fn folded_seed(flow: Flow) -> [u8; 32] {
+    xor32(seed(flow), RUN_SEED.get().copied().unwrap_or([0; 32]))
+}
+
+/// [`media_seed`], folded the same way [`folded_seed`] folds [`seed`].
+fn folded_media_seed(flow: Flow) -> [u8; 32] {
+    xor32(media_seed(flow), RUN_SEED.get().copied().unwrap_or([0; 32]))
 }
 
 /// How long to wait for the far end to become transferable before asking
@@ -241,7 +323,22 @@ fn main() -> ExitCode {
         println!("cannot resolve {server}:{port}");
         return ExitCode::FAILURE;
     };
+    let this_run_seed = match run_seed() {
+        Ok(seed) => seed,
+        Err(why) => {
+            println!("cannot start: {why}");
+            return ExitCode::FAILURE;
+        }
+    };
     println!("lab: {server}:{port} at {remote}, extension {extension}, as {user}");
+    println!("seed: {}", seed_hex(this_run_seed));
+    // set once, read by every `folded_seed`/`folded_media_seed` a flow's own
+    // `run` draws from; `main` is the only place that ever sets it, and it
+    // does so before the loop below calls `run` for the first time
+    // `Err` only if this ever ran twice, which `main` never does; there is
+    // nothing useful to do with that here, so it is dropped rather than
+    // matched
+    let _ = RUN_SEED.set(this_run_seed);
 
     let mut flows = vec![
         Flow::Register,
@@ -1823,7 +1920,13 @@ fn run(
 ) -> Result<String, String> {
     let bind_addr = SocketAddr::new(route_to(remote), 0);
     let now = Instant::now();
-    let mut endpoint = Endpoint::bind(seed(flow), media_seed(flow), bind_addr, catalog(), now)?;
+    let mut endpoint = Endpoint::bind(
+        folded_seed(flow),
+        folded_media_seed(flow),
+        bind_addr,
+        catalog(),
+        now,
+    )?;
     let account = endpoint.account(user, pass, server, remote)?;
 
     let mut script = Script::new(flow, account, extension, other, server, remote, now);
@@ -1979,8 +2082,20 @@ pub(crate) fn uri(text: &str) -> Result<Uri, String> {
     Uri::parse_str(text).map_err(|_| format!("{text} is not a URI"))
 }
 
-/// A different signalling seed per flow, so that two runs never mint the same
-/// branch.
+/// A different, fixed signalling seed per flow, so that flows of *one* run
+/// never mint the same branch or Call-ID as each other — a registrar that
+/// has already seen one flow's REGISTER would otherwise read another's as
+/// the same dialogue continued (RFC 3261 §10.2), with a CSeq starting over
+/// that it refuses as out of order.
+///
+/// This table alone repeats exactly between two runs, which is why
+/// `tests::scripted` uses it directly: the harness's own unit tests want
+/// the fixed pattern, not a fresh one every time they run. [`run`] never
+/// binds an endpoint with this alone — it folds in the run's own entropy
+/// first (see [`folded_seed`], [`run_seed`]) precisely because a fixed seed
+/// here sent the same Call-ID on every run, and a server that still held
+/// the last run's transaction or dialog answered the new one 482 Request
+/// merged.
 const fn seed(flow: Flow) -> [u8; 32] {
     match flow {
         Flow::Register => [17; 32],
@@ -2003,7 +2118,10 @@ const fn seed(flow: Flow) -> [u8; 32] {
 
 /// A media seed independent of the signalling one — `MediaEngine::new`'s own
 /// requirement, so that a recording of this run's signalling never carries
-/// the means to derive whatever key an SRTP flow drew.
+/// the means to derive whatever key an SRTP flow drew. Fixed per flow for
+/// the same reason [`seed`] is, and folded with the run's own entropy the
+/// same way before [`run`] ever binds an endpoint with it — see
+/// [`folded_media_seed`].
 const fn media_seed(flow: Flow) -> [u8; 32] {
     match flow {
         Flow::Register => [117; 32],

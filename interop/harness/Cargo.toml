@@ -47,6 +47,11 @@ sipral-core.workspace = true
 # crate never encodes Opus, and pulling it in would ask Windows for a C++
 # toolchain over nothing this flow uses.
 sipral-media = { path = "../../crates/sipral-media", version = "0.0.1", default-features = false }
+# The run's own entropy (`run_seed` in src/main.rs), the same crate and the
+# same version `crates/sipral/Cargo.toml` already pulls in for the identical
+# reason — already in this workspace's dependency graph, so naming it here
+# adds no new crate to the tree, only a direct line to what was transitive.
+getrandom = "0.2.17"
 
 # Two flows whose audio is a real device's, one per desktop this stack
 # targets: a call whose microphone and earpiece are PipeWire nodes

@@ -929,6 +929,7 @@ version = "0.0.1"
 name = "sipral-interop"
 version = "0.0.1"
 dependencies = [
+ "getrandom",
  "sipral",
  "sipral-core",
  "sipral-io-pipewire",

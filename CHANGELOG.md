@@ -675,6 +675,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **The interop harnesses no longer send the same Call-ID and tags on two
+  runs of the same flow.** Both drivers seeded every flow's stack from a
+  fixed pattern, one constant per flow, with no platform entropy — enough
+  to keep two flows of *one* run from colliding, not enough to keep two
+  *runs* apart, since a fresh process always drew the same pattern again.
+  A server that still held the previous run's transaction or dialog read
+  the new one as the same request arrived twice and answered 482 Request
+  Merged, reproduced running two of the Rust harness's own `call` flow at
+  once against the lab's Kamailio. Both harnesses now draw a fresh
+  thirty-two-byte seed from the operating system once per run and fold it
+  into the per-flow pattern, so flows of one run still differ from each
+  other and two runs never mint the same branch; `SIPRAL_HARNESS_SEED` (64
+  hex digits) pins it so a failing run can be repeated exactly, printed at
+  the start of every run either way.
 - **A loss right after a long one, or after the jitter buffer ran dry, no
   longer clicks on G.711.** The
   concealer kept the audio from before a hole in the stream — frames it
