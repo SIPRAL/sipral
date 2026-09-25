@@ -84,6 +84,78 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertThrowsError(try bridge.handleHold(uuid: uuid, onHold: true))
         XCTAssertThrowsError(try bridge.handleDtmf(uuid: uuid, digits: "1"))
     }
+
+    /// Alice calls Bob over loopback; Bob's call is left ringing, as a call
+    /// shown to a person is, with a reader on Bob's stack taken first.
+    private func ringingCall(from alice: SipralStack, to bob: SipralStack) async throws -> (Call, Call) {
+        let aliceAccount = try alice.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress
+        )
+        _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
+        let bobEvents = Recorder(bob.events())
+        let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+        let arrived = await bobEvents.first(within: 5) { $0.kind == .incomingCall }
+        let bobCall = try bob.takeIncomingCall(try XCTUnwrap(arrived, "no incoming call arrived"))
+        return (aliceCall, bobCall)
+    }
+
+    /// The bridge and the application both read the same bound call, and
+    /// neither takes events from the other: the bridge reports the call
+    /// connected and ended, and the application's own reader sees the
+    /// confirmation and the end too.
+    func testBridgeAndApplicationBothSeeEveryEventOfABoundCall() async throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
+        defer { aliceCall.close(); bobCall.close() }
+
+        let provider = RecordingProvider()
+        let bridge = CallKitBridge(provider: provider)
+        let uuid = UUID()
+        let application = Recorder(bobCall.events())
+        bridge.bind(uuid: uuid, to: bobCall)
+
+        try bridge.handleAnswer(uuid: uuid)
+        let connected = await eventually(within: 5) { await provider.connected.contains(uuid) }
+        XCTAssertTrue(connected, "the bridge never reported the call connected")
+        let confirmed = await application.first(within: 5) { $0.kind == .callConfirmed }
+        XCTAssertNotNil(confirmed, "the application's reader lost the confirmation to the bridge's")
+
+        try aliceCall.hangup()
+        let reported = await eventually(within: 5) { await provider.ended.contains { $0.uuid == uuid } }
+        XCTAssertTrue(reported, "the bridge never reported the call ended")
+        let endReason = await provider.ended.first { $0.uuid == uuid }?.reason
+        XCTAssertEqual(endReason, .remoteHangup)
+        let finished = await application.finished(within: 5)
+        XCTAssertTrue(finished)
+        XCTAssertEqual(application.elements.last?.kind, .callEnded)
+        XCTAssertNil(bridge.call(for: uuid), "an ended call must be unbound")
+    }
+
+    /// A call the caller gave up on before it was bound is still reported
+    /// ended once it is: its stream hands the bridge the end it missed,
+    /// rather than leaving the call screen ringing.
+    func testBindingACallThatAlreadyEndedReportsItEnded() async throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
+        defer { aliceCall.close(); bobCall.close() }
+
+        try aliceCall.hangup()
+        let ended = await eventually(within: 5) { bobCall.ended }
+        XCTAssertTrue(ended, "the callee never heard the caller give up")
+
+        let provider = RecordingProvider()
+        let bridge = CallKitBridge(provider: provider)
+        let uuid = UUID()
+        bridge.bind(uuid: uuid, to: bobCall)
+        let reported = await eventually(within: 5) { await provider.ended.contains { $0.uuid == uuid } }
+        XCTAssertTrue(reported, "a call bound after it ended was never reported ended")
+        let unbound = await eventually(within: 5) { bridge.call(for: uuid) == nil }
+        XCTAssertTrue(unbound, "a call bound after it ended must be unbound again")
+    }
 }
 
 private extension RecordingProvider {

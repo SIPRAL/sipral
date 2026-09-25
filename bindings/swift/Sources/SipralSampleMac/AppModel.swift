@@ -52,8 +52,9 @@ final class AppModel {
             let stack = try SipralStack()
             self.stack = stack
             append("listening on \(stack.bindAddress)")
+            let events = stack.events()
             eventTask = Task { [weak self] in
-                for await event in stack.events {
+                for await event in events {
                     await self?.handleStackEvent(event)
                 }
             }
@@ -97,8 +98,11 @@ final class AppModel {
     func answer(_ event: SipralEvent) {
         guard let stack else { return }
         do {
-            let call = try stack.answerCall(event)
+            // Attached before it is answered, so that its reader is there
+            // for the first event the answer brings.
+            let call = try stack.takeIncomingCall(event)
             attach(call)
+            try call.answer()
         } catch {
             append("answer failed: \(error)")
         }
@@ -129,8 +133,9 @@ final class AppModel {
         self.call = call
         callState = try? call.state
         callEventTask?.cancel()
+        let events = call.events()
         callEventTask = Task { [weak self] in
-            for await event in call.events {
+            for await event in events {
                 await self?.handleCallEvent(event, call: call)
             }
         }

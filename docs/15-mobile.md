@@ -595,9 +595,21 @@ PushKit. The push half of `C2` is tested through `PushKitBridge` and a
 
 **What an application has to know.** A call shown to a person before it is
 answered is taken with `takeIncomingCall`, not `answerCall`, so that
-CallKit's Answer is its one answer. Once bound to `CallKitBridge`, a call's
-`events` stream is the bridge's: an `AsyncStream` hands each event to one
-reader, so a second loop over the same stream sees only some of them.
+CallKit's Answer is its one answer. Binding a call to `CallKitBridge` takes
+nothing away from the application: `Call.events()` hands every caller a
+stream of its own, and every stream gets every event, in order, so the
+bridge's reader and the application's own loops over the same call each see
+all of them. A reader sees what is raised from the moment it takes its
+stream, not before, so the application takes it before the action it wants
+to see the outcome of — `takeIncomingCall`, then `events()`, then the
+answer. The one thing handed to a late reader is the end: every stream
+finishes right after the call's `CALL_ENDED`, and one taken after that gets
+that event and finishes, which is how a call the caller gave up on before
+it was bound is still reported ended to CallKit instead of left ringing.
+`Call.dtmf()` and `Media.frames()` work the same way; a reader that falls
+behind drops its own oldest items (past 4096 events or digits, and past 50
+frames — one second at 20 ms — unless it asks for another number) and
+never slows the others.
 
 ## What is still owed to phase 4, and is not signalling
 

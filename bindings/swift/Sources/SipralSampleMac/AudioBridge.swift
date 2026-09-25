@@ -5,7 +5,7 @@
 import AVFoundation
 import Sipral
 
-/// Bridges one call's audio (`Media.frames` / `Media.sendAudio`) to the
+/// Bridges one call's audio (`Media.frames()` / `Media.sendAudio`) to the
 /// device's microphone and speaker through `AVAudioEngine`.
 ///
 /// Deliberately simple -- this is the sample's own audio path, not
@@ -44,8 +44,9 @@ final class AudioBridge {
         try engine.start()
         player.play()
 
+        let frames = media.frames()
         frameTask = Task { [weak self] in
-            for await frame in media.frames {
+            for await frame in frames {
                 self?.play(frame)
             }
         }

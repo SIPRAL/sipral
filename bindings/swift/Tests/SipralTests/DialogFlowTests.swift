@@ -32,7 +32,7 @@ final class DialogFlowTests: XCTestCase {
         let account = try stack.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: server.localAddress)
         let call = try stack.placeCall(account: account, target: "sip:bob@\(server.localAddress)")
         defer { call.close() }
-        let events = Recorder(call.events)
+        let events = Recorder(call.events())
 
         let arrived = await requests(on: server, within: 5, until: "INVITE")
         let invite = try XCTUnwrap(arrived.first { $0.hasPrefix("INVITE ") }, "no INVITE reached the server")

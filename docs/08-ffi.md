@@ -1277,11 +1277,19 @@ What is not printed is the platform work, and it is what the binding earns its
 place for: `SipralStack`, `Account` and `Call` (`swift/Sources/Sipral/`), one
 POSIX socket per stack and per call's media (`UDPSocket.swift`, `Darwin` or
 `Glibc` directly rather than `Network.framework`, so the module also builds
-and runs on Linux), and the event callback bridged into an `AsyncStream` —
+and runs on Linux), and the event callback bridged into `AsyncStream`s —
 decoded synchronously, on the poll thread, into a `Sendable` `SipralEvent`
 before it crosses, the same rule `bindings/python/sipral/events.py` follows
 for the same reason (`sipral_event_t`'s pointers outlive nothing past the
-callback that carries them). `CallKitBridge` and `PushKitBridge` run
+callback that carries them). `SipralStack.events()`, `Call.events()`,
+`Call.dtmf()` and `Media.frames()` each hand every caller a stream of its
+own, fed every item from then on (`Broadcast.swift`): one `AsyncStream`
+read from two places splits its items between them, and a call bound to
+`CallKitBridge` is read by the bridge and the application at once. Nothing
+raised before a stream is taken reaches it, apart from a call's
+`CALL_ENDED`, handed to a stream taken after the call ended; a call's
+streams finish right after that event, a media's when it ends, a stack's
+when it closes. `CallKitBridge` and `PushKitBridge` run
 `docs/15-mobile.md`'s "C2" sequence — push, report to CallKit, announce,
 refresh the binding, match the INVITE, answer — behind `CallKitProviding`, a
 protocol small enough to fake in a test with no device and no `CallKit`

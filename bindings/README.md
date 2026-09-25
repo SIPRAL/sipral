@@ -37,7 +37,7 @@ Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
 `python/pyproject.toml`, `python/sipral/{stack,account,call,media,events,enums,errors}.py`
 (the idiomatic layer `_sipral_cffi.py` is written against), `python/tests/`,
 `python/examples/agent.py`,
-`swift/Sources/Sipral/{SipralStack,Account,Call,Media,SipralEvent,UDPSocket,CStrings,CallKitBridge,PushKitBridge,CallKitAdapter,PushKitAdapter}.swift`
+`swift/Sources/Sipral/{SipralStack,Account,Call,Media,SipralEvent,Broadcast,UDPSocket,CStrings,CallKitBridge,PushKitBridge,CallKitAdapter,PushKitAdapter}.swift`
 (the idiomatic layer `SipralAbi.swift` is written against, the same way
 the Python files above are written against `_sipral_cffi.py`),
 `swift/Tests/SipralTests/`, `swift/Sources/SipralLabAgent/`,

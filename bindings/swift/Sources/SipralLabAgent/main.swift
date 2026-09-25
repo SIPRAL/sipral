@@ -80,12 +80,14 @@ func environmentValue(_ name: String) -> String? {
 func respond(_ pcm: [Int16]) -> [Int16] { pcm }
 
 /// `call.media` may still be `nil` the instant a call is answered; this
-/// waits for it once, off `call.events`, the way
-/// `bindings/python/examples/agent.py`'s `run_call` does.
-func mediaFrames(of call: Call) async -> AsyncStream<[Int16]> {
-    if let media = call.media { return media.frames }
-    for await _ in call.events {
-        if let media = call.media { return media.frames }
+/// waits for it once, off `events`, the way
+/// `bindings/python/examples/agent.py`'s `run_call` does. `events` is a
+/// stream of this function's own, taken before the call was answered, so
+/// the `mediaStarted` that sets `call.media` cannot slip past it.
+func mediaFrames(of call: Call, watching events: AsyncStream<SipralEvent>) async -> AsyncStream<[Int16]> {
+    if let media = call.media { return media.frames() }
+    for await _ in events {
+        if let media = call.media { return media.frames() }
     }
     return AsyncStream { $0.finish() }
 }
@@ -95,27 +97,41 @@ private enum Termination: Sendable {
     case remoteEnded
 }
 
-func runCall(_ call: Call) async {
+/// The streams one call is watched through, each taken before the answer
+/// goes out: every one of them sees every event from then on, so three
+/// readers of the same call split nothing between them.
+struct CallStreams: Sendable {
+    let forMedia: AsyncStream<SipralEvent>
+    let forEnd: AsyncStream<SipralEvent>
+    let digits: AsyncStream<Character>
+
+    init(_ call: Call) {
+        forMedia = call.events()
+        forEnd = call.events()
+        digits = call.dtmf()
+    }
+}
+
+func runCall(_ call: Call, _ streams: CallStreams) async {
     print("answered \(String(call.handle, radix: 16))")
 
     let talkTask = Task {
-        for await frame in await mediaFrames(of: call) {
+        for await frame in await mediaFrames(of: call, watching: streams.forMedia) {
             call.media?.sendAudio(respond(frame))
         }
     }
 
     let termination = await withTaskGroup(of: Termination.self) { group -> Termination in
         group.addTask {
-            for await digit in call.dtmf {
+            for await digit in streams.digits {
                 print("dtmf \(digit)")
                 if digit == "#" { return .hangupRequested }
             }
             return .remoteEnded
         }
         group.addTask {
-            for await _ in call.events {
-                if call.ended { return .remoteEnded }
-            }
+            // Finishes right after the call's `callEnded`.
+            for await _ in streams.forEnd {}
             return .remoteEnded
         }
         let first = await group.next() ?? .remoteEnded
@@ -163,16 +179,27 @@ let account = try stack.addAccount(
     authUser: environmentValue("SIPRAL_AUTH_USER"),
     authPassword: environmentValue("SIPRAL_AUTH_PASSWORD")
 )
+// Taken before the REGISTER goes out, so that nothing it raises -- the
+// first INVITE included, however soon it follows -- lands before a reader.
+let stackEvents = stack.events()
 if environmentValue("SIPRAL_REGISTRAR") != nil {
     try account.register()
 }
 print("listening on \(stack.bindAddress)")
 
 await withTaskGroup(of: Void.self) { group in
-    for await event in stack.events {
+    for await event in stackEvents {
         if event.kind == .incomingCall {
-            guard let call = try? stack.answerCall(event, mediaHost: bindHost) else { continue }
-            group.addTask { await runCall(call) }
+            guard let call = try? stack.takeIncomingCall(event, mediaHost: bindHost) else { continue }
+            let streams = CallStreams(call)
+            do {
+                try call.answer()
+            } catch {
+                print("answer failed \(String(call.handle, radix: 16)): \(error)")
+                call.close()
+                continue
+            }
+            group.addTask { await runCall(call, streams) }
         }
     }
 }

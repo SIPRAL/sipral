@@ -68,9 +68,11 @@ public final class PushKitBridge: @unchecked Sendable {
         return pendingCall
     }
 
-    /// Matches an `IncomingCall`/`CallAnnounced` pair off `stack.events` to
+    /// Matches an `IncomingCall`/`CallAnnounced` pair off `stack.events()` to
     /// a still-pending push and resolves it. Call this from whatever reads
-    /// `SipralStack.events` for the application's account.
+    /// `SipralStack.events()` for the application's account -- a loop of its
+    /// own is as good as the application's main one, since every reader of
+    /// that stream sees every event.
     public func matchIncomingCall(_ event: SipralEvent, on stack: SipralStack) {
         guard event.kind == .incomingCall, let fromUri = event.callData?.fromUri else { return }
         let callerId = Self.userPart(of: fromUri)
@@ -89,9 +91,11 @@ public final class PushKitBridge: @unchecked Sendable {
 /// The call a `VoipPush` announced, before `sipral-ua` has matched an
 /// INVITE to it. `resolve(with:)` hands the real `Call` over once the
 /// application has built one (through `SipralStack.takeIncomingCall`, after
-/// reading the matching `IncomingCall` off `stack.events`, so that the
+/// reading the matching `IncomingCall` off `stack.events()`, so that the
 /// answer is left to CallKit's `CXAnswerCallAction`), and binds it
 /// into `CallKitBridge` under the same `UUID` the system already knows.
+/// The application can go on reading that `Call`'s own `events()` once it
+/// is bound: the bridge takes a stream of its own.
 public final class PendingCall: @unchecked Sendable {
     public let uuid: UUID
     public let callerId: String

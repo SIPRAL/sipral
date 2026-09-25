@@ -4,24 +4,36 @@
 import Dispatch
 import Foundation
 
+/// Whether `condition` came true within `seconds`, checked every 10 ms.
+func eventually(within seconds: Double, _ condition: () async -> Bool) async -> Bool {
+    let deadline = DispatchTime.now() + seconds
+    while true {
+        if await condition() { return true }
+        if DispatchTime.now() >= deadline { return false }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+}
+
 /// Everything one `AsyncStream` yields, read by a single task for as long as
 /// the stream lasts and kept, so that a test can wait for what it needs with
 /// a deadline.
 ///
 /// A deadline cannot be put on the `for await` loop itself: cancelling the
-/// task that iterates an `AsyncStream` finishes the stream, and every later
-/// read of `call.events` or `media.frames` would then come back empty. Here
-/// nothing is ever cancelled -- the reader ends when the stream does -- and
-/// a wait that runs out only stops looking.
+/// task that iterates an `AsyncStream` finishes that stream, so what the
+/// test is waiting for would never be recorded at all. Here nothing is ever
+/// cancelled -- the reader ends when the stream does -- and a wait that
+/// runs out only stops looking.
 final class Recorder<Element: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var seen: [Element] = []
+    private var ended = false
 
     init(_ stream: AsyncStream<Element>) {
         Task { [self] in
             for await element in stream {
                 append(element)
             }
+            finish()
         }
     }
 
@@ -31,10 +43,34 @@ final class Recorder<Element: Sendable>: @unchecked Sendable {
         seen.append(element)
     }
 
+    private func finish() {
+        lock.lock()
+        defer { lock.unlock() }
+        ended = true
+    }
+
     var elements: [Element] {
         lock.lock()
         defer { lock.unlock() }
         return seen
+    }
+
+    /// Whether the stream has finished and everything it yielded is in
+    /// `elements`.
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ended
+    }
+
+    /// Whether the stream finished within `seconds`.
+    func finished(within seconds: Double) async -> Bool {
+        let deadline = DispatchTime.now() + seconds
+        while !isFinished {
+            if DispatchTime.now() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return true
     }
 
     /// The first element `predicate` accepts, past the first `skipped` ones,

@@ -15,15 +15,58 @@ public final class Call: @unchecked Sendable {
     public unowned let stack: SipralStack
     public let handle: SipralHandle
 
-    /// Every event this call's handle names, decoded whole.
-    public let events: AsyncStream<SipralEvent>
-    private let eventContinuation: AsyncStream<SipralEvent>.Continuation
+    /// How many events, or digits, one reader of `events()` or `dtmf()` holds
+    /// unread before it starts dropping its oldest -- the same bound, and the
+    /// same choice of what to drop, as the Kotlin layer's `SipralCall.events`.
+    public static let eventBuffer = 4096
 
-    /// Just the digits: `SipralEventKind.digitReceived`'s own
-    /// `mediaData.digit`, so a voice agent that only cares about DTMF does
-    /// not have to filter `events` itself.
-    public let dtmf: AsyncStream<Character>
-    private let dtmfContinuation: AsyncStream<Character>.Continuation
+    private let eventBroadcast = Broadcast<SipralEvent>(
+        label: "org.sipral.call.events", policy: .bufferingNewest(Call.eventBuffer)
+    )
+    private let dtmfBroadcast = Broadcast<Character>(
+        label: "org.sipral.call.dtmf", policy: .bufferingNewest(Call.eventBuffer)
+    )
+
+    /// A new reader of every event this call's handle names, decoded whole.
+    ///
+    /// Every call returns a stream of its own, and every stream gets every
+    /// event, in the order the stack raised them: a `CallKitBridge` bound to
+    /// this call and the application's own loop over it both see all of
+    /// them. A reader sees what arrives from the moment this returns, and
+    /// nothing before -- so take the stream first and act second:
+    /// `let events = call.events()`, then `try call.hold()`, then wait on
+    /// `events`. What a late reader missed that still matters can be read
+    /// directly: `media` is set before `SipralEventKind.mediaStarted` is
+    /// delivered, `ended` before `SipralEventKind.callEnded`.
+    ///
+    /// Every stream finishes when the call ends, right after its
+    /// `SipralEventKind.callEnded`, or when `close()` runs first. A reader
+    /// that starts after the end gets that `callEnded` event alone and
+    /// finishes at once, so `for await` over a fresh stream always ends.
+    /// `SipralEventKind.mediaStatistics`, which comes after `callEnded`,
+    /// reaches the stack's `SipralStack.events()` only.
+    ///
+    /// Each reader buffers on its own, up to `Call.eventBuffer` events; one
+    /// that falls further behind drops its own oldest, and never slows the
+    /// others. A reader that stops -- its loop left, its task cancelled --
+    /// is fed nothing more.
+    public func events() -> AsyncStream<SipralEvent> {
+        eventBroadcast.stream()
+    }
+
+    /// A new reader of just the digits: `SipralEventKind.digitReceived`'s
+    /// own `mediaData.digit`, so a voice agent that only cares about DTMF
+    /// does not have to filter `events()` itself. The same rules as
+    /// `events()`: every reader gets every digit from the moment it asks,
+    /// and every stream finishes when the call ends, with no digit replayed
+    /// to a reader that starts after that.
+    public func dtmf() -> AsyncStream<Character> {
+        dtmfBroadcast.stream()
+    }
+
+    /// How many readers of `events()` are still being fed -- `internal` for
+    /// the same reason as `debugMediaSocketDescriptor`.
+    var debugEventReaders: Int { eventBroadcast.readerCount }
 
     private let stateQueue = DispatchQueue(label: "org.sipral.call.state")
     private var _media: Media?
@@ -56,21 +99,13 @@ public final class Call: @unchecked Sendable {
         self.handle = handle
         self.mediaSocket = mediaSocket
         self.mediaAddress = mediaSocket.localAddress
-
-        var eventContinuation: AsyncStream<SipralEvent>.Continuation!
-        self.events = AsyncStream { eventContinuation = $0 }
-        self.eventContinuation = eventContinuation
-
-        var dtmfContinuation: AsyncStream<Character>.Continuation!
-        self.dtmf = AsyncStream { dtmfContinuation = $0 }
-        self.dtmfContinuation = dtmfContinuation
     }
 
     /// Called by `SipralStack` on its own poll thread.
     ///
     /// Every side effect below -- minting `media`, marking `ended` -- happens
-    /// before `event` is ever yielded to a consumer: a task already awaiting
-    /// `events` that wakes and reads `call.media` must see it already set
+    /// before `event` is ever handed to a reader: a task already awaiting
+    /// `events()` that wakes and reads `call.media` must see it already set
     /// (`bindings/python/sipral/call.py`'s `deliver` orders its own steps
     /// for the same reason).
     func deliver(_ event: SipralEvent) {
@@ -80,10 +115,13 @@ public final class Call: @unchecked Sendable {
         }
         if event.kindRaw == SipralEventKind.callEnded.rawValue {
             stateQueue.sync { _ended = true }
+            eventBroadcast.finish(after: event)
+            dtmfBroadcast.finish()
+            return
         }
-        eventContinuation.yield(event)
+        eventBroadcast.send(event)
         if event.kindRaw == SipralEventKind.digitReceived.rawValue, let digit = event.mediaData?.digit {
-            dtmfContinuation.yield(digit)
+            dtmfBroadcast.send(digit)
         }
     }
 
@@ -172,7 +210,7 @@ public final class Call: @unchecked Sendable {
             mediaSocket.close()
         }
         stack.forgetCall(handle)
-        eventContinuation.finish()
-        dtmfContinuation.finish()
+        eventBroadcast.finish()
+        dtmfBroadcast.finish()
     }
 }

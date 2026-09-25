@@ -57,7 +57,7 @@ final class CallKitAdapterTests: XCTestCase {
         let alice = try SipralStack()
         let bob = try SipralStack()
         defer { alice.close(); bob.close() }
-        let bobEvents = Recorder(bob.events)
+        let bobEvents = Recorder(bob.events())
 
         let aliceAccount = try alice.addAccount(
             aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress
@@ -65,13 +65,16 @@ final class CallKitAdapterTests: XCTestCase {
         _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
         let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
         defer { aliceCall.close() }
-        let aliceEvents = Recorder(aliceCall.events)
-        let aliceDigits = Recorder(aliceCall.dtmf)
+        let aliceEvents = Recorder(aliceCall.events())
+        let aliceDigits = Recorder(aliceCall.dtmf())
 
         let arrived = await bobEvents.first(within: 5) { $0.kind == .incomingCall }
         let incoming = try XCTUnwrap(arrived, "no incoming call arrived")
         let bobCall = try bob.takeIncomingCall(incoming)
         defer { bobCall.close() }
+        // The application's own reader of the call the bridge is about to
+        // watch: both see every event.
+        let bobCallEvents = Recorder(bobCall.events())
 
         let configuration = CXProviderConfiguration()
         configuration.supportsVideo = false
@@ -95,13 +98,16 @@ final class CallKitAdapterTests: XCTestCase {
         adapter.provider(provider, perform: answerAgain)
         XCTAssertEqual(answerAgain.outcome, .failed, "a second answer to a call already up has to fail, not pass")
 
-        // Read on Alice's side: Bob's own `events` are the bridge's to
-        // read once it is bound, and a stream has one reader.
+        let bobConfirmed = await bobCallEvents.first(within: 5) { $0.kind == .callConfirmed }
+        XCTAssertNotNil(bobConfirmed, "the application's reader lost the confirmation to the bridge's")
+
         let hold = RecordingHold(call: uuid, onHold: true)
         adapter.provider(provider, perform: hold)
         XCTAssertEqual(hold.outcome, .fulfilled)
         let held = await aliceEvents.first(within: 5) { $0.callData?.heldThere == true }
         XCTAssertNotNil(held, "CallKit's hold never reached the caller")
+        let heldHere = await bobCallEvents.first(within: 5) { $0.callData?.heldHere == true }
+        XCTAssertNotNil(heldHere, "the application's reader lost the hold to the bridge's")
 
         let beforeResume = aliceEvents.elements.count
         let resume = RecordingHold(call: uuid, onHold: false)

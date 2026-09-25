@@ -13,7 +13,7 @@ import Dispatch
 ///
 /// This is the object an application reaches for. It owns the UDP socket
 /// signalling travels on, a background thread that drains `sipral_stack_poll`
-/// and the transport queues around it, and the `AsyncStream` events land on
+/// and the transport queues around it, and the `AsyncStream`s events land on
 /// -- the layer `SipralAbi.swift` (printed by `tools/abi-gen` from
 /// `crates/sipral-ffi`) is written against directly, the way
 /// `bindings/python/sipral/stack.py`'s `Stack` is the same shape in Python
@@ -22,12 +22,14 @@ import Dispatch
 /// **Threading.** The C callback (`docs/08-ffi.md`, "Events arrive on one
 /// callback") lands on this stack's own poll thread and is decoded there,
 /// synchronously, into a `Sendable` `SipralEvent` before it ever reaches
-/// `events`: nothing past that point touches the pointers `sipral_event_t`
-/// only promises for the length of the callback. `events` is a Swift
-/// `AsyncStream`, and `Continuation.yield` is documented safe to call from
-/// any thread, which is what lets the poll thread feed it directly with no
-/// further hop. Every other member here that calls into the C ABI may be
-/// called from any thread the application likes; a collision with the poll
+/// `events()`: nothing past that point touches the pointers `sipral_event_t`
+/// only promises for the length of the callback. Every reader `events()`
+/// hands out is a Swift `AsyncStream` of its own, and
+/// `Continuation.yield` is documented safe to call from any thread, which
+/// is what lets the poll thread feed each of them directly with no further
+/// hop, one after another, in the order the events were raised. Every
+/// other member here that calls into the C ABI may be called from any
+/// thread the application likes; a collision with the poll
 /// thread already inside the stack's lock is `SIPRAL_STATUS_BUSY` and is
 /// retried for up to half a second before it is thrown (`docs/08-ffi.md`,
 /// "Signalling on one stack is one thread at a time").
@@ -35,10 +37,28 @@ public final class SipralStack: @unchecked Sendable {
     public let handle: SipralHandle
     public let bindAddress: String
 
-    /// Every event this stack raises, decoded whole. A consumer that wants
-    /// only one call's events reads `Call.events` instead.
-    public let events: AsyncStream<SipralEvent>
-    private let eventContinuation: AsyncStream<SipralEvent>.Continuation
+    private let eventBroadcast = Broadcast<SipralEvent>(
+        label: "org.sipral.stack.events", policy: .bufferingNewest(Call.eventBuffer)
+    )
+
+    /// A new reader of every event this stack raises, decoded whole. A
+    /// consumer that wants only one call's events reads `Call.events()`
+    /// instead.
+    ///
+    /// Every call returns a stream of its own, and every stream gets every
+    /// event from the moment it is taken, in the order the stack raised
+    /// them -- an application's main loop and a second one waiting for the
+    /// `SipralEventKind.incomingCall` a push announced can both read them.
+    /// Nothing raised before a stream is taken reaches it, so take it
+    /// before the action whose outcome it is meant to see: before
+    /// `Account.register()` for the registration, before the call is placed
+    /// for the far end's `incomingCall`. Each reader buffers on its own, up
+    /// to `Call.eventBuffer` events, and drops its own oldest past that.
+    /// Every stream finishes when `close()` runs, and one taken after that is
+    /// finished from the start.
+    public func events() -> AsyncStream<SipralEvent> {
+        eventBroadcast.stream()
+    }
 
     private let socket: UDPSocket
     private let origin: DispatchTime
@@ -114,10 +134,6 @@ public final class SipralStack: @unchecked Sendable {
             }
         }
 
-        var continuation: AsyncStream<SipralEvent>.Continuation!
-        self.events = AsyncStream { continuation = $0 }
-        self.eventContinuation = continuation
-
         box.stack = self
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.run() }
     }
@@ -176,6 +192,11 @@ public final class SipralStack: @unchecked Sendable {
     /// `host:port` is what `sipral_call_config_t::media_address` offers, and
     /// `Call.media` mints once `SipralEventKind.mediaStarted` says the
     /// session is up.
+    ///
+    /// Take `Call.events()` as soon as this returns: the INVITE leaves on
+    /// the poll thread's next pass, and an answer quicker than the caller
+    /// is to take the stream is not replayed to it -- `Call.state`,
+    /// `Call.media` and `Call.ended` still say where the call got to.
     public func placeCall(
         account: Account,
         target: String,
@@ -213,8 +234,10 @@ public final class SipralStack: @unchecked Sendable {
 
     /// Opens a media socket for an incoming call and answers it there.
     /// `event` is the `SipralEventKind.incomingCall` a listener read off
-    /// `events`. Call `rejectCall` instead when the application does not
-    /// want it.
+    /// `events()`. Call `rejectCall` instead when the application does not
+    /// want it. The call's first events can arrive before the caller has
+    /// taken `Call.events()`; `takeIncomingCall`, a stream, then
+    /// `Call.answer()` is the order that misses none of them.
     public func answerCall(
         _ event: SipralEvent,
         mediaHost: String = "127.0.0.1",
@@ -282,7 +305,7 @@ public final class SipralStack: @unchecked Sendable {
         if let call = callFor(event.call) {
             call.deliver(event)
         }
-        eventContinuation.yield(event)
+        eventBroadcast.send(event)
     }
 
     private func drainTransmit() {
@@ -394,7 +417,7 @@ public final class SipralStack: @unchecked Sendable {
 
         _ = closedSemaphore.wait(timeout: .now() + 5)
         try? Sipral.stackDestroy(stack: handle)
-        eventContinuation.finish()
+        eventBroadcast.finish()
         socket.close()
     }
 }

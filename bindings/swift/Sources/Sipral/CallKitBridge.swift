@@ -69,13 +69,22 @@ public final class CallKitBridge: @unchecked Sendable {
     /// `sipral-ua` resolved it to, and starts mirroring that call's own
     /// events onto `provider` -- ringing, connected, ended -- for as long
     /// as the call lasts.
+    ///
+    /// The bridge reads a `Call.events()` stream of its own, taken here,
+    /// before this returns: the application keeps reading the same call's
+    /// events alongside it, and misses none to the bridge. Events raised
+    /// before `bind` are not replayed, with one exception that matters here
+    /// -- a call that has already ended, whose stream still hands over its
+    /// `callEnded`, so a call the far end gave up on before it was bound is
+    /// still reported ended rather than left ringing on the call screen.
     public func bind(uuid: UUID, to call: Call) {
         stateQueue.sync {
             callsByUuid[uuid] = call
             uuidsByCallHandle[call.handle] = uuid
         }
+        let events = call.events()
         let task = Task { [weak self, provider] in
-            for await event in call.events {
+            for await event in events {
                 guard let self else { return }
                 switch event.kind {
                 case .callConfirmed?, .mediaStarted?:
@@ -92,7 +101,14 @@ public final class CallKitBridge: @unchecked Sendable {
                 }
             }
         }
-        stateQueue.sync { watchTasks[uuid] = task }
+        // A call that had already ended can be unbound by its own task
+        // before this line runs; keeping the task then would keep it for
+        // good.
+        stateQueue.sync {
+            if callsByUuid[uuid] != nil {
+                watchTasks[uuid] = task
+            }
+        }
     }
 
     public func call(for uuid: UUID) -> Call? {

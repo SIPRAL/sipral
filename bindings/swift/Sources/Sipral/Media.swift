@@ -33,9 +33,29 @@ public final class Media: @unchecked Sendable {
     private var _remoteAddress: String?
     public var remoteAddress: String? { stateQueue.sync { _remoteAddress } }
 
-    /// Decoded 16-bit mono PCM, one frame per item.
-    public let frames: AsyncStream<[Int16]>
-    private let frameContinuation: AsyncStream<[Int16]>.Continuation
+    /// How many frames one reader of `frames(bufferingNewest:)` holds unread
+    /// unless it asks for another number: one second's worth at 20 ms.
+    public static let frameBuffer = 50
+
+    private let frameBroadcast = Broadcast<[Int16]>(
+        label: "org.sipral.media.frames", policy: .bufferingNewest(Media.frameBuffer)
+    )
+
+    /// A new reader of the far end's audio: decoded 16-bit mono PCM, one
+    /// frame per item.
+    ///
+    /// Every call returns a stream of its own, and every stream gets every
+    /// frame decoded from the moment it is taken -- a recorder and a speech
+    /// recogniser can both listen to the same call. A reader that falls
+    /// behind keeps only the newest `limit` frames and drops the older ones,
+    /// so a slow reader costs a bounded amount of memory and never holds up
+    /// the media thread or any other reader: audio that old is of no use to
+    /// a live call anyway. Every stream finishes when this media ends --
+    /// `close()`, or the stack reporting the media gone -- and one taken
+    /// after that is finished from the start.
+    public func frames(bufferingNewest limit: Int = Media.frameBuffer) -> AsyncStream<[Int16]> {
+        frameBroadcast.stream(bufferingPolicy: .bufferingNewest(max(limit, 1)))
+    }
 
     private let outgoing = DispatchQueue(label: "org.sipral.media.outgoing")
     private var pending: [Int16] = []
@@ -54,10 +74,6 @@ public final class Media: @unchecked Sendable {
         self.sampleRate = Int(info.sample_rate)
         self.frameSamples = info.frame_samples
         self.frameSeconds = Double(max(info.frame_ms, 1)) / 1000.0
-
-        var continuation: AsyncStream<[Int16]>.Continuation!
-        self.frames = AsyncStream { continuation = $0 }
-        self.frameContinuation = continuation
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.run() }
     }
@@ -166,14 +182,16 @@ public final class Media: @unchecked Sendable {
                 do {
                     let (written, _) = try Sipral.mediaPlayback(media: handle, samples: &samples)
                     if written > 0 {
-                        frameContinuation.yield(Array(samples.prefix(written)))
+                        frameBroadcast.send(Array(samples.prefix(written)))
                     }
                 } catch let error as SipralError where error.status != .busy {
                     // The media (or its call, or its stack) is gone
                     // (`docs/08-ffi.md`, "A media handle outlives its call,
-                    // and says so"): stop driving it, but let the loop keep
-                    // running so `close()` still finds it responsive.
+                    // and says so"): stop driving it, and tell every reader
+                    // no frame is coming, but let the loop keep running so
+                    // `close()` still finds it responsive.
                     active = false
+                    frameBroadcast.finish()
                 } catch {
                     // BUSY here means re-entry from inside a frame this
                     // thread is already running -- not expected on this
@@ -212,6 +230,10 @@ public final class Media: @unchecked Sendable {
         _ = closedSemaphore.wait(timeout: .now() + 5)
         try? Sipral.mediaRelease(media: handle)
         socket.close()
-        frameContinuation.finish()
+        frameBroadcast.finish()
     }
+
+    /// How many readers of `frames(bufferingNewest:)` are still being fed --
+    /// `internal`, for the tests.
+    var debugFrameReaders: Int { frameBroadcast.readerCount }
 }

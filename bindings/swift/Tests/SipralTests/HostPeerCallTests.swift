@@ -98,7 +98,7 @@ final class HostPeerCallTests: XCTestCase {
 
         let stack = try SipralStack(bindHost: setup.localHost)
         defer { stack.close() }
-        let stackEvents = Recorder(stack.events)
+        let stackEvents = Recorder(stack.events())
         let account = try await setup.account(on: stack, stackEvents: stackEvents)
 
         let placed = DispatchTime.now()
@@ -106,7 +106,7 @@ final class HostPeerCallTests: XCTestCase {
             account: account, target: target ?? "sip:agent@\(setup.peer)", mediaHost: setup.localHost
         )
         defer { call.close() }
-        let events = Recorder(call.events)
+        let events = Recorder(call.events())
 
         let confirmed = await events.first(within: 10) { $0.kind == .callConfirmed }
         let setupMs = (DispatchTime.now().uptimeNanoseconds - placed.uptimeNanoseconds) / 1_000_000
@@ -145,16 +145,17 @@ final class HostPeerCallTests: XCTestCase {
 
         let stack = try SipralStack(bindHost: setup.localHost)
         defer { stack.close() }
-        let stackEvents = Recorder(stack.events)
+        let stackEvents = Recorder(stack.events())
         _ = try await setup.account(on: stack, stackEvents: stackEvents)
         print("host-peer call: waiting \(Int(wait)) s for a call to \(setup.aor)")
 
         let incoming = await stackEvents.first(within: wait) { $0.kind == .incomingCall }
         let offered = try XCTUnwrap(incoming, "no call arrived within \(Int(wait)) s")
         let arrived = DispatchTime.now()
-        let call = try stack.answerCall(offered, mediaHost: setup.localHost)
+        let call = try stack.takeIncomingCall(offered, mediaHost: setup.localHost)
         defer { call.close() }
-        let events = Recorder(call.events)
+        let events = Recorder(call.events())
+        try call.answer()
 
         let confirmed = await events.first(within: 10) { $0.kind == .callConfirmed }
         let answerMs = (DispatchTime.now().uptimeNanoseconds - arrived.uptimeNanoseconds) / 1_000_000
@@ -176,7 +177,7 @@ final class HostPeerCallTests: XCTestCase {
     private func exchangeAudio(on call: Call, events: Recorder<SipralEvent>) async throws {
         let started = await events.first(within: 5) { $0.kind == .mediaStarted }
         let media = try XCTUnwrap(started.flatMap { _ in call.media }, "media never started")
-        let frames = Recorder(media.frames)
+        let frames = Recorder(media.frames())
 
         let period = 16
         let tone = (0..<(media.sampleRate)).map { index -> Int16 in

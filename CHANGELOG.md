@@ -1105,6 +1105,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **Every Swift event stream now reaches every reader.**
+  `SipralStack.events`, `Call.events`, `Call.dtmf` and `Media.frames` were
+  each one `AsyncStream`, which hands every item to one reader only: a call
+  bound to `CallKitBridge`, which reads the call's events itself, lost
+  events to the application's own loop over the same call, and the other
+  way round. They are now methods — `events()`, `dtmf()`,
+  `frames(bufferingNewest:)` — and every call returns a stream of its own
+  that gets every item from then on, in order. Nothing raised before a
+  stream is taken reaches it, except a call's `CALL_ENDED`: a call's
+  streams finish right after it, and one taken later gets that event and
+  finishes at once, so a call that ended before `CallKitBridge.bind` is
+  still reported ended. A media's streams finish when it ends, a stack's
+  when it closes. A reader that falls behind drops its own oldest items —
+  past 4096 events or digits, past 50 frames unless it asks for another
+  number — and never slows the others.
 - **The packaged artefacts leave libopus out unless asked for it.** The
   XCFramework, wheel, NuGet and AAR scripts build the C ABI without the
   `opus` feature by default, with every other default feature kept;

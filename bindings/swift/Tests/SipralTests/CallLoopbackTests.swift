@@ -22,25 +22,33 @@ final class CallLoopbackTests: XCTestCase {
         )
         _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
 
+        // Every stream is taken before the action whose outcome it waits
+        // for: a reader sees nothing raised before it was taken.
+        let bobEvents = bob.events()
         let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+        let aliceEvents = aliceCall.events()
 
-        var bobCall: Call?
-        for await event in bob.events {
-            if event.kind == .incomingCall {
-                bobCall = try bob.answerCall(event)
-                break
-            }
+        var answered: (call: Call, events: AsyncStream<SipralEvent>)?
+        for await event in bobEvents where event.kind == .incomingCall {
+            let call = try bob.takeIncomingCall(event)
+            let events = call.events()
+            try call.answer()
+            answered = (call, events)
+            break
         }
-        guard let bobCall else { throw XCTSkip("no incoming call arrived") }
+        guard let answered else { throw XCTSkip("no incoming call arrived") }
 
-        try await waitForMedia(aliceCall)
-        try await waitForMedia(bobCall)
-        return (aliceCall, bobCall)
+        try await waitForMedia(aliceCall, aliceEvents)
+        try await waitForMedia(answered.call, answered.events)
+        return (aliceCall, answered.call)
     }
 
-    private func waitForMedia(_ call: Call, timeoutSeconds: Double = 5) async throws {
+    private func waitForMedia(
+        _ call: Call, _ events: AsyncStream<SipralEvent>, timeoutSeconds: Double = 5
+    ) async throws {
+        if call.media != nil { return }
         let deadline = DispatchTime.now() + timeoutSeconds
-        for await _ in call.events {
+        for await _ in events {
             if call.media != nil { return }
             if DispatchTime.now() >= deadline { break }
         }
@@ -78,18 +86,20 @@ final class CallLoopbackTests: XCTestCase {
         let bobMedia = try XCTUnwrap(bobCall.media)
 
         let tone = [Int16](repeating: 4096, count: aliceMedia.frameSamples * 5)
+        let bobFrames = bobMedia.frames()
         aliceMedia.sendAudio(tone)
 
         var heard: [Int16]?
-        for await frame in bobMedia.frames {
+        for await frame in bobFrames {
             heard = frame
             break
         }
         XCTAssertEqual(heard?.count, aliceMedia.frameSamples)
 
+        let aliceFrames = aliceMedia.frames()
         bobMedia.sendAudio(tone)
         var heardBack: [Int16]?
-        for await frame in aliceMedia.frames {
+        for await frame in aliceFrames {
             heardBack = frame
             break
         }
@@ -104,16 +114,18 @@ final class CallLoopbackTests: XCTestCase {
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
         defer { aliceCall.close(); bobCall.close() }
 
+        let holdEvents = aliceCall.events()
         try aliceCall.hold()
         var sawHeldHere = false
-        for await event in aliceCall.events {
+        for await event in holdEvents {
             if event.callData?.heldHere == true { sawHeldHere = true; break }
         }
         XCTAssertTrue(sawHeldHere)
 
+        let resumeEvents = aliceCall.events()
         try aliceCall.resume()
         var sawResumed = false
-        for await event in aliceCall.events {
+        for await event in resumeEvents {
             // A resume re-offers the session the way a hold does, and its
             // outcome arrives the same way (`docs/08-ffi.md`, "The
             // application hears the outcome as
@@ -124,9 +136,10 @@ final class CallLoopbackTests: XCTestCase {
         }
         XCTAssertTrue(sawResumed)
 
+        let digits = aliceCall.dtmf()
         try bobCall.sendDtmf("5")
         var digit: Character?
-        for await d in aliceCall.dtmf {
+        for await d in digits {
             digit = d
             break
         }
@@ -142,6 +155,220 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertGreaterThan(stats.packets_sent, 0)
     }
 
+    /// Two readers of one call, both taken before anything happens on it,
+    /// each see every event the call raises, in the same order, and each
+    /// digit -- what a `CallKitBridge` bound to a call and the
+    /// application's own loop over that call both rely on. A single
+    /// `AsyncStream` read from two places splits its events between them.
+    func testTwoConcurrentReadersBothSeeEveryEventOfARealCall() async throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+
+        let aliceAccount = try alice.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress
+        )
+        _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
+        let aliceStackFirst = Recorder(alice.events())
+        let aliceStackSecond = Recorder(alice.events())
+        let bobEvents = Recorder(bob.events())
+
+        let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+        defer { aliceCall.close() }
+        let first = Recorder(aliceCall.events())
+        let second = Recorder(aliceCall.events())
+        let firstDigits = Recorder(aliceCall.dtmf())
+        let secondDigits = Recorder(aliceCall.dtmf())
+
+        let arrived = await bobEvents.first(within: 5) { $0.kind == .incomingCall }
+        let bobCall = try bob.takeIncomingCall(try XCTUnwrap(arrived, "no incoming call arrived"))
+        defer { bobCall.close() }
+        let bobCallEvents = Recorder(bobCall.events())
+        try bobCall.answer()
+
+        let aliceMedia = await first.first(within: 5) { $0.kind == .mediaStarted }
+        XCTAssertNotNil(aliceMedia, "media never started on the caller's side")
+        let bobMedia = await bobCallEvents.first(within: 5) { $0.kind == .mediaStarted }
+        XCTAssertNotNil(bobMedia, "media never started on the callee's side")
+
+        try aliceCall.hold()
+        let held = await first.first(within: 5) { $0.callData?.heldHere == true }
+        XCTAssertNotNil(held, "the hold never came back as a session change")
+        let beforeResume = first.elements.count
+        try aliceCall.resume()
+        let resumed = await first.first(within: 5, after: beforeResume) {
+            $0.kind == .sessionChanged && $0.callData?.heldHere == false
+        }
+        XCTAssertNotNil(resumed, "the resume never came back as a session change")
+
+        try bobCall.sendDtmf("5")
+        let digit = await firstDigits.first(within: 5) { _ in true }
+        XCTAssertEqual(digit, "5")
+
+        try bobCall.hangup()
+        let firstFinished = await first.finished(within: 5)
+        let secondFinished = await second.finished(within: 5)
+        let firstDigitsFinished = await firstDigits.finished(within: 5)
+        let secondDigitsFinished = await secondDigits.finished(within: 5)
+        XCTAssertTrue(firstFinished && secondFinished, "a call's event streams must finish when it ends")
+        XCTAssertTrue(firstDigitsFinished && secondDigitsFinished, "a call's digit streams must finish when it ends")
+
+        let firstKinds = first.elements.map(\.kindRaw)
+        XCTAssertEqual(firstKinds, second.elements.map(\.kindRaw), "both readers must see the same events, in order")
+        for kind in [SipralEventKind.mediaStarted, .sessionChanged, .digitReceived, .callEnded] {
+            XCTAssertTrue(firstKinds.contains(kind.rawValue), "\(kind) missing from what the readers saw")
+        }
+        XCTAssertEqual(firstKinds.last, SipralEventKind.callEnded.rawValue)
+        XCTAssertEqual(firstDigits.elements, ["5"])
+        XCTAssertEqual(secondDigits.elements, ["5"])
+        XCTAssertEqual(aliceCall.debugEventReaders, 0, "a finished call must hold no reader")
+
+        // The stack's own stream, read twice: the same events for this call,
+        // up to its end, on both.
+        func throughEnd(_ recorder: Recorder<SipralEvent>) async -> [UInt32] {
+            _ = await recorder.first(within: 5) { $0.kind == .callEnded && $0.call == aliceCall.handle }
+            let mine = recorder.elements.filter { $0.call == aliceCall.handle }.map(\.kindRaw)
+            guard let end = mine.firstIndex(of: SipralEventKind.callEnded.rawValue) else { return mine }
+            return Array(mine[...end])
+        }
+        let stackFirst = await throughEnd(aliceStackFirst)
+        let stackSecond = await throughEnd(aliceStackSecond)
+        XCTAssertEqual(stackFirst, stackSecond)
+        XCTAssertEqual(stackFirst.last, SipralEventKind.callEnded.rawValue)
+    }
+
+    /// One reader leaves after its first event, and another is taken and
+    /// never read at all: the reader beside them still gets every event on
+    /// time, the one that left is forgotten, and the one never read still
+    /// holds everything when it is finally drained.
+    func testAReaderThatStopsEarlyDoesNotHoldUpTheOthers() async throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+
+        let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
+        defer { aliceCall.close(); bobCall.close() }
+        let settled = await eventually(within: 5) { aliceCall.debugEventReaders == 0 }
+        XCTAssertTrue(settled, "the readers placeAndAnswer took must be gone once it returned")
+
+        let quitter = Task { [events = aliceCall.events()] () -> SipralEvent? in
+            for await event in events {
+                return event
+            }
+            return nil
+        }
+        let neverRead = aliceCall.events()
+        let steady = Recorder(aliceCall.events())
+        XCTAssertEqual(aliceCall.debugEventReaders, 3)
+
+        try aliceCall.hold()
+        let quitterSaw = await quitter.value
+        XCTAssertNotNil(quitterSaw)
+        let held = await steady.first(within: 5) { $0.callData?.heldHere == true }
+        XCTAssertNotNil(held, "the reader that stayed never saw the hold")
+        let forgotten = await eventually(within: 5) { aliceCall.debugEventReaders == 2 }
+        XCTAssertTrue(forgotten, "a reader whose loop has ended must be forgotten")
+
+        let beforeResume = steady.elements.count
+        try aliceCall.resume()
+        let resumed = await steady.first(within: 5, after: beforeResume) {
+            $0.kind == .sessionChanged && $0.callData?.heldHere == false
+        }
+        XCTAssertNotNil(resumed, "the reader that stayed never saw the resume")
+
+        try bobCall.hangup()
+        let finished = await steady.finished(within: 5)
+        XCTAssertTrue(finished)
+        let unread = await drain(neverRead)
+        XCTAssertEqual(unread.map(\.kindRaw), steady.elements.map(\.kindRaw))
+        XCTAssertEqual(unread.last?.kind, .callEnded)
+    }
+
+    /// Frames go to every reader too, and a slow one keeps only its newest.
+    func testEveryFrameReaderHearsTheFarEnd() async throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+
+        let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
+        defer { aliceCall.close(); bobCall.close() }
+        let aliceMedia = try XCTUnwrap(aliceCall.media)
+        let bobMedia = try XCTUnwrap(bobCall.media)
+
+        let first = Recorder(bobMedia.frames())
+        let second = Recorder(bobMedia.frames())
+        let slow = bobMedia.frames(bufferingNewest: 2)
+        // A square wave, not a constant: a codec is free to take a
+        // constant level out as the DC offset it is.
+        let tone = (0..<(aliceMedia.frameSamples * 25)).map { index -> Int16 in
+            (index / 8) % 2 == 0 ? 8192 : -8192
+        }
+        aliceMedia.sendAudio(tone)
+
+        func loud(_ frame: [Int16]) -> Bool { frame.contains { abs(Int32($0)) > 2048 } }
+        let firstLoud = await first.count(atLeast: 10, within: 5, where: loud)
+        let secondLoud = await second.count(atLeast: 10, within: 5, where: loud)
+        XCTAssertGreaterThanOrEqual(firstLoud, 10, "the first reader did not hear the tone")
+        XCTAssertGreaterThanOrEqual(secondLoud, 10, "the second reader did not hear the tone")
+        XCTAssertEqual(bobMedia.debugFrameReaders, 3)
+
+        bobCall.close()
+        let unread = await drain(slow)
+        XCTAssertLessThanOrEqual(unread.count, 2, "a reader bounded to two frames must keep at most two")
+        let firstFinished = await first.finished(within: 5)
+        XCTAssertTrue(firstFinished, "frame streams must finish when the media is closed")
+        XCTAssertEqual(bobMedia.debugFrameReaders, 0)
+    }
+
+    /// Every stream a call hands out finishes when the call ends, with no
+    /// `close()` needed; one taken after the end is handed that end and
+    /// finished at once, and a digit stream taken then is empty.
+    func testEveryStreamFinishesWhenTheCallEnds() async throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+
+        let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
+        defer { aliceCall.close(); bobCall.close() }
+
+        let events = Recorder(aliceCall.events())
+        let digits = Recorder(aliceCall.dtmf())
+        let frames = Recorder(try XCTUnwrap(aliceCall.media).frames())
+        try bobCall.hangup()
+
+        let eventsFinished = await events.finished(within: 5)
+        let digitsFinished = await digits.finished(within: 5)
+        let framesFinished = await frames.finished(within: 5)
+        XCTAssertTrue(eventsFinished, "the event stream did not finish when the call ended")
+        XCTAssertTrue(digitsFinished, "the digit stream did not finish when the call ended")
+        XCTAssertTrue(framesFinished, "the frame stream did not finish when the call's media ended")
+        XCTAssertEqual(events.elements.last?.kind, .callEnded)
+        XCTAssertEqual(events.elements.last?.callData?.endReason, .remoteHangup)
+        XCTAssertTrue(aliceCall.ended)
+
+        let late = await drain(aliceCall.events())
+        XCTAssertEqual(late.map(\.kind), [.callEnded])
+        XCTAssertEqual(late.first?.callData?.endReason, .remoteHangup)
+        let lateDigits = await drain(aliceCall.dtmf())
+        XCTAssertEqual(lateDigits, [])
+        XCTAssertEqual(aliceCall.debugEventReaders, 0)
+    }
+
+    /// A stack's stream finishes when the stack closes, and one taken after
+    /// that is finished from the start.
+    func testStackStreamsFinishWhenTheStackCloses() async throws {
+        let stack = try SipralStack()
+        let first = Recorder(stack.events())
+        let second = Recorder(stack.events())
+
+        stack.close()
+        let firstFinished = await first.finished(within: 5)
+        let secondFinished = await second.finished(within: 5)
+        XCTAssertTrue(firstFinished && secondFinished)
+        let late = await drain(stack.events())
+        XCTAssertEqual(late.count, 0)
+    }
+
     func testHandlesReleaseWithNoUseAfterFreeWhilePendingEventsExist() async throws {
         let alice = try SipralStack()
         let bob = try SipralStack()
@@ -149,7 +376,7 @@ final class CallLoopbackTests: XCTestCase {
 
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
 
-        // Hang up and close immediately, without draining `events` first --
+        // Hang up and close immediately, without draining `events()` first --
         // there may still be a CALL_ENDED (and its farewell) queued when
         // `close()` runs. `docs/08-ffi.md`'s "A media handle outlives its
         // call, and says so" is the property under test: nothing here may
