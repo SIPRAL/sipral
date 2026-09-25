@@ -657,12 +657,17 @@ What it does, in the order a session meets it:
   socket. One that reads it earlier, as the C ABI's loop does for a socket
   named for STUN, hands them to `MediaEngine::receive_early`, which keeps a
   Binding request whose `USERNAME` names the call's fragment and whose
-  `MESSAGE-INTEGRITY` checks out under the call's password — sixteen per
-  socket, since nobody without the call's description can make one — and
-  hands them to the agent the moment the session opens; the agent answers
-  each and checks back on its pair (RFC 8445 §7.3). Dropped instead, each
-  costs the pair the peer's next retransmission, half a second or more away
-  (§14.3).
+  `MESSAGE-INTEGRITY` checks out under the call's password, since nobody
+  without the call's description can make one, and hands them to the agent
+  the moment the session opens; the agent answers each and checks back on its
+  pair (RFC 8445 §7.3). Dropped instead, each costs the pair the peer's next
+  retransmission, half a second or more away (§14.3). What is kept is
+  bounded three ways: the newest sixteen per socket, since the newest are the
+  checks the peer is still waiting on, with a retransmission taking the place
+  of the copy it repeats; none older than the peer's transaction for it,
+  39.5 seconds with RFC 8489 §6.2.1's defaults, after which an answer
+  reaches nobody; and nothing past the end of its call, so a call that ends
+  before its session opens leaves nothing for the next call on the socket.
 - **Receiving before the selection.** Until a pair is selected, each end
   sends on the best pair its own checks have proved valid (§12.1), and moves
   when they prove a better one; each receives on any pair (§12.2). The
@@ -675,10 +680,11 @@ What it does, in the order a session meets it:
   the caller's own relay, from the TURN server's address, and the rest
   straight from the callee's relayed address. So until the selection the
   latch follows the far end to whichever address its audio comes from
-  (`RtpSession::set_following`) — moved only by a packet that has passed
-  everything a packet from the latched address must, SRTP's authentication
-  first on a secured call — and from the selection on it holds again, on the
-  chosen path. On the lab VM on 25 September 2026 the same call refused 49
+  (`RtpSession::set_following`) — moved only by a packet the stream took,
+  past SRTP's authentication on a secured call and then the source, the
+  sequence and the buffer, so a packet under an SSRC other than the far
+  end's, or a copy of one already heard, leaves it where it is — and from the
+  selection on it holds again, on the chosen path. On the lab VM on 25 September 2026 the same call refused 49
   packets before and 1 after, the one the stream's probation takes; the Rust
   caller in the same step got 197 of the callee's 198 back.
 

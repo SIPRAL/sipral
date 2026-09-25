@@ -111,10 +111,45 @@ const COMFORT_NOISE: &str = "CN";
 /// A peer paces its checks at one per Ta, fifty milliseconds unless both ends
 /// agree on less (RFC 8445 §14.2), and starts them when it sends its answer,
 /// so what reaches the socket before that answer is read is a handful: this
-/// holds most of a second of them, and one more is refused like any other
-/// datagram the socket did not expect.
+/// holds most of a second of them. One more pushes out the oldest, since the
+/// newest are the checks the far end is still waiting on; a retransmission
+/// takes the place of the copy it repeats rather than a second one.
 #[cfg(feature = "ice")]
 const EARLY_CHECKS: usize = 16;
+
+/// How long a kept check is still worth answering: RFC 8489 §6.2.1's
+/// defaults — Rc of 7, Rm of 16, an RTO of 500 ms — end the far end's
+/// transaction 39.5 seconds after its first request, and an answer after
+/// that reaches nobody. A check kept longer, on a call whose session is slow
+/// to open, is dropped rather than answered.
+#[cfg(feature = "ice")]
+const EARLY_CHECK_LIFETIME: Duration = Duration::from_millis(39_500);
+
+/// One of the far end's connectivity checks, kept for a call that has no
+/// session yet ([`MediaEngine::receive_early`]).
+#[cfg(feature = "ice")]
+#[derive(Debug)]
+struct EarlyCheck {
+    /// Where it came from, which is where the answer goes.
+    from: SocketAddr,
+    /// The whole datagram, as it arrived.
+    data: Vec<u8>,
+    /// When it arrived, for [`EARLY_CHECK_LIFETIME`].
+    at: Instant,
+}
+
+#[cfg(feature = "ice")]
+impl EarlyCheck {
+    /// The STUN transaction id (RFC 8489 §5), which a retransmission repeats.
+    fn transaction(&self) -> Option<&[u8]> {
+        self.data.get(8..20)
+    }
+
+    /// Whether it is still worth answering at `now`.
+    fn live(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.at) < EARLY_CHECK_LIFETIME
+    }
+}
 
 /// What this engine knows about one call.
 #[derive(Clone, Debug)]
@@ -422,12 +457,11 @@ pub struct MediaEngine {
     #[cfg(feature = "ice")]
     gathered: BTreeMap<CallHandle, crate::ice::Ice>,
     /// The far end's connectivity checks that reached a socket a call was
-    /// described on before that call's session opened, by the socket, each
-    /// with where it came from: what [`MediaEngine::receive_early`] kept for
-    /// the agent the session opens with, which answers them then (RFC 8445
-    /// §7.3).
+    /// described on before that call's session opened, by the socket, oldest
+    /// first: what [`MediaEngine::receive_early`] kept for the agent the
+    /// session opens with, which answers them then (RFC 8445 §7.3).
     #[cfg(feature = "ice")]
-    early: BTreeMap<SocketAddr, Vec<(SocketAddr, Vec<u8>)>>,
+    early: BTreeMap<SocketAddr, VecDeque<EarlyCheck>>,
     /// Relays handed to descriptions that were refused before there was a
     /// call to hold them, whole and live on their servers, waiting for
     /// [`MediaEngine::poll_returned_relay`].
@@ -2185,9 +2219,12 @@ impl MediaEngine {
     /// - a call described there using ICE that has no session yet: a Binding
     ///   request whose `USERNAME` names this call's fragment and whose
     ///   `MESSAGE-INTEGRITY` checks out under the password its description
-    ///   gave out is kept, up to sixteen for the socket, and handed to the
-    ///   session's agent the moment the session opens, which answers it and
-    ///   checks back on the same pair. Anything else is not the call's.
+    ///   gave out is kept, the newest sixteen for the socket, and handed to
+    ///   the session's agent the moment the session opens, which answers it
+    ///   and checks back on the same pair. One kept longer than the far end's
+    ///   transaction for it lasts, 39.5 seconds, is dropped instead, and so is
+    ///   everything kept for a call that ends first. Anything else is not the
+    ///   call's.
     ///
     /// `false` leaves the datagram for whoever else the socket answers to —
     /// a [`Mappings`](crate::Mappings) or a [`Relays`](crate::Relays)
@@ -2218,7 +2255,7 @@ impl MediaEngine {
         }
         #[cfg(feature = "ice")]
         {
-            self.keep_early(local, from, data)
+            self.keep_early(local, from, data, now)
         }
         #[cfg(not(feature = "ice"))]
         {
@@ -2229,7 +2266,13 @@ impl MediaEngine {
     /// Keep a connectivity check for the call described on `local` that has
     /// no session yet, when it is one ([`MediaEngine::receive_early`]).
     #[cfg(feature = "ice")]
-    fn keep_early(&mut self, local: SocketAddr, from: SocketAddr, data: &[u8]) -> bool {
+    fn keep_early(
+        &mut self,
+        local: SocketAddr,
+        from: SocketAddr,
+        data: &[u8],
+        now: Instant,
+    ) -> bool {
         let for_a_call = self.calls.iter().any(|(call, managed)| {
             managed.address == Some(local)
                 && !self.sessions.contains_key(call)
@@ -2241,17 +2284,23 @@ impl MediaEngine {
         if !for_a_call {
             return false;
         }
+        let check = EarlyCheck {
+            from,
+            data: data.to_vec(),
+            at: now,
+        };
         let kept = self.early.entry(local).or_default();
-        if kept.len() >= EARLY_CHECKS {
-            return false;
+        kept.retain(|held| held.transaction() != check.transaction());
+        while kept.len() >= EARLY_CHECKS {
+            kept.pop_front();
         }
-        kept.push((from, data.to_vec()));
+        kept.push_back(check);
         true
     }
 
     /// Hand a session that has just opened the checks kept for its socket
-    /// before it did, when it runs ICE; the kept checks go either way, since
-    /// they were for this session or for nobody.
+    /// before it did and still worth answering, when it runs ICE; the kept
+    /// checks go either way, since they were for this session or for nobody.
     #[cfg(feature = "ice")]
     fn replay_early(&mut self, call: CallHandle, now: Instant) {
         let Some(address) = self.calls.get(&call).and_then(|managed| managed.address) else {
@@ -2267,8 +2316,10 @@ impl MediaEngine {
         if !slot.session.runs_ice() {
             return;
         }
-        for (from, mut datagram) in kept {
-            let _ = slot.session.receive(&mut datagram, from, now);
+        for mut check in kept {
+            if check.live(now) {
+                let _ = slot.session.receive(&mut check.data, check.from, now);
+            }
         }
     }
 

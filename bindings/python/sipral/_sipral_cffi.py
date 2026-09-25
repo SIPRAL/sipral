@@ -6427,8 +6427,10 @@ sipral_status_t sipral_stack_poll_stun(sipral_handle_t stack, sipral_transmit_t 
  * relay. The far end's first connectivity checks on a call using ICE,
  * which start with its answer and can arrive before the 200 is read:
  * one signed with the password the call's description gave out is kept,
- * up to sixteen for the socket, and answered by the call's agent when
- * its session opens (RFC 8445 §7.3). And once the session is open, in
+ * the newest sixteen for the socket, and answered by the call's agent
+ * when its session opens (RFC 8445 §7.3) — unless it waited longer than
+ * 39.5 seconds, the far end's transaction for it, or its call ended
+ * first, when it is dropped. And once the session is open, in
  * the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
  * `sipral_call_media`, anything at all, which goes to the session as
  * through `sipral_media_receive`. From the media handle on, the socket's

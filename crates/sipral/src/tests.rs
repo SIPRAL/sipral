@@ -5127,6 +5127,96 @@ fn before_a_pair_is_chosen_the_far_end_is_heard_on_whichever_pair_it_moves_to() 
     );
 }
 
+/// From the selection on the latch holds again: once the far end's audio has
+/// arrived on the chosen path, a packet from anywhere else is refused as
+/// foreign, the same as on a call not using ICE.
+#[cfg(feature = "ice")]
+#[test]
+fn once_a_pair_is_chosen_the_latch_holds_on_it() {
+    let (mut pair, call, remote) = ice_call();
+    let _ = pair.check_paths(call, remote);
+    let now = pair.now;
+    let mut session = pair.caller.engine.session(call).expect("media");
+    let (_, chosen) = session.ice_path().expect("the caller chose a path");
+    for sequence in 0..3 {
+        let _ = session.receive(&mut far_end_packet(sequence), chosen, now);
+    }
+    let elsewhere: SocketAddr = "198.51.100.9:49207".parse().expect("an address");
+    assert_eq!(
+        session.receive(&mut far_end_packet(3), elsewhere, now),
+        Arrival::Dropped(crate::Discard::ForeignAddress)
+    );
+    assert_eq!(
+        session.receive(&mut far_end_packet(4), chosen, now),
+        Arrival::Queued
+    );
+}
+
+/// The lite role keeps what arrives early as the full one does. A full peer
+/// answering a lite offer is the controlling end (RFC 8445 §6.1.1) and checks
+/// the moment it answers; a check that reaches the lite caller's socket
+/// before the 200 does, handed to `MediaEngine::receive_early`, is kept and
+/// answered as the caller's session opens, and a copy signed with anything
+/// but the caller's password is refused.
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn a_lite_caller_answers_a_check_that_arrived_before_the_answer() {
+    let mine = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Lite);
+    let theirs = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::asymmetric(mine, theirs);
+    let remote = pair.ring();
+    let offer = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw an offer");
+    let stream = one_stream(&offer);
+    let credential = |name: &str| {
+        stream
+            .attribute(name)
+            .and_then(|line| line.value.clone())
+            .expect("the lite offer's credentials")
+    };
+    let (ufrag, pwd) = (credential("ice-ufrag"), credential("ice-pwd"));
+    let check = check_to_lite(&ufrag, &pwd, 3, true);
+    let forged = check_to_lite(&ufrag, "notthepasswordthelitecallergaveout", 4, true);
+    assert!(
+        !pair
+            .caller
+            .engine
+            .receive_early(caller_media(), callee_media(), &forged, pair.now),
+        "a check with a broken signature was kept"
+    );
+    assert!(
+        pair.caller
+            .engine
+            .receive_early(caller_media(), callee_media(), &check, pair.now),
+        "the callee's check was not kept for the lite caller"
+    );
+
+    pair.callee
+        .engine
+        .answer(&mut pair.callee.agent, remote, callee_media(), pair.now)
+        .expect("the answer goes");
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+    let call = pair.caller.call().expect("the caller's call");
+    let mut answers = 0;
+    while let Some((from_call, to, datagram)) = pair.caller.engine.poll_transmit(pair.now) {
+        if from_call == call
+            && to == callee_media()
+            && datagram.get(..2) == Some(&[0x01, 0x01][..])
+            && datagram.get(8..20) == check.get(8..20)
+        {
+            answers += 1;
+        }
+    }
+    assert_eq!(answers, 1, "the lite caller's answers to the kept check");
+}
+
 #[cfg(feature = "ice")]
 #[test]
 fn a_peer_that_does_not_do_ice_still_gets_its_audio() {

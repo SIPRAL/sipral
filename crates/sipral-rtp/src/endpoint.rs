@@ -610,9 +610,9 @@ impl RtpSession {
         // from any other address is dropped rather than merged, which is the
         // first thing this function does. Merging is how someone who can guess
         // a port gets their audio into the call. A stream told to follow
-        // (`set_following`) moves the latch here instead, and only here: a
-        // packet that failed the checks above never moves it
-        if self.inbound.latch.is_none() || self.inbound.following {
+        // (`set_following`) moves an already closed latch too, but only at the
+        // very end, for a packet the stream took
+        if self.inbound.latch.is_none() {
             self.inbound.latch = Some(from);
         }
 
@@ -654,7 +654,17 @@ impl RtpSession {
             .on_packet(header.timestamp, clock_ticks(self.outbound.clock_rate, now));
 
         match self.inbound.buffer.insert(&packet, now) {
-            Insert::Accepted | Insert::Displaced(_) => Received::Queued,
+            Insert::Accepted | Insert::Displaced(_) => {
+                // a packet from another address moves a following latch only
+                // once it has passed everything: the source, the sequence and
+                // the buffer as well as SRTP, so a stranger's packet under an
+                // SSRC it guessed wrong, or a copy of one already heard, does
+                // not move it
+                if self.inbound.following {
+                    self.inbound.latch = Some(from);
+                }
+                Received::Queued
+            }
             Insert::Duplicate => Received::Dropped(Discard::Duplicate),
             Insert::Late => Received::Dropped(Discard::Late),
         }
@@ -905,7 +915,8 @@ impl RtpSession {
     ///
     /// While following, a packet from an address other than the latched one
     /// is not refused for that: it is checked like any other — SRTP, shape,
-    /// payload type — and moves the latch to its address once it has passed.
+    /// payload type, source, sequence, a copy already heard — and moves the
+    /// latch to its address only once the stream has taken it.
     /// For a far end that may legitimately send from more than one address
     /// before anything has settled which one it will keep: an ICE agent's,
     /// which sends on any pair its checks have proved until a pair is
@@ -1790,6 +1801,40 @@ mod tests {
             Received::Dropped(Discard::ForeignAddress)
         );
         assert_eq!(session.latched(), Some(addr(PEER)));
+    }
+
+    /// Following moves the latch only for a packet the stream took: one that
+    /// passed the source and sequence checks too, not only the ones before
+    /// the latch. Otherwise a stranger who cannot know the far end's SSRC
+    /// still moves the latch with a packet that is then refused, and a
+    /// replayed copy of the far end's own packet does the same.
+    #[test]
+    fn a_following_latch_is_not_moved_by_a_packet_the_stream_refuses() {
+        let mut session = session();
+        let next = establish(&mut session, 7, addr(PEER));
+        session.set_following(true);
+
+        assert_eq!(
+            session.receive(&mut datagram(8, next, 8), addr(IMPOSTOR), Duration::ZERO),
+            Received::Dropped(Discard::SecondSource(8))
+        );
+        assert_eq!(session.latched(), Some(addr(PEER)));
+        assert_eq!(
+            session.receive(
+                &mut datagram(7, next - 1, 8),
+                addr(IMPOSTOR),
+                Duration::ZERO
+            ),
+            Received::Dropped(Discard::Duplicate)
+        );
+        assert_eq!(session.latched(), Some(addr(PEER)));
+
+        // and what the stream does take still moves it
+        assert_eq!(
+            session.receive(&mut datagram(7, next, 8), addr(IMPOSTOR), Duration::ZERO),
+            Received::Queued
+        );
+        assert_eq!(session.latched(), Some(addr(IMPOSTOR)));
     }
 
     #[test]

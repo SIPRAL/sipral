@@ -665,9 +665,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   lab's relayed call through the C ABI lost about fifty packets of the
   callee's tone that way on every run, the first few through the caller's
   own relay and the rest straight from the callee's. Until the selection
-  the latch now follows the far end, moved only by a packet that passed
-  SRTP and every other check (`RtpSession::set_following`), and holds again
-  from the selection on.
+  the latch now follows the far end, moved only by a packet the stream took
+  — past SRTP, the source, the sequence and the buffer — so a stranger's
+  packet under a wrong SSRC, or a copy of one already heard, leaves it where
+  it is (`RtpSession::set_following`), and holds again from the selection
+  on.
 - **The far end's first connectivity checks reach the call's agent over the
   C ABI.** A loop with no media handle for a call's socket hands what
   arrives there to `sipral_stack_receive_stun`, as `docs/08-ffi.md` says,
@@ -677,8 +679,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   for the far end to check again. The stack now hands what arrives there to
   the call (`MediaEngine::receive_early`): to its session once it is open,
   and before that, a check signed with the password the call's own
-  description gave out is kept, up to sixteen per socket, and answered by
-  the agent as the session opens (RFC 8445 §7.3).
+  description gave out is kept — the newest sixteen per socket, a
+  retransmission in the place of the copy it repeats — and answered by the
+  agent as the session opens (RFC 8445 §7.3), unless it has waited longer
+  than the far end's transaction for it lasts, 39.5 seconds, or its call
+  ended first.
 - **A forked call answered first by a second phone is kept, not hung up.**
   `ForkPolicy::KeepFirst` kept only the call placed and sent a BYE to any
   sibling that answered, even when the call placed had not: a proxy ringing

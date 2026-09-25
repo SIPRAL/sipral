@@ -583,13 +583,19 @@ the 200 is read, or in the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
 the `sipral_call_media` after it. Refused, they would be lost: the far end
 checks again no sooner than half a second later (RFC 8445 §14.3). So a check
 signed with the password the call's own description gave out, for the call
-described on that socket, is kept — up to sixteen for the socket — and handed
-to the call's agent when its session opens, which answers it and checks back
-on the same pair as RFC 8445 §7.3 asks of a check that arrives before the
-peer's candidates; once the session is open, the datagram goes to it exactly
-as through `sipral_media_receive`. Both are `SIPRAL_STATUS_OK`, and a
-datagram the session drops is `SIPRAL_STATUS_INVALID_ARGUMENT`. A check nobody
-can authenticate is refused like any other stranger's datagram. From the media
+described on that socket, is kept — the newest sixteen for the socket, a
+retransmission in the place of the copy it repeats — and handed to the call's
+agent when its session opens, which answers it and checks back on the same
+pair as RFC 8445 §7.3 asks of a check that arrives before the peer's
+candidates; once the session is open, the datagram goes to it exactly as
+through `sipral_media_receive`. Both are `SIPRAL_STATUS_OK`, and a datagram
+the session drops is `SIPRAL_STATUS_INVALID_ARGUMENT`. A check kept longer
+than the far end's transaction for it lasts, 39.5 seconds, is dropped when the
+session opens rather than answered, and everything kept for a call goes with
+it when the call ends before its session opens; a check for a call that has
+ended is refused. A check nobody can authenticate — unsigned, signed with any
+other password, or naming another fragment — is refused like any other
+stranger's datagram. From the media
 handle on, the socket's datagrams go to `sipral_media_receive` and nowhere
 else. A loop that does not read the socket at all until the media handle
 exists loses nothing either — what arrives waits in the socket — but it cannot

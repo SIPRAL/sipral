@@ -447,11 +447,25 @@ this end directly rather than through the line's own proxy.
   whole of the answer. RTP's own latch is the one thing ICE loosens: until a
   pair is selected it follows the far end rather than holding, because the
   far end may send on any pair it has proved (RFC 8445 §12.1) and a latch
-  that held refused a second of its audio. A packet moves it only after
-  passing SRTP's authentication, so on a secured call nobody without the keys
-  can; on a call in clear, anybody who can reach the socket before the
-  selection can have a packet played, which is no more than the first packet
-  of any call in clear could always do.
+  that held refused a second of its audio. A packet moves it only once the
+  stream has taken it: past SRTP's authentication, so on a secured call
+  nobody without the keys can, and past the source and sequence checks, so on
+  a call in clear a packet under any SSRC but the far end's, or a copy of one
+  already heard, leaves it where it is. What is left on a call in clear is
+  someone who can read the far end's packets on the path and write their own
+  before the selection, who can have a packet played — no more than such an
+  attacker could always do to any call in clear, and nothing an off-path
+  stranger can do once the far end's first packet has arrived.
+- **It keeps nothing a stranger sent before a call's session exists.** The C
+  ABI hands a call's socket to the stack until the media handle exists, and a
+  connectivity check that arrives there before the call's session does is
+  kept for its agent (`docs/08-ffi.md`). Nothing is kept that has not been
+  authenticated first:
+  a Binding request whose `USERNAME` names this call's own fragment and whose
+  `MESSAGE-INTEGRITY` verifies under the password only the call's description
+  gave out. The store is bounded — sixteen per socket, none older than 39.5
+  seconds, nothing past its call's end — so even the far end itself cannot
+  grow it, and a stranger cannot put anything in it at all.
 
 ## The unsafe surface
 
