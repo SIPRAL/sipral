@@ -12,6 +12,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The .NET binding can get a call past a NAT.** `SipralStack`'s
+  constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
+  `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP
+  options it already took; `ice`, on the stack or on `PlaceCall`, turns
+  on ICE, which is what puts a relay to use. `PlaceCall`/`AnswerCall`
+  wait out the media socket's own mapping (and, with a TURN server, its
+  relay) before the offer or answer is written, so the public address
+  is there from the first packet, and `SipralEventArgs.Nat`/`Relay` are
+  the idiomatic reading of the ABI's own numbers for both events.
 - **The Python binding can get a call past a NAT.** `Stack(nat=Nat.STUN,
   stun_server=...)`, and `turn_server`/`turn_username`/`turn_password`
   for a relay, join the codec/frame/DTMF/SRTP options `Stack.__init__`

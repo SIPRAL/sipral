@@ -5,6 +5,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -51,7 +52,32 @@ public sealed class SipralStack : IDisposable
     private readonly IntPtr _transmitDestination = Marshal.AllocHGlobal(AddressBytes);
     private readonly IntPtr _transmitSource = Marshal.AllocHGlobal(AddressBytes);
     private readonly IntPtr _farewellData = Marshal.AllocHGlobal(TransmitBytes);
+    private readonly IntPtr _stunData = Marshal.AllocHGlobal(TransmitBytes);
+    private readonly IntPtr _stunDestination = Marshal.AllocHGlobal(AddressBytes);
+    private readonly IntPtr _stunSource = Marshal.AllocHGlobal(AddressBytes);
     private readonly byte[] _receiveBuffer = new byte[TransmitBytes];
+    private readonly byte[] _stunReceiveBuffer = new byte[TransmitBytes];
+
+    private readonly SipralNat _nat;
+    private readonly bool _turn;
+    private readonly object _natLock = new();
+
+    /// <summary>Media sockets currently named with <c>sipral_stack_nat_map</c>,
+    /// keyed by their own <c>host:port</c> text — from
+    /// <see cref="MapMediaSocket"/> until either
+    /// <see cref="SipralEventKind.MediaStarted"/> hands the socket to
+    /// <see cref="CallMedia"/> (<see cref="ReleaseStunSocket"/>) or the
+    /// call gives up on it (<see cref="ForgetMediaSocket"/>). Read and
+    /// written from both the calling thread and the poll thread; <see
+    /// cref="_natLock"/> covers this and <see cref="_natWaiters"/>.</summary>
+    private readonly Dictionary<string, Socket> _stunSockets = new();
+
+    /// <summary>Per socket, one wait handle for
+    /// <see cref="SipralEventKind.NatMapping"/> and one for
+    /// <see cref="SipralEventKind.NatRelay"/> — a stack built with
+    /// <c>turnServer</c> waits out both before a call may be placed or
+    /// answered on the socket, a stack without it only the first.</summary>
+    private readonly Dictionary<string, (ManualResetEventSlim Mapping, ManualResetEventSlim Relay)> _natWaiters = new();
 
     private int _disposed;
 
@@ -82,7 +108,18 @@ public sealed class SipralStack : IDisposable
 
     /// <summary><c>sipral_stack_create</c>: binds the UDP socket and
     /// starts the poll thread, which raises
-    /// <see cref="SipralEventKind.Started"/> on its first pass.</summary>
+    /// <see cref="SipralEventKind.Started"/> on its first pass.
+    ///
+    /// <paramref name="ice"/> and <paramref name="nat"/> are
+    /// <c>0</c> for this build's own default (everything off — exactly
+    /// today's behaviour) or a <see cref="SipralIce"/>/<see
+    /// cref="SipralNat"/> value; <paramref name="nat"/> set to
+    /// <see cref="SipralNat.Stun"/> needs <paramref name="stunServer"/>
+    /// as <c>host:port</c>, and <paramref name="turnServer"/> rides on it
+    /// with <paramref name="turnUsername"/>/<paramref name="turnPassword"/>
+    /// (`docs/06-nat.md`, `docs/08-ffi.md` "Behind a NAT"). Neither
+    /// credential is written to any log, event or exception this package
+    /// raises.</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -90,8 +127,17 @@ public sealed class SipralStack : IDisposable
         string? codecs = null,
         uint frameMs = 0,
         bool? offerDtmf = null,
-        SipralSrtp srtp = 0)
+        SipralSrtp srtp = 0,
+        SipralIce ice = 0,
+        SipralNat nat = 0,
+        string? stunServer = null,
+        string? turnServer = null,
+        string? turnUsername = null,
+        string? turnPassword = null,
+        bool? g729AnnexB = null)
     {
+        _nat = nat;
+        _turn = turnServer is not null;
         NativeLibraryLoader.EnsureRegistered();
 
         _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -121,6 +167,10 @@ public sealed class SipralStack : IDisposable
         var codecsBytes = codecs is null ? null : Encoding.UTF8.GetBytes(codecs);
         var entropy = RandomBytes(32);
         var mediaSeed = RandomBytes(32);
+        var stunServerBytes = stunServer is null ? null : Encoding.UTF8.GetBytes(stunServer);
+        var turnServerBytes = turnServer is null ? null : Encoding.UTF8.GetBytes(turnServer);
+        var turnUsernameBytes = turnUsername is null ? null : Encoding.UTF8.GetBytes(turnUsername);
+        var turnPasswordBytes = turnPassword is null ? null : Encoding.UTF8.GetBytes(turnPassword);
 
         var stackHandle = 0ul;
         SipralStatus status;
@@ -129,6 +179,10 @@ public sealed class SipralStack : IDisposable
         using (var codecsPin = Pin(codecsBytes))
         using (var entropyPin = Pin(entropy))
         using (var seedPin = Pin(mediaSeed))
+        using (var stunServerPin = Pin(stunServerBytes))
+        using (var turnServerPin = Pin(turnServerBytes))
+        using (var turnUsernamePin = Pin(turnUsernameBytes))
+        using (var turnPasswordPin = Pin(turnPasswordBytes))
         {
             var config = SipralStackConfig.Sized();
             config.EventCallback = Marshal.GetFunctionPointerForDelegate(_callback);
@@ -148,6 +202,17 @@ public sealed class SipralStack : IDisposable
             config.MediaSeed = seedPin.Pointer;
             config.MediaSeedLen = 32;
             config.Srtp = (uint)srtp;
+            config.Ice = (uint)ice;
+            config.Nat = (uint)nat;
+            config.StunServer = stunServerPin.Pointer;
+            config.StunServerLen = (nuint)(stunServerBytes?.Length ?? 0);
+            config.G729AnnexB = ToggleOf(g729AnnexB);
+            config.TurnServer = turnServerPin.Pointer;
+            config.TurnServerLen = (nuint)(turnServerBytes?.Length ?? 0);
+            config.TurnUsername = turnUsernamePin.Pointer;
+            config.TurnUsernameLen = (nuint)(turnUsernameBytes?.Length ?? 0);
+            config.TurnPassword = turnPasswordPin.Pointer;
+            config.TurnPasswordLen = (nuint)(turnPasswordBytes?.Length ?? 0);
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }
@@ -204,12 +269,13 @@ public sealed class SipralStack : IDisposable
     /// a media socket is opened before the INVITE goes out, and its
     /// <c>host:port</c> is offered as <c>media_address</c>.
     /// </summary>
-    public Call PlaceCall(Account account, string target, string mediaHost = "127.0.0.1", int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0)
+    public Call PlaceCall(Account account, string target, string mediaHost = "127.0.0.1", int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0)
     {
         var mediaSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         mediaSocket.Bind(new IPEndPoint(IPAddress.Parse(mediaHost), mediaPort));
         mediaSocket.Blocking = false;
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
+        MapMediaSocket(mediaSocket, mediaAddress);
 
         var targetBytes = Encoding.UTF8.GetBytes(target);
         var mediaAddressBytes = Encoding.UTF8.GetBytes(mediaAddress);
@@ -226,13 +292,23 @@ public sealed class SipralStack : IDisposable
             config.MediaAddress = mediaPin.Pointer;
             config.MediaAddressLen = (nuint)mediaAddressBytes.Length;
             config.Srtp = (uint)srtp;
+            config.Ice = (uint)ice;
             if (destinationBytes is not null)
             {
                 config.Destination = destPin.Pointer;
                 config.DestinationLen = (nuint)destinationBytes.Length;
             }
 
-            SipralErrors.Call(() => NativeMethods.sipral_call_place(Handle, account.Handle, config, out callHandle, NowMs), "sipral_call_place");
+            try
+            {
+                SipralErrors.Call(() => NativeMethods.sipral_call_place(Handle, account.Handle, config, out callHandle, NowMs), "sipral_call_place");
+            }
+            catch
+            {
+                ForgetMediaSocket(mediaAddress);
+                mediaSocket.Dispose();
+                throw;
+            }
         }
 
         var call = new Call(this, callHandle, mediaSocket, mediaAddress);
@@ -252,10 +328,21 @@ public sealed class SipralStack : IDisposable
         mediaSocket.Bind(new IPEndPoint(IPAddress.Parse(mediaHost), mediaPort));
         mediaSocket.Blocking = false;
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
+        MapMediaSocket(mediaSocket, mediaAddress);
 
         var call = new Call(this, args.Call, mediaSocket, mediaAddress);
         RegisterCall(call);
-        call.Answer();
+        try
+        {
+            call.Answer();
+        }
+        catch
+        {
+            ForgetCall(call.Handle);
+            ForgetMediaSocket(mediaAddress);
+            mediaSocket.Dispose();
+            throw;
+        }
         return call;
     }
 
@@ -301,6 +388,21 @@ public sealed class SipralStack : IDisposable
         // keeps and for the same reason: a consumer of `Events` may look
         // up `CallFor(args.Call)` the moment it wakes and read state that
         // must already be current.
+        if (args.Kind is SipralEventKind.NatMapping or SipralEventKind.NatRelay)
+        {
+            var local = args.Nat?.Local ?? args.Relay?.Local;
+            if (local is not null)
+            {
+                lock (_natLock)
+                {
+                    if (_natWaiters.TryGetValue(local, out var waiters))
+                    {
+                        (args.Kind == SipralEventKind.NatMapping ? waiters.Mapping : waiters.Relay).Set();
+                    }
+                }
+            }
+        }
+
         var call = args.Call != 0 ? CallFor(args.Call) : null;
         call?.Deliver(args);
 
@@ -392,29 +494,248 @@ public sealed class SipralStack : IDisposable
         }
     }
 
+    // -- STUN/TURN on a media socket, before it has a call's media handle -
+
+    /// <summary><c>sipral_stack_nat_map</c>, and the wait its own doc
+    /// comment requires before a call may be described on <paramref
+    /// name="sock"/>.
+    ///
+    /// A no-op when this stack was not built with <c>nat:
+    /// SipralNat.Stun</c>: exactly today's behaviour for every other
+    /// stack. Otherwise <paramref name="sock"/> is tracked in <see
+    /// cref="_stunSockets"/> under <paramref name="address"/> —
+    /// <see cref="Run"/> then hands what arrives on it to
+    /// <c>sipral_stack_receive_stun</c> instead of treating it as
+    /// ordinary media, and <see cref="DrainStun"/> sends what
+    /// <c>sipral_stack_poll_stun</c> hands out for it — and this call
+    /// blocks the *calling* thread, never the poll thread, until <see
+    /// cref="SipralEventKind.NatMapping"/> names this socket (and, with
+    /// this stack's own <c>turnServer</c> set, until its <see
+    /// cref="SipralEventKind.NatRelay"/> too). <c>docs/06-nat.md</c> and
+    /// <c>docs/08-ffi.md</c> ("Behind a NAT") put the first within five
+    /// and a half seconds whatever the server does; <paramref
+    /// name="timeout"/> leaves comfortable room over that before raising
+    /// <see cref="TimeoutException"/>, which should not happen unless the
+    /// poll thread itself has stopped.</summary>
+    internal void MapMediaSocket(Socket sock, string address, TimeSpan? timeout = null)
+    {
+        if (_nat != SipralNat.Stun)
+        {
+            return;
+        }
+        var wait = timeout ?? TimeSpan.FromSeconds(7);
+        var waiters = (Mapping: new ManualResetEventSlim(false), Relay: new ManualResetEventSlim(false));
+        lock (_natLock)
+        {
+            _stunSockets[address] = sock;
+            _natWaiters[address] = waiters;
+        }
+        var localBytes = ToSBytes(address);
+        try
+        {
+            SipralErrors.Call(
+                () => NativeMethods.sipral_stack_nat_map(Handle, localBytes, (nuint)localBytes.Length, NowMs),
+                "sipral_stack_nat_map");
+        }
+        catch
+        {
+            ReleaseStunSocket(address);
+            throw;
+        }
+        if (!waiters.Mapping.Wait(wait))
+        {
+            ReleaseStunSocket(address);
+            throw new TimeoutException($"no NAT mapping answer for {address} within {wait}");
+        }
+        // `turnServer` rides the same socket: `sipral_call_place` and
+        // `sipral_call_answer_media` both refuse a socket named here until
+        // its `SIPRAL_EVENT_KIND_NAT_RELAY` has arrived too, allocated or
+        // not (`docs/08-ffi.md`, "Behind a NAT").
+        if (_turn && !waiters.Relay.Wait(wait))
+        {
+            ReleaseStunSocket(address);
+            throw new TimeoutException($"no TURN allocation answer for {address} within {wait}");
+        }
+    }
+
+    /// <summary>Stops treating <paramref name="address"/> as a
+    /// pre-media-handle STUN/TURN socket: called once <see
+    /// cref="SipralEventKind.MediaStarted"/> hands it to <see
+    /// cref="CallMedia"/> (which reads it from then on) or once a call
+    /// gives up on it before that ever happens.</summary>
+    internal void ReleaseStunSocket(string address)
+    {
+        lock (_natLock)
+        {
+            _stunSockets.Remove(address);
+            _natWaiters.Remove(address);
+        }
+    }
+
+    /// <summary><c>sipral_stack_nat_unmap</c> for a media socket named
+    /// with <c>sipral_stack_nat_map</c> that will carry no call after
+    /// all — <c>sipral_call_place</c> or <c>sipral_call_answer_media</c>
+    /// refused it, or <see cref="Dispose"/> is tearing the stack down
+    /// with it still named. A no-op for a socket this stack never
+    /// mapped (no <c>nat: SipralNat.Stun</c>, or the socket already
+    /// reached <see cref="SipralEventKind.MediaStarted"/> and belongs to
+    /// <see cref="CallMedia"/> now).</summary>
+    internal void ForgetMediaSocket(string address)
+    {
+        bool mapped;
+        lock (_natLock)
+        {
+            mapped = _stunSockets.ContainsKey(address);
+        }
+        if (!mapped)
+        {
+            return;
+        }
+        var localBytes = ToSBytes(address);
+        try
+        {
+            SipralErrors.Call(
+                () => NativeMethods.sipral_stack_nat_unmap(Handle, localBytes, (nuint)localBytes.Length, NowMs),
+                "sipral_stack_nat_unmap");
+            // A relayed socket owes the server a Refresh with a lifetime
+            // of zero, waiting in `sipral_stack_poll_stun` now
+            // (`docs/08-ffi.md`, "sipral_stack_nat_unmap"); one drain
+            // sends it from the socket while it is still tracked and
+            // still open.
+            DrainStun();
+        }
+        catch (SipralException)
+        {
+            // Best effort on the way out, like the poll thread's Python
+            // counterpart.
+        }
+        ReleaseStunSocket(address);
+    }
+
+    /// <summary><c>sipral_stack_poll_stun</c>, until nothing is left to
+    /// send. <c>transmit.Source</c> names which media socket to send
+    /// from — exactly the point of this queue being separate from
+    /// <see cref="DrainTransmit"/>'s: a STUN request for one socket sent
+    /// from another would teach the server the wrong socket's mapping,
+    /// silently (<c>docs/08-ffi.md</c>, "Three entry points rather than a
+    /// second use of the two signalling ones").</summary>
+    private void DrainStun()
+    {
+        while (true)
+        {
+            var transmit = SipralTransmit.Sized();
+            transmit.Data = _stunData;
+            transmit.Capacity = TransmitBytes;
+            transmit.Destination = _stunDestination;
+            transmit.DestinationCapacity = AddressBytes;
+            transmit.Source = _stunSource;
+            transmit.SourceCapacity = AddressBytes;
+            var status = NativeMethods.sipral_stack_poll_stun(Handle, ref transmit);
+            if (status != SipralStatus.Ok || transmit.Len == 0)
+            {
+                return;
+            }
+            var payload = new byte[(int)transmit.Len];
+            Marshal.Copy(_stunData, payload, 0, payload.Length);
+            var destination = Marshal.PtrToStringUTF8(_stunDestination, (int)transmit.DestinationLen) ?? string.Empty;
+            var sourceText = Marshal.PtrToStringUTF8(_stunSource, (int)transmit.SourceLen) ?? string.Empty;
+            Socket? sock;
+            lock (_natLock)
+            {
+                _stunSockets.TryGetValue(sourceText, out sock);
+            }
+            if (sock is null)
+            {
+                continue;
+            }
+            var (host, port) = ParseAddress(destination);
+            try
+            {
+                sock.SendTo(payload, new IPEndPoint(IPAddress.Parse(host), port));
+            }
+            catch (SocketException)
+            {
+            }
+        }
+    }
+
     private void Run()
     {
         while (!_closed.IsSet)
         {
-            if (_socket.Poll(50_000, SelectMode.SelectRead))
+            List<Socket> stunSnapshot;
+            lock (_natLock)
             {
-                try
+                stunSnapshot = _stunSockets.Values.ToList();
+            }
+            var checkRead = new List<Socket>(stunSnapshot.Count + 1) { _socket };
+            checkRead.AddRange(stunSnapshot);
+            try
+            {
+                Socket.Select(checkRead, null, null, 50_000);
+            }
+            catch (SocketException)
+            {
+                checkRead.Clear();
+            }
+
+            foreach (var sock in checkRead)
+            {
+                if (ReferenceEquals(sock, _socket))
                 {
-                    EndPoint from = new IPEndPoint(IPAddress.Any, 0);
-                    var count = _socket.ReceiveFrom(_receiveBuffer, ref from);
-                    var fromText = ToSBytes(Encoding.UTF8.GetBytes(FormatAddress((IPEndPoint)from)));
-                    // `transport` here is a transport *id* (Sipral.TransportMain,
-                    // i.e. 0, for the one this stack was created with, or a
-                    // further one sipral_stack_transport_bind minted) — not a
-                    // SipralTransport *kind*. This stack never binds a second
-                    // transport, so every datagram it reads off its one UDP
-                    // socket belongs to the main one.
-                    NativeMethods.sipral_stack_receive_datagram(
-                        Handle, global::Sipral.Sipral.TransportMain, _receiveBuffer, (nuint)count,
-                        fromText, (nuint)fromText.Length, null!, 0, NowMs);
+                    try
+                    {
+                        EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+                        var count = _socket.ReceiveFrom(_receiveBuffer, ref from);
+                        var fromText = ToSBytes(Encoding.UTF8.GetBytes(FormatAddress((IPEndPoint)from)));
+                        // `transport` here is a transport *id* (Sipral.TransportMain,
+                        // i.e. 0, for the one this stack was created with, or a
+                        // further one sipral_stack_transport_bind minted) — not a
+                        // SipralTransport *kind*. This stack never binds a second
+                        // transport, so every datagram it reads off its one UDP
+                        // socket belongs to the main one.
+                        NativeMethods.sipral_stack_receive_datagram(
+                            Handle, global::Sipral.Sipral.TransportMain, _receiveBuffer, (nuint)count,
+                            fromText, (nuint)fromText.Length, null!, 0, NowMs);
+                    }
+                    catch (SocketException)
+                    {
+                    }
                 }
-                catch (SocketException)
+                else
                 {
+                    // A media socket `MapMediaSocket` named, still
+                    // waiting for its own mapping/relay or already
+                    // described but with no media handle yet: everything
+                    // arriving on it still goes to
+                    // `sipral_stack_receive_stun` (`docs/08-ffi.md`,
+                    // "Behind a NAT" — "Until the call's media handle
+                    // exists, everything arriving on its socket still
+                    // goes to sipral_stack_receive_stun") until
+                    // `Call.Deliver` releases it on
+                    // `SIPRAL_EVENT_KIND_MEDIA_STARTED`.
+                    string? address;
+                    lock (_natLock)
+                    {
+                        address = _stunSockets.FirstOrDefault(kv => ReferenceEquals(kv.Value, sock)).Key;
+                    }
+                    if (address is null)
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+                        var count = sock.ReceiveFrom(_stunReceiveBuffer, ref from);
+                        var fromText = ToSBytes(Encoding.UTF8.GetBytes(FormatAddress((IPEndPoint)from)));
+                        var toText = ToSBytes(address);
+                        NativeMethods.sipral_stack_receive_stun(
+                            Handle, _stunReceiveBuffer, (nuint)count,
+                            fromText, (nuint)fromText.Length, toText, (nuint)toText.Length, NowMs);
+                    }
+                    catch (SocketException)
+                    {
+                    }
                 }
             }
 
@@ -425,6 +746,7 @@ public sealed class SipralStack : IDisposable
                 continue;
             }
             DrainTransmit();
+            DrainStun();
             DrainFarewells();
         }
     }
@@ -468,6 +790,23 @@ public sealed class SipralStack : IDisposable
             call.Close();
         }
 
+        // Every media socket still named with `sipral_stack_nat_map` and
+        // never reached by a call's own media handle —
+        // `sipral_stack_destroy` sends nothing, and a relay left
+        // allocated stays on the server until its lifetime runs out
+        // (`docs/08-ffi.md`, "sipral_stack_nat_unmap"). Each call above
+        // already did this for a socket it still owned; this catches one
+        // mapped and then abandoned before any call was ever placed on it.
+        List<string> leftover;
+        lock (_natLock)
+        {
+            leftover = _stunSockets.Keys.ToList();
+        }
+        foreach (var address in leftover)
+        {
+            ForgetMediaSocket(address);
+        }
+
         _closed.Set();
         if (Thread.CurrentThread != _pollThread)
         {
@@ -481,6 +820,9 @@ public sealed class SipralStack : IDisposable
         Marshal.FreeHGlobal(_transmitDestination);
         Marshal.FreeHGlobal(_transmitSource);
         Marshal.FreeHGlobal(_farewellData);
+        Marshal.FreeHGlobal(_stunData);
+        Marshal.FreeHGlobal(_stunDestination);
+        Marshal.FreeHGlobal(_stunSource);
     }
 
     private static uint ToggleOf(bool? value) => value switch

@@ -54,11 +54,16 @@ public sealed class SipralEventArgs : EventArgs
     public SipralTransferEventInfo? Transfer { get; }
     /// <summary>Set for <see cref="SipralEventKind.ResolveNeeded"/>.</summary>
     public SipralResolveEventInfo? Resolve { get; }
+    /// <summary>Set for <see cref="SipralEventKind.NatMapping"/>.</summary>
+    public SipralNatEventInfo? Nat { get; }
+    /// <summary>Set for <see cref="SipralEventKind.NatRelay"/>.</summary>
+    public SipralNatRelayEventInfo? Relay { get; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
         SipralRegistrationEventInfo? registration, SipralCallEventInfo? callInfo,
-        SipralMediaEventInfo? media, SipralTransferEventInfo? transfer, SipralResolveEventInfo? resolve)
+        SipralMediaEventInfo? media, SipralTransferEventInfo? transfer, SipralResolveEventInfo? resolve,
+        SipralNatEventInfo? nat, SipralNatRelayEventInfo? relay)
     {
         Kind = kind;
         KindName = kindName;
@@ -71,6 +76,8 @@ public sealed class SipralEventArgs : EventArgs
         Media = media;
         Transfer = transfer;
         Resolve = resolve;
+        Nat = nat;
+        Relay = relay;
     }
 
     private static readonly SipralEventKind[] CallKinds =
@@ -110,6 +117,8 @@ public sealed class SipralEventArgs : EventArgs
         SipralMediaEventInfo? media = null;
         SipralTransferEventInfo? transfer = null;
         SipralResolveEventInfo? resolve = null;
+        SipralNatEventInfo? nat = null;
+        SipralNatRelayEventInfo? relay = null;
 
         if (kind == SipralEventKind.RegistrationChanged)
         {
@@ -149,9 +158,23 @@ public sealed class SipralEventArgs : EventArgs
             var t = evt.Payload.Transfer;
             transfer = new SipralTransferEventInfo(t.StatusCode, t.Attended != 0, ReadUtf8(t.Target, t.TargetLen));
         }
+        else if (kind == SipralEventKind.NatMapping)
+        {
+            var n = evt.Payload.Nat;
+            nat = new SipralNatEventInfo((SipralNatMapping)n.Mapping, n.Signalling != 0, n.Transport,
+                n.Accounts, ReadUtf8(n.Local, n.LocalLen), ReadUtf8(n.Mapped, n.MappedLen),
+                ReadUtf8(n.Previous, n.PreviousLen));
+        }
+        else if (kind == SipralEventKind.NatRelay)
+        {
+            var r = evt.Payload.Relay;
+            relay = new SipralNatRelayEventInfo((SipralNatRelay)r.Outcome, r.Code,
+                ReadUtf8(r.Local, r.LocalLen), ReadUtf8(r.Relayed, r.RelayedLen),
+                ReadUtf8(r.Mapped, r.MappedLen), ReadUtf8(r.Reason, r.ReasonLen));
+        }
 
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
-            registration, callInfo, media, transfer, resolve);
+            registration, callInfo, media, transfer, resolve, nat, relay);
     }
 
     private static SipralStreamStatistics? ReadStatistics(IntPtr ptr)

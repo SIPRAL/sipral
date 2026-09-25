@@ -51,7 +51,15 @@ rules `docs/08-ffi.md` states for every binding: events land on the poll
 thread and not the caller's, `SIPRAL_STATUS_BUSY` surfaces rather than
 blocking, and disposing a stack with events still queued behind it never
 touches a freed handle. This is what `scripts/check.sh`'s `the dotnet
-bindings` step runs.
+bindings` step runs. `NatTests.cs` runs a STUN responder of its own (RFC
+5389 Section 15.2's `XOR-MAPPED-ADDRESS`, on loopback) to prove a stack
+built with `nat: SipralNat.Stun` learns and advertises the mapping,
+records what a `turnServer` gets as far as an Allocate request leaving
+for it, and runs two stacks with `ice: SipralIce.Required` against each
+other on this host's own routable address (never `127.0.0.1` — RFC 8445
+Section 5.1.1.1 rules a loopback address out as a host candidate) to
+prove media starts, both ways, through a full ICE checklist and
+nomination.
 
 ## Use
 
@@ -85,6 +93,27 @@ call.Resume();
 call.SendDtmf("123#");
 call.Hangup();
 ```
+
+### Behind a NAT
+
+`new SipralStack(nat: SipralNat.Stun, stunServer: "203.0.113.5:3478")`
+asks that server where this stack's sockets appear from; nothing else in
+an application's own code changes for the *signalling* socket, whose
+mapping is `stack.Events`' own `SipralEventKind.NatMapping` and every
+account's `Contact` besides. A *media* socket is the application's and
+exists before its call, so `PlaceCall`/`AnswerCall` themselves block the
+calling thread — never the poll thread — until that socket's own mapping
+answers, which is what lets the offer or answer they write carry the
+public address from the first packet (`docs/06-nat.md`, `docs/08-ffi.md`
+"Behind a NAT"). `turnServer`, `turnUsername` and `turnPassword` add a
+relay on the same server to the same socket, and the same two methods
+then wait out its `SipralEventKind.NatRelay` too. Both credentials stay
+out of every log, event and exception this package raises.
+`ice: SipralIce.Offered`/`SipralIce.Required`, on the stack or on
+`PlaceCall`, is what actually puts a relay to use — off by default, the
+same as `nat`, which `docs/06-nat.md` explains. `g729AnnexB: false` on
+the stack turns off G.729's Annex B silence compression (`annexb=no`) if
+that codec runs at all.
 
 ## Samples
 

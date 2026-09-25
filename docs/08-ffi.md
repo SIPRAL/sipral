@@ -1372,6 +1372,35 @@ behaviour, and in practice the CLR's own fatal-exception handling for one,
 which would take the whole process down over one subscriber's bug rather
 than only the thread it ran on.
 
+`SipralStack`'s constructor grew `ice`, `nat`, `stunServer`, `turnServer`,
+`turnUsername`, `turnPassword` and `g729AnnexB`, all defaulting to
+today's behaviour, and `PlaceCall` grew `ice`, the same additions
+`bindings/python/sipral/stack.py`'s own `Stack.__init__`/`place_call`
+made, kept to the same option names in each language's own idiom.
+`SipralEventArgs` grew `Nat`/`Relay`, decoding
+`SipralEventKind.NatMapping`/`NatRelay`'s payloads the same way every
+other kind already there does. A media socket is the harder half, since
+it is the application's own and exists before its call: `SipralStack`
+tracks every one `sipral_stack_nat_map` names — from `PlaceCall` or
+`AnswerCall`, once built with `nat: SipralNat.Stun` — in a
+`Dictionary<string, Socket>` the poll thread's own loop folds into the
+`Socket.Select` it already runs its main socket through each pass,
+reading what arrives on one into `sipral_stack_receive_stun` and sending
+what `sipral_stack_poll_stun` hands out for it from that socket and no
+other. `PlaceCall`/`AnswerCall` block the *calling* thread — never the
+poll thread, which keeps polling throughout — until the socket's own
+`SipralEventKind.NatMapping` arrives (and, with `turnServer` set, its
+`SipralEventKind.NatRelay` too), the wait `sipral_stack_nat_map`'s own
+doc comment requires before a call may be described on it. Once
+`SipralEventKind.MediaStarted` mints `Call.Media`, the socket is
+`CallMedia`'s to read from then on; a call that never reaches it gives
+the mapping back through `sipral_stack_nat_unmap` when it closes, and so
+does `SipralStack.Dispose` for a socket mapped and never spent by a call
+at all. `bindings/dotnet/Sipral.Tests/NatTests.cs` proves it against a
+STUN responder that test project runs itself, and runs two stacks with
+`ice: SipralIce.Required` against each other for the ICE half, with no
+server at all.
+
 ## Kotlin
 
 Two printed files, because Android has no way to call C but JNI:

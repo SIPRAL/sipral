@@ -63,6 +63,27 @@ public sealed record SipralResolveEventInfo(
     uint Port,
     SipralTransport Protocol);
 
+/// <summary>What a <see cref="SipralEventKind.NatMapping"/> event carries
+/// — the fields of <c>sipral_nat_event_t</c>.</summary>
+public sealed record SipralNatEventInfo(
+    SipralNatMapping Mapping,
+    bool Signalling,
+    uint Transport,
+    uint Accounts,
+    string? Local,
+    string? Mapped,
+    string? Previous);
+
+/// <summary>What a <see cref="SipralEventKind.NatRelay"/> event carries —
+/// the fields of <c>sipral_nat_relay_event_t</c>.</summary>
+public sealed record SipralNatRelayEventInfo(
+    SipralNatRelay Outcome,
+    uint Code,
+    string? Local,
+    string? Relayed,
+    string? Mapped,
+    string? Reason);
+
 /// <summary>A snapshot of <c>sipral_stream_stats_t</c>, copied field by
 /// field — never the library's own pointer, which is valid only for the
 /// callback that carried it.</summary>

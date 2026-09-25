@@ -82,6 +82,13 @@ public sealed class Call : IDisposable
     {
         if (args.Kind == SipralEventKind.MediaStarted && Media is null)
         {
+            // From here the socket is `CallMedia`'s own to read
+            // (`docs/08-ffi.md`, "From the media handle on, the socket's
+            // datagrams go to sipral_media_receive and nowhere else") —
+            // `SipralStack` stops treating it as a pre-media-handle
+            // STUN/TURN socket first, so the two never race to read the
+            // same socket.
+            _stack.ReleaseStunSocket(_mediaAddress);
             Media = new CallMedia(_stack, Handle, _mediaSocket);
         }
         if (args.Kind == SipralEventKind.CallEnded)
@@ -240,6 +247,12 @@ public sealed class Call : IDisposable
         }
         else
         {
+            // Never reached `SIPRAL_EVENT_KIND_MEDIA_STARTED`: refused,
+            // failed before answer, or hung up while still ringing. A
+            // socket `SipralStack.MapMediaSocket` named for it
+            // (`nat: SipralNat.Stun`) is still the stack's to give back
+            // (`sipral_stack_nat_unmap`) before the socket closes under it.
+            _stack.ForgetMediaSocket(_mediaAddress);
             _mediaSocket.Dispose();
         }
         _stack.ForgetCall(Handle);
