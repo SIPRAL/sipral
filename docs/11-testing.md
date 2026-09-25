@@ -142,7 +142,10 @@ frames that led up to it — `P` a packet loud enough to be the tone, `p` one
 that is not, `C` a lost packet concealed, `S` a pause stretched by the
 jitter buffer (`Playback` reports both as `Concealed`; the harness tells them
 apart by the buffer's own count), `N` comfort noise, `_` silence — each with
-its loudness.
+its loudness, and the splice's own frame in brackets. The list ends on the
+frame the splice was scored on, which is its own only once a run's fit is
+complete: a splice in a run's first five frames is scored with them, when
+the fit is, so the frames after it are listed too.
 
 A `lossy` run on 25 September failed on one click and the three runs after
 it passed, the day the jitter buffer had changed how it holds a frame in
@@ -167,7 +170,8 @@ the proxy refused both with `482 Request merged` before any audio flowed.
 
 The playout change made no difference: one `lossy` call in 39 failed on a
 click on either build (Fisher's exact test, two-sided, p = 1.0; per splice,
-1 in 1508 against 2 in 1624, p = 1.0), no `mobile` call did on either, and
+1 in 1508 against 2 in 1624, p = 1.0, though the two are the way into and
+out of one gap), no `mobile` call did on either, and
 the two failures were two shapes of one fault older than both builds. The
 one before the change:
 
@@ -175,7 +179,7 @@ one before the change:
 splice into concealment: jump 6396 against a threshold of 5744 (the tone's steepest step 3027)
   played -132 -2108 -4092 -5628 -6908 -7420 -7420 -6396 | 0 8 69 217 445 678 948 1056 ...
   tone   -144 -2036 -3886 -5487 -6645 -7205 -7067 -6203 | -4661 -2566 -110 2470 4915 ...
-  frames C2378 P3704 P4446 P4157 P3954 P3927 C3692 C2329 C720 C0 P3343 C2808
+  frames C2378 P3704 P4446 P4157 P3954 P3927 C3692 C2329 C720 C0 P3343 [C2808]
 ```
 
 Four frames lost, one received, one more lost; the played audio drops from
@@ -186,11 +190,12 @@ on to -4661. The one after it:
 splice into concealment: jump 7992 against a threshold of 5696 (the tone's steepest step 2998)
   played -5884 -8316 -9340 -9852 -9340 -8316 -5884 -3132 | 4860 6648 7405 7642 6855 ...
   tone   -5930 -7909 -9156 -9532 -8988 -7567 -5402 -2701 | 270 3217 5851 7911 9198 ...
-  frames P4446 P4157 P3954 _0 _0 _0 _0 P3954 C3362 P3848 P4446 C3388
+  frames P4446 P4157 P3954 _0 _0 _0 _0 P3954 [C3362] P3848 P4446 C3388
 ```
 
 Four frames of silence while the jitter buffer ran dry, one received, one
-lost; the concealment opens at 4860 where the tone was at 270, and the
+lost — the three frames after it are there because the run had only just
+begun, and its splices were scored when its fit completed; the concealment opens at 4860 where the tone was at 270, and the
 splice out of it clicked as well (6659), since the extension the stream was
 cross-faded back from restarted its one-frame period on that same jump. Both
 are real clicks, and both are the G.711 concealer's
@@ -204,8 +209,9 @@ sample instead of continuing from its last — after a gap long enough to fade
 to silence, the start of the fade. The frame after any hole now starts the
 history again (`Concealer::received` after a gap, `Coder::interrupted` for
 silence and comfort noise), and `plc.rs` and `crates/sipral/src/tests.rs`
-carry both shapes as tests over the tone's phases, each failing without the
-fix by a jump of the order the lab measured.
+carry both shapes as tests over the tone's phases, and the same hole filled
+with comfort noise packets, each failing without the fix by a jump of the
+order the lab measured.
 
 The rate a single full lab run meets this is low — one `lossy` call in 60
 short ones before the fix, 1.7%, under 9% at 95% confidence — but it was
@@ -215,7 +221,8 @@ while no smooth splice in any of these calls came nearer than 57% of it. The
 thresholds stay as they are; loosening them would have hidden this. With
 only two calls that clicked before the fix, the calls after it cannot show a
 lower rate at any useful confidence on their own (no click in 3515 splices
-against three in 3132 before it, p = 0.10); what shows the fix is the
+against three in 3132 before it, p = 0.10 — and two of the three are one
+gap, so counted by gap it is two against none, p = 0.22); what shows the fix is the
 mechanism, reproduced in the tests and read off the evidence above.
 
 `blackout` is different in kind: the outage silences the far end's tone for

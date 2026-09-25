@@ -662,8 +662,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - **A loss right after a long one, or after the jitter buffer ran dry, no
   longer clicks on G.711.** The
   concealer kept the audio from before a hole in the stream — frames it
-  concealed, or silence played while the jitter buffer ran dry and
-  refilled — and joined the next frame that arrived straight onto it, as if
+  concealed, silence played while the jitter buffer ran dry and
+  refilled, or comfort noise the far end sent — and joined the next frame that arrived straight onto it, as if
   nothing had been missed. A history joined that way can look periodic
   where the signal is not: after four missing frames of a tone whose period
   is five, the frame after the hole matched the one before it exactly, and

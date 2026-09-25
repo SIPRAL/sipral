@@ -3141,6 +3141,23 @@ fn a_lost_packet_is_played_as_concealment_rather_than_as_a_gap() {
 /// further than the tone itself does.
 #[test]
 fn a_loss_after_the_buffer_ran_dry_continues_the_audio_and_not_what_came_before_it() {
+    concealment_after_a_hole(Playback::Silence);
+}
+
+/// The same hole, sent: an RFC 3389 far end fills a pause with comfort
+/// noise packets, one per frame here, and the concealer sees none of them
+/// either. Its history from before the pause is no nearer the frame after
+/// it than it is across a buffer run dry.
+#[test]
+fn a_loss_after_comfort_noise_continues_the_audio_and_not_what_came_before_it() {
+    concealment_after_a_hole(Playback::ComfortNoise);
+}
+
+/// A hole of three to six frames in a G.711 tone, played as `hole` — the
+/// buffer running dry, or comfort noise the far end sent in the tone's
+/// place — then one packet, then one lost: every splice into concealment,
+/// over ten phases of the tone, may step no further than the tone does.
+fn concealment_after_a_hole(hole_played_as: Playback) {
     let rate = 8_000.0;
     let (low, high) = (
         2.0 * core::f64::consts::PI * 350.0 / rate,
@@ -3164,7 +3181,7 @@ fn a_loss_after_the_buffer_ran_dry_continues_the_audio_and_not_what_came_before_
             let mut at = now;
             let mut played = vec![0_i16; 160];
             let mut previous: Option<(Playback, i16)> = None;
-            let mut silent = 0;
+            let mut filled = 0;
 
             for index in 0..60_usize {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
@@ -3180,10 +3197,20 @@ fn a_loss_after_the_buffer_ran_dry_continues_the_audio_and_not_what_came_before_
                     .expect("it encodes")
                     .map(|out| out.payload.to_vec());
                 // a hole of `hole` packets, then one packet, then one more lost
-                let lost = (20..20 + hole).contains(&index) || index == 21 + hole;
+                let in_hole = (20..20 + hole).contains(&index);
+                let lost = (in_hole && hole_played_as == Playback::Silence) || index == 21 + hole;
                 if let Some(mut datagram) = datagram
                     && !lost
                 {
+                    if in_hole {
+                        // the same header, a comfort noise payload type and
+                        // a noise level of -70 dBov (RFC 3389 section 3)
+                        assert_eq!(datagram[0], 0x80, "a bare twelve-byte header");
+                        datagram[1] =
+                            (datagram[1] & 0x80) | sipral_media::comfort_noise::PAYLOAD_TYPE;
+                        datagram.truncate(12);
+                        datagram.push(70);
+                    }
                     receiver.receive(
                         &mut datagram,
                         "192.0.2.2:40002".parse().expect("an address"),
@@ -3191,8 +3218,8 @@ fn a_loss_after_the_buffer_ran_dry_continues_the_audio_and_not_what_came_before_
                     );
                 }
                 let outcome = receiver.playback(&mut played);
-                if outcome == Playback::Silence && index > 10 {
-                    silent += 1;
+                if outcome == hole_played_as && index > 10 {
+                    filled += 1;
                 }
                 if outcome == Playback::Concealed
                     && let Some((Playback::Packet, last)) = previous
@@ -3209,7 +3236,10 @@ fn a_loss_after_the_buffer_ran_dry_continues_the_audio_and_not_what_came_before_
                 previous = Some((outcome, played[159]));
                 at += TICK;
             }
-            assert!(silent > 0, "a hole of {hole} never ran the buffer dry");
+            assert!(
+                filled > 0,
+                "a hole of {hole} was never played as {hole_played_as:?}"
+            );
         }
     }
     assert!(

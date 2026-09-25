@@ -172,7 +172,9 @@ const EVIDENCE_BEFORE: usize = 8;
 const EVIDENCE_AFTER: usize = 16;
 
 /// Frames of playback history a click's evidence carries, the frame it was
-/// found on last.
+/// scored on last — which is the splice's own frame only once a run's fit is
+/// complete: a splice in a run's first frames is scored with them, when the
+/// fit is, up to a seed window later ([`Splice::behind`]).
 const HISTORY: usize = 12;
 
 /// Clicks a call keeps the evidence of. The verdict needs one; a handful
@@ -285,9 +287,13 @@ pub(crate) struct Splice {
     played: Vec<i16>,
     /// The fitted tone over the same samples.
     reference: Vec<i16>,
-    /// The frames leading up to it, the one it was found on last, as
-    /// [`Gate`] saw them: filled in by [`Gate::observe`], since [`score`]
-    /// sees only the run.
+    /// How many frames after its own the splice was scored on: none once a
+    /// run is under way, and up to a seed window's worth for one found in the
+    /// frames [`finish_seeding`] scores together.
+    behind: usize,
+    /// The frames leading up to the one it was scored on, as [`Gate`] saw
+    /// them, the splice's own in brackets: filled in by [`Gate::observe`],
+    /// since [`score`] sees only the run.
     frames: String,
 }
 
@@ -523,6 +529,7 @@ fn score(
                     steepest,
                     played,
                     reference,
+                    behind: 0,
                     frames: String::new(),
                 });
             }
@@ -573,9 +580,13 @@ fn finish_seeding(
         return State::Empty;
     };
     let mut run = Run::new(coefficients);
-    for (kind, samples) in frames {
+    for (index, (kind, samples)) in frames.iter().enumerate() {
         let scorable = matches!(kind, Kind::Packet);
+        let found = counters.splices.len();
         score(&mut run, counters, *kind, samples, w_low, w_high, scorable);
+        for splice in counters.splices.iter_mut().skip(found) {
+            splice.behind = frames.len() - 1 - index;
+        }
     }
     State::Running(run)
 }
@@ -623,11 +634,19 @@ impl Gate {
     /// The history as a click's evidence prints it: `P` a packet loud enough
     /// to be the tone and `p` one that is not, `C` a packet concealed, `S` a
     /// pause stretched, `N` comfort noise and `_` silence, each with its
-    /// loudness.
-    fn frames(&self) -> String {
+    /// loudness; the frame `behind` the last in brackets.
+    fn frames(&self, behind: usize) -> String {
+        let marked = self.history.len().checked_sub(behind + 1);
         self.history
             .iter()
-            .map(|(tag, loud)| format!("{tag}{loud}"))
+            .enumerate()
+            .map(|(index, (tag, loud))| {
+                if Some(index) == marked {
+                    format!("[{tag}{loud}]")
+                } else {
+                    format!("{tag}{loud}")
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -655,9 +674,16 @@ impl Gate {
         self.history.push_back((tag, audio::loudness(samples)));
         let found = self.counters.splices.len();
         self.see(outcome, samples, rate);
-        let frames = self.frames();
-        for splice in self.counters.splices.iter_mut().skip(found) {
-            splice.frames.clone_from(&frames);
+        for index in found..self.counters.splices.len() {
+            let behind = self
+                .counters
+                .splices
+                .get(index)
+                .map_or(0, |splice| splice.behind);
+            let frames = self.frames(behind);
+            if let Some(splice) = self.counters.splices.get_mut(index) {
+                splice.frames = frames;
+            }
         }
     }
 
@@ -1120,7 +1146,7 @@ mod tests {
                 .frames
                 .rsplit(' ')
                 .next()
-                .is_some_and(|last| last.starts_with('S')),
+                .is_some_and(|last| last.starts_with("[S")),
             "{}",
             splice.frames
         );
@@ -1128,6 +1154,52 @@ mod tests {
         assert!(evidence.contains("into concealment"), "{evidence}");
         assert!(evidence.contains(" | "), "{evidence}");
         assert_eq!(evidence.lines().filter(|line| !line.is_empty()).count(), 4);
+    }
+
+    /// A click in a run's first frames is scored only once the fit is, a
+    /// few frames later, and its evidence marks the frame it happened on
+    /// rather than the one it was scored on: read the other way, the lab's
+    /// second click looked like a loss four frames after the one it was.
+    #[test]
+    fn a_click_found_while_the_fit_was_seeding_marks_its_own_frame() {
+        let mut gate = Gate::new();
+        let mut n = 0_u64;
+        for outcome in [Playback::Silence; 4] {
+            gate.observe(outcome, &[0; FRAME], RATE);
+        }
+        gate.observe(
+            Playback::Packet,
+            &frame(n, 6_500.0, 4_200.0, 0.0, 0.0),
+            RATE,
+        );
+        n += FRAME as u64;
+        let mut jumped = frame(n, 6_500.0, 4_200.0, 0.0, 0.0);
+        jumped[0] = jumped[0].saturating_add(9_000);
+        gate.observe(Playback::Concealed, &jumped, RATE);
+        n += FRAME as u64;
+        for _ in 0..3 {
+            assert!(gate.report().splices.is_empty(), "scored before its fit");
+            gate.observe(
+                Playback::Packet,
+                &frame(n, 6_500.0, 4_200.0, 0.0, 0.0),
+                RATE,
+            );
+            n += FRAME as u64;
+        }
+
+        let report = gate.report();
+        let splice = report.splices.first().expect("the jump clicked");
+        assert!(splice.into_concealment);
+        assert_eq!(splice.behind, 3);
+        let frames: Vec<&str> = splice.frames.split(' ').collect();
+        assert_eq!(frames.len(), 9, "{}", splice.frames);
+        assert!(frames[5].starts_with("[C"), "{}", splice.frames);
+        assert_eq!(
+            frames.iter().filter(|frame| frame.starts_with('[')).count(),
+            1,
+            "{}",
+            splice.frames
+        );
     }
 
     /// A call nothing clicked on still says how near it came.
