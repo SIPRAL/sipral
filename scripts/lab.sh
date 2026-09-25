@@ -385,9 +385,36 @@ step "waiting for the servers to listen"
 wait_for kamailio "Listening on" || exit 1
 wait_for freeswitch "MSG Thread 0 Started" || exit 1
 # calls are relayed to the lab's own profile, which comes up after the core
-# does. Not fatal on its own: the harness is the verdict, and a readiness probe
-# that guesses at log wording should not be the thing that fails the run
-wait_for freeswitch "Started Profile lab" optional || true
+# does. It really does say so -- sofia.c logs "Started Profile lab
+# [sofia_reg_lab]" at NOTICE -- but never where wait_for above can read it:
+# the image runs `freeswitch -nc`, so only WARNING and above ever reach the
+# stdout `docker compose logs` captures, and that line never does regardless
+# of the phrase hunted for it. Asked over the event socket instead, the way
+# the image's own healthcheck.sh asks it (interop/freeswitch's own
+# lab_event_socket.conf.xml is why that connects at all here): freeswitch,
+# unlike kamailio's image, has a shell and fs_cli in it. "Invalid Profile!"
+# is what an unready or misnamed profile answers with; not fatal on its own
+# either way, since the harness's own flows are the real verdict, not a
+# probe of what a server said about itself.
+freeswitch_lab_profile_up() {
+    ( cd interop && docker compose exec -T freeswitch \
+        fs_cli -x 'sofia status profile lab' 2>/dev/null ) | grep -q 'sofia_reg_lab'
+}
+tries=0
+profile_seen=0
+while [ "$tries" -lt 45 ]; do
+    if freeswitch_lab_profile_up; then
+        profile_seen=1
+        break
+    fi
+    tries=$((tries + 1))
+    sleep 2
+done
+if [ "$profile_seen" -eq 1 ]; then
+    pass "freeswitch: lab profile running"
+else
+    printf '  note  freeswitch never confirmed the lab profile running; carrying on\n'
+fi
 wait_for asterisk "Asterisk Ready" || exit 1
 
 # The capture runs inside the harness's own container, on its own interface.

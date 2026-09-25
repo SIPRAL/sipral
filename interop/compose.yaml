@@ -57,11 +57,15 @@ services:
     image: safarov/freeswitch:1.10.12
     # names vanilla does not use, in directories it includes by glob: the
     # entrypoint copies its own tree over /etc/freeswitch at every start, so
-    # anything mounted at one of its paths is a fight it wins
+    # anything mounted at one of its paths is a fight it wins. The event
+    # socket config is the exception -- mod_event_socket loads exactly one
+    # file by that fixed name, not a directory by glob, so this one replaces
+    # vanilla's own rather than adding beside it (see its own comment).
     volumes:
       - ./freeswitch/lab_user.xml:/etc/freeswitch/directory/default/lab_user.xml:ro
       - ./freeswitch/lab.xml:/etc/freeswitch/dialplan/public/zz_sipral_lab.xml:ro
       - ./freeswitch/lab_profile.xml:/etc/freeswitch/sip_profiles/zz_sipral_lab.xml:ro
+      - ./freeswitch/lab_event_socket.conf.xml:/etc/freeswitch/autoload_configs/event_socket.conf.xml:ro
     networks: [lab]
 
   asterisk:
