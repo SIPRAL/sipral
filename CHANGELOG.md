@@ -680,6 +680,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   bars and the keyboard, and the icons are dark. Found running the APK on an
   Android 16 emulator, where it also placed, held, resumed and hung up a
   call through the telecom framework (`docs/15-mobile.md`).
+- **A call answered twice is no longer broken by the second answer.** The
+  INVITE's server transaction stays for 32 seconds after its 200 OK (RFC
+  6026), and an answer through it in that time — an application answering
+  from its own code and from the system call screen — sent a second 200
+  and put a call that was up back to waiting for its ACK; hanging it up
+  then sent no BYE. `UserAgent::answer` now refuses a call already
+  answered, and `sipral_call_answer`/`sipral_call_answer_media` answer it
+  `SIPRAL_STATUS_WRONG_STATE`.
 - **An ICE call hears the far end before a pair is chosen.** Until the
   controlling end nominates — up to `nomination_wait`, a second, after its
   first valid pair — the far end sends on whichever pair its own checks

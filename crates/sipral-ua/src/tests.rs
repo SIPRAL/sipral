@@ -2933,6 +2933,69 @@ fn the_answer_to_our_bye_is_not_news() {
     );
 }
 
+/// The INVITE's server transaction stays for 64*T1 after its 2xx (RFC 6026
+/// §7.1), long enough for an application that answers from two places --
+/// its own code and the system call screen -- to answer a second time. That
+/// second answer used to send another 200 and put the call back to waiting
+/// for an ACK, and the hangup after it sent no BYE.
+#[test]
+fn a_call_answered_once_is_not_answered_again() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("twice", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    assert!(ok.starts_with(b"SIP/2.0 200 OK\r\n"));
+
+    assert!(matches!(
+        agent.answer(call, Some(Arc::from(ANSWER)), t0),
+        Err(UaError::WrongState(_))
+    ));
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "no second 200 before the ACK"
+    );
+
+    let to = String::from_utf8_lossy(&header(&ok, HeaderName::To)).into_owned();
+    let ack = format!(
+        "ACK sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKtwice-ack;rport\r\n\
+Max-Forwards: 70\r\n\
+From: Bob <sip:bob@example.com>;tag=bobtag\r\n\
+To: {to}\r\n\
+Call-ID: incoming-twice\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    deliver(&mut agent, ack.as_bytes(), t0);
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::CallConfirmed { .. })),
+        "the ACK confirms the call"
+    );
+
+    assert!(matches!(
+        agent.answer(call, Some(Arc::from(ANSWER)), t0),
+        Err(UaError::WrongState(CallState::Confirmed))
+    ));
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "no second 200 after the ACK"
+    );
+    assert_eq!(
+        agent.calls.get(&call).map(|held| held.state),
+        Some(CallState::Confirmed)
+    );
+
+    agent.hangup(call, t0).expect("the BYE goes");
+    assert!(sent(&mut agent).starts_with(b"BYE sip:bob@192.0.2.9 SIP/2.0\r\n"));
+}
+
 /// A quality report is asked for after the `CallEnded` event that names the
 /// call, which is exactly the moment `finish` (`calls.rs`) has already
 /// forgotten it. Without the snapshot `finish` stashes right before that,

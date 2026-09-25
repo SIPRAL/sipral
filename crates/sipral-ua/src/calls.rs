@@ -275,13 +275,23 @@ impl UserAgent {
     /// in the ACK, as [`UaEvent::CallConfirmed`].
     ///
     /// # Errors
-    /// As [`UserAgent::ring`].
+    /// As [`UserAgent::ring`], and [`UaError::WrongState`] for a call this
+    /// end has already answered, whether or not its ACK has come.
     pub fn answer(
         &mut self,
         call: CallHandle,
         sdp: Option<Arc<[u8]>>,
         now: Instant,
     ) -> Result<(), UaError> {
+        // the INVITE's server transaction outlives its 2xx by 64*T1 (RFC 6026
+        // §7.1, Accepted), and a second 2xx through it would be sent, and would
+        // put a call that is up back to waiting for an ACK that already came:
+        // a call answered once is refused here, not answered again
+        if let Some(held) = self.calls.get(&call)
+            && (held.awaiting_ack.is_some() || held.acknowledged)
+        {
+            return Err(UaError::WrongState(held.state));
+        }
         // RFC 3262 §5: a reliable provisional that carried a description holds
         // the 2xx until it is acknowledged, or two unanswered offers are on the
         // wire at once and nothing says which the answer belongs to
