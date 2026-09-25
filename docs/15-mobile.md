@@ -377,12 +377,7 @@ both ends:
 | Audio | a voice-communication capture from the built-in microphone and a voice-communication playback track, both at 16 kHz, in `dumpsys media.audio_flinger`; with `-no-audio` the microphone reads silence (-89 dB) |
 | A simulated push | `RINGING` through the framework with no INVITE, and the incoming-call notification (category `call`, importance high, a full-screen intent); declined, `DISCONNECTED` with `REJECTED`; left alone, `MISSED` 20 seconds later, when the announcement's window ran out |
 
-The sample shows no audio levels. Two things it could not show there. An
-incoming INVITE: the emulator is behind its own NAT (10.0.2.15), so a caller
-on the Mac could reach it through a port redirect, but its ACK and BYE go to
-the `Contact` the sample answers with, an address nothing outside the
-emulator routes to; a registrar or a proxy in front of the phone is what
-carries that on a real network. And the full-screen intent: from Android 14,
+The sample shows no audio levels. The full-screen intent: from Android 14,
 `USE_FULL_SCREEN_INTENT` is not simply granted by the manifest, and the
 sideloaded sample was refused it (`adb shell appops get org.sipral.sample
 USE_FULL_SCREEN_INTENT`), so the call showed as a heads-up notification
@@ -395,8 +390,8 @@ and copied to the Mac:
 
 ```sh
 export ANDROID_HOME=~/Library/Android/sdk JAVA_HOME=/opt/homebrew/opt/openjdk
-"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n sipral \
-    -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_6
+echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n sipral \
+    -k "system-images;android-36;google_apis;arm64-v8a"
 "$ANDROID_HOME/emulator/emulator" -avd sipral -no-window -no-audio -no-snapshot \
     -no-boot-anim -gpu swiftshader_indirect -tcpdump emulator.pcap &
 adb wait-for-device
@@ -425,7 +420,58 @@ the registrar URI stays empty, Register, then call
 symmetric RTP on the agent carries the media back. The agent hangs up a call
 a minute after answering it, so hang up from the sample before then to see
 the phone's own BYE. `adb shell dumpsys telecom` shows the framework's side,
-and `emulator.pcap` the wire.
+and `emulator.pcap` the wire — but only the wire of `eth0`. An AVD created
+as above has `wlan0` (10.0.2.16) as well as `eth0` (10.0.2.15), the sample
+binds `wlan0`'s address, and `-tcpdump` records only `eth0`: a run against
+the lab below left the sample's own traffic out of the capture entirely, and
+the far end's view is what showed it.
+
+**Through the lab's Asterisk.** The same APK registered with the lab's
+Asterisk on another machine, reached from the Mac over a VPN, and called
+through it both ways. `scripts/lab.sh wasapi up` on the lab machine
+publishes Asterisk on its LAN address, SIP on 5062 and RTP on 10000 to
+10020. In the sample: address of record `sip:labuser-mobile@192.0.2.30`,
+registrar address `192.0.2.30:5062`, registrar URI `sip:192.0.2.30:5062`,
+auth user `labuser-mobile`, password `labpass`, Register; then call
+`sip:9008@192.0.2.30:5062`, the lab's echo. For the other direction, on the
+lab machine:
+
+```sh
+docker exec sipral-interop-asterisk-1 asterisk -rx \
+    'channel originate PJSIP/labuser-mobile extension 9008@lab'
+```
+
+and the sample rings; Answer, and Hang up. `labuser-mobile`
+(`interop/asterisk/pjsip.conf`) is the account for a phone behind a NAT: the
+emulator is behind its own, and in this run the path to the lab added a
+second, so Asterisk saw the phone at the VPN concentrator's public address
+while the phone's `Contact` and `c=` named 10.0.2.16. What was seen:
+
+| | |
+|---|---|
+| Register | REGISTER, 401, REGISTER with credentials, 200 OK: 106 ms at Asterisk from the first REGISTER to the 200, timed on the run with `labuser` below, and inside one second on `labuser-mobile`; the binding `labuser-mobile` keeps is the NAT's public address and port, not the `Contact` |
+| Outgoing, to 9008 | INVITE, 401, INVITE, 200 OK, ACK, all in the same second at Asterisk; the tap on Call to the framework's `SET_ACTIVE` 700 ms |
+| Outgoing media | G.711 µ-law both ways; Asterisk counted 2,114 packets in and 2,114 out 48 seconds into the call, one of the phone's lost on the way in and 38 of its own reported lost by the phone's RTCP; hung up from the sample, BYE and 200 OK, `DISCONNECTED` with cause `LOCAL` |
+| Incoming, from `channel originate` | INVITE to the NAT's public address and port, `SET_RINGING` in the sample and the incoming-call notification; the tap on Answer to `SET_ACTIVE` 200 ms, 200 OK and ACK |
+| Incoming media | Asterisk counted 1,449 packets each way over the 48 seconds from the originate, 17 of them ringing; hung up from the sample, BYE and 200 OK, `DISCONNECTED` with `LOCAL` |
+
+The sample does not show its own packet counts, and with the capture
+missing `wlan0` the phone's side of the media is Asterisk's count of what
+arrived from it, and the echo it sent back.
+
+The same phone on `labuser`, an account with Asterisk's defaults, shows why
+the other one exists. The REGISTER succeeds and Asterisk keeps
+`sip:labuser@10.0.2.16:<port>` as the binding; a call placed to it sends the
+INVITE to 10.0.2.16 and nothing rings; a call from it connects, and
+Asterisk sends its audio to the `c=` address 10.0.2.16, so the phone hears
+nothing while Asterisk hears the phone. `rewrite_contact` and
+`rtp_symmetric` on `labuser-mobile` are the settings a registrar facing
+phones behind NATs is configured with (`docs/06-nat.md`, "The order that
+matters"); STUN (`SIPRAL_NAT_STUN`) is the answer for one that is not, and
+the sample does not offer it yet. The NAT's mapping is not kept open by
+anything but the phone's own traffic, since UDP has no keepalive here and
+the registration refreshes once an hour: a call to a phone left idle longer
+than its NAT keeps a mapping is not something this run tested.
 
 ## The Swift package on iOS
 
@@ -467,17 +513,68 @@ TEST_RUNNER_SIPRAL_PEER=127.0.0.1:<port> xcodebuild test -scheme Sipral \
     -destination "platform=iOS Simulator,id=$UDID"
 ```
 
+**Through the lab's Asterisk.** The same test registers first when
+`SIPRAL_REGISTRAR` names a registrar URI, with `SIPRAL_AOR`,
+`SIPRAL_AUTH_USER` and `SIPRAL_AUTH_PASSWORD`, and calls `SIPRAL_TARGET`
+instead of the agent, hanging up itself once the echo is heard.
+`testCallFromThePeerThroughTheRegistrar` is the other direction: with
+`SIPRAL_WAIT_INCOMING_SECONDS` as well, it registers, waits that long for a
+call, answers it, and hangs it up once its audio has come back. Both are
+skipped, saying which variable is missing, without them. Against the lab
+brought up with `scripts/lab.sh wasapi up` at 192.0.2.30, from a Mac whose
+address on the way there is 192.0.2.41:
+
+```bash
+export TEST_RUNNER_SIPRAL_PEER=192.0.2.30:5062 TEST_RUNNER_SIPRAL_LOCAL_HOST=192.0.2.41 \
+    TEST_RUNNER_SIPRAL_REGISTRAR=sip:192.0.2.30:5062 \
+    TEST_RUNNER_SIPRAL_AOR=sip:labuser-mobile@192.0.2.30 \
+    TEST_RUNNER_SIPRAL_AUTH_USER=labuser-mobile TEST_RUNNER_SIPRAL_AUTH_PASSWORD=labpass \
+    TEST_RUNNER_SIPRAL_TARGET=sip:9008@192.0.2.30:5062 TEST_RUNNER_SIPRAL_WAIT_INCOMING_SECONDS=60
+xcodebuild test -scheme Sipral -destination "platform=iOS Simulator,id=$UDID" \
+    -only-testing:SipralTests/HostPeerCallTests/testCallToThePeerNamedBySipralPeer
+xcodebuild test -scheme Sipral -destination "platform=iOS Simulator,id=$UDID" \
+    -only-testing:SipralTests/HostPeerCallTests/testCallFromThePeerThroughTheRegistrar &
+# once it prints "waiting", on the lab machine:
+docker exec sipral-interop-asterisk-1 asterisk -rx \
+    'channel originate PJSIP/labuser-mobile extension 9008@lab'
+```
+
+What that showed, with the simulator on the Mac's VPN address and Asterisk
+seeing it at the VPN concentrator's public one:
+
+| | Outgoing, to 9008 | Incoming, from `channel originate` |
+|---|---|---|
+| Register, REGISTER to the 200 after the challenge | 142 ms | 139 ms |
+| Call set up | confirmed 98 ms after the INVITE, the 401 and the second INVITE included | confirmed 119 ms after the INVITE arrived |
+| Media, simulator's count when it read its statistics | 39 sent, 33 received, 25 frames of its tone heard back | 38 sent, 31 received, 25 frames heard back |
+| Media, Asterisk's count (`rtp set debug on`) | 34 in and 33 out on an earlier run of the same call | 35 in, 34 out |
+| Ended | BYE from the simulator, 200 OK, no channel left | BYE from the simulator, 200 OK, no channel left |
+
+The first runs of both ended with no BYE reaching Asterisk and its channel
+left up: its 200 OK names `sip:<lab>:5060`, the port inside its container,
+while it is reached on the mapped 5062, and the Swift package answered
+`SIPRAL_EVENT_KIND_RESOLVE_NEEDED` with that `Contact` as a literal address,
+which moved the dialog off the path its INVITE took. The ACK had already
+gone the right way, the BYE went to 5060, and nothing answered there. The
+package now leaves the event unanswered (`DialogFlowTests` is the case, with
+a server whose `Contact` names a second socket), and so do the Python and
+.NET packages, which did the same. On the account with Asterisk's defaults,
+`labuser`, the simulator's call works as well: the Mac's VPN address is
+routable from the lab, so the `c=` Asterisk sends to reaches it, where the
+emulator's does not.
+
 **What ran, on the iOS 26.5 simulator (iPhone 17, arm64) under Xcode 26.6.**
-All fourteen tests ran and passed, none skipped: the in-process loopback
-calls, the bridges against a recording provider, `CallKitAdapter` against
-CallKit's own action classes, and the call to the Mac. That call was up 60 ms
-after the INVITE; the simulator end counted 31 RTP packets sent and 29
-received at the moment it read its statistics, heard 25 frames of its own
-tone come back, and was hung up by the agent's BYE. The agent's own log
-showed it answered, the ACK arrived (the call read `confirmed`), `#` came in,
-and 40 packets sent and 39 received by the time it hung up. The x86_64
-simulator slice and the device slice link the same test bundle; neither was
-run.
+With none of the variables set, sixteen tests ran: fourteen passed — the
+in-process loopback calls, `DialogFlowTests`, the bridges against a
+recording provider and `CallKitAdapter` against CallKit's own action
+classes — and the two `HostPeerCallTests` were skipped, each saying why.
+Earlier, the call to `SipralLabAgent` on the Mac was up 60 ms after the
+INVITE; the simulator end counted 31 RTP packets sent and 29 received at the
+moment it read its statistics, heard 25 frames of its own tone come back,
+and was hung up by the agent's BYE. The agent's own log showed it answered,
+the ACK arrived (the call read `confirmed`), `#` came in, and 40 packets
+sent and 39 received by the time it hung up. The x86_64 simulator slice and
+the device slice link the same test bundle; neither was run.
 
 **What the simulator cannot show.** Its `callservicesd` turns away every
 third-party `CXProvider` — from an application bundle as much as from a

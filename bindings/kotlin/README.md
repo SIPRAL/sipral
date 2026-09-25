@@ -226,8 +226,9 @@ Proven off a phone: the logic, by `TelecomCheck.kt`; the connection's
 callbacks reaching it, by the helper's unit tests; the three artefacts, built
 and opened. Proven on an Android 16 emulator: the sample's APK installing,
 loading both natives, and placing, holding, resuming and hanging up a call
-with the telecom framework following each state, and a simulated push
-ringing through the framework and its incoming-call notification --
+with the telecom framework following each state, a simulated push ringing
+through the framework and its incoming-call notification, and, registered
+with the lab's Asterisk, a call placed through it and an incoming INVITE
+from it rung, answered in the sample and hung up --
 `docs/15-mobile.md` says what was seen and how to run it again. Not provable
-without a phone and a registrar: an incoming INVITE, real audio routes, and
-push delivery.
+without a phone: real audio routes, and push delivery.

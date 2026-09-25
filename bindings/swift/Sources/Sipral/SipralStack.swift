@@ -265,36 +265,24 @@ public final class SipralStack: @unchecked Sendable {
 
     // MARK: - the poll thread
 
+    /// Every event goes to its call, if it has one, and to `events`.
+    ///
+    /// `SipralEventKind.resolveNeeded` is passed on and not answered here.
+    /// A dialog keeps the flow its INVITE went out on -- the registrar or
+    /// outbound proxy an account names, the only path that survives a NAT
+    /// -- and the event only says that the far end's `Contact` names some
+    /// other address. This package has no resolver to answer it with, and
+    /// answering with that `Contact` as a literal address moves the rest of
+    /// the call onto it: behind a registrar reached through a port mapping
+    /// or a NAT, the BYE then goes to an address nothing answers on. An
+    /// application with a real lookup answers the event itself, through
+    /// `Sipral.stackResolved`.
     fileprivate func handleEvent(_ raw: sipral_event_t) {
         let event = SipralEventDecoder.decode(raw)
-        if event.kindRaw == SipralEventKind.resolveNeeded.rawValue {
-            resolve(raw: raw)
-        }
         if let call = callFor(event.call) {
             call.deliver(event)
         }
         eventContinuation.yield(event)
-    }
-
-    /// Answers `SipralEventKind.resolveNeeded` with the host as given.
-    ///
-    /// This package wires no DNS resolver of its own (`docs/08-ffi.md`
-    /// leaves RFC 3263 lookup to the caller on purpose); the numeric
-    /// `host:port` targets this layer is built around never raise it in the
-    /// first place, so this is only reached by a caller that named a
-    /// registrar or a target by hostname. An application that wants a real
-    /// lookup answers the event itself, through `Sipral.stackResolved`.
-    private func resolve(raw: sipral_event_t) {
-        let resolveEvent = raw.payload.resolve
-        guard let hostPointer = resolveEvent.host, resolveEvent.host_len > 0 else { return }
-        let hostText = hostPointer.withMemoryRebound(to: UInt8.self, capacity: resolveEvent.host_len) {
-            String(decoding: UnsafeBufferPointer(start: $0, count: resolveEvent.host_len), as: UTF8.self)
-        }
-        let port = resolveEvent.port == 0 ? 5060 : resolveEvent.port
-        let address = "\(hostText):\(port)"
-        try? Sipral.stackResolved(
-            stack: handle, dialog: resolveEvent.dialog, addresses: address, protocol: resolveEvent.protocol
-        )
     }
 
     private func drainTransmit() {

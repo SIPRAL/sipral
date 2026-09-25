@@ -318,35 +318,21 @@ class Stack:
     # -- the poll thread --------------------------------------------------
 
     def _on_event(self, raw, _user_data: object) -> None:
-        """The C callback. Runs on the poll thread, with nothing held."""
-        event = _events.decode(raw[0])
-        if event.kind == lib.SIPRAL_EVENT_KIND_RESOLVE_NEEDED:
-            self._resolve(event)
-        self._deliver(event)
+        """The C callback. Runs on the poll thread, with nothing held.
 
-    def _resolve(self, event: _events.Event) -> None:
-        """Answer `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` with the host as given.
-
-        This package wires no DNS resolver of its own -- `docs/08-ffi.md`
-        leaves RFC 3263 lookup to the caller on purpose, and a headless
-        binding with no asyncio-friendly resolver to reach for by default
-        treats the host it was handed as a literal address instead, which
-        is exactly right for the numeric `host:port` targets
-        :meth:`place_call` and two loopback stacks calling each other
-        direct are built around. An application that talks to a real
-        registrar behind a name would answer `SIPRAL_EVENT_KIND_RESOLVE_NEEDED`
-        itself instead, with its own lookup, through `sipral_stack_resolved`
-        (`sipral._sipral_cffi.lib`) directly.
+        `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` is delivered and not answered
+        here. A dialog keeps the flow its INVITE went out on -- the
+        registrar or outbound proxy the account names, the only path that
+        survives a NAT -- and the event only says that the far end's
+        `Contact` names some other address. This package has no resolver to
+        answer it with, and answering with that `Contact` as a literal
+        address moves the rest of the call onto it: behind a registrar
+        reached through a port mapping or a NAT, the BYE then goes to an
+        address nothing answers on. An application with a real lookup
+        answers the event itself, through `sipral_stack_resolved`
+        (`sipral._sipral_cffi.lib`).
         """
-        host = event.fields.get("host")
-        if not host:
-            return
-        port = event.fields.get("port") or 5060
-        protocol = event.fields.get("protocol") or lib.SIPRAL_TRANSPORT_UDP
-        address = f"{host}:{port}".encode("utf-8")
-        lib.sipral_stack_resolved(
-            self.handle, event.fields["dialog"], address, len(address), protocol
-        )
+        self._deliver(_events.decode(raw[0]))
 
     def _deliver(self, event: _events.Event) -> None:
         # The call's own side effects (minting `Call.media`, marking it

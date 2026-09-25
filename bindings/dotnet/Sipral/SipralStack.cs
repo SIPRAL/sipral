@@ -275,37 +275,22 @@ public sealed class SipralStack : IDisposable
 
     // -- the poll thread --------------------------------------------------
 
+    /// <summary>
+    /// The C callback, on the poll thread. <see cref="SipralEventKind.ResolveNeeded"/>
+    /// is delivered and not answered here. A dialog keeps the flow its
+    /// INVITE went out on — the registrar or outbound proxy the account
+    /// names, the only path that survives a NAT — and the event only says
+    /// that the far end's <c>Contact</c> names some other address. This
+    /// package has no resolver to answer it with, and answering with that
+    /// <c>Contact</c> as a literal address moves the rest of the call onto
+    /// it: behind a registrar reached through a port mapping or a NAT, the
+    /// BYE then goes to an address nothing answers on. An application with
+    /// a real lookup answers the event itself, through
+    /// <c>sipral_stack_resolved</c>.
+    /// </summary>
     private void OnEvent(IntPtr rawEvent, IntPtr _)
     {
-        var args = SipralEventArgs.Decode(rawEvent);
-        if (args.Kind == SipralEventKind.ResolveNeeded)
-        {
-            Resolve(args);
-        }
-        Deliver(args);
-    }
-
-    /// <summary>
-    /// Answers <see cref="SipralEventKind.ResolveNeeded"/> with the host
-    /// as given, treated as a literal address: this package wires no DNS
-    /// resolver of its own, the same choice
-    /// <c>bindings/python/sipral/stack.py</c> makes and for the same
-    /// reason — <c>docs/08-ffi.md</c> leaves RFC 3263 lookup to the
-    /// caller on purpose, and it is exactly right for the numeric
-    /// <c>host:port</c> targets <see cref="PlaceCall"/> and two loopback
-    /// stacks calling each other direct are built around.
-    /// </summary>
-    private void Resolve(SipralEventArgs args)
-    {
-        var resolve = args.Resolve;
-        if (resolve is null || string.IsNullOrEmpty(resolve.Host))
-        {
-            return;
-        }
-        var port = resolve.Port == 0 ? 5060 : resolve.Port;
-        var protocol = resolve.Protocol == 0 ? SipralTransport.Udp : resolve.Protocol;
-        var address = ToSBytes(Encoding.UTF8.GetBytes($"{resolve.Host}:{port}"));
-        NativeMethods.sipral_stack_resolved(Handle, resolve.Dialog, address, (nuint)address.Length, (uint)protocol);
+        Deliver(SipralEventArgs.Decode(rawEvent));
     }
 
     private void Deliver(SipralEventArgs args)

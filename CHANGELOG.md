@@ -18,7 +18,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `PushKitBridge` and the rest, not only the printed `SipralAbi.swift` —
   and its test suite, which `xcodebuild test` runs on a simulator against
   the XCFramework's simulator slice. A call from the simulator to
-  `SipralLabAgent` on the host is an opt-in test (`SIPRAL_PEER`), and
+  `SipralLabAgent` on the host is an opt-in test (`SIPRAL_PEER`), which
+  can also register with a registrar and call through it, or wait there
+  for a call and answer it (`SIPRAL_REGISTRAR`), and
   `CallKitAdapter` is tested against CallKit's own action classes on iOS.
   `SipralStack.takeIncomingCall` hands over an incoming call without
   answering it, so that CallKit's Answer is the one answer it gets.
@@ -687,6 +689,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   is about 3 000. The history now starts again at the frame after any hole,
   concealed or silent, so a pitch is only ever estimated over audio that is
   contiguous in time.
+- **A call through a registrar reached at another address than its
+  `Contact` names is hung up where the registrar is.** The Swift, Python
+  and .NET packages answered `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` themselves
+  with the far end's `Contact` taken as a literal address, which moved the
+  rest of the dialog off the path its INVITE took: behind a port mapping or
+  a NAT the ACK still reached the server and the BYE went to an address
+  nothing answered on, so the server kept the call up. The event is now
+  delivered and left unanswered, as `sipral_ua::Runtime` already leaves it
+  for a literal address. Found calling through the lab's Asterisk from the
+  iOS Simulator (`docs/15-mobile.md`).
 - **The Android sample's screen no longer sits under the status bar.** An
   application targeting Android 15 is drawn edge to edge, and the sample's
   first field and heading were under the clock, with the status bar's white

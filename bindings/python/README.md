@@ -106,7 +106,6 @@ dialplan sends.
 `numpy` support
 for `call.media` (accepted wherever `bytes`/`memoryview` is, but never
 required — `array.array('h', ...)` or a `numpy` array's `.tobytes()` work
-today); a DNS resolver for `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` beyond
-treating the host as a literal address, which is what two stacks with no
-registrar between them, or a target already given as `host:port`, need
-and nothing more (see `Stack._resolve`).
+today); a DNS resolver for `SIPRAL_EVENT_KIND_RESOLVE_NEEDED`, which is
+delivered and left unanswered, so that a dialog stays on the path its
+INVITE took (see `Stack._on_event`).

@@ -900,10 +900,16 @@ The Swift suite also runs on the iOS Simulator, outside the gate: against
 the XCFramework's simulator slice, from the distribution package
 `scripts/package/xcframework.sh` prints, with `xcodebuild test` on a
 simulator device made for the run. `docs/15-mobile.md`, "The Swift package on
-iOS", has the commands and what the last run showed: all fourteen tests
-passed on iOS 26.5, none skipped, among them a call from the simulator to
-`SipralLabAgent` on the Mac. That call is opt-in, through `SIPRAL_PEER`, and
-`swift test` in the gate reports it skipped, saying why. The CallKit tests
+iOS", has the commands and what the last runs showed: sixteen tests on iOS
+26.5, and the two that need a peer outside the process run on their own —
+a call from the simulator to `SipralLabAgent` on the Mac, and, through the
+lab's Asterisk published by `scripts/lab.sh wasapi up`, a registration and
+a call both ways, with REGISTER, INVITE, ACK, BYE and RTP seen at the
+simulator and at Asterisk. Those two are opt-in, through `SIPRAL_PEER` and
+`SIPRAL_REGISTRAR`, and `swift test` in the gate reports them skipped,
+saying why. The Android sample was run the same way, on an emulator
+registered with the same Asterisk, placing a call and answering one
+(`docs/15-mobile.md`, "Android, run on an emulator"). The CallKit tests
 compile and run only on iOS; the simulator refuses a real `CXProvider`, so
 the system's own delivery of CallKit actions and VoIP pushes is a device's to
 show.

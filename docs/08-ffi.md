@@ -1587,12 +1587,14 @@ shape signalling has: `sipral_media_receive`, `sipral_media_playback`,
 — `Media.send_audio` queues 16-bit mono PCM of any length, cut to one
 frame at a time as it is sent, and `Media.frames` is the far end's own
 audio, one frame per item, decoded the moment `sipral_media_playback`
-answers it. `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` is answered automatically,
-by `Stack._resolve`, treating the host the ABI hands over as a literal
-address: this package wires no DNS resolver of its own, and a numeric
-`host:port` target — what two stacks on loopback with no registrar
-between them, or a call placed straight at an address, both use — needs
-none. `sipral_stack_poll_farewell`'s own goodbye is drained on the same
+answers it. `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` is delivered and not
+answered: this package wires no DNS resolver of its own, and the dialog
+stays on the flow its INVITE took, as `docs/12-core-api.md` says the
+endpoint keeps it — the same choice the Swift and .NET packages make, and
+the one `sipral_ua::Runtime` makes for a literal address. Answering with
+the far end's `Contact` as a literal would move the rest of the call onto
+it, and behind a registrar reached through a port mapping or a NAT the BYE
+would then go where nothing answers. `sipral_stack_poll_farewell`'s own goodbye is drained on the same
 poll thread and sent through the ending call's own media socket, to the
 last address that socket actually heard from, since nothing in this ABI
 hands an address back for it any other way (`docs/08-ffi.md`, "A call
