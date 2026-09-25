@@ -438,7 +438,8 @@ yet. Each is listed with the licence verified from its own LICENSE file.
 | Component | Use | Licence |
 |---|---|---|
 | libvpx, libaom | video codecs, phase 6, after 1.0 | BSD-3-Clause / BSD-2-Clause |
-| rustls | the TLS example only; the transport, and its TLS, belong to the application | Apache-2.0 OR ISC OR MIT |
+
+## Written in-tree rather than linked
 
 Audio device I/O is written in-tree per platform rather than taken from a
 portable library, because the render-to-capture delay and the device-loss
@@ -486,11 +487,11 @@ country by country, and it is confirmed in writing before the codec ships
 under the commercial licence.
 
 What that statement is about, and what it is not about, matters more than
-the date. **What is implemented here is G.729 with Annex A**: Annex A's
-encoder, and a decoder of the bitstream the main body and Annex A share,
-with Annex A's postfilter. Of Annex B the tree reads a SID frame's length
-and its energy level and nothing more — no voice activity detector, no
-discontinuous transmission, no comfort-noise generator of Annex B's own.
+the date. **What is implemented here is G.729 with Annexes A and B**: Annex
+A's encoder, and a decoder of the bitstream the main body and Annex A share,
+with Annex A's postfilter, and over them Annex B's voice activity detector,
+discontinuous transmission and comfort-noise generator, bit-exact against the
+ITU Annex A and Annex B conformance streams.
 **Not here, and not covered by anything above**: G.729.1, the embedded
 wideband codec, whose patent declarations are far later; the later annexes
 of G.729 — the 6.4 and 11.8 kbit/s extensions (Annexes D and E) and every

@@ -309,8 +309,9 @@ edges is worse than none:
   from a deeply recursive application callback, and a `SIGKILL` from the
   platform for missing a deadline. None of these is a network operation and
   none is catchable in a library.
-- **The application's own code.** A `Handler` that panics panics on its own
-  thread; nothing here catches it. The FFI boundary is the one place that must
+- **The application's own code.** A `Handler` (the reference loop's callback
+  trait, `sipral_ua::runtime`, behind the `reference-loop` feature) that
+  panics panics on its own thread; nothing here catches it. The FFI boundary is the one place that must
   catch, and it does — `crates/sipral-ffi` routes every entry point through one
   macro, and `scripts/check.sh` fails the build if a symbol is exported around
   it.
@@ -385,7 +386,7 @@ application asks for something.
 | Transaction timers | only while a transaction is running. A non-INVITE over UDP holds Timer K for 5 s after its final response and then there is nothing | no, and there is nothing to stop |
 | Session timer (RFC 4028) | only while a call has one. 1800 s negotiated means the refresher wakes at 900 s and the other end at 1768 s. A call that is not up by the refresh time (a retry after a 422 still ringing, a 2xx still waiting for its ACK) wakes once every quarter of the interval until it is up or over | no; a call with no timer is a line billed for nothing |
 | Stream keepalive | a 4-byte ping every 25 s per **stream** transport, jittered. Datagram transports have none | yes: `EndpointConfig::keepalive_interval = None`. It exists to keep a NAT binding open, so stopping it costs reachability on that flow |
-| Reference loop tick | 200 ms by default, so 5 turns a second on a line where nothing happens | yes: `Runtime::idle_cap(None)`, and then a turn waits for a deadline or a packet |
+| Reference loop tick | 200 ms by default, so 5 turns a second on a line where nothing happens | yes: `Runtime::idle_cap(None)` (reference loop only), and then a turn waits for a deadline or a packet |
 
 ### The floor
 

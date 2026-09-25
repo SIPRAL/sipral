@@ -39,7 +39,8 @@ precisely because everybody re-solves them badly, one application at a time.
 
 ### A1 · Subscriptions and busy-lamp-field · P0
 
-The largest single piece of protocol still missing. A subscription dialog with
+The largest single piece of protocol this list asked for (now built: see "What
+the C ABI reaches today"). A subscription dialog with
 refresh, expiry and re-subscription after failure (RFC 6665), carrying
 `application/dialog-info+xml` (RFC 4235) parsed into state an application can
 render. Per-subscription state is an event, including termination *and its
@@ -253,9 +254,9 @@ signing it cannot work at all, because a runner has no keychain. The gate is
 `scripts/check.sh` and it runs where the keys already are. That is where this
 check belongs.
 
-The timing is fortunate. There is no generated header yet and the .NET binding
-is a name reservation, so this is designed before three bindings exist rather
-than retrofitted across them.
+This was designed before three bindings existed, and it holds now that there
+are four: the header and every binding are printed by `tools/abi-gen` from
+`crates/sipral-ffi`.
 
 ---
 
@@ -446,8 +447,8 @@ comes back. The last is the shape of every report that says the call froze.
 This is not a second copy of the priorities above; it is the other axis —
 which of them a binding can act on through `sipral.h` and `crates/sipral-ffi`
 alone, which exist only as Rust today, and which do not exist anywhere yet.
-Updated as 8.4 closes the gap, against the tree rather than against a plan for
-it.
+Updated as the remaining C entry points land, against the tree rather than
+against a plan for it.
 
 Two requirements are not part of this list because reachability is not the
 question for them. **C1** reduces to one sentence about the platform ("the
@@ -467,15 +468,15 @@ live stack rather than reached from one.
 | **A6** — stream statistics | `sipral_call_media` mints a handle once media starts; `sipral_media_info` and `sipral_media_statistics` read it live, and `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` delivers the completed record once the call has ended. |
 | **A9** — DTMF over INFO | `sipral_call_send_dtmf`'s `via` argument picks RTP or INFO per send; `SIPRAL_EVENT_KIND_DTMF_SENT` reports the far end's answer, a 415 included, and `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`'s `source` says which of the two a keypress arrived by. |
 | **A10** — product identity, the settable half | `sipral_stack_config_t::user_agent`. The signalling-trace half is superseded by D1, and D1 is Rust-only — see below. |
-| **B1** — never emit a request that cannot arrive | RFC 3261 §18.1.1 runs on every call this stack signals, with nothing to turn it on, and every byte `sipral_stack_poll_transmit` hands over is already the size the application is about to put on the wire, without a capture. `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` carries the choice itself: a request too large for a datagram does not go out, the event names where it was going and over which protocol, and `sipral_stack_transport_add` lets the application answer it. |
+| **B1** — never emit a request that cannot arrive | RFC 3261 §18.1.1 runs on every call this stack signals, with nothing to turn it on, and every byte `sipral_stack_poll_transmit` hands over is already the size the application is about to put on the wire, without a capture. `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` carries the choice itself: a request too large for a datagram does not go out, the event names where it was going and over which protocol, and `sipral_stack_transport_bind` lets the application answer it. |
 | **B2** — a silently ignored setting is worse than an unsupported one | `SIPRAL_STATUS_NOT_SUPPORTED`, a status distinct from `SIPRAL_STATUS_INVALID_ARGUMENT`, exists for exactly this and nothing else. |
 | **B3** — a failure during suspend or resume is an event, not an abort | True of every way in: a background timer through `sipral_stack_poll`, a dead transport through `sipral_stack_transport_failed`, and now suspend, resume and lost name resolution through the D4 entry points below. None of them aborts; each raises an event and leaves the stack answerable. |
 | **B4** — the threading contract is a guarantee, not a convention | Documented and tested in `docs/08-ffi.md`; a call that lands on the wrong thread gets `SIPRAL_STATUS_BUSY`, not a fault. |
 | **B5** — media that has stopped is detected by the engine | `SIPRAL_EVENT_KIND_MEDIA_STALLED` and `_MEDIA_RESUMED`, both carrying `silent_for_ms`. |
-| **B6** — defaults chosen for the equipment actually deployed against | `rport` and symmetric RTP with latching are what every call gets (`docs/06-nat.md`); full ICE is not wired to a call at all yet, so the mechanism that caused the original harm is unreachable through this header by default rather than by configuration. |
+| **B6** — defaults chosen for the equipment actually deployed against | `rport` and symmetric RTP with latching are what every call gets (`docs/06-nat.md`); full ICE is reachable per call but defaults to `SIPRAL_ICE_OFF`, so the mechanism that caused the original harm stays off unless the application asks for it. |
 | **B7** — adding a function cannot leave a platform behind | `scripts/check.sh`'s "the bindings compile" step (`docs/08-ffi.md`) builds all three generated bindings against the library this gate just built, and `BindingCheck.kt` creates a real stack and hears a real event on a thread the JVM did not make. |
 | **C5** — cheap when idle | `sipral_stack_poll`'s `has_deadline`/`next_poll_in_ms` answers the same question `UserAgent::idle().is_quiet()` answers in Rust. The itemised counts behind it (`Idle::registrations`, `::subscriptions`, ...) are Rust-only. |
-| **A1** — subscriptions and busy-lamp-field | `sipral_account_subscribe` mints a subscription of its own, `sipral_subscription_end` gives it up, and `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` and `_NOTIFIED` report what becomes of it — the second with the NOTIFY whole, for a package this ABI has no reader for. For `dialog`, `sipral_subscription_lamp` is the busy lamp field in one call and one number, and `sipral_subscription_dialog_count`/`_at`/`_text` are who is on the call. `sipral_capabilities` sets `SIPRAL_FEATURE_SUBSCRIPTIONS` now that all of it is reachable. |
+| **A1** — subscriptions and busy-lamp-field | `sipral_account_subscribe` mints a subscription of its own, `sipral_subscription_end` gives it up, and `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` and `SIPRAL_EVENT_KIND_NOTIFIED` report what becomes of it — the second with the NOTIFY whole, for a package this ABI has no reader for. For `dialog`, `sipral_subscription_lamp` is the busy lamp field in one call and one number, and `sipral_subscription_dialog_count`/`_at`/`_text` are who is on the call. `sipral_capabilities` sets `SIPRAL_FEATURE_SUBSCRIPTIONS` now that all of it is reachable. |
 | **A7** — network change and recovery | `sipral_stack_network_changed` and the rest of the D4 ladder start the recovery, and `SIPRAL_EVENT_KIND_RECOVERY` reports each rung, its outcome and why a failed one failed. |
 | **A8** — refusing an unwanted INVITE before it is visible | `sipral_stack_screen` installs a policy that is asked about every INVITE before it has any effect: before ringing, before `SIPRAL_EVENT_KIND_INCOMING_CALL`, before a call handle exists. It answers with a SIP status, and `SIPRAL_SCREEN_ACCEPT` — 200 — is the one answer that lets a call through, so a listener that failed to answer refuses rather than admits. |
 | **C2** — accepting a call announced out of band | `sipral_account_announce` takes whoever the push said is calling and writes back either the announcement, when nothing has arrived yet, or the call, when the INVITE beat the notification. `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` names the announcement the INVITE answers and is queued immediately before the incoming-call event for it, so the screen is named before the call is; `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` says one never came, and `sipral_announcement_forget` takes the screen down early. |

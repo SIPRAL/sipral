@@ -11,8 +11,9 @@ Copyright (c) 2026 Tiberiu Balasea
 **S**ession **I**nitiation **P**rotocol **R**ust **A**udio **L**ayer.
 
 A SIP user agent stack written in Rust: memory-safe, sans-I/O at the core, no
-audio device inside it, one C ABI, and thin bindings for Swift, .NET and Kotlin.
-Small enough to embed in an AI voice agent, complete enough to run a softphone.
+audio device inside it, one C ABI, and thin bindings for Swift, .NET, Kotlin and
+Python. Small enough to embed in an AI voice agent, complete enough to run a
+softphone.
 
 > **Status: pre-alpha, phase 1.** Registration, calls, hold, and blind and
 > attended transfer run against Kamailio, FreeSWITCH and Asterisk in the
@@ -34,8 +35,10 @@ made to run a whole media server or a whole PBX to get at the audio.
 Sipral is the narrow answer to both: a stack you can link into a closed product
 under a clear commercial licence, and a headless mode that will hand you raw PCM
 on a socket with no audio device and no room abstraction anywhere near it. The
-framing and control protocol for that mode is written and tested; joining it to
-the media pipeline is phase 5, and until then no audio reaches it.
+framing and control protocol for that mode is written and tested, and the
+`sipral` crate's `headless` feature (off by default) joins it to a live call's
+media: see [`docs/07-headless.md`](docs/07-headless.md#real-media) and
+`crates/sipral/examples/headless-socket-agent.rs`.
 
 ## Try it in sixty seconds
 
@@ -50,9 +53,10 @@ cargo run --example call
 This dials `sip:thetestcall@sip2sip.info`, a public IVR that sip2sip.info
 publishes for exactly this — reachable by anyone, no registration needed. It
 waits for the greeting, presses `2` to ask for its digits read back, sends a
-short string, and plays what comes back through the default output device.
-On a machine with no audio device it writes what it heard to `call.wav` in the
-current directory instead, and `--wav out.wav` does the same on any machine.
+short string, and, on macOS and iOS, plays what comes back through the default
+output device. On every other platform it writes what it heard to `call.wav` in
+the current directory instead, and `--wav out.wav` does the same on any
+machine.
 The first build compiles the dependencies and takes a minute or two. A call
 that worked prints:
 
@@ -68,17 +72,20 @@ and, when it wrote a file, `wrote N samples (call.wav)` at the end: about
 twenty-five seconds of the IVR talking.
 
 That one example is also the shortest way to read what embedding this stack
-looks like: a [`sipral::UserAgent`](crates/sipral/examples/call.rs) and a
-[`sipral::MediaEngine`] driven over sockets the application owns, RTP paced
-against a real clock, and PCM handed to a device or a file. The other
+looks like: a `sipral::UserAgent` and a `sipral::MediaEngine` (both in
+[`crates/sipral/examples/call.rs`](crates/sipral/examples/call.rs)) driven over
+sockets the application owns, RTP paced against a real clock, and PCM handed to
+a device or a file. The other
 examples in [`crates/sipral/examples/`](crates/sipral/examples/) build on the
 same shape: `register-and-call.rs` adds an account, a registrar, hold and
 transfer, with the destination on the command line; `tls.rs` is `call.rs`
 again with the signalling carried over TLS instead of plain UDP, using
 `rustls` as that one example's own dependency (`cargo run --example tls
---features example-tls`); `headless-agent.rs` is a fifty-line agent that
-answers whatever calls it and repeats back whatever it hears, with no device
-and no room abstraction anywhere near it — the shape a voice agent embeds.
+--features example-tls`); `headless-agent.rs` is an agent that answers
+whatever calls it and repeats back whatever it hears, with no device and no
+room abstraction anywhere near it — the shape a voice agent embeds;
+`headless-socket-agent.rs` carries the same call over `sipral-headless`'s
+socket protocol to a separate agent process (`--features headless`).
 
 ## Design in one paragraph
 
@@ -104,15 +111,16 @@ you pick, or replace, or leave out entirely.
 | `sipral-core` | message parser and serializer, transactions, dialogs, SDP, authentication, the diagnostic record, session recording and replay. Sans-I/O, no allocation surprises, no clock of its own |
 | `sipral-ua` | registration, calls, hold, transfer, subscriptions and busy lamp field, push-announced calls, suspend and resume, screening of unwanted INVITEs. Built on the core |
 | `sipral-rtp` | RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF, SRTP |
-| `sipral-nat` | STUN client, TURN client, and ICE in both roles — the lite one, and the full one with gathering, checklists, nomination, role conflicts, restarts and consent freshness. The full agent is reached from a call through `IcePolicy`, the STUN client through `sipral::Mappings` and `SIPRAL_NAT_STUN`, and the TURN client through `sipral::Relays` and `turn_server`, a relay the full agent carries as its relayed candidate; all off by default |
+| `sipral-nat` | STUN client, TURN client, and ICE in both roles — the lite one, and the full one with gathering, checklists, nomination, role conflicts, restarts and consent freshness. The full agent is reached from a call through `IcePolicy`, the STUN client through `sipral::Mappings` and `SIPRAL_NAT_STUN`, and the TURN client through `sipral::Relays` and `turn_server`, a relay the full agent carries as its relayed candidate; all compiled in by default and inactive until a call or the stack asks for them (`IcePolicy::Off`, no STUN or TURN server) |
+| `sipral-aec-webrtc` | an optional echo canceller, gain control and noise suppressor over webrtc-audio-processing, attached at `sipral-media`'s processor seam. Outside the workspace, and needs meson, ninja and a C++ compiler |
 | `sipral-dtls` | DTLS 1.2 for DTLS-SRTP: the client and server handshake with retransmission, the stateless cookie exchange, alerts and the SRTP key export, over the record layer, handshake framing and messages, key derivation, and self-signed certificates checked by fingerprint. Reached from a call behind the `dtls` feature |
 | `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law and G.722 in-tree, written from the Recommendations; Opus linked (libopus), behind a compile-time feature that is on by default and that a build meant for hardware turns off; G.729 with Annexes A and B in-tree, written the same way and bit-exact against the ITU's conformance streams, for the carrier that insists and offered only when named |
 | `sipral-io-common` | the parts of a device backend that are not about any device: the lock-free ring between the audio thread and an ordinary one, the gate that says when that thread is out of our memory, and volume, mute and the meter |
 | `sipral-io-coreaudio` | macOS and iOS device I/O |
 | `sipral-io-wasapi` | Windows device I/O |
 | `sipral-io-pipewire` | Linux desktop device I/O, over `libpipewire`. AAudio for Android follows |
-| `sipral-headless` | the PCM-over-a-socket framing and control protocol for AI agents, with no audio device. Not yet joined to the media pipeline |
-| `sipral-ffi` | the C ABI, printed from one declaration into the header and the Swift, .NET and Kotlin bindings. Not frozen yet |
+| `sipral-headless` | the PCM-over-a-socket framing and control protocol for AI agents, with no audio device. Joined to a call's media by `sipral`'s `headless` feature |
+| `sipral-ffi` | the C ABI, printed from one declaration into the header and the Swift, .NET, Kotlin and Python bindings. Not frozen yet |
 | `sipral` | the facade: signalling from `sipral-ua` joined to the media pipeline, with the codec catalogue, SRTP keying, DTMF, call recording and statistics per call. The one crate an application depends on, and what `sipral-ffi` exposes |
 
 ## Standards
@@ -133,7 +141,7 @@ here treats them as exceptional.
 - **No panics on input.** `unwrap`, `expect`, `panic` and unchecked indexing are
   lints across the workspace, and `scripts/check.sh` runs with `-D warnings`.
 - **`Limits`** bounds every message parse before it starts: 64 KiB per message,
-  128 header fields, 4 KiB per header value, all three lower on request.
+  128 header fields, 16 KiB per header value, all three lower on request.
 - **Fuzzing** since the twenty-sixth commit — twenty-nine `cargo-fuzz`
   targets, over the parser, the builder, the stream framer, SDP and its
   `a=crypto` lines, the recording format, the dialog-info and
@@ -177,7 +185,13 @@ cargo test --workspace
 ```
 
 Rust 1.95 or newer, edition 2024. The toolchain is pinned in
-`rust-toolchain.toml`.
+`rust-toolchain.toml`. `cargo build` and `cargo test` need only Rust.
+`./scripts/check.sh` is the full release gate and also needs `cargo-deny`,
+`gitleaks`, `zig`, `python3`, `meson` and `ninja` with a C++ compiler, and the
+targets `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` and
+`aarch64-apple-ios`. It skips, and reports the skip, when the .NET SDK,
+`kotlinc`, Swift or a nightly toolchain with `cargo-fuzz` is missing. Use
+`./scripts/check.sh --hygiene-only` for the tree checks without a build.
 
 ## Where to start reading
 
@@ -186,7 +200,9 @@ documents are indexed in [`docs/README.md`](docs/README.md); the ones to read
 first are [`docs/01-architecture.md`](docs/01-architecture.md) for the shape of
 the stack, [`docs/12-core-api.md`](docs/12-core-api.md) for the sans-I/O core
 and [`docs/08-ffi.md`](docs/08-ffi.md) for the C ABI and what each binding
-covers.
+covers. From another language, start at
+[`bindings/README.md`](bindings/README.md), which lists every binding, what is
+generated and what is written by hand, and links each language's own readme.
 
 ## Licence
 

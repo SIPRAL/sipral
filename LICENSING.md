@@ -62,8 +62,9 @@ contract, not a runtime lock.
 
 ## Third-party code
 
-Sipral links only permissively licensed dependencies (MIT, BSD, Apache-2.0,
-ISC, Zlib). None of them restricts either arm. Their licence texts are
+Sipral links only permissively licensed dependencies (the allow-list in
+`deny.toml`, spelled out in THIRD-PARTY-NOTICES.md: MIT, BSD, Apache-2.0, ISC,
+Zlib and a few equivalents). None of them restricts either arm. Their licence texts are
 generated into
 [`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt), which must ship with
 your binaries; [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) explains
@@ -93,10 +94,11 @@ something you discover later.
 Two things follow. [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) sets out
 the pool, its licensors, what it claims to cover and where to read the primary
 sources, at `opuspool.com`. And if your product cannot carry that exposure,
-build without the codec: Opus sits behind a Cargo feature that is on by
-default, and `--no-default-features` on `sipral` — or on `sipral-ffi`, if what
-you ship is the C library — links no libopus at all and leaves you G.711 and
-G.722. What such a build offers is in
+build without the codec: `--no-default-features --features dtls,ice,stun` on
+`sipral` — or on `sipral-ffi`, if what you ship is the C library — links no
+libopus at all, and leaves you G.711, G.722, and G.729 where the application
+names it. Plain `--no-default-features` also drops DTLS-SRTP, ICE and STUN.
+What such a build offers is in
 [`docs/05-media.md`](docs/05-media.md).
 
 ## The name

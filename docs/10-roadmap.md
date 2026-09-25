@@ -83,9 +83,9 @@ Three groups join it from `13-client-requirements.md`, for one reason each.
 and every one of them is something a client is entitled to assume:
 
 - **D9** — no clock read anywhere in the core, stated and tested. `D2` depends
-  on it, so it goes first.
+  on it, so it goes first. *Built.*
 - **B4** — the threading contract documented and tested; a violation is an
-  error and never a fault.
+  error and never a fault. *Built.*
 - **B3** — no network failure terminates the process, with the boundary of the
   guarantee written down rather than implied. *Built*, and the tests that carry
   it drive the stack through suspend and resume over a dead transport and with
@@ -103,14 +103,16 @@ and every one of them is something a client is entitled to assume:
 
 - **B7** — one source of truth for the ABI, with the bindings generated from
   it and `scripts/check.sh` failing when one is missing. It was cheapest before
-  three bindings existed; there are still not three, but the C ABI has roughly
-  doubled since this line was written, so the saving is being spent.
+  three bindings existed; there are now four (Swift, .NET, Kotlin, Python), all
+  printed from the one source, and the C ABI has roughly doubled since this
+  line was written.
 - **D1** — the call's diagnostic record. *Built.* The argument for doing it
   early held: every decision site written before it exists is a site to
   revisit, and the sites written since have carried their reason codes from the
   start.
 - **D2** — deterministic replay, which the sans-I/O core makes nearly free and
-  which turns every later field failure into a permanent test.
+  which turns every later field failure into a permanent test. *Built*
+  (`docs/18-replay.md`).
 
 **The media and transport work the phase was already about**, plus what
 production says is missing from it:
@@ -205,7 +207,8 @@ and each is cheaper before the ABI carries it than after:
   `DtlsRequired`, `MediaEvent::Secured`, and a stream that agreed to be
   encrypted and sends nothing until the handshake has keyed it. Still to do:
   the adversarial cryptography review, before it ships under the commercial
-  licence, and the lab run against a real DTLS-SRTP peer.
+  licence. The lab runs it against FreeSWITCH and Asterisk
+  (`docs/11-testing.md`).
 
 **Exit:**
 
@@ -242,9 +245,11 @@ roadmap whose finished items still read as future work is a roadmap nobody
 trusts.
 
 - **A2, A3** — device enumeration with an identity that survives replug, gain,
-  mute and a peak level cheap enough for a meter. *Built.* Selection per call
-  is the part that is not, and it is D6's rather than the device layer's; the
-  codec and transport halves of D6 are across the ABI, the device half is not.
+  mute and a peak level cheap enough for a meter, *built inside the three
+  device crates*; not yet reachable through `sipral` or `sipral.h`, which is
+  what docs/13 counts. Selection per call is the part that is not, and it is
+  D6's rather than the device layer's; the codec and transport halves of D6
+  are across the ABI, the device half is not.
 - **A5** — call recording: the mixed conversation to one file, started and
   stopped mid-call. *Built.*
 - **A4** — codec enumeration and priority, and what a live call settled on.
@@ -276,9 +281,10 @@ trusts.
   the C# file unbuildable and the five that made the JNI shim unbuildable:
   the same two, where `out_call` beside `call` derived one name twice, and
   three more where a parameter called `status` landed on the local the shim
-  writes for the status it is about to return. Compiling the Swift, Kotlin and .NET
-  bindings in the gate is still to be added, and the ABI does not freeze
-  before it is.
+  writes for the status it is about to return. The gate now compiles the
+  Swift, Kotlin and .NET bindings too (`scripts/check.sh`, step "the bindings
+  compile"); it skips a binding whose toolchain is missing from the machine,
+  and a skip does not count as a pass.
 - **D6** — device, codec and transport as properties of a call rather than of
   the process. *Built* in Rust, and the codec and transport halves are across
   the ABI: `sipral_call_config_t` carries `codecs` and `transport` beside
@@ -355,14 +361,16 @@ property through before it reaches C.
   async stream, the `CallKit` and `PushKit` sequence from `15-mobile.md`), an
   idiomatic C# namespace (safe handles, events, tasks, PCM as spans) and an
   idiomatic Kotlin layer (coroutines, `ConnectionService`), each with a sample
-  application skeleton that makes a call;
+  application skeleton that makes a call. *Built*: Swift, C#, Kotlin and
+  Python, each with a sample (`bindings/README.md`);
 - the artefacts each platform consumes, built locally: an `.xcframework`, an
   AAR with the shared object for each Android ABI, a NuGet with native runtimes,
   wheels — with publishing left to a person, and each of them built without
   the `opus` feature or published as two variants labelled clearly enough that
   nobody ships the wrong one without noticing, because a binary somebody
   downloads instead of compiling is the one place the default would put
-  libopus into a product quietly (`05-media.md`);
+  libopus into a product quietly (`05-media.md`). *Built* locally by
+  `scripts/package/*.sh`; publishing is left to a person;
 - `sipral-io-pipewire` for Linux desktops over `libpipewire` (MIT; ALSA and
   PulseAudio client libraries are LGPL and stay out), on a `sipral-io-common`
   crate holding what the two device crates currently duplicate. *Built*:
@@ -433,17 +441,12 @@ call.
 
 `sipral-headless`, packaging, public documentation, published packages.
 
-The headless crate — the reason the README says the stack is small enough to
-embed in a voice agent — shares no type with the media pipeline it is drawn
-beside and is linked by nothing. The phase therefore starts one layer lower
-than planned:
+The headless crate is joined to the engine: `sipral::HeadlessSession`, behind
+the `headless` feature, turns socket frames into `MediaSession` capture and
+playback at the negotiated rate, sends voice activity and received digits as
+control events, and gives an agent that embeds rather than connects an
+in-process session. *Built* (`docs/07-headless.md#real-media`).
 
-- **headless joined to the engine**: socket frames become `MediaSession`
-  capture and playback, the sample rate is negotiated against the media plan
-  rather than chosen blind, voice activity from `sipral-media` becomes a
-  control event so an agent can be interrupted, a received digit becomes the
-  control message that already exists for it, and an in-process session exists
-  for an agent that embeds rather than connects;
 - **hundreds of calls in one process**, measured: one stack, many calls, a lock
   per media session, four threads driving them, the numbers committed — and if
   one stack is not enough, the shape with several stacks on one port is
@@ -451,20 +454,24 @@ than planned:
 - **Python**, because that is what voice agents are written in: a package over
   the C ABI (a fifth generated back end, not a second binding of the Rust API),
   with an idiomatic asynchronous layer, PCM as bytes, and a one-file agent
-  as the example;
+  as the example. *Built* (`bindings/python`); `pip install` from a registry
+  waits for the freeze;
 - **a call in sixty seconds with no account**: `cargo run --example call`
   dials a public test IVR, plays the menu through the device crate or into a
   file, presses a digit and hears it read back; the other examples register,
   call, hold, transfer, and run over TLS with the transport the application
-  brings;
+  brings. *Built*;
 - **numbers** rather than adjectives: library size per platform, memory and CPU
   per call for G.711 and Opus, end-to-end latency in the lab, in a dated
-  document produced by a script;
+  document produced by a script. *Built*: `docs/19-numbers.md`,
+  `scripts/bench.sh`;
 - the interoperability matrix as a public page generated from lab results,
   with carriers and session border controllers added as access to each is
-  obtained, and marked untested until then;
+  obtained, and marked untested until then. *Built*: `scripts/interop-matrix.py`
+  into `docs/11-testing.md`;
 - a security model in two pages: the threat model, what is fuzzed and for how
-  long, what is redacted where, what the stack does not cover.
+  long, what is redacted where, what the stack does not cover. *Built*:
+  `docs/20-security-model.md`.
 
 **Exit:** an external developer integrates Sipral from the published
 documentation without asking a question that the documentation should have
@@ -503,8 +510,9 @@ feasibility.
   in place, which they are from commit zero.
 - No crate is published to a registry before the ABI in `08-ffi.md` is frozen.
   A published crate name is a promise about compatibility. The one exception
-  is the `sipral` name reservation, a placeholder that exports a version
-  constant and promises nothing.
+  is the `Sipral` 0.0.1 name reservation on NuGet, a stub assembly that
+  implements nothing. The `sipral` crate is the only one with `publish = true`,
+  and it is not uploaded to crates.io before the freeze.
 - The ABI is not frozen before every entry the desktop client needs exists in
   C (the phase 3 list), before a C driver has run the lab's flows through
   `sipral.h`, and before every printed binding compiles in the gate. Flipping

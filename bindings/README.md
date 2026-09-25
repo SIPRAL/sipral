@@ -5,8 +5,9 @@ Copyright (c) 2026 Tiberiu Balasea
 
 # The bindings
 
-Nothing in here is written by hand except the packaging. The header and every
-binding are printed from the declarations in `crates/sipral-ffi` by
+Only the files in the table below are printed. Everything else here is written
+by hand. The header and every binding are printed from the declarations in
+`crates/sipral-ffi` by
 `tools/abi-gen`, and `scripts/check.sh` prints them again and fails if what is
 committed is not what came out. A function added on the Rust side and missing
 from a binding is therefore a failed check rather than a crash on one platform.
@@ -18,7 +19,7 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 
 | Printed file | What it is |
 |---|---|
-| `c/include/sipral.h` | The C header, and the interface the other three are written against |
+| `c/include/sipral.h` | The C header, and the interface the other four are written against |
 | `swift/Sources/Sipral/SipralAbi.swift` | The Swift binding, over the C target |
 | `dotnet/Sipral/SipralAbi.cs` | The .NET binding: P/Invoke and the layer above it |
 | `kotlin/sipral/src/main/kotlin/org/sipral/SipralAbi.kt` | The Kotlin binding |
@@ -26,7 +27,12 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 | `python/sipral/_sipral_cffi.py` | The raw `cffi` ABI-mode surface: `ffi` and `lib` |
 
 Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
-`dotnet/Sipral/Sipral.csproj`, `dotnet/Sipral/SipralInfo.cs`,
+`dotnet/Sipral/Sipral.csproj`, `dotnet/Sipral/SipralInfo.cs` and the rest of
+`dotnet/Sipral/*.cs` other than `SipralAbi.cs`, `dotnet/Sipral.Tests/`,
+`dotnet/samples/`,
+`kotlin/sipral/src/main/kotlin/org/sipral/{idiomatic,telecom}/`,
+`kotlin/sipral/src/main/jni/idiomatic_media.c`, `kotlin/sipral/src/test/`,
+`kotlin/android/`, `kotlin/examples/`,
 `python/pyproject.toml`, `python/sipral/{stack,account,call,media,events,enums,errors}.py`
 (the idiomatic layer `_sipral_cffi.py` is written against), `python/tests/`,
 `python/examples/agent.py`,

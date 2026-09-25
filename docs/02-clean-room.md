@@ -43,10 +43,10 @@ design document, dated, and close the source before implementing.
 
 **3. BSD-licensed code may be read for architecture, and still not copied.**
 baresip and libre, reSIProcate. Their licences would allow copying with
-attribution. We decline, so the tree carries no third-party notice inside it and
-can be relicensed without asking anyone. Structural ideas, such as separating
-transaction from dialog, or the sans-I/O boundary, are not copyrightable and are
-free to use.
+attribution. We decline, so no third-party source is copied into the tree and
+none of it needs relicensing; the notices in THIRD-PARTY-NOTICES.md cover
+linked dependencies only. Structural ideas, such as separating transaction from
+dialog, or the sans-I/O boundary, are not copyrightable and are free to use.
 
 **4. Provenance is demonstrable.** One repository, from commit zero, complete
 history, never squashed. Two commit messages have been rewritten, and no
@@ -60,6 +60,12 @@ the answer.
 
 **5. Test vectors are ours or are public.** Captures from our own lab, the RFC
 4475 corpus, the public SIPit bug list. SIPp is a tool we run, not code we ship.
+
+One exception, recorded in [`CLEANROOM_AUDIT.md`](../CLEANROOM_AUDIT.md): the
+numeric values of G.729's trained tables, which the Recommendation's text does
+not print, were extracted by a script from the table files of the ITU software
+attachment, without anyone reading those files. No other file of the
+attachment, and no C source, was opened.
 
 **6. When unsure about the provenance of a pattern, write it differently.** The
 cost of a second implementation of a small function is an hour. The cost of the

@@ -41,15 +41,16 @@ Consequences, in the order they matter:
 
 The cost is honest: the caller writes the event loop. `sipral-ua` ships a
 reference loop for people who do not want to, off by default and described
-below. The bindings do not: they are printed declarations of the C ABI and no
-more, and the idiomatic loop for each language — `async`/`await`, a `Task`,
-coroutines and a `Flow` — is named per binding in [08-ffi.md](08-ffi.md) and is
-still ahead.
+below. The bindings ship more than the declarations: each has a handwritten
+idiomatic layer over the printed C ABI (Swift classes and async events, a C#
+layer over P/Invoke, Kotlin coroutines, Python) — `bindings/README.md` lists
+which files are generated and which are written by hand, and
+[08-ffi.md](08-ffi.md) covers each one.
 
 ## Layers
 
 ```
-                    sipral-ffi          C ABI, Swift / .NET / Kotlin
+                    sipral-ffi          C ABI, Swift / .NET / Kotlin / Python
                         │
                      sipral             the facade, and the one crate an
                         │               application depends on
@@ -64,25 +65,27 @@ still ahead.
                             sipral-core     parser, transactions,
                                             dialogs, SDP, auth
 
+   sipral-dtls       DTLS 1.2 for DTLS-SRTP, keyed beside sipral-nat (`dtls`)
    sipral-headless   PCM on a socket, no audio device — sipral ⇠ ⎯ ⎯ (`headless`)
-   sipral-io-*       CoreAudio, WASAPI, the device itself
+   sipral-io-*       CoreAudio, WASAPI, PipeWire, the device itself
         │
    sipral-io-common  the ring, the gate, volume — no device at all
 ```
 
 Dependencies point down only, and most of these crates have none. `sipral-core`
 depends on nothing outside the standard library; `sipral-media`, `sipral-rtp`
-and `sipral-headless` name no Sipral crate at all, and the two `sipral-io-*`
+and `sipral-headless` name no Sipral crate at all, and the three `sipral-io-*`
 name exactly one, `sipral-io-common`, which names none. The device crates
 stand outside the picture because nothing in it depends on them: an
-application links one of `sipral-io-coreaudio`/`sipral-io-wasapi`, or neither,
-and never both.
+application links at most one of `sipral-io-coreaudio`, `sipral-io-wasapi` or
+`sipral-io-pipewire`, and never more than one.
 
 `sipral-headless` stands outside the picture the same way, and names no
 Sipral crate itself — it stays the leaf the picture above draws it as, sans-I/O
 and free of every other layer's state. The dashed edge is the one exception to
 "nothing in the picture depends on them": `sipral`'s own optional `headless`
-feature (off by default, the same pattern as `dtls` and `ice`) depends on it,
+feature (off by default, unlike `dtls`, `ice` and `stun`, which are on) depends
+on it,
 to carry PCM between this protocol's queues and a live `MediaSession` — the
 [facade's own section](#the-facade) below and
 [07-headless.md](07-headless.md#real-media) say what that join does and does
@@ -214,7 +217,7 @@ builds on rather than once per backend — so that PipeWire and AAudio are not
 the third and fourth copy.
 
 What stayed behind in each backend is what is genuinely its own, and the
-counters are the clearest case of the difference. Both keep the same four
+counters are the clearest case of the difference. All three keep the same four
 numbers — samples captured, dropped, played and invented — and then CoreAudio
 counts the times `AudioUnitRender` refused while WASAPI counts buffer gaps,
 refused `GetBuffer` calls, and a buffer-ready event that did not arrive. Those
@@ -300,9 +303,11 @@ crosses `sipral-ua` as a `SocketAddr`; `sipral-ua` still names no NAT crate.
 ## Errors and panics
 
 The library never panics on input. Malformed packets are the normal case on a
-public SIP port, not an exception. `unwrap`, `expect`, `panic` and unchecked
-indexing are lints at warn level across the workspace, and a suppression of any
-of them carries a comment saying why it cannot fire.
+public SIP port, not an exception. `unwrap`, `expect` and `panic` are lints at
+warn level and unchecked indexing is denied, across the workspace;
+`scripts/check.sh` runs clippy with `-D warnings`, so none of them passes the
+gate, and a suppression of any of them carries a comment saying why it cannot
+fire.
 
 Errors are typed per layer and do not leak the layer below.
 

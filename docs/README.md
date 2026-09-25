@@ -25,9 +25,9 @@ tree object survived both unchanged, so the code history is untouched.
 | [03-core-signalling.md](03-core-signalling.md) | parser, transactions, dialogs, SDP, authentication |
 | [04-ua.md](04-ua.md) | registration, calls, hold, transfer, subscriptions |
 | [05-media.md](05-media.md) | RTP, jitter buffer, loss concealment, DTMF, SRTP, codecs |
-| [06-nat.md](06-nat.md) | STUN, TURN, ICE-lite, and what carriers actually need |
+| [06-nat.md](06-nat.md) | STUN, TURN, ICE in the lite and full roles, and what carriers actually need |
 | [07-headless.md](07-headless.md) | the PCM socket endpoint for AI voice agents |
-| [08-ffi.md](08-ffi.md) | C ABI rules, and the Swift, .NET and Kotlin bindings |
+| [08-ffi.md](08-ffi.md) | C ABI rules, and the Swift, .NET, Kotlin and Python bindings |
 | [09-rfc-index.md](09-rfc-index.md) | every specification implemented, and by which crate |
 | [10-roadmap.md](10-roadmap.md) | phases and their exit criteria |
 | [11-testing.md](11-testing.md) | test corpus, fixtures, the interoperability matrix |
@@ -38,6 +38,7 @@ tree object survived both unchanged, so the code history is untouched.
 | [16-lifecycle.md](16-lifecycle.md) | suspend, resume, a network that changed, and what the stack costs when idle |
 | [17-observability.md](17-observability.md) | health counters, capability reporting, and the B2 audit of configuration entry points |
 | [18-replay.md](18-replay.md) | the recorded-session format, what it cannot hold, and what a replay reproduces |
+| [19-numbers.md](19-numbers.md) | measured size, per-frame cost, call set-up time and memory, and how `scripts/bench.sh` produces each |
 | [20-security-model.md](20-security-model.md) | the threat model: what a hostile peer can do, what refuses it, where the keys come from, what is not read yet |
 
 ## Conventions
