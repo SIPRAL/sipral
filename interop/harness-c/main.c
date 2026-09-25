@@ -1652,7 +1652,8 @@ static int up_and_talking(struct endpoint *end, const char *server,
 
 /* Give up whatever is still open: `flow_mwi`'s own subscription, a call
  * (mostly already hung up, since only `flow_mwi` needs one gone before it can
- * finish), and the binding. */
+ * finish), a media socket named for a call that was never placed, and the
+ * binding. */
 static void finish(struct endpoint *end)
 {
     if (end->subscription != SIPRAL_HANDLE_NONE) {
@@ -1663,6 +1664,16 @@ static void finish(struct endpoint *end)
     if (end->call != SIPRAL_HANDLE_NONE && !end->seen.ended) {
         (void)sipral_call_hangup(end->stack, end->call, now_ms());
         (void)wait_until(end, hung_up, 5000u);
+    }
+    /* a flow that failed between `sipral_stack_nat_map` and placing its call
+     * still holds the socket's relay, which `sipral_stack_destroy` would
+     * leave on the TURN server for its whole lifetime: the header asks for
+     * every socket still named to be unmapped first, and the Refresh that
+     * gives the relay back leaves through `sipral_stack_poll_stun` */
+    if (end->mapping_media && end->call == SIPRAL_HANDLE_NONE) {
+        (void)sipral_stack_nat_unmap(end->stack, end->rtp_address, strlen(end->rtp_address),
+                                     now_ms());
+        (void)wait_until(end, NULL, 400u);
     }
     if (end->account != SIPRAL_HANDLE_NONE) {
         (void)sipral_account_unregister(end->stack, end->account, now_ms());
