@@ -212,6 +212,12 @@ impl Endpoint {
 }
 ```
 
+From `sipral-ua` the same calls are on `agent.endpoint()` (for example
+`agent.endpoint().diagnostics_json()`). From C,
+`sipral_stack_diagnostics_json(stack, buffer, capacity, &len)` copies the
+same JSON document, and answers `SIPRAL_STATUS_BUFFER_TOO_SMALL` with the
+length needed.
+
 Records are found by `Call-ID`, which is the only name a call has that both
 ends, every proxy and every capture agree on. `recorded_calls` hands them back
 least recently written first, so the front of it is what the endpoint is about

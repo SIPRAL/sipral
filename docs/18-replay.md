@@ -70,9 +70,10 @@ frame rather than from a wall clock:
 - **a wake** — a deadline the application came back at. Recorded because the
   deadlines are part of the session: whether a retransmission went before the
   answer arrived is a fact about the run, not a detail of the loop.
-- **a resolved answer** — `Endpoint::resolved`, the dialog it named and the
-  addresses it was given. Unlike a cue this is data rather than a name, so a
-  replay repeats it exactly instead of asking the caller to.
+- **a resolved answer** — `Endpoint::resolved`: the dialog it named, the
+  transport the lookup named (`-` for none), and the addresses it was given.
+  Unlike a cue this is data rather than a name, so a replay repeats it exactly
+  instead of asking the caller to.
 - **a cue** — the application acting on its own, under a name the application
   chose. Placing a call, answering one, registering an account: none of those
   arrive from anywhere, so no recording can feed them back. What it does
@@ -110,14 +111,14 @@ a binary body cannot be recorded either. A recorder handed one refuses, and
 the refusal spoils the whole recording rather than dropping the body — a
 recording holds every byte the stack was fed or it does not exist. In the
 traffic this exists for that costs nothing, because SIP and SDP are text; a
-build that has to record binary bodies needs a version 2 of the format, and
-`Recorder::finish` says so instead of guessing.
+build that has to record binary bodies needs a new version of the format (4
+or later), and `Recorder::finish` says so instead of guessing.
 
 It also holds no configuration. See the boundaries below.
 
 ## The version rule
 
-The first line is `sipral-recording 2`.
+The first line is `sipral-recording 3`.
 
 A reader that meets a higher number **refuses the file and says so** —
 `ReadError::Version { found, supported }` — rather than reading the lines it
@@ -126,8 +127,11 @@ those lines means, and a recording is fed into a state machine: a replay that
 quietly took a wrong turn would report a result that looks exactly like a
 real one. Every other line is read the same way. A line the reader does not
 understand stops the read; it is never skipped. A version 1 file is still read
-without complaint — this build's reader understands everything version 1
-wrote, and a `resolved` line is simply absent from one, not misread.
+without complaint, because it has no `resolved` lines. A version 2 file reads
+the same way unless it has a `resolved` line. That line is refused as
+`ReadError::Syntax`, not `ReadError::Version`, because version 3 added a token
+to it. Re-record such a session, or insert `-` after the dialog id on each
+`resolved` line and change the banner to 3.
 
 The version rises when what an existing line means changes, or when a frame is
 added that a version 1 reader would have to understand to replay the session
@@ -136,14 +140,19 @@ correctly. Version 2 is the second case: `resolved` lines
 nothing to, so a version 1 reader is made to refuse the file rather than
 replay the session at the wrong destination.
 
+Version 3 is the second case again: `Endpoint::resolved` learned the transport
+an RFC 3263 lookup names, so a `resolved` line carries a protocol token (`-`
+for none) between the dialog and the addresses, and a version 2 reader would
+take that token for an address.
+
 ## The file
 
-This is `fixtures/replay/registration-challenged.sipralrec`, whole. A phone
+This is `fixtures/replay/registration-challenged.sipralrec`. A phone
 registering, a registrar that challenges, the retry with credentials, the
 binding granted for an hour, and the refresh fifty-one minutes later.
 
 ```
-sipral-recording 1
+sipral-recording 3
 seed 0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b
 note a registrar that challenges, a binding granted for an hour, one refresh
 +0.000000000 bound 1 UDP 192.0.2.1:5060 -
@@ -217,10 +226,38 @@ runs are compared byte for byte, event for event, and record for record:
   depended on the time of day would not be reproduced, and nothing in these
   crates depends on it, because nothing in them reads it.
 
+## Replaying one
+
+```rust
+let recording = Recording::parse(&text)?;
+let mut agent = UserAgent::new(config, recording.seed())?;
+let mut replay = Replay::new(&recording, origin);
+while replay.next_at().is_some() {
+    match replay.step(&mut agent)? {
+        Some(Played::Cue(label)) => { /* repeat the application's action named by label */ }
+        Some(Played::Fed) => {}
+        None => break,
+    }
+    while let Some(tx) = agent.poll_transmit() { /* compare or discard */ }
+    while let Some(ev) = agent.poll_event() { /* assert */ }
+}
+```
+
 ## How a support engineer produces one
 
-The recorder is passive: it is told about the calls the driver is already
-making, and it never reads a clock of its own.
+The simplest way is built in. `UserAgent::start_recording(Some("note"))`
+starts one, and `UserAgent::stop_recording()` hands back the `Recording` (or
+the `RecordError`). From C, `sipral_stack_recording_start` and
+`sipral_stack_recording_stop` do the same and copy out the text. Both use the
+seed the stack was built with. They record arrivals and wakes only, with no
+cues and no `resolved` answers, so a replay of one has to repeat the
+application's own actions itself.
+
+The recorder can also be driven by hand, which is what a layer with cues or
+`resolved` answers of its own needs. It is passive: it is told about the
+calls the driver is already making, and it never reads a clock of its own.
+Its seed must be the same 32 bytes passed to `Endpoint::new` or
+`UserAgent::new`.
 
 ```rust
 let mut recorder = Recorder::new(seed).about("Asterisk 20.5, one-way audio after hold");
@@ -230,6 +267,8 @@ agent.receive(input, now)?;
 
 recorder.woke(now);                     // beside every UserAgent::handle_timeout
 agent.handle_timeout(now);
+
+recorder.resolved(dialog, &addresses, protocol, now); // beside every Endpoint::resolved
 
 recorder.cue("answer", now);            // beside anything the application does
 agent.answer(call, sdp, now)?;

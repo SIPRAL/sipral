@@ -3,18 +3,17 @@ SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 Copyright (c) 2026 Tiberiu Balasea
 -->
 
-# sipral-core: the public API, agreed on paper
+# sipral-core: the public API
 
-This is the surface phase 1 implements. It was chosen from four independent
-proposals scored by three reviewers with different concerns (implementer,
-binding author, protocol reviewer), and then merged by hand. What was taken
-from where, and what was rejected, is at the end, so that the next person to
-disagree with a decision can see what it was weighed against.
+This is `sipral-core`'s public surface as implemented. It was chosen from
+four independent proposals scored by three reviewers with different concerns
+(implementer, binding author, protocol reviewer), and then merged by hand.
+What was taken from where, and what was rejected, is at the end, so that the
+next person to disagree with a decision can see what it was weighed against.
 
-Signatures only. Bodies come in phase 1. Anything here that phase 1 proves
-wrong is changed here in the same commit.
+Anything the code changes is changed here in the same commit.
 
-## The contract in four calls
+## The contract in five calls
 
 ```rust
 impl Endpoint {
@@ -81,9 +80,9 @@ pub struct TransportId(pub u32);
 
 Typing the transaction handle by machine kind means "respond to a PRACK using
 an INVITE server transaction handle" is a compile error rather than a runtime
-`Err`. That guarantee survives translation into a C struct per kind, and from
-there into Swift, .NET and Kotlin types. Generational identity means a stale
-handle yields a typed error, never a different transaction.
+`Err`. That guarantee holds for Rust callers of `sipral-core`; the C ABI does
+not expose transaction handles. Generational identity means a stale handle
+yields a typed error, never a different transaction.
 
 ## State machines
 
@@ -978,6 +977,9 @@ impl Endpoint {
         -> Result<ProvisionalResponseId, RespondError>;
     pub fn respond(&mut self, transaction: TransactionId<NonInviteServer>, response: &OutgoingResponse, now: Instant)
         -> Result<(), RespondError>;
+    /// Builds the subscriber's dialog from a NOTIFY; call it before answering.
+    pub fn open_dialog(&mut self, transaction: TransactionId<NonInviteServer>, local_seq: Option<u32>) -> Option<DialogId>;
+    pub fn close_dialog(&mut self, dialog: DialogId);
 
     // -- introspection ----------------------------------------------------------
     /// An unguessable token from the stream the branches, tags and `Call-ID`s
@@ -1018,6 +1020,9 @@ impl Endpoint {
     /// Every record as one JSON document, which is the artefact a bug report
     /// carries. `docs/14-diagnostics.md` has the shape and the stability rule.
     pub fn diagnostics_json(&self) -> String;
+    /// A decision a layer above made about a message this endpoint handed it,
+    /// recorded alongside the send and the arrival around it.
+    pub fn note_arrival(&mut self, message: &RawMessage<'_>, reason: Reason, now: Instant);
 }
 
 pub struct DialogSnapshot {
@@ -1159,12 +1164,15 @@ pub enum Event {
 
 pub enum FailureReason { Timeout, TransportFailed, Refused }
 pub enum TerminationReason { Completed, TimedOut, TransportFailed }
-pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed, Gone }
+pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed, Gone, Closed }
 ```
 
 `Gone` is §12.2.1.2's case: a 481 or a 408 to a request inside the dialog, or
 no answer at all. No BYE goes out for it — the far end has just said there is
 no such dialog, and a BYE would earn the same 481.
+
+`Closed` is `close_dialog`: a usage that ended with nothing on the wire to end
+it (RFC 6665 §4.4.1).
 
 **What a response says is reported before the transaction that carried it
 ends.** `Failed`, `Cancelled`, `Response`, `Challenged`, `ReinviteFailed` and
@@ -1376,7 +1384,7 @@ assert_eq!(ep.poll_timeout(), Some(t0 + 3 * T1));         // A doubles
 
 ep.handle_timeout(t0 + 64 * T1);                          // timer B
 assert!(matches!(ep.poll_event(), Some(Event::Failed { reason: FailureReason::Timeout, .. })));
-assert_eq!(ep.transaction_state(inv), Some(InviteClientState::Terminated));
+assert_eq!(ep.transaction_state(inv), None); // terminated and freed: the handle is stale
 ```
 
 No socket, no thread, no sleep. Every RFC 3261 timer diagram becomes a test of
@@ -1396,7 +1404,8 @@ loop {
 }
 ```
 
-`sipral-ua` ships this over `std::net` behind a feature flag, off by default.
+`sipral-ua` ships this over `std::net` behind the `reference-loop` feature,
+off by default.
 Each binding ships the idiomatic version for its runtime.
 
 ## Layering above
@@ -1407,7 +1416,7 @@ method per operation (`register`, `call`, `answer`, `hangup`, `hold`,
 `transfer`, `subscribe`, ...) rather than a command enum, and a `UaEvent` enum
 (`Registered`, `IncomingCall`, `CallProgress`, `CallConfirmed`, `CallEnded`,
 ...). It owns the policy the core refuses to
-have: registration refresh, automatic credential retry, `MultipleAnswerPolicy`
+have: registration refresh, automatic credential retry, `ForkPolicy`
 for forks, hold via re-INVITE or UPDATE, transfer sequencing. Every type it
 exposes is fully owned; no lifetime parameter leaves `sipral-core`.
 
@@ -1421,14 +1430,15 @@ adopts it; each one after that is a sibling.
 
 ## Projection onto C
 
-- Handles: one POD struct per transaction kind (`sipral_invite_client_txn`,
-  ...), `sipral_dialog`, `sipral_provisional`. Eight bytes each, generational,
-  never a raw index.
+- Handles: the C ABI is built over `sipral-ua`, so no transaction or dialog
+  handle crosses it. Stacks, accounts, calls and media are opaque generational
+  `sipral_handle_t` values (docs/08-ffi.md), and a stale one is
+  `SIPRAL_STATUS_STALE_HANDLE`.
 - Events: one tagged struct with `size` as its first field, so a struct can
   grow at the end across ABI versions. Borrowed buffers (`OwnedMessage` bytes)
   are valid for the callback's duration only; every binding copies out.
 - Every entry point runs under `catch_unwind` and maps a caught panic to
-  `SIPRAL_ERR_PANIC`. Reaching that code path is itself the bug report.
+  `SIPRAL_STATUS_PANIC`.
 - The ABI is built over `sipral-ua`, not over `sipral-core`. The core's
   surface is public because sibling crates need it, but the compatibility
   promise at 1.0 is made for `sipral-ua` and the C ABI.
@@ -1446,7 +1456,7 @@ refcounted `Transmit` from the zero-copy proposal. Generational
 the introspection function from the typed-handles proposal. The separate
 `handle_timeout` and the shared Input/Transmit vocabulary across both layers
 from the endpoint-poll proposal. The 1.0 stability policy, `#[non_exhaustive]`
-everywhere and `MultipleAnswerPolicy` from the minimal-surface proposal. The
+everywhere and `ForkPolicy` from the minimal-surface proposal. The
 pending-cancel flag for RFC 3261 §9.1 from the zero-copy proposal, in place of
 a `NoProvisionalYet` error.
 

@@ -107,9 +107,9 @@ connection is retired, and `receive` returns the error.
 ### Serialization
 
 Deterministic byte-for-byte output, so tests can compare against fixtures.
-Compact header forms are supported on receive and not used on send: readable
-traces are worth more than the bytes saved, except on UDP near the MTU, where
-the transport layer may switch.
+Compact header forms are accepted on receive and never written on send. A
+request near the MTU is moved to a stream transport instead (§2 below), not
+shortened.
 
 ### The things that are always got wrong
 
@@ -144,26 +144,29 @@ the socket.
   `transport=ws` parameter on `Contact` and `Route` are phase 2, and
   `crates/sipral-core/src/endpoint/transport.rs` says so at the declaration.
   An application that binds a WebSocket today does the handshake itself.
-- **Automatic switch to TCP** when a request is within 200 bytes of a known
-  path MTU, or, when the path MTU is unknown, larger than 1300 bytes, per RFC
-  3261 §18.1.1. Both figures are configurable, because some carriers perform
-  worse than the RFC's assumed 1500-byte Ethernet MTU.
+- **Switch to TCP** when a request is within 200 bytes of a known path MTU, or
+  larger than 1300 bytes when the path MTU is unknown (RFC 3261 §18.1.1). The
+  request moves onto a TCP transport the caller has already bound to the same
+  destination. If there is none, nothing is sent: the call returns
+  `SendError::NeedsStreamTransport`, and `Event::TransportWanted {
+  destination, request_bytes, limit_bytes }` asks the caller to open one and
+  send again. Both figures are configurable (`EndpointConfig::datagram_limit`).
 - **`Via` handling.** `branch` with the `z9hG4bK` magic cookie, `rport` per RFC
   3581 always requested, `received` and `rport` honoured on responses. Symmetric
   behaviour: responses go back where the request came from, not where the `Via`
   claims.
 - **Keepalive.** Double-CRLF on connection-oriented transports (RFC 5626
-  §4.4.1), or `OPTIONS` where a registrar wants a request. The interval is an
-  upper bound, not a period: §4.4.1 requires it to be drawn at random between
-  the bound and 20% below it, so that a server does not receive every client's
-  ping at the same instant. The bound is 25 s by default rather than the 120 s
-  the RFC suggests, because that figure assumes a network which leaves an idle
-  TCP connection alone for over two minutes and carrier-grade NATs routinely do
-  not; a softphone that notices a dead flow two minutes late has missed the call
-  it exists for. The cost is four bytes per connection per interval. Tunable per
-  endpoint. The core owns the CRLF timer and emits the keepalive as a
-  `Transmit`; the `OPTIONS` variant, and any per-account policy, live in
-  `sipral-ua`, which has accounts and the core does not.
+  §4.4.1). The interval is an upper bound, not a period: §4.4.1 requires it to
+  be drawn at random between the bound and 20% below it, so that a server does
+  not receive every client's ping at the same instant. The bound is 25 s by
+  default rather than the 120 s the RFC suggests, because that figure assumes
+  a network which leaves an idle TCP connection alone for over two minutes and
+  carrier-grade NATs routinely do not; a softphone that notices a dead flow
+  two minutes late has missed the call it exists for. The cost is four bytes
+  per connection per interval. Tunable per endpoint. The core owns the CRLF
+  timer and emits the keepalive as a `Transmit`. There is no `OPTIONS`
+  keepalive and no per-account keepalive policy; on UDP, a flow is kept open
+  only by registration refreshes (and the STUN refresh when STUN is on).
 - **Dead-flow detection**, which is what the keepalive is for. §4.4.1: "If a
   pong is not received within 10 seconds after sending a ping ... then the
   client MUST treat the flow as failed." The framer counts the answering CRLF
@@ -226,10 +229,13 @@ Four state machines from RFC 3261 §17, implemented from the diagrams in the RFC
 
 | Machine | Timers |
 |---|---|
-| INVITE client | A, B, D |
+| INVITE client | A, B, D, and M (RFC 6026) |
 | non-INVITE client | E, F, K |
-| INVITE server | G, H, I |
+| INVITE server | G, H, I, and L (RFC 6026) |
 | non-INVITE server | J |
+
+RFC 6026's `Accepted` state keeps both INVITE machines alive for 64·T1 after
+a 2xx.
 
 `T1 = 500 ms`, `T2 = 4 s`, `T4 = 5 s`, all configurable, because carriers exist
 where they must be. `t1` and `t2` are the two the endpoint refuses to be
@@ -351,8 +357,8 @@ state and belongs to `sipral-ua`.
 ## SDP
 
 Offer/answer per RFC 3264, as a value type: parse, inspect, build. No policy.
-`sipral-ua` decides which codecs to offer; `sipral-core` only encodes the
-result.
+`sipral` (the facade: `MediaEngine` and its `CodecCatalog`) decides which
+codecs to offer; `sipral-core` only encodes the result.
 
 Every line is kept, including the ones this stack has no use for: a body
 travels through a call inside messages that get forwarded, and a stack that
@@ -361,7 +367,7 @@ Attributes are held generically — name and value — with typed access for the
 ones the stack acts on.
 
 Typed today: `m=audio` with RTP/AVP and RTP/SAVP, `a=rtpmap`, `a=fmtp`,
-`a=ptime`/`a=maxptime`, `a=sendrecv|sendonly|recvonly|inactive`, `a=rtcp`,
+`a=ptime`, `a=sendrecv|sendonly|recvonly|inactive`, `a=rtcp`, `a=rtcp-xr`,
 `a=rtcp-mux`, `c=` with IPv4 and IPv6, and `a=crypto` for SDES (RFC 4568): the
 suite as a value rather than a token, the master key and salt decoded out of
 the key parameter, and the lifetime and key identifier that travel beside them.
