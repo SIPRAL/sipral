@@ -58,13 +58,21 @@ bindings` step runs.
 ```csharp
 using Sipral;
 
-using var stack = new SipralStack();
+using var stack = new SipralStack(bindHost: "192.0.2.10");
 var account = stack.AddAccount(
     "sip:alice@example.invalid",
-    registrarAddress: "203.0.113.10:5060");
+    registrarAddress: "203.0.113.10:5060",
+    registrar: "sip:example.invalid",
+    authUser: "alice",
+    authPassword: secret);
 account.Register();
 
-var call = stack.PlaceCall(account, "sip:bob@example.invalid");
+// Without `registrar` the account never registers: registering throws,
+// and the registrar address is only the outbound proxy. The stack and
+// media sockets default to 127.0.0.1, so name an address the registrar
+// can reach.
+
+var call = stack.PlaceCall(account, "sip:bob@example.invalid", mediaHost: "192.0.2.10");
 var media = await call.WaitForMediaAsync();
 media!.SendAudio(pcmSamples);          // 16-bit mono, one call at a time
 await foreach (var frame in media.Frames)

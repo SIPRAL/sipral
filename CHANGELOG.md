@@ -456,8 +456,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `cdef` against the header's own numbers and against `bindings/c/abi-sizes.txt`.
   `bindings/python/examples/agent.py` is a complete headless voice agent in
   one file, talking through one `respond(pcm) -> pcm` function
-  a real model replaces. Packaging (wheels with the library bundled in) is a
-  later task; this one installs from the checkout with `pip install -e .`.
+  a real model replaces. It installs from the checkout with
+  `pip install -e .`; a wheel with the library bundled in is built by
+  `scripts/package/wheels.sh` (see Platform packages, above).
   The interop lab runs that agent as its docstring says to, registered at
   Asterisk and called by it. For that the agent now binds to, and answers
   media on, the address its route to the registrar leaves from: it bound
@@ -597,7 +598,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   to gather from, gathering finishes before the call that started it returns,
   which is what keeps an offer one pass of work and is why neither the Rust
   API nor the C ABI grew a two-phase description. Server-reflexive candidates
-  are the next step and change none of the above.
+  are the next step and change none of the above. (Since superseded: a stack
+  with STUN adds a server-reflexive candidate, and one with a TURN relay a
+  relayed candidate; see the STUN and TURN entries above.)
 
   **A peer that does not do ICE keeps its call.** No ICE attributes, no usable
   candidate, or a description whose own default destinations are missing from
@@ -1084,11 +1087,29 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   rather than drawing one, which RFC 4568 §7.1.4 warns leaves the far end
   unable to read this end until the answer arrives.
 
+- **The ABI is at 0.26.** Each minor since 0.20 is noted with the entry that
+  caused it.
 - **ABI 0.20.** It covers two changes to the printed header: ICE's own
   (`SipralIce`, `SIPRAL_FEATURE_ICE`, event 33, the `ice` member on both
   config structs, and `now_ms` on `sipral_media_capture`), which went out
   without the minor moving, and `sipral_call_change_codecs`. The gate now
   refuses the first kind.
+- **ABI 0.21.** `sipral_call_join`, `sipral_call_leave` and
+  `sipral_media_mix`, for a two-call conference held on this stack.
+- **ABI 0.22.** `SIPRAL_EVENT_KIND_MEDIA_UNJOINED` (38), the survivor notice
+  a joined call's partner gets when the call it was joined to ends.
+- **ABI 0.23.** STUN from the stack (`sipral_stack_nat_map`,
+  `sipral_stack_poll_stun`, `sipral_stack_receive_stun`, the `nat` and
+  `stun_server` fields of `sipral_stack_config_t`, `SIPRAL_FEATURE_STUN` and
+  event 39, `SIPRAL_EVENT_KIND_NAT_MAPPING`) and the audio processor
+  attached from C (`sipral_call_attach_processor` and its detach and reset,
+  `sipral_processor_frame_t`, `sipral_processor_callback_t`).
+- **ABI 0.24.** `SIPRAL_CODEC_G729`.
+- **ABI 0.25.** TURN in the stack configuration (`turn_server`,
+  `turn_username`, `turn_password`), its relay event and records
+  (`SIPRAL_EVENT_KIND_NAT_RELAY`, event 40), and the G.729 Annex B toggle
+  (`annexb`).
+- **ABI 0.26.** `sipral_stack_nat_unmap`.
 
 - **`sipral_media_capture` takes `now_ms`**, in the position its three
   siblings put it and read exactly as they read theirs. ICE has to be told

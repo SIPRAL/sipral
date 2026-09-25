@@ -5,6 +5,9 @@ Copyright (c) 2026 Tiberiu Balasea
 
 # sipral-ffi and the language bindings
 
+Codes such as B7, D5 or D6 are requirements in
+[`docs/13-client-requirements.md`](13-client-requirements.md).
+
 ## The shape
 
 One narrow C ABI, and one idiomatic wrapper per language written on top of it.
@@ -63,7 +66,7 @@ Rules for the ABI:
   `SIPRAL_STATUS_STALE_HANDLE`.
 
   One pass of that queue hands over only what was already waiting when it
-  began (task 8.4.21). What is posted while it runs — from another thread, or
+  began. What is posted while it runs — from another thread, or
   from the callback it is in the middle of calling — is still in the queue
   when the pass returns, and the very next poll on this stack, even one that
   raised nothing of its own, is what notices and delivers it. The poll whose
@@ -97,11 +100,13 @@ Rules for the ABI:
   point that works on one call's media takes it in place of the stack and the
   call: `sipral_media_receive`, `sipral_media_playback`,
   `sipral_media_capture`, `sipral_media_mix`, `sipral_media_poll_rtcp`,
-  `sipral_media_info`, `sipral_media_statistics`, `sipral_media_dialling`,
-  `sipral_media_stop_dialling`, `sipral_media_record_start`,
-  `sipral_media_record_stop` and `sipral_media_record_state`. A handle costs
-  the stack's lock once, when it is minted, and never on the path that runs
-  fifty times a second.
+  `sipral_media_poll_transmit`, `sipral_media_info`, `sipral_media_statistics`,
+  `sipral_media_dialling`, `sipral_media_stop_dialling`,
+  `sipral_media_record_start`, `sipral_media_record_stop`,
+  `sipral_media_record_state` and `sipral_media_codec_candidate_count`/
+  `..._at`. A handle costs the stack's lock once, when it is minted, and
+  never on the path that runs fifty times a second. `sipral_media_release`
+  frees the handle.
 
   Each session has a lock of its own, and that lock waits. Two threads on one
   call's media — a render thread and a capture thread, or the poll thread
@@ -205,8 +210,9 @@ Rules for the ABI:
   also take the five in front of it, and a number taken by a feature that does
   not exist is exactly the lie the reservation was meant to prevent. The media
   surface took 17 and 19 this way and left 15, 16, 18 and 20 where they were.
-  8.4.10 has since turned 18 into `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, in
-  place, and left 15, 16 and 20 where they still are.
+  18 has since turned into `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, in place,
+  and so have 15 (`..._SUBSCRIPTION_CHANGED`) and 20
+  (`..._ANNOUNCED_CALL_MISSING`); 16 is still reserved.
   27, 28 and 29 were held the same way for three events no requirement numbers
   but the C ABI already planned: a DTMF digit sent by SIP INFO being answered,
   the stack recovering from a suspension or a network change, and a
@@ -220,7 +226,8 @@ Rules for the ABI:
   `..._MESSAGE_RECEIVED`, `..._MESSAGE_SENT` and `..._MESSAGES_WAITING`
   (RFC 3428, RFC 3842), 37 to `..._QUALITY_REPORT_SENT` for the RTCP-XR
   quality reports, and 38 to `..._MEDIA_UNJOINED` for the local conference's
-  own survivor notice. The next free number is 39.
+  own survivor notice. 39 and 40 went to `..._NAT_MAPPING` and `..._NAT_RELAY`.
+  The next free number is 41.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
@@ -230,9 +237,10 @@ Rules for the ABI:
 ## Handles
 
 A handle is sixty-four bits naming one thing the library owns: a stack, an
-account, a call, a call's media, a subscription, an announced call, or a
-dialog waiting to be resolved. A caller reads nothing out of it. The layout
-is written down for the person reading a log line or a crash dump, and for
+account, a call, a call's media, a subscription, an announced call, a
+message send, or a dialog waiting to be resolved. A caller reads nothing out
+of it. The layout is written down for the person reading a log line or a
+crash dump, and for
 whoever adds a table.
 
 - **The layout.** The low twenty-four bits are the slot, the eight above them
@@ -259,7 +267,7 @@ whoever adds a table.
   or the call, and answered `SIPRAL_STATUS_OK` for a hang-up that named no call
   at all. The four bits of kind are what a handle now carries to say which
   table it came from — a stack, an account, a call, a call's media, a
-  subscription, an announced call, or a dialog — and
+  subscription, an announced call, a message send, or a dialog — and
   every lookup refuses a handle of another kind with
   `SIPRAL_STATUS_INVALID_HANDLE` before it looks at a slot, naming the kind it
   actually got. Every handle of every kind, tag included, is put together by one
@@ -398,7 +406,7 @@ send nothing. It is a registration state rather than a status because it is a
 fact about the account for as long as the account exists, not about one
 request.
 
-**A table of transports, and the main one still published (task 8.4.10).**
+**A table of transports, and the main one still published.**
 `SIPRAL_TRANSPORT_MAIN` is the transport a stack is created with, and every
 call still names it by default — a caller that never binds a second one sees
 exactly the surface this crate always had. `sipral_stack_transport_bind` may
@@ -427,8 +435,8 @@ time. An account whose transport is retired this way is untouched by it: it is
 a fact about the transport, and the account starts sending again the moment
 the same id is bound.
 
-**The stream path is carried, and the promotion onto it is now too (task
-8.4.10).** TCP and TLS work end to end: bytes go in as fragments, the layer
+**The stream path is carried, and the promotion onto it is now too.**
+TCP and TLS work end to end: bytes go in as fragments, the layer
 below frames them on `Content-Length` (§18.3), and a connection that closes
 retires its transport. A WebSocket frame goes in as a datagram, because RFC
 7118 §4.2 puts one message in each. §18.1.1 — a request that outgrew a
@@ -537,7 +545,7 @@ a call is printed with its parameters handed through as they came.
 
 ### Behind a NAT
 
-**`nat` and `stun_server` on `sipral_stack_config_t`** (task 8.5.5, appended at
+**`nat` and `stun_server` on `sipral_stack_config_t`** (appended at
 the tail; `MIN_SIZE` unmoved) turn on STUN: `SIPRAL_NAT_STUN` and a server as
 `host:port`. Either without the other is `SIPRAL_STATUS_INVALID_ARGUMENT`, and
 a build without `SIPRAL_FEATURE_STUN` answers `SIPRAL_STATUS_NOT_SUPPORTED`.
@@ -607,7 +615,7 @@ of `sipral_stack_poll_transmit` would be sent from the SIP socket by every loop
 that ignores `source` on a request — every one written so far — and would
 learn the SIP socket's mapping instead, silently.
 
-**`turn_server`, `turn_username` and `turn_password`** (task 8.5.5, appended
+**`turn_server`, `turn_username` and `turn_password`** (appended
 at the tail after `stun_server`; `MIN_SIZE` unmoved) add a TURN server
 (RFC 8656) to the same path: with them, every media socket
 `sipral_stack_nat_map` names is also given a relay on that server, and the
@@ -619,6 +627,12 @@ coturn usually is — and all three together; anything else is
 the only thing that can use a relay, answers `SIPRAL_STATUS_NOT_SUPPORTED`.
 The password is copied into memory overwritten when the stack is destroyed,
 and it is in no event and no error text.
+
+A relay is used only by a call that runs ICE, and ICE is off by default. Set
+`sipral_stack_config_t::ice`, or `sipral_call_config_t::ice` for one call, to
+`SIPRAL_ICE_OFFERED`. With the default `SIPRAL_ICE_OFF`, the relay is given
+back as soon as the call is described. `docs/06-nat.md` has the policy
+values.
 
 Nothing new to call. The Allocate and its authenticated second attempt come
 out of `sipral_stack_poll_stun` after the Binding request, and the answers go
@@ -652,7 +666,7 @@ sent nothing that named the relay, and leaves it on its socket for the next
 call there. A relay nobody takes is given back when the socket is spent by a
 call that did not take it.
 
-**`sipral_stack_nat_unmap(stack, local, len, now_ms)`** (task 8.5.5) is how a
+**`sipral_stack_nat_unmap(stack, local, len, now_ms)`** is how a
 socket named with `sipral_stack_nat_map` that will carry no call after all
 says so: it is no longer asked about every twenty-five seconds, a request for
 it still queued is dropped, and its relay goes back to the server — a Refresh
@@ -897,7 +911,7 @@ answer — a call negotiated from a description with no media line in it had
 nothing in the running at all.
 
 **`sipral_call_ring_media` rings an incoming call with this stack running the
-audio** (task 8.4.9): the answer to the offer the INVITE carried is written
+audio:** the answer to the offer the INVITE carried is written
 from this stack's codec order against `config.media_address`, and the session
 opens on it there and then, before anybody answers — the far end hears
 whatever the application plays on it, `SIPRAL_EVENT_KIND_MEDIA_STARTED`
@@ -936,8 +950,8 @@ has to be that same one; after a `sipral_call_ring` that sent none it is
 not — see `docs/05-media.md`, "Ringing with media", for the reasoning in
 full.
 
-**`sipral_call_accept_transfer` takes a `sipral_call_config_t` now** (task
-8.4.4), and places the call a REFER asked for the way `sipral_call_place`
+**`sipral_call_accept_transfer` takes a `sipral_call_config_t` now**,
+and places the call a REFER asked for the way `sipral_call_place`
 places one: `media_address` for an offer this stack writes and runs the
 audio of, `sdp` for a description the application wrote and runs its own,
 `srtp` overriding the stack's policy for the former the same way it does on
@@ -978,7 +992,7 @@ buffers the caller brings — checked before anything is built, so a frame is
 never encoded and then dropped for want of somewhere to put it.
 
 **A call that ends owes the far end an RTCP BYE, and by then its media handle
-is already gone** (task 8.4.21). `MediaEngine::release` builds the goodbye at
+is already gone.** `MediaEngine::release` builds the goodbye at
 the moment the call ends, but every `sipral_media_` entry point on that call's
 handle already answers `SIPRAL_STATUS_WRONG_STATE` by the time an application
 could ask for it, so `sipral_stack_poll_farewell(stack, out_call, out_packet)`
@@ -993,7 +1007,7 @@ call this stack was running media on, and keep calling until it answers a
 its own timeout. A call whose media never ran leaves nothing here.
 
 **The queue behind it has a ceiling, the same shape `events_dropped` already
-has for the outbox** (task 8.4.21). An application that never calls
+has for the outbox.** An application that never calls
 `sipral_stack_poll_farewell` — including one built against a header from
 before this entry point existed — would otherwise keep every ended call's
 goodbye in memory for as long as the stack lives. Past
@@ -1023,7 +1037,7 @@ is a three-valued `sipral_toggle_t` — default, on, off — because a zeroed st
 cannot otherwise tell "off" from "nothing was said", and
 `sipral_stack_settings_t` reads back what each of them came to.
 
-## One declaration, and five files printed from it
+## One declaration, and every printed file (the header, the four bindings and the JNI shim)
 
 B7's failure is a C seam declared in several places that have to agree: a
 function added to the Rust and forgotten in one binding produced a build that
@@ -1167,7 +1181,8 @@ A function, a struct, a union, an enumeration, a constant or an alias added,
 removed or renamed on the Rust side and not reaching the header or any of the
 four bindings. A member appended to a struct, a value added to an enumeration,
 a parameter added to a function, a type changed. The number an event kind
-spends, which travels into all five files. Every one of those is a difference
+spends, which travels into every printed file (the header, the four
+bindings and the JNI shim). Every one of those is a difference
 between what is committed under `bindings/` and what the declarations produce,
 and the gate prints which file and says what to run.
 
@@ -1215,7 +1230,7 @@ gate; `bindings/c/sipral.c` compiles it a second time as the Swift package's
 own translation unit.
 
 **It says nothing about meaning.** A member that keeps its name and its type and
-starts meaning something else travels into all five files intact. So does a
+starts meaning something else travels into every printed file intact. So does a
 function whose behaviour changed under a signature that did not.
 
 **The built library is checked on this platform and no other.** The gate reads
@@ -1496,8 +1511,9 @@ first touch of the binding surfaces as the cause of an
 
 **What still crosses as an address.** `sipral_media_packet_t` and
 `sipral_transmit_t`, the structs a caller part-fills with buffers the library
-writes into, cross as a `Long`, so `callCapture`, `stackPollRtcp` and
-`stackPollTransmit` cannot be called from Kotlin alone through the generated
+writes into, cross as a `Long`, so `mediaCapture`, `mediaPollRtcp`,
+`mediaPollTransmit`, `stackPollTransmit`, `stackPollStun` and
+`stackPollFarewell` cannot be called from Kotlin alone through the generated
 shim; `org.sipral.idiomatic` reaches them through a second, hand-written one
 (`idiomatic_media.c`) linked into the same library. `sipral.aar`, built by
 `scripts/package/aar.sh`, carries a `proguard.txt` with the keep rules R8
@@ -1642,7 +1658,8 @@ is what they mean:
   from the one before it: a binding generated against the grown header loads
   happily against a library built before the addition, and finds the symbol
   or the member missing at the first call that wants it.
-- **patch**, for a fix that changes no declaration. It is not asked for at
+- **patch**, for a fix that changes no declaration, once a release has been
+  published; before the first release it stays 0. It is not asked for at
   load, because it cannot make two builds disagree.
 
 A member appended to a config struct is the ordinary case of that, and what

@@ -114,7 +114,9 @@ first-come would show the user the wrong name whenever two calls overlap, and a
 wrong match is the one failure this design will not accept.
 
 An announcement is used once and then gone, and it lives for twenty seconds by
-default (`expect_within` changes it). Twenty is made of two numbers: the far
+default (`UserAgent::expect_within` changes it in Rust; through `sipral.h`
+and the bindings it is fixed at twenty seconds). Twenty is made of two
+numbers: the far
 end's own INVITE transaction gives up after 64·T1, thirty-two seconds, so a
 longer window would be waiting for a caller who has already hung up; and a cold
 start that has to resolve a name, build a connection, answer a challenge and
@@ -146,6 +148,19 @@ not take that call: it becomes an ordinary announcement and expires
 harmlessly.
 
 `forget_announcement` drops one that the user dismissed before the INVITE came.
+
+### Through `sipral.h`
+
+`sipral_account_announce` is `announce`: it fills `out_call` when the INVITE
+came first and `out_announcement` otherwise. `sipral_account_refresh_binding`
+is `refresh_binding`, and `sipral_announcement_forget` is
+`forget_announcement`. The events are `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` (31),
+then `SIPRAL_EVENT_KIND_INCOMING_CALL`; a miss is
+`SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` (20). The push parameters are
+`push_provider`, `push_prid`, `push_param` and `push_wakes_itself` on
+`sipral_account_config_t`, and `sipral_account_push_echo` reads the
+registrar's answer. On iOS, `CallKitBridge` and `PushKitBridge` run this
+sequence; on Android, `org.sipral.telecom.TelecomBridge` does.
 
 ## C3 — a registration that freezes and thaws
 
@@ -348,9 +363,9 @@ saying it will send the pushes, and anything else means nobody has.
 taken away and given back mid-call by an incoming cellular call, by a Bluetooth
 headset connecting mid-sentence, by a car taking over routing, by the operating
 system reclaiming the session — is not a protocol problem and has no business
-in `sipral-ua`. It belongs in the per-platform `sipral-io-*` crates, where the
-audio session, the interruption notifications and the route-change callbacks
-live, and it reaches the application as transitions rather than as silence. The
+in `sipral-ua`. On iOS and Android it is the application's today
+(`AVAudioSession` on iOS, the telecom framework's audio routes on Android).
+No `sipral-io-*` crate handles either yet. The
 same goes for `C5`'s measurements: what runs while the application is
 backgrounded with no call is a property of the whole process, and the polled
 core is what makes it *possible* to answer, not the answer.

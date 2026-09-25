@@ -11,12 +11,13 @@ boring. Almost everything is deterministic and runs without a network.
 ## Time is given, never read
 
 A guarantee rather than a habit, because everything else here rests on it:
-**no library code in `sipral-core`, `sipral-ua`, `sipral-rtp`, `sipral-media`
-or `sipral-nat` reads the machine's clock.** Time arrives as a parameter —
-`receive(input, now)`, `handle_timeout(now)` — and leaves as `poll_timeout()`.
-The one exception in library code is `sipral_ua::Runtime`, the reference loop
-over real sockets, which is where a clock belongs and which is behind a feature
-so that nothing links it by accident.
+**no library code in `sipral-core`, `sipral-ua`, `sipral-rtp`, `sipral-media`,
+`sipral-nat` or `sipral-dtls` reads the machine's clock.** Time arrives as a
+parameter — `receive(input, now)`, `handle_timeout(now)` — and leaves as
+`poll_timeout()`. The one exception in library code is `sipral_ua::Runtime`,
+the reference loop over real sockets, which is where a clock belongs and
+which is behind the `reference-loop` feature, off by default, so that
+nothing links it by accident.
 
 `scripts/check.sh` enforces it. Everything from a file's first `#[cfg(test)]`
 is cut, modules that are nothing but tests are skipped by name, and a single
@@ -264,7 +265,8 @@ what it received; then through what a handshake reads next from that message:
 the cookie check, the certificate's key and fingerprint, the key exchange
 point, the signatures.
 
-One more, added for 8.3.11's incoming DTMF over signalling. `dtmf_info` takes
+One more, added for `sipral-ua`'s own INFO-based DTMF (`docs/04-ua.md`).
+`dtmf_info` takes
 a `Content-Type` and a body — the first byte says how many of the rest name
 the header, capped at what is left, and the remainder is the body — through
 `sipral_ua::dtmf::parse_info`, the reader an incoming INFO answers 200, 415
@@ -286,7 +288,7 @@ every probe leaves from a socket it was given, `send` appends to the caller's
 buffer instead of overwriting it, and a datagram the agent reports as
 `Foreign` has not moved the selected pair.
 
-And one for the TURN client, added with 8.7.9, since `turn` reads only its
+And one for the TURN client, since `turn` reads only its
 framing. `turn_client` is a program: a configuration byte, then instructions
 that answer the last request the client sent, hand it a datagram of the
 fuzzer's own, move the clock, or ask it to permit, bind or send. An answer is
@@ -299,13 +301,21 @@ every control message the client writes parses, that a range handed back
 indexes the datagram it came from, that a send appends to the caller's buffer,
 and that no instruction raises events without end.
 
-Its seeds are the reason it reaches anything. A connectivity check is
+The `ice` target's seeds are the reason it reaches anything. A connectivity check is
 authenticated before it is acted on, so an unsigned datagram dies at the door
 and a coverage-guided fuzzer will not forge an HMAC to get past it: the seeds
 carry checks signed with the same password the harness publishes, one of them
 nominating, plus a response and a role conflict answering the first
 transaction id the harness hands out. Those six seeds alone reach more of the
 agent than several hundred thousand random runs did before they existed.
+
+Ten more cover the media path: `media_resample`, `media_plc`, `media_drift`,
+`media_comfort_noise`, `media_vad`, `media_g722`, `media_g729`, `media_mix`,
+`media_opus` and `headless_media`, each built from arbitrary bytes through
+its own crate's public entry point rather than through a call — the codec,
+the packet-loss concealer, the drift corrector, the comfort-noise generator,
+the voice-activity detector, the two codecs read from their bitstream side,
+the local mixer, and the headless framing over real audio.
 
 ```sh
 ./scripts/fuzz.sh 600 parse        # one target, ten minutes
@@ -364,7 +374,7 @@ and 432 in all, the eighteen sharing a corpus per target and queued
 round-robin so that each had the same share of the machine. About 37 billion
 executions, and no crash, no timeout and no run out of memory on any target.
 The eight media targets, added after that run, had the same gate on 23
-September 2026: 48 runs of 30 minutes each per target, 384 CPU-hours in all,
+September 2026: 48 runs of 30 minutes each per target, 192 CPU-hours in all,
 about 24 billion executions, and nothing found on any of them.
 `headless_media`, `media_g729` and `turn_client`, the newest, have not had it yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
@@ -569,8 +579,9 @@ Known peer behaviours worth writing down rather than rediscovering:
 ## Interoperability procedure
 
 Each live exit criterion in `10-roadmap.md` is one scripted flow, driven by
-`interop/harness` (`sipral-interop`) against the container lab. Since 8.5.1
-the harness drives every flow through the `sipral` facade — `MediaEngine` and
+`interop/harness` (`sipral-interop`) against the container lab. Since the
+harness moved onto the facade, it drives every flow through the `sipral`
+facade — `MediaEngine` and
 `MediaSession` for RTP, codecs, DTMF and SRTP — the same seam a real
 application links, rather than through a second RTP/codec pipeline written
 for the lab alone: **a phase whose proof runs on a path no customer uses has
@@ -580,7 +591,7 @@ tone — not a second media join. Pass and fail are defined per flow, not
 judged at the time; a flow that did four things out of five is a failure
 naming the fifth, printed as `FAIL <flow> — <what did not hold>`.
 
-Since 8.5.2 the same flows run **a second time, through the C ABI**, driven by
+The same flows run **a second time, through the C ABI**, driven by
 `interop/harness-c`. That is not redundancy. The Rust driver reaches
 `MediaEngine` and `UserAgent` as Rust types, which is not how anybody outside
 this repository will ever reach them, so it is structurally incapable of
@@ -605,7 +616,7 @@ change was the one the C surface could not express until
 `sipral_call_change_codecs` existed — and the Rust driver could not either,
 through the facade: it wrote that re-offer itself until
 `MediaEngine::change_codecs` did. MESSAGE and message waiting indication
-(8.6.5) run in C too, driven by `sipral_account_message` and
+run in C too, driven by `sipral_account_message` and
 `sipral_account_subscribe`. The local-conference flow (below) runs in C as
 well, driven by `sipral_call_join`, `sipral_call_leave` and
 `sipral_media_mix` — it needs two calls on one account rather than a second
@@ -638,14 +649,14 @@ server:
 | blind transfer | connected, the transfer completed (its own status read from the `NOTIFY` sipfrag), the far end ended it | all three |
 | attended transfer | as blind, plus the consultation leg itself connected first | all three |
 | DTMF, RFC 4733 | connected, a digit sent as a named telephone event named back the same way by the lab's own dialplan (`interop/asterisk/extensions.conf`'s 9003), hung up, ended. Not run through the proxy to FreeSWITCH yet: its 9003 in `interop/freeswitch/lab.xml` never named the digit back, dialled at once or after a pause, and a flow is not run where it is known not to pass until the reason is found | Asterisk only |
-| DTMF, SIP INFO | connected, the same digit sent by `UserAgent::send_dtmf_info` (8.3.11) instead, answered with success (`UaEvent::DtmfSent`) and named back the same way by extension 9003 — against the lab's own `labuser-infodtmf` endpoint (`interop/asterisk/pjsip.conf`, `dtmf_mode=info`), so `SendDTMF()`'s own echo goes back over INFO too and this end's receiving half is exercised against a real peer as well as its sending one — hung up, ended | Asterisk only |
+| DTMF, SIP INFO | connected, the same digit sent by `UserAgent::send_dtmf_info` instead, answered with success (`UaEvent::DtmfSent`) and named back the same way by extension 9003 — against the lab's own `labuser-infodtmf` endpoint (`interop/asterisk/pjsip.conf`, `dtmf_mode=info`), so `SendDTMF()`'s own echo goes back over INFO too and this end's receiving half is exercised against a real peer as well as its sending one — hung up, ended | Asterisk only |
 | SRTP | connected under SDES against the lab's own SDES endpoint (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004) — refused rather than answered plainly if the far end will not key it | Asterisk only |
 | DTLS-SRTP, held and resumed | connected against the lab's own DTLS endpoint — on Asterisk `interop/asterisk/pjsip.conf`'s `labuser-dtls`, on FreeSWITCH extension 9005 of `interop/freeswitch/lab.xml`, which makes secure media mandatory for that call alone and certifies with the RSA-4096 key FreeSWITCH generates for itself, so the flow is also the proof that a peer's RSA certificate keys a call in either role — keyed by its own handshake — `SIPRAL_EVENT_KIND_MEDIA_SECURED` for that call, not `MEDIA_STARTED`: a DTLS call is still waiting for its keys there — then held and resumed, both agreed, hung up by this end, ended. A handshake that fails is named from `MEDIA_FAILED`'s own reason and ends the flow at once. Audio is required only *after* the resume, not merely after the call connects: the hold and the resume are both re-offers that hand the DTLS roles back with `a=setup:actpass` (RFC 8842 §5.5), so audio heard once they are agreed says the far end answered with the roles already in force (§5.3) and the association that keyed the call still carries it | all three |
 | call, phone to phone | `Flow::Call` again, dialled at baresip's own AOR instead of an extension — connected, hung up by this end, ended, audio required both ways exactly as the plain call above | baresip only |
 | hold and resume, phone to phone | `Flow::Hold` again, same peer: as the row above, plus the hold and the resume both agreed by baresip's own `menu` module | baresip only |
 | SRTP, phone to phone | connected under SDES against baresip's own `baresip-srtp` account (`interop/baresip/config/accounts`, `mediaenc=srtp-mand`) — refused rather than answered plainly if that peer will not key it either | baresip only |
 | DTLS-SRTP, phone to phone | connected against baresip's own `baresip-dtls` account, keyed by its own handshake exactly as the DTLS-SRTP row above asks of a server — baresip's `dtls_srtp` module self-signs its own certificate at startup and is checked by fingerprint alone, the same RFC 8122 §5 / RFC 5763 §5 check Asterisk's `dtls_auto_generate_cert=yes` stands in for — a third independent DTLS-SRTP implementation, on the far side of a call this stack placed rather than answered | baresip only |
-| hold with a codec change | as hold, but between the hold and the resume the call is moved onto a narrower codec list while it stays held (`MediaEngine::change_codecs`, the 8.2.1 case): the far end's answer names a different codec than the one the call held on, the hold survives the change, and the resume keeps the new codec | Asterisk only |
+| hold with a codec change | as hold, but between the hold and the resume the call is moved onto a narrower codec list while it stays held (`MediaEngine::change_codecs`): the far end's answer names a different codec than the one the call held on, the hold survives the change, and the resume keeps the new codec | Asterisk only |
 | local conference | two calls placed on one account — one to the lab's own tone extension (9000), one to its echo extension (9008, `Answer(); Echo();`) — joined with `MediaEngine::join` and driven a frame at a time with `MediaEngine::mix`; passes once several frames are audible while the tone extension's own cadence says it should be silent, which only the echo extension playing back what this end had just relayed to it can produce (`interop/harness/src/join.rs`'s own module documentation has the reasoning) | Asterisk only |
 | forked, the second phone answering first | three stacks in one harness run (`interop/harness/src/fork.rs`): a desk and a mobile register as the one user `interop/kamailio/kamailio.cfg` forks — `forked`, looked up and relayed to every binding in parallel, which no other flow dials — the mobile second; a third calls that user. The desk rings at once and never answers, the mobile rings 400 ms later and answers at 1.2 s, so the call placed is the desk's early dialog and the mobile's is the sibling `UaEvent::CallForked` announced, and the first 2xx is the sibling's. Passes when `ForkPolicy::KeepFirst` kept the sibling (`CallConfirmed` on it), the branch placed ended `ForkLost`, the desk saw Kamailio's CANCEL (its call ended `Cancelled`), the mobile's call lasted until the caller hung up three seconds later, and at least ten frames of tone crossed each way on the branch kept. A run where the desk's branch answered instead fails as proving nothing. Run with `scripts/lab.sh kamailio`, or alone with `SIPRAL_FLOWS=fork`. On 25 September 2026, on the Linux x86-64 lab machine, it passed with 118 audible frames at the caller and 119 at the mobile; the same step built with the user agent as it was before the fix failed it, the mobile's branch hung up by the caller the moment it answered | Kamailio only |
 | MESSAGE, echoed | an out-of-dialog MESSAGE (`UserAgent::message`) sent to the lab's own echo extension (`interop/asterisk/extensions.conf`'s 9006, `MessageSend()`), answered with success (`UaEvent::MessageSent`), and a MESSAGE of the dialplan's own arriving back (`UaEvent::MessageReceived`) — proving both directions, not only that this end's own send was accepted | Asterisk only |
@@ -699,7 +710,7 @@ back, audible, refused, and the session's own `Quality` (loss, jitter, delay
 against target, how much the buffer shrank or stretched) — read off what
 `MediaSession::capture`, `receive` and `playback` actually did on the wire,
 frame by frame, the same as a real application watching its own socket would
-read it. Since 8.6.9 the same line also carries the R factor and the two
+read it. The same line also carries the R factor and the two
 mean opinion scores `StreamStatistics::voip_metrics` reports — "n/a" for
 G.722 and Opus, which G.113 tabulates no `Ie`/`Bpl` for, rather than a
 guessed number — so every flow that negotiates PCMU or PCMA reads a MOS.
@@ -758,12 +769,15 @@ at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,
 language, whether an internal file or a capture has reached the tree, and
 whether the seed corpus still matches the targets it belongs to and holds
-only what the rest of the tree is allowed to hold. A tool that
+only what the rest of the tree is allowed to hold, the dotnet and Kotlin/JVM
+bindings built and tested, the Swift package built and tested, and a
+`package --dry-run` over `scripts/package/*.sh`. A tool that
 is missing fails the step rather than skipping it: a gate that goes green
-without the scanner has not looked. The one exception is `cargo fuzz`, which
-needs a nightly toolchain and a cargo subcommand a clone will not have: that
-step says `skip` and names what is missing, because the alternative is a gate
-nobody outside this machine can run at all. It must exit zero before a commit
+without the scanner has not looked. The exceptions are the toolchains a
+plain Rust clone will not have: the fuzz nightly and `cargo-fuzz`, a JDK (the
+JNI shim), the .NET SDK, a Kotlin compiler and a full Xcode for SwiftPM. Each
+of those steps says `skip` and names what to install, and a run with any
+skip has not checked that binding. It must exit zero before a commit
 exists. `--hygiene-only` skips the build for a fast pass.
 
 `scripts/lab.sh` runs the container lab: the four servers, the flows against

@@ -9,9 +9,10 @@ Everything Sipral implements comes from this list. Nothing in the tree is
 derived from another implementation; see [02-clean-room.md](02-clean-room.md).
 
 Status names the phase from [10-roadmap.md](10-roadmap.md) that delivers the
-row. Whether a phase's rows are met is recorded there, not repeated here. A row
-marked *written, not linked* is implemented and tested in its crate and reached
-by no call yet.
+row. Whether a phase's rows are met is recorded there, not repeated here.
+*built* and *done* both mean implemented and reached from a call; a bare
+phase means the row is delivered by that phase, and 10-roadmap.md records
+whether it is met; *in part* is followed by what is missing.
 
 ## Signalling
 
@@ -47,6 +48,11 @@ by no call yet.
 | 7118 | SIP over WebSocket | sipral-core | phase 1, in part |
 | 3323 / 3325 | Privacy, and asserted identity | sipral-ua | phase 2 |
 | 4475 | SIP torture test messages | test corpus | phase 1 |
+| 7616 | HTTP Digest: challenge, `qop`, nonce count restarted only for a new nonce (§3.4) | sipral-core | phase 1 |
+| 6086 | The INFO framework, for DTMF over SIP INFO | sipral-ua | phase 2 |
+| 3903 | PUBLISH, for the RFC 6035 report only | sipral-ua | phase 2 |
+| 3841 | Caller preferences headers carried | sipral-ua | phase 1 |
+| 2543 | Backward compatibility: tagless `From`, branch without the magic cookie | sipral-core | phase 1 |
 
 ## Media
 
@@ -57,7 +63,7 @@ by no call yet.
 | 4733 | RTP payload for DTMF, both directions. The packet and the timestamp rules are `sipral-rtp`'s; the schedule is the facade's, because a packet per captured frame needs a frame boundary and the layer that writes the packet never sees one | sipral-rtp, sipral | phase 2 |
 | 3711 | SRTP | sipral-rtp | phase 2 |
 | 4568 | SDES key exchange in SDP | sipral-core | phase 2 |
-| 5764 | DTLS-SRTP: the `use_srtp` extension and the keys it exports. Negotiated by the handshake in `sipral-dtls` — required in both hellos, the profile chosen by the server from the client's list, no MKI agreed — and the key layout of §4.2 for `SRTP_AES128_CM_HMAC_SHA1_80` and `_32` exported once both Finished messages are verified; keying `sipral-rtp` with them is not written | sipral-dtls, sipral-rtp | phase 2; done, and keying `sipral-rtp` with the export is `sipral`'s `dtls` feature |
+| 5764 | DTLS-SRTP: the `use_srtp` extension and the keys it exports. Negotiated by the handshake in `sipral-dtls` — required in both hellos, the profile chosen by the server from the client's list, no MKI agreed — and the key layout of §4.2 for `SRTP_AES128_CM_HMAC_SHA1_80` and `_32` exported once both Finished messages are verified | sipral-dtls, sipral-rtp | phase 2; done, and keying `sipral-rtp` with the export is `sipral`'s `dtls` feature |
 | 5763 | The DTLS-SRTP framework: a certificate from both ends, each checked against the fingerprint the other's signalling carried, and `a=setup` deciding which end sends the ClientHello. The handshake half is in `sipral-dtls` | sipral-dtls | phase 2; done, both halves — the facade writes the fingerprint and the role and starts the handshake |
 | 8827 | WebRTC security, §6.5 only: the suite and curve every peer supports, no NULL SRTP profile, no MKI, renegotiation refused with `no_renegotiation` | sipral-dtls | phase 2; done |
 | 6347 | DTLS 1.2, both roles, written in-tree over permissively licensed primitives; no renegotiation, no resumption. The record layer with its epoch, 48-bit sequence number and anti-replay window; handshake fragmentation and bounded reassembly; the client and server state machines with the server's stateless HelloVerifyRequest cookie; flight retransmission on the timer of §4.2.4.1; alerts and closure | sipral-dtls | phase 2; done, driven from `MediaSession` |
@@ -84,6 +90,7 @@ by no call yet.
 | 4856 | Media type registrations for the RTP audio payloads, among them `audio/G729` and its `annexb` parameter (§2.1.9, carried over from RFC 3555 §4.1.9): absent means yes | sipral | phase 2; done for G.729 — an offer states `annexb=yes` (or `no`, per `CodecCatalog::with_g729_annex_b`), an answer follows the offer, and the encoder uses Annex B only where both said yes; a re-offer the user agent answers by itself echoes the offer's value |
 | 3611 | RTCP-XR: the XR packet and the VoIP Metrics report block (§4.7), including the Appendix A.2 burst/gap classification, negotiated with `a=rtcp-xr` (§5) on both offer and answer. The R factor and the two MOS fields come from a simplified ITU-T G.107 E-model, with the codec's own G.113 Appendix I `Ie`/`Bpl` mapped in `sipral`; a codec G.113 does not tabulate reports its own §4.7.5 "unavailable" sentinel rather than a guess | sipral-rtp, sipral-core, sipral | phase 2; done |
 | 6035 | Quality reports published as `vq-rtcpxr` over a PUBLISH (RFC 3903) when an account names a collector, once per call on call end. Only the `LocalMetrics` set is written; `RemoteMetrics` needs a channel to the far end's own measurement that does not exist | sipral-ua, sipral | phase 2; done |
+| 8842 | `a=setup` in re-offers | sipral | phase 2; done |
 
 ## NAT
 
@@ -92,10 +99,10 @@ by no call yet.
 | 8489 | STUN | sipral-nat, sipral, sipral-ua | phase 2; done — the Binding client reached through `sipral::Mappings` and `SIPRAL_NAT_STUN`, its answer in the `Contact` and in `c=`/`m=` |
 | 5389 | STUN, previous version, for compatibility | sipral-nat | phase 2; the same client, which reads a server that has not moved |
 | 8656 | TURN | sipral-nat, sipral | phase 4; over UDP, a relay allocated before the call by `sipral::Relays` (`turn_server` in the C ABI) and taken over by the full ICE agent as the relayed candidate; TCP and TLS to the server written in the client, not carried by the agent |
-| 8445 | ICE, lite role | sipral-nat | phase 2; written, not linked |
+| 8445 | ICE, lite role | sipral-nat | phase 2; done: `IcePolicy::Lite`, in a build with the `headless` feature, for a host reachable at the address it advertises (the headless agent on a server) |
 | 8445 | ICE, full role: gathering, checks, nomination, role conflicts, restarts. Off by default on a desktop | sipral-nat, sipral | phase 4; a host candidate, a server-reflexive one from the stack's own STUN mapping of the socket, and a relayed one from a TURN allocation made before the call; the agent asks no server itself before the offer |
 | 7675 | STUN consent freshness, for a session ICE established | sipral-nat, sipral | phase 4 |
-| 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2; written, not linked |
+| 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2; no separate code; the RFC 8445 agents answer an RFC 5245 peer (RFC 8445 §10) |
 | 8863 | ICE patiently awaiting connectivity: a checklist with nothing left to check is waited on, not failed | sipral-nat, sipral | phase 4 |
 | 8839 | SDP offer/answer procedures for ICE (`a=ice-lite`, `a=candidate`, `a=ice-pacing`, `a=ice-mismatch`); `a=remote-candidates` waits for an offer that would carry one | sipral-nat, sipral, sipral-ua | phase 2; the facade writes the attributes and the user agent carries them onto an answer it writes itself |
 | 7362 | Latching: hosted NAT traversal for media | sipral-rtp | phase 1 |

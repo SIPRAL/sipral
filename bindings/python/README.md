@@ -35,7 +35,8 @@ pip install -e .
 it), then beside this package, then the repository's own `target/release`
 and `target/debug` — build it first with `cargo build --release -p
 sipral-ffi`, or point `SIPRAL_LIBRARY` at a checkout's `target/debug`
-while developing against one.
+while developing against one. To build a platform wheel with the native
+library inside, run `scripts/package/wheels.sh` from the repository root.
 
 ## Use
 
@@ -45,14 +46,22 @@ from sipral import Stack
 
 async def main():
     loop = asyncio.get_running_loop()
-    with Stack(loop=loop) as stack:
+    with Stack(bind_host="192.0.2.10", loop=loop) as stack:
         account = stack.add_account(
             "sip:alice@example.invalid",
             registrar_address="203.0.113.10:5060",
+            registrar="sip:example.invalid",
+            auth_user="alice",
+            auth_password=secret,
         )
         account.register()
 
-        call = stack.place_call(account, "sip:bob@example.invalid")
+        # Without `registrar` the account never registers: registering
+        # throws, and the registrar address is only the outbound proxy.
+        # The stack and media sockets default to 127.0.0.1, so name an
+        # address the registrar can reach.
+
+        call = stack.place_call(account, "sip:bob@example.invalid", media_host="192.0.2.10")
         while call.media is None:
             event = await call.events.get()
             print(event.kind_name)
@@ -94,7 +103,7 @@ dialplan sends.
 
 ## What is not here
 
-Wheels with the native library bundled in (a later task); `numpy` support
+`numpy` support
 for `call.media` (accepted wherever `bytes`/`memoryview` is, but never
 required — `array.array('h', ...)` or a `numpy` array's `.tobytes()` work
 today); a DNS resolver for `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` beyond

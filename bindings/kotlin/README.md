@@ -24,6 +24,18 @@ shared library, `libsipral_ffi.dylib` or `libsipral_ffi.so`, which is what a
 JVM can load; the Kotlin side loads it as `sipral_jni` and checks the ABI
 version as it does.
 
+```sh
+cc -std=c11 -dynamiclib -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/darwin" \
+    -Ibindings/c/include -o libsipral_jni.dylib \
+    bindings/kotlin/sipral/src/main/jni/sipral_jni.c \
+    bindings/kotlin/sipral/src/main/jni/idiomatic_media.c \
+    -Ltarget/release -lsipral_ffi
+```
+
+On Linux, `-shared -fPIC` in place of `-dynamiclib`, `include/linux` in place
+of `include/darwin`, and `libsipral_jni.so` in place of `.dylib`. Run with
+`-Djava.library.path` naming the directory the shim landed in.
+
 ```kotlin
 val stack = Sipral.stackCreate(
     SipralStackConfig(
@@ -69,9 +81,15 @@ when the ABI call that started them returns.
 
 ```kotlin
 val client = SipralClient.open(bindHost = "192.0.2.10")
-val account = client.addAccount("sip:alice@example.com", registrarAddress = "203.0.113.5:5060")
+val account = client.addAccount(
+    "sip:alice@example.com",
+    registrarAddress = "203.0.113.5:5060",
+    registrar = "sip:example.com",
+    authUser = "alice",
+    authPassword = secret,
+)
 account.registerAndWait()
-val call = client.placeCall(account, "sip:bob@example.com")
+val call = client.placeCall(account, "sip:bob@example.com", mediaHost = "192.0.2.10")
 call.waitConfirmed()
 call.hold(); call.resume()
 call.sendDtmf("123#")
@@ -79,14 +97,20 @@ call.hangup()
 client.close()
 ```
 
+Without `registrar` the account never registers: registering throws, and
+the registrar address is only the outbound proxy. The stack and media
+sockets default to 127.0.0.1, so name an address the registrar can reach.
+
 Two structs the generated shim has no way to build from Kotlin —
 `sipral_media_packet_t` and `sipral_transmit_t`, "two structs a caller
 part-fills with buffers" the paragraph above still names — are what
 `SipralMedia`/`SipralClient` need to drive real RTP and to drain outgoing
 SIP messages; `sipral/src/main/jni/idiomatic_media.c` is a second,
-hand-written shim beside the generated one, exposing just those four ABI
-calls as plain byte arrays, linked into the same `libsipral_jni` the
-generated shim already loads.
+hand-written shim beside the generated one, exposing the five ABI calls
+that take them (`sipral_media_capture`, `sipral_media_poll_rtcp`,
+`sipral_media_poll_transmit`, `sipral_stack_poll_farewell`,
+`sipral_stack_poll_transmit`) as plain byte arrays, linked into the same
+`libsipral_jni` the generated shim already loads.
 
 It depends on `kotlinx-coroutines-core-jvm` (Apache-2.0,
 `THIRD-PARTY-NOTICES.md`), fetched once into a cache outside the repository
@@ -174,10 +198,10 @@ Split in two, so that the part worth testing needs no Android:
   bridge. What the connection tells the framework cannot be seen there, and
   waits for a device.
 
-Which announcement an INVITE answered is in the event payload, which does not
-cross this binding yet, so `TelecomBridge` chooses among its own by the same
-rule the library applied -- same account, same user and host in `From`,
-oldest first on a tie -- and they agree whenever the two readings of the URI
+`SIPRAL_EVENT_KIND_CALL_ANNOUNCED` names the announcement an INVITE answered
+in `event.payload.announce.announcement`. `TelecomBridge` still matches by
+its own rule (same account, same user and host in `From`, oldest first on a
+tie), which agrees with the library's whenever the two readings of the URI
 do. An `ANNOUNCED_CALL_MISSING` is the oldest announcement still waiting,
 because every announcement waits the same window.
 
