@@ -149,7 +149,7 @@ the socket.
   request moves onto a TCP transport the caller has already bound to the same
   destination. If there is none, nothing is sent: the call returns
   `SendError::NeedsStreamTransport`, and `Event::TransportWanted {
-  destination, request_bytes, limit_bytes }` asks the caller to open one and
+  protocol, destination, request_bytes, limit_bytes }` asks the caller to open one and
   send again. Both figures are configurable (`EndpointConfig::datagram_limit`).
 - **`Via` handling.** `branch` with the `z9hG4bK` magic cookie, `rport` per RFC
   3581 always requested, `received` and `rport` honoured on responses. Symmetric

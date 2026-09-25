@@ -247,7 +247,7 @@ while replay.next_at().is_some() {
 
 The simplest way is built in. `UserAgent::start_recording(Some("note"))`
 starts one, and `UserAgent::stop_recording()` hands back the `Recording` (or
-the `RecordError`). From C, `sipral_stack_recording_start` and
+the `RecordError`), or `None` when nothing was being recorded. From C, `sipral_stack_recording_start` and
 `sipral_stack_recording_stop` do the same and copy out the text. Both use the
 seed the stack was built with. They record arrivals and wakes only, with no
 cues and no `resolved` answers, so a replay of one has to repeat the
