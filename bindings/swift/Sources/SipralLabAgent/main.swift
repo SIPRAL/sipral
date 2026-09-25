@@ -19,6 +19,7 @@ import Darwin
 #elseif canImport(Glibc)
 import Glibc
 #endif
+import Dispatch
 import Sipral
 
 // Unbuffered: this agent's log is read from `docker logs` while it is still
@@ -112,8 +113,39 @@ struct CallStreams: Sendable {
     }
 }
 
+/// The last statistics read while the call was up. Once the far end's BYE
+/// is answered the stack ends the call's media on its own poll thread, and a
+/// statistics call after that answers that the media has ended rather than
+/// with numbers -- so the call is read every 200 ms while it lasts, and the
+/// numbers printed at the end are the last ones that came back.
+final class LastStatistics: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "org.sipral.lab-agent.statistics")
+    private var sent: UInt64 = 0
+    private var received: UInt64 = 0
+
+    func read(_ media: Media?) {
+        guard let media, let stats = try? media.statistics() else { return }
+        queue.sync {
+            sent = stats.packets_sent
+            received = stats.packets_received
+        }
+    }
+
+    var counts: (sent: UInt64, received: UInt64) {
+        queue.sync { (sent, received) }
+    }
+}
+
 func runCall(_ call: Call, _ streams: CallStreams) async {
     print("answered \(String(call.handle, radix: 16))")
+
+    let last = LastStatistics()
+    let statisticsTask = Task {
+        while !Task.isCancelled {
+            last.read(call.media)
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
 
     let talkTask = Task {
         for await frame in await mediaFrames(of: call, watching: streams.forMedia) {
@@ -140,20 +172,9 @@ func runCall(_ call: Call, _ streams: CallStreams) async {
     }
     talkTask.cancel()
 
-    var sent: UInt64 = 0
-    var received: UInt64 = 0
-    func captureStats(_ media: Media?) {
-        guard let media, let stats = try? media.statistics() else { return }
-        sent = stats.packets_sent
-        received = stats.packets_received
-    }
-
     if termination == .hangupRequested {
-        // Read while the call is still up: once the BYE is answered the
-        // stack ends the call's media on its own poll thread, and a
-        // statistics call after that answers that the media has ended
-        // rather than with numbers.
-        captureStats(call.media)
+        // The call is still up, so this last reading is the final count.
+        last.read(call.media)
         // Read fresh from the stack, not from an event: an answered call
         // stays ringing until its ACK arrives, so "confirmed" here is this
         // end's word that the caller acknowledged the 200 OK.
@@ -161,12 +182,12 @@ func runCall(_ call: Call, _ streams: CallStreams) async {
             print("state \(String(call.handle, radix: 16)): \(state)")
         }
         try? call.hangup()
-    } else {
-        captureStats(call.media)
     }
+    statisticsTask.cancel()
     call.close()
 
-    print("ended \(String(call.handle, radix: 16)): packets_sent=\(sent) packets_received=\(received)")
+    let counts = last.counts
+    print("ended \(String(call.handle, radix: 16)): packets_sent=\(counts.sent) packets_received=\(counts.received)")
 }
 
 let registrarAddress = environmentValue("SIPRAL_REGISTRAR_ADDRESS") ?? "127.0.0.1:5060"

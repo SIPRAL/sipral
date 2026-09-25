@@ -708,9 +708,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   statistics only once the far end had already ended it, racing the moment
   `sipral_media_statistics` starts answering `WRONG_STATE` (its own numbers
   arrive with `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` instead) — printing -1 in
-  Kotlin and .NET, an empty record in Python. All three now poll the numbers
-  every 200 ms while the call is up, so what `ended` prints is real either
-  way, not a race against teardown.
+  Kotlin and .NET, an empty record in Python, zeros in the Swift
+  `SipralLabAgent`. All four now poll the numbers every 200 ms while the call
+  is up, so what `ended` prints is real either way, not a race against
+  teardown.
 - **The Android sample's screen no longer sits under the status bar.** An
   application targeting Android 15 is drawn edge to edge, and the sample's
   first field and heading were under the clock, with the status bar's white
