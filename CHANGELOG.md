@@ -1119,7 +1119,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   still reported ended. A media's streams finish when it ends, a stack's
   when it closes. A reader that falls behind drops its own oldest items —
   past 4096 events or digits, past 50 frames unless it asks for another
-  number — and never slows the others.
+  number — and never slows the others. `CallKitBridge` also covers the one
+  case where a call's stream finishes without ever handing over
+  `CALL_ENDED` — the application hanging up and closing a bound call
+  without reading its own `events()` first — by still reporting the call
+  ended and forgetting it.
 - **The packaged artefacts leave libopus out unless asked for it.** The
   XCFramework, wheel, NuGet and AAR scripts build the C ABI without the
   `opus` feature by default, with every other default feature kept;

@@ -100,6 +100,19 @@ public final class CallKitBridge: @unchecked Sendable {
                     break
                 }
             }
+            // The stream finished without ever handing over `.callEnded`:
+            // `Call.close()` forgets the call and finishes its broadcasts
+            // synchronously, ahead of the stack's own asynchronous delivery
+            // of the CALL_ENDED that a hangup it just issued will raise
+            // (`SipralStack.forgetCall` runs before that event can ever
+            // reach `Call.deliver`) -- reachable whenever an application
+            // hangs up and closes a bound call without reading its own
+            // events() first. CallKit still has to be told, and this uuid
+            // still has to be forgotten, or the call screen and this
+            // bridge's own bookkeeping would both outlive the call.
+            guard let self else { return }
+            provider.reportCallEnded(uuid: uuid, reason: .localHangup)
+            self.unbind(uuid: uuid)
         }
         // A call that had already ended can be unbound by its own task
         // before this line runs; keeping the task then would keep it for

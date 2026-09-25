@@ -156,6 +156,42 @@ final class CallKitBridgeTests: XCTestCase {
         let unbound = await eventually(within: 5) { bridge.call(for: uuid) == nil }
         XCTAssertTrue(unbound, "a call bound after it ended must be unbound again")
     }
+
+    /// `Call.close()` forgets the call and force-finishes its broadcasts
+    /// synchronously; a hangup it just issued still owes the stack an
+    /// asynchronous CALL_ENDED, which can now never reach this call's
+    /// `deliver` (the call is already forgotten by the time it would).
+    /// Bob's own application code never reads `bobCall.events()` here, the
+    /// same shape as `testHandlesReleaseWithNoUseAfterFreeWhilePendingEventsExist`
+    /// -- only the bridge is watching -- so the bridge is the only thing
+    /// that can be left holding a call CallKit still thinks is live.
+    func testBridgeStillReportsEndedWhenTheApplicationHangsUpAndClosesWithoutReadingEvents() async throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
+        defer { aliceCall.close() }
+
+        let provider = RecordingProvider()
+        let bridge = CallKitBridge(provider: provider)
+        let uuid = UUID()
+        bridge.bind(uuid: uuid, to: bobCall)
+        try bridge.handleAnswer(uuid: uuid)
+        _ = await eventually(within: 5) { await provider.connected.contains(uuid) }
+
+        // Bob hangs up and closes right away -- no draining of events()
+        // first, the same shape as
+        // testHandlesReleaseWithNoUseAfterFreeWhilePendingEventsExist.
+        try bobCall.hangup()
+        bobCall.close()
+
+        let reported = await eventually(within: 5) { await provider.ended.contains { $0.uuid == uuid } }
+        XCTAssertTrue(reported, "the bridge never reported the call ended")
+        let endReason = await provider.ended.first { $0.uuid == uuid }?.reason
+        XCTAssertEqual(endReason, .localHangup)
+        let unbound = await eventually(within: 5) { bridge.call(for: uuid) == nil }
+        XCTAssertTrue(unbound, "a call closed out from under the bridge must still be unbound")
+    }
 }
 
 private extension RecordingProvider {
