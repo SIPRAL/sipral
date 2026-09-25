@@ -106,6 +106,8 @@
 //! played signal leaping by something of the order of its own amplitude,
 //! which is what "far above the signal's own slope" means in practice.
 
+use std::collections::VecDeque;
+
 use sipral::Playback;
 
 use crate::audio;
@@ -161,6 +163,22 @@ const CLICK_MARGIN_FRACTION: f64 = 0.6;
 /// them.
 pub(crate) const MIN_SEGMENTAL_SNR_DB: f64 = 10.0;
 
+/// Samples played before a splice that a click's evidence carries.
+const EVIDENCE_BEFORE: usize = 8;
+
+/// Samples played from a splice on that a click's evidence carries: enough to
+/// see whether the audio went on from the jump as smoothly as the tone does,
+/// or jumped back.
+const EVIDENCE_AFTER: usize = 16;
+
+/// Frames of playback history a click's evidence carries, the frame it was
+/// found on last.
+const HISTORY: usize = 12;
+
+/// Clicks a call keeps the evidence of. The verdict needs one; a handful
+/// shows whether they share a shape.
+const EVIDENCE_KEPT: usize = 4;
+
 /// How many samples a run's fit is taken over, at `rate` — see the module
 /// doc for why this particular count rather than one frame's worth.
 fn seed_window(rate: u32) -> usize {
@@ -211,6 +229,9 @@ struct Run {
     /// b2*sin(w2*n)`.
     coefficients: [f64; 4],
     last_sample: f64,
+    /// The last [`EVIDENCE_BEFORE`] samples taken, oldest first, for a
+    /// click's evidence.
+    tail: Vec<i16>,
     last_kind: Kind,
     /// Whether a frame has been scored yet. The run's first frame seeds
     /// `last_sample` rather than being compared against it — there is
@@ -224,6 +245,7 @@ impl Run {
             n: 0,
             coefficients,
             last_sample: 0.0,
+            tail: Vec::with_capacity(EVIDENCE_BEFORE),
             last_kind: Kind::Packet,
             seeded: false,
         }
@@ -239,6 +261,75 @@ struct Counters {
     concealed_frames: u32,
     edges_checked: u32,
     clicks: u32,
+    /// The largest jump any splice took, as a fraction of its threshold.
+    worst: f64,
+    /// The first [`EVIDENCE_KEPT`] clicks, sample by sample.
+    splices: Vec<Splice>,
+}
+
+/// What a splice that clicked actually played: the samples either side of it
+/// against the fitted tone, and the frames that led up to it. A click is a
+/// claim about a waveform, and a verdict that says only that one happened
+/// leaves nobody able to tell a real discontinuity from a threshold that read
+/// a smooth one wrong — which is how the first threshold of this gate was
+/// found out.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Splice {
+    /// Real audio giving way to concealment, rather than the other way.
+    into_concealment: bool,
+    jump: f64,
+    threshold: f64,
+    steepest: f64,
+    /// [`EVIDENCE_BEFORE`] samples before the splice and up to
+    /// [`EVIDENCE_AFTER`] from it, as played.
+    played: Vec<i16>,
+    /// The fitted tone over the same samples.
+    reference: Vec<i16>,
+    /// The frames leading up to it, the one it was found on last, as
+    /// [`Gate`] saw them: filled in by [`Gate::observe`], since [`score`]
+    /// sees only the run.
+    frames: String,
+}
+
+impl Splice {
+    /// Several lines: what jumped, by how much, and the samples it did it in.
+    pub(crate) fn describe(&self) -> String {
+        let row = |values: &[i16]| {
+            let (before, after) = values.split_at(EVIDENCE_BEFORE.min(values.len()));
+            let join = |part: &[i16]| {
+                part.iter()
+                    .map(i16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            format!("{} | {}", join(before), join(after))
+        };
+        format!(
+            "splice {} concealment: jump {:.0} against a threshold of {:.0} \
+             (the tone's steepest step {:.0})\n  played {}\n  tone   {}\n  frames {}",
+            if self.into_concealment {
+                "into"
+            } else {
+                "out of"
+            },
+            self.jump,
+            self.threshold,
+            self.steepest,
+            row(&self.played),
+            row(&self.reference),
+            self.frames
+        )
+    }
+}
+
+/// The fitted tone as a sample, for a click's evidence.
+// the reference is fitted to i16 samples and stays within a few per cent of
+// their range, and the saturating cast is what a sample outside it would get
+#[allow(clippy::cast_possible_truncation)]
+fn as_sample(value: f64) -> i16 {
+    value
+        .round()
+        .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
 }
 
 /// Where a call's gate stands: nothing in progress, a run whose fit is still
@@ -415,10 +506,33 @@ fn score(
         let steepest = steepest_step(run.coefficients, w_low, w_high);
         counters.edges_checked = counters.edges_checked.saturating_add(1);
         let threshold = steepest + CLICK_FLOOR + CLICK_MARGIN_FRACTION * steepest;
+        counters.worst = counters.worst.max(observed / threshold);
         if observed > threshold {
             counters.clicks = counters.clicks.saturating_add(1);
+            if counters.splices.len() < EVIDENCE_KEPT {
+                let after = samples.get(..EVIDENCE_AFTER).unwrap_or(samples);
+                let played: Vec<i16> = run.tail.iter().chain(after).copied().collect();
+                let first = run.n.saturating_sub(run.tail.len() as u64);
+                let reference = (0..played.len() as u64)
+                    .map(|k| as_sample(reference_at(run.coefficients, first + k, w_low, w_high)))
+                    .collect();
+                counters.splices.push(Splice {
+                    into_concealment: kind == Kind::Concealed,
+                    jump: observed,
+                    threshold,
+                    steepest,
+                    played,
+                    reference,
+                    frames: String::new(),
+                });
+            }
         }
     }
+    let keep = samples.len().min(EVIDENCE_BEFORE);
+    let excess = (run.tail.len() + keep).saturating_sub(EVIDENCE_BEFORE);
+    run.tail.drain(..excess.min(run.tail.len()));
+    run.tail
+        .extend_from_slice(samples.get(samples.len() - keep..).unwrap_or_default());
 
     let mut frame_signal = 0.0_f64;
     let mut frame_noise = 0.0_f64;
@@ -476,6 +590,13 @@ pub(crate) struct Gate {
     window: usize,
     state: State,
     counters: Counters,
+    /// The last [`HISTORY`] frames observed, for a click's evidence: each
+    /// one's kind and its loudness ([`audio::loudness`]).
+    history: VecDeque<(char, i32)>,
+    /// Whether the frame about to be observed is concealment the jitter
+    /// buffer asked for to stretch a pause, rather than for a packet lost —
+    /// [`Gate::stretched`].
+    stretching: bool,
 }
 
 impl Gate {
@@ -486,7 +607,29 @@ impl Gate {
             window: 0,
             state: State::Empty,
             counters: Counters::default(),
+            history: VecDeque::with_capacity(HISTORY),
+            stretching: false,
         }
+    }
+
+    /// Say that the next frame [`Gate::observe`] takes is a pause being
+    /// stretched rather than a packet concealed. `Playback` reports both as
+    /// [`Playback::Concealed`], and a click's evidence is only worth reading
+    /// if it tells the two apart.
+    pub(crate) const fn stretched(&mut self) {
+        self.stretching = true;
+    }
+
+    /// The history as a click's evidence prints it: `P` a packet loud enough
+    /// to be the tone and `p` one that is not, `C` a packet concealed, `S` a
+    /// pause stretched, `N` comfort noise and `_` silence, each with its
+    /// loudness.
+    fn frames(&self) -> String {
+        self.history
+            .iter()
+            .map(|(tag, loud)| format!("{tag}{loud}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Take one played frame: `outcome` is what
@@ -494,9 +637,32 @@ impl Gate {
     /// it wrote, and `rate` is the session's current sample rate — read
     /// fresh every call because nothing here assumes it cannot change.
     pub(crate) fn observe(&mut self, outcome: Playback, samples: &[i16], rate: u32) {
+        let stretching = std::mem::take(&mut self.stretching);
         if samples.is_empty() {
             return;
         }
+        let tag = match outcome {
+            Playback::Packet if audio::is_audible(samples) => 'P',
+            Playback::Packet => 'p',
+            Playback::Concealed if stretching => 'S',
+            Playback::Concealed => 'C',
+            Playback::ComfortNoise => 'N',
+            _ => '_',
+        };
+        if self.history.len() == HISTORY {
+            self.history.pop_front();
+        }
+        self.history.push_back((tag, audio::loudness(samples)));
+        let found = self.counters.splices.len();
+        self.see(outcome, samples, rate);
+        let frames = self.frames();
+        for splice in self.counters.splices.iter_mut().skip(found) {
+            splice.frames.clone_from(&frames);
+        }
+    }
+
+    /// [`Gate::observe`] without the evidence it keeps.
+    fn see(&mut self, outcome: Playback, samples: &[i16], rate: u32) {
         if self.rate != Some(rate) {
             // a rate this call has not seen before: a fit made under the old
             // one describes nothing under the new one
@@ -613,6 +779,8 @@ impl Gate {
             concealed_frames: self.counters.concealed_frames,
             edges_checked: self.counters.edges_checked,
             clicks: self.counters.clicks,
+            worst_splice: self.counters.worst,
+            splices: self.counters.splices.clone(),
         }
     }
 }
@@ -624,7 +792,7 @@ fn angular(freq_hz: f64, rate: u32) -> f64 {
 }
 
 /// What [`Gate::report`] measured over one call.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Report {
     /// Playback frames scored for segmental SNR: `Playback::Packet`, loud
     /// enough to be the tone.
@@ -640,6 +808,12 @@ pub(crate) struct Report {
     /// Of those, the ones whose jump was far enough above the reference's
     /// own to count as a click.
     pub(crate) clicks: u32,
+    /// The largest jump any splice took, as a fraction of the threshold it
+    /// was held to: how near the call came to clicking, which a count of
+    /// clicks says nothing about until it is one.
+    pub(crate) worst_splice: f64,
+    /// The first few clicks, sample by sample.
+    pub(crate) splices: Vec<Splice>,
 }
 
 impl Report {
@@ -669,19 +843,36 @@ impl Report {
     /// the gate passed, so a profile's own line always says what it found.
     pub(crate) fn summary(&self) -> String {
         format!(
-            "segSNR {:.1}dB over {} frames, concealed {}, clicks {}/{}",
+            "segSNR {:.1}dB over {} frames, concealed {}, clicks {}/{}, \
+             worst splice {:.0}% of its threshold",
             self.mean_seg_snr_db,
             self.segments,
             self.concealed_frames,
             self.clicks,
-            self.edges_checked
+            self.edges_checked,
+            self.worst_splice * 100.0
         )
+    }
+
+    /// Every click kept, one indented block each, for the lines under a
+    /// failure: empty when nothing clicked.
+    pub(crate) fn evidence(&self) -> String {
+        let mut lines = String::new();
+        for splice in &self.splices {
+            for line in splice.describe().lines() {
+                lines.push_str("\n        ");
+                lines.push_str(line);
+            }
+        }
+        lines
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FREQ_HIGH, FREQ_LOW, Gate, MIN_SEGMENTAL_SNR_DB, angular};
+    use super::{
+        EVIDENCE_AFTER, EVIDENCE_BEFORE, FREQ_HIGH, FREQ_LOW, Gate, MIN_SEGMENTAL_SNR_DB, angular,
+    };
     use sipral::Playback;
 
     const RATE: u32 = 8_000;
@@ -883,6 +1074,83 @@ mod tests {
             "a jump onto the splice never clicked: {report:?}"
         );
         assert!(report.verdict().is_err());
+        assert!(report.worst_splice > 1.0, "{report:?}");
+    }
+
+    /// A click carries what it clicked on: the samples either side of the
+    /// splice, the tone they were held against, and the frames that led up
+    /// to it, a stretched pause told apart from a lost packet — so a failure
+    /// can be read sample by sample instead of taken on the count's word.
+    #[test]
+    fn a_click_carries_the_samples_it_was_found_in() {
+        let mut gate = Gate::new();
+        let mut n = 0_u64;
+        for _ in 0..8 {
+            gate.observe(
+                Playback::Packet,
+                &frame(n, 6_500.0, 4_200.0, 0.0, 0.0),
+                RATE,
+            );
+            n += FRAME as u64;
+        }
+        let before = frame(n - FRAME as u64, 6_500.0, 4_200.0, 0.0, 0.0);
+        let mut jumped = frame(n, 6_500.0, 4_200.0, 0.0, 0.0);
+        jumped[0] = jumped[0].saturating_add(9_000);
+        gate.stretched();
+        gate.observe(Playback::Concealed, &jumped, RATE);
+
+        let report = gate.report();
+        assert_eq!(report.splices.len(), 1, "{report:?}");
+        let splice = &report.splices[0];
+        assert!(splice.into_concealment);
+        assert_eq!(
+            splice.played[..EVIDENCE_BEFORE],
+            before[FRAME - EVIDENCE_BEFORE..]
+        );
+        assert_eq!(splice.played[EVIDENCE_BEFORE..], jumped[..EVIDENCE_AFTER]);
+        // the fitted tone matches the clean samples to within rounding
+        for (played, tone) in splice.played[..EVIDENCE_BEFORE]
+            .iter()
+            .zip(&splice.reference)
+        {
+            assert!((i32::from(*played) - i32::from(*tone)).abs() <= 2);
+        }
+        assert!(
+            splice
+                .frames
+                .rsplit(' ')
+                .next()
+                .is_some_and(|last| last.starts_with('S')),
+            "{}",
+            splice.frames
+        );
+        let evidence = report.evidence();
+        assert!(evidence.contains("into concealment"), "{evidence}");
+        assert!(evidence.contains(" | "), "{evidence}");
+        assert_eq!(evidence.lines().filter(|line| !line.is_empty()).count(), 4);
+    }
+
+    /// A call nothing clicked on still says how near it came.
+    #[test]
+    fn a_smooth_splice_reports_its_margin_and_no_evidence() {
+        let mut gate = Gate::new();
+        let mut n = 0_u64;
+        for kind in [Playback::Packet; 8]
+            .into_iter()
+            .chain([Playback::Concealed])
+            .chain([Playback::Packet; 2])
+        {
+            gate.observe(kind, &frame(n, 6_500.0, 4_200.0, 0.0, 0.0), RATE);
+            n += FRAME as u64;
+        }
+        let report = gate.report();
+        assert_eq!(report.edges_checked, 2, "{report:?}");
+        assert!(report.splices.is_empty());
+        assert!(report.evidence().is_empty());
+        assert!(
+            report.worst_splice > 0.0 && report.worst_splice < 1.0,
+            "{report:?}"
+        );
     }
 
     /// A concealed frame landing inside the seed window -- before the run

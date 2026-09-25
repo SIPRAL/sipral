@@ -448,7 +448,20 @@ impl Media {
         let mut played = [0_i16; MAX_SAMPLES];
         while now >= self.next_play {
             let room = played.get_mut(..frame).unwrap_or_default();
+            // the gate's evidence tells a pause stretched from a packet
+            // concealed, which `Playback` reports alike; the buffer's own
+            // count moving across the frame is what says which it was
+            let stretched = self
+                .quality
+                .is_some()
+                .then(|| session.statistics(now).quality.stretched);
             let outcome = session.playback(room);
+            if let Some(before) = stretched
+                && session.statistics(now).quality.stretched > before
+                && let Some(gate) = self.quality.as_mut()
+            {
+                gate.stretched();
+            }
             let audible = matches!(outcome, Playback::Packet) && loudness(room) >= AUDIBLE;
             if audible {
                 self.heard.audible = self.heard.audible.saturating_add(1);

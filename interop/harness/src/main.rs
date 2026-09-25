@@ -1836,11 +1836,27 @@ fn run(
     // still be a failure the ordinary facts above never see, if what it
     // carried clicked at a concealment splice or measured too noisy to
     // trust. See `quality`'s own module doc.
+    // A failure carries the path's own account beside it, and the clicks'
+    // evidence under it, since a click is a claim about a waveform that the
+    // count alone cannot be checked against.
     let quality = script.quality_report(&endpoint);
-    if let Some(report) = quality
+    if let Some(report) = quality.as_ref()
         && let Err(why) = report.verdict()
     {
-        return Err(format!("{why} ({})", report.summary()));
+        let path = script
+            .quality(&mut endpoint, Instant::now())
+            .map(|path| {
+                format!(
+                    "; lost {}, late {}, shrunk {}, stretched {}",
+                    path.lost, path.discarded_late, path.shrunk, path.stretched
+                )
+            })
+            .unwrap_or_default();
+        return Err(format!(
+            "{why} ({}{path}){}",
+            report.summary(),
+            report.evidence()
+        ));
     }
 
     if heard.sent == 0 {

@@ -134,6 +134,90 @@ tests, the smooth resume at a peak among them. Measured after the change on
 the lab VM: 31 calls on `mobile` and `lossy`, 176 splices checked, no click,
 segmental SNR between 18.9 and 34.4 dB.
 
+**A click shows its waveform.** The result line carries `worst splice N% of
+its threshold`, how near the call came to clicking, and a call that fails on
+a click prints each one under the failure: the eight samples before the
+splice and sixteen from it, as played and as the fitted tone, and the twelve
+frames that led up to it — `P` a packet loud enough to be the tone, `p` one
+that is not, `C` a lost packet concealed, `S` a pause stretched by the
+jitter buffer (`Playback` reports both as `Concealed`; the harness tells them
+apart by the buffer's own count), `N` comfort noise, `_` silence — each with
+its loudness.
+
+A `lossy` run on 25 September failed on one click and the three runs after
+it passed, the day the jitter buffer had changed how it holds a frame in
+pauses, so the two playouts were measured against each other on the lab VM:
+the harness built at the commit before that change and at the one after it,
+the same lab and the same evidence, alternating build by batch of five
+`lossy` and five `mobile` calls, one `scripts/lab.sh netem` at a time. A
+short call checks only a handful of splices, so the same comparison was also
+run on thirty-second calls — the two profiles with `DWELL_MS=30000`, copies
+kept off the tree for the measurement — which check ten times as many. Then
+the build with the fix below, the same way. Each cell is calls that failed on
+a click, of calls run:
+
+| build | `lossy` | `mobile` | `lossy`, 30 s | `mobile`, 30 s | splices checked | clicks | nearest smooth splice |
+|---|---|---|---|---|---|---|---|
+| before the playout change | 1 of 30 | 0 of 30 | 0 of 9 | 0 of 9 | 1508 | 1 | 57% |
+| after it | 0 of 30 | 0 of 30 | 1 of 9 | 0 of 9 | 1624 | 2 | 54% |
+| after it, with the fix | 0 of 29 | 0 of 29 | 0 of 24 | 0 of 24 | 3515 | 0 | 50% |
+
+Two more calls on the fixed build, one per profile, are not in the table:
+the proxy refused both with `482 Request merged` before any audio flowed.
+
+The playout change made no difference: one `lossy` call in 39 failed on a
+click on either build (Fisher's exact test, two-sided, p = 1.0; per splice,
+1 in 1508 against 2 in 1624, p = 1.0), no `mobile` call did on either, and
+the two failures were two shapes of one fault older than both builds. The
+one before the change:
+
+```text
+splice into concealment: jump 6396 against a threshold of 5744 (the tone's steepest step 3027)
+  played -132 -2108 -4092 -5628 -6908 -7420 -7420 -6396 | 0 8 69 217 445 678 948 1056 ...
+  tone   -144 -2036 -3886 -5487 -6645 -7205 -7067 -6203 | -4661 -2566 -110 2470 4915 ...
+  frames C2378 P3704 P4446 P4157 P3954 P3927 C3692 C2329 C720 C0 P3343 C2808
+```
+
+Four frames lost, one received, one more lost; the played audio drops from
+-6396 to 0 in one sample and climbs back through a fade, where the tone went
+on to -4661. The one after it:
+
+```text
+splice into concealment: jump 7992 against a threshold of 5696 (the tone's steepest step 2998)
+  played -5884 -8316 -9340 -9852 -9340 -8316 -5884 -3132 | 4860 6648 7405 7642 6855 ...
+  tone   -5930 -7909 -9156 -9532 -8988 -7567 -5402 -2701 | 270 3217 5851 7911 9198 ...
+  frames P4446 P4157 P3954 _0 _0 _0 _0 P3954 C3362 P3848 P4446 C3388
+```
+
+Four frames of silence while the jitter buffer ran dry, one received, one
+lost; the concealment opens at 4860 where the tone was at 270, and the
+splice out of it clicked as well (6659), since the extension the stream was
+cross-faded back from restarted its one-frame period on that same jump. Both
+are real clicks, and both are the G.711 concealer's
+(`crates/sipral-media/src/plc.rs`): it
+kept the audio from before a hole — frames it concealed, or silence it never
+saw — and joined the frame after the hole straight on. The lab's tone repeats
+every five frames, so after a hole of four the resumed frame matched the one
+before the hole exactly, one frame back in that joined history; the next loss
+took that as a one-frame period and opened on the resumed frame's first
+sample instead of continuing from its last — after a gap long enough to fade
+to silence, the start of the fade. The frame after any hole now starts the
+history again (`Concealer::received` after a gap, `Coder::interrupted` for
+silence and comfort noise), and `plc.rs` and `crates/sipral/src/tests.rs`
+carry both shapes as tests over the tone's phases, each failing without the
+fix by a jump of the order the lab measured.
+
+The rate a single full lab run meets this is low — one `lossy` call in 60
+short ones before the fix, 1.7%, under 9% at 95% confidence — but it was
+never noise: each flagged splice, read sample by sample, is a jump of about
+the tone's whole amplitude, clearing the threshold by 11%, 40% and 17%,
+while no smooth splice in any of these calls came nearer than 57% of it. The
+thresholds stay as they are; loosening them would have hidden this. With
+only two calls that clicked before the fix, the calls after it cannot show a
+lower rate at any useful confidence on their own (no click in 3515 splices
+against three in 3132 before it, p = 0.10); what shows the fix is the
+mechanism, reproduced in the tests and read off the evidence above.
+
 `blackout` is different in kind: the outage silences the far end's tone for
 whole seconds at once, which `MediaSession` reports as `Playback::Silence`
 rather than concealment, so no splice is checked either side of it and
