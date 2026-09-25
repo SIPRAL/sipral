@@ -45,7 +45,9 @@
 //!
 //! Chosen here, from the behaviour wanted rather than from any published
 //! table: the search range of 50 to 400 Hz, the preference for the longest lag
-//! within five percent of the best score, the four millisecond cross-fade, the
+//! within five percent of the best score, the two and a half millisecond
+//! shortest correlation window, the pitch carried across a gap to a history
+//! too short to measure it again, the four millisecond cross-fade, the
 //! smoothstep shape of it, the sixty millisecond bound, and the amplitude ramp
 //! to zero at that bound with the gain held constant across each period and
 //! the last four milliseconds faded out so the ramp lands on silence rather
@@ -78,6 +80,14 @@ const WINDOW: usize = MAX_PERIOD;
 /// Past audio kept per stream: a correlation window plus the furthest lag it
 /// is compared against.
 const HISTORY: usize = WINDOW + MAX_PERIOD;
+
+/// The shortest correlation window worth a verdict: two and a half
+/// milliseconds, a whole cycle of the highest pitch in range. A history
+/// shorter than [`WINDOW`] + [`MAX_PERIOD`] — one frame after a gap started
+/// it again — gives up window before lag range, down to this, so the search
+/// still reaches the whole voice range as soon as there is this much audio
+/// beyond one [`MAX_PERIOD`].
+const MIN_WINDOW: usize = MIN_PERIOD;
 
 /// The longest cross-fade, in samples. Four milliseconds is long enough to
 /// hide a splice and short enough that two signals out of phase with each
@@ -116,11 +126,16 @@ pub enum Concealment {
 ///
 /// Every frame the far end sent goes through [`received`](Self::received),
 /// which keeps the history the extension is built from and repairs the splice
-/// when a gap has just ended. Every frame it did not send goes through
-/// [`conceal`](Self::conceal).
+/// when a gap has just ended. Every frame it sent that did not arrive goes
+/// through [`conceal`](Self::conceal), and every frame played to lengthen a
+/// pause, which nobody sent, through [`stretch`](Self::stretch).
 pub struct Concealer {
     history: History,
     gap: Option<Gap>,
+    /// The pitch last measured over the whole voice range, kept across a
+    /// gap: the voice that paused is the one that resumes, while the history
+    /// after it is too short to measure that pitch again.
+    pitch: Option<Pitch>,
 }
 
 impl Concealer {
@@ -133,6 +148,7 @@ impl Concealer {
                 filled: 0,
             },
             gap: None,
+            pitch: None,
         }
     }
 
@@ -141,7 +157,9 @@ impl Concealer {
     /// If it is the first frame after a gap, its opening samples are
     /// cross-faded with the extension that was being played, in place, because
     /// splicing two waveforms that were never in phase clicks. The frame is
-    /// then remembered as the material for the next gap.
+    /// remembered as the material for the next gap as it arrived, before
+    /// that cross-fade: the fade's samples are partly the extension's, which
+    /// is invented.
     ///
     /// The first frame after a gap starts the history again rather than
     /// joining it. What was remembered before the gap is no longer next to
@@ -151,13 +169,22 @@ impl Concealer {
     /// frames, the frame that ended the gap matched the one before the gap
     /// exactly, one frame back in the history, and the next gap repeated it
     /// as a one-frame period, opening on its first sample instead of the one
-    /// after its last — a jump of up to the tone's whole amplitude.
+    /// after its last — a jump of up to the tone's whole amplitude. The pitch
+    /// measured before the gap is kept, for the next gap to use while the
+    /// history is still too short to measure it again.
+    ///
+    /// A gap made only of [`stretch`](Self::stretch)es is no hole: the frame
+    /// after it is the one the far end sent next, and it joins the history.
     pub fn received(&mut self, frame: &mut [i16]) {
-        if let Some(mut gap) = self.gap.take() {
-            gap.blend_into(frame);
+        let Some(mut gap) = self.gap.take() else {
+            self.history.push(frame);
+            return;
+        };
+        if gap.hole {
             self.history.filled = 0;
         }
         self.history.push(frame);
+        gap.blend_into(frame);
     }
 
     /// Fill a frame the far end did send and this end did not get.
@@ -166,13 +193,32 @@ impl Concealer {
     /// the next estimate should be made from what somebody actually said, not
     /// from what this invented.
     pub fn conceal(&mut self, frame: &mut [i16]) -> Concealment {
+        self.extend(frame, true)
+    }
+
+    /// Fill a frame the far end never sent, played to lengthen the delay in
+    /// a pause: the same extension as [`conceal`](Self::conceal), but nothing
+    /// of the stream is missing, so the frame that follows is next to the
+    /// history in time and does not start it again.
+    pub fn stretch(&mut self, frame: &mut [i16]) -> Concealment {
+        self.extend(frame, false)
+    }
+
+    fn extend(&mut self, frame: &mut [i16], lost: bool) -> Concealment {
         if self.gap.is_none() {
-            self.gap = Gap::start(self.history.recent());
+            let history = self.history.recent();
+            self.gap = estimate_period(history, self.pitch).and_then(|estimate| {
+                if let Some(measured) = estimate.measured {
+                    self.pitch = Some(measured);
+                }
+                Gap::start(history, estimate.lag)
+            });
         }
         let Some(gap) = self.gap.as_mut() else {
             frame.fill(0);
             return Concealment::Cold;
         };
+        gap.hole |= lost;
         let spent = gap.emitted >= MAX_GAP_SAMPLES;
         for sample in frame.iter_mut() {
             *sample = gap.next_sample();
@@ -192,6 +238,7 @@ impl Concealer {
     pub fn reset(&mut self) {
         self.history.filled = 0;
         self.gap = None;
+        self.pitch = None;
     }
 
     /// The period being repeated while a gap is open, in samples, for
@@ -275,11 +322,13 @@ struct Gap {
     seam: i64,
     gain: i64,
     previous_gain: i64,
+    /// Whether any of it stood in for a frame that was lost, rather than
+    /// only lengthening a pause.
+    hole: bool,
 }
 
 impl Gap {
-    fn start(history: &[i16]) -> Option<Self> {
-        let period_len = estimate_period(history)?;
+    fn start(history: &[i16], period_len: usize) -> Option<Self> {
         let source = history.get(history.len().checked_sub(period_len)?..)?;
         let mut period = [0_i16; MAX_PERIOD];
         period.get_mut(..period_len)?.copy_from_slice(source);
@@ -302,6 +351,7 @@ impl Gap {
             // the audio before the gap was at full level, and the first period
             // fades from there down to its own gain
             previous_gain: ONE,
+            hole: false,
         })
     }
 
@@ -358,58 +408,164 @@ impl Gap {
 /// repeating the whole one does not. The energy of the recent window is a
 /// factor common to every lag, so it is left out of the comparison rather than
 /// divided away.
-fn estimate_period(history: &[i16]) -> Option<usize> {
+///
+/// The window is [`WINDOW`] long when the history allows it and shrinks,
+/// down to [`MIN_WINDOW`], before the lag range does, so one short frame
+/// after a gap is still searched over every voice pitch rather than only
+/// the highest. A history too short even for that — one ten millisecond
+/// frame holds a single cycle of a voice at 100 Hz — cannot tell a period
+/// from anything else, and there the pitch last measured over the whole
+/// range stands in, as the longest whole number of its cycles the history
+/// holds. A cycle of it longer than the history says every lag the search
+/// could reach is too short to be the voice's period, and so does less than
+/// one short window beyond the shortest lag: either way what there is is
+/// repeated whole. With no pitch known, the search covers the lags it can
+/// reach.
+fn estimate_period(history: &[i16], pitch: Option<Pitch>) -> Option<Estimate> {
     if history.is_empty() {
         return None;
     }
-    let window_len = WINDOW.min(history.len() / 2);
-    if window_len < MIN_PERIOD {
-        // not enough to correlate anything against anything: repeat what there is
-        return Some(history.len().min(MAX_PERIOD));
+    let window_len = history
+        .len()
+        .saturating_sub(MAX_PERIOD)
+        .clamp(MIN_WINDOW, WINDOW);
+    let max_lag = MAX_PERIOD.min(history.len().saturating_sub(window_len));
+    if max_lag == MAX_PERIOD {
+        let (lag, best) = search(history, window_len, max_lag);
+        let cycles = best.map_or(1, |best| cycles(history, window_len, lag, best));
+        return Some(Estimate {
+            lag,
+            measured: Some(Pitch { lag, cycles }),
+        });
     }
-    let recent = history.get(history.len() - window_len..)?;
-    let max_lag = MAX_PERIOD.min(history.len() - window_len);
+    if let Some(lag) = pitch.and_then(|pitch| pitch.within(history.len())) {
+        return Some(Estimate {
+            lag,
+            measured: None,
+        });
+    }
+    let lag = if max_lag < MIN_PERIOD || pitch.is_some() {
+        history.len().min(MAX_PERIOD)
+    } else {
+        search(history, window_len, max_lag).0
+    };
+    Some(Estimate {
+        lag,
+        measured: None,
+    })
+}
 
+/// What [`estimate_period`] settled on: the lag to repeat, and the pitch it
+/// measured, when the history was long enough to search the whole range.
+struct Estimate {
+    lag: usize,
+    measured: Option<Pitch>,
+}
+
+/// A pitch measured over the whole voice range: the lag the search chose,
+/// and how many cycles of the voice it spans, since the search prefers the
+/// longest of several lags that score alike and so often lands on two or
+/// three periods rather than one.
+#[derive(Clone, Copy)]
+struct Pitch {
+    lag: usize,
+    cycles: usize,
+}
+
+impl Pitch {
+    /// The longest whole number of cycles shorter than `available` samples,
+    /// so that the sample one period before the last is still in the
+    /// history, and no shorter than [`MIN_PERIOD`].
+    fn within(self, available: usize) -> Option<usize> {
+        (1..=self.cycles)
+            .rev()
+            .map(|count| (self.lag * count + self.cycles / 2) / self.cycles)
+            .find(|lag| (MIN_PERIOD..available).contains(lag))
+    }
+}
+
+/// The lag in `MIN_PERIOD..=max_lag` the search prefers, and the best score
+/// any lag reached; `None` for the score, and the longest lag, when nothing
+/// correlated positively at all.
+fn search(history: &[i16], window_len: usize, max_lag: usize) -> (usize, Option<(i128, i128)>) {
     let mut best: Option<(i128, i128)> = None;
-    let mut best_lag = window_len;
+    let mut best_lag = max_lag;
     for lag in MIN_PERIOD..=max_lag {
-        let start = history.len() - window_len - lag;
-        let Some(past) = history.get(start..start + window_len) else {
+        let Some(candidate) = score(history, window_len, lag) else {
             continue;
         };
-        let product: i64 = recent
-            .iter()
-            .zip(past)
-            .map(|(near, far)| i64::from(*near) * i64::from(*far))
-            .sum();
-        // a negative correlation is not a candidate at any strength
-        if product <= 0 {
-            continue;
-        }
-        let power = energy(past);
-        if power == 0 {
-            continue;
-        }
-        let (product, power) = (i128::from(product), i128::from(power));
         match best {
             None => {
-                best = Some((product, power));
+                best = Some(candidate);
                 best_lag = lag;
             }
-            Some((best_product, best_power)) => {
-                // r = product / sqrt(power), compared without the square root
-                let candidate = product * product * best_power;
-                let incumbent = best_product * best_product * power;
-                if candidate > incumbent {
-                    best = Some((product, power));
+            Some(incumbent) => {
+                if outscores(candidate, incumbent) {
+                    best = Some(candidate);
                     best_lag = lag;
-                } else if candidate * MARGIN_DENOMINATOR >= incumbent * MARGIN_NUMERATOR {
+                } else if scores_alike(candidate, incumbent) {
                     best_lag = lag;
                 }
             }
         }
     }
-    Some(best_lag)
+    (best_lag, best)
+}
+
+/// How many cycles of the voice `lag` spans: the most it can be divided
+/// into, each part still no shorter than [`MIN_PERIOD`], with a lag at one
+/// part's length — to the nearest sample either way, since a part is rarely
+/// a whole number of samples — scoring alike with `best`. One when no part
+/// does.
+fn cycles(history: &[i16], window_len: usize, lag: usize, best: (i128, i128)) -> usize {
+    (2..=lag / MIN_PERIOD)
+        .rev()
+        .find(|&count| {
+            let part = (lag + count / 2) / count;
+            (part - 1..=part + 1).any(|candidate| {
+                candidate >= MIN_PERIOD
+                    && score(history, window_len, candidate)
+                        .is_some_and(|score| scores_alike(score, best))
+            })
+        })
+        .unwrap_or(1)
+}
+
+/// The correlation of the most recent `window_len` samples with the same
+/// length `lag` samples earlier, as the product and the earlier stretch's
+/// energy; `None` where the lag is no candidate at any strength.
+fn score(history: &[i16], window_len: usize, lag: usize) -> Option<(i128, i128)> {
+    let end = history.len().checked_sub(lag)?;
+    let start = end.checked_sub(window_len)?;
+    let recent = history.get(history.len() - window_len..)?;
+    let past = history.get(start..end)?;
+    let product: i64 = recent
+        .iter()
+        .zip(past)
+        .map(|(near, far)| i64::from(*near) * i64::from(*far))
+        .sum();
+    // a negative correlation is not a candidate at any strength
+    if product <= 0 {
+        return None;
+    }
+    let power = energy(past);
+    if power == 0 {
+        return None;
+    }
+    Some((i128::from(product), i128::from(power)))
+}
+
+/// Whether one score beats another: r = product / sqrt(power), compared
+/// without the square root.
+fn outscores((product, power): (i128, i128), (best_product, best_power): (i128, i128)) -> bool {
+    product * product * best_power > best_product * best_product * power
+}
+
+/// Whether one score is within [`MARGIN_NUMERATOR`]/[`MARGIN_DENOMINATOR`]
+/// of another.
+fn scores_alike((product, power): (i128, i128), (best_product, best_power): (i128, i128)) -> bool {
+    product * product * best_power * MARGIN_DENOMINATOR
+        >= best_product * best_product * power * MARGIN_NUMERATOR
 }
 
 fn energy(samples: &[i16]) -> i64 {
@@ -964,6 +1120,137 @@ mod tests {
         );
     }
 
+    /// One sample of a voiced sound: eight harmonics of a cycle `period`
+    /// samples long, each weaker by the reciprocal of its number, at phases
+    /// chosen so that no two line up. The cycle is not a whole number of
+    /// samples, as a voice's never is.
+    fn voice(index: usize, period: f64) -> i16 {
+        let phases = [0.3, 1.9, 4.1, 2.7, 0.8, 5.5, 3.3, 1.2];
+        #[allow(clippy::cast_precision_loss)]
+        let total: f64 = phases
+            .iter()
+            .enumerate()
+            .map(|(order, phase)| {
+                let harmonic = (order + 1) as f64;
+                (core::f64::consts::TAU * harmonic * index as f64 / period + phase).sin() / harmonic
+            })
+            .sum();
+        #[allow(clippy::cast_possible_truncation)]
+        let sample = (total * 3_000.0).round() as i16;
+        sample
+    }
+
+    fn spoken(range: std::ops::Range<usize>, period: f64) -> Vec<i16> {
+        range.map(|n| voice(n, period)).collect()
+    }
+
+    /// Signal to error, in decibels, of a concealed frame against what the
+    /// far end really sent in its place.
+    fn snr(truth: &[i16], concealed: &[i16]) -> f64 {
+        let signal: f64 = truth.iter().map(|sample| f64::from(*sample).powi(2)).sum();
+        let error: f64 = truth
+            .iter()
+            .zip(concealed)
+            .map(|(real, made)| (f64::from(*real) - f64::from(*made)).powi(2))
+            .sum();
+        10.0 * (signal / error.max(1.0)).log10()
+    }
+
+    /// Ten millisecond frames, which G.711 is offered at as readily as
+    /// twenty: one lost, one received, one lost. The frame that ended the
+    /// first gap is all the history there is when the second opens, eighty
+    /// samples, and a search that halved it into a window and a lag range
+    /// could only reach lags of 20 to 40 — 200 to 400 Hz, above every voice
+    /// here — and repeated a period no voice had: the second gap scored -1
+    /// to -5 dB against what was really said, -3 dB on average. A history
+    /// joined across the gap had averaged 15 dB but fell to 1 dB at 110 Hz.
+    /// Every voice from 110 to 178 Hz must now clear both floors.
+    #[test]
+    fn one_ten_millisecond_frame_between_two_gaps_keeps_the_voice_pitch() {
+        const SHORT: usize = 80;
+        let mut scores = Vec::new();
+        for hertz in (110..=178).step_by(4) {
+            let period = f64::from(g711::CLOCK_RATE) / f64::from(hertz);
+            let mut concealer = Concealer::new();
+            let mut sent = 0;
+            for _ in 0..10 {
+                concealer.received(&mut spoken(sent..sent + SHORT, period));
+                sent += SHORT;
+            }
+            concealer.conceal(&mut [0_i16; SHORT]);
+            sent += SHORT;
+            concealer.received(&mut spoken(sent..sent + SHORT, period));
+            sent += SHORT;
+
+            let mut patch = vec![0_i16; SHORT];
+            assert_eq!(concealer.conceal(&mut patch), Concealment::Extended);
+            let score = snr(&spoken(sent..sent + SHORT, period), &patch);
+            scores.push((hertz, score, concealer.pitch_period()));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let mean = scores.iter().map(|(_, score, _)| score).sum::<f64>() / scores.len() as f64;
+        let worst = scores
+            .iter()
+            .map(|(_, score, _)| *score)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            worst >= 5.0 && mean >= 12.0,
+            "worst {worst:.1} dB, mean {mean:.1} dB: {scores:?}"
+        );
+    }
+
+    /// A stretch lengthens a pause by a frame the far end never sent, so the
+    /// frame after it is the one that came next and the history goes on
+    /// across it: a gap after that is concealed from exactly what it would
+    /// have been without the stretch, sample for sample.
+    #[test]
+    fn a_stretch_is_not_a_hole() {
+        for hertz in [70, 110, 150, 230] {
+            let period = f64::from(g711::CLOCK_RATE) / f64::from(hertz);
+            let mut stretched = Concealer::new();
+            let mut straight = Concealer::new();
+            let mut sent = 0;
+            for _ in 0..3 {
+                stretched.received(&mut spoken(sent..sent + FRAME, period));
+                straight.received(&mut spoken(sent..sent + FRAME, period));
+                sent += FRAME;
+            }
+            let mut filler = vec![0_i16; FRAME];
+            assert_eq!(stretched.stretch(&mut filler), Concealment::Extended);
+            stretched.received(&mut spoken(sent..sent + FRAME, period));
+            straight.received(&mut spoken(sent..sent + FRAME, period));
+
+            let (mut after_stretch, mut without) = (vec![0_i16; FRAME], vec![0_i16; FRAME]);
+            stretched.conceal(&mut after_stretch);
+            straight.conceal(&mut without);
+            assert_eq!(
+                stretched.pitch_period(),
+                straight.pitch_period(),
+                "{hertz} Hz"
+            );
+            assert_eq!(after_stretch, without, "{hertz} Hz");
+        }
+    }
+
+    /// And a stretch that a loss then joins is a hole after all: the frame
+    /// after both starts the history again, as after any loss.
+    #[test]
+    fn a_loss_inside_a_stretch_still_ends_the_history() {
+        let mut concealer = Concealer::new();
+        prime(&mut concealer, 2, 40, 8_000);
+        let mut filler = vec![0_i16; FRAME];
+        concealer.stretch(&mut filler);
+        concealer.conceal(&mut filler);
+        concealer.received(&mut tone(0..FRAME, 40, 8_000));
+        assert_eq!(concealer.history.filled, FRAME);
+
+        let mut concealer = Concealer::new();
+        prime(&mut concealer, 2, 40, 8_000);
+        concealer.stretch(&mut filler);
+        concealer.received(&mut tone(0..FRAME, 40, 8_000));
+        assert_eq!(concealer.history.filled, HISTORY);
+    }
+
     #[test]
     fn reset_forgets_the_stream() {
         let mut concealer = Concealer::new();
@@ -975,6 +1262,23 @@ mod tests {
         assert_eq!(concealer.pitch_period(), None);
         assert_eq!(concealer.conceal(&mut patch), Concealment::Cold);
         assert!(patch.iter().all(|sample| *sample == 0));
+
+        // the pitch measured before the reset goes with it: one short frame
+        // after it is concealed as by a concealer that never heard the stream
+        let period = f64::from(g711::CLOCK_RATE) / 120.0;
+        let mut concealer = Concealer::new();
+        for start in (0..HISTORY).step_by(FRAME) {
+            concealer.received(&mut spoken(start..start + FRAME, period));
+        }
+        concealer.conceal(&mut patch);
+        concealer.reset();
+        let mut fresh = Concealer::new();
+        concealer.received(&mut spoken(HISTORY..HISTORY + 80, period));
+        fresh.received(&mut spoken(HISTORY..HISTORY + 80, period));
+        let mut again = vec![0_i16; FRAME];
+        concealer.conceal(&mut patch);
+        fresh.conceal(&mut again);
+        assert_eq!(patch, again);
     }
 
     fn xorshift64(state: &mut u64) -> u64 {

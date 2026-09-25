@@ -741,6 +741,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   is about 3 000. The history now starts again at the frame after any hole,
   concealed or silent, so a pitch is only ever estimated over audio that is
   contiguous in time.
+- **G.711 at 10 ms frames conceals a loss one frame after another at the
+  voice's own pitch.** Once the history started again after a gap, a
+  single 10 ms frame was all there was, and the search halved it into a
+  window and a range of lags that reached only 200 to 400 Hz: every voice
+  below that was repeated at a pitch it never had, -1 to -5 dB against
+  what was really said. The pitch measured before the first gap now
+  carries across it while the new audio is too short to measure one, and
+  a short history gives up window length before lag range; the same loss
+  pattern now scores 9 to 22 dB for voices from 110 to 178 Hz, and 20 ms
+  frames gain 1 to 3 dB on average. A frame the jitter buffer plays to
+  stretch a pause no longer starts the history again either, since nothing
+  the far end sent is missing, and the frame after a gap is remembered as
+  it arrived rather than with the cross-fade into it.
 - **A call through a registrar reached at another address than its
   `Contact` names is hung up where the registrar is.** The Swift, Python
   and .NET packages answered `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` themselves

@@ -1342,7 +1342,7 @@ impl MediaSession {
                 if coder.pause(room).is_some() {
                     Playback::ComfortNoise
                 } else {
-                    conceal(coder, room)
+                    stretch(coder, room)
                 }
             }
             // nothing the coder decoded or concealed is played, so its
@@ -2613,6 +2613,15 @@ fn ticks_in(samples: usize, frame_ticks: u32, frame_samples: usize) -> u32 {
 /// Conceal one frame, whichever concealment this codec has.
 fn conceal(coder: &mut Coder, room: &mut [i16]) -> Playback {
     if coder.conceal(room).is_err() {
+        room.fill(0);
+    }
+    Playback::Concealed
+}
+
+/// Lengthen a pause by one frame, concealed as a loss would be but with the
+/// stream's history left whole: nothing the far end sent is missing.
+fn stretch(coder: &mut Coder, room: &mut [i16]) -> Playback {
+    if coder.stretch(room).is_err() {
         room.fill(0);
     }
     Playback::Concealed

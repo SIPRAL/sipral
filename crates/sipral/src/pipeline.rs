@@ -321,6 +321,23 @@ impl Coder {
         }
     }
 
+    /// Fill a frame nobody sent, played to lengthen the delay in a pause:
+    /// concealment, except that the waveform concealer's history goes on
+    /// across it, since the frame after it is the one the far end sent next.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Coder::conceal`], for the codecs that conceal inside the
+    /// decoder.
+    pub(crate) fn stretch(&mut self, out: &mut [i16]) -> Result<usize, MediaError> {
+        let frame = self.frame_samples.min(out.len());
+        if let Kind::Companded(_, concealer) | Kind::Wideband(_, concealer) = &mut self.kind {
+            concealer.stretch(out.get_mut(..frame).unwrap_or_default());
+            return Ok(frame);
+        }
+        self.conceal(out)
+    }
+
     /// Fill a frame the far end did not send, when it did not send it
     /// because it is in a pause: G.729's comfort noise, carried on from the
     /// last SID frame (B.4.4). `None` for every other case — another codec,
@@ -554,6 +571,53 @@ mod tests {
                 loudness(&concealed) > 100,
                 "{codec} concealed a voiced frame with near-silence"
             );
+        }
+    }
+
+    /// A frame stretched into a pause is a whole frame for every codec, and
+    /// for the codecs the waveform concealer serves it is no hole in the
+    /// stream: the next loss is concealed sample for sample as it would have
+    /// been had the pause not been stretched.
+    #[test]
+    fn a_stretched_frame_leaves_the_concealment_as_it_was() {
+        for codec in Codec::ALL {
+            let frame = codec.frame_samples(DEFAULT_FRAME_MS);
+            let mut payload = vec![0_u8; codec.max_payload(DEFAULT_FRAME_MS)];
+            let mut back = vec![0_i16; frame];
+            let mut stretched = Coder::new(codec, DEFAULT_FRAME_MS).unwrap();
+            let mut straight = Coder::new(codec, DEFAULT_FRAME_MS).unwrap();
+            let mut sent = Vec::new();
+            // two tones that share no period the concealer could search:
+            // a history cut short at the stretch would settle on another lag
+            let rate = f64::from(codec.sample_rate());
+            for index in 0..25 {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                let samples: Vec<i16> = (index * frame..(index + 1) * frame)
+                    .map(|n| {
+                        let at = core::f64::consts::TAU * n as f64 / rate;
+                        (6_000.0 * (70.0 * at).sin() + 3_000.0 * (173.0 * at + 1.0).sin()) as i16
+                    })
+                    .collect();
+                let written = straight.encode(&samples, &mut payload).unwrap().octets;
+                sent.push(payload[..written].to_vec());
+            }
+            for packet in &sent[..24] {
+                stretched.decode(packet, &mut back).unwrap();
+                straight.decode(packet, &mut back).unwrap();
+            }
+
+            let mut filler = vec![0_i16; frame];
+            assert_eq!(stretched.stretch(&mut filler).unwrap(), frame, "{codec}");
+            if !matches!(codec, Codec::Pcmu | Codec::Pcma | Codec::G722) {
+                continue;
+            }
+            stretched.decode(&sent[24], &mut back).unwrap();
+            straight.decode(&sent[24], &mut back).unwrap();
+            let (mut after_stretch, mut without) = (vec![0_i16; frame], vec![0_i16; frame]);
+            stretched.conceal(&mut after_stretch).unwrap();
+            straight.conceal(&mut without).unwrap();
+            assert!(loudness(&without) > 100, "{codec} concealed nothing");
+            assert_eq!(after_stretch, without, "{codec}");
         }
     }
 

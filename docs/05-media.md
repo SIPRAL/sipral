@@ -450,7 +450,16 @@ Loss on a real mobile network is not exceptional. Concealment is per codec:
   silence or comfort noise played while the jitter buffer had nothing —
   starts the history again, since a history joined across a hole can look
   periodic where the signal is not, and the next gap would repeat that
-  false period with a click at its first sample.
+  false period with a click at its first sample. A frame the jitter buffer
+  plays to stretch a pause is no hole: nothing the far end sent is missing,
+  and the history goes on across it. What starts again is the audio, not
+  the pitch: a 10 ms frame holds a single cycle of a voice at 100 Hz, too
+  little to measure one, so a gap that opens that soon after another
+  repeats the longest whole number of cycles of the pitch measured before
+  the first gap that the new audio holds. Once the history holds 22.5 ms —
+  the longest period in range and a 2.5 ms window — the search reaches
+  every voice pitch again, from a shorter window rather than over a
+  shorter range of lags.
 
 ### DTMF
 

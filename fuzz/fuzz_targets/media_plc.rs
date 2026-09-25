@@ -4,8 +4,10 @@
 //! A stream of real frames and gaps through [`sipral_media::plc::Concealer`],
 //! in whatever order and of whatever length the input names.
 //!
-//! Each step reads a control octet — its low bit says `received` or
-//! `conceal` — a length octet, and that many sample pairs, so one input can
+//! Each step reads a control octet — its low bit says `received` or a frame
+//! that did not arrive, the bit above it `reset` after the step, and the one
+//! above that `stretch` rather than `conceal` for a frame that did not
+//! arrive — a length octet, and that many sample pairs, so one input can
 //! walk the concealer through the sequence its own doc comment calls out as
 //! the subtle part: a gap that opens cold, one that runs past
 //! [`sipral_media::plc::MAX_GAP_MS`], and a real frame arriving mid-gap to
@@ -37,7 +39,11 @@ fuzz_target!(|data: &[u8]| {
         if op & 1 == 0 {
             concealer.received(&mut frame);
         } else {
-            let _ = concealer.conceal(&mut frame);
+            let _ = if op & 4 == 0 {
+                concealer.conceal(&mut frame)
+            } else {
+                concealer.stretch(&mut frame)
+            };
             let _ = concealer.pitch_period();
             let _ = concealer.gap_samples();
         }
