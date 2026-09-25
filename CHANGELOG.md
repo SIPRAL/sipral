@@ -12,6 +12,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The Swift package runs on the iOS Simulator.** The distribution
+  package `xcframework.sh` prints over `CSipral.xcframework` now carries
+  the whole `Sipral` module — `SipralStack`, `Call`, `CallKitBridge`,
+  `PushKitBridge` and the rest, not only the printed `SipralAbi.swift` —
+  and its test suite, which `xcodebuild test` runs on a simulator against
+  the XCFramework's simulator slice. A call from the simulator to
+  `SipralLabAgent` on the host is an opt-in test (`SIPRAL_PEER`), and
+  `CallKitAdapter` is tested against CallKit's own action classes on iOS.
+  `SipralStack.takeIncomingCall` hands over an incoming call without
+  answering it, so that CallKit's Answer is the one answer it gets.
+  `docs/15-mobile.md` says what the simulator cannot show: it refuses
+  every third-party `CXProvider`, and registers no VoIP push without the
+  signing a device needs.
+
 - **G.729's Annex B can be switched off from C.** Rust had
   `CodecCatalog::with_g729_annex_b` and the C ABI had nothing, so a C, Swift,
   .NET, Kotlin or Python application could not stop an offer saying

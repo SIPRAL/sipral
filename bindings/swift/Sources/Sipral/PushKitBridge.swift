@@ -88,8 +88,9 @@ public final class PushKitBridge: @unchecked Sendable {
 
 /// The call a `VoipPush` announced, before `sipral-ua` has matched an
 /// INVITE to it. `resolve(with:)` hands the real `Call` over once the
-/// application has built one (through `SipralStack.answerCall`, after
-/// reading the matching `IncomingCall` off `stack.events`), and binds it
+/// application has built one (through `SipralStack.takeIncomingCall`, after
+/// reading the matching `IncomingCall` off `stack.events`, so that the
+/// answer is left to CallKit's `CXAnswerCallAction`), and binds it
 /// into `CallKitBridge` under the same `UUID` the system already knows.
 public final class PendingCall: @unchecked Sendable {
     public let uuid: UUID

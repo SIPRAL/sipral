@@ -225,8 +225,16 @@ fi
 step "the distribution Package.swift"
 SPM="$OUT/spm"
 rm -rf "$SPM"
-mkdir -p "$SPM/Sources/Sipral"
-cp "$ROOT/bindings/swift/Sources/Sipral/SipralAbi.swift" "$SPM/Sources/Sipral/"
+mkdir -p "$SPM/Sources/Sipral" "$SPM/Tests/SipralTests"
+cp "$ROOT"/bindings/swift/Sources/Sipral/*.swift "$SPM/Sources/Sipral/"
+cp "$ROOT"/bindings/swift/Tests/SipralTests/*.swift "$SPM/Tests/SipralTests/"
+copied=$(find "$SPM/Sources/Sipral" -name '*.swift' | wc -l | tr -d ' ')
+expected=$(find "$ROOT/bindings/swift/Sources/Sipral" -name '*.swift' | wc -l | tr -d ' ')
+if [ "$copied" -eq "$expected" ] && [ "$copied" -gt 0 ]; then
+    pass "$copied Swift sources of the Sipral module copied, the whole module"
+else
+    fail "$copied Swift sources copied into spm/Sources/Sipral, $expected in bindings/swift/Sources/Sipral"
+fi
 # Unquoted, for the one line that names the variant; nothing else in it
 # expands.
 cat >"$SPM/Package.swift" <<EOF
@@ -236,9 +244,16 @@ cat >"$SPM/Package.swift" <<EOF
 //
 // Printed by scripts/package/xcframework.sh, over the CSipral.xcframework
 // beside it, for a consumer who links the built library instead of compiling
-// bindings/Package.swift's source target. SipralAbi.swift is copied in
-// unchanged from bindings/swift/Sources/Sipral: it depends on nothing but
-// CSipral's module, whether that module comes from source or from here.
+// bindings/Package.swift's source target. Sources/Sipral is
+// bindings/swift/Sources/Sipral copied in unchanged -- the printed
+// SipralAbi.swift and the layer written over it, CallKitBridge and
+// PushKitBridge among it -- since none of it depends on anything but
+// CSipral's module and the platform's own, whether that module comes from
+// source or from here. Tests/SipralTests is that package's suite, run
+// against this artefact instead of a library cargo left in target/:
+// swift test here for the macOS slice, and xcodebuild test -scheme Sipral
+// -destination 'platform=iOS Simulator,id=<device>' for the simulator one
+// (docs/15-mobile.md, "The Swift package on iOS").
 //
 // Variant: $VARIANT_LABEL.
 // sipral-ffi features: $FFI_FEATURES.
@@ -259,7 +274,8 @@ let package = Package(
     ],
     targets: [
         .binaryTarget(name: "CSipral", path: "../CSipral.xcframework"),
-        .target(name: "Sipral", dependencies: ["CSipral"], path: "Sources/Sipral")
+        .target(name: "Sipral", dependencies: ["CSipral"], path: "Sources/Sipral"),
+        .testTarget(name: "SipralTests", dependencies: ["Sipral"], path: "Tests/SipralTests")
     ]
 )
 EOF

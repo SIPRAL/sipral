@@ -427,6 +427,81 @@ a minute after answering it, so hang up from the sample before then to see
 the phone's own BYE. `adb shell dumpsys telecom` shows the framework's side,
 and `emulator.pcap` the wire.
 
+## The Swift package on iOS
+
+`scripts/package/xcframework.sh --out DIR` builds `DIR/CSipral.xcframework`
+— macOS (arm64 and x86_64), iOS device (arm64) and iOS Simulator (arm64 and
+x86_64) — and prints `DIR/spm/Package.swift` over it: the whole `Sipral`
+module from `bindings/swift/Sources/Sipral`, CallKit and PushKit bridges
+included, on a `binaryTarget` instead of the source target, with the
+package's test suite beside it. `bindings/Package.swift` itself stays the
+macOS and Linux package the gate and the lab build: its tests link the
+library `cargo` leaves in `target/release`, which is a macOS or Linux
+library and nothing an iOS target can link. So the suite runs on iOS
+against the artefact an application would ship with:
+
+```bash
+scripts/package/xcframework.sh --out /tmp/sipral-xcf --dry-run
+UDID=$(xcrun simctl create sipral-test "iPhone 17" com.apple.CoreSimulator.SimRuntime.iOS-26-5)
+cd /tmp/sipral-xcf/spm
+xcodebuild test -scheme Sipral -destination "platform=iOS Simulator,id=$UDID"
+xcrun simctl delete "$UDID"
+```
+
+The same directory answers `swift test` for the macOS slice.
+
+**A call from the simulator to a peer on the Mac.** The simulator shares
+the Mac's network stack, so a peer listening on the Mac's loopback is
+reachable from it with no registrar in between. `SipralLabAgent` is that
+peer: built by `swift build` in `bindings/`, run with no registrar, it
+answers, echoes every frame, hangs up on `#`, and prints what it saw.
+`HostPeerCallTests` places the call when `SIPRAL_PEER` names the agent, and
+is skipped, saying why, when it does not; `xcodebuild` passes a test process
+every `TEST_RUNNER_<NAME>` variable as `<NAME>`:
+
+```bash
+cd bindings && swift build
+SIPRAL_REGISTRAR_ADDRESS=127.0.0.1:5060 .build/debug/SipralLabAgent &   # prints "listening on 127.0.0.1:<port>"
+cd /tmp/sipral-xcf/spm
+TEST_RUNNER_SIPRAL_PEER=127.0.0.1:<port> xcodebuild test -scheme Sipral \
+    -destination "platform=iOS Simulator,id=$UDID"
+```
+
+**What ran, on the iOS 26.5 simulator (iPhone 17, arm64) under Xcode 26.6.**
+All fourteen tests ran and passed, none skipped: the in-process loopback
+calls, the bridges against a recording provider, `CallKitAdapter` against
+CallKit's own action classes, and the call to the Mac. That call was up 60 ms
+after the INVITE; the simulator end counted 31 RTP packets sent and 29
+received at the moment it read its statistics, heard 25 frames of its own
+tone come back, and was hung up by the agent's BYE. The agent's own log
+showed it answered, the ACK arrived (the call read `confirmed`), `#` came in,
+and 40 packets sent and 39 received by the time it hung up. The x86_64
+simulator slice and the device slice link the same test bundle; neither was
+run.
+
+**What the simulator cannot show.** Its `callservicesd` turns away every
+third-party `CXProvider` — from an application bundle as much as from a
+test bundle — logging that a call source "couldn't be created", and never
+calls `reportNewIncomingCall`'s completion, so `CallKitBridge.reportIncomingCall`
+waits for good there. `CallKitAdapterTests` therefore hands CallKit's action
+classes to the adapter's `CXProviderDelegate` methods directly: Answer answers
+a call left ringing by `SipralStack.takeIncomingCall` and the caller sees the
+200 OK, a second Answer fails, Hold and resume reach the caller as
+re-offers, a keypad digit arrives as DTMF, and End reaches it as a BYE. The
+system's own delivery of those actions, and the incoming-call screen, need a
+device. PushKit fares no better: a `PKPushRegistry` asking for VoIP pushes
+is ignored ("no environment could be determined") without an
+`aps-environment` entitlement, which only a provisioning profile gives, and
+`xcrun simctl push` delivers to an application's notification centre, not to
+PushKit. The push half of `C2` is tested through `PushKitBridge` and a
+`VoipPush` value, as on macOS.
+
+**What an application has to know.** A call shown to a person before it is
+answered is taken with `takeIncomingCall`, not `answerCall`, so that
+CallKit's Answer is its one answer. Once bound to `CallKitBridge`, a call's
+`events` stream is the bridge's: an `AsyncStream` hands each event to one
+reader, so a second loop over the same stream sees only some of them.
+
 ## What is still owed to phase 4, and is not signalling
 
 **The platform audio session is not here, deliberately.** `C4` — the device

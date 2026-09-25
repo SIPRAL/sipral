@@ -138,6 +138,12 @@ func runCall(_ call: Call) async {
         // statistics call after that answers that the media has ended
         // rather than with numbers.
         captureStats(call.media)
+        // Read fresh from the stack, not from an event: an answered call
+        // stays ringing until its ACK arrives, so "confirmed" here is this
+        // end's word that the caller acknowledged the 200 OK.
+        if let state = try? call.state {
+            print("state \(String(call.handle, radix: 16)): \(state)")
+        }
         try? call.hangup()
     } else {
         captureStats(call.media)

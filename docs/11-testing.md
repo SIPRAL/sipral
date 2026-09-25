@@ -896,6 +896,18 @@ of those steps says `skip` and names what to install, and a run with any
 skip has not checked that binding. It must exit zero before a commit
 exists. `--hygiene-only` skips the build for a fast pass.
 
+The Swift suite also runs on the iOS Simulator, outside the gate: against
+the XCFramework's simulator slice, from the distribution package
+`scripts/package/xcframework.sh` prints, with `xcodebuild test` on a
+simulator device made for the run. `docs/15-mobile.md`, "The Swift package on
+iOS", has the commands and what the last run showed: all fourteen tests
+passed on iOS 26.5, none skipped, among them a call from the simulator to
+`SipralLabAgent` on the Mac. That call is opt-in, through `SIPRAL_PEER`, and
+`swift test` in the gate reports it skipped, saying why. The CallKit tests
+compile and run only on iOS; the simulator refuses a real `CXProvider`, so
+the system's own delivery of CallKit actions and VoIP pushes is a device's to
+show.
+
 `scripts/lab.sh` runs the container lab: the four servers, the flows against
 each, and the same call again over a link made bad with `tc netem`. It needs
 Docker and nothing else, so it runs on any machine of ours that has a Linux

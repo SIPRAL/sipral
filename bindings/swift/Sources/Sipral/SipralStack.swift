@@ -220,10 +220,28 @@ public final class SipralStack: @unchecked Sendable {
         mediaHost: String = "127.0.0.1",
         mediaPort: UInt16 = 0
     ) throws -> Call {
+        let call = try takeIncomingCall(event, mediaHost: mediaHost, mediaPort: mediaPort)
+        try call.answer()
+        return call
+    }
+
+    /// A `Call` for an incoming call that is left ringing: its media socket
+    /// opened and its events routed, and nothing sent. `Call.answer()`
+    /// answers it later, `Call.reject(code:)` refuses it.
+    ///
+    /// What an application that shows the call to a person first needs --
+    /// on iOS, the `Call` bound into `CallKitBridge` before the user
+    /// touches Answer, so that the `CXAnswerCallAction` CallKit then
+    /// delivers is the one answer this call gets. `answerCall` is this
+    /// plus the answer, for an agent that picks up at once.
+    public func takeIncomingCall(
+        _ event: SipralEvent,
+        mediaHost: String = "127.0.0.1",
+        mediaPort: UInt16 = 0
+    ) throws -> Call {
         let mediaSocket = try UDPSocket(host: mediaHost, port: mediaPort)
         let call = Call(stack: self, handle: event.call, mediaSocket: mediaSocket)
         registerCall(call)
-        try call.answer()
         return call
     }
 
