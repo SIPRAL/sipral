@@ -939,6 +939,15 @@ each, and the same call again over a link made bad with `tc netem`. It needs
 Docker and nothing else, so it runs on any machine of ours that has a Linux
 kernel under it.
 
+`scripts/lab.sh wasapi up` and `scripts/lab.sh wasapi down` take
+`/var/lock/sipral-lab.lock` themselves, so two runs on the same host never
+race each other's `docker compose`. A caller that already holds that lock,
+to keep the stack in one state across several of these calls, sets
+`SIPRAL_LAB_LOCK_HELD=1` first: `flock` is not re-entrant, so wrapping these
+two in an outer `flock` on the same file without also setting that variable
+deadlocks the caller against its own hold. With the variable set, the two
+skip taking the lock again and trust the caller's.
+
 `scripts/fuzz.sh` runs every fuzz target for as long as it is given, five
 minutes each by default. Before a release, and overnight.
 
