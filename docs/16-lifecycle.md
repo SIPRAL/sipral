@@ -310,7 +310,7 @@ edges is worse than none:
   platform for missing a deadline. None of these is a network operation and
   none is catchable in a library.
 - **The application's own code.** A `Handler` (the reference loop's callback
-  trait, `sipral_ua::runtime`, behind the `reference-loop` feature) that
+  trait, `sipral_ua::Handler`, behind the `reference-loop` feature) that
   panics panics on its own thread; nothing here catches it. The FFI boundary is the one place that must
   catch, and it does — `crates/sipral-ffi` routes every entry point through one
   macro, and `scripts/check.sh` fails the build if a symbol is exported around

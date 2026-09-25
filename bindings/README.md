@@ -25,6 +25,7 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 | `kotlin/sipral/src/main/kotlin/org/sipral/SipralAbi.kt` | The Kotlin binding |
 | `kotlin/sipral/src/main/jni/sipral_jni.c` | The JNI that implements it |
 | `python/sipral/_sipral_cffi.py` | The raw `cffi` ABI-mode surface: `ffi` and `lib` |
+| `c/abi-sizes.txt` | Each sized struct's first published length and its length in this build |
 
 Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
 `dotnet/Sipral/Sipral.csproj`, `dotnet/Sipral/SipralInfo.cs` and the rest of

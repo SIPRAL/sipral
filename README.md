@@ -189,8 +189,9 @@ Rust 1.95 or newer, edition 2024. The toolchain is pinned in
 `./scripts/check.sh` is the full release gate and also needs `cargo-deny`,
 `gitleaks`, `zig`, `python3`, `meson` and `ninja` with a C++ compiler, and the
 targets `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` and
-`aarch64-apple-ios`. It skips, and reports the skip, when the .NET SDK,
-`kotlinc`, Swift or a nightly toolchain with `cargo-fuzz` is missing. Use
+`aarch64-apple-ios`. It skips, and reports the skip, when a JDK, the .NET SDK,
+`kotlinc`, a full Xcode (for SwiftPM) or a nightly toolchain with `cargo-fuzz`
+is missing, and a run with a skip has not checked that part. Use
 `./scripts/check.sh --hygiene-only` for the tree checks without a build.
 
 ## Where to start reading

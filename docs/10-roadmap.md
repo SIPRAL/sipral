@@ -509,10 +509,10 @@ feasibility.
   over the whole history, and the licence set, SPDX headers and `cargo deny`
   in place, which they are from commit zero.
 - No crate is published to a registry before the ABI in `08-ffi.md` is frozen.
-  A published crate name is a promise about compatibility. The one exception
-  is the `Sipral` 0.0.1 name reservation on NuGet, a stub assembly that
-  implements nothing. The `sipral` crate is the only one with `publish = true`,
-  and it is not uploaded to crates.io before the freeze.
+  A published crate name is a promise about compatibility. The exceptions are
+  name reservations: `Sipral` 0.0.1 on NuGet, a stub assembly that implements
+  nothing, and the `sipral` name on crates.io, reserved the same way by a
+  pre-release version of the one crate with `publish = true`.
 - The ABI is not frozen before every entry the desktop client needs exists in
   C (the phase 3 list), before a C driver has run the lab's flows through
   `sipral.h`, and before every printed binding compiles in the gate. Flipping

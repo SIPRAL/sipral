@@ -73,8 +73,8 @@ which files are generated and which are written by hand, and
 ```
 
 Dependencies point down only, and most of these crates have none. `sipral-core`
-depends on nothing outside the standard library; `sipral-media`, `sipral-rtp`
-and `sipral-headless` name no Sipral crate at all, and the three `sipral-io-*`
+depends on nothing outside the standard library; `sipral-media`, `sipral-rtp`,
+`sipral-dtls` and `sipral-headless` name no Sipral crate at all, and the three `sipral-io-*`
 name exactly one, `sipral-io-common`, which names none. The device crates
 stand outside the picture because nothing in it depends on them: an
 application links at most one of `sipral-io-coreaudio`, `sipral-io-wasapi` or
@@ -220,8 +220,9 @@ What stayed behind in each backend is what is genuinely its own, and the
 counters are the clearest case of the difference. All three keep the same four
 numbers — samples captured, dropped, played and invented — and then CoreAudio
 counts the times `AudioUnitRender` refused while WASAPI counts buffer gaps,
-refused `GetBuffer` calls, and a buffer-ready event that did not arrive. Those
-are not one measurement with two names, so they are not shared.
+refused `GetBuffer` calls, and a buffer-ready event that did not arrive, and
+PipeWire counts the cycles `pw_stream_dequeue_buffer` had no buffer for. Those
+are not one measurement with three names, so they are not shared.
 
 ### sipral-ffi
 
