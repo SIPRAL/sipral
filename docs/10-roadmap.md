@@ -408,9 +408,9 @@ after it. What is left is platform work, and platform work needs the platform.
   the rest of this phase is now within reach.
 - **C4** — the audio device taken away and given back during a live call,
   survived unaided, every transition reported. **Not built, and not buildable
-  from here**: it is `AVAudioSession` and `AudioManager`, so it needs
-  `sipral-io-*` crates for iOS and Android that do not exist yet, and a device
-  to run them on.
+  from here**: it is `AVAudioSession` interruptions, which
+  `sipral-io-coreaudio` leaves to the application on iOS, and `AudioManager`,
+  for which no Android device crate exists yet, and a device to run them on.
 - **`ConnectionService` and the AAR** — C2 carried onto Android's telecom
   framework as a self-managed connection, and the AAR with both natives for
   arm64-v8a, armeabi-v7a and x86_64. *Built and tested off a phone*: the
