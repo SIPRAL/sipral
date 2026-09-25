@@ -30,6 +30,10 @@ __all__ = [
     "DtmfVia",
     "Direction",
     "MediaFault",
+    "Ice",
+    "Nat",
+    "NatMapping",
+    "NatRelay",
 ]
 
 
@@ -100,3 +104,18 @@ Direction = _enum("Direction", "SIPRAL_DIRECTION_")
 
 #: A `sipral_media_fault_t`, on a media event that reports one.
 MediaFault = _enum("MediaFault", "SIPRAL_MEDIA_FAULT_")
+
+#: A `sipral_ice_t`: `sipral_stack_config_t::ice` (the stack's default) and
+#: `sipral_call_config_t::ice` (a per-call override). `docs/06-nat.md`
+#: says why `OFF` is the default.
+Ice = _enum("Ice", "SIPRAL_ICE_")
+
+#: A `sipral_nat_t`: `sipral_stack_config_t::nat`. Excludes the mapping and
+#: relay outcome spaces below, which share the same `SIPRAL_NAT_` start.
+Nat = _enum("Nat", "SIPRAL_NAT_", exclude=("SIPRAL_NAT_MAPPING_", "SIPRAL_NAT_RELAY_"))
+
+#: A `sipral_nat_mapping_t`, carried on `SIPRAL_EVENT_KIND_NAT_MAPPING`.
+NatMapping = _enum("NatMapping", "SIPRAL_NAT_MAPPING_")
+
+#: A `sipral_nat_relay_t`, carried on `SIPRAL_EVENT_KIND_NAT_RELAY`.
+NatRelay = _enum("NatRelay", "SIPRAL_NAT_RELAY_")

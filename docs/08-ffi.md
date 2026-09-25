@@ -1644,6 +1644,35 @@ list used to name as missing — is `scripts/package/wheels.sh`: it builds
 make that true; a wheel built this way loads exactly the `cdef` and the
 load-and-check boilerplate this section describes.
 
+`Stack.__init__`'s `ice`, `nat`, `stun_server`, `turn_server`,
+`turn_username`, `turn_password` and `g729_annex_b` set the matching
+`sipral_stack_config_t` fields, all defaulting to today's behaviour
+(everything off). `sipral.enums.Ice`/`Nat`/`NatMapping`/`NatRelay` are
+built the same reflective way every other enum here is, and
+`sipral.events._decode_payload` grew the two cases `sipral_nat_event_t`
+and `sipral_nat_relay_event_t` need. The harder half is a *media* socket:
+it is the application's own and exists before its call, so `Stack`
+tracks every one `sipral_stack_nat_map` names — from `place_call` or
+`answer_call`, when the stack was built with `nat=Nat.STUN` — in the poll
+thread's own selector alongside the signalling socket, reading what
+arrives on it into `sipral_stack_receive_stun` and sending what
+`sipral_stack_poll_stun` hands out for it from that socket and no other,
+exactly as "Three entry points rather than a second use of the two
+signalling ones" above requires. `place_call`/`answer_call` themselves
+block the *calling* thread — never the poll thread, which keeps polling
+throughout — until the socket's own `SIPRAL_EVENT_KIND_NAT_MAPPING`
+arrives (and, with `turn_server` set, its `SIPRAL_EVENT_KIND_NAT_RELAY`
+too), the wait `sipral_stack_nat_map`'s own doc comment requires before a
+call may be described on it. Once `SIPRAL_EVENT_KIND_MEDIA_STARTED`
+mints `Call.media`, the socket is `sipral.media.Media`'s to read from
+then on, the same handoff this ABI itself describes; a call that never
+reaches it — refused, or hung up while still ringing — gives the mapping
+back through `sipral_stack_nat_unmap` when its `Call` closes, and so does
+`Stack.close` for any socket mapped and never spent by a call at all.
+`bindings/python/tests/test_nat.py` proves it against a STUN responder
+this test suite runs itself, and runs two stacks with `ice=Ice.REQUIRED`
+against each other for the ICE half, with no server at all.
+
 ## Versioning
 
 The C ABI carries its own version, independent of the crate version. It is

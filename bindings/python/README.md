@@ -85,6 +85,28 @@ thread racing the stack's own poll loop, which is retried for up to half a
 second before it is raised as anything else
 (`docs/08-ffi.md`, "Signalling on one stack is one thread at a time").
 
+### Behind a NAT
+
+`Stack(nat=Nat.STUN, stun_server="203.0.113.5:3478")` (`sipral.enums.Nat`)
+asks that server where this stack's sockets appear from; nothing else in
+an application's own code changes for the *signalling* socket, whose
+mapping is `stack.events`' own `SIPRAL_EVENT_KIND_NAT_MAPPING` and every
+account's `Contact` besides. A *media* socket is the application's and
+exists before its call, so `Stack.place_call`/`Stack.answer_call`
+themselves block the calling thread — never the poll thread — until that
+socket's own mapping answers, which is what lets the offer or answer they
+write carry the public address from the first packet
+(`docs/06-nat.md`, `docs/08-ffi.md` "Behind a NAT"). `turn_server`,
+`turn_username` and `turn_password` add a relay on the same server to the
+same socket, and the same two calls then wait out its
+`SIPRAL_EVENT_KIND_NAT_RELAY` too. Both credentials stay out of every log,
+event and error this package raises. `ice=Ice.OFFERED`/`Ice.REQUIRED`
+(`sipral.enums.Ice`), per stack or per `place_call`, is what actually puts
+a relay to use — off by default, the same as `nat`, which
+`docs/06-nat.md` explains. `g729_annex_b=False` on the stack turns off
+G.729's Annex B silence compression (`annexb=no`) if that codec runs at
+all.
+
 ## Test
 
 ```sh
@@ -95,6 +117,14 @@ Standard library `unittest` only, no `pytest`. `tests/test_abi.py` needs
 `bindings/c/include/sipral.h` and `bindings/c/abi-sizes.txt` from this
 checkout; `tests/test_call.py` runs two stacks against each other on
 `127.0.0.1`, with no registrar and no network beyond loopback.
+`tests/test_nat.py` runs a STUN responder of its own (RFC 5389 Section
+15.2's `XOR-MAPPED-ADDRESS`, answering on loopback) to prove a stack built
+with `nat=Nat.STUN` learns and advertises the mapping, records what a
+`turn_server` gets as far as an Allocate request leaving for it, and runs
+two stacks with `ice=Ice.REQUIRED` against each other on this host's own
+routable address (never `127.0.0.1` — RFC 8445 Section 5.1.1.1 rules a
+loopback address out as a host candidate) to prove media starts, both
+ways, through a full ICE checklist and nomination.
 
 `examples/agent.py` is also run by the interop lab (`scripts/lab.sh`), as
 its own docstring says to run it: registered at the lab's Asterisk, called

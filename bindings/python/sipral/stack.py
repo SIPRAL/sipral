@@ -78,11 +78,51 @@ class Stack:
         frame_ms: int = 0,
         offer_dtmf: bool | None = None,
         srtp: int = 0,
+        ice: int = 0,
+        nat: int = 0,
+        stun_server: str | None = None,
+        turn_server: str | None = None,
+        turn_username: str | None = None,
+        turn_password: str | None = None,
+        g729_annex_b: bool | None = None,
     ) -> None:
+        """See the class docstring for the socket and thread this owns.
+
+        ``ice`` and ``nat`` are :class:`sipral.enums.Ice` /
+        :class:`sipral.enums.Nat` values, or ``0`` for this build's own
+        default (`SIPRAL_ICE_OFF`, `SIPRAL_NAT_OFF` -- exactly today's
+        behaviour). ``nat=Nat.STUN`` needs ``stun_server`` as ``host:port``;
+        ``turn_server`` rides on it and needs ``turn_username`` and
+        ``turn_password`` with it (`docs/06-nat.md`, `docs/08-ffi.md`
+        "Behind a NAT"). The TURN credentials are copied into the library
+        and kept out of every log, event and error this package raises --
+        neither is in `repr(stack)` (there is none) or anywhere else this
+        module writes text.
+        """
         self._loop = loop
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
         self._calls: dict[int, Call] = {}
         self._lock = threading.Lock()
+        self._nat = nat
+        self._turn = turn_server is not None
+
+        #: Media sockets currently named with `sipral_stack_nat_map`, keyed
+        #: by their own `host:port` text -- from that call until either
+        #: `SIPRAL_EVENT_KIND_MEDIA_STARTED` hands the socket to
+        #: :class:`sipral.media.Media` or the call gives up on it. Written
+        #: from the calling thread (:meth:`_map_media_socket`,
+        #: :meth:`_release_stun_socket`) and read from the poll thread
+        #: (:meth:`_run`, :meth:`_drain_stun`); :attr:`_nat_lock` covers
+        #: this and the two dicts below.
+        self._nat_lock = threading.Lock()
+        self._stun_sockets: dict[str, socket.socket] = {}
+        #: Per socket, one `threading.Event` for `SIPRAL_EVENT_KIND_NAT_MAPPING`
+        #: and one for `SIPRAL_EVENT_KIND_NAT_RELAY` -- a stack built with
+        #: `turn_server` waits out both before a call may be placed or
+        #: answered on the socket (`sipral_call_place`'s own
+        #: `SIPRAL_STATUS_WRONG_STATE` for one that has not), a stack
+        #: without it only the first.
+        self._nat_waiters: dict[str, dict[str, threading.Event]] = {}
 
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.bind((bind_host, bind_port))
@@ -110,6 +150,18 @@ class Stack:
         codecs_buf = ffi.new("char[]", codecs.encode("utf-8")) if codecs else None
         entropy = ffi.new("uint8_t[]", os.urandom(32))
         media_seed = ffi.new("uint8_t[]", os.urandom(32))
+        stun_server_buf = (
+            ffi.new("char[]", stun_server.encode("utf-8")) if stun_server else None
+        )
+        turn_server_buf = (
+            ffi.new("char[]", turn_server.encode("utf-8")) if turn_server else None
+        )
+        turn_username_buf = (
+            ffi.new("char[]", turn_username.encode("utf-8")) if turn_username else None
+        )
+        turn_password_buf = (
+            ffi.new("char[]", turn_password.encode("utf-8")) if turn_password else None
+        )
 
         config = ffi.new("sipral_stack_config_t *")
         config.size = ffi.sizeof("sipral_stack_config_t")
@@ -130,17 +182,36 @@ class Stack:
         config.media_seed = media_seed
         config.media_seed_len = 32
         config.srtp = srtp
+        config.ice = ice
+        config.nat = nat
+        if stun_server_buf is not None:
+            config.stun_server = stun_server_buf
+            config.stun_server_len = len(stun_server.encode("utf-8"))
+        config.g729_annex_b = _toggle(g729_annex_b)
+        if turn_server_buf is not None:
+            config.turn_server = turn_server_buf
+            config.turn_server_len = len(turn_server.encode("utf-8"))
+        if turn_username_buf is not None:
+            config.turn_username = turn_username_buf
+            config.turn_username_len = len(turn_username.encode("utf-8"))
+        if turn_password_buf is not None:
+            config.turn_password = turn_password_buf
+            config.turn_password_len = len(turn_password.encode("utf-8"))
 
         out_stack = ffi.new("sipral_handle_t *")
         check(lib.sipral_stack_create(config, out_stack), "sipral_stack_create")
         self.handle = int(out_stack[0])
 
         self._selector = selectors.DefaultSelector()
-        self._selector.register(self._socket, selectors.EVENT_READ)
+        self._selector.register(self._socket, selectors.EVENT_READ, data="main")
         self._transmit = ffi.new("sipral_transmit_t *")
         self._transmit_data = ffi.new(f"uint8_t[{_TRANSMIT_BYTES}]")
         self._transmit_destination = ffi.new(f"char[{_ADDRESS_BYTES}]")
         self._transmit_source = ffi.new(f"char[{_ADDRESS_BYTES}]")
+        self._stun_transmit = ffi.new("sipral_transmit_t *")
+        self._stun_data = ffi.new(f"uint8_t[{_TRANSMIT_BYTES}]")
+        self._stun_destination = ffi.new(f"char[{_ADDRESS_BYTES}]")
+        self._stun_source = ffi.new(f"char[{_ADDRESS_BYTES}]")
 
         self._closed = threading.Event()
         self._thread = threading.Thread(
@@ -216,6 +287,7 @@ class Stack:
         media_port: int = 0,
         destination: str | None = None,
         srtp: int = 0,
+        ice: int = 0,
     ) -> Call:
         """`sipral_call_place`, with this stack running the call's audio.
 
@@ -225,11 +297,20 @@ class Stack:
         reads the answer, and :class:`sipral.media.Media` starts once
         `SIPRAL_EVENT_KIND_MEDIA_STARTED` says the session is up
         (`docs/08-ffi.md`, "A call is described one way or the other").
+
+        ``ice`` is a :class:`sipral.enums.Ice` value, or ``0`` for the
+        stack's own default. On a stack built with ``nat=Nat.STUN``, the
+        socket is named with `sipral_stack_nat_map` first and this call
+        blocks the calling thread -- never the poll thread -- until its
+        `SIPRAL_EVENT_KIND_NAT_MAPPING` arrives, exactly as
+        `sipral_stack_nat_map`'s own doc comment requires: placing a call
+        on the socket any sooner is `SIPRAL_STATUS_WRONG_STATE`.
         """
         media_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         media_socket.bind((media_host, media_port))
         media_socket.setblocking(False)
         media_address = format_address(*media_socket.getsockname())
+        self._map_media_socket(media_socket, media_address)
 
         target_buf = ffi.new("char[]", target.encode("utf-8"))
         media_address_buf = ffi.new("char[]", media_address.encode("utf-8"))
@@ -244,17 +325,23 @@ class Stack:
         config.media_address = media_address_buf
         config.media_address_len = len(media_address.encode("utf-8"))
         config.srtp = srtp
+        config.ice = ice
         if destination_buf is not None:
             config.destination = destination_buf
             config.destination_len = len(destination.encode("utf-8"))
 
         out_call = ffi.new("sipral_handle_t *")
-        _retry(
-            lambda: lib.sipral_call_place(
-                self.handle, account.handle, config, out_call, self.now_ms()
-            ),
-            "sipral_call_place",
-        )
+        try:
+            _retry(
+                lambda: lib.sipral_call_place(
+                    self.handle, account.handle, config, out_call, self.now_ms()
+                ),
+                "sipral_call_place",
+            )
+        except Exception:
+            self._forget_media_socket(media_address)
+            media_socket.close()
+            raise
         call = Call(self, int(out_call[0]), media_socket, media_address)
         with self._lock:
             self._calls[call.handle] = call
@@ -276,15 +363,26 @@ class Stack:
         the other half of :meth:`place_call`. Call :meth:`Call.reject`
         instead when the application does not want it; that needs no
         socket, so it takes the call handle straight off ``event.call``.
+
+        On a stack built with ``nat=Nat.STUN`` this blocks the calling
+        thread until the socket's `SIPRAL_EVENT_KIND_NAT_MAPPING` arrives,
+        the same wait :meth:`place_call` makes.
         """
         media_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         media_socket.bind((media_host, media_port))
         media_socket.setblocking(False)
         media_address = format_address(*media_socket.getsockname())
+        self._map_media_socket(media_socket, media_address)
 
         call = Call(self, event.call, media_socket, media_address)
         self.register_call(call)
-        call.answer()
+        try:
+            call.answer()
+        except Exception:
+            self.forget_call(call.handle)
+            self._forget_media_socket(media_address)
+            media_socket.close()
+            raise
         return call
 
     def reject_call(self, event: _events.Event, code: int = 486) -> None:
@@ -340,6 +438,15 @@ class Stack:
         # reason `Call.deliver` orders its own steps that way: a consumer
         # of `self.events` may look up `self.call_for(event.call)` and
         # read its state, and that state has to already be current.
+        if event.kind in (lib.SIPRAL_EVENT_KIND_NAT_MAPPING, lib.SIPRAL_EVENT_KIND_NAT_RELAY):
+            local = event.fields.get("local")
+            if local:
+                with self._nat_lock:
+                    waiters = self._nat_waiters.get(local)
+                if waiters is not None:
+                    key = "mapping" if event.kind == lib.SIPRAL_EVENT_KIND_NAT_MAPPING else "relay"
+                    waiters[key].set()
+
         call = self.call_for(event.call) if event.call else None
         if call is not None:
             call.deliver(event)
@@ -409,33 +516,194 @@ class Stack:
                 continue
             call.media.send_to(bytes(ffi.buffer(packet.data, packet.len)), call.media.remote_address)
 
+    # -- STUN/TURN on a media socket, before it has a call's media handle -
+
+    def _map_media_socket(self, sock: socket.socket, address: str, *, timeout: float = 7.0) -> None:
+        """`sipral_stack_nat_map`, and the wait its own doc comment
+        requires before a call may be described on ``sock``.
+
+        A no-op when this stack was not built with `nat=Nat.STUN`: exactly
+        today's behaviour for every other stack. Otherwise ``sock`` is
+        registered with the poll thread's own selector under the
+        ``("stun", address)`` tag -- :meth:`_run` then hands what arrives
+        on it to `sipral_stack_receive_stun` instead of treating it as
+        ordinary media, and :meth:`_drain_stun` sends what
+        `sipral_stack_poll_stun` hands out for it -- and this call blocks
+        the *calling* thread, never the poll thread, until
+        `SIPRAL_EVENT_KIND_NAT_MAPPING` names this socket. `docs/06-nat.md`
+        and `docs/08-ffi.md` ("Behind a NAT") put that within five and a
+        half seconds whatever the server does; ``timeout`` leaves
+        comfortable room over that before raising `TimeoutError`, which
+        should not happen unless the poll thread itself has stopped.
+        """
+        if self._nat != lib.SIPRAL_NAT_STUN:
+            return
+        waiters = {"mapping": threading.Event(), "relay": threading.Event()}
+        with self._nat_lock:
+            self._stun_sockets[address] = sock
+            self._nat_waiters[address] = waiters
+        self._selector.register(sock, selectors.EVENT_READ, data=("stun", address))
+        address_bytes = address.encode("utf-8")
+        local_buf = ffi.new("char[]", address_bytes)
+        try:
+            _retry(
+                lambda: lib.sipral_stack_nat_map(
+                    self.handle, local_buf, len(address_bytes), self.now_ms()
+                ),
+                "sipral_stack_nat_map",
+            )
+        except Exception:
+            self._release_stun_socket(address)
+            raise
+        if not waiters["mapping"].wait(timeout):
+            self._release_stun_socket(address)
+            raise TimeoutError(f"no NAT mapping answer for {address} within {timeout}s")
+        # `turn_server` rides the same socket: `sipral_call_place` and
+        # `sipral_call_answer_media` both refuse a socket named here until
+        # its `SIPRAL_EVENT_KIND_NAT_RELAY` has arrived too, allocated or
+        # not (`docs/08-ffi.md`, "Behind a NAT").
+        if self._turn and not waiters["relay"].wait(timeout):
+            self._release_stun_socket(address)
+            raise TimeoutError(f"no TURN allocation answer for {address} within {timeout}s")
+
+    def _release_stun_socket(self, address: str) -> None:
+        """Stop treating ``address`` as a pre-media-handle STUN/TURN
+        socket: called once `SIPRAL_EVENT_KIND_MEDIA_STARTED` hands it to
+        :class:`sipral.media.Media` (which reads it from then on) or once
+        a call gives up on it before that ever happens."""
+        with self._nat_lock:
+            sock = self._stun_sockets.pop(address, None)
+            self._nat_waiters.pop(address, None)
+        if sock is not None:
+            try:
+                self._selector.unregister(sock)
+            except (KeyError, ValueError, OSError):
+                pass
+
+    def _forget_media_socket(self, address: str) -> None:
+        """`sipral_stack_nat_unmap` for a media socket named with
+        `sipral_stack_nat_map` that will carry no call after all --
+        `sipral_call_place` or `sipral_call_answer_media` refused it, or
+        :meth:`close` is tearing the stack down with it still named. A
+        no-op for a socket this stack never mapped (no `nat=Nat.STUN`,
+        or the socket already reached `SIPRAL_EVENT_KIND_MEDIA_STARTED`
+        and belongs to `Media` now).
+        """
+        with self._nat_lock:
+            mapped = address in self._stun_sockets
+        if not mapped:
+            return
+        address_bytes = address.encode("utf-8")
+        local_buf = ffi.new("char[]", address_bytes)
+        try:
+            _retry(
+                lambda: lib.sipral_stack_nat_unmap(
+                    self.handle, local_buf, len(address_bytes), self.now_ms()
+                ),
+                "sipral_stack_nat_unmap",
+            )
+        except Exception:  # noqa: BLE001 -- best effort on the way out
+            pass
+        else:
+            # A relayed socket owes the server a Refresh with a lifetime
+            # of zero, waiting in `sipral_stack_poll_stun` now
+            # (`docs/08-ffi.md`, "sipral_stack_nat_unmap"); one drain
+            # sends it from the socket while it is still registered and
+            # still open.
+            self._drain_stun()
+        self._release_stun_socket(address)
+
+    def _drain_stun(self) -> None:
+        """`sipral_stack_poll_stun`, until nothing is left to send.
+
+        `transmit.source` names which media socket to send from --
+        exactly the point of this queue being separate from
+        `_drain_transmit`'s: a STUN request for one socket sent from
+        another would teach the server the wrong socket's mapping,
+        silently (`docs/08-ffi.md`, "Three entry points rather than a
+        second use of the two signalling ones").
+        """
+        transmit = self._stun_transmit
+        while True:
+            transmit.size = ffi.sizeof("sipral_transmit_t")
+            transmit.data = self._stun_data
+            transmit.capacity = _TRANSMIT_BYTES
+            transmit.destination = self._stun_destination
+            transmit.destination_capacity = _ADDRESS_BYTES
+            transmit.source = self._stun_source
+            transmit.source_capacity = _ADDRESS_BYTES
+            status = lib.sipral_stack_poll_stun(self.handle, transmit)
+            if status != lib.SIPRAL_STATUS_OK or transmit.len == 0:
+                return
+            payload = bytes(ffi.buffer(transmit.data, transmit.len))
+            destination = ffi.string(transmit.destination, transmit.destination_len).decode("utf-8")
+            source_text = ffi.string(transmit.source, transmit.source_len).decode("utf-8")
+            with self._nat_lock:
+                sock = self._stun_sockets.get(source_text)
+            if sock is None:
+                continue
+            host, port = parse_address(destination)
+            try:
+                sock.sendto(payload, (host, port))
+            except OSError:
+                pass
+
     def _run(self) -> None:
         result = ffi.new("sipral_poll_result_t *")
         while not self._closed.is_set():
             timeout = 0.05
             events = self._selector.select(timeout)
-            for _key, _mask in events:
-                try:
-                    data, from_address = self._socket.recvfrom(_TRANSMIT_BYTES)
-                except (BlockingIOError, OSError):
-                    continue
-                from_text = format_address(*from_address).encode("utf-8")
-                lib.sipral_stack_receive_datagram(
-                    self.handle,
-                    lib.SIPRAL_TRANSPORT_MAIN,
-                    data,
-                    len(data),
-                    from_text,
-                    len(from_text),
-                    ffi.NULL,
-                    0,
-                    self.now_ms(),
-                )
+            for key, _mask in events:
+                if key.data == "main":
+                    try:
+                        data, from_address = self._socket.recvfrom(_TRANSMIT_BYTES)
+                    except (BlockingIOError, OSError):
+                        continue
+                    from_text = format_address(*from_address).encode("utf-8")
+                    lib.sipral_stack_receive_datagram(
+                        self.handle,
+                        lib.SIPRAL_TRANSPORT_MAIN,
+                        data,
+                        len(data),
+                        from_text,
+                        len(from_text),
+                        ffi.NULL,
+                        0,
+                        self.now_ms(),
+                    )
+                else:
+                    # A media socket `_map_media_socket` named, still
+                    # waiting for `SIPRAL_EVENT_KIND_NAT_MAPPING` or a
+                    # call, or already described but with no media handle
+                    # yet: everything arriving on it still goes to
+                    # `sipral_stack_receive_stun` (`docs/08-ffi.md`,
+                    # "Behind a NAT" -- "Until the call's media handle
+                    # exists, everything arriving on its socket still
+                    # goes to sipral_stack_receive_stun").
+                    _tag, address = key.data
+                    sock = key.fileobj
+                    try:
+                        data, from_address = sock.recvfrom(_TRANSMIT_BYTES)
+                    except (BlockingIOError, OSError):
+                        continue
+                    from_text = format_address(*from_address).encode("utf-8")
+                    to_text = address.encode("utf-8")
+                    lib.sipral_stack_receive_stun(
+                        self.handle,
+                        data,
+                        len(data),
+                        from_text,
+                        len(from_text),
+                        to_text,
+                        len(to_text),
+                        self.now_ms(),
+                    )
             result.size = ffi.sizeof("sipral_poll_result_t")
             status = lib.sipral_stack_poll(self.handle, self.now_ms(), result)
             if status != lib.SIPRAL_STATUS_OK:
                 continue
             self._drain_transmit()
+            self._drain_stun()
             self._drain_farewells()
 
     def close(self) -> None:
@@ -479,6 +747,17 @@ class Stack:
             time.sleep(0.2)
         for call in calls:
             call.close()
+        # Every media socket still named with `sipral_stack_nat_map` and
+        # never reached by a call's own media handle -- `sipral_stack_destroy`
+        # sends nothing, and a relay left allocated stays on the server
+        # until its lifetime runs out (`docs/08-ffi.md`,
+        # "sipral_stack_nat_unmap"). `Call.close` above already did this
+        # for every socket a call still owned; this catches one mapped
+        # and then abandoned before any call was ever placed on it.
+        with self._nat_lock:
+            leftover = list(self._stun_sockets)
+        for address in leftover:
+            self._forget_media_socket(address)
         self._closed.set()
         if threading.current_thread() is not self._thread:
             self._thread.join(timeout=5.0)

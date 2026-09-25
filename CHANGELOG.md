@@ -12,6 +12,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The Python binding can get a call past a NAT.** `Stack(nat=Nat.STUN,
+  stun_server=...)`, and `turn_server`/`turn_username`/`turn_password`
+  for a relay, join the codec/frame/DTMF/SRTP options `Stack.__init__`
+  already took; `ice=` on the stack or a call turns on ICE, which is what
+  puts a relay to use. `place_call`/`answer_call` wait out the media
+  socket's own mapping (and, with a TURN server, its relay) before the
+  offer or answer is written, so the public address is there from the
+  first packet, and `sipral.enums.Ice`/`Nat`/`NatMapping`/`NatRelay` and
+  the matching event fields are the idiomatic reading of the ABI's own
+  numbers for all of it.
 - **The Swift package runs on the iOS Simulator.** The distribution
   package `xcframework.sh` prints over `CSipral.xcframework` now carries
   the whole `Sipral` module — `SipralStack`, `Call`, `CallKitBridge`,

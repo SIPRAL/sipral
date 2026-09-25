@@ -157,6 +157,29 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "target": _text(transfer.target, transfer.target_len),
         }
 
+    if kind == lib.SIPRAL_EVENT_KIND_NAT_MAPPING:
+        nat = payload.nat
+        return {
+            "mapping": int(nat.mapping),
+            "signalling": bool(nat.signalling),
+            "transport": int(nat.transport),
+            "accounts": int(nat.accounts),
+            "local": _text(nat.local, nat.local_len),
+            "mapped": _text(nat.mapped, nat.mapped_len),
+            "previous": _text(nat.previous, nat.previous_len),
+        }
+
+    if kind == lib.SIPRAL_EVENT_KIND_NAT_RELAY:
+        relay = payload.relay
+        return {
+            "outcome": int(relay.outcome),
+            "code": int(relay.code),
+            "local": _text(relay.local, relay.local_len),
+            "relayed": _text(relay.relayed, relay.relayed_len),
+            "mapped": _text(relay.mapped, relay.mapped_len),
+            "reason": _text(relay.reason, relay.reason_len),
+        }
+
     # Unknown or not yet decoded here: the caller still has `message` and
     # the raw `kind`/`kind_name`, which is what a generic event is for.
     return {}

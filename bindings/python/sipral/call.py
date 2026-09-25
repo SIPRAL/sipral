@@ -65,6 +65,12 @@ class Call:
         on regardless of when that happens.
         """
         if event.kind == lib.SIPRAL_EVENT_KIND_MEDIA_STARTED and self.media is None:
+            # From here the socket is `Media`'s own to read
+            # (`docs/08-ffi.md`, "From the media handle on, the socket's
+            # datagrams go to sipral_media_receive and nowhere else") --
+            # `Stack` stops treating it as a pre-media-handle STUN/TURN
+            # socket first, so the two never race to read the same fd.
+            self.stack._release_stun_socket(self._media_address)
             self.media = Media(self.stack, self.handle, self._media_socket)
 
         if event.kind == lib.SIPRAL_EVENT_KIND_CALL_ENDED:
@@ -177,6 +183,12 @@ class Call:
         if self.media is not None:
             self.media.close()
         else:
+            # Never reached `SIPRAL_EVENT_KIND_MEDIA_STARTED`: refused,
+            # failed before answer, or hung up while still ringing. A
+            # socket `Stack._map_media_socket` named for it (`nat=Nat.STUN`)
+            # is still the stack's to give back (`sipral_stack_nat_unmap`)
+            # before the socket closes under it.
+            self.stack._forget_media_socket(self._media_address)
             self._media_socket.close()
         self.stack.forget_call(self.handle)
 
