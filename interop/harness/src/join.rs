@@ -92,6 +92,14 @@ const ECHO_EXTENSION: &str = "9008";
 /// a moment of network jitter does not reach on its own.
 const CROSSED_THRESHOLD: u32 = 5;
 
+/// This flow's own endpoint identity, folded with the run's own entropy
+/// before anything binds with it (`run_folded`, `main.rs`). Listed in
+/// `main.rs`'s `tests::endpoint_identity_constants_are_distinct` alongside
+/// every other step's, so a value reused here or added later fails that
+/// test rather than a live run.
+pub(crate) const SEED: u8 = 151;
+pub(crate) const MEDIA_SEED: u8 = 163;
+
 /// One call this flow placed, and what it has told this end so far.
 #[derive(Debug, Default)]
 struct Leg {
@@ -124,13 +132,9 @@ pub(crate) fn run(
 ) -> Result<String, String> {
     let bind_addr = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
-    // distinct from every seed `main.rs`'s own `seed`/`media_seed` and
-    // `pair.rs`'s own `run` already use, so that this flow's stack never
-    // mints the same branch as another flow's in the same run; `run_folded`
-    // is what keeps one run of it from minting the last run's
     let mut endpoint = Endpoint::bind(
-        run_folded([151; 32]),
-        run_folded([163; 32]),
+        run_folded([SEED; 32]),
+        run_folded([MEDIA_SEED; 32]),
         bind_addr,
         catalog(),
         now,

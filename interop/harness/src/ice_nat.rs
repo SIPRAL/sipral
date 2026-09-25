@@ -59,6 +59,18 @@ const MAPPING_PATIENCE: Duration = Duration::from_secs(8);
 /// How long the callee waits for the call to arrive.
 const CALLEE_PATIENCE: Duration = Duration::from_secs(60);
 
+/// This flow's own endpoint identity constants, each folded with the run's
+/// own entropy before anything binds with it (`run_folded`, `main.rs`).
+/// Listed in `main.rs`'s `tests::endpoint_identity_constants_are_distinct`
+/// alongside every other step's, so a value reused here or added later fails
+/// that test rather than a live run.
+pub(crate) const CALLER_SEED: u8 = 8;
+pub(crate) const CALLER_MEDIA_SEED: u8 = 9;
+pub(crate) const CALLER_RELAY_SEED: u8 = 10;
+pub(crate) const ANSWER_SEED: u8 = 11;
+pub(crate) const ANSWER_MEDIA_SEED: u8 = 12;
+pub(crate) const ANSWER_RELAY_SEED: u8 = 13;
+
 /// The STUN server both ends ask, from `SIPRAL_STUN_SERVER`.
 fn stun_server() -> Result<SocketAddr, String> {
     env::var("SIPRAL_STUN_SERVER")
@@ -234,8 +246,8 @@ pub(crate) fn call(target: &str, remote: SocketAddr) -> Result<String, String> {
     let stun = stun_server()?;
     let required = catalog().with_ice(IcePolicy::Required);
     let mut endpoint = Endpoint::bind(
-        run_folded([181; 32]),
-        run_folded([191; 32]),
+        run_folded([CALLER_SEED; 32]),
+        run_folded([CALLER_MEDIA_SEED; 32]),
         SocketAddr::new(route_to(remote), 0),
         required.clone(),
         Instant::now(),
@@ -247,7 +259,8 @@ pub(crate) fn call(target: &str, remote: SocketAddr) -> Result<String, String> {
         endpoint.transport,
         remote,
     ));
-    let (media, local, public, relayed) = mapped_media(remote, stun, run_folded([193; 32]))?;
+    let (media, local, public, relayed) =
+        mapped_media(remote, stun, run_folded([CALLER_RELAY_SEED; 32]))?;
     let turn = turn_server()?.map(|(server, ..)| server);
     let (described, allocated) = with_relay(
         CallMedia::new(required, MediaConfig::default()).public_address(public),
@@ -317,8 +330,8 @@ pub(crate) fn answer(stun_hint: SocketAddr) -> Result<String, String> {
         .map_err(|_| "SIPRAL_CONTACT does not name the forwarded address".to_owned())?;
     let required = catalog().with_ice(IcePolicy::Required);
     let mut endpoint = Endpoint::bind(
-        run_folded([197; 32]),
-        run_folded([199; 32]),
+        run_folded([ANSWER_SEED; 32]),
+        run_folded([ANSWER_MEDIA_SEED; 32]),
         SocketAddr::new(route_to(stun_hint), 5060),
         required.clone(),
         Instant::now(),
@@ -330,7 +343,8 @@ pub(crate) fn answer(stun_hint: SocketAddr) -> Result<String, String> {
         endpoint.transport,
         stun,
     ));
-    let (media, local, public, relayed) = mapped_media(stun, stun, run_folded([211; 32]))?;
+    let (media, local, public, relayed) =
+        mapped_media(stun, stun, run_folded([ANSWER_RELAY_SEED; 32]))?;
     let (described, allocated) = with_relay(
         CallMedia::new(required, MediaConfig::default()).public_address(public),
         relayed,

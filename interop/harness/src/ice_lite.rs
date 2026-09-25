@@ -43,6 +43,14 @@ const DWELL: Duration = Duration::from_secs(3);
 /// concealment reaches.
 const AUDIBLE_FRAMES: u32 = 10;
 
+/// This flow's own endpoint identity, folded with the run's own entropy
+/// before anything binds with it (`run_folded`, `main.rs`). Listed in
+/// `main.rs`'s `tests::endpoint_identity_constants_are_distinct` alongside
+/// every other step's, so a value reused here or added later fails that
+/// test rather than a live run.
+pub(crate) const SEED: u8 = 242;
+pub(crate) const MEDIA_SEED: u8 = 243;
+
 /// What the call told this end, in the order it matters to the verdict, and
 /// when — measured from the moment the offer was written.
 #[derive(Debug, Default)]
@@ -63,8 +71,8 @@ pub(crate) fn run(target: &str, remote: SocketAddr) -> Result<String, String> {
     let now = Instant::now();
     let required = catalog().with_ice(IcePolicy::Required);
     let mut endpoint = Endpoint::bind(
-        run_folded([173; 32]),
-        run_folded([179; 32]),
+        run_folded([SEED; 32]),
+        run_folded([MEDIA_SEED; 32]),
         SocketAddr::new(route_to(remote), 0),
         required.clone(),
         now,

@@ -50,6 +50,18 @@ const AUDIBLE_WANTED: u32 = 10;
 const FORK_USER: &str = "forked";
 const FORK_PASS: &str = "forkedpass";
 
+/// This flow's own endpoint identity constants, each folded with the run's
+/// own entropy before anything binds with it (`run_folded`, `main.rs`).
+/// Listed in `main.rs`'s `tests::endpoint_identity_constants_are_distinct`
+/// alongside every other step's and the flow table's own, so a value reused
+/// here or added later fails that test rather than a live run.
+pub(crate) const DESK_SEED: u8 = 2;
+pub(crate) const DESK_MEDIA_SEED: u8 = 3;
+pub(crate) const MOBILE_SEED: u8 = 4;
+pub(crate) const MOBILE_MEDIA_SEED: u8 = 5;
+pub(crate) const CALLER_SEED: u8 = 6;
+pub(crate) const CALLER_MEDIA_SEED: u8 = 7;
+
 /// How far a phone has gone with the call it was given.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -248,42 +260,44 @@ impl Caller {
 pub(crate) fn run(server: &str, remote: SocketAddr) -> Result<String, String> {
     let bind = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
-    let phone = |name, seed: u8, rings_after, answers_after| -> Result<Phone, String> {
-        let mut endpoint = Endpoint::bind(
-            run_folded([seed; 32]),
-            run_folded([seed ^ 0x5a; 32]),
-            bind,
-            catalog(),
-            now,
-        )
-        .map_err(|error| format!("cannot bind the {name}: {error}"))?;
-        let account = endpoint.account(FORK_USER, FORK_PASS, server, remote)?;
-        Ok(Phone {
-            name,
-            endpoint,
-            account,
-            remote,
-            rings_after,
-            answers_after,
-            registered: false,
-            call: None,
-            stage: Stage::Waiting,
-            confirmed: false,
-            ended: None,
-        })
-    };
+    let phone =
+        |name, seed: u8, media_seed: u8, rings_after, answers_after| -> Result<Phone, String> {
+            let mut endpoint = Endpoint::bind(
+                run_folded([seed; 32]),
+                run_folded([media_seed; 32]),
+                bind,
+                catalog(),
+                now,
+            )
+            .map_err(|error| format!("cannot bind the {name}: {error}"))?;
+            let account = endpoint.account(FORK_USER, FORK_PASS, server, remote)?;
+            Ok(Phone {
+                name,
+                endpoint,
+                account,
+                remote,
+                rings_after,
+                answers_after,
+                registered: false,
+                call: None,
+                stage: Stage::Waiting,
+                confirmed: false,
+                ended: None,
+            })
+        };
     // the desk registers first and the mobile second: "the second contact"
     // is the one that answers
-    let mut desk = phone("desk", 151, Duration::ZERO, None)?;
+    let mut desk = phone("desk", DESK_SEED, DESK_MEDIA_SEED, Duration::ZERO, None)?;
     let mut mobile = phone(
         "mobile",
-        157,
+        MOBILE_SEED,
+        MOBILE_MEDIA_SEED,
         MOBILE_RINGS_AFTER,
         Some(MOBILE_ANSWERS_AFTER),
     )?;
     let mut caller_endpoint = Endpoint::bind(
-        run_folded([163; 32]),
-        run_folded([167; 32]),
+        run_folded([CALLER_SEED; 32]),
+        run_folded([CALLER_MEDIA_SEED; 32]),
         bind,
         catalog(),
         now,

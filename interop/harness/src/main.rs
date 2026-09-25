@@ -2442,4 +2442,91 @@ mod tests {
         };
         assert_eq!(script.verdict(after, true), Ok(()));
     }
+
+    /// Every fixed endpoint identity byte this crate binds an endpoint with
+    /// — the flow table's own [`seed`]/[`media_seed`] and each step's own
+    /// constants — has to be distinct from every other one, or two flows (or
+    /// a flow and a step) in the same run mint the same Call-ID and the
+    /// registrar that has already seen one reads the other as the same
+    /// dialogue continued (see [`seed`]'s own doc comment). Each is folded
+    /// with the run's own entropy before anything binds with it, so this
+    /// checks the fixed bytes the fold starts from, not what a live run
+    /// sends — the fixed bytes are what has to stay distinct.
+    ///
+    /// A step new to this list adds its own constants here too: nothing
+    /// discovers them on its own.
+    #[test]
+    fn endpoint_identity_constants_are_distinct() {
+        const FLOWS: &[Flow] = &[
+            Flow::Register,
+            Flow::Call,
+            Flow::Hold,
+            Flow::Blind,
+            Flow::Attended,
+            Flow::Dtmf4733,
+            Flow::DtmfInfo,
+            Flow::Srtp,
+            Flow::HoldCodecChange,
+            Flow::Dtls,
+            Flow::Message,
+            Flow::Mwi,
+            Flow::PeerSrtp,
+            Flow::PeerDtls,
+            Flow::G729,
+        ];
+        // name, value -- a step new to this list adds its own constants
+        // here too, nothing discovers them on its own
+        macro_rules! id {
+            ($($path:expr => $value:expr),* $(,)?) => {
+                vec![$((stringify!($path).to_owned(), $value)),*]
+            };
+        }
+        let mut all: Vec<(String, u8)> = id![
+            fork::DESK_SEED => crate::fork::DESK_SEED,
+            fork::DESK_MEDIA_SEED => crate::fork::DESK_MEDIA_SEED,
+            fork::MOBILE_SEED => crate::fork::MOBILE_SEED,
+            fork::MOBILE_MEDIA_SEED => crate::fork::MOBILE_MEDIA_SEED,
+            fork::CALLER_SEED => crate::fork::CALLER_SEED,
+            fork::CALLER_MEDIA_SEED => crate::fork::CALLER_MEDIA_SEED,
+            ice_lite::SEED => crate::ice_lite::SEED,
+            ice_lite::MEDIA_SEED => crate::ice_lite::MEDIA_SEED,
+            ice_nat::CALLER_SEED => crate::ice_nat::CALLER_SEED,
+            ice_nat::CALLER_MEDIA_SEED => crate::ice_nat::CALLER_MEDIA_SEED,
+            ice_nat::CALLER_RELAY_SEED => crate::ice_nat::CALLER_RELAY_SEED,
+            ice_nat::ANSWER_SEED => crate::ice_nat::ANSWER_SEED,
+            ice_nat::ANSWER_MEDIA_SEED => crate::ice_nat::ANSWER_MEDIA_SEED,
+            ice_nat::ANSWER_RELAY_SEED => crate::ice_nat::ANSWER_RELAY_SEED,
+            join::SEED => crate::join::SEED,
+            join::MEDIA_SEED => crate::join::MEDIA_SEED,
+            pair::ANSWERING_SEED => crate::pair::ANSWERING_SEED,
+            pair::ANSWERING_MEDIA_SEED => crate::pair::ANSWERING_MEDIA_SEED,
+            pair::DIALLING_SEED => crate::pair::DIALLING_SEED,
+            pair::DIALLING_MEDIA_SEED => crate::pair::DIALLING_MEDIA_SEED,
+            drift::SEED => crate::drift::SEED,
+            drift::MEDIA_SEED => crate::drift::MEDIA_SEED,
+        ];
+        #[cfg(all(feature = "pipewire", target_os = "linux"))]
+        all.extend(id![
+            pipewire::SEED => crate::pipewire::SEED,
+            pipewire::MEDIA_SEED => crate::pipewire::MEDIA_SEED,
+        ]);
+        #[cfg(all(feature = "wasapi", target_os = "windows"))]
+        all.extend(id![
+            wasapi::SEED => crate::wasapi::SEED,
+            wasapi::MEDIA_SEED => crate::wasapi::MEDIA_SEED,
+        ]);
+        for flow in FLOWS {
+            all.push((format!("seed({flow:?})"), seed(*flow)[0]));
+            all.push((format!("media_seed({flow:?})"), media_seed(*flow)[0]));
+        }
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(
+                    all[i].1, all[j].1,
+                    "{} and {} share the endpoint identity byte {}",
+                    all[i].0, all[j].0, all[i].1
+                );
+            }
+        }
+    }
 }

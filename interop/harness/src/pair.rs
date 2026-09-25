@@ -37,6 +37,16 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// How long the call stays up once it is answered.
 const DWELL: Duration = Duration::from_secs(2);
 
+/// This flow's own endpoint identity constants, each folded with the run's
+/// own entropy before anything binds with it (`run_folded`, `main.rs`).
+/// Listed in `main.rs`'s `tests::endpoint_identity_constants_are_distinct`
+/// alongside every other step's, so a value reused here or added later fails
+/// that test rather than a live run.
+pub(crate) const ANSWERING_SEED: u8 = 71;
+pub(crate) const ANSWERING_MEDIA_SEED: u8 = 171;
+pub(crate) const DIALLING_SEED: u8 = 73;
+pub(crate) const DIALLING_MEDIA_SEED: u8 = 173;
+
 /// What the callee saw, which is what this flow exists to check.
 #[derive(Debug, Default)]
 struct Narrowing {
@@ -221,16 +231,16 @@ pub(crate) fn run(
     let now = Instant::now();
 
     let mut answering_endpoint = Endpoint::bind(
-        run_folded([71; 32]),
-        run_folded([171; 32]),
+        run_folded([ANSWERING_SEED; 32]),
+        run_folded([ANSWERING_MEDIA_SEED; 32]),
         bind,
         catalog(),
         now,
     )
     .map_err(|error| format!("cannot bind the callee: {error}"))?;
     let mut dialling_endpoint = Endpoint::bind(
-        run_folded([73; 32]),
-        run_folded([173; 32]),
+        run_folded([DIALLING_SEED; 32]),
+        run_folded([DIALLING_MEDIA_SEED; 32]),
         bind,
         catalog(),
         now,

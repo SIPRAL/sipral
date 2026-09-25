@@ -86,6 +86,14 @@ const HEARD_THRESHOLD: u32 = 25;
 /// around that — but not so wide that noise or a stuck level passes.
 const CROSSINGS_PER_SECOND: std::ops::RangeInclusive<u64> = 700..=1_100;
 
+/// This flow's own endpoint identity, folded with the run's own entropy
+/// before anything binds with it (`run_folded`, `main.rs`). Listed in
+/// `main.rs`'s `tests::endpoint_identity_constants_are_distinct` alongside
+/// every other step's, so a value reused here or added later fails that
+/// test rather than a live run.
+pub(crate) const SEED: u8 = 15;
+pub(crate) const MEDIA_SEED: u8 = 16;
+
 /// The four streams: the phone's two, and the room's two.
 struct Devices {
     mouth: PlaybackStream,
@@ -174,9 +182,7 @@ pub(crate) fn flow(server: &str, remote: SocketAddr, user: &str, pass: &str, wan
 fn run(server: &str, remote: SocketAddr, user: &str, pass: &str) -> Result<String, String> {
     let bind_addr = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
-    // distinct from every seed the other flows use, so no two of them mint
-    // the same branch
-    let (seed, media_seed) = (run_folded([191; 32]), run_folded([197; 32]));
+    let (seed, media_seed) = (run_folded([SEED; 32]), run_folded([MEDIA_SEED; 32]));
     let mut endpoint = Endpoint::bind(seed, media_seed, bind_addr, catalog(), now)
         .map_err(|error| format!("cannot bind: {error}"))?;
     let account = endpoint.account(user, pass, server, remote)?;

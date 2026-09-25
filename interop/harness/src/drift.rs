@@ -98,6 +98,14 @@ const FRAME: Duration = Duration::from_millis(20);
 /// (`crate::audio`'s own cadence).
 const AUDIBLE_SHARE: f64 = 1200.0 / 1800.0;
 
+/// This flow's own endpoint identity, folded with the run's own entropy
+/// before anything binds with it (`run_folded`, `main.rs`). Listed in
+/// `main.rs`'s `tests::endpoint_identity_constants_are_distinct` alongside
+/// every other step's, so a value reused here or added later fails that
+/// test rather than a live run.
+pub(crate) const SEED: u8 = 239;
+pub(crate) const MEDIA_SEED: u8 = 241;
+
 fn millis_from(name: &str, fallback: u64) -> Duration {
     Duration::from_millis(
         env::var(name)
@@ -168,10 +176,9 @@ pub(crate) fn run(
 
     let bind_addr = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
-    // seeds no other flow in this table uses
     let mut endpoint = Endpoint::bind(
-        run_folded([239; 32]),
-        run_folded([241; 32]),
+        run_folded([SEED; 32]),
+        run_folded([MEDIA_SEED; 32]),
         bind_addr,
         catalog(),
         now,

@@ -88,6 +88,14 @@ const DWELL: Duration = Duration::from_secs(8);
 /// dwell has little left to prove the loop keeps carrying it unaided.
 const SEED_FRAMES: u32 = 50;
 
+/// This flow's own endpoint identity, folded with the run's own entropy
+/// before anything binds with it (`run_folded`, `main.rs`). Listed in
+/// `main.rs`'s `tests::endpoint_identity_constants_are_distinct` alongside
+/// every other step's, so a value reused here or added later fails that
+/// test rather than a live run.
+pub(crate) const SEED: u8 = 14;
+pub(crate) const MEDIA_SEED: u8 = 187;
+
 /// Environment variable naming the earpiece endpoint's id exactly, when
 /// [`is_vb_cable_endpoint`] below is not enough — two cables installed, say.
 const EARPIECE_ID_ENV: &str = "SIPRAL_WASAPI_EARPIECE_ID";
@@ -344,11 +352,9 @@ pub(crate) fn flow(server: &str, remote: SocketAddr, user: &str, pass: &str, wan
 fn run(server: &str, remote: SocketAddr, user: &str, pass: &str) -> Result<String, String> {
     let bind_addr = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
-    // distinct from every seed the other flows use (`pipewire.rs` included),
-    // so no two of them mint the same branch
     let mut endpoint = Endpoint::bind(
-        run_folded([181; 32]),
-        run_folded([187; 32]),
+        run_folded([SEED; 32]),
+        run_folded([MEDIA_SEED; 32]),
         bind_addr,
         catalog(),
         now,
