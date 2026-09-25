@@ -494,7 +494,10 @@ fn carry(
         let Ok(produced) = devices.to_device.process(&session_frame, &mut device_frame) else {
             break;
         };
-        if !devices.earpiece.write(&device_frame[..produced]) {
+        let Some(written) = device_frame.get(..produced) else {
+            break;
+        };
+        if !devices.earpiece.write(written) {
             break;
         }
         tally.played = tally.played.saturating_add(1);
@@ -537,9 +540,10 @@ fn carry(
         let Ok(produced) = devices.from_device.process(&mic_frame, &mut resampled) else {
             continue;
         };
-        devices
-            .mic_pending
-            .extend_from_slice(&resampled[..produced]);
+        let Some(fresh) = resampled.get(..produced) else {
+            continue;
+        };
+        devices.mic_pending.extend_from_slice(fresh);
         while devices.mic_pending.len() >= session_len {
             let chunk: Vec<i16> = devices.mic_pending.drain(..session_len).collect();
             tally.looped = tally.looped.saturating_add(1);

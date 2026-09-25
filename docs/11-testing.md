@@ -895,8 +895,9 @@ package's translation unit, the JNI shim and its thread helper, and the lab's C
 driver — compiled again against glibc's own headers for x86_64 and aarch64
 Linux with `zig cc` — glibc hides POSIX under a
 strict `-std` and the Apple SDK does not, so the compiler here alone passes a
-file that fails on the machine it runs on — `clippy` and `rustdoc` over the Windows half of the audio I/O
-and `clippy` over the iOS half of the CoreAudio one, for two targets this
+file that fails on the machine it runs on — `clippy` and `rustdoc` over the Windows half of the audio I/O,
+`clippy` over the lab harness's own WASAPI flow, which no other step
+compiles, and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
 over all twenty-nine fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops

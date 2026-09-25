@@ -794,6 +794,12 @@ if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-msvc;
         --target x86_64-pc-windows-msvc >/dev/null 2>&1 \
         && pass "cargo doc -p sipral-io-wasapi for Windows" \
         || fail "RUSTDOCFLAGS=-D warnings cargo doc -p sipral-io-wasapi --no-deps --target x86_64-pc-windows-msvc"
+    # the harness's own WASAPI flow, the Windows twin of the PipeWire one
+    # below: nothing else here ever compiles it
+    cargo clippy -p sipral-interop --features wasapi --target x86_64-pc-windows-msvc \
+        --all-targets -- -D warnings >/dev/null 2>&1 \
+        && pass "cargo clippy -p sipral-interop --features wasapi for Windows" \
+        || fail "cargo clippy -p sipral-interop --features wasapi --target x86_64-pc-windows-msvc --all-targets"
 else
     fail "x86_64-pc-windows-msvc is not installed: rustup target add x86_64-pc-windows-msvc"
 fi
