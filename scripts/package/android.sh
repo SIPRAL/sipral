@@ -37,9 +37,10 @@
 # (sipral-android-cargo, sipral-android-gradle), so a second run builds
 # only what changed; `docker volume rm` them to start clean.
 #
-# No emulator run: nothing here needs /dev/kvm, and what the telecom
-# framework itself does with a self-managed call -- and audio routing, and
-# push delivery -- is only observable on a device.
+# No emulator run: nothing here needs /dev/kvm. What the telecom framework
+# itself does with a self-managed call is observable only with the APK
+# running, and docs/15-mobile.md says how it was run on an emulator and
+# what was seen; audio routing and push delivery need a phone.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."

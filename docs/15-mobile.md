@@ -357,6 +357,76 @@ Whether the registrar a device talks to is one of the two is exactly what
 `push_echo` reports: `+sip.pns` naming the service asked for is the network
 saying it will send the pushes, and anything else means nobody has.
 
+## Android, run on an emulator
+
+The Compose sample (`bindings/kotlin/android/sample`) and the
+`ConnectionService` helper under it have been run, not only built: the APK
+`scripts/package/android.sh` produces (without Opus, debug-signed,
+20,193,618 bytes, natives for arm64-v8a, armeabi-v7a and x86_64) on an
+Android 16 (API 36, `google_apis`, arm64-v8a) emulator on an Apple-silicon
+Mac, headless, against a Sipral agent on the same Mac. What was seen, from
+both ends:
+
+| | |
+|---|---|
+| Cold start to first frame (`am start -W`, `TotalTime`) | 1.40 to 1.66 s, and up to 2.05 s on the first launch after an install |
+| Native load | `libsipral_jni.so` from `lib/arm64-v8a`, with `libsipral_ffi.so` as its `NEEDED`, loaded when the stack is first opened: within 40 ms of the tap on Register |
+| Call setup | INVITE to 200 OK 26 to 111 ms on the wire, ACK 7 to 24 ms after it; the tap on Call to the framework's `SET_ACTIVE` 240 to 650 ms |
+| Media | G.722 both ways; a 60-second call carried 2,756 packets from the phone and 2,121 back, the difference being the 12 seconds the phone held the call; the agent counted 2,121 sent and 2,762 received; one digit from the keypad crossed as 7 RFC 4733 packets |
+| Telecom | `CONNECTING`, `DIALING`, `ACTIVE`, `ON_HOLD`, `ACTIVE`, then `DISCONNECTED` with cause `LOCAL` for the phone's own hang-up (BYE from the phone, 200 OK back) and `REMOTE` for the agent's, and `DESTROYED`; the only route the emulator offers is Speaker |
+| Audio | a voice-communication capture from the built-in microphone and a voice-communication playback track, both at 16 kHz, in `dumpsys media.audio_flinger`; with `-no-audio` the microphone reads silence (-89 dB) |
+| A simulated push | `RINGING` through the framework with no INVITE, and the incoming-call notification (category `call`, importance high, a full-screen intent); declined, `DISCONNECTED` with `REJECTED`; left alone, `MISSED` 20 seconds later, when the announcement's window ran out |
+
+The sample shows no audio levels. Two things it could not show there. An
+incoming INVITE: the emulator is behind its own NAT (10.0.2.15), so a caller
+on the Mac could reach it through a port redirect, but its ACK and BYE go to
+the `Contact` the sample answers with, an address nothing outside the
+emulator routes to; a registrar or a proxy in front of the phone is what
+carries that on a real network. And the full-screen intent: from Android 14,
+`USE_FULL_SCREEN_INTENT` is not simply granted by the manifest, and the
+sideloaded sample was refused it (`adb shell appops get org.sipral.sample
+USE_FULL_SCREEN_INTENT`), so the call showed as a heads-up notification
+rather than a screen over the lock screen; the user can allow it in the
+application's settings.
+
+Running it again, from a checkout, with the APK built on a machine with
+Docker (`scripts/package/android.sh --out out --accept-android-sdk-licenses`)
+and copied to the Mac:
+
+```sh
+export ANDROID_HOME=~/Library/Android/sdk JAVA_HOME=/opt/homebrew/opt/openjdk
+"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n sipral \
+    -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_6
+"$ANDROID_HOME/emulator/emulator" -avd sipral -no-window -no-audio -no-snapshot \
+    -no-boot-anim -gpu swiftshader_indirect -tcpdump emulator.pcap &
+adb wait-for-device
+adb install out/sipral-sample.apk
+adb shell pm grant org.sipral.sample android.permission.RECORD_AUDIO
+adb shell pm grant org.sipral.sample android.permission.POST_NOTIFICATIONS
+adb shell am start -W -n org.sipral.sample/.MainActivity
+```
+
+The far end is `bindings/kotlin/examples/Agent.kt` on the Mac's JVM, built
+as `bindings/kotlin/README.md` says, with no registrar, and bound to the
+Mac's LAN address rather than to loopback: its answer advertises the address
+it is bound to, and 127.0.0.1 inside the emulator is the emulator's own.
+`SIPRAL_REGISTRAR_ADDRESS` only picks that address:
+
+```sh
+SIPRAL_AOR=sip:agent@192.0.2.20 SIPRAL_REGISTRAR_ADDRESS=192.0.2.20:5060 \
+    java -Djava.library.path=<shim dir> -cp <classes>:<coroutines jar>:<kotlin-stdlib.jar> \
+    org.sipral.examples.AgentKt
+```
+
+It prints `listening on 192.0.2.20:<port>`. In the sample, the address of
+record is any SIP URI, the registrar address is that `192.0.2.20:<port>`,
+the registrar URI stays empty, Register, then call
+`sip:agent@192.0.2.20:<port>`. The emulator's NAT carries the call out, and
+symmetric RTP on the agent carries the media back. The agent hangs up a call
+a minute after answering it, so hang up from the sample before then to see
+the phone's own BYE. `adb shell dumpsys telecom` shows the framework's side,
+and `emulator.pcap` the wire.
+
 ## What is still owed to phase 4, and is not signalling
 
 **The platform audio session is not here, deliberately.** `C4` — the device

@@ -673,6 +673,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   is about 3 000. The history now starts again at the frame after any hole,
   concealed or silent, so a pitch is only ever estimated over audio that is
   contiguous in time.
+- **The Android sample's screen no longer sits under the status bar.** An
+  application targeting Android 15 is drawn edge to edge, and the sample's
+  first field and heading were under the clock, with the status bar's white
+  icons over a light screen. It now keeps its content clear of the system
+  bars and the keyboard, and the icons are dark. Found running the APK on an
+  Android 16 emulator, where it also placed, held, resumed and hung up a
+  call through the telecom framework (`docs/15-mobile.md`).
 - **An ICE call hears the far end before a pair is chosen.** Until the
   controlling end nominates — up to `nomination_wait`, a second, after its
   first valid pair — the far end sends on whichever pair its own checks

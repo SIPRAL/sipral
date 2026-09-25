@@ -414,12 +414,16 @@ after it. What is left is platform work, and platform work needs the platform.
   for which no Android device crate exists yet, and a device to run them on.
 - **`ConnectionService` and the AAR** — C2 carried onto Android's telecom
   framework as a self-managed connection, and the AAR with both natives for
-  arm64-v8a, armeabi-v7a and x86_64. *Built and tested off a phone*: the
-  helper's logic on a JVM through fakes and over two real stacks, and the AAR,
+  arm64-v8a, armeabi-v7a and x86_64. *Built, and run on an emulator*: the
+  helper's logic on a JVM through fakes and over two real stacks, the AAR,
   the helper's library and a Compose sample built with the Android SDK and
-  opened (`bindings/kotlin/README.md`). What the framework itself does with the
-  call, audio routing and push delivery wait for a device; so does the
-  foreground service for a call's lifetime.
+  opened (`bindings/kotlin/README.md`), and the sample's APK on an Android 16
+  arm64 emulator placing a call to a Sipral agent, holding, resuming, sending
+  a digit and hanging up, with the telecom framework following every state,
+  and a simulated push ringing through it (`docs/15-mobile.md`). An incoming
+  INVITE, real audio devices and routes, and push delivery wait for a phone
+  and a registrar in front of it; so does the foreground service for a
+  call's lifetime.
 - **ICE in the full role** (RFC 8445) with TURN, on top of the STUN, TURN and
   ICE-lite in `sipral-nat`: gathering, pairing, checks, nomination, role
   conflicts, restarts, consent freshness (RFC 7675). *The agent is written*,

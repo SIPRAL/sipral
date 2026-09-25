@@ -195,8 +195,8 @@ Split in two, so that the part worth testing needs no Android:
   against the platform's stub jar, with TestNG: every one the framework may
   answer, turn away (`onReject` with no argument, with a reason, or with a
   message), hang up, abort, hold, resume or send a digit through reaches the
-  bridge. What the connection tells the framework cannot be seen there, and
-  waits for a device.
+  bridge. What the connection tells the framework cannot be seen there; it
+  was on an emulator, through `dumpsys telecom` (`docs/15-mobile.md`).
 
 `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` names the announcement an INVITE answered
 in `event.payload.announce.announcement`. `TelecomBridge` still matches by
@@ -224,5 +224,10 @@ against.
 
 Proven off a phone: the logic, by `TelecomCheck.kt`; the connection's
 callbacks reaching it, by the helper's unit tests; the three artefacts, built
-and opened. Not provable without one: what the telecom framework itself
-does with a self-managed call, audio routing, and push delivery.
+and opened. Proven on an Android 16 emulator: the sample's APK installing,
+loading both natives, and placing, holding, resuming and hanging up a call
+with the telecom framework following each state, and a simulated push
+ringing through the framework and its incoming-call notification --
+`docs/15-mobile.md` says what was seen and how to run it again. Not provable
+without a phone and a registrar: an incoming INVITE, real audio routes, and
+push delivery.

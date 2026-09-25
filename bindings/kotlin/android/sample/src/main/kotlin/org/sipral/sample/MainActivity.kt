@@ -7,6 +7,7 @@ import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -47,6 +49,10 @@ class MainActivity : ComponentActivity() {
     private val model: SampleModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Edge to edge on every release, not only from Android 15 on, and
+        // with the status bar's icons dark over this light screen rather
+        // than the platform's white ones.
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {
@@ -75,9 +81,13 @@ private fun Permissions() {
 
 @Composable
 private fun Sample(model: SampleModel) {
+    // Android 15 draws every application targeting it edge to edge, under
+    // the status bar, the navigation bar and the keyboard: the screen keeps
+    // its content out of all three itself.
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .safeDrawingPadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
