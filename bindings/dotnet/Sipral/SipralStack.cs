@@ -678,6 +678,18 @@ public sealed class SipralStack : IDisposable
             {
                 checkRead.Clear();
             }
+            catch (ObjectDisposedException)
+            {
+                // A media socket in `stunSnapshot` was disposed by
+                // another thread — `Call.Close`/`ForgetMediaSocket`
+                // race with this select the way
+                // `bindings/python/sipral/stack.py`'s own `_run` can
+                // race a socket's `close()` too, caught there as an
+                // `OSError` on the next `recvfrom` instead. This poll
+                // just skips the sockets it cannot trust this pass;
+                // the next one reads `_stunSockets` fresh.
+                checkRead.Clear();
+            }
 
             foreach (var sock in checkRead)
             {
