@@ -973,7 +973,7 @@ different one. `UserAgent::has_described` is what `ring_with` asks, and the
 refusal is the same error, with nothing sent.
 
 `sipral_call_ring_media` (`docs/08-ffi.md`) is the C entry point, and the one
-place SRTP on an incoming call's own terms was still missing after 8.4.6:
+place SRTP on an incoming call's own terms was still missing before it:
 `sipral_call_answer_media` reads no configuration of its own, so a call this
 stack describes the media of had no way to choose anything but the stack's
 SRTP policy until it could ring with one first.
