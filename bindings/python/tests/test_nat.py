@@ -24,12 +24,16 @@ no NAT helper of its own to work at all.
 allocation request leaving": a `turn_server` naming a fake server that
 never answers still gets `sipral_stack_nat_map`'s Binding request out
 (taken by this test's fake STUN responder, which this one also is) and,
-once that is answered, a TURN Allocate request -- unauthenticated the
-first time, RFC 8656 Section 9's mandatory 401 challenge round, credentials
-attached the second -- both readable off the wire this test listens on
-directly. Proving an actual relay needs coturn, which this repository does
-not run outside the lab (`intern/ops/agenti-si-cost.md`); this is as far
-as a unit test gets.
+once that is answered, an unauthenticated TURN Allocate request, read off
+the wire this test listens on directly -- RFC 8656 Section 9's mandatory
+401 challenge round, and the credentialed retry it would prompt, needs a
+server that actually sends the 401, which this fake one deliberately does
+not (checked directly: this test's own server sees nothing but identical
+retransmits of that first request over several seconds of retrying, never
+a second one with `labuser`/`labpass` attached). Proving that leg, and an
+actual relay, both need coturn, which this repository does not run outside
+the lab (`intern/ops/agenti-si-cost.md`); this is as far as a unit test
+gets.
 """
 
 from __future__ import annotations
