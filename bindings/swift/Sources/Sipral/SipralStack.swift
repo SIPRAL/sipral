@@ -85,6 +85,48 @@ public final class SipralStack: @unchecked Sendable {
         weak var stack: SipralStack?
     }
 
+    /// The STUN server this stack asks where its sockets appear from, as
+    /// `host:port`, or `nil` for a stack that asks nobody.
+    public let stunServer: String?
+    private let turnServer: String?
+
+    /// Media sockets `sipral_stack_nat_map` named whose call has no media
+    /// handle yet, by `host:port`: the poll thread reads them and hands what
+    /// arrives to `sipral_stack_receive_stun`, and sends what
+    /// `sipral_stack_poll_stun` names each of them as the source of. Guarded
+    /// by `natQueue`, which also covers each socket's close, so the poll
+    /// thread never writes to one that was just given back.
+    private let natQueue = DispatchQueue(label: "org.sipral.stack.nat")
+    private var stunSockets: [String: UDPSocket] = [:]
+    private var natWaiters: [String: NatWaiter] = [:]
+
+    /// One media socket's wait for `SipralEventKind.natMapping` and, with a
+    /// TURN server, `SipralEventKind.natRelay`.
+    private final class NatWaiter {
+        let done = DispatchSemaphore(value: 0)
+        var mapped = false
+        var relayed: Bool
+        init(needsRelay: Bool) { relayed = !needsRelay }
+    }
+
+    /// A stack.
+    ///
+    /// Every option left `nil` is this build's own default, which is what a
+    /// stack created before the option existed does. `ice` is what every
+    /// call does about ICE (RFC 8445) unless `placeCall(ice:)` says
+    /// otherwise; `SipralIce.off` by default.
+    ///
+    /// `stunServer`, as `host:port` -- an address, not a name -- turns on
+    /// `SIPRAL_NAT_STUN`: the signalling socket asks it where it appears
+    /// from, every account's `Contact` moves to that public address
+    /// (`SipralEventKind.natMapping`, `NatEventData.signalling`), and every
+    /// media socket `placeCall` or `takeIncomingCall` opens is asked the
+    /// same before its call is described, so the SDP a far end reads names
+    /// the address it can actually send to. `turn` adds a relay on a TURN
+    /// server for each of those media sockets, offered as the call's relayed
+    /// ICE candidate; it needs `stunServer` too, and a call only uses the
+    /// relay under ICE. `g729AnnexB` allows G.729's silence compression
+    /// (on by default).
     public init(
         bindHost: String = "127.0.0.1",
         bindPort: UInt16 = 0,
@@ -92,11 +134,17 @@ public final class SipralStack: @unchecked Sendable {
         codecs: String? = nil,
         frameMs: UInt32 = 0,
         offerDtmf: Bool? = nil,
-        srtp: SipralSrtp? = nil
+        srtp: SipralSrtp? = nil,
+        ice: SipralIce? = nil,
+        stunServer: String? = nil,
+        turn: TurnServer? = nil,
+        g729AnnexB: Bool? = nil
     ) throws {
         let socket = try UDPSocket(host: bindHost, port: bindPort)
         self.socket = socket
         self.bindAddress = socket.localAddress
+        self.stunServer = stunServer
+        self.turnServer = turn?.address
         self.origin = .now()
         self.box = StackBox()
         self.transmitData = .allocate(capacity: 65536)
@@ -110,7 +158,9 @@ public final class SipralStack: @unchecked Sendable {
 
         self.handle = try entropy.withUnsafeBufferPointer { entropyBuf in
             try mediaSeed.withUnsafeBufferPointer { seedBuf in
-                try CStrings.with([socket.localAddress, userAgent, codecs]) { parts in
+                try CStrings.with(
+                    [socket.localAddress, userAgent, codecs, stunServer, turn?.address, turn?.username, turn?.password]
+                ) { parts in
                     var config = sipral_stack_config_t.sized()
                     config.event_callback = sipralStackEventTrampoline
                     config.event_user_data = boxPointer
@@ -129,6 +179,21 @@ public final class SipralStack: @unchecked Sendable {
                     config.media_seed = seedBuf.baseAddress
                     config.media_seed_len = 32
                     config.srtp = srtp?.rawValue ?? 0
+                    config.ice = ice?.rawValue ?? 0
+                    config.g729_annex_b = SipralStack.toggle(g729AnnexB)
+                    if let stunPointer = parts[3].pointer {
+                        config.nat = SipralNat.stun.rawValue
+                        config.stun_server = stunPointer
+                        config.stun_server_len = parts[3].count
+                    }
+                    if let turnPointer = parts[4].pointer {
+                        config.turn_server = turnPointer
+                        config.turn_server_len = parts[4].count
+                        config.turn_username = parts[5].pointer
+                        config.turn_username_len = parts[5].count
+                        config.turn_password = parts[6].pointer
+                        config.turn_password_len = parts[6].count
+                    }
                     return try Sipral.stackCreate(config: config)
                 }
             }
@@ -203,28 +268,37 @@ public final class SipralStack: @unchecked Sendable {
         mediaHost: String = "127.0.0.1",
         mediaPort: UInt16 = 0,
         destination: String? = nil,
-        srtp: SipralSrtp? = nil
+        srtp: SipralSrtp? = nil,
+        ice: SipralIce? = nil
     ) throws -> Call {
         let mediaSocket = try UDPSocket(host: mediaHost, port: mediaPort)
         let stackHandle = handle
-        let now = nowMs()
 
-        let callHandle: SipralHandle = try CStrings.with([target, mediaSocket.localAddress, destination]) { parts in
-            var config = sipral_call_config_t.sized()
-            config.target = parts[0].pointer
-            config.target_len = parts[0].count
-            config.media_address = parts[1].pointer
-            config.media_address_len = parts[1].count
-            config.srtp = srtp?.rawValue ?? 0
-            if let destinationPointer = parts[2].pointer {
-                config.destination = destinationPointer
-                config.destination_len = parts[2].count
+        let callHandle: SipralHandle
+        do {
+            try mapMediaSocket(mediaSocket)
+            let now = nowMs()
+            callHandle = try CStrings.with([target, mediaSocket.localAddress, destination]) { parts in
+                var config = sipral_call_config_t.sized()
+                config.target = parts[0].pointer
+                config.target_len = parts[0].count
+                config.media_address = parts[1].pointer
+                config.media_address_len = parts[1].count
+                config.srtp = srtp?.rawValue ?? 0
+                config.ice = ice?.rawValue ?? 0
+                if let destinationPointer = parts[2].pointer {
+                    config.destination = destinationPointer
+                    config.destination_len = parts[2].count
+                }
+                return try retryingBusy {
+                    try Sipral.callPlace(
+                        stack: stackHandle, account: account.handle, config: config, configHeaders: [], nowMs: now
+                    )
+                }
             }
-            return try retryingBusy {
-                try Sipral.callPlace(
-                    stack: stackHandle, account: account.handle, config: config, configHeaders: [], nowMs: now
-                )
-            }
+        } catch {
+            giveBackMediaSocket(mediaSocket)
+            throw error
         }
 
         let call = Call(stack: self, handle: callHandle, mediaSocket: mediaSocket)
@@ -263,6 +337,12 @@ public final class SipralStack: @unchecked Sendable {
         mediaPort: UInt16 = 0
     ) throws -> Call {
         let mediaSocket = try UDPSocket(host: mediaHost, port: mediaPort)
+        do {
+            try mapMediaSocket(mediaSocket)
+        } catch {
+            giveBackMediaSocket(mediaSocket)
+            throw error
+        }
         let call = Call(stack: self, handle: event.call, mediaSocket: mediaSocket)
         registerCall(call)
 
@@ -303,6 +383,143 @@ public final class SipralStack: @unchecked Sendable {
         callsQueue.sync { _ = calls.removeValue(forKey: handle) }
     }
 
+    // MARK: - media sockets behind a NAT
+
+    /// How long `mapMediaSocket` waits: the STUN answer comes within five
+    /// and a half seconds whatever the server does, and a TURN Allocate
+    /// nobody answers is given up on after thirty-nine and a half.
+    private var natPatience: DispatchTimeInterval {
+        turnServer == nil ? .seconds(7) : .seconds(42)
+    }
+
+    /// `sipral_stack_nat_map` for a media socket about to carry a call, and
+    /// the wait until the stack can describe the call by what the servers
+    /// said -- placing or answering before that is
+    /// `SIPRAL_STATUS_WRONG_STATE`. The socket is read by the poll thread
+    /// from here until its call's media handle exists. Nothing at all on a
+    /// stack without a STUN server.
+    private func mapMediaSocket(_ socket: UDPSocket) throws {
+        guard stunServer != nil else { return }
+        let local = socket.localAddress
+        let waiter = NatWaiter(needsRelay: turnServer != nil)
+        natQueue.sync {
+            stunSockets[local] = socket
+            natWaiters[local] = waiter
+        }
+        defer { natQueue.sync { _ = natWaiters.removeValue(forKey: local) } }
+        try retryingBusy { try Sipral.stackNatMap(stack: handle, local: local, nowMs: nowMs()) }
+        _ = waiter.done.wait(timeout: .now() + natPatience)
+    }
+
+    /// The poll thread's half of `mapMediaSocket`'s wait.
+    private func noteNat(_ event: SipralEvent) {
+        let local: String
+        if let nat = event.natData, !nat.signalling {
+            local = nat.local
+        } else if let relay = event.relayData {
+            local = relay.local
+        } else {
+            return
+        }
+        natQueue.sync {
+            guard let waiter = natWaiters[local] else { return }
+            if event.natData != nil { waiter.mapped = true } else { waiter.relayed = true }
+            if waiter.mapped && waiter.relayed { waiter.done.signal() }
+        }
+    }
+
+    /// The call on `local` has its media handle: its socket's datagrams go
+    /// to `sipral_media_receive` from now on, read by `Media`'s own thread.
+    /// Called on the poll thread, in the same poll that raised
+    /// `SipralEventKind.mediaStarted`.
+    func mediaSocketTaken(_ local: String) {
+        natQueue.sync { _ = stunSockets.removeValue(forKey: local) }
+    }
+
+    /// A media socket that will carry no call after all, or whose call ended
+    /// before it had media: `sipral_stack_nat_unmap`, so the stack stops
+    /// refreshing its mapping and gives its relay back, the Refresh that
+    /// does that sent from the socket itself, and then the socket closed.
+    func giveBackMediaSocket(_ socket: UDPSocket) {
+        let local = socket.localAddress
+        let named = natQueue.sync { stunSockets[local] != nil }
+        if named {
+            try? retryingBusy { try Sipral.stackNatUnmap(stack: handle, local: local, nowMs: nowMs()) }
+            drainStun()
+        }
+        natQueue.sync {
+            _ = stunSockets.removeValue(forKey: local)
+            socket.close()
+        }
+    }
+
+    /// `sipral_stack_poll_stun`: every request a media socket owes, sent
+    /// from the socket the stack names -- the address the server sees it
+    /// come from is the whole point -- to wherever the stack says: the
+    /// STUN server, the TURN server, or, once a call is placed on a relay,
+    /// the relay's refreshes. Its buffers are its own, since the poll thread
+    /// and a thread giving a socket back can both be here.
+    private func drainStun() {
+        guard stunServer != nil else { return }
+        var data = [UInt8](repeating: 0, count: 1500)
+        var destination = [UInt8](repeating: 0, count: 128)
+        var source = [UInt8](repeating: 0, count: 128)
+        while true {
+            let taken: (payload: [UInt8], destination: String, source: String)? = data.withUnsafeMutableBufferPointer { dataBuf in
+                destination.withUnsafeMutableBufferPointer { destinationBuf in
+                    source.withUnsafeMutableBufferPointer { sourceBuf in
+                        var transmit = sipral_transmit_t.sized()
+                        transmit.data = dataBuf.baseAddress
+                        transmit.capacity = dataBuf.count
+                        transmit.destination = UnsafeMutableRawPointer(destinationBuf.baseAddress!)
+                            .assumingMemoryBound(to: CChar.self)
+                        transmit.destination_capacity = destinationBuf.count
+                        transmit.source = UnsafeMutableRawPointer(sourceBuf.baseAddress!)
+                            .assumingMemoryBound(to: CChar.self)
+                        transmit.source_capacity = sourceBuf.count
+                        guard (try? retryingBusy({ try Sipral.stackPollStun(stack: handle, transmit: &transmit) })) != nil,
+                              transmit.len > 0 else { return nil }
+                        return (
+                            Array(dataBuf.prefix(transmit.len)),
+                            String(decoding: destinationBuf.prefix(transmit.destination_len), as: UTF8.self),
+                            String(decoding: sourceBuf.prefix(transmit.source_len), as: UTF8.self)
+                        )
+                    }
+                }
+            }
+            guard let taken else { return }
+            natQueue.sync { _ = stunSockets[taken.source]?.send(taken.payload, to: taken.destination) }
+        }
+    }
+
+    /// Everything waiting on the media sockets not yet handed to a call's
+    /// media, collected under `natQueue` and handed to
+    /// `sipral_stack_receive_stun` outside it.
+    private func receiveStun() {
+        let arrived: [(data: [UInt8], from: String, to: String)] = natQueue.sync {
+            var arrived: [(data: [UInt8], from: String, to: String)] = []
+            for (local, socket) in stunSockets {
+                while let (data, from) = socket.receive(capacity: 2048) {
+                    arrived.append((data, from, local))
+                }
+            }
+            return arrived
+        }
+        for datagram in arrived {
+            // A datagram from a stranger, or early media before the session
+            // opens, is refused and costs that one datagram.
+            try? retryingBusy {
+                try Sipral.stackReceiveStun(
+                    stack: handle, data: datagram.data, from: datagram.from, to: datagram.to, nowMs: nowMs()
+                )
+            }
+        }
+    }
+
+    private var stunDescriptors: [Int32] {
+        natQueue.sync { stunSockets.values.map(\.fd) }
+    }
+
     // MARK: - the poll thread
 
     /// Every event goes to its call, if it has one, and to `events`.
@@ -319,6 +536,7 @@ public final class SipralStack: @unchecked Sendable {
     /// `Sipral.stackResolved`.
     fileprivate func handleEvent(_ raw: sipral_event_t) {
         let event = SipralEventDecoder.decode(raw)
+        noteNat(event)
         if let call = callFor(event.call) {
             call.deliver(event)
         }
@@ -344,36 +562,50 @@ public final class SipralStack: @unchecked Sendable {
         }
     }
 
-    /// `sipral_stack_poll_farewell`: the RTCP BYE a call that just ended
-    /// still owes, sent through that call's own media socket, to the last
-    /// address media was actually heard from.
+    /// `sipral_stack_poll_farewell`: what a call that just ended still owes
+    /// -- its RTCP BYE, and with a TURN server the Refresh that gives its
+    /// relay back -- sent through that call's own media socket to the
+    /// address the stack names. Under ICE that is the path ICE chose or the
+    /// TURN server, not necessarily the last address media came from, which
+    /// is only the fallback for a packet that names none.
     private func drainFarewells() {
+        var destination = [UInt8](repeating: 0, count: 128)
         while true {
-            var packet = sipral_media_packet_t.sized()
-            packet.data = farewellData
-            packet.capacity = 1500
-            packet.destination = nil
-            packet.destination_capacity = 0
-            let call: SipralHandle
-            do {
-                call = try Sipral.stackPollFarewell(stack: handle, outPacket: &packet)
-            } catch {
-                return
-            }
-            guard packet.len > 0 else { return }
-            guard let target = callFor(call), let media = target.media, let remote = media.remoteAddress else {
-                continue
-            }
-            let payload = Array(UnsafeBufferPointer(start: farewellData, count: packet.len))
-            media.sendRaw(payload, to: remote)
+            let taken: (call: SipralHandle, payload: [UInt8], destination: String)? =
+                destination.withUnsafeMutableBufferPointer { destinationBuf in
+                    var packet = sipral_media_packet_t.sized()
+                    packet.data = farewellData
+                    packet.capacity = 1500
+                    packet.destination = UnsafeMutableRawPointer(destinationBuf.baseAddress!)
+                        .assumingMemoryBound(to: CChar.self)
+                    packet.destination_capacity = destinationBuf.count
+                    guard let call = try? Sipral.stackPollFarewell(stack: handle, outPacket: &packet),
+                          packet.len > 0 else { return nil }
+                    return (
+                        call,
+                        Array(UnsafeBufferPointer(start: farewellData, count: packet.len)),
+                        String(decoding: destinationBuf.prefix(packet.destination_len), as: UTF8.self)
+                    )
+                }
+            guard let taken else { return }
+            guard let target = callFor(taken.call) else { continue }
+            let address = taken.destination.isEmpty ? target.media?.remoteAddress : taken.destination
+            guard let address else { continue }
+            target.sendOnMediaSocket(taken.payload, to: address)
         }
     }
 
     private func run() {
         while !isClosed {
-            var pfd = pollfd(fd: socket.fd, events: Int16(POLLIN), revents: 0)
-            _ = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, 50) }
-            if pfd.revents & Int16(POLLIN) != 0 {
+            // The signalling socket first, then every media socket still
+            // waiting for its call's media handle.
+            var pfds = [pollfd(fd: socket.fd, events: Int16(POLLIN), revents: 0)]
+            pfds += stunDescriptors.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
+            _ = pfds.withUnsafeMutableBufferPointer { poll($0.baseAddress, nfds_t($0.count), 50) }
+            if pfds.dropFirst().contains(where: { $0.revents & Int16(POLLIN) != 0 }) {
+                receiveStun()
+            }
+            if pfds[0].revents & Int16(POLLIN) != 0 {
                 while let (data, from) = socket.receive() {
                     // `to` is "the address the datagram arrived on"
                     // (`docs/08-ffi.md`) and null/empty is meant to mean
@@ -398,6 +630,7 @@ public final class SipralStack: @unchecked Sendable {
             }
             guard (try? Sipral.stackPoll(stack: handle, nowMs: nowMs())) != nil else { continue }
             drainTransmit()
+            drainStun()
             drainFarewells()
         }
         closedSemaphore.signal()
@@ -430,6 +663,13 @@ public final class SipralStack: @unchecked Sendable {
         }
         for call in openCalls {
             call.close()
+        }
+        // A socket mapped for a call that was never placed still holds a
+        // relay the server would keep for up to ten minutes after the stack
+        // is gone, since `sipral_stack_destroy` sends nothing.
+        let unspent = natQueue.sync { Array(stunSockets.values) }
+        for socket in unspent {
+            giveBackMediaSocket(socket)
         }
 
         _ = closedSemaphore.wait(timeout: .now() + 5)

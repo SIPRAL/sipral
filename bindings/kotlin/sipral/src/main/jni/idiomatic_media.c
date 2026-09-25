@@ -240,3 +240,59 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollTransmit(JNIEnv *env, jcla
     (*env)->SetLongArrayRegion(env, outLen, 0, 3, lens);
     return (jint)status;
 }
+
+/* sipral_stack_poll_stun fills the same sipral_transmit_t, and here the
+ * source is the point: it names the media socket the request has to leave
+ * from, since the address the server sees it come from is the answer. So all
+ * three buffers are the caller's, and `outLen` comes back as
+ * [len, destination_len, source_len]. */
+JNIEXPORT jint JNICALL
+Java_org_sipral_idiomatic_SipralSignalNative_stackPollStun(JNIEnv *env, jclass cls,
+    jlong stack, jbyteArray outData, jbyteArray outDestination, jbyteArray outSource,
+    jlongArray outLen)
+{
+    sipral_transmit_t transmit;
+    jbyte *data_buf;
+    jbyte *dest_buf;
+    jbyte *source_buf;
+    sipral_status_t status;
+    jlong lens[3];
+
+    (void)cls;
+    memset(&transmit, 0, sizeof transmit);
+    transmit.size = sizeof transmit;
+
+    data_buf = (*env)->GetByteArrayElements(env, outData, NULL);
+    if (data_buf == NULL) {
+        return (jint)-1;
+    }
+    dest_buf = (*env)->GetByteArrayElements(env, outDestination, NULL);
+    if (dest_buf == NULL) {
+        (*env)->ReleaseByteArrayElements(env, outData, data_buf, JNI_ABORT);
+        return (jint)-1;
+    }
+    source_buf = (*env)->GetByteArrayElements(env, outSource, NULL);
+    if (source_buf == NULL) {
+        (*env)->ReleaseByteArrayElements(env, outDestination, dest_buf, JNI_ABORT);
+        (*env)->ReleaseByteArrayElements(env, outData, data_buf, JNI_ABORT);
+        return (jint)-1;
+    }
+    transmit.data = (uint8_t *)data_buf;
+    transmit.capacity = (size_t)(*env)->GetArrayLength(env, outData);
+    transmit.destination = (char *)dest_buf;
+    transmit.destination_capacity = (size_t)(*env)->GetArrayLength(env, outDestination);
+    transmit.source = (char *)source_buf;
+    transmit.source_capacity = (size_t)(*env)->GetArrayLength(env, outSource);
+
+    status = sipral_stack_poll_stun((sipral_handle_t)stack, &transmit);
+
+    (*env)->ReleaseByteArrayElements(env, outSource, source_buf, 0);
+    (*env)->ReleaseByteArrayElements(env, outDestination, dest_buf, 0);
+    (*env)->ReleaseByteArrayElements(env, outData, data_buf, 0);
+
+    lens[0] = (jlong)transmit.len;
+    lens[1] = (jlong)transmit.destination_len;
+    lens[2] = (jlong)transmit.source_len;
+    (*env)->SetLongArrayRegion(env, outLen, 0, 3, lens);
+    return (jint)status;
+}

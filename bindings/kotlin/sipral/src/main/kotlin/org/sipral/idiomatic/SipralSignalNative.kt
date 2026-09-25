@@ -30,4 +30,17 @@ internal object SipralSignalNative {
         outDestination: ByteArray,
         outLen: LongArray,
     ): Int
+
+    /**
+     * `sipral_stack_poll_stun`, with the source: the media socket the
+     * request must leave from. `outLen` comes back as
+     * `[len, destination_len, source_len]`.
+     */
+    external fun stackPollStun(
+        stack: Long,
+        outData: ByteArray,
+        outDestination: ByteArray,
+        outSource: ByteArray,
+        outLen: LongArray,
+    ): Int
 }

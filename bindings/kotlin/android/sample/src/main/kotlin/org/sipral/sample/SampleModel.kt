@@ -23,11 +23,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.sipral.SipralEventKind
+import org.sipral.SipralIce
 import org.sipral.android.telecom.AndroidTelecomPlatform
 import org.sipral.android.telecom.AudioRoute
 import org.sipral.android.telecom.SipralTelecom
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.SipralTurnServer
+import org.sipral.idiomatic.natOf
 import org.sipral.telecom.IdiomaticSipCalls
 import org.sipral.telecom.TelecomBridge
 import org.sipral.telecom.TelecomCall
@@ -51,6 +54,10 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
     var registrar by mutableStateOf("")
     var authUser by mutableStateOf("")
     var authPassword by mutableStateOf("")
+    var stunServer by mutableStateOf("")
+    var turnServer by mutableStateOf("")
+    var turnUser by mutableStateOf("")
+    var turnPassword by mutableStateOf("")
     var target by mutableStateOf("")
     var pushCaller by mutableStateOf("")
 
@@ -89,8 +96,21 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
                 // Sockets are opened and the first REGISTER goes out here, so
                 // off the main thread, which Android does not let touch the
                 // network.
+                // A STUN server makes the Contact the registrar stores, and
+                // the SDP of every call, name the address this device appears
+                // from beyond its NAT. A TURN server adds a relay, which only
+                // an ICE call can use, so ICE is offered when one is given.
+                val stun = stunServer.trim().ifEmpty { null }
+                val turn = turnServer.trim().ifEmpty { null }?.let {
+                    SipralTurnServer(it, turnUser.trim(), turnPassword)
+                }
                 val (opened, added) = withContext(Dispatchers.IO) {
-                    val opened = SipralClient.open(bindHost = host)
+                    val opened = SipralClient.open(
+                        bindHost = host,
+                        stunServer = stun,
+                        turn = turn,
+                        ice = if (turn != null) SipralIce.OFFERED else null,
+                    )
                     opened to opened.addAccount(
                         aor = aor,
                         registrarAddress = registrarAddress,
@@ -112,7 +132,12 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
                 scope.launch {
                     opened.events.collect { event ->
                         val kind = SipralEventKind.of(event.kind.toInt())
-                        kind?.let { append(it.name.lowercase()) }
+                        val nat = natOf(event)
+                        if (nat != null) {
+                            append("nat mapping ${nat.local} -> ${nat.mapped ?: "no answer"}")
+                        } else {
+                            kind?.let { append(it.name.lowercase()) }
+                        }
                         // Media arrives after the call is up, and the list of
                         // calls does not change when it does.
                         if (kind == SipralEventKind.MEDIA_STARTED) {
@@ -134,10 +159,19 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // Placing and answering wait for the STUN server to map the call's
+    // media socket when one is configured, so both run off the main thread.
     fun call() {
         val account = account ?: return
-        if (target.isNotBlank()) {
-            bridge?.placeCall(account.handle, target.trim())
+        val dialled = target.trim()
+        if (dialled.isNotEmpty()) {
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) { bridge?.placeCall(account.handle, dialled) }
+                } catch (failed: Exception) {
+                    append("call failed: ${failed.message}")
+                }
+            }
         }
     }
 
@@ -155,7 +189,13 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun answer(id: String) {
-        bridge?.answer(id)
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) { bridge?.answer(id) }
+            } catch (failed: Exception) {
+                append("answer failed: ${failed.message}")
+            }
+        }
     }
 
     fun decline(id: String) {

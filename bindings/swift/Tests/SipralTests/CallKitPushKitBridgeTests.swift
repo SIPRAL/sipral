@@ -260,7 +260,7 @@ final class PushKitBridgeTests: XCTestCase {
                 heldHere: false, heldThere: false, localSdp: nil, remoteSdp: nil, retryInMs: 0,
                 fromUri: "sip:alice@sipral.invalid", fromDisplay: nil, toUri: nil, callId: nil, digit: 0
             ),
-            mediaData: nil, registrationData: nil, announceData: nil
+            mediaData: nil, registrationData: nil, announceData: nil, natData: nil, relayData: nil
         )
 
         pushKit.matchIncomingCall(event, on: stack)

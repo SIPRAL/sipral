@@ -180,7 +180,11 @@ to `c=` and nowhere else. For those this end has to write its public address
 in the first place, and a Binding request from the socket in question is how
 it learns it. Off by default everywhere; on with `nat = SIPRAL_NAT_STUN` and a
 `stun_server` (an `ip:port`, not a name) in `sipral_stack_config_t`, or with
-`sipral::Mappings` from Rust.
+`sipral::Mappings` from Rust; the Swift layer takes it as
+`SipralStack(stunServer:)` and the Kotlin one as
+`SipralClient.open(stunServer = ...)`, each with `ice` and a TURN server
+beside it, and each runs the media socket's side of it for the application
+(`docs/08-ffi.md`, "Behind a NAT").
 `Capabilities::stun` and `SIPRAL_FEATURE_STUN` say whether the build has it.
 
 The decisions, and why each one is what it is:

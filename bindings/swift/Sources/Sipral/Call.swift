@@ -101,6 +101,13 @@ public final class Call: @unchecked Sendable {
         self.mediaAddress = mediaSocket.localAddress
     }
 
+    /// Writes straight to this call's own media socket -- used by
+    /// `SipralStack` for what `sipral_stack_poll_farewell` hands back once
+    /// signalling has already ended.
+    func sendOnMediaSocket(_ payload: [UInt8], to address: String) {
+        mediaSocket.send(payload, to: address)
+    }
+
     /// Called by `SipralStack` on its own poll thread.
     ///
     /// Every side effect below -- minting `media`, marking `ended` -- happens
@@ -109,9 +116,13 @@ public final class Call: @unchecked Sendable {
     /// (`bindings/python/sipral/call.py`'s `deliver` orders its own steps
     /// for the same reason).
     func deliver(_ event: SipralEvent) {
-        if event.kindRaw == SipralEventKind.mediaStarted.rawValue, media == nil,
-           let minted = try? Media(stack: stack, callHandle: handle, socket: mediaSocket) {
-            setMedia(minted)
+        if event.kindRaw == SipralEventKind.mediaStarted.rawValue, media == nil {
+            // Behind a NAT the poll thread has been reading this socket for
+            // the stack until now; from the media handle on, `Media` does.
+            stack.mediaSocketTaken(mediaAddress)
+            if let minted = try? Media(stack: stack, callHandle: handle, socket: mediaSocket) {
+                setMedia(minted)
+            }
         }
         if event.kindRaw == SipralEventKind.callEnded.rawValue {
             stateQueue.sync { _ended = true }
@@ -207,7 +218,7 @@ public final class Call: @unchecked Sendable {
         if let media {
             media.close()
         } else {
-            mediaSocket.close()
+            stack.giveBackMediaSocket(mediaSocket)
         }
         stack.forgetCall(handle)
         eventBroadcast.finish()

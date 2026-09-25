@@ -3,7 +3,9 @@
 
 package org.sipral.idiomatic
 
+import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetSocketAddress
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.BufferOverflow
@@ -116,6 +118,10 @@ class SipralCall internal constructor(
         if (event.kind == SipralEventKind.MEDIA_STARTED.value.toLong()) {
             synchronized(mediaLock) {
                 if (media == null && !closing) {
+                    // Behind a NAT the poll thread has been reading this
+                    // socket for the stack until now; from the media handle
+                    // on, SipralMedia does.
+                    client.mediaSocketTaken(mediaAddress)
                     media = mintMedia()
                 }
             }
@@ -262,9 +268,20 @@ class SipralCall internal constructor(
         if (current != null) {
             current.close()
         } else {
-            mediaSocket.close()
+            client.giveBackMediaSocket(mediaSocket, mediaAddress)
         }
         client.forgetCall(handle)
+    }
+
+    /** Writes straight to this call's own media socket: what
+     * `sipral_stack_poll_farewell` hands [SipralClient] once signalling has
+     * already ended. */
+    internal fun sendOnMediaSocket(payload: ByteArray, address: InetSocketAddress) {
+        try {
+            mediaSocket.send(DatagramPacket(payload, payload.size, address))
+        } catch (_: Exception) {
+            // best effort: a socket already closed has nobody left to tell
+        }
     }
 }
 

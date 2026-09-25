@@ -29,6 +29,45 @@ public struct SipralEvent: Sendable {
     public let mediaData: MediaEventData?
     public let registrationData: RegistrationEventData?
     public let announceData: AnnounceEventData?
+    /// `payload.nat`, for `SipralEventKind.natMapping` only.
+    public let natData: NatEventData?
+    /// `payload.relay`, for `SipralEventKind.natRelay` only.
+    public let relayData: RelayEventData?
+}
+
+/// What a STUN server said about one of this stack's sockets
+/// (`sipral_nat_event_t`).
+public struct NatEventData: Sendable {
+    public let mappingRaw: UInt32
+    public let mapping: SipralNatMapping?
+    /// True for the signalling socket, false for a call's media socket.
+    public let signalling: Bool
+    /// The transport, for the signalling socket; zero otherwise.
+    public let transport: UInt32
+    /// How many accounts' `Contact` moved to `mapped` because of this.
+    public let accounts: UInt32
+    /// The socket, as this layer bound it.
+    public let local: String
+    /// Where the server saw it from -- the public address -- or `nil` for
+    /// `SipralNatMapping.unanswered`.
+    public let mapped: String?
+    /// The mapping before, for `SipralNatMapping.moved`.
+    public let previous: String?
+}
+
+/// What a TURN server said about a media socket's relay
+/// (`sipral_nat_relay_event_t`). Nothing of the credential is in it.
+public struct RelayEventData: Sendable {
+    public let outcomeRaw: UInt32
+    public let outcome: SipralNatRelay?
+    /// The STUN error code the server refused with, or zero.
+    public let code: UInt32
+    public let local: String
+    /// The relayed address, for `SipralNatRelay.allocated`.
+    public let relayed: String?
+    public let mapped: String?
+    /// Why there is none, for `SipralNatRelay.failed`.
+    public let reason: String?
 }
 
 public struct CallEventData: Sendable {
@@ -187,6 +226,31 @@ enum SipralEventDecoder {
         AnnounceEventData(announcement: announce.announcement, waitedMs: announce.waited_ms)
     }
 
+    private static func natData(_ nat: sipral_nat_event_t) -> NatEventData {
+        NatEventData(
+            mappingRaw: nat.mapping,
+            mapping: SipralNatMapping(rawValue: nat.mapping),
+            signalling: nat.signalling != 0,
+            transport: nat.transport,
+            accounts: nat.accounts,
+            local: textC(nat.local, nat.local_len) ?? "",
+            mapped: textC(nat.mapped, nat.mapped_len),
+            previous: textC(nat.previous, nat.previous_len)
+        )
+    }
+
+    private static func relayData(_ relay: sipral_nat_relay_event_t) -> RelayEventData {
+        RelayEventData(
+            outcomeRaw: relay.outcome,
+            outcome: SipralNatRelay(rawValue: relay.outcome),
+            code: relay.code,
+            local: textC(relay.local, relay.local_len) ?? "",
+            relayed: textC(relay.relayed, relay.relayed_len),
+            mapped: textC(relay.mapped, relay.mapped_len),
+            reason: textC(relay.reason, relay.reason_len)
+        )
+    }
+
     /// Copies one `sipral_event_t` out into a standalone `SipralEvent`.
     ///
     /// Called from inside the C callback, and nowhere else: `raw` points at
@@ -199,8 +263,14 @@ enum SipralEventDecoder {
         var mediaData: MediaEventData?
         var registrationData: RegistrationEventData?
         var announceData: AnnounceEventData?
+        var natData: NatEventData?
+        var relayData: RelayEventData?
 
-        if kindRaw == SipralEventKind.registrationChanged.rawValue {
+        if kindRaw == SipralEventKind.natMapping.rawValue {
+            natData = self.natData(raw.payload.nat)
+        } else if kindRaw == SipralEventKind.natRelay.rawValue {
+            relayData = self.relayData(raw.payload.relay)
+        } else if kindRaw == SipralEventKind.registrationChanged.rawValue {
             registrationData = self.registrationData(raw.payload.registration)
         } else if callKinds.contains(kindRaw) {
             callData = self.callData(raw.payload.call)
@@ -222,7 +292,9 @@ enum SipralEventDecoder {
             callData: callData,
             mediaData: mediaData,
             registrationData: registrationData,
-            announceData: announceData
+            announceData: announceData,
+            natData: natData,
+            relayData: relayData
         )
     }
 }

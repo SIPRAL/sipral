@@ -119,6 +119,17 @@ private fun Sample(model: SampleModel) {
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             modifier = Modifier.fillMaxWidth(),
         )
+        Field("STUN server (host:port, empty: none)", model.stunServer) { model.stunServer = it }
+        Field("TURN server (host:port, needs STUN)", model.turnServer) { model.turnServer = it }
+        Field("TURN user", model.turnUser) { model.turnUser = it }
+        OutlinedTextField(
+            value = model.turnPassword,
+            onValueChange = { model.turnPassword = it },
+            label = { Text("TURN password") },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            modifier = Modifier.fillMaxWidth(),
+        )
         Button(onClick = { model.register() }) { Text("Register") }
         Text(model.status)
 

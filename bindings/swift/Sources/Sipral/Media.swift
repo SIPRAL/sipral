@@ -97,13 +97,6 @@ public final class Media: @unchecked Sendable {
         outgoing.sync { toSend.append(samples) }
     }
 
-    /// Writes straight to this call's own RTP socket -- used by
-    /// `SipralStack` to send the RTCP BYE `sipral_stack_poll_farewell` hands
-    /// back once signalling has already ended.
-    func sendRaw(_ payload: [UInt8], to address: String) {
-        socket.send(payload, to: address)
-    }
-
     private func nextChunk() -> [Int16] {
         outgoing.sync {
             while pending.count < frameSamples {

@@ -163,6 +163,37 @@ then its `events()`, then `answer()`. Under CallKit, bind the ringing `Call`
 into `CallKitBridge` instead, and CallKit's `CXAnswerCallAction` is what
 answers it.
 
+### Behind a NAT
+
+```swift
+let stack = try SipralStack(
+    bindHost: "10.0.2.16",
+    ice: .offered,                          // every call; placeCall(ice:) overrides one
+    stunServer: "198.51.100.1:3478",        // an address, not a name
+    turn: TurnServer(address: "198.51.100.1:3478", username: "alice", password: secret)
+)
+```
+
+Every option left `nil` is the build's own default, so a stack made without
+them behaves as it always did: no STUN, no ICE, no relay. With `stunServer`
+the signalling socket asks the server where it appears from, and every
+account's `Contact` moves to that public address — `SipralEventKind.natMapping`
+says so, with `event.natData` naming the socket, the mapping and how many
+accounts moved. `placeCall` and `takeIncomingCall` then ask the same about
+the call's media socket before the call is described, so the SDP names an
+address the far end can send to; they return once the server has answered, or
+five and a half seconds on without an answer (longer with a TURN server,
+whose `SipralEventKind.natRelay` and `event.relayData` say whether a relay was
+allocated). Until the call has media the stack's poll thread reads that
+socket, sends what `sipral_stack_poll_stun` names it as the source of, and
+hands everything arriving there — the servers' answers, the far end's first
+ICE checks — to `sipral_stack_receive_stun`. The relay is offered only as an
+ICE candidate, so it is used only with `ice`. `TurnServer`'s password stays
+out of its `description` and of `dump()`. `g729AnnexB: false` turns off
+G.729's silence compression. `Tests/SipralTests/NatTests.swift` proves each
+on the wire against a STUN and TURN server inside the test, and carries a
+call between two stacks that require ICE.
+
 ## Samples
 
 `Sources/SipralLabAgent` — a headless voice agent (answers, echoes, hangs up

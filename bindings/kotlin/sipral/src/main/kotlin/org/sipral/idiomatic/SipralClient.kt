@@ -20,6 +20,8 @@ import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -28,8 +30,12 @@ import org.sipral.Sipral
 import org.sipral.SipralCallConfig
 import org.sipral.SipralEvent
 import org.sipral.SipralEventListener
+import org.sipral.SipralException
+import org.sipral.SipralIce
+import org.sipral.SipralNat
 import org.sipral.SipralStackConfig
 import org.sipral.SipralStatus
+import org.sipral.SipralToggle
 import org.sipral.SipralTransport
 
 private const val TRANSMIT_BYTES = 1 shl 16
@@ -56,6 +62,10 @@ internal fun parseHostPort(text: String): InetSocketAddress {
 class SipralClient private constructor(
     private val socket: DatagramSocket,
     val bindAddress: String,
+    /** The STUN server this client asks where its sockets appear from, as
+     * `host:port`, or null for a client that asks nobody. */
+    val stunServer: String?,
+    private val turnServer: String?,
 ) : AutoCloseable {
     internal var handle: Long = 0L
         private set
@@ -98,23 +108,54 @@ class SipralClient private constructor(
          * [SipralClient.bindAddress] once this returns -- the same
          * two-step `bindings/python/sipral/stack.py` follows, because the
          * ABI has to be told the address before it exists.
+         *
+         * Every option left null is this build's own default, which is what
+         * a client opened before the option existed does. [ice] is what
+         * every call does about ICE (RFC 8445) unless [placeCall] says
+         * otherwise; `SipralIce.OFF` by default. [stunServer], as
+         * `host:port` -- an address, not a name -- turns on
+         * `SIPRAL_NAT_STUN`: the signalling socket asks it where it appears
+         * from, every account's `Contact` moves to that public address
+         * (`SIPRAL_EVENT_KIND_NAT_MAPPING`, read with [natOf]), and every
+         * media socket [placeCall] or [answerCall] opens is asked the same
+         * before its call is described, so the SDP a far end reads names an
+         * address it can actually send to. [turn] adds a relay on a TURN
+         * server for each of those media sockets, offered as the call's
+         * relayed ICE candidate ([relayOf]); it needs [stunServer] too, and
+         * a call only uses the relay under ICE. [g729AnnexB] allows G.729's
+         * silence compression, on by default.
          */
         fun open(
             bindHost: String = "127.0.0.1",
             bindPort: Int = 0,
             userAgent: String? = null,
             codecs: String? = null,
+            ice: SipralIce? = null,
+            stunServer: String? = null,
+            turn: SipralTurnServer? = null,
+            g729AnnexB: Boolean? = null,
         ): SipralClient {
             val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost))
             socket.soTimeout = 20
             val bindAddress = formatAddress(socket.localAddress.hostAddress, socket.localPort)
-            val client = SipralClient(socket, bindAddress)
-            client.start(userAgent, codecs)
+            val client = SipralClient(socket, bindAddress, stunServer, turn?.address)
+            try {
+                client.start(userAgent, codecs, ice, turn, g729AnnexB)
+            } catch (refused: Exception) {
+                socket.close()
+                throw refused
+            }
             return client
+        }
+
+        private fun toggle(value: Boolean?): Long = when (value) {
+            null -> SipralToggle.DEFAULT.value.toLong()
+            true -> SipralToggle.ON.value.toLong()
+            false -> SipralToggle.OFF.value.toLong()
         }
     }
 
-    private fun start(userAgent: String?, codecs: String?) {
+    private fun start(userAgent: String?, codecs: String?, ice: SipralIce?, turn: SipralTurnServer?, g729AnnexB: Boolean?) {
         val random = SecureRandom()
         val entropy = ByteArray(32).also { random.nextBytes(it) }
         val mediaSeed = ByteArray(32).also { random.nextBytes(it) }
@@ -127,6 +168,13 @@ class SipralClient private constructor(
             entropy = entropy,
             codecs = codecs,
             mediaSeed = mediaSeed,
+            ice = (ice?.value ?: 0).toLong(),
+            nat = if (stunServer != null) SipralNat.STUN.value.toLong() else 0,
+            stunServer = stunServer,
+            g729AnnexB = toggle(g729AnnexB),
+            turnServer = turn?.address,
+            turnUsername = turn?.username,
+            turnPassword = turn?.password,
         )
         handle = Sipral.stackCreate(config)
         thread = Thread(::run, "sipral-client-$bindAddress").apply {
@@ -176,6 +224,12 @@ class SipralClient private constructor(
      * `sipral_call_place`, with this stack running the call's own audio: a
      * media socket is opened here, before the INVITE goes out, and its
      * `host:port` is what `media_address` in `sipral_call_config_t` offers.
+     *
+     * With a [stunServer], the socket is first asked where it appears from,
+     * and this returns once the server has answered -- or has not, five and
+     * a half seconds on; with a TURN server, once the relay is allocated or
+     * refused as well. So call it off the main thread. [ice] overrides the
+     * client's own ICE policy for this call.
      */
     fun placeCall(
         account: SipralAccount,
@@ -184,6 +238,7 @@ class SipralClient private constructor(
         mediaPort: Int = 0,
         destination: String? = null,
         srtp: Long = 0,
+        ice: SipralIce? = null,
     ): SipralCall {
         val mediaSocket = DatagramSocket(mediaPort, InetAddress.getByName(mediaHost))
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
@@ -192,8 +247,15 @@ class SipralClient private constructor(
             mediaAddress = mediaAddress,
             destination = destination,
             srtp = srtp,
+            ice = (ice?.value ?: 0).toLong(),
         )
-        val callHandle = retryBusy { Sipral.callPlace(handle, account.handle, config, nowMs()) }
+        val callHandle = try {
+            mapMediaSocket(mediaSocket, mediaAddress)
+            retryBusy { Sipral.callPlace(handle, account.handle, config, nowMs()) }
+        } catch (refused: Exception) {
+            giveBackMediaSocket(mediaSocket, mediaAddress)
+            throw refused
+        }
         val call = SipralCall(this, callHandle, mediaSocket, mediaAddress)
         calls[callHandle] = call
         return call
@@ -218,10 +280,11 @@ class SipralClient private constructor(
         val call = SipralCall(this, callHandle, mediaSocket, mediaAddress)
         calls[callHandle] = call
         try {
+            mapMediaSocket(mediaSocket, mediaAddress)
             call.answer(mediaAddress)
         } catch (refused: Exception) {
             calls.remove(callHandle)
-            mediaSocket.close()
+            giveBackMediaSocket(mediaSocket, mediaAddress)
             throw refused
         }
         return call
@@ -252,6 +315,170 @@ class SipralClient private constructor(
         calls.remove(callHandle)
     }
 
+    // -- media sockets behind a NAT ------------------------------------------
+
+    // Media sockets `sipral_stack_nat_map` named whose call has no media
+    // handle yet, by `host:port`: the poll thread reads them and hands what
+    // arrives to `sipral_stack_receive_stun`, and sends what
+    // `sipral_stack_poll_stun` names each of them as the source of. Every
+    // read, send and close of one happens under `natLock`, so the poll
+    // thread never touches a socket that was just given back; no ABI call
+    // is made under it.
+    private val natLock = Any()
+    private val stunSockets = HashMap<String, DatagramSocket>()
+    private val natWaiters = ConcurrentHashMap<String, NatWaiter>()
+
+    /** One media socket's wait for `SIPRAL_EVENT_KIND_NAT_MAPPING` and,
+     * with a TURN server, `SIPRAL_EVENT_KIND_NAT_RELAY`. */
+    private class NatWaiter(needsRelay: Boolean) {
+        val mapped = AtomicBoolean(false)
+        val relayed = AtomicBoolean(!needsRelay)
+        val done = CountDownLatch(1)
+
+        fun settle() {
+            if (mapped.get() && relayed.get()) done.countDown()
+        }
+    }
+
+    /**
+     * `sipral_stack_nat_map` for a media socket about to carry a call, and
+     * the wait until the stack can describe the call by what the servers
+     * said: placing or answering before that is `SIPRAL_STATUS_WRONG_STATE`.
+     * The STUN answer comes within five and a half seconds whatever the
+     * server does; a TURN Allocate nobody answers is given up on after
+     * thirty-nine and a half. Nothing at all without a STUN server.
+     */
+    private fun mapMediaSocket(mediaSocket: DatagramSocket, local: String) {
+        if (stunServer == null) {
+            return
+        }
+        val waiter = NatWaiter(needsRelay = turnServer != null)
+        mediaSocket.soTimeout = 1
+        synchronized(natLock) { stunSockets[local] = mediaSocket }
+        natWaiters[local] = waiter
+        try {
+            retryBusy { Sipral.stackNatMap(handle, local, nowMs()) }
+            waiter.done.await(if (turnServer == null) 7L else 42L, TimeUnit.SECONDS)
+        } finally {
+            natWaiters.remove(local)
+        }
+    }
+
+    /** The poll thread's half of [mapMediaSocket]'s wait. */
+    private fun noteNat(event: SipralEvent) {
+        val nat = natOf(event)
+        val relay = relayOf(event)
+        when {
+            nat != null && nat.signalling == 0L -> natWaiters[nat.local ?: return]?.let {
+                it.mapped.set(true)
+                it.settle()
+            }
+            relay != null -> natWaiters[relay.local ?: return]?.let {
+                it.relayed.set(true)
+                it.settle()
+            }
+        }
+    }
+
+    /** The call on `local` has its media handle: its socket's datagrams go
+     * to `sipral_media_receive` from now on, read by [SipralMedia]'s own
+     * thread. Called on the poll thread, in the poll that raised
+     * `SIPRAL_EVENT_KIND_MEDIA_STARTED`. */
+    internal fun mediaSocketTaken(local: String) {
+        synchronized(natLock) { stunSockets.remove(local) }
+    }
+
+    /**
+     * A media socket that will carry no call after all, or whose call ended
+     * before it had media: `sipral_stack_nat_unmap`, so the stack stops
+     * refreshing its mapping and gives its relay back, the Refresh that
+     * does that sent from the socket itself, and then the socket closed.
+     */
+    internal fun giveBackMediaSocket(mediaSocket: DatagramSocket, local: String) {
+        val named = synchronized(natLock) { stunSockets.containsKey(local) }
+        if (named) {
+            try {
+                retryBusy { Sipral.stackNatUnmap(handle, local, nowMs()) }
+            } catch (_: Exception) {
+                // a stack already destroyed keeps nothing to give back
+            }
+            drainStun()
+        }
+        synchronized(natLock) {
+            stunSockets.remove(local)
+            mediaSocket.close()
+        }
+    }
+
+    /**
+     * `sipral_stack_poll_stun`: every request a media socket owes, sent from
+     * the socket the stack names -- the address the server sees it come from
+     * is the whole point -- to wherever the stack says. Its buffers are its
+     * own, since the poll thread and a thread giving a socket back can both
+     * be here.
+     */
+    private fun drainStun() {
+        if (stunServer == null) {
+            return
+        }
+        val data = ByteArray(PACKET_BYTES)
+        val destination = ByteArray(ADDRESS_BYTES)
+        val source = ByteArray(ADDRESS_BYTES)
+        val lens = LongArray(3)
+        var busyFor = 0
+        while (true) {
+            val status = SipralSignalNative.stackPollStun(handle, data, destination, source, lens)
+            if (status == SipralStatus.BUSY.value && busyFor < 500) {
+                busyFor += 1
+                Thread.sleep(1)
+                continue
+            }
+            val len = lens[0].toInt()
+            if (status != SipralStatus.OK.value || len == 0) {
+                return
+            }
+            val to = parseHostPort(String(destination, 0, lens[1].toInt(), Charsets.UTF_8))
+            val from = String(source, 0, lens[2].toInt(), Charsets.UTF_8)
+            synchronized(natLock) {
+                try {
+                    stunSockets[from]?.send(DatagramPacket(data.copyOfRange(0, len), len, to))
+                } catch (_: Exception) {
+                    // best effort: the stack retransmits what goes unanswered
+                }
+            }
+        }
+    }
+
+    /** Everything waiting on the media sockets not yet handed to a call's
+     * media, read under `natLock` and handed to `sipral_stack_receive_stun`
+     * outside it. */
+    private fun receiveStun() {
+        val arrived = ArrayList<Triple<ByteArray, String, String>>()
+        synchronized(natLock) {
+            val buffer = ByteArray(2048)
+            for ((local, mediaSocket) in stunSockets) {
+                while (true) {
+                    val packet = DatagramPacket(buffer, buffer.size)
+                    try {
+                        mediaSocket.receive(packet)
+                    } catch (_: Exception) {
+                        break
+                    }
+                    val from = formatAddress(packet.address.hostAddress, packet.port)
+                    arrived += Triple(packet.data.copyOfRange(0, packet.length), from, local)
+                }
+            }
+        }
+        for ((data, from, local) in arrived) {
+            try {
+                retryBusy { Sipral.stackReceiveStun(handle, data, from, local, nowMs()) }
+            } catch (_: SipralException) {
+                // a datagram from a stranger, or early media before the
+                // session opens: refused, and it costs that one datagram
+            }
+        }
+    }
+
     // -- the poll thread -----------------------------------------------------
 
     private fun onEvent(event: SipralEvent) {
@@ -259,6 +486,7 @@ class SipralClient private constructor(
         // `events` reading `callFor(event.call)`'s own state must find it
         // already current, the same ordering `sipral.call.Call.deliver`
         // (the Python binding) keeps for the same reason.
+        noteNat(event)
         calls[event.call]?.deliver(event)
         eventsFlow.tryEmit(event)
     }
@@ -283,6 +511,14 @@ class SipralClient private constructor(
         }
     }
 
+    /**
+     * What a call that just ended still owes -- its RTCP BYE, and with a
+     * TURN server the Refresh that gives its relay back -- sent through
+     * that call's own media socket to the address the stack names. Under
+     * ICE that is the path ICE chose or the TURN server, not necessarily the
+     * last address media came from, which is only the fallback for a packet
+     * that names none.
+     */
     private fun drainFarewells() {
         val data = ByteArray(PACKET_BYTES)
         val destination = ByteArray(ADDRESS_BYTES)
@@ -295,9 +531,13 @@ class SipralClient private constructor(
                 return
             }
             val call = calls[outCall[0]] ?: continue
-            val media = call.media ?: continue
-            val remote = media.remoteAddress ?: continue
-            media.sendTo(data.copyOfRange(0, len), remote)
+            val named = lens[1].toInt()
+            val to = if (named > 0) {
+                parseHostPort(String(destination, 0, named, Charsets.UTF_8))
+            } else {
+                call.media?.remoteAddress ?: continue
+            }
+            call.sendOnMediaSocket(data.copyOfRange(0, len), to)
         }
     }
 
@@ -329,12 +569,14 @@ class SipralClient private constructor(
             if (closed.get()) {
                 return
             }
+            receiveStun()
             try {
                 Sipral.stackPoll(handle, nowMs())
             } catch (_: Exception) {
                 continue
             }
             drainTransmit()
+            drainStun()
             drainFarewells()
         }
     }
@@ -369,6 +611,13 @@ class SipralClient private constructor(
         }
         for (call in open) {
             call.close()
+        }
+        // A socket mapped for a call that was never placed still holds a
+        // relay the server would keep for up to ten minutes after the stack
+        // is gone, since `sipral_stack_destroy` sends nothing.
+        val unspent = synchronized(natLock) { stunSockets.toList() }
+        for ((local, mediaSocket) in unspent) {
+            giveBackMediaSocket(mediaSocket, local)
         }
         if (Thread.currentThread() !== thread) {
             thread.join(5000)

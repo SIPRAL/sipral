@@ -156,6 +156,37 @@ val (call, incoming) = client.events.awaitNext(SipralEventKind.INCOMING_CALL) {
 val answered = client.answerCall(incoming)
 ```
 
+### Behind a NAT
+
+```kotlin
+val client = SipralClient.open(
+    bindHost = "10.0.2.16",
+    ice = SipralIce.OFFERED,                // every call; placeCall(ice = ...) overrides one
+    stunServer = "198.51.100.1:3478",       // an address, not a name
+    turn = SipralTurnServer("198.51.100.1:3478", "alice", secret),
+)
+```
+
+Every option left null is the build's own default, so a client opened without
+them behaves as it always did: no STUN, no ICE, no relay. With `stunServer`
+the signalling socket asks the server where it appears from, and every
+account's `Contact` moves to that public address: `natOf(event)` reads the
+`SIPRAL_EVENT_KIND_NAT_MAPPING` payload, `relayOf(event)` the
+`SIPRAL_EVENT_KIND_NAT_RELAY` one. `placeCall` and `answerCall` ask the same
+about the call's media socket before the call is described and block until
+the server has answered, or five and a half seconds on without an answer
+(longer with a TURN server) — call them off the main thread. Until the call
+has media, the poll thread reads that socket, sends what
+`sipral_stack_poll_stun` names it as the source of (through
+`idiomatic_media.c`'s `stackPollStun`), and hands everything arriving there to
+`sipral_stack_receive_stun`. The relay is offered only as an ICE candidate,
+so it is used only with `ice`. `SipralTurnServer.toString()` leaves the
+password out. `g729AnnexB = false` turns off G.729's silence compression.
+`src/test/kotlin/org/sipral/idiomatic/NatCheck.kt`, run by `scripts/check.sh`
+with `IdiomaticCheck.kt`, proves each on the wire against a STUN and TURN
+server inside the check, and carries a call between two clients that require
+ICE.
+
 ## The ConnectionService helper
 
 Split in two, so that the part worth testing needs no Android:

@@ -31,6 +31,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   first packet, and `sipral.enums.Ice`/`Nat`/`NatMapping`/`NatRelay` and
   the matching event fields are the idiomatic reading of the ABI's own
   numbers for all of it.
+- **The Swift and Kotlin layers get past a NAT.** `SipralStack` and
+  `SipralClient.open` take an ICE policy, a STUN server, a TURN server
+  with its credential and the G.729 Annex B setting, all defaulting to
+  what they did before. With a STUN server every account's `Contact` and
+  every call's SDP name the public address the server reports: each
+  call's media socket is mapped before the call is described, read for
+  the stack until the call has media, and given back when it carries no
+  call. Media and farewells go to the address the stack names, so a call
+  can run over the path ICE chose or a TURN relay. The NAT mapping and
+  relay events are decoded (`SipralEvent.natData`/`relayData`,
+  `natOf`/`relayOf`), and a TURN password stays out of every
+  `description` and `toString`.
 - **The Swift package runs on the iOS Simulator.** The distribution
   package `xcframework.sh` prints over `CSipral.xcframework` now carries
   the whole `Sipral` module — `SipralStack`, `Call`, `CallKitBridge`,

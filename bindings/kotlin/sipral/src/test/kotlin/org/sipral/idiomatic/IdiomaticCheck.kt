@@ -36,7 +36,7 @@ import org.sipral.SipralStatus
 
 fun main() {
     val said = try {
-        runBlocking { everything() }
+        runBlocking { everything() + "; " + natChecks() }
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)
