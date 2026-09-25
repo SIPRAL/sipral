@@ -1095,7 +1095,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   without the minor moving, and `sipral_call_change_codecs`. The gate now
   refuses the first kind.
 - **ABI 0.21.** `sipral_call_join`, `sipral_call_leave` and
-  `sipral_media_mix`, for a two-call conference held on this stack.
+  `sipral_media_mix`, for a two-call conference held on this stack, and
+  what had landed since 0.20 without the minor moving: `sipral_account_message`
+  and events 34 to 37 (MESSAGE received and sent, message waiting, and the
+  quality report sent).
 - **ABI 0.22.** `SIPRAL_EVENT_KIND_MEDIA_UNJOINED` (38), the survivor notice
   a joined call's partner gets when the call it was joined to ends.
 - **ABI 0.23.** STUN from the stack (`sipral_stack_nat_map`,
@@ -1108,7 +1111,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - **ABI 0.25.** TURN in the stack configuration (`turn_server`,
   `turn_username`, `turn_password`), its relay event and records
   (`SIPRAL_EVENT_KIND_NAT_RELAY`, event 40), and the G.729 Annex B toggle
-  (`annexb`).
+  (`g729_annex_b` on `sipral_stack_config_t` and `sipral_stack_settings_t`).
 - **ABI 0.26.** `sipral_stack_nat_unmap`.
 
 - **`sipral_media_capture` takes `now_ms`**, in the position its three

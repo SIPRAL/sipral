@@ -309,13 +309,15 @@ nominating, plus a response and a role conflict answering the first
 transaction id the harness hands out. Those six seeds alone reach more of the
 agent than several hundred thousand random runs did before they existed.
 
-Ten more cover the media path: `media_resample`, `media_plc`, `media_drift`,
-`media_comfort_noise`, `media_vad`, `media_g722`, `media_g729`, `media_mix`,
-`media_opus` and `headless_media`, each built from arbitrary bytes through
-its own crate's public entry point rather than through a call — the codec,
-the packet-loss concealer, the drift corrector, the comfort-noise generator,
-the voice-activity detector, the two codecs read from their bitstream side,
-the local mixer, and the headless framing over real audio.
+Ten more cover the media path, each driving one piece through its public
+entry point rather than through a call: `media_resample` the resampler,
+`media_plc` the loss concealer, `media_drift` the drift corrector,
+`media_comfort_noise` the comfort-noise payload's decoder, encoder and
+generator, `media_vad` the voice-activity detector, `media_g722`,
+`media_g729` and `media_opus` each codec's decoder on octets no encoder
+produced (and G.722's encoder too), `media_mix` the local mixer's sums, and
+`headless_media` the facade's `HeadlessSession` between the socket's frames
+and a codec's.
 
 ```sh
 ./scripts/fuzz.sh 600 parse        # one target, ten minutes

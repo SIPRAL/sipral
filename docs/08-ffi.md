@@ -1514,8 +1514,9 @@ first touch of the binding surfaces as the cause of an
 writes into, cross as a `Long`, so `mediaCapture`, `mediaPollRtcp`,
 `mediaPollTransmit`, `stackPollTransmit`, `stackPollStun` and
 `stackPollFarewell` cannot be called from Kotlin alone through the generated
-shim; `org.sipral.idiomatic` reaches them through a second, hand-written one
-(`idiomatic_media.c`) linked into the same library. `sipral.aar`, built by
+shim; `org.sipral.idiomatic` reaches all of them but `stackPollStun` through
+a second, hand-written one (`idiomatic_media.c`) linked into the same library,
+so STUN from the stack is not reachable from Kotlin yet. `sipral.aar`, built by
 `scripts/package/aar.sh`, carries a `proguard.txt` with the keep rules R8
 needs for the three listener keepers' `deliver`, which nothing but native code
 calls, and for every `external fun`. Coroutines and `Flow` for events are
