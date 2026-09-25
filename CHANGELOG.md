@@ -687,6 +687,30 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   no longer leaves that call as the current one when `answer()` then
   throws: it detaches and closes it, rather than leaving hangup, hold and
   DTMF doing nothing, silently, against a ghost call.
+- **The published interop matrix no longer shows a failed lab run as
+  passing.** `scripts/interop-matrix.py` read only the calling harness's own
+  pass/FAIL line for the full-ICE and TURN-relay rows in `docs/11-testing.md`,
+  never the callee's (a separate container, on the other side of the pair of
+  NATs) or `scripts/lab.sh`'s own closing line for the step — so a callee
+  that failed, or a step `nat_pair_call` never got off the ground, still
+  rendered "pass". Both are read now, and the row fails if either did.
+  Separately, the two "blocked without TURN" rows — negative controls that
+  are supposed to fail to place a call — were read like every other flow, so
+  the block holding read "fail" in the table and the block breaking, a real
+  regression, read "pass"; both are inverted now, with the reason given when
+  the block breaks.
+- **A pinned `SIPRAL_HARNESS_SEED` now actually pins a containerized lab
+  run.** `scripts/lab.sh` never forwarded it into any of its `docker run`
+  invocations of `/harness` or `/harness-c`, so setting it on the host to
+  repeat a failing run drew a fresh seed inside the container instead, with
+  different Call-IDs, tags and branches every time.
+- **`interop/harness-c/main.c` builds again on the interop lab's own host.**
+  It read its run seed through `getentropy`, unconditionally including
+  `<sys/random.h>` for it — glibc 2.25 and newer only, older than the
+  lab host's own glibc — so the host-side `cc` build `scripts/lab.sh` falls
+  back to when no prebuilt C harness is given failed to compile. It reads
+  `/dev/urandom` directly now, the same fallback the file already had for a
+  `getentropy` call that failed at run time.
 - **The interop harnesses no longer send the same Call-ID and tags on two
   runs of the same flow.** Both drivers seeded every flow's stack from a
   fixed pattern, one constant per flow, with no platform entropy — enough

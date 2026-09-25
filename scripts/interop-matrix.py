@@ -67,6 +67,13 @@ FLOW_SECTIONS = {
     ),
     "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them": ("full_ice", "rust"),
 }
+# The one FLOW_SECTIONS header lab.sh runs through nat_pair_call (ice_nat_flow)
+# rather than a single harness process: parse_log() reads it with
+# parse_nat_pair_flow_lines() instead of plain parse_flow_lines(), the same
+# way TURN_RELAY_BLOCKS's own five markers already have to.
+NAT_PAIR_FLOW_SECTIONS = {
+    "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them",
+}
 # Sections shaped like an example agent's own transcript rather than the
 # harness's flow output: nobody here prints a "pass"/"FAIL" line of the shape
 # FLOW_PASS_RE/FLOW_FAIL_RE read, only lab.sh's own closing `ok`/`FAIL` line,
@@ -135,6 +142,16 @@ FLOW_FAIL_RE = re.compile(r"^  FAIL  (.+?) \u2014 (.+)$")
 EVERY_PASSED_RE = re.compile(r"^every flow passed$")
 N_FAILED_RE = re.compile(r"^\d+ flow\(s\) failed$")
 LAB_SH_LINE_RE = re.compile(r"^  (?:ok|FAIL)  +(.+)$")
+# `scripts/lab.sh`'s own fail() closing a nat_pair_call-backed step or block --
+# never the harness's own FAIL line, which always carries the em dash above;
+# a lab.sh message never does, so excluding it is what tells the two apart.
+LAB_SH_FAIL_RE = re.compile(r"^  FAIL  (?!.*\u2014 )(.+)$")
+# `nat_pair_call` (scripts/lab.sh) runs the harness twice, caller and callee,
+# each in its own container; `docker logs $ICE_CALLEE_NAME | sed 's/^/    callee  /'`
+# is how the callee's stdout reaches this log, so its own "  pass  "/"  FAIL  "
+# lines -- printed in the identical shape by the same main.rs -- show up with
+# this exact twelve-character prefix in front of them.
+CALLEE_PREFIX = "    callee  "
 
 
 @dataclass
@@ -229,6 +246,69 @@ def parse_flow_lines(lines: list[str]) -> list[tuple[str, str, str | None]]:
         m = FLOW_FAIL_RE.match(line)
         if m:
             out.append((m.group(1), "fail", m.group(2)))
+    return out
+
+
+def parse_callee_flow_lines(lines: list[str]) -> list[tuple[str, str | None]]:
+    """The callee's own pass/FAIL results, in the order its container printed
+    them: (result, detail) pairs, result being "pass" or "fail". Read by
+    stripping CALLEE_PREFIX and matching what is left against FLOW_PASS_RE/
+    FLOW_FAIL_RE directly, rather than through parse_flow_lines -- the
+    callee's own "lab: ..." line and terminator are real lines of the same
+    shape those functions key off, but reachable only through this prefix,
+    never through the caller's own unprefixed loop above.
+    """
+    out: list[tuple[str, str | None]] = []
+    for line in lines:
+        if not line.startswith(CALLEE_PREFIX):
+            continue
+        rest = line[len(CALLEE_PREFIX) :]
+        if FLOW_PASS_RE.match(rest):
+            out.append(("pass", None))
+            continue
+        m = FLOW_FAIL_RE.match(rest)
+        if m:
+            out.append(("fail", m.group(2)))
+    return out
+
+
+def closing_lab_fail(lines: list[str]) -> str | None:
+    """lab.sh's own closing fail() line for a nat_pair_call-backed step, if
+    one was printed anywhere in `lines` -- not only at the end, since
+    TURN_RELAY_BLOCKS splits one such step into several marker blocks and
+    only the last one holds the step's own closing line.
+    """
+    for line in lines:
+        m = LAB_SH_FAIL_RE.match(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def parse_nat_pair_flow_lines(lines: list[str]) -> list[tuple[str, str, str | None]]:
+    """parse_flow_lines(), widened for a flow lab.sh runs through
+    nat_pair_call: two harness processes, caller and callee, each in its own
+    container, and lab.sh's own step that can fail before either one prints
+    anything (the callee never comes up, the SIP forward could not be set
+    up). The caller's own line is only one of three ways this can fail, and
+    reading only it -- what parse_flow_lines alone did -- is what let a
+    failed callee, or a failed nat_pair_call itself, render as a passing row.
+    A caller's "pass" is downgraded to "fail" when the callee failed or
+    lab.sh's own closing line did, keeping the caller's own detail unless it
+    is the callee's or lab.sh's own reason that explains it; a caller
+    already reporting "fail" is left as it is.
+    """
+    flows = parse_flow_lines(lines)
+    callee = parse_callee_flow_lines(lines)
+    lab_fail = closing_lab_fail(lines)
+    out: list[tuple[str, str, str | None]] = []
+    for index, (name, result, detail) in enumerate(flows):
+        callee_result, callee_detail = callee[index] if index < len(callee) else (None, None)
+        if result == "pass" and callee_result == "fail":
+            result, detail = "fail", callee_detail
+        if result == "pass" and lab_fail is not None:
+            result, detail = "fail", lab_fail
+        out.append((name, result, detail))
     return out
 
 
@@ -354,10 +434,10 @@ def parse_netem_section(
 # flow name ("full ICE through two NATs, calling"), since it is the same
 # harness flow run five ways, so the qualifier here is what tells the five
 # rows apart in the Results table -- and it is also what keeps the two
-# "blocked without TURN" runs, which are *meant* to fail (proving the block
-# holds before TURN is offered), out of every feature's `flows` list: a
-# passing TURN relay must never read "partial" because of a negative test
-# that worked.
+# "blocked without TURN" runs, negative controls proving the block holds
+# before TURN is offered (see invert_negative_control()), out of every
+# feature's `flows` list: a passing TURN relay must never read "partial"
+# because of a negative control that held.
 TURN_RELAY_BLOCKS = {
     "  without TURN: the call has to find no path": ("rust", "blocked without TURN"),
     "  with TURN: the call has to go through coturn": ("rust", "via TURN"),
@@ -368,6 +448,36 @@ TURN_RELAY_BLOCKS = {
         "via TURN, caller relay only",
     ),
 }
+# The qualifier that marks the two negative controls above: a run meant to
+# fail (see NEGATIVE_CONTROL_QUALIFIER's own use below).
+NEGATIVE_CONTROL_QUALIFIER = "blocked without TURN"
+# ice_turn_flow's own note (scripts/lab.sh) when one of the two negative
+# controls breaks -- the call connected with the path between the two NATs
+# blocked, which the harness itself reports as a "pass" (it placed and heard
+# a call), and is what invert_negative_control() below reads for the reason.
+BLOCK_DOES_NOT_HOLD_RE = re.compile(
+    r"^  the call(?: through the C ABI)? connected with the path between the NATs blocked: .+$"
+)
+
+
+def invert_negative_control(
+    lines: list[str], flows: list[tuple[str, str, str | None]]
+) -> list[tuple[str, str, str | None]]:
+    """The two 'blocked without TURN' runs prove a negative: the harness
+    failing to place the call is the block holding, which is what a normal
+    run looks like, and the harness succeeding is the block not holding, a
+    real regression. Read literally, like every other flow, the two read
+    backwards -- passing exactly when something is wrong. Inverted here,
+    once, rather than at every reader of a Row's `result`.
+    """
+    reason = next((line.strip() for line in lines if BLOCK_DOES_NOT_HOLD_RE.match(line)), None)
+    out: list[tuple[str, str, str | None]] = []
+    for name, result, detail in flows:
+        if result == "fail":
+            out.append((name, "pass", None))
+        else:
+            out.append((name, "fail", reason or detail or "the block does not hold"))
+    return out
 
 
 def parse_turn_relay_section(lines: list[str], versions: dict[str, str], date: str, rows: list[Row]) -> None:
@@ -387,10 +497,12 @@ def parse_turn_relay_section(lines: list[str], versions: dict[str, str], date: s
     version = peer_version_label("full_ice", versions)
     for marker, block in blocks:
         driver, qualifier = TURN_RELAY_BLOCKS[marker]
-        flows = parse_flow_lines(block)
+        flows = parse_nat_pair_flow_lines(block)
         if not flows:
             print(f"warning: TURN relay run {marker!r} had no flow results", file=sys.stderr)
             continue
+        if qualifier == NEGATIVE_CONTROL_QUALIFIER:
+            flows = invert_negative_control(block, flows)
         for name, result, detail in flows:
             rows.append(
                 Row(
@@ -462,7 +574,8 @@ def parse_log(text: str, versions: dict[str, str], date: str) -> list[Row]:
     for header, body in split_sections(text):
         if header in FLOW_SECTIONS:
             peer_key, driver = FLOW_SECTIONS[header]
-            flows = parse_flow_lines(body)
+            parser = parse_nat_pair_flow_lines if header in NAT_PAIR_FLOW_SECTIONS else parse_flow_lines
+            flows = parser(body)
             if not flows:
                 print(f"warning: section {header!r} had no flow results", file=sys.stderr)
                 continue

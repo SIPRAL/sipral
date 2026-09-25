@@ -379,6 +379,7 @@ flows() {
     docker run --rm --network sipral-interop_lab \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
         -v "$ROOT/interop/pcap:/pcap" \
         debian:trixie-slim sh -c "
@@ -411,6 +412,7 @@ flows_c() {
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 \
         -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS_C:/harness-c:ro" \
         -v "$beside:/lib-sipral:ro" \
         -v "$ROOT/interop/pcap:/pcap" \
@@ -834,6 +836,7 @@ flows_baresip() {
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip \
         -e SIPRAL_FLOWS=call,hold,peersrtp,peerdtls \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
         -v "$ROOT/interop/pcap:/pcap" \
         debian:trixie-slim sh -c "
@@ -860,6 +863,7 @@ flows_baresip_c() {
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip \
         -e SIPRAL_FLOWS=call,hold,peersrtp,peerdtls \
         -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS_C:/harness-c:ro" \
         -v "$beside:/lib-sipral:ro" \
         -v "$ROOT/interop/pcap:/pcap" \
@@ -933,6 +937,7 @@ nat_flow() {
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=nat \
         -e "SIPRAL_STUN_SERVER=$stun:3478" \
         -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS_C:/harness-c:ro" \
         -v "$beside:/lib-sipral:ro" \
         sipral-lab-nat sh -c "
@@ -1036,6 +1041,7 @@ ice_lite_flow() {
         "$ICE_APP_NAME")
     docker run --rm --network sipral-interop_lab \
         -e SIPRAL_FLOWS=icelite \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
         debian:trixie-slim /harness "$address" 5060 agent
     status=$?
@@ -1203,6 +1209,7 @@ nat_pair_call() {
         -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
         -e "SIPRAL_CONTACT=$NAT_PAIR_OUTSIDE2:5060" \
         ${1+"$@"} \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
         sipral-lab-nat sh -c "
             ip route replace default via $NAT_PAIR_GATEWAY2 || exit 1
@@ -1247,6 +1254,7 @@ nat_pair_call() {
             ${1+"$@"} \
             ${caller_only[@]+"${caller_only[@]}"} \
             -e LD_LIBRARY_PATH=/lib-sipral \
+            ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
             -v "$HARNESS_C:/harness-c:ro" \
             -v "$beside:/lib-sipral:ro" \
             sipral-lab-nat sh -c "
@@ -1259,6 +1267,7 @@ nat_pair_call() {
             -e SIPRAL_FLOWS=icenat \
             -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
             ${1+"$@"} \
+            ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
             -v "$HARNESS:/harness:ro" \
             sipral-lab-nat sh -c "
                 ip route replace default via $NAT_PAIR_GATEWAY || exit 1
@@ -1436,6 +1445,7 @@ bad_network() {
         -e "SIPRAL_DWELL_MS=${DWELL_MS:-2000}" \
         -e "SIPRAL_PATIENCE_MS=$(( ${DWELL_MS:-2000} + 20000 ))" \
         -e "NETEM=$NETEM" -e "REQUIRE=$REQUIRE" -e "DURING=$DURING" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
         debian:trixie-slim sh -c '
             export DEBIAN_FRONTEND=noninteractive
@@ -1489,6 +1499,7 @@ drift_flow() {
         -e SIPRAL_DRIFT_MS="${SIPRAL_DRIFT_MS:-3600000}" \
         -e SIPRAL_DRIFT_REPORT_MS="${SIPRAL_DRIFT_REPORT_MS:-300000}" \
         -e SIPRAL_DRIFT_PPM="${SIPRAL_DRIFT_PPM:-250}" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
         debian:trixie-slim /harness asterisk 5060 9000
 }

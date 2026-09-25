@@ -613,9 +613,9 @@ the generator itself — never the block, which the next run overwrites.
 | headless agent (ICE-lite) | n/a | ICE required, against 172.18.0.5 | pass | 2026-09-25 |
 | Asterisk | 22.10.1 | ICE-lite, Asterisk's ICE calling in | pass | 2026-09-25 |
 | sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling | pass | 2026-09-25 |
-| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, blocked without TURN | fail (no path was ever chosen (0 sent, 0 back): the far end answered no check) | 2026-09-25 |
+| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, blocked without TURN | pass | 2026-09-25 |
 | sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN | pass | 2026-09-25 |
-| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, blocked without TURN (C ABI) | fail (no path was ever chosen (0 sent, 0 back): the far end answered no check) | 2026-09-25 |
+| sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, blocked without TURN (C ABI) | pass | 2026-09-25 |
 | sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN (C ABI) | pass | 2026-09-25 |
 | sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN, caller relay only (C ABI) | pass | 2026-09-25 |
 | Kamailio → FreeSWITCH | 6.1.4 | register, over a bad link (lossy) | pass | 2026-09-25 |

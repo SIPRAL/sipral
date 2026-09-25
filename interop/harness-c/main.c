@@ -39,11 +39,6 @@
  * this one was built for the lab. 200809 is the edition all four are in.
  */
 #define _POSIX_C_SOURCE 200809L
-/* `getentropy` is not POSIX -- glibc gates it behind this (or `_GNU_SOURCE`)
- * rather than exposing it whenever `_POSIX_C_SOURCE` alone is defined, and
- * macOS's own `<sys/random.h>` wants nothing extra, so defining it costs
- * that platform nothing. */
-#define _DEFAULT_SOURCE 1
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -52,7 +47,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
@@ -1184,16 +1178,18 @@ static int mailbox_counted(const struct endpoint *end)
  * `SIPRAL_HARNESS_SEED` fills it. */
 static uint8_t g_run_seed[32];
 
-/* Thirty-two octets from the operating system: `getentropy`, falling back to
- * `/dev/urandom` for a libc old enough, or minimal enough, not to have it.
- * Zero on success, -1 if neither worked, `out` left alone. */
+/* Thirty-two octets from the operating system, read straight off
+ * `/dev/urandom` rather than through `getentropy`: that call is not POSIX,
+ * glibc gates its declaration behind `_GNU_SOURCE`/`_DEFAULT_SOURCE`, and the
+ * symbol itself is glibc 2.25 and newer only -- the voip-demo lab host's
+ * glibc predates both the header and the function. Every platform this file
+ * targets has `/dev/urandom`, and this is the only thing it is used for.
+ * Zero on success, -1 if it could not be opened or read in full, `out` left
+ * alone. */
 static int run_entropy(uint8_t out[32])
 {
     FILE *urandom;
     size_t got;
-    if (getentropy(out, 32) == 0) {
-        return 0;
-    }
     urandom = fopen("/dev/urandom", "rb");
     if (urandom == NULL) {
         return -1;
