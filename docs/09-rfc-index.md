@@ -51,7 +51,7 @@ whether it is met; *in part* is followed by what is missing.
 | 7616 | HTTP Digest: challenge, `qop`, nonce count restarted only for a new nonce (§3.4) | sipral-core | phase 1 |
 | 6086 | The INFO framework, for DTMF over SIP INFO | sipral-ua | phase 2 |
 | 3903 | PUBLISH, for the RFC 6035 report only | sipral-ua | phase 2 |
-| 3841 | Caller preferences headers carried | sipral-ua | phase 1 |
+| 3841 | Caller preferences: `Accept-Contact`, `Reject-Contact` and `Request-Disposition` known to the parser, with their compact forms, and carried; no preference is acted on | sipral-core | phase 1 |
 | 2543 | Backward compatibility: tagless `From`, branch without the magic cookie | sipral-core | phase 1 |
 
 ## Media
