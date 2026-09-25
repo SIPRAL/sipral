@@ -1038,6 +1038,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **The packaged artefacts leave libopus out unless asked for it.** The
+  XCFramework, wheel, NuGet and AAR scripts build the C ABI without the
+  `opus` feature by default, with every other default feature kept;
+  `--with-opus` builds the variant that carries it, under a name that says
+  so (`CSipral-opus.xcframework.zip`, `sipral-opus`, `Sipral.Opus`,
+  `sipral-opus.aar`). The gate checks the packaged XCFramework for libopus
+  symbols.
 - **`CallMedia` is no longer `Clone` or `PartialEq`.** It can carry a relay
   on a TURN server, which is an allocation one call holds, not a value two
   calls can share or be compared by; build one per call with

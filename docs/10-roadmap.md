@@ -156,7 +156,7 @@ and each is cheaper before the ABI carries it than after:
 - **STUN reached from a call** — the softphone profile behind a NAT learns its
   public address from `sipral-nat`; ICE-lite stays where `06-nat.md` puts it,
   on a public server.
-  *Built* (task 8.5.5): `sipral::Mappings` asks a STUN server about the
+  *Built*: `sipral::Mappings` asks a STUN server about the
   signalling socket and each media socket, `UserAgent::readdress` moves the
   accounts' `Contact` onto the answer and `CallMedia::public_address` puts it in
   `c=` and `m=` — and in a server-reflexive ICE candidate when ICE is on.
@@ -171,7 +171,7 @@ and each is cheaper before the ABI carries it than after:
   between two NATs that let nothing else through (`docs/06-nat.md#turn`);
 - **early media on the answering side**, so a stack that answers can speak
   before 200 OK through its own engine rather than through a second one.
-  *Built* (task 8.4.9): `MediaEngine::ring`/`ring_with`, and
+  *Built*: `MediaEngine::ring`/`ring_with`, and
   `sipral_call_ring_media` in C, open the session on the 183 itself and the
   200 OK that follows reuses it, per RFC 3262 §5 and RFC 6337 §3.1.1;
 - **the 200 OK to REGISTER kept**, and with it Service-Route (RFC 3608) in the
@@ -187,7 +187,7 @@ and each is cheaper before the ABI carries it than after:
   confirmed in writing before the codec ships under the commercial licence,
   and G.729.1 and the later annexes stay out. Not in the default offer:
   narrower and worse than Opus or G.722, it is there for the carrier that
-  insists. *Built* (task 8.6.15): Annex A's encoder and decoder and Annex
+  insists. *Built*: Annex A's encoder and decoder and Annex
   B over them, bit-exact against every ITU Annex A and Annex B conformance
   stream and input, in a call on payload type 18 when an order names it,
   and heard through the lab's Asterisk. Annex B is offered with
