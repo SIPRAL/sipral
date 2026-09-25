@@ -1,12 +1,12 @@
 
 the harness
-  ok    taken as given: /opt/sipral-w20-cabi/target/release/sipral-interop
+  ok    taken as given: /opt/sipral/target-linux/release/sipral-interop
 
 the harness, in C
-  ok    taken as given: /opt/sipral-w20-cabi/target/release/harness-c
+  ok    taken as given: /opt/sipral/target-linux/release/harness-c
 
 the socket-framed agent
-  ok    taken as given: /opt/sipral-w20-cabi/target/release/examples/headless-socket-agent, /opt/sipral-w20-cabi/target/release/examples/agent
+  ok    taken as given: /opt/sipral/target-linux/release/examples/headless-socket-agent, /opt/sipral/target-linux/release/examples/agent
 
 the Swift binding's lab agent
   ok    built
@@ -23,22 +23,23 @@ waiting for the servers to listen
 register, call, hold, resume, transfer -- through the proxy
 lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
   pass  register
-  pass  call   (101 sent, 98 back, 67 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  call   (102 sent, 98 back, 67 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  hold and resume   (27 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  blind transfer   (5 sent, 2 back, 1 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  attended transfer   (2 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
-  pass  DTLS-SRTP, held and resumed   (129 sent, 103 back, 71 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  DTLS-SRTP, held and resumed   (129 sent, 102 back, 71 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  forked, the second phone answering first   (the mobile kept, the desk cancelled; 118 audible frames at the caller, 119 at the mobile)
 every flow passed
   ok    kamailio to freeswitch
 
 the same, through the C ABI -- through the proxy
 lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
   pass  register
-  pass  call   (125 sent, 124 back, 92 audible, 1 refused)
-  pass  hold and resume   (55 sent, 26 back, 25 audible, 1 refused)
-  pass  blind transfer   (77 sent, 74 back, 58 audible, 1 refused)
-  pass  attended transfer   (29 sent, 27 back, 26 audible, 2 refused)
-  pass  DTLS-SRTP, held and resumed   (155 sent, 129 back, 98 audible, 1 refused)
+  pass  call   (123 sent, 124 back, 91 audible, 1 refused)
+  pass  hold and resume   (51 sent, 26 back, 25 audible, 1 refused)
+  pass  blind transfer   (76 sent, 75 back, 58 audible, 1 refused)
+  pass  attended transfer   (28 sent, 27 back, 26 audible, 2 refused)
+  pass  DTLS-SRTP, held and resumed   (155 sent, 130 back, 98 audible, 1 refused)
 every flow passed
   ok    kamailio to freeswitch, in C
 
@@ -51,18 +52,18 @@ lab: opensips:5060 at 172.18.0.5:5060, extension 9000, as labuser
   pass  hold and resume   (27 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  blind transfer   (5 sent, 2 back, 1 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  attended transfer   (2 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
-  pass  DTLS-SRTP, held and resumed   (129 sent, 102 back, 71 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  DTLS-SRTP, held and resumed   (129 sent, 103 back, 71 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
 every flow passed
   ok    opensips to freeswitch
 
 the same, through the C ABI -- through OpenSIPS
 lab: opensips:5060 at 172.18.0.5:5060, extension 9000, as labuser
   pass  register
-  pass  call   (124 sent, 124 back, 91 audible, 1 refused)
-  pass  hold and resume   (55 sent, 26 back, 25 audible, 1 refused)
-  pass  blind transfer   (76 sent, 74 back, 58 audible, 1 refused)
-  pass  attended transfer   (28 sent, 27 back, 25 audible, 2 refused)
-  pass  DTLS-SRTP, held and resumed   (154 sent, 130 back, 99 audible, 1 refused)
+  pass  call   (121 sent, 124 back, 91 audible, 1 refused)
+  pass  hold and resume   (54 sent, 27 back, 26 audible, 1 refused)
+  pass  blind transfer   (77 sent, 75 back, 58 audible, 1 refused)
+  pass  attended transfer   (28 sent, 28 back, 26 audible, 2 refused)
+  pass  DTLS-SRTP, held and resumed   (154 sent, 129 back, 97 audible, 1 refused)
 every flow passed
   ok    opensips to freeswitch, in C
 
@@ -75,12 +76,12 @@ lab: asterisk:5060 at 172.18.0.4:5060, extension 9000, as labuser
   pass  attended transfer   (2 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  DTMF, RFC 4733   (20 sent, 10 back, 0 audible, 1 refused; lost 0, late 0, jitter 4ms, delay 40ms of 120ms, shrunk 1, stretched 3; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  DTMF, SIP INFO   (11 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
-  pass  SRTP   (101 sent, 99 back, 67 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 1; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  SRTP   (101 sent, 98 back, 67 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 1; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  hold with a codec change   (2 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  MESSAGE, echoed
   pass  message waiting indication   (101 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
   pass  G.729, echoed   (101 sent, 99 back, 67 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R n/a, MOS-LQ n/a, MOS-CQ n/a)
-  pass  DTLS-SRTP, held and resumed   (104 sent, 51 back, 18 audible, 1 refused; lost 51, late 0, jitter 0ms, delay 40ms of 40ms, shrunk 0, stretched 1; R 6, MOS-LQ 1.0, MOS-CQ 1.0)
+  pass  DTLS-SRTP, held and resumed   (104 sent, 52 back, 19 audible, 1 refused; lost 50, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 0; R 6, MOS-LQ 1.0, MOS-CQ 1.0)
   pass  local conference   (300 frame(s) mixed, 14 carried the tone extension's audio back by way of the echo extension while the tone extension itself was silent)
 every flow passed
   ok    asterisk
@@ -88,29 +89,29 @@ every flow passed
 the same, through the C ABI -- straight at Asterisk
 lab: asterisk:5060 at 172.18.0.4:5060, extension 9000, as labuser
   pass  register
-  pass  call   (119 sent, 123 back, 90 audible, 1 refused)
-  pass  hold and resume   (27 sent, 25 back, 23 audible, 1 refused)
-  pass  blind transfer   (76 sent, 73 back, 59 audible, 1 refused)
-  pass  attended transfer   (28 sent, 26 back, 24 audible, 1 refused)
+  pass  call   (123 sent, 122 back, 89 audible, 1 refused)
+  pass  hold and resume   (28 sent, 24 back, 24 audible, 1 refused)
+  pass  blind transfer   (75 sent, 74 back, 59 audible, 1 refused)
+  pass  attended transfer   (28 sent, 27 back, 25 audible, 1 refused)
   pass  DTMF, RFC 4733   (51 sent, 9 back, 0 audible, 1 refused)
-  pass  DTMF, SIP INFO   (37 sent, 0 back, 0 audible, 0 refused)
-  pass  SRTP   (122 sent, 123 back, 90 audible, 1 refused)
-  pass  hold with a codec change   (87 sent, 87 back, 56 audible, 1 refused)
+  pass  DTMF, SIP INFO   (36 sent, 0 back, 0 audible, 0 refused)
+  pass  SRTP   (125 sent, 123 back, 91 audible, 1 refused)
+  pass  hold with a codec change   (87 sent, 86 back, 56 audible, 1 refused)
   pass  MESSAGE, echoed   (0 sent, 0 back, 0 audible, 0 refused)
-  pass  message waiting indication   (118 sent, 0 back, 0 audible, 0 refused)
-  pass  G.729, echoed   (120 sent, 118 back, 86 audible, 1 refused)
-  pass  DTLS-SRTP, held and resumed   (125 sent, 78 back, 41 audible, 1 refused)
-  pass  local conference   (133 frame(s) mixed, 41 crossed)
+  pass  message waiting indication   (125 sent, 0 back, 0 audible, 0 refused)
+  pass  G.729, echoed   (124 sent, 122 back, 90 audible, 1 refused)
+  pass  DTLS-SRTP, held and resumed   (129 sent, 77 back, 45 audible, 1 refused)
+  pass  local conference   (134 frame(s) mixed, 39 crossed)
 every flow passed
   ok    asterisk, in C
 
 the Python example agent, called by Asterisk
-    listening on 172.18.0.5:59180
+    listening on 172.18.0.5:54656
     answered 1200000000
     dtmf 1
     dtmf 2
     dtmf #
-    ended 1200000000: {'codec': 1, 'round_trip_us': None, 'packets_sent': 200, 'octets_sent': 32000, 'packets_received': 179, 'packets_lost': 0, 'delay_us': 0, 'jitter_us': 13750, 'loss_rate': 0.0, 'score': 100.0, 'suffering': False}
+    ended 1200000000: {'codec': 1, 'round_trip_us': None, 'packets_sent': 200, 'octets_sent': 32000, 'packets_received': 179, 'packets_lost': 0, 'delay_us': 0, 'jitter_us': 13875, 'loss_rate': 0.0, 'score': 100.0, 'suffering': False}
   ok    agent.py answered, echoed and hung up
 
 the socket-framed agent, called by Asterisk
@@ -128,7 +129,7 @@ the socket-framed agent, called by Asterisk
     agent  call CallHandle(0) state: Ended { reason: Some("hung up here") }
     app    listening on 172.18.0.5:5060; registering labuser-agent-headless@asterisk at 172.18.0.4:5060
     app    waiting for the agent to connect on 0.0.0.0:7001
-    app    agent connected from 172.18.0.6:40518
+    app    agent connected from 172.18.0.6:56038
     app    registered
     app    answered CallHandle(0)
     app    dtmf 1
@@ -138,24 +139,30 @@ the socket-framed agent, called by Asterisk
   ok    headless-socket-agent answered, echoed and carried DTMF
 
 the Swift binding's example agent, called by Asterisk
-    listening on 172.18.0.5:49582
+    listening on 172.18.0.5:45800
     answered 1200000000
     dtmf 1
     dtmf 2
     dtmf #
-    ended 1200000000: packets_sent=200 packets_received=180
+    ended 1200000000: packets_sent=200 packets_received=179
   ok    SipralLabAgent answered, echoed and carried DTMF
 
 the Kotlin idiomatic-layer agent, called by Asterisk
-  note  KOTLIN_AGENT_JAR not set; see bindings/kotlin/README.md
+    listening on 172.18.0.5:50974
+    answered 1200000000
+    dtmf 1
+    dtmf 2
+    dtmf #
+    ended 1200000000 packets_sent=194 packets_received=179
+  ok    Agent.kt answered, echoed and carried DTMF
 
 the .NET sample agent, called by Asterisk
-    listening on 172.18.0.5:47443
+    listening on 172.18.0.5:36352
     answered 1
     dtmf 1
     dtmf 2
     dtmf #
-    ended 1: packets_received=180 packets_sent=208
+    ended 1: packets_received=179 packets_sent=208
   ok    Sipral.Sample.Agent answered, echoed and hung up
 
 phone to phone -- baresip through the proxy
@@ -166,16 +173,16 @@ phone to phone -- baresip through the proxy
 lab: kamailio:5060 at 172.18.0.2:5060, extension baresip, as labuser
   pass  call   (101 sent, 99 back, 98 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  hold and resume   (2 sent, 1 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
-  pass  SRTP, phone to phone   (101 sent, 99 back, 99 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
-  pass  DTLS-SRTP, phone to phone   (103 sent, 101 back, 101 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  SRTP, phone to phone   (101 sent, 99 back, 98 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  DTLS-SRTP, phone to phone   (103 sent, 101 back, 101 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
 every flow passed
   ok    sipral to baresip
 
 the same, through the C ABI -- baresip through the proxy
 lab: kamailio:5060 at 172.18.0.2:5060, extension baresip, as labuser
-  pass  call   (124 sent, 125 back, 123 audible, 1 refused)
-  pass  hold and resume   (27 sent, 27 back, 26 audible, 1 refused)
-  pass  SRTP, phone to phone   (123 sent, 125 back, 122 audible, 1 refused)
+  pass  call   (123 sent, 125 back, 122 audible, 1 refused)
+  pass  hold and resume   (28 sent, 28 back, 27 audible, 1 refused)
+  pass  SRTP, phone to phone   (124 sent, 126 back, 123 audible, 1 refused)
   pass  DTLS-SRTP, phone to phone   (127 sent, 128 back, 123 audible, 1 refused)
 every flow passed
   ok    sipral to baresip, in C
@@ -187,18 +194,18 @@ behind a NAT -- STUN against coturn, then register and call Asterisk, in C
 lab: asterisk:5060 at 172.18.0.4:5060, extension 9000, as labuser
   nat   signalling 172.19.0.3:5062 appears as 172.18.0.5:15062
   nat   media 172.19.0.3:40062 appears as 172.18.0.5:45062
-  pass  behind a NAT, through STUN   (172 sent, 174 back, 117 audible, 1 refused)
+  pass  behind a NAT, through STUN   (177 sent, 175 back, 117 audible, 1 refused)
 every flow passed
   ok    registered and heard from behind the NAT, at the address STUN reported
 
 ICE-lite -- a call that requires ICE, placed at the headless agent answering as lite
 lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension agent, as labuser
-  pass  ICE required, against 172.18.0.5   (path 172.18.0.7:55994 -> 172.18.0.5:51900, chosen 70 ms after the offer and 59 ms after the answer; 152 sent, 149 back, 114 audible)
+  pass  ICE required, against 172.18.0.5   (path 172.18.0.7:39365 -> 172.18.0.5:46196, chosen 66 ms after the offer and 57 ms after the answer; 152 sent, 149 back, 114 audible)
 every flow passed
     agent  connecting to sipral-lab-icelite-app:7001
     agent  connected
     agent  session open: 16000 Hz, 20 ms frames
-    agent  call CallHandle(0) from sip:harness@172.18.0.7:38544
+    agent  call CallHandle(0) from sip:harness@172.18.0.7:49198
     agent  call CallHandle(0) state: Ringing
     agent  call CallHandle(0) state: Answered
     agent  call CallHandle(0) speaking
@@ -207,9 +214,9 @@ every flow passed
     agent  call CallHandle(0) state: Ended { reason: Some("hung up there") }
     app    listening on 172.18.0.5:5060; dial sip:agent@172.18.0.5:5060
     app    waiting for the agent to connect on 0.0.0.0:7001
-    app    agent connected from 172.18.0.6:48212
+    app    agent connected from 172.18.0.6:36566
     app    answered CallHandle(0)
-    app    path chosen 172.18.0.5:51900 -> 172.18.0.7:55994
+    app    path chosen 172.18.0.5:46196 -> 172.18.0.7:39365
     app    ended CallHandle(0): packets_received=151 packets_sent=150 capture_dropped=0 audio_dropped=0
   ok    the full caller chose a path on the lite end, and the tone came back on it
 
@@ -229,10 +236,10 @@ ICE-lite -- Asterisk's own ICE calling the headless agent
     agent  call CallHandle(0) state: Ended { reason: Some("hung up here") }
     app    listening on 172.18.0.5:5060; registering labuser-agent-ice@asterisk at 172.18.0.4:5060
     app    waiting for the agent to connect on 0.0.0.0:7001
-    app    agent connected from 172.18.0.6:33340
+    app    agent connected from 172.18.0.6:45398
     app    registered
     app    answered CallHandle(0)
-    app    path chosen 172.18.0.5:58884 -> 172.18.0.4:16426
+    app    path chosen 172.18.0.5:45052 -> 172.18.0.4:16830
     app    dtmf 1
     app    dtmf 2
     app    dtmf #
@@ -243,13 +250,13 @@ full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them
   ok    natbox: nat: masquerading out of
   ok    natbox2: nat: masquerading out of
   ok    coturn: Listener address to use
-  caller behind 172.19.0.2, callee behind 172.20.0.2 (172.18.0.6 outside), STUN at 172.18.0.5:3478
-lab: 172.18.0.6:5060 at 172.18.0.6:5060, extension callee, as labuser
-  pass  full ICE through two NATs, calling   (path 172.18.0.7:41184 -> 172.18.0.6:34951, chosen 1117 ms after the offer and 1112 ms after the answer; 200 sent, 202 back, 140 audible); this end at 172.19.0.3:41184, mapped to 172.18.0.7:41184
+  caller behind 172.19.0.2, callee behind 172.20.0.2 (172.18.0.7 outside), STUN at 172.18.0.5:3478
+lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
+  pass  full ICE through two NATs, calling   (path 172.18.0.6:57095 -> 172.18.0.7:42822, chosen 1115 ms after the offer and 1113 ms after the answer; 200 sent, 202 back, 140 audible); this end at 172.19.0.3:57095, mapped to 172.18.0.6:57095
 every flow passed
     callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:34951, mapped to 172.18.0.6:34951
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.6:34951 -> 172.18.0.7:41184, chosen 1114 ms after the offer and 1112 ms after the answer; 203 sent, 199 back, 138 audible); this end at 172.20.0.3:34951, mapped to 172.18.0.6:34951
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:42822, mapped to 172.18.0.7:42822
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.7:42822 -> 172.18.0.6:57095, chosen 1113 ms after the offer and 1111 ms after the answer; 203 sent, 199 back, 138 audible); this end at 172.20.0.3:42822, mapped to 172.18.0.7:42822
     callee  every flow passed
   ok    the call found its path through both NATs, and the tone crossed it both ways
 
@@ -257,127 +264,168 @@ full ICE through a relay -- the path between the two NATs blocked, coturn as TUR
   ok    natbox: nat: masquerading out of
   ok    natbox2: nat: masquerading out of
   ok    coturn: Listener address to use
-  caller behind 172.19.0.2 (172.18.0.6 outside), callee behind 172.20.0.2 (172.18.0.7 outside), TURN at 172.18.0.5:3478
+  caller behind 172.19.0.2 (172.18.0.7 outside), callee behind 172.20.0.2 (172.18.0.5 outside), TURN at 172.18.0.6:3478
   without TURN: the call has to find no path
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
   FAIL  full ICE through two NATs, calling — no path was ever chosen (0 sent, 0 back): the far end answered no check
 1 flow(s) failed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:58030, mapped to 172.18.0.7:58030
+    callee  lab: 172.18.0.6:3478 at 172.18.0.6:3478, extension callee, as labuser
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:50013, mapped to 172.18.0.5:50013
     callee    FAIL  full ICE through two NATs, answering — no path was ever chosen (0 sent, 0 back): the far end answered no check
     callee  1 flow(s) failed
   with TURN: the call has to go through coturn
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
-  pass  full ICE through two NATs, calling   (path 172.18.0.6:51810 -> 172.18.0.5:49243, chosen 1117 ms after the offer and 1114 ms after the answer; 200 sent, 197 back, 135 audible); this end at 172.19.0.3:51810, mapped to 172.18.0.6:51810, relay 172.18.0.5:49180 allocated in 6 ms
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+  pass  full ICE through two NATs, calling   (path 172.18.0.7:56720 -> 172.18.0.6:49161, chosen 1121 ms after the offer and 1116 ms after the answer; 200 sent, 197 back, 135 audible); this end at 172.19.0.3:56720, mapped to 172.18.0.7:56720, relay 172.18.0.6:49201 allocated in 6 ms
 every flow passed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:51159, mapped to 172.18.0.7:51159, relay 172.18.0.5:49243 allocated in 6 ms
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:49243 -> 172.18.0.6:51810, chosen 1113 ms after the offer and 1110 ms after the answer; 198 sent, 199 back, 138 audible); this end at 172.20.0.3:51159, mapped to 172.18.0.7:51159, relay 172.18.0.5:49243 allocated in 6 ms
+    callee  lab: 172.18.0.6:3478 at 172.18.0.6:3478, extension callee, as labuser
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:59711, mapped to 172.18.0.5:59711, relay 172.18.0.6:49161 allocated in 6 ms
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.6:49161 -> 172.18.0.7:56720, chosen 1116 ms after the offer and 1113 ms after the answer; 199 sent, 199 back, 138 audible); this end at 172.20.0.3:59711, mapped to 172.18.0.5:59711, relay 172.18.0.6:49161 allocated in 6 ms
     callee  every flow passed
-    coturn  coturn-1  | 2026-09-24T23:20:17.599+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.174+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.179+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.179+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.179+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.180+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.181+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.181+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:19.289+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:22.295+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:22.298+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 022000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:30.593+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.174+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:32.293+0000 INFO peer 172.18.0.7 lifetime updated: 600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:35.297+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:35.303+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
   coturn: 2 allocation(s), 2 given back
   without TURN, through the C ABI: the call has to find no path
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
-  ice   media 172.19.0.3:38027 appears as 172.18.0.6:38027
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+  ice   media 172.19.0.3:57192 appears as 172.18.0.7:57192
   FAIL  full ICE through two NATs, calling — no path was ever chosen (0 sent, 0 back): the far end answered no check
 1 flow(s) failed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:42688, mapped to 172.18.0.7:42688
+    callee  lab: 172.18.0.6:3478 at 172.18.0.6:3478, extension callee, as labuser
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:45744, mapped to 172.18.0.5:45744
     callee    FAIL  full ICE through two NATs, answering — no path was ever chosen (0 sent, 0 back): the far end answered no check
     callee  1 flow(s) failed
   with TURN, through the C ABI: the call has to go through coturn
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
-  ice   media 172.19.0.3:39185 appears as 172.18.0.6:39185, relay 172.18.0.5:49185 allocated in 49 ms
-  ice   path sends to 172.18.0.5:49215, chosen 1233 ms after the offer and 1208 ms after the answer
-  ice   relay given back: a Refresh of lifetime zero to 172.18.0.5:3478
-  pass  full ICE through two NATs, calling   (197 sent, 153 back, 90 audible, 50 refused)
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+  ice   media 172.19.0.3:46863 appears as 172.18.0.7:46863, relay 172.18.0.6:49156 allocated in 51 ms
+  ice   path sends to 172.18.0.6:49221, chosen 1237 ms after the offer and 1216 ms after the answer
+  ice   0 datagram(s) on the media socket before its media handle, 0 of them refused
+  ice   relay given back: a Refresh of lifetime zero to 172.18.0.6:3478
+  pass  full ICE through two NATs, calling   (196 sent, 203 back, 139 audible, 1 refused)
 every flow passed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:39421, mapped to 172.18.0.7:39421, relay 172.18.0.5:49215 allocated in 6 ms
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:49215 -> 172.18.0.6:39185, chosen 1209 ms after the offer and 1190 ms after the answer; 204 sent, 196 back, 134 audible); this end at 172.20.0.3:39421, mapped to 172.18.0.7:39421, relay 172.18.0.5:49215 allocated in 6 ms
+    callee  lab: 172.18.0.6:3478 at 172.18.0.6:3478, extension callee, as labuser
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:42781, mapped to 172.18.0.5:42781, relay 172.18.0.6:49221 allocated in 6 ms
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.6:49221 -> 172.18.0.7:46863, chosen 1213 ms after the offer and 1198 ms after the answer; 204 sent, 195 back, 131 audible); this end at 172.20.0.3:42781, mapped to 172.18.0.5:42781, relay 172.18.0.6:49221 allocated in 6 ms
     callee  every flow passed
-    coturn  coturn-1  | 2026-09-24T23:20:17.599+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.174+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.179+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.179+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.179+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.180+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.181+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:18.181+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:19.289+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:22.295+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:22.298+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:55.021+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 013000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:55.613+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:55.666+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 013000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:55.666+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 013000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:55.666+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 013000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:55.701+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:55.701+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:55.701+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:56.854+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 013000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:59.881+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-24T23:20:59.908+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:30.593+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.174+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:32.293+0000 INFO peer 172.18.0.7 lifetime updated: 600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:35.297+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:35.303+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.132+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.785+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.839+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.839+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.839+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.873+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.873+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.873+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:10.035+0000 INFO peer 172.18.0.7 lifetime updated: 600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:13.065+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:13.092+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 013000000000000001)
   coturn: 4 allocation(s), 4 given back
+  with TURN at the C caller alone: the call has to go through its own relay
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+  ice   media 172.19.0.3:56086 appears as 172.18.0.7:56086, relay 172.18.0.6:49190 allocated in 44 ms
+  ice   path sends to 172.18.0.6:3478, chosen 1237 ms after the offer and 1208 ms after the answer
+  ice   0 datagram(s) on the media socket before its media handle, 0 of them refused
+  ice   relay given back: a Refresh of lifetime zero to 172.18.0.6:3478
+  pass  full ICE through two NATs, calling   (198 sent, 204 back, 142 audible, 1 refused)
+every flow passed
+    callee  lab: 172.18.0.6:3478 at 172.18.0.6:3478, extension callee, as labuser
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:59764, mapped to 172.18.0.5:59764
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:59764 -> 172.18.0.6:49190, chosen 1215 ms after the offer and 1191 ms after the answer; 206 sent, 197 back, 135 audible); this end at 172.20.0.3:59764, mapped to 172.18.0.5:59764
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-25T01:53:30.593+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.174+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:31.181+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:32.293+0000 INFO peer 172.18.0.7 lifetime updated: 600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:35.297+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:53:35.303+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.132+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.785+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.839+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.839+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.839+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.873+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.873+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:08.873+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:10.035+0000 INFO peer 172.18.0.7 lifetime updated: 600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:13.065+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 015000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:13.092+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:15.429+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 029000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:15.525+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 029000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:15.525+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 029000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:16.693+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 029000000000000001)
+    coturn  coturn-1  | 2026-09-25T01:54:19.741+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 029000000000000001)
+  coturn: 5 allocation(s), 5 given back
   ok    no path without TURN; with it, every call went through coturn and every relay was given back
 
 the same call, over a bad network
   lossy      bursty loss, jitter and reordering together
-  out: qdisc netem 8194: root refcnt 129 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 10643436915577106920 gap 1
+  out: qdisc netem 81bc: root refcnt 129 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 3302959569740559489 gap 1
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
-  in:  qdisc netem 8195: root refcnt 2 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 5197226506895065380 gap 1
+  in:  qdisc netem 81bd: root refcnt 2 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 5378182343308851297 gap 1
 lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
   pass  register
-  pass  call   (102 sent, 92 back, 65 audible, 1 refused; segSNR 34.4dB over 65 frames, concealed 1, clicks 0/0; lost 5, late 0, jitter 8ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 42, MOS-LQ 2.2, MOS-CQ 2.2)
+  pass  call   (127 sent, 113 back, 83 audible, 2 refused; segSNR 33.9dB over 83 frames, concealed 4, clicks 0/4; lost 4, late 0, jitter 8ms, delay 40ms of 40ms, shrunk 0, stretched 0; R 53, MOS-LQ 2.7, MOS-CQ 2.7)
 every flow passed
   ok    lossy: audio survived it
   mobile     two per cent loss in bursts, on a link whose delay moves
-  out: qdisc netem 8196: root refcnt 129 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 15246265984039374654
+  out: qdisc netem 81be: root refcnt 129 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 1624045807971269676
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
-  in:  qdisc netem 8197: root refcnt 2 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 1131652823019450114
+  in:  qdisc netem 81bf: root refcnt 2 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 6382761243812862180
 lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
   pass  register
-  pass  call   (103 sent, 86 back, 55 audible, 3 refused; segSNR 33.0dB over 55 frames, concealed 14, clicks 0/8; lost 13, late 2, jitter 36ms, delay 100ms of 140ms, shrunk 1, stretched 2; R 21, MOS-LQ 1.3, MOS-CQ 1.3)
+  pass  call   (101 sent, 87 back, 56 audible, 8 refused; segSNR 29.6dB over 56 frames, concealed 7, clicks 0/4; lost 3, late 1, jitter 40ms, delay 60ms of 140ms, shrunk 3, stretched 4; R 56, MOS-LQ 2.9, MOS-CQ 2.9)
 every flow passed
   ok    mobile: audio survived it
   satellite  a geostationary carrier: half a second of round trip, and steady
-  out: qdisc netem 8198: root refcnt 129 limit 1000 delay 250ms  10ms loss 0.5% seed 4797546807812507553
+  out: qdisc netem 81c0: root refcnt 129 limit 1000 delay 250ms  10ms loss 0.5% seed 13957482408921677217
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
-  in:  qdisc netem 8199: root refcnt 2 limit 1000 delay 250ms  10ms loss 0.5% seed 207918453137196400
+  in:  qdisc netem 81c1: root refcnt 2 limit 1000 delay 250ms  10ms loss 0.5% seed 5740764805538717098
 lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
   pass  register
-  pass  call   (103 sent, 98 back, 67 audible, 1 refused; segSNR 34.4dB over 67 frames, concealed 0, clicks 0/0; lost 0, late 0, jitter 9ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  call   (101 sent, 99 back, 67 audible, 1 refused; segSNR 34.4dB over 64 frames, concealed 0, clicks 0/0; lost 0, late 0, jitter 12ms, delay 40ms of 60ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
 every flow passed
   ok    satellite: audio survived it
   blackout   the link disappears for eight seconds in the middle of the call
-  out: qdisc netem 819a: root refcnt 129 limit 1000 seed 1611867598120303940
+  out: qdisc netem 81c2: root refcnt 129 limit 1000 seed 17978934108628786937
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
-  in:  qdisc netem 819b: root refcnt 2 limit 1000 seed 17639790724350815368
+  in:  qdisc netem 81c3: root refcnt 2 limit 1000 seed 8379250837740551998
 lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
   pass  register
-  pass  call   (1001 sent, 599 back, 388 audible, 1 refused; segSNR 34.4dB over 388 frames, concealed 1, clicks 0/0; lost 401, late 0, jitter 1ms, delay 40ms of 20ms, shrunk 0, stretched 1; R 7, MOS-LQ 1.0, MOS-CQ 1.0)
+  pass  call   (1001 sent, 598 back, 410 audible, 1 refused; segSNR 34.4dB over 407 frames, concealed 0, clicks 0/0; lost 401, late 0, jitter 0ms, delay 20ms of 20ms, shrunk 0, stretched 0; R 7, MOS-LQ 1.0, MOS-CQ 1.0)
 every flow passed
   ok    blackout: audio survived it
 
 the capture
-total 2720
--rw-r--r-- 1 tcpdump _ssh 688569 Sep 25 02:16 asterisk-c.pcap
--rw-r--r-- 1 tcpdump _ssh 660775 Sep 25 02:15 asterisk.pcap
--rw-r--r-- 1 tcpdump _ssh 280285 Sep 25 02:15 opensips-c.pcap
--rw-r--r-- 1 tcpdump _ssh 196044 Sep 25 02:14 opensips.pcap
--rw-r--r-- 1 tcpdump _ssh 250521 Sep 25 02:18 proxy-baresip-c.pcap
--rw-r--r-- 1 tcpdump _ssh 206286 Sep 25 02:18 proxy-baresip.pcap
--rw-r--r-- 1 tcpdump _ssh 286266 Sep 25 02:14 proxy-c.pcap
--rw-r--r-- 1 tcpdump _ssh 198613 Sep 25 02:13 proxy.pcap
+total 2824
+-rw-r--r-- 1 tcpdump _ssh 693786 Sep 25 04:49 asterisk-c.pcap
+-rw-r--r-- 1 tcpdump _ssh 660687 Sep 25 04:48 asterisk.pcap
+-rw-r--r-- 1 tcpdump _ssh 280037 Sep 25 04:48 opensips-c.pcap
+-rw-r--r-- 1 tcpdump _ssh 196047 Sep 25 04:47 opensips.pcap
+-rw-r--r-- 1 tcpdump _ssh 251060 Sep 25 04:51 proxy-baresip-c.pcap
+-rw-r--r-- 1 tcpdump _ssh 206543 Sep 25 04:51 proxy-baresip.pcap
+-rw-r--r-- 1 tcpdump _ssh 283475 Sep 25 04:47 proxy-c.pcap
+-rw-r--r-- 1 tcpdump _ssh 302948 Sep 25 04:46 proxy.pcap
 
 the lab agrees
