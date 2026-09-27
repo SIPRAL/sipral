@@ -912,6 +912,32 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   without touching the call. A call a taken REFER could not even send ends the
   subscription with §2.4.5's 503 instead of leaving the referrer on a 100 and
   the call unable to take another REFER.
+- **A full ICE peer that gets the roles backwards can no longer strand a
+  lite end without a path.** RFC 8445 §6.1.1 makes a full peer's role
+  against a lite one controlling, unconditionally — never controlled — but
+  `LiteAgent`'s role-conflict handling ran the general §7.3.1.1 tiebreaker
+  arithmetic anyway, so a Binding request carrying ICE-CONTROLLED (a full
+  peer, honestly confused about 3PCC-style role determination or an
+  attacker forging one) moved the lite end to the controlling role roughly
+  half the time — a role it can never act on, since it gathers no
+  candidate beyond host, leaving the call unable to complete ICE. A Binding
+  request only ever reaches a lite agent's answering side from a full peer
+  in the first place (§8.2: two lite agents exchange no connectivity
+  checks at all), so an ICE-CONTROLLED request naming the lite end's
+  controlled role is never a genuine ambiguity for the tiebreaker to
+  settle; it is now always answered 487 with the role kept.
+- **A TURN 401 to an already-authenticated request no longer gets a
+  pointless retry.** `TurnClient::answerable` answered a 401 once per
+  transaction regardless of whether the request already carried
+  MESSAGE-INTEGRITY, so a Refresh — or anything else sent once the
+  allocation was authenticated — whose credentials the server rejected,
+  most commonly because ephemeral credentials had expired, sent one more
+  copy of the same USERNAME/REALM/password before giving up, which RFC
+  8489 §9.2.5 forbids ("the client MUST NOT perform this retry if it is
+  not changing the USERNAME, USERHASH, REALM, or its associated password
+  from the previous attempt"). A 401 naming the realm already in use now
+  ends the transaction with `TurnError::Unauthenticated` at once; one
+  naming a different realm, a genuine change, still gets its one retry.
 - **Apple artefacts are built for the releases they claim.** The macOS
   wheel was tagged with the building Mac's own version (`macosx_26_0`), so
   pip refused it on every older macOS the library runs on; and in every

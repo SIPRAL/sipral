@@ -128,7 +128,23 @@ pub(super) fn remote_ufrag<'m>(username: &'m [u8], local_ufrag: &[u8]) -> Option
 /// flipped in the other case, if that is what the tiebreaker called for. A
 /// request naming the role this agent does not hold — ICE-CONTROLLING to a
 /// controlled agent, or the reverse — is no conflict and changes nothing.
-pub(super) fn resolve_role(role: &mut Role, tiebreaker: u64, message: &Message<'_>) -> bool {
+///
+/// `allow_switch_to_controlling` gates only the controlled agent's half of
+/// the arithmetic: when it is `false`, an ICE-CONTROLLED request is always
+/// answered with a 487 that keeps the controlled role, whatever the
+/// tiebreaker says. A full agent has no reason to pass `false` — either side
+/// of a full-full conflict is a real ambiguity the arithmetic is meant to
+/// settle. A lite agent does: §6.1.1 makes "one full, one lite" the full
+/// agent's controlling role unconditionally, so an ICE-CONTROLLED request
+/// naming that lite agent's controlled role is not a genuine conflict for
+/// the arithmetic to settle — it is the one case the RFC never predicts, and
+/// [`super::agent`] never lets the tiebreaker decide it.
+pub(super) fn resolve_role(
+    role: &mut Role,
+    tiebreaker: u64,
+    message: &Message<'_>,
+    allow_switch_to_controlling: bool,
+) -> bool {
     if let Some(theirs) = message.ice_controlling() {
         if *role != Role::Controlling {
             return false;
@@ -141,7 +157,7 @@ pub(super) fn resolve_role(role: &mut Role, tiebreaker: u64, message: &Message<'
         if *role != Role::Controlled {
             return false;
         }
-        if tiebreaker >= theirs {
+        if allow_switch_to_controlling && tiebreaker >= theirs {
             *role = Role::Controlling;
         } else {
             return true;

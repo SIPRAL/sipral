@@ -21,9 +21,11 @@ use crate::stun::{Message, error_code};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     /// This agent picks the pair and tells the peer with USE-CANDIDATE.
-    /// Unreachable for a lite agent unless the peer is lite too, since a full
-    /// peer is always controlling (§6.1.1) — but this agent still has to hold
-    /// the role correctly for the role-conflict arithmetic in §7.3.1.1.
+    /// Reachable for a lite agent only as the initial role against a peer
+    /// this session believes is lite too (§6.1.1); it is never the outcome
+    /// of answering a Binding request; a full peer is always controlling
+    /// (§6.1.1), so that answering side never lets a role-conflict message
+    /// move this agent into it (see [`super::server::resolve_role`]).
     Controlling,
     /// This agent waits for a nomination and accepts it.
     Controlled,
@@ -244,7 +246,19 @@ impl LiteAgent {
 
         // Past this point the request is authenticated, so a response may be
         // signed with the same credentials the peer just proved it holds.
-        if server::resolve_role(&mut self.role, self.tiebreaker, &message) {
+        //
+        // A Binding request only ever reaches a lite agent's answering side
+        // when the peer is a full agent (RFC 8445 §8.2: two lite agents
+        // exchange no connectivity checks at all, so a lite peer never sends
+        // one) — and §6.1.1 makes a full peer's role controlling
+        // unconditionally, never controlled. An ICE-CONTROLLED request is
+        // therefore never a genuine role conflict here, only a full peer
+        // that has it backwards (or is spoofing one): the tiebreaker
+        // arithmetic in §7.3.1.1 is not run in this agent's favour, so it
+        // cannot move this agent to the controlling role roughly half the
+        // time, one it can never act on (no candidate gathering beyond
+        // host) and that would leave the call unable to find a path.
+        if server::resolve_role(&mut self.role, self.tiebreaker, &message, false) {
             return server::error_signed(
                 &message,
                 error_code::ROLE_CONFLICT,
@@ -755,11 +769,18 @@ mod tests {
     }
 
     #[test]
-    fn a_controlled_agent_that_wins_the_tiebreaker_switches_to_controlling() {
-        // this agent's tiebreaker is 100; RFC 8445 SS7.3.1.1 gives it the
-        // controlling role when its tiebreaker is "larger than or equal to"
-        // the peer's, so the boundary (equal) is a win, not a coin flip
-        for theirs in [50, 100] {
+    fn a_controlled_lite_agent_never_switches_to_controlling_whatever_the_tiebreaker_says() {
+        // a Binding request only ever reaches this code from a full peer
+        // (RFC 8445 SS8.2: two lite agents exchange none), and SS6.1.1 makes
+        // that peer's role controlling unconditionally — never controlled —
+        // so ICE-CONTROLLED naming this agent's role is not the genuine
+        // ambiguity SS7.3.1.1's arithmetic exists to settle. Before this
+        // defence, a tiebreaker (100, fixed by `agent()`) that happened to
+        // be "larger than or equal to" the value the request named would
+        // still flip this agent to a role it can never act on — no
+        // candidate gathering beyond host — leaving the call unable to find
+        // a path about half the time a full peer got the roles backwards.
+        for theirs in [0, 50, 100, u64::MAX] {
             let mut agent = agent(Role::Controlled);
             let datagram = check(|builder| {
                 builder
@@ -770,11 +791,11 @@ mod tests {
                 .handle_binding_request(ComponentId::RTP, local(), peer(), &datagram)
                 .expect("a reply");
             assert_eq!(
-                parsed(&response).class(),
-                Class::Success,
+                error_code_of(&response),
+                error_code::ROLE_CONFLICT,
                 "theirs = {theirs}"
             );
-            assert_eq!(agent.role(), Role::Controlling, "theirs = {theirs}");
+            assert_eq!(agent.role(), Role::Controlled, "theirs = {theirs}");
         }
     }
 

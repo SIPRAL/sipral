@@ -561,10 +561,18 @@ opens on demand. What it does, in the order a call meets it:
   unanswered, while one that carries none is judged by its integrity alone —
   and answered with XOR-MAPPED-ADDRESS, signed the way the request was, with
   FINGERPRINT. One that fails authentication is refused unsigned
-  (RFC 8489 §9.1.3). The role rules are §7.3.1.1's: a lite end facing a full
-  one starts controlled (§6.1.1), and a peer that claims the same role is
-  settled by the tiebreaker. The answers wait for `poll_transmit` under the
-  full role's ceiling and drop policy (below, "The outbox").
+  (RFC 8489 §9.1.3). A lite end facing a full one starts controlled (§6.1.1),
+  and stays there: a Binding request only ever reaches a lite agent's
+  answering side from a full peer (§8.2 — two lite agents exchange no
+  connectivity checks at all), and §6.1.1 makes that peer's role controlling
+  unconditionally, never controlled, so an ICE-CONTROLLED request naming this
+  end's controlled role is answered 487 and the role kept, whatever the
+  §7.3.1.1 tiebreaker would otherwise have said — a full peer that has the
+  roles backwards, honestly or by an attacker's forgery, does not get to move
+  a lite end to a controlling role it can never act on (no candidate
+  gathering beyond host) and leave the call unable to find a path. The
+  answers wait for `poll_transmit` under the full role's ceiling and drop
+  policy (below, "The outbox").
 - **The path.** The pair a check carrying USE-CANDIDATE arrives on is the
   media path (§7.3.2), and it is reported as `MediaEvent::PathChosen` —
   event 33, the one the full role uses — with the advertised address as its
