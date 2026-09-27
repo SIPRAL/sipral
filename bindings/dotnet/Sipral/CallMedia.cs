@@ -129,6 +129,43 @@ public sealed class CallMedia : IDisposable
             stats.SilentForMs, stats.FramesUnderrun);
     }
 
+    /// <summary>Every path this call's ICE agent tried — the candidate
+    /// pairs its checklist held, then the relays it held — and what became
+    /// of each (<c>sipral_media_path_candidate_count</c>/<c>_at</c>; D5's
+    /// transport and NAT half, <c>docs/05-media.md</c>). Empty for a call
+    /// not using ICE.</summary>
+    public IReadOnlyList<SipralPath> PathCandidates()
+    {
+        nuint count = 0;
+        SipralErrors.Call(() => NativeMethods.sipral_media_path_candidate_count(Handle, out count), "sipral_media_path_candidate_count");
+        var paths = new List<SipralPath>((int)count);
+        var local = Marshal.AllocHGlobal(AddressBytes);
+        var remote = Marshal.AllocHGlobal(AddressBytes);
+        try
+        {
+            for (nuint index = 0; index < count; index++)
+            {
+                var path = SipralPathCandidate.Sized();
+                path.Local = local;
+                path.LocalCapacity = AddressBytes;
+                path.Remote = remote;
+                path.RemoteCapacity = AddressBytes;
+                SipralErrors.Check(NativeMethods.sipral_media_path_candidate_at(Handle, index, ref path), "sipral_media_path_candidate_at");
+                paths.Add(new SipralPath(
+                    (SipralPathKind)path.Kind, (SipralPathOutcome)path.Outcome, path.Code,
+                    (SipralCandidateKind)path.LocalKind, (SipralCandidateKind)path.RemoteKind, path.Priority,
+                    Marshal.PtrToStringUTF8(local, (int)path.LocalLen) ?? string.Empty,
+                    Marshal.PtrToStringUTF8(remote, (int)path.RemoteLen) ?? string.Empty));
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(local);
+            Marshal.FreeHGlobal(remote);
+        }
+        return paths;
+    }
+
     // -- the two frame-carrying calls, as Span/ReadOnlySpan ---------------
 
     /// <summary><c>sipral_media_playback</c>: the frame due for the

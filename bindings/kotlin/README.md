@@ -64,7 +64,7 @@ under `sipral/src/main/kotlin`, and a `proguard.txt` keeping what only native
 code calls. The classes are compiled for Kotlin 2.2 (`-language-version` and
 `-api-version`), so that an application built with Kotlin 2.1 or later -- the
 Android Gradle Plugin 9's own is 2.2 -- can compile against them.
-`docs/08-ffi.md` says what the binding still does not carry: two structs a
+`docs/08-ffi.md` says what the binding still does not carry: three structs a
 caller part-fills with buffers, which still cross as addresses. The event
 payload union does cross now — every event carries every arm the union
 declares, read back through `SipralEvent.payload`, one class per arm.
@@ -101,15 +101,17 @@ Without `registrar` the account never registers: registering throws, and
 the registrar address is only the outbound proxy. The stack and media
 sockets default to 127.0.0.1, so name an address the registrar can reach.
 
-Two structs the generated shim has no way to build from Kotlin —
-`sipral_media_packet_t` and `sipral_transmit_t`, "two structs a caller
-part-fills with buffers" the paragraph above still names — are what
-`SipralMedia`/`SipralClient` need to drive real RTP and to drain outgoing
-SIP messages; `sipral/src/main/jni/idiomatic_media.c` is a second,
-hand-written shim beside the generated one, exposing the five ABI calls
-that take them (`sipral_media_capture`, `sipral_media_poll_rtcp`,
+Three structs the generated shim has no way to build from Kotlin —
+`sipral_media_packet_t`, `sipral_transmit_t` and `sipral_path_candidate_t`,
+"three structs a caller part-fills with buffers" the paragraph above still
+names — are what `SipralMedia`/`SipralClient` need to drive real RTP, to
+drain outgoing SIP messages and to say which ICE paths a call tried;
+`sipral/src/main/jni/idiomatic_media.c` is a second, hand-written shim beside
+the generated one, exposing the ABI calls that take them
+(`sipral_media_capture`, `sipral_media_poll_rtcp`,
 `sipral_media_poll_transmit`, `sipral_stack_poll_farewell`,
-`sipral_stack_poll_transmit`) as plain byte arrays, linked into the same
+`sipral_stack_poll_transmit`, `sipral_stack_poll_stun`,
+`sipral_media_path_candidate_at`) as plain byte arrays, linked into the same
 `libsipral_jni` the generated shim already loads.
 
 It depends on `kotlinx-coroutines-core-jvm` (Apache-2.0,

@@ -86,6 +86,8 @@ pub(crate) mod min_size {
     pub const MEDIA_INFO: usize = 88;
     /// `sipral_media_packet_t`
     pub const MEDIA_PACKET: usize = 56;
+    /// `sipral_path_candidate_t`
+    pub const PATH_CANDIDATE: usize = 88;
     /// `sipral_poll_result_t`
     pub const POLL_RESULT: usize = 48;
     /// `sipral_push_echo_t`

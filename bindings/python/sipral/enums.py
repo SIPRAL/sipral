@@ -34,6 +34,9 @@ __all__ = [
     "Nat",
     "NatMapping",
     "NatRelay",
+    "PathKind",
+    "PathOutcome",
+    "CandidateKind",
 ]
 
 
@@ -119,3 +122,14 @@ NatMapping = _enum("NatMapping", "SIPRAL_NAT_MAPPING_")
 
 #: A `sipral_nat_relay_t`, carried on `SIPRAL_EVENT_KIND_NAT_RELAY`.
 NatRelay = _enum("NatRelay", "SIPRAL_NAT_RELAY_")
+
+#: A `sipral_path_kind_t`: whether one of `Media.path_candidates()` is a
+#: candidate pair or a relay.
+PathKind = _enum("PathKind", "SIPRAL_PATH_KIND_")
+
+#: A `sipral_path_outcome_t`: what became of one of `Media.path_candidates()`.
+PathOutcome = _enum("PathOutcome", "SIPRAL_PATH_OUTCOME_")
+
+#: A `sipral_candidate_kind_t`: the kind of an ICE candidate (RFC 8445
+#: Section 5.1.1), a path's `local_kind` and `remote_kind`.
+CandidateKind = _enum("CandidateKind", "SIPRAL_CANDIDATE_KIND_")

@@ -819,8 +819,9 @@ What it does, in the order a session meets it:
   the old credentials, until the new session selects a pair, reported as a
   second `PathChosen` (§4.4.3.1.1, RFC 7675 §5.1). That is the remedy for
   `IcePathLost`, which forbids the old credentials on the pair, and for a
-  network change the application sees first. The C ABI has no entry point
-  for it yet: a restart from this end is the Rust API's.
+  network change the application sees first. Over the C ABI it is
+  `sipral_call_restart_ice`, and `restartIce()` / `restart_ice()` /
+  `RestartIce()` in the four bindings.
 
   The far end checks under its new credentials as soon as it has answered,
   and those checks can reach this end before the answer does — every time,

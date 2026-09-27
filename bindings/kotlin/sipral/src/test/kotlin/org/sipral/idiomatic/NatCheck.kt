@@ -31,9 +31,12 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.sipral.SipralCandidateKind
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralIce
+import org.sipral.SipralPathKind
+import org.sipral.SipralPathOutcome
 import org.sipral.SipralNatMapping
 import org.sipral.SipralNatRelay
 
@@ -510,6 +513,53 @@ private suspend fun turnAllocationIsGivenBackWhenTheCallEnds(host: String): Stri
     }
 }
 
+/**
+ * D5's path half and a restart this end starts, through the idiomatic
+ * layer: the call's agent says which pair carries it and what became of
+ * every other, and `restartIce()` checks again under new credentials until
+ * a second path is chosen.
+ */
+private suspend fun iceCallSaysWhichPathsItTriedAndRestarts(host: String): String {
+    SipralClient.open(bindHost = host, ice = SipralIce.REQUIRED).use { alice ->
+        SipralClient.open(bindHost = host, ice = SipralIce.REQUIRED).use { bob ->
+            val aliceAccount = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
+            bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)
+            val (aliceCall, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+                alice.placeCall(aliceAccount, target = "sip:bob@${bob.bindAddress}", mediaHost = host)
+            }
+            aliceCall.use {
+                bob.answerCall(incoming, mediaHost = host).use {
+                    val chosen = firstEvent(alice) { it.kind == SipralEventKind.MEDIA_PATH_CHOSEN.value.toLong() }
+                    assertNotNull(chosen, "ICE never chose a path")
+                    val deadline = System.currentTimeMillis() + 5_000
+                    while (aliceCall.media == null && System.currentTimeMillis() < deadline) {
+                        delay(20)
+                    }
+                    val aliceMedia = assertNotNull(aliceCall.media, "alice's media never started")
+                    val paths = aliceMedia.pathCandidates()
+                    val selected = paths.filter {
+                        it.kind == SipralPathKind.PAIR && it.outcome == SipralPathOutcome.SELECTED
+                    }
+                    assertTrue(selected.size == 1, "one pair carries the call: $paths")
+                    assertTrue(
+                        selected.single().localKind == SipralCandidateKind.HOST &&
+                            selected.single().priority > 0 && selected.single().remote.isNotEmpty(),
+                        "the selected pair is not described: $paths",
+                    )
+
+                    // the restart's own selection is a second PATH_CHOSEN,
+                    // subscribed to before the restart is asked for
+                    val (_, again) = alice.events.awaitNext(SipralEventKind.MEDIA_PATH_CHOSEN, timeoutMs = 15_000) {
+                        aliceCall.restartIce()
+                    }
+                    assertNotNull(again, "the restart never chose a path again")
+                    return "an ICE call named ${paths.size} paths, one selected, and a restart chose again"
+                }
+            }
+        }
+    }
+}
+
 /** Everything above, for IdiomaticCheck.kt's main. */
 internal suspend fun natChecks(): String {
     val host = hostAddress() ?: error("no interface but loopback: ICE has no host candidate to check with")
@@ -517,6 +567,7 @@ internal suspend fun natChecks(): String {
         stunMappingReachesContactAndSdp(host),
         turnRelayIsAllocatedAndOffered(host),
         iceBehindStunCarriesAudio(host),
+        iceCallSaysWhichPathsItTriedAndRestarts(host),
         liteAnsweringAFullAgentCarriesAudio(host),
         turnAllocationIsGivenBackWhenTheCallEnds(host),
     ).joinToString(", ")

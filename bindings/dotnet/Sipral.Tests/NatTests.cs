@@ -570,6 +570,19 @@ public sealed class NatTests
             Assert.Equal(SipralCallState.Confirmed, bobCall.State);
             Assert.True(aliceCall.Media!.Info().Sending);
             Assert.True(bobCall.Media!.Info().Receiving);
+
+            // D5's path half: the one pair that carries the call, named
+            var paths = aliceCall.Media!.PathCandidates();
+            var chosen = paths.Where(p => p.Kind == SipralPathKind.Pair && p.Outcome == SipralPathOutcome.Selected).ToList();
+            Assert.Single(chosen);
+            Assert.Equal(SipralCandidateKind.Host, chosen[0].LocalKind);
+            Assert.True(chosen[0].Priority > 0);
+            Assert.False(string.IsNullOrEmpty(chosen[0].Remote));
+
+            // and a restart this end starts checks again under new
+            // credentials until a second path is chosen (RFC 8445 §9)
+            aliceCall.RestartIce();
+            await FirstMatchingAsync(aliceCall.Events, e => e.Kind == SipralEventKind.MediaPathChosen, Timeout);
         }
         finally
         {

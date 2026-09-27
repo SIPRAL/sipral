@@ -95,7 +95,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   or lost with the server's reason. The agent writes each outcome down as
   the transaction that decides it ends (`IceAgent::pair_report`,
   `IceAgent::relay_report`), so the list outlives the checklist §8.1.2
-  prunes at the selection; a restart starts it again.
+  prunes at the selection; a restart starts it again. Over the C ABI it is
+  `sipral_media_path_candidate_count` and `sipral_media_path_candidate_at`,
+  filling a `sipral_path_candidate_t` whose two addresses go into buffers
+  the caller brings, with `sipral_path_kind_t`, `sipral_path_outcome_t` and
+  `sipral_candidate_kind_t` naming the numbers (ABI 0.28); each binding
+  has it as `pathCandidates()` / `path_candidates()` / `PathCandidates()`
+  on a call's media.
 - **ICE restarts in the full role, from either end.** A peer's re-offer
   that changes both `ice-ufrag` and `ice-pwd` is answered with new
   credentials of this end's own (RFC 8839 §4.4.2.1) instead of the ones the
@@ -108,8 +114,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `MediaEvent::PathChosen`; a restart the far end refuses leaves ICE as it
   was. It is the remedy for `MediaError::IcePathLost`. A call running no
   ICE agent is refused with the new `MediaError::NoIce`. Over the C ABI a
-  peer's restart is followed the same way; a restart this end starts has
-  no entry point there yet.
+  peer's restart is followed the same way, and `sipral_call_restart_ice`
+  starts one from this end (ABI 0.28; `restartIce()` / `restart_ice()` /
+  `RestartIce()` on a call in the four bindings).
 - **The quality report says what the far end measured.** The RFC 6035
   `vq-rtcpxr` report sent on call end carries a `RemoteMetrics` set from
   the last RTCP XR VoIP Metrics block (RFC 3611 §4.7) the far end sent

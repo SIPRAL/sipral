@@ -255,9 +255,15 @@ trusts.
 - **A5** — call recording: the mixed conversation to one file, started and
   stopped mid-call. *Built.*
 - **A4** — codec enumeration and priority, and what a live call settled on.
-  *Built*, and with it **D5**'s codec half: the engine says what became of
-  every candidate that lost, through `sipral_media_codec_candidate_count` and
-  `..._at`. D5's transport and NAT half is not built anywhere.
+  *Built*, and with it **D5** in both halves: the engine says what became of
+  every codec candidate that lost, through `sipral_media_codec_candidate_count`
+  and `..._at`, and of every ICE candidate pair and relay a call tried —
+  selected, outranked, nominated elsewhere, unanswered, refused with its
+  code, answered from another address, refused by the relay with its reason,
+  never checked, a relay released or lost — through
+  `sipral_media_path_candidate_count` and `..._at`
+  (`MediaSession::path_candidates` in Rust, a `pathCandidates` in each
+  binding).
 - **A7, D4** — the network-change entry point and the lifecycle model behind
   it, with tests that suspend and resume under adverse conditions. *Built*, and
   it brought `RegistrationState::Unverified` with it: a monotonic clock cannot
@@ -317,9 +323,10 @@ shape is permanent once published:
   RFC 8599 half of C3 (`sipral_account_announce`,
   `sipral_account_refresh_binding`, `sipral_announcement_forget`,
   `sipral_account_push_echo`, the four push members on
-  `sipral_account_config_t`, and event kinds 20 and 31), D5's codec half
+  `sipral_account_config_t`, and event kinds 20 and 31), D5 in both halves
   (`sipral_media_codec_candidate_count`, `..._at` and
-  `sipral_codec_candidate_t`) and the freeze and thaw half of C3
+  `sipral_codec_candidate_t`; `sipral_media_path_candidate_count`, `..._at`
+  and `sipral_path_candidate_t`) and the freeze and thaw half of C3
   (`sipral_account_freeze`, `sipral_account_thaw`, `sipral_stack_cold_start`
   and `sipral_account_time_to_ready`). **Every one of them is across**;
 - SRTP cannot be offered or required from C while `sipral_capabilities`

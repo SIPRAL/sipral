@@ -168,6 +168,16 @@ public sealed class Call : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_call_resume(_stack.Handle, Handle, _stack.NowMs), "sipral_call_resume");
     }
 
+    /// <summary><c>sipral_call_restart_ice</c>: offer the call again with
+    /// new ICE credentials (RFC 8445 §9) and check every pair again once
+    /// the far end answers, while the path it has carries the audio. The
+    /// new path arrives as another
+    /// <see cref="SipralEventKind.MediaPathChosen"/>.</summary>
+    public void RestartIce()
+    {
+        SipralErrors.Call(() => NativeMethods.sipral_call_restart_ice(_stack.Handle, Handle, _stack.NowMs), "sipral_call_restart_ice");
+    }
+
     /// <summary><c>sipral_call_send_dtmf</c>.</summary>
     public void SendDtmf(string digits, SipralDtmf via = SipralDtmf.Rtp, uint durationMs = 100)
     {

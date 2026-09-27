@@ -1729,6 +1729,15 @@ Java_org_sipral_SipralNative_sipral_1call_1change_1codecs(JNIEnv *env, jobject s
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1call_1restart_1ice(JNIEnv *env, jobject self, jlong stack, jlong call, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_call_restart_ice((sipral_handle_t)stack, (sipral_handle_t)call, (uint64_t)nowMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1call_1join(JNIEnv *env, jobject self, jlong stack, jlong callA, jlong callB)
 {
     (void)env;
@@ -2143,6 +2152,29 @@ Java_org_sipral_SipralNative_sipral_1media_1codec_1candidate_1at(JNIEnv *env, jo
         slots[3] = (jlong)candidate_value.outranked_by;
         (*env)->SetLongArrayRegion(env, candidate, 0, 4, slots);
     }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1media_1path_1candidate_1count(JNIEnv *env, jobject self, jlong media, jlongArray count)
+{
+    (void)env;
+    (void)self;
+    size_t count_value = 0;
+    sipral_status_t status = sipral_media_path_candidate_count((sipral_handle_t)media, &count_value);
+    {
+        jlong slot = (jlong)count_value;
+        (*env)->SetLongArrayRegion(env, count, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1media_1path_1candidate_1at(JNIEnv *env, jobject self, jlong media, jlong index, jlong outCandidate)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_media_path_candidate_at((sipral_handle_t)media, (size_t)index, (sipral_path_candidate_t *)(intptr_t)outCandidate);
     return (jint)status;
 }
 

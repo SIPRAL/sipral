@@ -18,7 +18,9 @@
  * Four entry points, each building one sipral_media_packet_t on the C stack,
  * filling it from Java arrays the caller owns, and copying what came back
  * into two more the caller also owns -- nothing here keeps a pointer past
- * its own call, the same rule sipral_jni.c follows throughout.
+ * its own call, the same rule sipral_jni.c follows throughout. Below them,
+ * the same done for sipral_path_candidate_t and sipral_transmit_t, the
+ * other structs a caller part-fills with buffers.
  */
 
 #include <jni.h>
@@ -186,6 +188,56 @@ Java_org_sipral_idiomatic_SipralMediaNative_stackPollFarewell(JNIEnv *env, jclas
     call_slot = (jlong)args.out_call;
     (*env)->SetLongArrayRegion(env, outCall, 0, 1, &call_slot);
     return status;
+}
+
+/* sipral_media_path_candidate_at's sipral_path_candidate_t is a third struct
+ * a caller part-fills with buffers: two addresses, the path's own and the far
+ * one. Both buffers are the caller's, and `outNumbers` comes back as
+ * [priority, kind, outcome, code, local_kind, remote_kind, local_len,
+ * remote_len]. */
+JNIEXPORT jint JNICALL
+Java_org_sipral_idiomatic_SipralMediaNative_mediaPathCandidateAt(JNIEnv *env, jclass cls,
+    jlong media, jlong index, jbyteArray outLocal, jbyteArray outRemote, jlongArray outNumbers)
+{
+    sipral_path_candidate_t path;
+    jbyte *local_buf;
+    jbyte *remote_buf;
+    sipral_status_t status;
+    jlong numbers[8];
+
+    (void)cls;
+    memset(&path, 0, sizeof path);
+    path.size = sizeof path;
+
+    local_buf = (*env)->GetByteArrayElements(env, outLocal, NULL);
+    if (local_buf == NULL) {
+        return (jint)-1;
+    }
+    remote_buf = (*env)->GetByteArrayElements(env, outRemote, NULL);
+    if (remote_buf == NULL) {
+        (*env)->ReleaseByteArrayElements(env, outLocal, local_buf, JNI_ABORT);
+        return (jint)-1;
+    }
+    path.local = (char *)local_buf;
+    path.local_capacity = (size_t)(*env)->GetArrayLength(env, outLocal);
+    path.remote = (char *)remote_buf;
+    path.remote_capacity = (size_t)(*env)->GetArrayLength(env, outRemote);
+
+    status = sipral_media_path_candidate_at((sipral_handle_t)media, (size_t)index, &path);
+
+    (*env)->ReleaseByteArrayElements(env, outRemote, remote_buf, 0);
+    (*env)->ReleaseByteArrayElements(env, outLocal, local_buf, 0);
+
+    numbers[0] = (jlong)path.priority;
+    numbers[1] = (jlong)path.kind;
+    numbers[2] = (jlong)path.outcome;
+    numbers[3] = (jlong)path.code;
+    numbers[4] = (jlong)path.local_kind;
+    numbers[5] = (jlong)path.remote_kind;
+    numbers[6] = (jlong)path.local_len;
+    numbers[7] = (jlong)path.remote_len;
+    (*env)->SetLongArrayRegion(env, outNumbers, 0, 8, numbers);
+    return (jint)status;
 }
 
 /* sipral_stack_poll_transmit's sipral_transmit_t is the other struct a

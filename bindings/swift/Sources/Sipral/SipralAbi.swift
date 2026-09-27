@@ -285,6 +285,88 @@ public enum SipralCodecOutcome: UInt32, Sendable {
     case outranked = 3
 }
 
+/// Whether a sipral_path_candidate_t is a candidate pair or a relay.
+public enum SipralPathKind: UInt32, Sendable {
+    /// Not a kind: the struct was never filled in.
+    case unknown = 0
+    /// A candidate pair the call's ICE checklist held (RFC 8445
+    /// §6.1.2).
+    case pair = 1
+    /// An allocation on a TURN server the call's agent held (RFC 8656).
+    case relay = 2
+}
+
+/// The kind of an ICE candidate (RFC 8445 §5.1.1). Names for
+/// sipral_path_candidate_t.local_kind and `remote_kind`.
+public enum SipralCandidateKind: UInt32, Sendable {
+    /// Not known: a relay's server, which is no candidate, or the far
+    /// end of a pair a lite end took from a nomination and never learned
+    /// the kind of.
+    case unknown = 0
+    /// An address a socket of the host's own is bound to.
+    case host = 1
+    /// The address a NAT maps the host's socket to, as a STUN or TURN
+    /// server saw it.
+    case serverReflexive = 2
+    /// An address a connectivity check revealed (RFC 8445 §7.3.1.3).
+    case peerReflexive = 3
+    /// An address on a TURN server that relays for the host.
+    case relayed = 4
+}
+
+/// What became of one path a call's ICE agent tried. Names for
+/// sipral_path_candidate_t.outcome.
+///
+/// D5's transport and NAT half: a call that ended up relayed when a
+/// direct path was expected, or found no path at all, is a support call,
+/// and the answer to it is which of these happened to each pair.
+public enum SipralPathOutcome: UInt32, Sendable {
+    /// Not an outcome: either the path is from a build this ABI has no
+    /// number for, or the struct was never filled in.
+    case unknown = 0
+    /// The path the call's media takes: the selected pair (RFC 8445
+    /// §8.1.2), or the relay it runs through.
+    case selected = 1
+    /// A pair whose check succeeded, with nothing selected yet.
+    case valid = 2
+    /// Nothing has decided it yet: a pair frozen, waiting its turn or
+    /// with its check on the wire; a relay still being allocated.
+    case waiting = 3
+    /// A pair whose check succeeded, with a pair of higher priority
+    /// selected over it.
+    case outranked = 4
+    /// A pair another was nominated ahead of: its check had not finished
+    /// when the selection took it off the checklist (RFC 8445 §8.1.2),
+    /// or it succeeded after a lower one was nominated.
+    case nominatedElsewhere = 5
+    /// A pair whose check was never answered (RFC 8489 §6.2.1).
+    case timedOut = 6
+    /// A pair the far end refused; `code` is the STUN error code (RFC
+    /// 8445 §7.2.5.2.4).
+    case refused = 7
+    /// A pair whose answer came from an address other than the one its
+    /// check went to (RFC 8445 §7.2.5.2.1): a NAT between rewriting it.
+    case notSymmetric = 8
+    /// A pair whose answer named no address to form a valid pair from.
+    case unusable = 9
+    /// A relayed pair the relay would not let the far end through for,
+    /// or a relay whose allocation the server refused; `code` is the
+    /// TURN server's error code, zero when it gave none (RFC 8656 §9,
+    /// §7.3).
+    case relayRefused = 10
+    /// A pair never checked: the pair limit discarded it (RFC 8445
+    /// §6.1.2.5), or its checklist ended before its turn came.
+    case notChecked = 11
+    /// A relay held, that no selected pair runs through — or none yet.
+    case held = 12
+    /// A relay given back: ICE concluded on a pair that does not use it
+    /// (RFC 8445 §8.3.1), or this branch of a forked call let go of it.
+    case released = 13
+    /// A relay the server took back; `code` is its error code, zero when
+    /// a refresh went unanswered (RFC 8656 §8).
+    case lost = 14
+}
+
 /// Which way audio may flow, as seen from here. Names for every `direction`.
 public enum SipralDirection: UInt32, Sendable {
     /// Not negotiated.
@@ -1294,6 +1376,16 @@ public extension sipral_codec_info_t {
 }
 
 public extension sipral_codec_candidate_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_path_candidate_t {
     /// A zeroed one with its size filled in, which is what every
     /// struct here has to be handed over as.
     static func sized() -> Self {
@@ -2767,6 +2859,41 @@ public enum Sipral {
         try check(status)
     }
 
+    /// Restart ICE on a call (RFC 8445 §9): offer the call again with new
+    /// credentials of this end's own, and check every pair again once the
+    /// far end has answered.
+    ///
+    /// The call's last description is offered again with its ICE lines
+    /// written as for a first offer — both `ice-ufrag` and `ice-pwd` changed,
+    /// which is how RFC 8839 §4.4.1.1.1 signals a restart — the candidates
+    /// its agent still holds, and the role it had. Nothing else moves, and
+    /// nothing reaches the running agent until the far end accepts: "Should
+    /// a subsequent offer fail, ICE processing continues as if the
+    /// subsequent offer had never been made" (§4.4). Then the agent checks
+    /// again under both ends' new credentials while the pair it had goes on
+    /// carrying the audio, and the new selection arrives as another
+    /// `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`; the far end's checks that
+    /// arrive before its answer are kept and answered then. A refusal
+    /// arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and leaves ICE as
+    /// it was.
+    ///
+    /// The remedy for a path whose consent was lost
+    /// (`SIPRAL_MEDIA_FAULT_ICE`), and for a network change this end sees
+    /// first. For a call whose media the stack describes: one placed or
+    /// answered with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a
+    /// call the stack writes no description for, one running no ICE agent,
+    /// one with no description yet, or while another change is on its way;
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` from a build without ICE.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    public static func callRestartIce(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status = sipral_call_restart_ice(stack, call, nowMs)
+        try check(status)
+    }
+
     /// Join two active calls into a local conference of three: from here on,
     /// each call's far end hears the other's far end and this end's own
     /// microphone, mixed. sipral_media_mix
@@ -3241,6 +3368,48 @@ public enum Sipral {
         let status = sipral_media_codec_candidate_at(media, index, &candidate)
         try check(status)
         return candidate
+    }
+
+    /// How many paths this call's ICE agent tried: every candidate pair its
+    /// checklist held, then every relay it held.
+    ///
+    /// Zero is an answer, not a failure: a call not using ICE has one path,
+    /// the address its description named, and nothing here to explain. A
+    /// restart (RFC 8445 §9) starts the list again with the new session.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    public static func mediaPathCandidateCount(media: SipralHandle) throws -> Int {
+        try ensureAbi()
+        var count = Int()
+        let status = sipral_media_path_candidate_count(media, &count)
+        try check(status)
+        return count
+    }
+
+    /// One of them, by index, from zero to what
+    /// `sipral_media_path_candidate_count` said: the pairs in the order the
+    /// checklist took them in, then the relays.
+    ///
+    /// D5's transport and NAT half, beside `sipral_media_codec_candidate_at`:
+    /// which path the media took, and for every other one whether its check
+    /// went unanswered, the far end refused it, the answer came back from
+    /// elsewhere, the relay would not let the far end through, or it worked
+    /// and lost to a better one. An index past the end is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are; an address
+    /// buffer smaller than `SIPRAL_ADDRESS_BYTES` is
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, before anything is written.
+    ///
+    /// Safety
+    ///
+    /// `out_candidate` must point at a `sipral_path_candidate_t` whose `size`
+    /// member says how long it is, and its two address buffers, when not
+    /// null, must be writable for the capacities beside them.
+    public static func mediaPathCandidateAt(media: SipralHandle, index: Int, outCandidate: inout sipral_path_candidate_t) throws {
+        try ensureAbi()
+        let status = sipral_media_path_candidate_at(media, index, &outCandidate)
+        try check(status)
     }
 
     /// What one call's media has cost, and what it is costing now.
@@ -4013,7 +4182,14 @@ public enum Sipral {
     /// the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
     /// `sipral_call_media`, anything at all, which goes to the session as
     /// through `sipral_media_receive`. From the media handle on, the socket's
-    /// datagrams go to `sipral_media_receive` instead.
+    /// datagrams go to `sipral_media_receive` instead — except on a socket
+    /// the branches of a forked call share (`keep_all_forks`), whose
+    /// datagrams keep coming here for as long as the branches last: one
+    /// offer described them all on the one socket, and each datagram goes to
+    /// the branch that claims it, by the ICE fragment a check names, the
+    /// check an answer answers, or the address its media comes from (RFC
+    /// 8839 §7.3). That much a stack that asks no server takes too; anything
+    /// else it refuses with `SIPRAL_STATUS_WRONG_STATE`.
     ///
     /// `to` is the socket it arrived on, as `local` was given there; `from`
     /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN

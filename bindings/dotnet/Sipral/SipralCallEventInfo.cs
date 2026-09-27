@@ -96,6 +96,20 @@ public sealed record SipralNatRelayEventInfo(
     string? Mapped,
     string? Reason);
 
+/// <summary>One path a call's ICE agent tried — a candidate pair it
+/// checked, or a relay it held — and what became of it: a
+/// <c>sipral_path_candidate_t</c> with its two addresses read out
+/// (<see cref="CallMedia.PathCandidates"/>).</summary>
+public sealed record SipralPath(
+    SipralPathKind Kind,
+    SipralPathOutcome Outcome,
+    uint Code,
+    SipralCandidateKind LocalKind,
+    SipralCandidateKind RemoteKind,
+    ulong Priority,
+    string Local,
+    string Remote);
+
 /// <summary>A snapshot of <c>sipral_stream_stats_t</c>, copied field by
 /// field — never the library's own pointer, which is valid only for the
 /// callback that carried it. <see cref="FramesUnderrun"/> is

@@ -185,6 +185,17 @@ public final class Call: @unchecked Sendable {
         }
     }
 
+    /// `sipral_call_restart_ice`: offer the call again with new ICE
+    /// credentials (RFC 8445 §9) and check every pair again once the far end
+    /// answers, while the path it has carries the audio -- the remedy for a
+    /// path whose consent was lost, and for a network change. The new path
+    /// arrives as another `.mediaPathChosen`.
+    public func restartIce() throws {
+        try retryingBusy {
+            try Sipral.callRestartIce(stack: stack.handle, call: handle, nowMs: stack.nowMs())
+        }
+    }
+
     public func sendDtmf(_ digits: String, via: SipralDtmf = .rtp, durationMs: UInt32 = 100) throws {
         try retryingBusy {
             try Sipral.callSendDtmf(

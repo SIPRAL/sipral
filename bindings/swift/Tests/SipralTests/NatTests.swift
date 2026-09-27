@@ -503,7 +503,36 @@ final class NatTests: XCTestCase {
         #endif
     }
 
-    private func assertIceCarriesAudio(_ alice: SipralStack, _ bob: SipralStack, host: String) async throws {
+    /// D5's path half and a restart this end starts, through the idiomatic
+    /// layer: the call's agent says which pair carries it and what became of
+    /// every other, and `restartIce()` checks again under new credentials
+    /// until a second path is chosen.
+    func testAnIceCallSaysWhichPathsItTriedAndRestartsItsIce() async throws {
+        let host = try hostAddress()
+        let alice = try SipralStack(bindHost: host, ice: .required)
+        let bob = try SipralStack(bindHost: host, ice: .required)
+        defer { alice.close(); bob.close() }
+        try await assertIceCarriesAudio(alice, bob, host: host) { aliceCall, aliceMedia in
+            let paths = try aliceMedia.pathCandidates()
+            let chosen = paths.filter { $0.kind == .pair && $0.outcome == .selected }
+            XCTAssertEqual(chosen.count, 1, "\(paths)")
+            XCTAssertEqual(chosen.first?.localKind, .host, "\(paths)")
+            XCTAssertGreaterThan(chosen.first?.priority ?? 0, 0)
+            XCTAssertFalse(chosen.first?.remote.isEmpty ?? true)
+
+            // taken before the restart, so it hears the restart's own
+            // selection and nothing from before it
+            let again = alice.events()
+            try aliceCall.restartIce()
+            let reselected = await self.first(again, within: 10) { $0.kind == .mediaPathChosen }
+            XCTAssertNotNil(reselected, "the restart never chose a path again")
+        }
+    }
+
+    private func assertIceCarriesAudio(
+        _ alice: SipralStack, _ bob: SipralStack, host: String,
+        then: ((Call, Media) async throws -> Void)? = nil
+    ) async throws {
         let aliceAccount = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
         _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
         let bobEvents = bob.events()
@@ -545,5 +574,6 @@ final class NatTests: XCTestCase {
         }
         XCTAssertGreaterThanOrEqual(try aliceMedia.statistics().packets_received, 10)
         XCTAssertGreaterThanOrEqual(try bobMedia.statistics().packets_received, 10)
+        try await then?(aliceCall, aliceMedia)
     }
 }

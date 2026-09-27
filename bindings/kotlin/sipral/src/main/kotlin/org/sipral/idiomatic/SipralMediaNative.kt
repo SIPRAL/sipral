@@ -13,9 +13,10 @@
 package org.sipral.idiomatic
 
 /**
- * The four ABI calls SipralAbi.kt cannot print a usable signature for,
- * because each takes a `sipral_media_packet_t *` and the generator has no
- * way to build one from Kotlin (docs/08-ffi.md, "The conventions are
+ * The ABI calls SipralAbi.kt cannot print a usable signature for, because
+ * each takes a `sipral_media_packet_t *` (or, for the last, a
+ * `sipral_path_candidate_t *`) and the generator has no way to build one
+ * from Kotlin (docs/08-ffi.md, "The conventions are
  * load-bearing now"; bindings/kotlin/README.md names the gap). Package-
  * private: [SipralMedia] is the only caller, and it is the one place that
  * owns buffers the right size to hand these.
@@ -66,5 +67,20 @@ internal object SipralMediaNative {
         outDestination: ByteArray?,
         outLen: LongArray,
         outCall: LongArray,
+    ): Int
+
+    /**
+     * `sipral_media_path_candidate_at`, whose `sipral_path_candidate_t` a
+     * caller part-fills with two address buffers the same way. `outLocal`
+     * and `outRemote` are filled in place; `outNumbers` comes back as
+     * `[priority, kind, outcome, code, local_kind, remote_kind, local_len,
+     * remote_len]`.
+     */
+    external fun mediaPathCandidateAt(
+        media: Long,
+        index: Long,
+        outLocal: ByteArray,
+        outRemote: ByteArray,
+        outNumbers: LongArray,
     ): Int
 }

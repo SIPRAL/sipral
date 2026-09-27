@@ -159,6 +159,45 @@ class Media:
             "frames_underrun": int(out.frames_underrun),
         }
 
+    def path_candidates(self) -> list[dict[str, object]]:
+        """Every path this call's ICE agent tried -- the candidate pairs its
+        checklist held, then the relays it held -- and what became of each
+        (`sipral_media_path_candidate_count`/`_at`; D5's transport and NAT
+        half, `docs/05-media.md`), each as a plain `dict`. Empty for a call
+        not using ICE."""
+        count = ffi.new("size_t *")
+        _call(
+            lambda: lib.sipral_media_path_candidate_count(self.handle, count),
+            "sipral_media_path_candidate_count",
+        )
+        paths = []
+        for index in range(int(count[0])):
+            out = ffi.new("sipral_path_candidate_t *")
+            out.size = ffi.sizeof("sipral_path_candidate_t")
+            local = ffi.new(f"char[{lib.SIPRAL_ADDRESS_BYTES}]")
+            remote = ffi.new(f"char[{lib.SIPRAL_ADDRESS_BYTES}]")
+            out.local = local
+            out.local_capacity = lib.SIPRAL_ADDRESS_BYTES
+            out.remote = remote
+            out.remote_capacity = lib.SIPRAL_ADDRESS_BYTES
+            _call(
+                lambda: lib.sipral_media_path_candidate_at(self.handle, index, out),
+                "sipral_media_path_candidate_at",
+            )
+            paths.append(
+                {
+                    "kind": int(out.kind),
+                    "outcome": int(out.outcome),
+                    "code": int(out.code),
+                    "local_kind": int(out.local_kind),
+                    "remote_kind": int(out.remote_kind),
+                    "priority": int(out.priority),
+                    "local": ffi.string(local, out.local_len).decode(),
+                    "remote": ffi.string(remote, out.remote_len).decode(),
+                }
+            )
+        return paths
+
     def send_audio(self, pcm: bytes | memoryview) -> None:
         """Queue 16-bit mono PCM to go out, one frame at a time.
 

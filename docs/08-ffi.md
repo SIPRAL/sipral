@@ -103,8 +103,9 @@ Rules for the ABI:
   `sipral_media_poll_transmit`, `sipral_media_info`, `sipral_media_statistics`,
   `sipral_media_dialling`, `sipral_media_stop_dialling`,
   `sipral_media_record_start`, `sipral_media_record_stop`,
-  `sipral_media_record_state` and `sipral_media_codec_candidate_count`/
-  `..._at`. A handle costs the stack's lock once, when it is minted, and
+  `sipral_media_record_state`, `sipral_media_codec_candidate_count`/
+  `..._at` and `sipral_media_path_candidate_count`/`..._at`. A handle costs
+  the stack's lock once, when it is minted, and
   never on the path that runs fifty times a second. `sipral_media_release`
   frees the handle.
 
@@ -610,6 +611,20 @@ else. A loop that does not read the socket at all until the media handle
 exists loses nothing either — what arrives waits in the socket — but it cannot
 do that on a socket with a relay, whose refresh is answered here.
 
+**A socket the branches of a forked call share keeps coming here.** A call
+placed with `keep_all_forks` that a proxy forks has one media handle per
+branch kept, and one offer described them all on the one socket, so what
+arrives there says which branch it is for only by what it is: a check names
+the phone's ICE fragment, an answer answers one branch's own check, and
+media comes from an address among one phone's candidates (RFC 8839 §7.3).
+`sipral_stack_receive_stun` hands each datagram to the branch that claims it,
+media handles or not — on a stack that asks no server too, which refuses
+only what no call takes — and the relay the offer named serves every branch at
+once — each branch's agent holds it, lets its own phone through, and lets go
+when its branch ends, and the last to let go gives it back
+(`docs/06-nat.md`). A loop with one socket per call and one handle per
+socket loses nothing by going on as before.
+
 Three entry points rather than a second use of the two signalling ones,
 because a media socket is not a transport: a STUN request for it that came out
 of `sipral_stack_poll_transmit` would be sent from the SIP socket by every loop
@@ -771,6 +786,22 @@ is `SIPRAL_EVENT_KIND_MEDIA_CHANGED` naming the codec the answer settled on,
 or `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` with the call left on the list it
 had. A call placed or answered with `sdp` is the application's to re-offer,
 and is `SIPRAL_STATUS_WRONG_STATE` here.
+
+**And restarts its own ICE.** `sipral_call_restart_ice(stack, call, now_ms)`
+re-offers a managed call running ICE with new credentials of this end's own —
+both `ice-ufrag` and `ice-pwd` changed, which is how RFC 8839 §4.4.1.1.1
+signals a restart — and the candidates its agent still holds, and nothing
+else of the description moved. Nothing reaches the running agent until the
+far end accepts (§4.4); then it checks again under both ends' new
+credentials while the pair it had goes on carrying the audio, and the new
+selection arrives as another `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`. The far
+end's checks that beat its answer back are kept and answered when it comes.
+A refusal is `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`, with ICE as it was.
+It is the remedy for `SIPRAL_MEDIA_FAULT_ICE` after consent was lost, and for
+a network change this end sees first. `SIPRAL_STATUS_WRONG_STATE` for a call
+placed or answered with `sdp`, a call running no ICE agent, or while another
+change is on its way; `SIPRAL_STATUS_NOT_SUPPORTED` from a build without
+`SIPRAL_FEATURE_ICE`.
 
 One session change runs in a call at a time (RFC 3261 §14.1). A
 `sipral_call_hold` or `sipral_call_resume` asked for while another is running
@@ -942,6 +973,37 @@ somebody is debugging. Both take a media handle, like `sipral_media_info`, so
 neither reaches a stack and neither can wait on one. A count of zero is an
 answer — a call negotiated from a description with no media line in it had
 nothing in the running at all.
+
+**Why each path lost** is D5's other half, for a call running ICE.
+`sipral_media_path_candidate_count` and `sipral_media_path_candidate_at`
+walk every candidate pair the call's agent formed, in the order its checklist
+took them in, then every relay it held, and fill a `sipral_path_candidate_t`
+(88 bytes): `kind` (`SIPRAL_PATH_KIND_PAIR` or `..._RELAY`), `outcome` and,
+beside it, `code`, the pair's `priority` (RFC 8445 §6.1.2.3), what kind of
+candidate each end is (`SIPRAL_CANDIDATE_KIND_HOST`, `..._SERVER_REFLEXIVE`,
+`..._PEER_REFLEXIVE`, `..._RELAYED`), and the two addresses as `host:port`,
+written into two buffers the caller brings the way `sipral_media_packet_t`
+brings its destination — `local`/`local_capacity` and `remote`/
+`remote_capacity`, each at least `SIPRAL_ADDRESS_BYTES` or null for an
+address not wanted, `SIPRAL_STATUS_BUFFER_TOO_SMALL` before anything is
+written otherwise. For a pair, `local` is the candidate its checks left from
+(a reflexive candidate is paired as its base, RFC 8445 §6.1.2.4) and
+`remote` the far end's; for a relay, the relayed address and the TURN
+server. The outcomes: `SELECTED` — the pair the media takes, or the relay it
+runs through; `VALID` and `WAITING` while nothing has decided; `OUTRANKED`,
+a pair that worked and lost to one of higher priority; `NOMINATED_ELSEWHERE`,
+one another was nominated ahead of (§8.1.2 takes the unfinished pairs off the
+checklist at the selection); `TIMED_OUT`; `REFUSED`, with the far end's STUN
+error in `code`; `NOT_SYMMETRIC`, an answer from an address other than the
+one the check went to (§7.2.5.2.1) — a NAT between rewriting it;
+`UNUSABLE`; `RELAY_REFUSED`, with the TURN server's error in `code`, for a
+relayed pair whose peer the relay would not let through; `NOT_CHECKED`, a pair
+the pair limit discarded or its checklist ended before; and for a relay,
+`HELD`, `RELEASED` — given back unused (§8.3.1), or let go of by the branch
+of a forked call that ended — and `LOST`, with the server's code. Like the
+codec list, it is what the agent wrote down as each transaction ended, not
+worked out again; a restart (RFC 8445 §9) starts it again. A call not using
+ICE has none, and a count of zero.
 
 **`sipral_call_ring_media` rings an incoming call with this stack running the
 audio:** the answer to the offer the INVITE carried is written
@@ -1351,8 +1413,8 @@ struct the binding prints, made into the C array inside the call; a buffer the
 caller brings is an `inout` array; a struct the library fills in whole is what
 the call returns, with an extension per struct that hands over a zeroed one
 with its `size` already set. Nothing in
-the printed surface is a raw pointer except the two structs a caller part-fills
-with its own buffers, which are `inout` and typed.
+the printed surface is a raw pointer except the three structs a caller
+part-fills with its own buffers, which are `inout` and typed.
 
 What is not printed is the platform work, and it is what the binding earns its
 place for: `SipralStack`, `Account` and `Call` (`swift/Sources/Sipral/`), one
@@ -1638,11 +1700,11 @@ first touch of the binding surfaces as the cause of an
 `ExceptionInInitializerError`.
 
 **What still crosses as an address.** `sipral_media_packet_t` and
-`sipral_transmit_t`, the structs a caller part-fills with buffers the library
-writes into, cross as a `Long`, so `mediaCapture`, `mediaPollRtcp`,
-`mediaPollTransmit`, `stackPollTransmit`, `stackPollStun` and
-`stackPollFarewell` cannot be called from Kotlin alone through the generated
-shim; `org.sipral.idiomatic` reaches all of them through a second,
+`sipral_transmit_t`, and `sipral_path_candidate_t` beside them, the structs a
+caller part-fills with buffers the library writes into, cross as a `Long`, so
+`mediaCapture`, `mediaPollRtcp`, `mediaPollTransmit`, `stackPollTransmit`,
+`stackPollStun`, `stackPollFarewell` and `mediaPathCandidateAt` cannot be
+called from Kotlin alone through the generated shim; `org.sipral.idiomatic` reaches all of them through a second,
 hand-written one (`idiomatic_media.c`) linked into the same library, and
 `SipralClient.open` takes `ice`, `stunServer`, `turn` and `g729AnnexB` and runs
 the media-socket loop "Behind a NAT" describes. It takes `referrals` as well,

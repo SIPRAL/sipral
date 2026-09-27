@@ -48,7 +48,16 @@ import threading
 import unittest
 
 from sipral import Stack
-from sipral.enums import CallState, EventKind, Ice, Nat, NatRelay
+from sipral.enums import (
+    CallState,
+    CandidateKind,
+    EventKind,
+    Ice,
+    Nat,
+    NatRelay,
+    PathKind,
+    PathOutcome,
+)
 
 _MAGIC_COOKIE = 0x2112A442
 _COOKIE = struct.pack("!I", _MAGIC_COOKIE)
@@ -558,6 +567,35 @@ class TwoStacksTalkThroughIce(unittest.IsolatedAsyncioTestCase):
         self.bob_stack.close()
 
     async def test_call_reaches_confirmed_with_media_both_ways(self) -> None:
+        alice_call, bob_call = await self._connect()
+        self.assertEqual(alice_call.state, CallState.CONFIRMED)
+        self.assertEqual(bob_call.state, CallState.CONFIRMED)
+        self.assertTrue(alice_call.media.info()["sending"])
+        self.assertTrue(bob_call.media.info()["receiving"])
+
+    async def test_the_call_says_which_paths_it_tried_and_restarts_its_ice(self) -> None:
+        """D5's path half and a restart this end starts, through the
+        idiomatic layer: the agent names the one pair that carries the call,
+        and `restart_ice()` checks again under new credentials until a
+        second path is chosen."""
+        alice_call, _ = await self._connect()
+        paths = alice_call.media.path_candidates()
+        chosen = [
+            path
+            for path in paths
+            if path["kind"] == PathKind.PAIR and path["outcome"] == PathOutcome.SELECTED
+        ]
+        self.assertEqual(len(chosen), 1, paths)
+        self.assertEqual(chosen[0]["local_kind"], CandidateKind.HOST, paths)
+        self.assertGreater(chosen[0]["priority"], 0)
+        self.assertTrue(chosen[0]["remote"], paths)
+
+        alice_call.restart_ice()
+        event = None
+        while event is None or event.kind != EventKind.MEDIA_PATH_CHOSEN:
+            event = await asyncio.wait_for(alice_call.events.get(), timeout=10)
+
+    async def _connect(self):
         alice_account = self.alice_stack.add_account(
             "sip:alice@sipral.invalid",
             registrar_address=self.bob_stack.bind_address,
@@ -594,8 +632,4 @@ class TwoStacksTalkThroughIce(unittest.IsolatedAsyncioTestCase):
             event = None
             while event is None or event.kind != EventKind.MEDIA_PATH_CHOSEN:
                 event = await asyncio.wait_for(call.events.get(), timeout=8)
-
-        self.assertEqual(alice_call.state, CallState.CONFIRMED)
-        self.assertEqual(bob_call.state, CallState.CONFIRMED)
-        self.assertTrue(alice_call.media.info()["sending"])
-        self.assertTrue(bob_call.media.info()["receiving"])
+        return alice_call, bob_call

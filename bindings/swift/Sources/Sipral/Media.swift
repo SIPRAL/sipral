@@ -9,6 +9,28 @@ import Glibc
 import CSipral
 import Dispatch
 
+/// One path a call's ICE agent tried, and what became of it: a
+/// `sipral_path_candidate_t` with its two addresses read out.
+public struct PathCandidate: Sendable, Equatable {
+    /// A candidate pair, or a relay.
+    public let kind: SipralPathKind
+    /// What became of it.
+    public let outcome: SipralPathOutcome
+    /// The STUN error code of a refusal, or the TURN server's; zero otherwise.
+    public let code: UInt32
+    /// What `local` is.
+    public let localKind: SipralCandidateKind
+    /// What `remote` is, `.unknown` for a relay's server.
+    public let remoteKind: SipralCandidateKind
+    /// The pair's priority (RFC 8445 §6.1.2.3); zero for a relay.
+    public let priority: UInt64
+    /// For a pair, the candidate its checks left from; for a relay, the
+    /// relayed address. `host:port`.
+    public let local: String
+    /// For a pair, the far end's candidate; for a relay, the TURN server.
+    public let remote: String
+}
+
 /// One call's audio, paced at its own frame rate.
 ///
 /// A call's media has a handle of its own and never takes the stack's lock
@@ -84,6 +106,41 @@ public final class Media: @unchecked Sendable {
 
     public func statistics() throws -> sipral_stream_stats_t {
         try Sipral.mediaStatistics(media: handle, nowMs: stack.nowMs())
+    }
+
+    /// Every path this call's ICE agent tried -- the candidate pairs its
+    /// checklist held, then the relays it held -- and what became of each
+    /// (`sipral_media_path_candidate_count`/`_at`; D5's transport and NAT
+    /// half, `docs/05-media.md`). Empty for a call not using ICE.
+    public func pathCandidates() throws -> [PathCandidate] {
+        let count = try Sipral.mediaPathCandidateCount(media: handle)
+        return try (0..<count).map { index in
+            var local = [CChar](repeating: 0, count: Sipral.addressBytes)
+            var remote = [CChar](repeating: 0, count: Sipral.addressBytes)
+            var candidate = sipral_path_candidate_t.sized()
+            try local.withUnsafeMutableBufferPointer { localBuf in
+                try remote.withUnsafeMutableBufferPointer { remoteBuf in
+                    candidate.local = localBuf.baseAddress
+                    candidate.local_capacity = localBuf.count
+                    candidate.remote = remoteBuf.baseAddress
+                    candidate.remote_capacity = remoteBuf.count
+                    try Sipral.mediaPathCandidateAt(media: handle, index: index, outCandidate: &candidate)
+                }
+            }
+            let text = { (buffer: [CChar], length: Int) in
+                String(decoding: buffer.prefix(length).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            }
+            return PathCandidate(
+                kind: SipralPathKind(rawValue: candidate.kind) ?? .unknown,
+                outcome: SipralPathOutcome(rawValue: candidate.outcome) ?? .unknown,
+                code: candidate.code,
+                localKind: SipralCandidateKind(rawValue: candidate.local_kind) ?? .unknown,
+                remoteKind: SipralCandidateKind(rawValue: candidate.remote_kind) ?? .unknown,
+                priority: candidate.priority,
+                local: text(local, candidate.local_len),
+                remote: text(remote, candidate.remote_len)
+            )
+        }
     }
 
     /// Queue 16-bit mono PCM to go out, one frame at a time.

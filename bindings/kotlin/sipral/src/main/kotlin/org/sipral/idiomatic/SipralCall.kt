@@ -187,6 +187,16 @@ class SipralCall internal constructor(
         retryBusy { Sipral.callResume(client.handle, handle, client.nowMs()) }
     }
 
+    /**
+     * `sipral_call_restart_ice`: offer the call again with new ICE
+     * credentials (RFC 8445 §9) and check every pair again once the far end
+     * answers, while the path it has carries the audio. The new path arrives
+     * as another `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`.
+     */
+    fun restartIce() {
+        retryBusy { Sipral.callRestartIce(client.handle, handle, client.nowMs()) }
+    }
+
     /** `sipral_call_set_headers`. */
     fun setHeaders(headers: List<SipralHeader>) {
         retryBusy { Sipral.callSetHeaders(client.handle, handle, headers) }

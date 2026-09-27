@@ -37,6 +37,7 @@
     X(sipral_account_config) X(sipral_call_config) X(sipral_codec_info)       \
     X(sipral_codec_candidate) X(sipral_media_info) X(sipral_stream_stats)     \
     X(sipral_media_packet) X(sipral_transmit) X(sipral_event)                 \
+    X(sipral_path_candidate)                                                  \
     X(sipral_suspending) X(sipral_screen_request)                             \
     X(sipral_subscribe_config) X(sipral_watched_dialog) X(sipral_push_echo)   \
     X(sipral_processor_frame)
@@ -160,7 +161,9 @@ static const char fixture_dialog_info[] =
 
 /* A call that comes in with an offer and is answered with media of this
  * stack's own, because two of the structs describe a call's media and a call
- * that was only placed has none yet. */
+ * that was only placed has none yet. The offer carries ICE, and the stack
+ * answers it with its own, because one of them describes the paths a call's
+ * agent tried and a call without an agent has none. */
 static const char fixture_invite[] =
     "INVITE sip:carol@192.0.2.30:5060 SIP/2.0\r\n"
     "Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-smoke-oldest\r\n"
@@ -179,7 +182,11 @@ static const char fixture_offer[] =
     "t=0 0\r\n"
     "m=audio 41000 RTP/AVP 0\r\n"
     "a=rtpmap:0 PCMU/8000\r\n"
-    "a=sendrecv\r\n";
+    "a=sendrecv\r\n"
+    "a=rtcp-mux\r\n"
+    "a=ice-ufrag:smok\r\n"
+    "a=ice-pwd:smokesmokesmokesmoke00\r\n"
+    "a=candidate:1 1 UDP 2130706431 203.0.113.5 41000 typ host\r\n";
 
 /* Stacks built only to be refused or thrown away never report anything that
  * is read. */
@@ -280,6 +287,7 @@ static int fixture_up(struct fixture *fixture)
     sipral_stack_config_t stack = fixture_stack_config(sizeof stack, entropy, media_seed);
     stack.event_callback = on_fixture_event;
     stack.event_user_data = fixture;
+    stack.ice = SIPRAL_ICE_OFFERED;
     sipral_account_config_t account = fixture_account_config(sizeof account);
     expect("the stack the oldest lengths are tried on would not start",
            sipral_stack_create(&stack, &fixture->stack) == SIPRAL_STATUS_OK);
@@ -811,6 +819,23 @@ static sipral_status_t codec_candidate_at(struct fixture *fixture, size_t declar
     return status;
 }
 
+static sipral_status_t path_candidate_at(struct fixture *fixture, size_t declared)
+{
+    sipral_path_candidate_t candidate = { 0 };
+    candidate.size = declared;
+    candidate.local = destination_buffer;
+    candidate.local_capacity = sizeof destination_buffer;
+    candidate.remote = source_buffer;
+    candidate.remote_capacity = sizeof source_buffer;
+    sipral_handle_t media = media_handle_of(fixture);
+    if (media == SIPRAL_HANDLE_NONE) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_status_t status = sipral_media_path_candidate_at(media, 0, &candidate);
+    sipral_media_release(media);
+    return status;
+}
+
 static sipral_status_t stream_stats_at(struct fixture *fixture, size_t declared)
 {
     sipral_stream_stats_t stats = { 0 };
@@ -868,6 +893,7 @@ static const struct {
     { "sipral_call_config_t", call_config_at },
     { "sipral_codec_info_t", codec_info_at },
     { "sipral_codec_candidate_t", codec_candidate_at },
+    { "sipral_path_candidate_t", path_candidate_at },
     { "sipral_media_info_t", media_info_at },
     { "sipral_stream_stats_t", stream_stats_at },
     { "sipral_media_packet_t", media_packet_at },
@@ -2091,6 +2117,110 @@ static void every_codec_says_what_became_of_it(void)
     sipral_stack_destroy(fixture.stack);
 }
 
+/* -- why each path lost ------------------------------------------------------
+ *
+ * D5's other half: the fixture's far end offered one host candidate, the
+ * stack's agent paired its own with it, and nothing has answered the check
+ * yet -- so the one pair it tried is still waiting, between the two
+ * addresses the two descriptions named. */
+static void every_path_says_what_became_of_it(void)
+{
+    struct fixture fixture;
+    if (!fixture_up(&fixture)) {
+        return;
+    }
+    sipral_handle_t media = media_handle_of(&fixture);
+    expect("the fixture call has no media to explain", media != SIPRAL_HANDLE_NONE);
+    if (media == SIPRAL_HANDLE_NONE) {
+        sipral_stack_destroy(fixture.stack);
+        return;
+    }
+
+    size_t paths = 0;
+    expect("the call would not say how many paths its agent tried",
+           sipral_media_path_candidate_count(media, &paths) == SIPRAL_STATUS_OK);
+    expect("an agent with a candidate on each end tried no pair", paths == 1);
+
+    char local[SIPRAL_ADDRESS_BYTES];
+    char remote[SIPRAL_ADDRESS_BYTES];
+    sipral_path_candidate_t path = { 0 };
+    path.size = sizeof path;
+    path.local = local;
+    path.local_capacity = sizeof local;
+    path.remote = remote;
+    path.remote_capacity = sizeof remote;
+    expect("the pair inside the count was refused",
+           sipral_media_path_candidate_at(media, 0, &path) == SIPRAL_STATUS_OK);
+    expect("the pair is not said to be a pair", path.kind == SIPRAL_PATH_KIND_PAIR);
+    expect("a pair nothing has answered is not said to be waiting",
+           path.outcome == SIPRAL_PATH_OUTCOME_WAITING);
+    expect("the pair's local candidate is not the host the call was answered on",
+           path.local_kind == SIPRAL_CANDIDATE_KIND_HOST &&
+               strcmp(local, fixture_media) == 0 && path.local_len == strlen(fixture_media));
+    expect("the pair's far candidate is not the one the offer named",
+           path.remote_kind == SIPRAL_CANDIDATE_KIND_HOST &&
+               strcmp(remote, "203.0.113.5:41000") == 0);
+    expect("a pair has no priority", path.priority > 0);
+
+    sipral_path_candidate_t past = { 0 };
+    past.size = sizeof past;
+    expect("a path index past the end was answered",
+           sipral_media_path_candidate_at(media, paths, &past) == SIPRAL_STATUS_INVALID_ARGUMENT);
+    sipral_path_candidate_t cramped = path;
+    cramped.local_capacity = 8;
+    expect("an address buffer too small to hold an address was written into",
+           sipral_media_path_candidate_at(media, 0, &cramped) == SIPRAL_STATUS_BUFFER_TOO_SMALL);
+
+    sipral_media_release(media);
+    sipral_stack_destroy(fixture.stack);
+}
+
+/* A restart this end starts: the call is offered again, with credentials of
+ * this end's own that are not the ones its answer gave out. */
+static void a_call_restarts_its_ice(void)
+{
+    struct fixture fixture;
+    if (!fixture_up(&fixture)) {
+        return;
+    }
+    while (1) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        if (sipral_stack_poll_transmit(fixture.stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            break;
+        }
+    }
+    expect("a call running ICE would not restart it",
+           sipral_call_restart_ice(fixture.stack, fixture.call, 0) == SIPRAL_STATUS_OK);
+    int offered = 0;
+    while (1) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        if (sipral_stack_poll_transmit(fixture.stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            break;
+        }
+        message_buffer[transmit.len] = '\0';
+        const char *text = (const char *)message_buffer;
+        if (strncmp(text, "INVITE ", strlen("INVITE ")) == 0 &&
+            strstr(text, "a=ice-ufrag:") != NULL) {
+            offered = 1;
+        }
+    }
+    expect("the restart put no re-offer with ICE credentials on the wire", offered);
+    expect("a second restart went out while the first was on its way",
+           sipral_call_restart_ice(fixture.stack, fixture.call, 0) != SIPRAL_STATUS_OK);
+    expect("a restart was asked of a handle that names no call",
+           sipral_call_restart_ice(fixture.stack, SIPRAL_HANDLE_NONE, 0) ==
+               SIPRAL_STATUS_INVALID_HANDLE);
+    sipral_stack_destroy(fixture.stack);
+}
+
 static void sizes_agree(void)
 {
 #define ASK(type)                                                             \
@@ -2181,6 +2311,8 @@ int main(void)
     a_call_names_its_own_codecs();
     g729_annex_b_is_the_stacks_to_say();
     every_codec_says_what_became_of_it();
+    every_path_says_what_became_of_it();
+    a_call_restarts_its_ice();
     a_call_keyed_by_a_handshake_says_so_in_its_offer();
     nothing_is_due_on_a_call_with_no_media();
     a_registration_freezes_and_thaws();

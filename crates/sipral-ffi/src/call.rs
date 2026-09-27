@@ -1026,6 +1026,84 @@ entry! {
 }
 
 entry! {
+    /// Restart ICE on a call (RFC 8445 §9): offer the call again with new
+    /// credentials of this end's own, and check every pair again once the
+    /// far end has answered.
+    ///
+    /// The call's last description is offered again with its ICE lines
+    /// written as for a first offer — both `ice-ufrag` and `ice-pwd` changed,
+    /// which is how RFC 8839 §4.4.1.1.1 signals a restart — the candidates
+    /// its agent still holds, and the role it had. Nothing else moves, and
+    /// nothing reaches the running agent until the far end accepts: "Should
+    /// a subsequent offer fail, ICE processing continues as if the
+    /// subsequent offer had never been made" (§4.4). Then the agent checks
+    /// again under both ends' new credentials while the pair it had goes on
+    /// carrying the audio, and the new selection arrives as another
+    /// `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`; the far end's checks that
+    /// arrive before its answer are kept and answered then. A refusal
+    /// arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and leaves ICE as
+    /// it was.
+    ///
+    /// The remedy for a path whose consent was lost
+    /// (`SIPRAL_MEDIA_FAULT_ICE`), and for a network change this end sees
+    /// first. For a call whose media the stack describes: one placed or
+    /// answered with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a
+    /// call the stack writes no description for, one running no ICE agent,
+    /// one with no description yet, or while another change is on its way;
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` from a build without ICE.
+    ///
+    /// # Safety
+    ///
+    /// Safe to call with any handle values.
+    fn sipral_call_restart_ice(stack: SipralHandle, call: SipralHandle, now_ms: u64) {
+        with_stack_at(stack, now_ms, |state, now| {
+            let id = state.calls.get(call).map_err(handle_failed)?;
+            restart_ice(state, id, now)
+        })
+    }
+}
+
+/// [`sipral_call_restart_ice`] on a call the handle table found.
+#[cfg(feature = "ice")]
+fn restart_ice(
+    state: &mut StackState,
+    call: sipral::CallHandle,
+    now: std::time::Instant,
+) -> Result<(), Fail> {
+    state
+        .engine
+        .restart_ice(&mut state.agent, call, now)
+        .map_err(|error| match error {
+            // the call is real — the handle was just found — so what the
+            // engine does not know is its media
+            sipral::MediaError::NoSuchCall => fail(
+                SipralStatus::WrongState,
+                "the stack writes no description for this call: it was placed or answered \
+                 without media_address, so its offers are the application's",
+            ),
+            sipral::MediaError::NoIce => fail(
+                SipralStatus::WrongState,
+                "this call runs no ICE agent to restart: its policy offered none, or the far end \
+                 answered without it",
+            ),
+            other => media_failed(&other),
+        })
+}
+
+/// Without the agent there is nothing to restart.
+#[cfg(not(feature = "ice"))]
+fn restart_ice(
+    _state: &mut crate::stack::StackState,
+    _call: sipral::CallHandle,
+    _now: std::time::Instant,
+) -> Result<(), Fail> {
+    Err(fail(
+        SipralStatus::NotSupported,
+        "this build has no ICE agent; SIPRAL_FEATURE_ICE says so",
+    ))
+}
+
+entry! {
     /// Join two active calls into a local conference of three: from here on,
     /// each call's far end hears the other's far end and this end's own
     /// microphone, mixed. [`sipral_media_mix`](crate::media::sipral_media_mix)

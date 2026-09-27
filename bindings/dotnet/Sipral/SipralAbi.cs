@@ -393,6 +393,143 @@ public enum SipralCodecOutcome : uint
 }
 
 /// <summary>
+/// Whether a SipralPathCandidate is a candidate pair or a relay.
+/// </summary>
+public enum SipralPathKind : uint
+{
+    /// <summary>
+    /// Not a kind: the struct was never filled in.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// A candidate pair the call's ICE checklist held (RFC 8445
+    /// §6.1.2).
+    /// </summary>
+    Pair = 1,
+    /// <summary>
+    /// An allocation on a TURN server the call's agent held (RFC 8656).
+    /// </summary>
+    Relay = 2,
+}
+
+/// <summary>
+/// The kind of an ICE candidate (RFC 8445 §5.1.1). Names for
+/// SipralPathCandidate.LocalKind and `remote_kind`.
+/// </summary>
+public enum SipralCandidateKind : uint
+{
+    /// <summary>
+    /// Not known: a relay's server, which is no candidate, or the far
+    /// end of a pair a lite end took from a nomination and never learned
+    /// the kind of.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// An address a socket of the host's own is bound to.
+    /// </summary>
+    Host = 1,
+    /// <summary>
+    /// The address a NAT maps the host's socket to, as a STUN or TURN
+    /// server saw it.
+    /// </summary>
+    ServerReflexive = 2,
+    /// <summary>
+    /// An address a connectivity check revealed (RFC 8445 §7.3.1.3).
+    /// </summary>
+    PeerReflexive = 3,
+    /// <summary>
+    /// An address on a TURN server that relays for the host.
+    /// </summary>
+    Relayed = 4,
+}
+
+/// <summary>
+/// What became of one path a call's ICE agent tried. Names for
+/// SipralPathCandidate.Outcome.
+///
+/// D5's transport and NAT half: a call that ended up relayed when a
+/// direct path was expected, or found no path at all, is a support call,
+/// and the answer to it is which of these happened to each pair.
+/// </summary>
+public enum SipralPathOutcome : uint
+{
+    /// <summary>
+    /// Not an outcome: either the path is from a build this ABI has no
+    /// number for, or the struct was never filled in.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// The path the call's media takes: the selected pair (RFC 8445
+    /// §8.1.2), or the relay it runs through.
+    /// </summary>
+    Selected = 1,
+    /// <summary>
+    /// A pair whose check succeeded, with nothing selected yet.
+    /// </summary>
+    Valid = 2,
+    /// <summary>
+    /// Nothing has decided it yet: a pair frozen, waiting its turn or
+    /// with its check on the wire; a relay still being allocated.
+    /// </summary>
+    Waiting = 3,
+    /// <summary>
+    /// A pair whose check succeeded, with a pair of higher priority
+    /// selected over it.
+    /// </summary>
+    Outranked = 4,
+    /// <summary>
+    /// A pair another was nominated ahead of: its check had not finished
+    /// when the selection took it off the checklist (RFC 8445 §8.1.2),
+    /// or it succeeded after a lower one was nominated.
+    /// </summary>
+    NominatedElsewhere = 5,
+    /// <summary>
+    /// A pair whose check was never answered (RFC 8489 §6.2.1).
+    /// </summary>
+    TimedOut = 6,
+    /// <summary>
+    /// A pair the far end refused; `code` is the STUN error code (RFC
+    /// 8445 §7.2.5.2.4).
+    /// </summary>
+    Refused = 7,
+    /// <summary>
+    /// A pair whose answer came from an address other than the one its
+    /// check went to (RFC 8445 §7.2.5.2.1): a NAT between rewriting it.
+    /// </summary>
+    NotSymmetric = 8,
+    /// <summary>
+    /// A pair whose answer named no address to form a valid pair from.
+    /// </summary>
+    Unusable = 9,
+    /// <summary>
+    /// A relayed pair the relay would not let the far end through for,
+    /// or a relay whose allocation the server refused; `code` is the
+    /// TURN server's error code, zero when it gave none (RFC 8656 §9,
+    /// §7.3).
+    /// </summary>
+    RelayRefused = 10,
+    /// <summary>
+    /// A pair never checked: the pair limit discarded it (RFC 8445
+    /// §6.1.2.5), or its checklist ended before its turn came.
+    /// </summary>
+    NotChecked = 11,
+    /// <summary>
+    /// A relay held, that no selected pair runs through — or none yet.
+    /// </summary>
+    Held = 12,
+    /// <summary>
+    /// A relay given back: ICE concluded on a pair that does not use it
+    /// (RFC 8445 §8.3.1), or this branch of a forked call let go of it.
+    /// </summary>
+    Released = 13,
+    /// <summary>
+    /// A relay the server took back; `code` is its error code, zero when
+    /// a refresh went unanswered (RFC 8656 §8).
+    /// </summary>
+    Lost = 14,
+}
+
+/// <summary>
 /// Which way audio may flow, as seen from here. Names for every `direction`.
 /// </summary>
 public enum SipralDirection : uint
@@ -3038,6 +3175,96 @@ public struct SipralCodecCandidate
 }
 
 /// <summary>
+/// One path a call's ICE agent tried — a candidate pair it checked, or a
+/// relay it held — and what became of it, with its two addresses written
+/// into the caller's own buffers.
+///
+/// The caller fills in `size`, the two pointers and the two capacities;
+/// the library fills in the rest. A pointer left null with a capacity of
+/// zero is an address the caller does not want. Written down by the
+/// agent as each outcome happened, never worked out again when it is
+/// asked for: RFC 8445 §8.1.2 takes the losing pairs off the checklist
+/// the moment one is selected.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralPathCandidate
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The pair's priority (RFC 8445 §6.1.2.3), as this end's role
+    /// computes it; zero for a relay.
+    /// </summary>
+    public ulong Priority;
+    /// <summary>
+    /// A SipralPathKind.
+    /// </summary>
+    public uint Kind;
+    /// <summary>
+    /// A SipralPathOutcome.
+    /// </summary>
+    public uint Outcome;
+    /// <summary>
+    /// For `SIPRAL_PATH_OUTCOME_REFUSED`, the STUN error code the far end
+    /// answered with; for `SIPRAL_PATH_OUTCOME_RELAY_REFUSED` and
+    /// `SIPRAL_PATH_OUTCOME_LOST`, the TURN server's, zero when it gave
+    /// none. Zero otherwise.
+    /// </summary>
+    public uint Code;
+    /// <summary>
+    /// A SipralCandidateKind: what `local` is.
+    /// </summary>
+    public uint LocalKind;
+    /// <summary>
+    /// A SipralCandidateKind: what `remote` is, when it is a
+    /// candidate at all.
+    /// </summary>
+    public uint RemoteKind;
+    /// <summary>
+    /// Where to write the local address, `host:port` with a trailing
+    /// NUL: for a pair, the candidate its checks left from — the host
+    /// candidate, or the relayed one; for a relay, the relayed address.
+    /// </summary>
+    public IntPtr Local;
+    /// <summary>
+    /// How much room `local` has. At least SIPRAL_ADDRESS_BYTES when
+    /// it is not null.
+    /// </summary>
+    public nuint LocalCapacity;
+    /// <summary>
+    /// How many bytes of it were written, the NUL not counted. Zero for
+    /// a relay that has no relayed address.
+    /// </summary>
+    public nuint LocalLen;
+    /// <summary>
+    /// Where to write the far address, `host:port` with a trailing NUL:
+    /// for a pair, the far end's candidate; for a relay, the TURN
+    /// server.
+    /// </summary>
+    public IntPtr Remote;
+    /// <summary>
+    /// How much room `remote` has. At least SIPRAL_ADDRESS_BYTES
+    /// when it is not null.
+    /// </summary>
+    public nuint RemoteCapacity;
+    /// <summary>
+    /// How many bytes of it were written, the NUL not counted.
+    /// </summary>
+    public nuint RemoteLen;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralPathCandidate Sized()
+    {
+        var value = default(SipralPathCandidate);
+        value.Size = (nuint)Marshal.SizeOf<SipralPathCandidate>();
+        return value;
+    }
+}
+
+/// <summary>
 /// What one call's media settled on, and what it is doing now.
 ///
 /// A4's reporting half and as much of D5 as this stack knows: the codec that
@@ -4928,6 +5155,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_change_codecs(ulong stack, ulong call, sbyte[] codecs, nuint codecsLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_restart_ice(ulong stack, ulong call, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_join(ulong stack, ulong callA, ulong callB);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -4989,6 +5219,12 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_codec_candidate_at(ulong media, nuint index, ref SipralCodecCandidate outCandidate);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_path_candidate_count(ulong media, out nuint count);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_path_candidate_at(ulong media, nuint index, ref SipralPathCandidate outCandidate);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_statistics(ulong media, ulong nowMs, ref SipralStreamStats outStats);
@@ -6438,6 +6674,42 @@ public static class Sipral
     }
 
     /// <summary>
+    /// Restart ICE on a call (RFC 8445 §9): offer the call again with new
+    /// credentials of this end's own, and check every pair again once the
+    /// far end has answered.
+    ///
+    /// The call's last description is offered again with its ICE lines
+    /// written as for a first offer — both `ice-ufrag` and `ice-pwd` changed,
+    /// which is how RFC 8839 §4.4.1.1.1 signals a restart — the candidates
+    /// its agent still holds, and the role it had. Nothing else moves, and
+    /// nothing reaches the running agent until the far end accepts: "Should
+    /// a subsequent offer fail, ICE processing continues as if the
+    /// subsequent offer had never been made" (§4.4). Then the agent checks
+    /// again under both ends' new credentials while the pair it had goes on
+    /// carrying the audio, and the new selection arrives as another
+    /// `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`; the far end's checks that
+    /// arrive before its answer are kept and answered then. A refusal
+    /// arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and leaves ICE as
+    /// it was.
+    ///
+    /// The remedy for a path whose consent was lost
+    /// (`SIPRAL_MEDIA_FAULT_ICE`), and for a network change this end sees
+    /// first. For a call whose media the stack describes: one placed or
+    /// answered with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a
+    /// call the stack writes no description for, one running no ICE agent,
+    /// one with no description yet, or while another change is on its way;
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` from a build without ICE.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    /// </summary>
+    public static void CallRestartIce(ulong stack, ulong call, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_call_restart_ice(stack, call, nowMs));
+    }
+
+    /// <summary>
     /// Join two active calls into a local conference of three: from here on,
     /// each call's far end hears the other's far end and this end's own
     /// microphone, mixed. sipral_media_mix
@@ -6907,6 +7179,49 @@ public static class Sipral
         var candidate = SipralCodecCandidate.Sized();
         Check(NativeMethods.sipral_media_codec_candidate_at(media, index, ref candidate));
         return candidate;
+    }
+
+    /// <summary>
+    /// How many paths this call's ICE agent tried: every candidate pair its
+    /// checklist held, then every relay it held.
+    ///
+    /// Zero is an answer, not a failure: a call not using ICE has one path,
+    /// the address its description named, and nothing here to explain. A
+    /// restart (RFC 8445 §9) starts the list again with the new session.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    /// </summary>
+    public static nuint MediaPathCandidateCount(ulong media)
+    {
+        Check(NativeMethods.sipral_media_path_candidate_count(media, out var count));
+        return count;
+    }
+
+    /// <summary>
+    /// One of them, by index, from zero to what
+    /// `sipral_media_path_candidate_count` said: the pairs in the order the
+    /// checklist took them in, then the relays.
+    ///
+    /// D5's transport and NAT half, beside `sipral_media_codec_candidate_at`:
+    /// which path the media took, and for every other one whether its check
+    /// went unanswered, the far end refused it, the answer came back from
+    /// elsewhere, the relay would not let the far end through, or it worked
+    /// and lost to a better one. An index past the end is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are; an address
+    /// buffer smaller than `SIPRAL_ADDRESS_BYTES` is
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, before anything is written.
+    ///
+    /// Safety
+    ///
+    /// `out_candidate` must point at a `sipral_path_candidate_t` whose `size`
+    /// member says how long it is, and its two address buffers, when not
+    /// null, must be writable for the capacities beside them.
+    /// </summary>
+    public static void MediaPathCandidateAt(ulong media, nuint index, ref SipralPathCandidate outCandidate)
+    {
+        Check(NativeMethods.sipral_media_path_candidate_at(media, index, ref outCandidate));
     }
 
     /// <summary>
@@ -7662,7 +7977,14 @@ public static class Sipral
     /// the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
     /// `sipral_call_media`, anything at all, which goes to the session as
     /// through `sipral_media_receive`. From the media handle on, the socket's
-    /// datagrams go to `sipral_media_receive` instead.
+    /// datagrams go to `sipral_media_receive` instead — except on a socket
+    /// the branches of a forked call share (`keep_all_forks`), whose
+    /// datagrams keep coming here for as long as the branches last: one
+    /// offer described them all on the one socket, and each datagram goes to
+    /// the branch that claims it, by the ICE fragment a check names, the
+    /// check an answer answers, or the address its media comes from (RFC
+    /// 8839 §7.3). That much a stack that asks no server takes too; anything
+    /// else it refuses with `SIPRAL_STATUS_WRONG_STATE`.
     ///
     /// `to` is the socket it arrived on, as `local` was given there; `from`
     /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN

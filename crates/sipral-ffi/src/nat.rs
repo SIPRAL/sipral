@@ -865,6 +865,11 @@ impl Nat {
         now: Instant,
     ) -> Result<(), Fail> {
         if state.nat.active.is_none() {
+            // a stack that asks nobody still has the branches of a forked
+            // call to hand a shared socket's datagrams to
+            if state.engine.receive_early(local, from, data, now) {
+                return Ok(());
+            }
             return Err(not_asking());
         }
         if Self::intercept(state, local, from, data, now) {
@@ -1149,9 +1154,10 @@ fn relay_event(stack: SipralHandle, said: sipral::RelayEvent) -> Raised {
 }
 
 /// The STUN error code a relay failure stands for, or zero for a failure no
-/// server answered with (RFC 8656 §19, RFC 8489 §14.8).
-#[cfg(all(feature = "stun", feature = "ice"))]
-fn refusal_code(failure: sipral::TurnFailure) -> u32 {
+/// server answered with (RFC 8656 §19, RFC 8489 §14.8): what a relay event
+/// carries, and what a path a relay refused or lost does.
+#[cfg(feature = "ice")]
+pub(crate) fn refusal_code(failure: sipral::TurnFailure) -> u32 {
     use sipral::TurnFailure;
     match failure {
         TurnFailure::Alternate(_) => 300,
@@ -1380,7 +1386,14 @@ entry! {
     /// the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
     /// `sipral_call_media`, anything at all, which goes to the session as
     /// through `sipral_media_receive`. From the media handle on, the socket's
-    /// datagrams go to `sipral_media_receive` instead.
+    /// datagrams go to `sipral_media_receive` instead — except on a socket
+    /// the branches of a forked call share (`keep_all_forks`), whose
+    /// datagrams keep coming here for as long as the branches last: one
+    /// offer described them all on the one socket, and each datagram goes to
+    /// the branch that claims it, by the ICE fragment a check names, the
+    /// check an answer answers, or the address its media comes from (RFC
+    /// 8839 §7.3). That much a stack that asks no server takes too; anything
+    /// else it refuses with `SIPRAL_STATUS_WRONG_STATE`.
     ///
     /// `to` is the socket it arrived on, as `local` was given there; `from`
     /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN
@@ -2080,6 +2093,43 @@ mod tests {
         assert!(
             signalling_out(stack).is_empty(),
             "no STUN request goes out on a stack that was not asked for one"
+        );
+    }
+
+    /// A stack that asks nobody still takes a datagram for a call described
+    /// on the socket it arrived on: the loop that hands a socket the
+    /// branches of a forked call share to `sipral_stack_receive_stun` needs
+    /// no STUN server to do it. A datagram for no call is still refused as
+    /// before.
+    #[test]
+    fn a_stack_that_asks_nobody_still_hands_a_calls_datagrams_to_the_call() {
+        let mut observed = Observed::default();
+        let (stack, _call) = crate::call::tests::media_call(&mut observed);
+        let peer = crate::call::tests::PEER_MEDIA;
+        let rtp = |sequence: u16| {
+            let mut out = vec![0x80, 0x00];
+            out.extend_from_slice(&sequence.to_be_bytes());
+            out.extend_from_slice(&(u32::from(sequence) * 160).to_be_bytes());
+            out.extend_from_slice(&0xDEAD_BEEF_u32.to_be_bytes());
+            out.extend_from_slice(&[0xFF; 160]);
+            out
+        };
+        // RFC 3550 A.1 wants two packets in a row before a source is
+        // believed, so the first is the session's and dropped by it
+        let _ = on_media_socket(stack, &rtp(1), peer, 2_000);
+        assert_eq!(
+            on_media_socket(stack, &rtp(2), peer, 2_020),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            on_media_socket(stack, b"\x01\x01\x00\x00", SERVER, 2_040),
+            SipralStatus::WrongState
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
         );
     }
 
@@ -3631,6 +3681,259 @@ Content-Type: application/sdp\r\n"
             observed.kinds().contains(&SipralEventKind::MediaPathChosen),
             "the pair the peer nominated carries the call: {:?}",
             observed.kinds()
+        );
+    }
+
+    /// A call placed with ICE and answered with it: the stack, the call,
+    /// its media handle and the fragment its INVITE gave out.
+    #[cfg(feature = "ice")]
+    fn answered_ice_call(
+        observed: &mut Observed,
+    ) -> (SipralHandle, SipralHandle, SipralHandle, String) {
+        let (stack, call, invite, ufrag, _) = ice_call(observed);
+        crate::call::tests::deliver(
+            stack,
+            &crate::call::tests::accepted(&invite, &ice_answer(), true),
+            50,
+        );
+        let _ = poll(stack, 50);
+        let media = media_of(stack, call);
+        (stack, call, media, ufrag)
+    }
+
+    /// One path, by index, with room for both its addresses.
+    #[cfg(feature = "ice")]
+    fn path_at(
+        media: SipralHandle,
+        index: usize,
+    ) -> (
+        SipralStatus,
+        crate::media::SipralPathCandidate,
+        String,
+        String,
+    ) {
+        let mut local: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
+        let mut remote: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
+        let mut path = crate::media::SipralPathCandidate {
+            size: size_of::<crate::media::SipralPathCandidate>(),
+            priority: 0,
+            kind: 0,
+            outcome: 0,
+            code: 0,
+            local_kind: 0,
+            remote_kind: 0,
+            local: local.as_mut_ptr(),
+            local_capacity: local.len(),
+            local_len: 0,
+            remote: remote.as_mut_ptr(),
+            remote_capacity: remote.len(),
+            remote_len: 0,
+        };
+        let status =
+            unsafe { crate::media::sipral_media_path_candidate_at(media, index, &raw mut path) };
+        let text = |buffer: &[c_char; SIPRAL_ADDRESS_BYTES]| {
+            unsafe { CStr::from_ptr(buffer.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        (status, path, text(&local), text(&remote))
+    }
+
+    /// D5's path half over the ABI: the pairs the call's agent formed, each
+    /// between the addresses the two descriptions named, and what became of
+    /// each — here, nothing yet, since nothing has answered a check.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_call_says_which_paths_its_agent_tried_and_what_became_of_each() {
+        use crate::media::{
+            SipralCandidateKind, SipralPathKind, SipralPathOutcome,
+            sipral_media_path_candidate_count,
+        };
+
+        let mut observed = Observed::default();
+        let (stack, _, media, _) = answered_ice_call(&mut observed);
+        let mut count = usize::MAX;
+        assert_eq!(
+            unsafe { sipral_media_path_candidate_count(media, &raw mut count) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert!(count >= 1, "the agent paired nothing");
+        let mut locals = Vec::new();
+        for index in 0..count {
+            let (status, path, local, remote) = path_at(media, index);
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            assert_eq!(path.kind, SipralPathKind::Pair as u32);
+            assert_eq!(path.outcome, SipralPathOutcome::Waiting as u32);
+            assert_eq!(path.code, 0);
+            assert_eq!(remote, PEER_CHECKS_FROM);
+            assert_eq!(path.remote_kind, SipralCandidateKind::Host as u32);
+            assert_eq!(path.local_len, local.len());
+            assert!(path.priority > 0);
+            locals.push((local, path.local_kind));
+        }
+        // a reflexive candidate is paired as its base (RFC 8445 §6.1.2.4),
+        // so every pair leaves from the socket itself
+        assert!(
+            locals
+                .iter()
+                .all(|(local, kind)| local == MEDIA && *kind == SipralCandidateKind::Host as u32),
+            "{locals:?}"
+        );
+        // past the end, and an address buffer with no room, are refused
+        // before anything is written
+        let (past, ..) = path_at(media, count);
+        assert_eq!(past, SipralStatus::InvalidArgument);
+        assert!(last_error_text().contains(&count.to_string()));
+        let mut cramped: [c_char; 8] = [0; 8];
+        let mut path = crate::media::SipralPathCandidate {
+            size: size_of::<crate::media::SipralPathCandidate>(),
+            priority: 0,
+            kind: 0,
+            outcome: 0,
+            code: 0,
+            local_kind: 0,
+            remote_kind: 0,
+            local: cramped.as_mut_ptr(),
+            local_capacity: cramped.len(),
+            local_len: 0,
+            remote: ptr::null_mut(),
+            remote_capacity: 0,
+            remote_len: 0,
+        };
+        assert_eq!(
+            unsafe { crate::media::sipral_media_path_candidate_at(media, 0, &raw mut path) },
+            SipralStatus::BufferTooSmall
+        );
+        path.size = crate::versioned::min_size::PATH_CANDIDATE - 1;
+        assert_eq!(
+            unsafe { crate::media::sipral_media_path_candidate_at(media, 0, &raw mut path) },
+            SipralStatus::UnsupportedVersion
+        );
+        assert_eq!(
+            unsafe { sipral_media_path_candidate_count(media, ptr::null_mut()) },
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A pair that lost, over the ABI: the far end refused this end's check,
+    /// and the list says so, with the STUN code it refused with.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_pair_the_far_end_refused_says_so_with_its_code() {
+        use crate::media::{SipralPathOutcome, sipral_media_receive};
+        use sipral_nat::stun::{Class, Message, MessageBuilder, Method};
+
+        let mut observed = Observed::default();
+        let (stack, _, media, _) = answered_ice_call(&mut observed);
+        // this end's check towards the far end, answered with a 400 signed
+        // with the password the far end's answer gave out (RFC 8445
+        // §7.2.5.2.4): the pair has failed, and says why
+        let sent = media_over(stack, media, 60);
+        let check = sent
+            .iter()
+            .filter(|(_, to)| to == PEER_CHECKS_FROM)
+            .filter_map(|(message, _)| Message::parse(message).ok())
+            .find(|message| message.class() == Class::Request)
+            .map(|message| message.transaction_id())
+            .expect("a check towards the far end");
+        let mut builder = MessageBuilder::new(Class::Error, Method::BINDING, check);
+        builder
+            .add_error_code(400, b"no")
+            .expect("room for ERROR-CODE");
+        builder
+            .add_message_integrity(PEER_PWD.as_bytes())
+            .expect("room for MESSAGE-INTEGRITY");
+        builder.add_fingerprint().expect("room for FINGERPRINT");
+        let mut refusal = builder.finish();
+        let status = unsafe {
+            sipral_media_receive(
+                media,
+                refusal.as_mut_ptr(),
+                refusal.len(),
+                PEER_CHECKS_FROM.as_ptr().cast::<c_char>(),
+                PEER_CHECKS_FROM.len(),
+                420,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let (status, path, _, remote) = path_at(media, 0);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(remote, PEER_CHECKS_FROM);
+        assert_eq!(path.outcome, SipralPathOutcome::Refused as u32);
+        assert_eq!(path.code, 400);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A restart this end starts, over the ABI: the call goes out again as a
+    /// re-offer whose credentials are not the ones the first offer gave out
+    /// (RFC 8839 §4.4.1.1.1), and a second one is refused while the first is
+    /// on its way.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_restart_this_end_starts_goes_out_with_new_credentials() {
+        use crate::call::sipral_call_restart_ice;
+
+        let mut observed = Observed::default();
+        let (stack, call, _, ufrag) = answered_ice_call(&mut observed);
+        let _ = signalling_out(stack);
+        assert_eq!(
+            unsafe { sipral_call_restart_ice(stack, call, 60) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let reoffer = signalling_out(stack)
+            .into_iter()
+            .find(|(message, _)| message.starts_with(b"INVITE "))
+            .expect("the re-offer")
+            .0;
+        let text = String::from_utf8_lossy(&reoffer).into_owned();
+        assert_ne!(attribute(&text, "ice-ufrag"), ufrag);
+        assert!(text.contains("a=candidate:"), "{text}");
+        assert_eq!(
+            unsafe { sipral_call_restart_ice(stack, call, 70) },
+            SipralStatus::WrongState,
+            "a second restart went while the first was on its way"
+        );
+        assert_eq!(
+            unsafe { sipral_call_restart_ice(stack, SIPRAL_HANDLE_NONE, 70) },
+            SipralStatus::InvalidHandle
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A call running no ICE agent has nothing to restart, and says so
+    /// rather than sending an offer.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_restart_asked_of_a_call_without_ice_is_the_wrong_state() {
+        let mut observed = Observed::default();
+        let (stack, call) = crate::call::tests::media_call(&mut observed);
+        assert_eq!(
+            unsafe { crate::call::sipral_call_restart_ice(stack, call, 2_000) },
+            SipralStatus::WrongState
+        );
+        assert!(
+            last_error_text().contains("no ICE agent"),
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
         );
     }
 }

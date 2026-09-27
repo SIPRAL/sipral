@@ -14,12 +14,38 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
 import org.sipral.Sipral
 import org.sipral.SipralException
+import org.sipral.SipralCandidateKind
 import org.sipral.SipralMediaInfo
+import org.sipral.SipralPathKind
+import org.sipral.SipralPathOutcome
 import org.sipral.SipralStatus
 import org.sipral.SipralStreamStats
 
 private const val PACKET_BYTES = 1500
 private const val ADDRESS_BYTES = 64
+
+/**
+ * One path a call's ICE agent tried, and what became of it: a
+ * `sipral_path_candidate_t` with its two addresses read out.
+ */
+data class PathCandidate(
+    /** A candidate pair, or a relay. */
+    val kind: SipralPathKind,
+    /** What became of it. */
+    val outcome: SipralPathOutcome,
+    /** The STUN error code of a refusal, or the TURN server's; zero otherwise. */
+    val code: Int,
+    /** What [local] is. */
+    val localKind: SipralCandidateKind,
+    /** What [remote] is; `UNKNOWN` for a relay's server. */
+    val remoteKind: SipralCandidateKind,
+    /** The pair's priority (RFC 8445 §6.1.2.3); zero for a relay. */
+    val priority: Long,
+    /** For a pair, the candidate its checks left from; for a relay, the relayed address. */
+    val local: String,
+    /** For a pair, the far end's candidate; for a relay, the TURN server. */
+    val remote: String,
+)
 
 private fun parseAddress(text: String): InetSocketAddress {
     val at = text.lastIndexOf(':')
@@ -102,6 +128,35 @@ class SipralMedia internal constructor(
 
     /** `sipral_media_statistics`. */
     fun statistics(): SipralStreamStats = Sipral.mediaStatistics(handle, client.nowMs())
+
+    /**
+     * Every path this call's ICE agent tried -- the candidate pairs its
+     * checklist held, then the relays it held -- and what became of each
+     * (`sipral_media_path_candidate_count`/`_at`; D5's transport and NAT
+     * half, `docs/05-media.md`). Empty for a call not using ICE.
+     */
+    fun pathCandidates(): List<PathCandidate> {
+        val count = Sipral.mediaPathCandidateCount(handle)
+        return (0 until count).map { index ->
+            val local = ByteArray(ADDRESS_BYTES)
+            val remote = ByteArray(ADDRESS_BYTES)
+            val numbers = LongArray(8)
+            val status = SipralMediaNative.mediaPathCandidateAt(handle, index, local, remote, numbers)
+            if (status != SipralStatus.OK.value) {
+                throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())
+            }
+            PathCandidate(
+                kind = SipralPathKind.of(numbers[1].toInt()) ?: SipralPathKind.UNKNOWN,
+                outcome = SipralPathOutcome.of(numbers[2].toInt()) ?: SipralPathOutcome.UNKNOWN,
+                code = numbers[3].toInt(),
+                localKind = SipralCandidateKind.of(numbers[4].toInt()) ?: SipralCandidateKind.UNKNOWN,
+                remoteKind = SipralCandidateKind.of(numbers[5].toInt()) ?: SipralCandidateKind.UNKNOWN,
+                priority = numbers[0],
+                local = String(local, 0, numbers[6].toInt(), Charsets.UTF_8),
+                remote = String(remote, 0, numbers[7].toInt(), Charsets.UTF_8),
+            )
+        }
+    }
 
     /**
      * Queue 16-bit mono PCM to go out, one frame at a time. A chunk that is

@@ -294,6 +294,97 @@ codes! {
 }
 
 codes! {
+    /// Whether a [`SipralPathCandidate`] is a candidate pair or a relay.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralPathKind: u32 {
+        /// Not a kind: the struct was never filled in.
+        Unknown = 0,
+        /// A candidate pair the call's ICE checklist held (RFC 8445
+        /// §6.1.2).
+        Pair = 1,
+        /// An allocation on a TURN server the call's agent held (RFC 8656).
+        Relay = 2,
+    }
+}
+
+codes! {
+    /// The kind of an ICE candidate (RFC 8445 §5.1.1). Names for
+    /// [`SipralPathCandidate::local_kind`] and `remote_kind`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralCandidateKind: u32 {
+        /// Not known: a relay's server, which is no candidate, or the far
+        /// end of a pair a lite end took from a nomination and never learned
+        /// the kind of.
+        Unknown = 0,
+        /// An address a socket of the host's own is bound to.
+        Host = 1,
+        /// The address a NAT maps the host's socket to, as a STUN or TURN
+        /// server saw it.
+        ServerReflexive = 2,
+        /// An address a connectivity check revealed (RFC 8445 §7.3.1.3).
+        PeerReflexive = 3,
+        /// An address on a TURN server that relays for the host.
+        Relayed = 4,
+    }
+}
+
+codes! {
+    /// What became of one path a call's ICE agent tried. Names for
+    /// [`SipralPathCandidate::outcome`].
+    ///
+    /// D5's transport and NAT half: a call that ended up relayed when a
+    /// direct path was expected, or found no path at all, is a support call,
+    /// and the answer to it is which of these happened to each pair.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralPathOutcome: u32 {
+        /// Not an outcome: either the path is from a build this ABI has no
+        /// number for, or the struct was never filled in.
+        Unknown = 0,
+        /// The path the call's media takes: the selected pair (RFC 8445
+        /// §8.1.2), or the relay it runs through.
+        Selected = 1,
+        /// A pair whose check succeeded, with nothing selected yet.
+        Valid = 2,
+        /// Nothing has decided it yet: a pair frozen, waiting its turn or
+        /// with its check on the wire; a relay still being allocated.
+        Waiting = 3,
+        /// A pair whose check succeeded, with a pair of higher priority
+        /// selected over it.
+        Outranked = 4,
+        /// A pair another was nominated ahead of: its check had not finished
+        /// when the selection took it off the checklist (RFC 8445 §8.1.2),
+        /// or it succeeded after a lower one was nominated.
+        NominatedElsewhere = 5,
+        /// A pair whose check was never answered (RFC 8489 §6.2.1).
+        TimedOut = 6,
+        /// A pair the far end refused; `code` is the STUN error code (RFC
+        /// 8445 §7.2.5.2.4).
+        Refused = 7,
+        /// A pair whose answer came from an address other than the one its
+        /// check went to (RFC 8445 §7.2.5.2.1): a NAT between rewriting it.
+        NotSymmetric = 8,
+        /// A pair whose answer named no address to form a valid pair from.
+        Unusable = 9,
+        /// A relayed pair the relay would not let the far end through for,
+        /// or a relay whose allocation the server refused; `code` is the
+        /// TURN server's error code, zero when it gave none (RFC 8656 §9,
+        /// §7.3).
+        RelayRefused = 10,
+        /// A pair never checked: the pair limit discarded it (RFC 8445
+        /// §6.1.2.5), or its checklist ended before its turn came.
+        NotChecked = 11,
+        /// A relay held, that no selected pair runs through — or none yet.
+        Held = 12,
+        /// A relay given back: ICE concluded on a pair that does not use it
+        /// (RFC 8445 §8.3.1), or this branch of a forked call let go of it.
+        Released = 13,
+        /// A relay the server took back; `code` is its error code, zero when
+        /// a refresh went unanswered (RFC 8656 §8).
+        Lost = 14,
+    }
+}
+
+codes! {
     /// Which way audio may flow, as seen from here. Names for every `direction`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDirection: u32 {
@@ -505,6 +596,72 @@ record! {
 unsafe impl Versioned for SipralCodecCandidate {
     const NAME: &'static str = "sipral_codec_candidate";
     const MIN_SIZE: usize = crate::versioned::min_size::CODEC_CANDIDATE;
+
+    fn set_declared_size(&mut self, bytes: usize) {
+        self.size = bytes;
+    }
+}
+
+record! {
+    /// One path a call's ICE agent tried — a candidate pair it checked, or a
+    /// relay it held — and what became of it, with its two addresses written
+    /// into the caller's own buffers.
+    ///
+    /// The caller fills in `size`, the two pointers and the two capacities;
+    /// the library fills in the rest. A pointer left null with a capacity of
+    /// zero is an address the caller does not want. Written down by the
+    /// agent as each outcome happened, never worked out again when it is
+    /// asked for: RFC 8445 §8.1.2 takes the losing pairs off the checklist
+    /// the moment one is selected.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SipralPathCandidate {
+        /// `sizeof` this struct, as the caller's header declares it.
+        pub size: usize,
+        /// The pair's priority (RFC 8445 §6.1.2.3), as this end's role
+        /// computes it; zero for a relay.
+        pub priority: u64,
+        /// A [`SipralPathKind`].
+        pub kind: u32,
+        /// A [`SipralPathOutcome`].
+        pub outcome: u32,
+        /// For `SIPRAL_PATH_OUTCOME_REFUSED`, the STUN error code the far end
+        /// answered with; for `SIPRAL_PATH_OUTCOME_RELAY_REFUSED` and
+        /// `SIPRAL_PATH_OUTCOME_LOST`, the TURN server's, zero when it gave
+        /// none. Zero otherwise.
+        pub code: u32,
+        /// A [`SipralCandidateKind`]: what `local` is.
+        pub local_kind: u32,
+        /// A [`SipralCandidateKind`]: what `remote` is, when it is a
+        /// candidate at all.
+        pub remote_kind: u32,
+        /// Where to write the local address, `host:port` with a trailing
+        /// NUL: for a pair, the candidate its checks left from — the host
+        /// candidate, or the relayed one; for a relay, the relayed address.
+        pub local: *mut c_char,
+        /// How much room `local` has. At least [`SIPRAL_ADDRESS_BYTES`] when
+        /// it is not null.
+        pub local_capacity: usize,
+        /// How many bytes of it were written, the NUL not counted. Zero for
+        /// a relay that has no relayed address.
+        pub local_len: usize,
+        /// Where to write the far address, `host:port` with a trailing NUL:
+        /// for a pair, the far end's candidate; for a relay, the TURN
+        /// server.
+        pub remote: *mut c_char,
+        /// How much room `remote` has. At least [`SIPRAL_ADDRESS_BYTES`]
+        /// when it is not null.
+        pub remote_capacity: usize,
+        /// How many bytes of it were written, the NUL not counted.
+        pub remote_len: usize,
+    }
+}
+
+// Safety: plain data with no invariant between the members. The two
+// pointers are the caller's own buffers, as in `SipralMediaPacket`, and
+// all-zero is a caller that wants neither address.
+unsafe impl Versioned for SipralPathCandidate {
+    const NAME: &'static str = "sipral_path_candidate";
+    const MIN_SIZE: usize = crate::versioned::min_size::PATH_CANDIDATE;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -1566,6 +1723,163 @@ entry! {
         })?;
         unsafe { write_versioned(out_candidate, candidate) }
     }
+}
+
+entry! {
+    /// How many paths this call's ICE agent tried: every candidate pair its
+    /// checklist held, then every relay it held.
+    ///
+    /// Zero is an answer, not a failure: a call not using ICE has one path,
+    /// the address its description named, and nothing here to explain. A
+    /// restart (RFC 8445 §9) starts the list again with the new session.
+    ///
+    /// # Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    fn sipral_media_path_candidate_count(media: SipralHandle, out_count: *mut usize) {
+        if out_count.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_count is null"));
+        }
+        let count = with_media(media, |session, _| Ok(paths_of(session).len()))?;
+        unsafe { out_count.write(count) };
+        Ok(())
+    }
+}
+
+entry! {
+    /// One of them, by index, from zero to what
+    /// `sipral_media_path_candidate_count` said: the pairs in the order the
+    /// checklist took them in, then the relays.
+    ///
+    /// D5's transport and NAT half, beside `sipral_media_codec_candidate_at`:
+    /// which path the media took, and for every other one whether its check
+    /// went unanswered, the far end refused it, the answer came back from
+    /// elsewhere, the relay would not let the far end through, or it worked
+    /// and lost to a better one. An index past the end is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are; an address
+    /// buffer smaller than `SIPRAL_ADDRESS_BYTES` is
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, before anything is written.
+    ///
+    /// # Safety
+    ///
+    /// `out_candidate` must point at a `sipral_path_candidate_t` whose `size`
+    /// member says how long it is, and its two address buffers, when not
+    /// null, must be writable for the capacities beside them.
+    fn sipral_media_path_candidate_at(
+        media: SipralHandle,
+        index: usize,
+        out_candidate: *mut SipralPathCandidate,
+    ) {
+        let mut out = unsafe { read_versioned(out_candidate.cast_const()) }?;
+        for (pointer, capacity, name) in [
+            (out.local, out.local_capacity, "local"),
+            (out.remote, out.remote_capacity, "remote"),
+        ] {
+            if !pointer.is_null() && capacity < SIPRAL_ADDRESS_BYTES {
+                return Err(fail(
+                    SipralStatus::BufferTooSmall,
+                    format!(
+                        "an address buffer is at least {SIPRAL_ADDRESS_BYTES} bytes and {name} \
+                         has room for {capacity}"
+                    ),
+                ));
+            }
+        }
+        let (numbers, local, remote) = with_media(media, |session, _| {
+            let paths = paths_of(session);
+            let count = paths.len();
+            paths.into_iter().nth(index).ok_or_else(|| {
+                fail(
+                    SipralStatus::InvalidArgument,
+                    format!("there is no path {index}; this call's agent tried {count}"),
+                )
+            })
+        })?;
+        out.priority = numbers.priority;
+        out.kind = numbers.kind;
+        out.outcome = numbers.outcome;
+        out.code = numbers.code;
+        out.local_kind = numbers.local_kind;
+        out.remote_kind = numbers.remote_kind;
+        out.local_len = unsafe { crate::transport::write_address(out.local, local, "local") }?;
+        out.remote_len =
+            unsafe { crate::transport::write_address(out.remote, remote, "remote") }?;
+        unsafe { write_versioned(out_candidate, out) }
+    }
+}
+
+/// Every path a call's agent tried, as the numbers this ABI has for it and
+/// the two addresses to write beside them.
+#[cfg(feature = "ice")]
+fn paths_of(
+    session: &MediaSession,
+) -> Vec<(SipralPathCandidate, Option<SocketAddr>, Option<SocketAddr>)> {
+    use sipral::{CandidateKind, PathKind, PathOutcome};
+
+    let kind_of = |kind: CandidateKind| match kind {
+        CandidateKind::Host => SipralCandidateKind::Host,
+        CandidateKind::ServerReflexive => SipralCandidateKind::ServerReflexive,
+        CandidateKind::PeerReflexive => SipralCandidateKind::PeerReflexive,
+        CandidateKind::Relayed => SipralCandidateKind::Relayed,
+    };
+    session
+        .path_candidates()
+        .into_iter()
+        .map(|path| {
+            let (outcome, code) = match path.outcome {
+                PathOutcome::Selected => (SipralPathOutcome::Selected, 0),
+                PathOutcome::Valid => (SipralPathOutcome::Valid, 0),
+                PathOutcome::Waiting => (SipralPathOutcome::Waiting, 0),
+                PathOutcome::Outranked => (SipralPathOutcome::Outranked, 0),
+                PathOutcome::NominatedElsewhere => (SipralPathOutcome::NominatedElsewhere, 0),
+                PathOutcome::TimedOut => (SipralPathOutcome::TimedOut, 0),
+                PathOutcome::Refused(code) => (SipralPathOutcome::Refused, u32::from(code)),
+                PathOutcome::NotSymmetric => (SipralPathOutcome::NotSymmetric, 0),
+                PathOutcome::Unusable => (SipralPathOutcome::Unusable, 0),
+                PathOutcome::RelayRefused(why) => (
+                    SipralPathOutcome::RelayRefused,
+                    crate::nat::refusal_code(why),
+                ),
+                PathOutcome::NotChecked => (SipralPathOutcome::NotChecked, 0),
+                PathOutcome::Held => (SipralPathOutcome::Held, 0),
+                PathOutcome::Released => (SipralPathOutcome::Released, 0),
+                PathOutcome::Lost(why) => (SipralPathOutcome::Lost, crate::nat::refusal_code(why)),
+                // the layer below has grown an outcome this ABI has no number
+                // for, and saying so beats picking one that is wrong
+                _ => (SipralPathOutcome::Unknown, 0),
+            };
+            let numbers = SipralPathCandidate {
+                size: size_of::<SipralPathCandidate>(),
+                priority: path.priority,
+                kind: match path.kind {
+                    PathKind::Pair => SipralPathKind::Pair,
+                    PathKind::Relay => SipralPathKind::Relay,
+                } as u32,
+                outcome: outcome as u32,
+                code,
+                local_kind: kind_of(path.local_kind) as u32,
+                remote_kind: path
+                    .remote_kind
+                    .map_or(SipralCandidateKind::Unknown, kind_of)
+                    as u32,
+                local: ptr::null_mut(),
+                local_capacity: 0,
+                local_len: 0,
+                remote: ptr::null_mut(),
+                remote_capacity: 0,
+                remote_len: 0,
+            };
+            (numbers, path.local, Some(path.remote))
+        })
+        .collect()
+}
+
+/// Without the agent there is no path to explain.
+#[cfg(not(feature = "ice"))]
+fn paths_of(
+    _session: &MediaSession,
+) -> Vec<(SipralPathCandidate, Option<SocketAddr>, Option<SocketAddr>)> {
+    Vec::new()
 }
 
 /// What the negotiation recorded about one codec, as the numbers this ABI has

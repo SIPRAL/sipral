@@ -147,6 +147,18 @@ class Call:
             "sipral_call_resume",
         )
 
+    def restart_ice(self) -> None:
+        """`sipral_call_restart_ice`: offer the call again with new ICE
+        credentials (RFC 8445 §9) and check every pair again once the far
+        end answers, while the path it has carries the audio. The new path
+        arrives as another `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`."""
+        _call(
+            lambda: lib.sipral_call_restart_ice(
+                self.stack.handle, self.handle, self.stack.now_ms()
+            ),
+            "sipral_call_restart_ice",
+        )
+
     def send_dtmf(
         self,
         digits: str,
