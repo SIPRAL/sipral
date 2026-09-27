@@ -172,7 +172,8 @@ pub(crate) fn run(
                     event: MediaEvent::Stalled { .. },
                 } => {
                     if let Some(leg) = legs.iter_mut().find(|leg| leg.call == Some(call)) {
-                        leg.failure.get_or_insert_with(|| "the stream stalled".to_owned());
+                        leg.failure
+                            .get_or_insert_with(|| "the stream stalled".to_owned());
                     }
                 }
                 _ => {}
@@ -195,7 +196,13 @@ pub(crate) fn run(
             next_place += 1;
             next_place_at = now + stagger;
         }
-        if next_place >= count && registered && legs.iter().all(|leg| leg.call.is_some() || leg.failure.is_some()) && now > began + PATIENCE {
+        if next_place >= count
+            && registered
+            && legs
+                .iter()
+                .all(|leg| leg.call.is_some() || leg.failure.is_some())
+            && now > began + PATIENCE
+        {
             // every leg that was ever going to start has had its chance
             for leg in &mut legs {
                 if leg.call.is_some() && leg.started.is_none() && leg.failure.is_none() {
@@ -244,7 +251,11 @@ pub(crate) fn run(
 }
 
 /// `p` in `[0, 100]` of a sorted list.
-#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
     if sorted.is_empty() {
         return Duration::ZERO;
@@ -293,7 +304,10 @@ mod tests {
 
     #[test]
     fn percentile_reads_off_the_sorted_list() {
-        let sorted: Vec<Duration> = [10, 20, 30, 40].iter().map(|ms| Duration::from_millis(*ms)).collect();
+        let sorted: Vec<Duration> = [10, 20, 30, 40]
+            .iter()
+            .map(|ms| Duration::from_millis(*ms))
+            .collect();
         assert_eq!(percentile(&sorted, 0.0), Duration::from_millis(10));
         assert_eq!(percentile(&sorted, 100.0), Duration::from_millis(40));
     }

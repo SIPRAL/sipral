@@ -878,7 +878,13 @@ mod tests {
             edges_checked: 4,
             ..quality::Report::default()
         };
-        let verdict = verdict(&[control(0, 0)], 2_000, Some(FRAME * 9_000), false, &[Some(report)]);
+        let verdict = verdict(
+            &[control(0, 0)],
+            2_000,
+            Some(FRAME * 9_000),
+            false,
+            &[Some(report)],
+        );
         let why = verdict.expect_err("the gate found a click");
         assert!(why.contains("1 of 4"), "{why}");
     }

@@ -237,7 +237,9 @@ pub(crate) fn run(
     if stalls > 0 {
         return Err(format!("the stack said the audio stalled {stalls} time(s)"));
     }
-    let sent = u32::try_from(marks.len()).unwrap_or(u32::MAX).saturating_add(lost);
+    let sent = u32::try_from(marks.len())
+        .unwrap_or(u32::MAX)
+        .saturating_add(lost);
     if sent == 0 {
         return Err("no marker ever went out".to_owned());
     }
@@ -250,7 +252,11 @@ pub(crate) fn run(
 }
 
 /// Sorted, `p` in `[0, 100]`.
-#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
     if sorted.is_empty() {
         return Duration::ZERO;

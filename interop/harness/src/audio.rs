@@ -488,7 +488,11 @@ impl Media {
         let mut samples = [0_i16; MAX_SAMPLES];
 
         while now >= self.next {
-            if let Some(pending) = self.pending_mark.as_mut().filter(|mark| mark.sent.is_none()) {
+            if let Some(pending) = self
+                .pending_mark
+                .as_mut()
+                .filter(|mark| mark.sent.is_none())
+            {
                 if let Some(slot) = samples.get_mut(..frame) {
                     slot.fill(MARK_AMPLITUDE);
                 }
