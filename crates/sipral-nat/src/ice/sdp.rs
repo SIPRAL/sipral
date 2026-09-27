@@ -335,47 +335,62 @@ mod tests {
     /// attributes below were four hundred of the bytes that did it, against a
     /// peer that did not speak ICE at all. `docs/06-nat.md` quotes this test.
     ///
-    /// One address and one component is the floor. A laptop with Wi-Fi,
-    /// Ethernet and a VPN, offering both components and a reflexive candidate
-    /// for each, multiplies the candidate lines by nine.
+    /// One address and one component is the floor: 143 bytes, fixed
+    /// attributes and one candidate line together (`docs/06-nat.md`). A
+    /// laptop with Wi-Fi, Ethernet and a VPN, offering both components and a
+    /// reflexive candidate for each, adds eight more candidate lines to that
+    /// floor — not eight more copies of the fixed attributes, which are
+    /// written once regardless of how many candidates follow.
     #[test]
     fn what_declaring_ice_costs_on_the_wire() {
+        // `n` identical candidates, so every candidate line this writes is
+        // byte-for-byte the same one: what grows with `n` is only the count
+        // of lines, never their width.
+        fn declared(n: usize) -> usize {
+            let mut description = session();
+            write_session(&mut description);
+            let agent = LiteAgent::new(
+                "8hhY".to_owned(),
+                "asd88fgpdd777uzjYhagZg".to_owned(),
+                Role::Controlled,
+                42,
+            );
+            let one = (
+                ComponentId::RTP,
+                HostAddresses {
+                    v4: Some(SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 7), 9000)),
+                    v6: None,
+                },
+            );
+            let candidates = gather(&vec![one; n]);
+            let mut media = audio_media();
+            write_media(&mut media, &agent, &candidates);
+            description.media.push(media);
+            description.to_string().len()
+        }
+
         let bare = {
             let mut description = session();
             description.media.push(audio_media());
             description.to_string().len()
         };
 
-        let mut description = session();
-        write_session(&mut description);
-        let agent = LiteAgent::new(
-            "8hhY".to_owned(),
-            "asd88fgpdd777uzjYhagZg".to_owned(),
-            Role::Controlled,
-            42,
-        );
-        let candidates = gather(&[(
-            ComponentId::RTP,
-            HostAddresses {
-                v4: Some(SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 7), 9000)),
-                v6: None,
-            },
-        )]);
-        let mut media = audio_media();
-        write_media(&mut media, &agent, &candidates);
-        description.media.push(media);
-        let declared = description.to_string().len();
-
-        let added = declared - bare;
+        let one_candidate = declared(1) - bare;
         assert_eq!(
-            added, 143,
-            "one candidate, one address: {added} bytes. If this changed, the \
-             figure in docs/06-nat.md changed with it."
+            one_candidate, 143,
+            "one candidate, one address: {one_candidate} bytes. If this \
+             changed, the figure in docs/06-nat.md changed with it."
         );
-        assert!(
-            added * 9 > 1_300 - bare,
-            "nine candidates and this offer no longer fit the 1300-byte floor \
-             RFC 3261 §18.1.1 sets for a datagram, which is the whole point"
+
+        // the marginal cost of one more candidate line, measured rather than
+        // assumed, since it is not the 143 divided any particular way
+        let per_extra_line = declared(2) - bare - one_candidate;
+        let nine_candidates = declared(9) - bare;
+        assert_eq!(
+            nine_candidates,
+            one_candidate + 8 * per_extra_line,
+            "docs/06-nat.md says 143 plus eight more candidate lines, not the \
+             143-byte floor multiplied by nine"
         );
     }
 
