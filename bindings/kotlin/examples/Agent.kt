@@ -17,6 +17,7 @@ package org.sipral.examples
 
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
@@ -25,10 +26,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.sipral.SipralEventKind
+import org.sipral.SipralException
+import org.sipral.SipralIce
 import org.sipral.SipralStreamStats
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.SipralTurnServer
 import org.sipral.idiomatic.digitOf
 
 /** Which of this host's addresses a datagram to `address` leaves from.
@@ -131,7 +136,160 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
     )
 }
 
+/**
+ * Talk for the life of one call this end placed, the same shape [handleCall]
+ * is but for a peer with nothing of its own that would ever hang up first
+ * (the lab's own two-NAT pair, `scripts/lab.sh`'s `ice_turn_flow`, where the
+ * far end is the harness's own `iceanswer` role): [patienceMs] is how long
+ * this end waits for media at all, so a call under `SipralIce.REQUIRED` with
+ * every path blocked is given up on rather than waited on forever, and
+ * [dwellMs] is how long it talks before hanging up on its own once media has
+ * started. `false` when it ended before media ever started, which
+ * [runDirectCall] needs to tell apart from an ordinary hangup.
+ */
+private suspend fun runCallDirect(call: SipralCall, patienceMs: Long, dwellMs: Long): Boolean = coroutineScope {
+    println("answered ${call.handle.toString(16)}")
+    try {
+        withTimeout(patienceMs) {
+            while (call.media == null && !call.ended) {
+                delay(20)
+            }
+        }
+    } catch (timedOut: TimeoutCancellationException) {
+        println("ended ${call.handle.toString(16)}: no media within ${patienceMs}ms -- no path was ever chosen")
+        try {
+            call.hangup()
+        } catch (_: SipralException) {
+        }
+        call.close()
+        return@coroutineScope false
+    }
+    val media = call.media
+    if (media == null) {
+        println("ended ${call.handle.toString(16)}: no media -- the call never connected")
+        call.close()
+        return@coroutineScope false
+    }
+
+    val talking = launch {
+        media.frames.collect { frame -> media.sendAudio(frame) }
+    }
+    var stats: SipralStreamStats? = null
+    val polling = launch {
+        while (isActive) {
+            stats = try {
+                media.statistics()
+            } catch (_: Exception) {
+                stats
+            }
+            delay(200)
+        }
+    }
+    val ending = launch { call.waitEnded(Long.MAX_VALUE) }
+    val dwelling = launch { delay(dwellMs) }
+    select<Unit> {
+        ending.onJoin { }
+        dwelling.onJoin { }
+    }
+    dwelling.cancel()
+    if (!call.ended) {
+        // one last read while the call is still certainly up, for the
+        // freshest number this path can give
+        stats = try {
+            media.statistics()
+        } catch (_: Exception) {
+            stats
+        }
+        try {
+            call.hangup()
+        } catch (_: SipralException) {
+        }
+        // the relayed call's farewell -- the TURN Refresh that gives its
+        // allocation back, not only the RTCP BYE -- is queued once the far
+        // end's 200 to this end's own BYE is read on the poll thread, so
+        // this waits for `ended` rather than closing right behind hangup()
+        withTimeoutOrNull(5_000) { call.waitEnded() }
+    }
+    ending.cancel()
+    talking.cancel()
+    polling.cancel()
+    // the same short wait bindings/python/examples/agent.py's own
+    // hang_up_after_dwell gives, so a relayed call's farewell has had its
+    // own turn on the poll thread before the stack tears the socket down
+    delay(200)
+
+    call.close()
+    println(
+        "ended ${call.handle.toString(16)}: packets_sent=${stats?.packetsSent ?: -1} " +
+            "packets_received=${stats?.packetsReceived ?: -1}",
+    )
+    true
+}
+
+/**
+ * Dial a peer straight at its address, no registrar between them --
+ * `scripts/lab.sh`'s own `ice_turn_flow`, where the far end is the
+ * harness's own `iceanswer` role rather than a server. SIPRAL_PEER_HOST/
+ * SIPRAL_PEER_PORT name it, and the account this end adds is one
+ * [SipralClient.addAccount]'s own registrarAddress is just the routing
+ * destination for: `registrar` is left null, so nothing is ever registered.
+ *
+ * SIPRAL_STUN_SERVER turns on STUN the same way [SipralClient.open] already
+ * offers any application; SIPRAL_TURN_SERVER/SIPRAL_TURN_USER/
+ * SIPRAL_TURN_PASSWORD ride on it, and SIPRAL_ICE=required asks
+ * [SipralIce.REQUIRED] of the call this places, which is what makes a call
+ * that cannot find a path fail outright rather than fall back to the
+ * address this end bound to -- the one thing that would let a run through a
+ * blocked NAT pair pass by accident.
+ */
+private suspend fun runDirectCall(): Boolean {
+    val peerHost = System.getenv("SIPRAL_PEER_HOST") ?: error("SIPRAL_PEER_HOST is required")
+    val peerPort = System.getenv("SIPRAL_PEER_PORT") ?: "5060"
+    val peerUser = System.getenv("SIPRAL_PEER_USER") ?: "callee"
+    val peer = "$peerHost:$peerPort"
+    val host = routeTo(peer)
+
+    val stunServer = System.getenv("SIPRAL_STUN_SERVER")
+    val turnServer = System.getenv("SIPRAL_TURN_SERVER")
+    val turn = if (turnServer != null) {
+        SipralTurnServer(
+            address = turnServer,
+            username = System.getenv("SIPRAL_TURN_USER") ?: "",
+            password = System.getenv("SIPRAL_TURN_PASSWORD") ?: "",
+        )
+    } else {
+        null
+    }
+    val ice = if (System.getenv("SIPRAL_ICE") == "required") SipralIce.REQUIRED else null
+
+    val client = SipralClient.open(bindHost = host, stunServer = stunServer, turn = turn, ice = ice)
+    val account = client.addAccount(aor = "sip:caller@${client.bindAddress}", registrarAddress = peer)
+    println("dialling sip:$peerUser@$peer from ${client.bindAddress}")
+    val call = try {
+        client.placeCall(account, "sip:$peerUser@$peer", mediaHost = host, destination = peer)
+    } catch (refused: SipralException) {
+        println("call failed: $refused")
+        client.close()
+        return false
+    }
+    val patienceMs = System.getenv("SIPRAL_PATIENCE_MS")?.toLong() ?: 20_000L
+    val dwellMs = System.getenv("SIPRAL_DWELL_MS")?.toLong() ?: 2_000L
+    val ok = runCallDirect(call, patienceMs, dwellMs)
+    client.close()
+    return ok
+}
+
 fun main() = runBlocking {
+    // The lab's own NAT-pair flow (`ice_turn_flow`) runs this mode instead
+    // of the registrar-and-listen one below: SIPRAL_PEER_HOST is what tells
+    // the two apart, since a real registrar address never doubles as one --
+    // the same tell bindings/python/examples/agent.py's own `main` reads.
+    if (System.getenv("SIPRAL_PEER_HOST") != null) {
+        if (!runDirectCall()) {
+            kotlin.system.exitProcess(1)
+        }
+        return@runBlocking
+    }
     val registrarAddress = System.getenv("SIPRAL_REGISTRAR_ADDRESS")
         ?: error("SIPRAL_REGISTRAR_ADDRESS is required")
     val host = routeTo(registrarAddress)

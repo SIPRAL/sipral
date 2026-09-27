@@ -53,6 +53,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the unit, and answers `StreamEvent::DeviceLost`; `Stream::recover` builds
   a new unit, the only thing that works after a reset. It used to answer
   `None` on iOS whatever had happened.
+- **TURN through the lab, from Kotlin, .NET and Swift too.**
+  `bindings/kotlin/examples/Agent.kt`'s `runDirectCall`,
+  `bindings/dotnet/samples/Sipral.Sample.Agent/Program.cs`'s
+  `RunDirectCallAsync` and `bindings/swift/Sources/SipralLabAgent/main.swift`'s
+  `runDirectCall` each dial a peer straight at its address, no registrar
+  between them (`SIPRAL_PEER_HOST`/`_PORT`/`_USER`), with
+  `SIPRAL_STUN_SERVER` and `SIPRAL_TURN_SERVER`/`_USER`/`_PASSWORD` turning
+  on that binding's own NAT traversal and `SIPRAL_ICE=required` asking ICE
+  be required of the call — the same shape the Python binding's own
+  `run_direct_call` already proved. `scripts/lab.sh`'s `ice_turn_flow` runs
+  each behind the same two-NAT pair the Rust and C harnesses and the Python
+  binding already prove TURN through (`NAT_PAIR_CALLER=kotlin`, `=dotnet`,
+  `=swift`), without and then with a relay, both ends' allocations given
+  back read off coturn's own log the same way every other driver's are.
 - **The far end hanging up on its own is proven through the C ABI too.**
   `FLOW_PEER_HANGUP` (key `peerhangup`) is `interop/harness-c`'s own half of
   `Flow::PeerHangup`: it places the call at baresip's dedicated

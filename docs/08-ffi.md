@@ -710,15 +710,18 @@ and sends their farewells, calls `sipral_stack_nat_unmap` for every socket
 still named and sends what `sipral_stack_poll_stun` hands out, and destroys
 the stack after that.
 
-The Swift and Kotlin layers run all of this for the application: given a STUN
-server they name each call's media socket before describing the call, wait
-for the mapping (and the relay), read the socket for the stack until the
-call's media handle exists, send every request from the socket
-`sipral_stack_poll_stun` names to the address it names, send each farewell to
-the destination `sipral_stack_poll_farewell` gives rather than to the last
-address media came from, and give back every socket still named when a call
-ends before its media or the stack closes. Their `NatTests.swift` and
-`NatCheck.kt` hold them to it on the wire.
+All four idiomatic layers -- Swift, Kotlin, .NET and Python -- run all of
+this for the application: given a STUN server they name each call's media
+socket before describing the call, wait for the mapping (and the relay),
+read the socket for the stack until the call's media handle exists, send
+every request from the socket `sipral_stack_poll_stun` names to the address
+it names, send each farewell to the destination `sipral_stack_poll_farewell`
+gives rather than to the last address media came from, and give back every
+socket still named when a call ends before its media or the stack closes.
+`NatTests.swift`, `NatCheck.kt` and `scripts/lab.sh`'s own `ice_turn_flow`
+(driving each binding's idiomatic layer directly, through
+`NAT_PAIR_CALLER=python`, `=kotlin`, `=dotnet` or `=swift`) hold them to it
+on the wire.
 
 ## Media across the boundary
 

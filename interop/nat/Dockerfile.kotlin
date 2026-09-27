@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# The host behind the NAT (Dockerfile's own second use), for the Kotlin
+# binding's lab agent instead of the Rust harness: `interop/kotlin`'s own
+# image, already carrying the JDK and a C compiler the JNI shim needs, with
+# `ip` added on top -- `inside` has no route out to anywhere at all, so this
+# has to be built rather than fetched once the container is placed there,
+# the same reasoning Dockerfile.python gives for Python and cffi.
+#
+# Built FROM sipral-lab-kotlin rather than repeating its own Dockerfile,
+# so the two stay one image apart instead of two copies to keep in step.
+
+FROM sipral-lab-kotlin
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        iproute2 \
+    && rm -rf /var/lib/apt/lists/*

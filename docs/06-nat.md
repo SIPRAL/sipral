@@ -492,14 +492,14 @@ than a registrar (`SIPRAL_PEER_HOST`), reads `SIPRAL_STUN_SERVER` and
 would, and `SIPRAL_ICE=required` into `Ice.REQUIRED`. It fails to find a path
 without TURN the same way the two harnesses do, and completes with a relay
 the same way once one is offered, `scripts/lab.sh`'s own `nat_pair_call`
-driving it with `NAT_PAIR_CALLER=python`. The Kotlin, .NET and Swift lab
-agents (`bindings/kotlin/examples/Agent.kt`,
-`bindings/dotnet/samples/Sipral.Sample.Agent/Program.cs`,
-`bindings/swift/Sources/SipralLabAgent`) still only register through
-Asterisk (`docs/11-testing.md`'s own lab table): their own idiomatic layers
-already take a TURN server, its credential and an ICE policy — the entries
-above this one — but no agent built on any of the three reads them from an
-environment variable yet, so none is wired into this NAT pair.
+driving it with `NAT_PAIR_CALLER=python`. Kotlin, .NET and Swift prove the
+same claim the same way: `bindings/kotlin/examples/Agent.kt`'s
+`runDirectCall`, `bindings/dotnet/samples/Sipral.Sample.Agent/Program.cs`'s
+`RunDirectCallAsync` and `bindings/swift/Sources/SipralLabAgent/main.swift`'s
+`runDirectCall` each read the same five environment variables into their own
+idiomatic layer's `Client`/`SipralStack` constructor and `placeCall`, and
+`nat_pair_call` drives each with `NAT_PAIR_CALLER=kotlin`, `=dotnet` or
+`=swift`.
 
 ## ICE-lite
 

@@ -1576,12 +1576,17 @@ nat_pair_down() {
 # C harness instead (interop/harness-c's own FLOW_ICE_NAT, the same flow key
 # and the same variables), with the Rust harness still answering; with
 # NAT_PAIR_CALLER_TURN=1 as well, that caller alone is given the relay
-# step's TURN server and credential. NAT_PAIR_CALLER=python places it from
-# bindings/python/examples/agent.py's own run_direct_call instead --
-# SIPRAL_PEER_HOST/_PORT naming the callee directly, no registrar, the same
-# shape `docs/08-ffi.md`'s "An account with no registrar never registers"
-# gives a trunk -- proving the idiomatic layer takes TURN and ICE the way an
-# application actually would, not only the harnesses written for this lab.
+# step's TURN server and credential. NAT_PAIR_CALLER=python, kotlin, dotnet
+# or swift places it instead from that binding's own idiomatic layer --
+# bindings/python/examples/agent.py's run_direct_call,
+# bindings/kotlin/examples/Agent.kt's runDirectCall,
+# bindings/dotnet/samples/Sipral.Sample.Agent/Program.cs's
+# RunDirectCallAsync, bindings/swift/Sources/SipralLabAgent/main.swift's
+# runDirectCall -- SIPRAL_PEER_HOST/_PORT naming the callee directly, no
+# registrar, the same shape `docs/08-ffi.md`'s "An account with no
+# registrar never registers" gives a trunk -- proving each idiomatic layer
+# takes TURN and ICE the way an application actually would, not only the
+# harnesses written for this lab.
 nat_pair_call() {
     local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
     local callee callee_status status=0 tries=0 beside
@@ -1685,6 +1690,124 @@ nat_pair_call() {
                     exec python3 -u /python/examples/agent.py"
             status=$?
         fi
+    elif [ "$status" -eq 0 ] && [ "${NAT_PAIR_CALLER:-rust}" = kotlin ]; then
+        # bindings/kotlin/examples/Agent.kt's own runDirectCall, the same
+        # shape as the Python branch above: interop/nat/Dockerfile.kotlin,
+        # built FROM interop/kotlin's own image, which already carries the
+        # JDK and a C compiler the JNI shim needs -- `ip` is the one thing
+        # it does not, and `inside` has no route out to anywhere at all, so
+        # that is built in ahead of time too (interop/nat/Dockerfile.python's
+        # own reasoning). Built once per run and cached by Docker after that.
+        if [ -z "${KOTLIN_AGENT_JAR:-}" ] || [ -z "${KOTLIN_STDLIB_JAR:-}" ] \
+            || [ -z "${KOTLIN_COROUTINES_JAR:-}" ]; then
+            printf '  note  no Kotlin agent jar built; see bindings/kotlin/README.md -- skipped\n'
+            status=1
+        elif [ -z "$HARNESS_C" ]; then
+            printf '  note  no C harness built, so there is no libsipral for the Kotlin agent -- skipped\n'
+            status=1
+        else
+            beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+            docker build -q -t sipral-lab-kotlin "$ROOT/interop/kotlin" >/dev/null \
+                && docker build -q -f "$ROOT/interop/nat/Dockerfile.kotlin" \
+                    -t sipral-lab-nat-kotlin "$ROOT/interop/nat" >/dev/null \
+                || { printf '  could not build the Kotlin agent'"'"'s own NAT image\n'; status=1; }
+        fi
+        if [ "$status" -eq 0 ]; then
+            docker run --rm --network "${project}_inside" \
+                --cap-add NET_ADMIN \
+                -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_PEER_HOST=$NAT_PAIR_OUTSIDE2" -e SIPRAL_PEER_PORT=5060 \
+                -e SIPRAL_ICE=required \
+                ${1+"$@"} \
+                ${caller_only[@]+"${caller_only[@]}"} \
+                -v "$beside:/lib-sipral:ro" \
+                -v "$ROOT/bindings/c/include:/sipral-include:ro" \
+                -v "$ROOT/bindings/kotlin/sipral/src/main/jni:/sipral-jni:ro" \
+                -v "$KOTLIN_AGENT_JAR:/kotlin/sipral-kotlin.jar:ro" \
+                -v "$KOTLIN_STDLIB_JAR:/kotlin/kotlin-stdlib.jar:ro" \
+                -v "$KOTLIN_COROUTINES_JAR:/kotlin/kotlinx-coroutines.jar:ro" \
+                sipral-lab-nat-kotlin sh -c "
+                    set -e
+                    ip route replace default via $NAT_PAIR_GATEWAY || exit 1
+                    cc -std=c11 -Wall -shared -fPIC \
+                        -I\"\$JAVA_HOME/include\" -I\"\$JAVA_HOME/include/linux\" -I/sipral-include \
+                        -o /tmp/libsipral_jni.so \
+                        /sipral-jni/sipral_jni.c /sipral-jni/idiomatic_media.c \
+                        -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral
+                    exec java -Djava.library.path=/tmp \
+                        -cp /kotlin/sipral-kotlin.jar:/kotlin/kotlin-stdlib.jar:/kotlin/kotlinx-coroutines.jar \
+                        org.sipral.examples.AgentKt"
+            status=$?
+        fi
+    elif [ "$status" -eq 0 ] && [ "${NAT_PAIR_CALLER:-rust}" = dotnet ]; then
+        # Program.cs's own RunDirectCallAsync, the same shape as the Python
+        # branch above: interop/nat/Dockerfile.dotnet, the SDK image with
+        # `ip` added -- `inside` has no route out to anywhere at all, so
+        # that is built in ahead of time too (interop/nat/Dockerfile.python's
+        # own reasoning). Neither project under bindings/dotnet names a
+        # NuGet package, so `dotnet run` itself still touches nothing
+        # outside the container once it is there. Built once per run and
+        # cached by Docker after that.
+        if [ -z "$HARNESS_C" ]; then
+            printf '  note  no C harness built, so there is no libsipral for the .NET agent -- skipped\n'
+            status=1
+        else
+            beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+            [ -s "$beside/libsipral_ffi.so" ] \
+                || { printf '  no libsipral_ffi.so beside the C harness\n'; status=1; }
+            docker build -q -f "$ROOT/interop/nat/Dockerfile.dotnet" \
+                -t sipral-lab-nat-dotnet "$ROOT/interop/nat" >/dev/null \
+                || { printf '  could not build the .NET agent'"'"'s own NAT image\n'; status=1; }
+        fi
+        if [ "$status" -eq 0 ]; then
+            docker run --rm --network "${project}_inside" \
+                --cap-add NET_ADMIN \
+                -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_PEER_HOST=$NAT_PAIR_OUTSIDE2" -e SIPRAL_PEER_PORT=5060 \
+                -e SIPRAL_ICE=required \
+                -e SIPRAL_LIBRARY=/lib-sipral/libsipral_ffi.so \
+                -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e DOTNET_NOLOGO=1 \
+                ${1+"$@"} \
+                ${caller_only[@]+"${caller_only[@]}"} \
+                -v "$beside:/lib-sipral:ro" \
+                -v "$ROOT/bindings/dotnet:/src-dotnet:ro" \
+                sipral-lab-nat-dotnet sh -c '
+                    cp -r /src-dotnet /dotnet
+                    cd /dotnet/samples/Sipral.Sample.Agent
+                    ip route replace default via '"$NAT_PAIR_GATEWAY"' || exit 1
+                    exec dotnet run -c Release --no-launch-profile'
+            status=$?
+        fi
+    elif [ "$status" -eq 0 ] && [ "${NAT_PAIR_CALLER:-rust}" = swift ]; then
+        # SipralLabAgent's own runDirectCall, the same shape as the Python
+        # branch above: the same $SWIFT_AGENT binary swift_agent() runs, and
+        # the same mounts -- its own -rpath is the absolute path they land
+        # on -- so nothing is built again here but
+        # interop/nat/Dockerfile.swift, the same `swift:6.1` with `ip` added
+        # -- `inside` has no route out to anywhere at all, so that is built
+        # in ahead of time too (interop/nat/Dockerfile.python's own
+        # reasoning). Built once per run and cached by Docker after that.
+        if [ -z "$SWIFT_AGENT" ]; then
+            printf '  note  no Swift lab agent built; that step is skipped\n'
+            status=1
+        elif ! docker build -q -f "$ROOT/interop/nat/Dockerfile.swift" \
+                -t sipral-lab-nat-swift "$ROOT/interop/nat" >/dev/null; then
+            printf '  could not build the Swift agent'"'"'s own NAT image\n'
+            status=1
+        else
+            docker run --rm --network "${project}_inside" \
+                --cap-add NET_ADMIN \
+                -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_PEER_HOST=$NAT_PAIR_OUTSIDE2" -e SIPRAL_PEER_PORT=5060 \
+                -e SIPRAL_ICE=required \
+                ${1+"$@"} \
+                ${caller_only[@]+"${caller_only[@]}"} \
+                -v "$ROOT":/work:ro -v "${SWIFT_LIB_DIR:-$ROOT/target/release}":/work/target/release:ro \
+                sipral-lab-nat-swift sh -c "
+                    ip route replace default via $NAT_PAIR_GATEWAY || exit 1
+                    exec /work/bindings/.build/release/SipralLabAgent"
+            status=$?
+        fi
     elif [ "$status" -eq 0 ]; then
         docker run --rm --network "${project}_inside" \
             --cap-add NET_ADMIN \
@@ -1729,6 +1852,14 @@ nat_pair_call() {
 # has to count its two allocations as given back on top of the first two.
 # Last, the C caller alone is given TURN: the only path left runs through its
 # own relay, and its one allocation has to be given back as well.
+#
+# Then the same two calls again from each idiomatic binding in turn --
+# Python, Kotlin, .NET, Swift -- each placing the call itself through its
+# own `Stack`/`Client`/`SipralStack`, not through a harness written for this
+# lab, so the same claim is proved from every layer an application would
+# actually use. Each is skipped, rather than failed, when its own build step
+# above found nothing to run -- except under `scripts/lab.sh turn`, asked
+# for by name, where a skip fails the run instead of passing silently.
 ice_turn_flow() {
     local status=0
     SIPRAL_TURN_USER=sipral-lab
@@ -1827,6 +1958,86 @@ ice_turn_flow() {
         fi
         if [ "$status" -eq 0 ]; then
             turn_given_back 7 || status=1
+        fi
+    fi
+    if [ "$status" -eq 0 ] \
+        && { [ -z "${KOTLIN_AGENT_JAR:-}" ] || [ -z "${KOTLIN_STDLIB_JAR:-}" ] \
+            || [ -z "${KOTLIN_COROUTINES_JAR:-}" ] || [ -z "$HARNESS_C" ]; }; then
+        if [ "$WANT" = turn ]; then
+            printf '  no Kotlin agent jar built, or no C harness for the libsipral it loads, so there is no relayed call through the Kotlin bindings\n'
+            status=1
+        else
+            printf '  note  no Kotlin agent jar, or no C harness, so the relayed call through the Kotlin bindings is skipped with the other C flows\n'
+        fi
+    elif [ "$status" -eq 0 ]; then
+        printf '  without TURN, through the Kotlin bindings: the call has to find no path\n'
+        if NAT_PAIR_CALLER=kotlin nat_pair_call; then
+            printf '  the call through the Kotlin bindings connected with the path between the NATs blocked: the block does not hold\n'
+            status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            printf '  with TURN, through the Kotlin bindings: the call has to go through coturn\n'
+            NAT_PAIR_CALLER=kotlin nat_pair_call \
+                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
+                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
+                || status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            turn_given_back 9 || status=1
+        fi
+    fi
+    if [ "$status" -eq 0 ] && [ -z "$HARNESS_C" ]; then
+        if [ "$WANT" = turn ]; then
+            # the .NET bindings load the same library the C ABI step above
+            # needs, so no C harness means no relayed call to place through
+            # them either
+            printf '  there is no C harness, so there is no libsipral for the relayed call through the .NET bindings\n'
+            status=1
+        else
+            printf '  note  no C harness, so the relayed call through the .NET bindings is skipped with the other C flows\n'
+        fi
+    elif [ "$status" -eq 0 ]; then
+        printf '  without TURN, through the .NET bindings: the call has to find no path\n'
+        if NAT_PAIR_CALLER=dotnet nat_pair_call; then
+            printf '  the call through the .NET bindings connected with the path between the NATs blocked: the block does not hold\n'
+            status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            printf '  with TURN, through the .NET bindings: the call has to go through coturn\n'
+            NAT_PAIR_CALLER=dotnet nat_pair_call \
+                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
+                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
+                || status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            turn_given_back 11 || status=1
+        fi
+    fi
+    if [ "$status" -eq 0 ] && [ -z "$SWIFT_AGENT" ]; then
+        if [ "$WANT" = turn ]; then
+            printf '  no Swift lab agent built, so there is no relayed call through the Swift bindings\n'
+            status=1
+        else
+            printf '  note  no Swift lab agent, so the relayed call through the Swift bindings is skipped with the other C flows\n'
+        fi
+    elif [ "$status" -eq 0 ]; then
+        printf '  without TURN, through the Swift bindings: the call has to find no path\n'
+        if NAT_PAIR_CALLER=swift nat_pair_call; then
+            printf '  the call through the Swift bindings connected with the path between the NATs blocked: the block does not hold\n'
+            status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            printf '  with TURN, through the Swift bindings: the call has to go through coturn\n'
+            NAT_PAIR_CALLER=swift nat_pair_call \
+                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
+                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
+                || status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            turn_given_back 13 || status=1
         fi
     fi
     nat_pair_down -f compose.yaml -f turn/compose.override.yaml

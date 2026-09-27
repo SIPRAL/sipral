@@ -190,6 +190,163 @@ func runCall(_ call: Call, _ streams: CallStreams) async {
     print("ended \(String(call.handle, radix: 16)): packets_sent=\(counts.sent) packets_received=\(counts.received)")
 }
 
+/// Talk for the life of one call this end placed against a peer with
+/// nothing of its own that would ever hang up first (the lab's own
+/// two-NAT pair, `scripts/lab.sh`'s `ice_turn_flow`, where the far end is
+/// the harness's own `iceanswer` role rather than a server): `patienceMs`
+/// is how long this end waits for media at all, so a call under
+/// `SipralIce.required` with every path blocked is given up on rather than
+/// waited on forever, and `dwellMs` is how long it talks before hanging up
+/// on its own once media has started. `false` when it ended before media
+/// ever started, which `runDirectCall` needs to tell apart from an
+/// ordinary hangup.
+func runCallDirect(_ call: Call, patienceMs: UInt64, dwellMs: UInt64) async -> Bool {
+    print("answered \(String(call.handle, radix: 16))")
+    let mediaEvents = call.events()
+
+    let gotMedia: Bool = if call.media != nil {
+        true
+    } else {
+        await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                for await _ in mediaEvents where call.media != nil {
+                    return true
+                }
+                return call.media != nil
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: patienceMs * 1_000_000)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first || call.media != nil
+        }
+    }
+    guard gotMedia, let media = call.media else {
+        print("ended \(String(call.handle, radix: 16)): no media within \(patienceMs)ms -- no path was ever chosen")
+        try? call.hangup()
+        call.close()
+        return false
+    }
+
+    let last = LastStatistics()
+    let statisticsTask = Task {
+        while !Task.isCancelled {
+            last.read(call.media)
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
+    let talkTask = Task {
+        for await frame in media.frames() {
+            call.media?.sendAudio(respond(frame))
+        }
+    }
+    let endTask = Task {
+        for await _ in mediaEvents {
+            if call.ended { return }
+        }
+    }
+    let dwellTask = Task {
+        try? await Task.sleep(nanoseconds: dwellMs * 1_000_000)
+    }
+    _ = await withTaskGroup(of: Void.self) { group -> Void in
+        group.addTask { await endTask.value }
+        group.addTask { await dwellTask.value }
+        await group.next()
+        group.cancelAll()
+    }
+    if !call.ended {
+        // one last read while the call is still certainly up, for the
+        // freshest number this path can give
+        last.read(call.media)
+        try? call.hangup()
+        // the relayed call's farewell -- the TURN Refresh that gives its
+        // allocation back, not only the RTCP BYE -- is queued once the far
+        // end's 200 to this end's own BYE is read, so this waits for
+        // `call.ended` rather than closing right behind hangup()
+        _ = await withTaskGroup(of: Void.self) { group -> Void in
+            group.addTask { await endTask.value }
+            group.addTask { try? await Task.sleep(nanoseconds: 5_000_000_000) }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+    talkTask.cancel()
+    statisticsTask.cancel()
+    endTask.cancel()
+    // the same short wait bindings/python/examples/agent.py's own
+    // hang_up_after_dwell gives, so a relayed call's farewell has had its
+    // own turn before the stack tears the socket down
+    try? await Task.sleep(nanoseconds: 200_000_000)
+
+    call.close()
+    let counts = last.counts
+    print("ended \(String(call.handle, radix: 16)): packets_sent=\(counts.sent) packets_received=\(counts.received)")
+    return true
+}
+
+/// Dial a peer straight at its address, no registrar between them --
+/// `scripts/lab.sh`'s own `ice_turn_flow`, where the far end is the
+/// harness's own `iceanswer` role rather than a server.
+/// SIPRAL_PEER_HOST/SIPRAL_PEER_PORT name it, and the account this end
+/// adds is one whose `registrarAddress` is just the routing destination
+/// for: `registrar` is left `nil`, so nothing is ever registered.
+///
+/// SIPRAL_STUN_SERVER turns on STUN the same way `SipralStack`'s own
+/// initializer already offers any application; SIPRAL_TURN_SERVER/
+/// SIPRAL_TURN_USER/SIPRAL_TURN_PASSWORD ride on it, and SIPRAL_ICE=required
+/// asks `SipralIce.required` of the stack, which is what makes a call that
+/// cannot find a path fail outright rather than fall back to the address
+/// this end bound to -- the one thing that would let a run through a
+/// blocked NAT pair pass by accident.
+func runDirectCall() async -> Bool {
+    guard let peerHost = environmentValue("SIPRAL_PEER_HOST") else {
+        print("SIPRAL_PEER_HOST is required")
+        return false
+    }
+    let peerPort = environmentValue("SIPRAL_PEER_PORT") ?? "5060"
+    let peerUser = environmentValue("SIPRAL_PEER_USER") ?? "callee"
+    let peer = "\(peerHost):\(peerPort)"
+    let host = routeTo(peer)
+
+    let stunServer = environmentValue("SIPRAL_STUN_SERVER")
+    let turnServer = environmentValue("SIPRAL_TURN_SERVER")
+    let turn = turnServer.map {
+        TurnServer(
+            address: $0,
+            username: environmentValue("SIPRAL_TURN_USER") ?? "",
+            password: environmentValue("SIPRAL_TURN_PASSWORD") ?? ""
+        )
+    }
+    let ice: SipralIce? = environmentValue("SIPRAL_ICE") == "required" ? .required : nil
+
+    let stack: SipralStack
+    let account: Account
+    let call: Call
+    do {
+        stack = try SipralStack(bindHost: host, ice: ice, stunServer: stunServer, turn: turn)
+        account = try stack.addAccount(aor: "sip:caller@\(stack.bindAddress)", registrarAddress: peer)
+        print("dialling sip:\(peerUser)@\(peer) from \(stack.bindAddress)")
+        call = try stack.placeCall(account: account, target: "sip:\(peerUser)@\(peer)", mediaHost: host, destination: peer, ice: ice)
+    } catch {
+        print("call failed: \(error)")
+        return false
+    }
+    let patienceMs = UInt64(environmentValue("SIPRAL_PATIENCE_MS") ?? "20000") ?? 20000
+    let dwellMs = UInt64(environmentValue("SIPRAL_DWELL_MS") ?? "2000") ?? 2000
+    return await runCallDirect(call, patienceMs: patienceMs, dwellMs: dwellMs)
+}
+
+// The lab's own NAT-pair flow (`ice_turn_flow`) runs this mode instead of
+// the registrar-and-listen one below: SIPRAL_PEER_HOST is what tells the
+// two apart, since a real registrar address never doubles as one -- the
+// same tell `bindings/python/examples/agent.py`'s own `main` reads.
+if environmentValue("SIPRAL_PEER_HOST") != nil {
+    let ok = await runDirectCall()
+    exit(ok ? 0 : 1)
+}
+
 let registrarAddress = environmentValue("SIPRAL_REGISTRAR_ADDRESS") ?? "127.0.0.1:5060"
 let bindHost = routeTo(registrarAddress)
 let stack = try SipralStack(bindHost: bindHost)

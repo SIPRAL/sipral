@@ -141,6 +141,197 @@ async Task RunCallAsync(Call call, int tag)
         $"packets_sent={stats?.PacketsSent ?? 0}");
 }
 
+// Talk for the life of one call this end placed against a peer with
+// nothing of its own that would ever hang up first (the lab's own
+// two-NAT pair, scripts/lab.sh's ice_turn_flow, where the far end is the
+// harness's own iceanswer role rather than a server): patienceMs is how
+// long this end waits for media at all, so a call under SipralIce.Required
+// with every path blocked is given up on rather than waited on forever,
+// and dwellMs is how long it talks before hanging up on its own once
+// media has started. false when it ended before media ever started, which
+// RunDirectCallAsync needs to tell apart from an ordinary hangup.
+async Task<bool> RunCallDirectAsync(Call call, int patienceMs, int dwellMs)
+{
+    Console.WriteLine("answered");
+    using var mediaWait = new CancellationTokenSource(patienceMs);
+    CallMedia? media;
+    try
+    {
+        media = await call.WaitForMediaAsync(mediaWait.Token);
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine($"ended: no media within {patienceMs}ms -- no path was ever chosen");
+        try
+        {
+            call.Hangup();
+        }
+        catch (SipralException)
+        {
+        }
+        call.Close();
+        return false;
+    }
+    if (media is null)
+    {
+        Console.WriteLine("ended: no media -- the call never connected");
+        call.Close();
+        return false;
+    }
+
+    using var stop = new CancellationTokenSource();
+    SipralStreamStatistics? stats = null;
+
+    var talking = Task.Run(async () =>
+    {
+        try
+        {
+            await foreach (var heard in media.Frames.WithCancellation(stop.Token))
+            {
+                media.SendAudio(Respond(heard));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    });
+
+    var polling = Task.Run(async () =>
+    {
+        try
+        {
+            while (true)
+            {
+                try
+                {
+                    stats = media.Statistics();
+                }
+                catch (SipralException)
+                {
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(200), stop.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    });
+
+    var endingRemotely = Task.Run(async () =>
+    {
+        await foreach (var _ in call.Events.WithCancellation(stop.Token))
+        {
+            if (call.Ended)
+            {
+                return;
+            }
+        }
+    });
+    var dwelling = Task.Delay(dwellMs);
+
+    await Task.WhenAny(dwelling, endingRemotely);
+    if (!call.Ended)
+    {
+        // one last read while the call is still certainly up, for the
+        // freshest number this path can give
+        try
+        {
+            stats = media.Statistics();
+        }
+        catch (SipralException)
+        {
+        }
+        try
+        {
+            call.Hangup();
+        }
+        catch (SipralException)
+        {
+        }
+        // the relayed call's farewell -- the TURN Refresh that gives its
+        // allocation back, not only the RTCP BYE -- is queued once the far
+        // end's 200 to this end's own BYE is read on the poll thread, so
+        // this waits for it rather than closing right behind Hangup()
+        await Task.WhenAny(endingRemotely, Task.Delay(5000));
+    }
+    stop.Cancel();
+    await Task.WhenAll(talking, polling, endingRemotely).ContinueWith(_ => { });
+    // the same short wait bindings/python/examples/agent.py's own
+    // hang_up_after_dwell gives, so a relayed call's farewell has had its
+    // own turn on the poll thread before the stack tears the socket down
+    await Task.Delay(200);
+
+    call.Close();
+    Console.WriteLine(
+        $"ended: packets_sent={stats?.PacketsSent ?? 0} packets_received={stats?.PacketsReceived ?? 0}");
+    return true;
+}
+
+// Dial a peer straight at its address, no registrar between them --
+// scripts/lab.sh's own ice_turn_flow, where the far end is the harness's
+// own iceanswer role rather than a server. SIPRAL_PEER_HOST/
+// SIPRAL_PEER_PORT name it, and the account this end adds is one whose
+// registrarAddress is just the routing destination for: registrar is
+// left null, so nothing is ever registered.
+//
+// SIPRAL_STUN_SERVER turns on STUN the same way SipralStack's constructor
+// already offers any application; SIPRAL_TURN_SERVER/SIPRAL_TURN_USER/
+// SIPRAL_TURN_PASSWORD ride on it, and SIPRAL_ICE=required asks
+// SipralIce.Required of the stack, which is what makes a call that
+// cannot find a path fail outright rather than fall back to the address
+// this end bound to -- the one thing that would let a run through a
+// blocked NAT pair pass by accident.
+async Task<bool> RunDirectCallAsync()
+{
+    var peerHost = Environment.GetEnvironmentVariable("SIPRAL_PEER_HOST")
+        ?? throw new InvalidOperationException("SIPRAL_PEER_HOST is required");
+    var peerPort = Environment.GetEnvironmentVariable("SIPRAL_PEER_PORT") ?? "5060";
+    var peerUser = Environment.GetEnvironmentVariable("SIPRAL_PEER_USER") ?? "callee";
+    var peer = $"{peerHost}:{peerPort}";
+    var host = RouteTo(peer);
+
+    var stunServer = Environment.GetEnvironmentVariable("SIPRAL_STUN_SERVER");
+    var turnServer = Environment.GetEnvironmentVariable("SIPRAL_TURN_SERVER");
+    var ice = Environment.GetEnvironmentVariable("SIPRAL_ICE") == "required" ? SipralIce.Required : (SipralIce?)null;
+
+    using var stack = new SipralStack(
+        bindHost: host,
+        ice: ice ?? 0,
+        nat: stunServer is not null ? SipralNat.Stun : 0,
+        stunServer: stunServer,
+        turnServer: turnServer,
+        turnUsername: Environment.GetEnvironmentVariable("SIPRAL_TURN_USER"),
+        turnPassword: Environment.GetEnvironmentVariable("SIPRAL_TURN_PASSWORD"));
+    var account = stack.AddAccount($"sip:caller@{stack.BindAddress}", registrarAddress: peer);
+    Console.WriteLine($"dialling sip:{peerUser}@{peer} from {stack.BindAddress}");
+    Call call;
+    try
+    {
+        call = stack.PlaceCall(account, $"sip:{peerUser}@{peer}", mediaHost: host, destination: peer, ice: ice ?? 0);
+    }
+    catch (SipralException error)
+    {
+        Console.WriteLine($"call failed: {error}");
+        return false;
+    }
+    var patienceMs = int.Parse(Environment.GetEnvironmentVariable("SIPRAL_PATIENCE_MS") ?? "20000");
+    var dwellMs = int.Parse(Environment.GetEnvironmentVariable("SIPRAL_DWELL_MS") ?? "2000");
+    return await RunCallDirectAsync(call, patienceMs, dwellMs);
+}
+
+// The lab's own NAT-pair flow (ice_turn_flow) runs this mode instead of
+// the registrar-and-listen one below: SIPRAL_PEER_HOST is what tells the
+// two apart, since a real registrar address never doubles as one -- the
+// same tell bindings/python/examples/agent.py's own main reads.
+if (Environment.GetEnvironmentVariable("SIPRAL_PEER_HOST") is not null)
+{
+    if (!await RunDirectCallAsync())
+    {
+        Environment.Exit(1);
+    }
+    return;
+}
+
 var registrarAddress = Environment.GetEnvironmentVariable("SIPRAL_REGISTRAR_ADDRESS")
     ?? throw new InvalidOperationException("SIPRAL_REGISTRAR_ADDRESS is required");
 var bindHost = RouteTo(registrarAddress);

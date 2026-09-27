@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# The host behind the NAT (Dockerfile's own second use), for the .NET
+# binding's lab agent instead of the Rust harness: the SDK image `ip`
+# added on top -- `inside` has no route out to anywhere at all, so this has
+# to be built rather than fetched once the container is placed there, the
+# same reasoning Dockerfile.python gives for Python and cffi. Neither
+# project under bindings/dotnet names a NuGet package, so `dotnet run`
+# itself still touches nothing outside the container once it is there.
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        iproute2 \
+    && rm -rf /var/lib/apt/lists/*
