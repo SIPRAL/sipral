@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# The host behind the NAT (Dockerfile's own second use), plus Python and
+# cffi baked in at build time.
+#
+# `inside`/`inside2` (interop/compose.yaml) are Docker `internal: true`
+# networks -- no route out to anywhere at all, which is the whole point of
+# simulating a NAT with nothing on the far side of it -- so a container
+# placed on one cannot `apt-get install` anything once it is there. The Rust
+# and C harnesses never needed to: both are compiled before scripts/lab.sh
+# ever starts a NAT-pair step. The Python lab agent
+# (bindings/python/examples/agent.py) is interpreted, and `cffi` is a real
+# dependency, so this build stage is where that has to happen instead.
+#
+# The same digest Dockerfile and interop/baresip/Dockerfile build from.
+
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        iproute2 python3 python3-cffi \
+    && rm -rf /var/lib/apt/lists/*

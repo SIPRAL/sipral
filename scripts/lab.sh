@@ -1609,6 +1609,17 @@ nat_pair_call() {
             status=1
         else
             beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+            # `inside` is a Docker `internal` network (interop/compose.yaml)
+            # with no route out to anywhere -- an `apt-get` from behind it
+            # can never reach a mirror, so Python and cffi are built into
+            # the image ahead of time instead (interop/nat/Dockerfile.python's
+            # own reasoning). Built once per run and cached by Docker after
+            # that, the same way natbox/natbox2's own image is.
+            docker build -q -f "$ROOT/interop/nat/Dockerfile.python" \
+                -t sipral-lab-nat-python "$ROOT/interop/nat" >/dev/null \
+                || { printf '  could not build the Python agent'"'"'s own NAT image\n'; status=1; }
+        fi
+        if [ "$status" -eq 0 ]; then
             docker run --rm --network "${project}_inside" \
                 --cap-add NET_ADMIN \
                 -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
@@ -1619,10 +1630,8 @@ nat_pair_call() {
                 ${caller_only[@]+"${caller_only[@]}"} \
                 -v "$beside:/lib-sipral:ro" \
                 -v "$ROOT/bindings/python:/python:ro" \
-                sipral-lab-nat sh -c "
+                sipral-lab-nat-python sh -c "
                     ip route replace default via $NAT_PAIR_GATEWAY || exit 1
-                    apt-get -qq update >/dev/null 2>&1 || exit 1
-                    apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1 || exit 1
                     exec python3 -u /python/examples/agent.py"
             status=$?
         fi
