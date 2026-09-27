@@ -41,12 +41,10 @@ opinion score come from RTCP-XR on a real call (`docs/05-media.md`).
 jitter buffer did about two clocks for all of it (`scripts/lab.sh drift`,
 below).
 
-**Not measured yet:** the same load on a mobile processor; a frame of Opus
-rather than G.711; the delay from one end's microphone to the other's
-earpiece in the lab; a hundred calls through a real proxy and PBX rather than
-between two stacks in one process; the media load test's memory on Linux; and
-drift on a path with loss and jitter, where the buffer's target is more than
-the one frame a clean path gives it.
+**Not measured yet:** the same load on a mobile processor. A frame of Opus
+against G.711, the microphone-to-earpiece delay, a hundred calls through a
+real proxy and PBX, the media load test's memory on Linux, and drift on a
+path with loss and jitter are answered further down, dated 27 September.
 
 ## 23 September 2026 — `0.0.1`
 
@@ -199,7 +197,8 @@ Read together:
 
 What a real peer adds — a proxy's and a PBX's own processing, and the
 network — is not in these figures; a hundred calls through the lab's
-Kamailio to FreeSWITCH or to Asterisk has not been run.
+Kamailio to FreeSWITCH, and a hundred straight at Asterisk, are the
+27 September section further down.
 
 ## 24 September 2026 — `0.0.1`, an hour on a call
 
@@ -476,9 +475,240 @@ did not get from the far end, takes it as it takes a concealed frame, so
 played read as a loss rate of 0.6 with RTCP-XR's loss and discard rates
 both at zero (`an_earpiece_that_outruns_the_far_end_counts_the_silence_it_played`).
 
+## 27 September 2026 — `0.0.1`, Opus against G.711, and the load test's memory on Linux
+
+`scripts/bench.sh`'s new step, `crates/sipral/src/pipeline::tests::cost_of_a_frame_by_codec`
+(`SIPRAL_CODEC_BENCH_FRAMES`, `SIPRAL_CODEC_BENCH_CALLS`, the same two the load test's own
+`FRAMES`/`CALLS` already gave a name: a minute of audio, two hundred calls). It times
+`Coder::encode` and `Coder::decode` directly — the codec layer alone, no session, no jitter
+buffer, no socket — for one call, twenty-five frames of warm-up first the same reason every
+codec's own round-trip test in that file gives one; and then at the load test's own shape:
+two hundred calls' worth of `Coder`, fifty to a thread on four threads, driven for the same
+number of frames each, wall-clock time over every call and every thread together. Every codec
+this build carries, not Opus alone, because the other four came for the same price once the
+harness existed.
+
+Apple M2, macOS, `rustc 1.95.0`, release profile; the Intel Xeon E5-2698 v4 at 2.2 GHz Linux
+lab machine, `rust:1.95-trixie`, ten cores given to the container this time rather than the
+eight of 23 September. Both shared with other work throughout, the same reason the 24
+September signalling figures are ranges rather than points — this table is not, because a
+frame's own cost moves by tens of a microsecond where a call's setup moves by hundreds, and
+the run below was not repeated to find its range.
+
+| Codec, one call | Mac, encode | decode | total | Linux, encode | decode | total |
+|---|---|---|---|---|---|---|
+| PCMU (G.711 μ-law) | 0.86 µs | 0.04 µs | 0.91 µs | 0.95 µs | 0.15 µs | 1.10 µs |
+| PCMA (G.711 A-law) | 0.41 µs | 0.05 µs | 0.46 µs | 0.70 µs | 0.16 µs | 0.87 µs |
+| G.722 | 21.0 µs | 11.3 µs | 32.3 µs | 45.8 µs | 33.5 µs | 79.3 µs |
+| G.729 | 195.1 µs | 43.6 µs | 238.6 µs | 181.6 µs | 36.0 µs | 217.6 µs |
+| Opus | 200.3 µs | 29.2 µs | 229.5 µs | 191.9 µs | 63.7 µs | 255.6 µs |
+
+| Codec, 200 calls on 4 threads | Mac, µs/frame | Linux, µs/frame |
+|---|---|---|
+| PCMU | 1.33 | 1.20 |
+| PCMA | 0.89 | 0.90 |
+| G.722 | 33.6 | 54.1 |
+| G.729 | 171.8 | 224.5 |
+| Opus | 195.0 | 157.3 |
+
+Read together:
+
+- **Opus costs about two hundred and fifty times G.711's per frame, one call at a time.**
+  G.711 is a table lookup a sample at a time; Opus is a real-time encoder doing linear
+  prediction, a psychoacoustic model and entropy coding on every twenty-millisecond frame,
+  and the difference between "companding a sample" and "encoding a signal" is exactly the
+  size this table gives it. G.729, the other codec here that predicts rather than compands,
+  costs about the same as Opus — CELP's codebook search is not cheaper than what Opus does,
+  it is a different way of being expensive.
+- **Two hundred Opus calls cost about two of this Mac's eight cores, continuously.** Two
+  hundred calls at fifty frames a second is ten thousand frames a second; at the load
+  shape's own 195 µs a frame that is 1.95 seconds of processor time a second of audio — near
+  enough two whole cores busy without stopping. The 23 September table's "two per cent of a
+  single core" for G.711 at the same two hundred calls holds for Opus only if two per cent
+  is read as two hundred: PCMU's own 1.33 µs a frame here is 13.3 ms of a core a second,
+  matching that figure exactly.
+- **The load shape did not cost more than one call, and for Opus and G.729 it cost less.**
+  A lock two hundred calls contend for would show as the opposite — the 24 September
+  signalling table's own "the cost of a call grows with the number of calls" is exactly
+  that, from `MediaEngine::poll_event`'s lock. Nothing here takes one: every `Coder` is its
+  own state, encoding and decoding nothing but its own call's samples, so what moved between
+  one call and two hundred is cache and a machine shared with other work, not contention —
+  the same qualification the 24 September table's own wide ranges carry, read onto a
+  narrower number.
+- **The Linux machine is not uniformly faster or slower.** G.711 reads about the same on
+  both; G.722 and G.729 read slower on the Linux container than the Mac; Opus reads slower
+  alone and faster at the load shape. A single run on a shared machine is not a verdict on
+  either processor, only what this run measured.
+
+The same Linux run gives the media load test's own memory, which the 24 September table left
+open: `crates/sipral-ffi`'s own load test, timed directly rather than through `cargo test`,
+the same method the 24 September addendum settled on for the Mac. Two hundred calls at a
+minute of audio each peaked at 19 615 744 bytes; one call at 6 516 736 bytes; 65 824 bytes a
+call over the difference between them. The Mac read the same day, same method: 20 578 304
+bytes at two hundred calls, 4 554 752 bytes at one, 80 520 bytes a call — within a few
+per cent of the 24 September addendum's own 79 203, the same figure read again rather than
+a different one.
+
+## 27 September 2026 — `0.0.1`, microphone to earpiece
+
+`scripts/lab.sh latency` (`interop/harness/src/latency.rs`): there is no second host in this
+lab to put a real microphone and a real earpiece on either end of, so what is measured is a
+round trip on one call to Asterisk's echo (9008) — a marker frame, full scale rather than the
+tone, in place of whatever this end would otherwise have sent, and the same call's own
+playback watching for its echo — halved. The path is capture, encode, network, Asterisk's
+`Echo()`, network, jitter buffer, decode and playback, twice each but Asterisk's own
+turnaround; halving it assumes the two directions cost the same, which a lab on one host and
+one link is the closest thing here to being able to say. A marker every two seconds for two
+minutes, the buffer given five seconds to settle first. Three stages, only one of them read
+directly off `sipral`: **framing**, the wait from the marker's own instant to the next
+twenty-millisecond tick that actually carries it — this harness's own capture loop and its
+poll granularity included, the same way a real device's callback scheduling would be;
+**jitter buffer**, the playout buffer's own target delay the instant the echo came back
+(`MediaSession::statistics`); and **network**, the round trip less the two of those —
+Asterisk's own turnaround and this end's own next playback tick folded into it, since nothing
+here can tell them apart from the wire. The Linux lab machine, as above.
+
+| One way | Value |
+|---|---|
+| Markers sent, come back | 58, 58 (none lost) |
+| Minimum | 28.2 ms |
+| Median | 30.8 ms |
+| 90th percentile | 31.0 ms |
+| Maximum | 31.2 ms |
+| Mean | 30.0 ms |
+| — framing | 20.1 ms |
+| — jitter buffer | 20.0 ms |
+| — network | 0.0 ms |
+
+Read together:
+
+- **Framing and the jitter buffer are the delay.** Twenty milliseconds waiting for the next
+  captured frame and twenty more held by the playout buffer at its default one-frame target
+  account for all but nothing of the thirty measured; on a container network a few
+  microseconds wide, that is the honest answer, not a rounding trick — `docs/05-media.md`'s
+  own default target is one frame, and one frame is what a call on a clean path pays for it
+  twice, once on each end of the round trip this measures.
+- **The spread is a few tenths of a millisecond, not milliseconds.** Every mark measured
+  within three milliseconds of the median; the buffer never had to stretch or shrink to keep
+  up with a marker sent every two seconds on an otherwise idle call, so what moved was
+  scheduling noise in this harness's own poll loop, not the network or Asterisk's own
+  processing.
+- **This is a floor, not a call's own worst case.** A real network and a real device add to
+  both framing (real hardware buffers more than one host's own scheduling jitter) and the
+  network term this run reads as zero; the netem-shaped drift run further down reads the
+  jitter buffer's own target moving well past one frame once the link is not clean, which
+  changes the second of these two numbers directly.
+
+## 27 September 2026 — `0.0.1`, a hundred calls through a real proxy and PBX
+
+`scripts/lab.sh volume` (`interop/harness/src/volume.rs`): a hundred calls at once rather than
+one, fifty milliseconds apart, held five seconds once every one that came up has started its
+media, hung up together. `interop/kamailio/kamailio.cfg` in this lab has no route to
+Asterisk — it forwards everything to FreeSWITCH, and nowhere else — so "a real proxy and PBX"
+is two runs here, not one: straight at Asterisk, no proxy in front of it, and through
+Kamailio to FreeSWITCH behind it. This end's own process, `/usr/bin/time -v` around the whole
+of it: signalling, media and the harness's own bookkeeping together, not `sipral`'s alone. The
+real server's own peak channel count is read over its console (`asterisk -rx`, `fs_cli`)
+rather than guessed from this end's count of calls still up. The Linux lab machine, as above.
+
+| | Asterisk, no proxy | Kamailio, to FreeSWITCH |
+|---|---|---|
+| Calls up | 100 of 100 | 58 of 100 |
+| Setup time (of the calls that came up) | min 9 ms, p50 12 ms, p90 14 ms, max 66 ms | min 7 ms, p50 10 ms, p90 12 ms, max 51 ms |
+| This end's CPU | 0.85 s user + 1.52 s system, 23% of one core over 10.11 s | 0.56 s user + 1.03 s system, 15% of one core over 10.11 s |
+| This end's peak memory | 10 192 KB | 8 296 KB |
+| Real server's peak channels | 300 (three a call: the SIP leg and `Local/9002`'s own pair) | 169 |
+| Failures | none | 42, all `Refused (500)`: FreeSWITCH's own admission control |
+
+Read together:
+
+- **Asterisk took a hundred calls in a burst without complaint.** Every call answered inside
+  sixty-six milliseconds of being placed, the slowest ninety per cent of them inside
+  fourteen; this end's own share of carrying them was under a quarter of one core.
+- **FreeSWITCH did not.** `mod_loopback`'s own session-rate limiter — thirty sessions a
+  second by default, and each of these calls opens two (`Local/9002`'s own pair) on top of
+  its one SIP leg — started refusing calls with a 500 partway through the burst: the
+  container's own log carried `Throttle Error!` and `Over Session Rate of 30!` for every one
+  of the forty-two. This is not a defect in this stack: FreeSWITCH said no, in band, and the
+  harness's own verdict reports exactly that refusal rather than a call that silently never
+  came up. It is what "the lab's Asterisk itself could take" turns out to depend on which
+  server is actually behind the proxy — Kamailio itself never refused anything; the limit
+  belongs to what it is forwarding to, at fifty calls a second including both of a call's
+  legs. `SIPRAL_VOLUME_STAGGER_MS=100` (ten calls a second, twenty sessions) is comfortably
+  under it; this run used the default to find where the ceiling was rather than to avoid it.
+- **A call that does come up costs about the same either way.** Ten to twelve milliseconds
+  at the middle of the distribution, straight at Asterisk or through Kamailio to FreeSWITCH,
+  is closer to the 24 September signalling table's own single-call figures than the extra
+  hop through a proxy might suggest — a hundred calls in a ten-second burst is not the
+  regime that table's own "cost grows with the number of calls already up" was measured in.
+
+## 27 September 2026 — `0.0.1`, drift on a bad link
+
+`scripts/lab.sh drift-netem` (the drift flow, `interop/harness/src/drift.rs`, under a netem
+profile the way `scripts/lab.sh netem` shapes the ordinary calls, `SIPRAL_AUDIO_GATE=1`
+throughout): the same three calls as an hour on a call, above, their earpieces at −2000, 0
+and +2000 ppm, `SIPRAL_DRIFT_MS=180000 SIPRAL_DRIFT_REPORT_MS=30000 SIPRAL_DRIFT_PPM=2000` —
+the review length `docs/11-testing.md` gives, since 250 ppm is too small to read against a
+link already this noisy — over `lossy` (`interop/impairment/lossy.sh`): "delay 40ms 15ms loss
+gemodel 4% 40% 60% 2%", both directions, the general-case profile `scripts/lab.sh netem`
+already passes on an ordinary two-second call. This measures the buffer that is on `main` at
+`156f7c0`, this batch's own base; the tooling that measured it is `caa4067`. `media2`, working
+on the buffer's own drift handling at the same time, is not in it. The Linux lab machine, as
+above.
+
+| At three minutes | Slow (−2000 ppm) | Control (0 ppm) | Fast (+2000 ppm) |
+|---|---|---|---|
+| Buffer depth, target 60 ms | 20 ms | 60 ms | 40 ms |
+| Jitter | 13 ms | 15 ms | 13 ms |
+| Shrunk, stretched | 126, 117 | 112, 120 | 114, 142 |
+| Ran dry, of those in the tone | 153, 41 | 133, 42 | 145, 40 |
+| Concealed | 1 034 | 1 024 | 1 012 |
+| Measured skew | +161 418.4 ppm | +158 669.6 ppm | +161 778.7 ppm |
+| R factor, MOS-LQ | 20, 1.3 | 21, 1.3 | 21, 1.3 |
+| Audio gate | segSNR −4.3 dB, 5 123 frames, 120/1 224 splices clicked, worst 374% | segSNR −4.2 dB, 5 175 frames, 124/1 163 clicked, worst 367% | segSNR −4.0 dB, 5 159 frames, 114/1 204 clicked, worst 366% |
+| Verdict | failed | failed | failed |
+
+Read together:
+
+- **The buffer's target left one frame behind at the first report and never came back.**
+  Twenty milliseconds, the clean-path target every earlier section in this document reads,
+  grew to sixty within the first thirty seconds on every one of the three calls, the control
+  included, and the depth itself moved between zero and eighty for the rest of the run —
+  `lossy`'s own fifteen milliseconds of jitter is most of a frame by itself, and the buffer's
+  own adaptive target (`docs/05-media.md`) did what it is meant to about it. This is the
+  regime the microphone-to-earpiece section above could not read, on a clean path where the
+  target never leaves one frame.
+- **The skew this flow measures is not readable under real loss.** The control call, given
+  no skew at all, measured +158 669.6 ppm — indistinguishable from the −2000 and +2000 ppm
+  calls' own readings. `balance`'s own accounting (`interop/harness/src/drift.rs`) counts
+  every concealed frame as drift absorbed, and `lossy`'s own four per cent loss concealed far
+  more frames in three minutes than either clock's own 2000 ppm skew would; a method built to
+  read a clean path's clock skew from what the buffer invented reads a bad path's own loss
+  instead, and over this profile cannot tell the two apart. The buffer depth, the ratings and
+  the gate are what this run is actually worth reading; `verdict`'s own skew check is not,
+  here, and the failure it reports for that reason is not evidence of anything about drift.
+- **The ratings fell from a clean path's 93 and 4.4 to about 20 and 1.3, on every leg
+  alike — control included.** `lossy`'s own loss rate accounts for that on RFC 3611's E-model
+  before a single frame of drift enters into it; a call in the middle of nothing but this
+  profile, no skew at all, is already rated this badly.
+- **The audio quality gate failed all three, and the control failed the same way the skewed
+  legs did.** A tenth of the concealment splices clicked, at three to four times the
+  threshold that counts as one, and the segmental SNR read negative — more noise than signal
+  by the gate's own measure — on every leg, including the one running true. Since the
+  control shares the failure with the skewed legs almost exactly (124 of 1163 splices against
+  120 of 1224 and 114 of 1204, the same order of magnitude of frames concealed), what failed
+  it is `lossy` itself sustained for three minutes, not the drift this flow adds: the same
+  profile passes `scripts/lab.sh netem`'s own two-second call, and three minutes of it is a
+  different, harder claim that this run is the first to have made. Whether the buffer's own
+  handling of `lossy`'s bursts, sustained, or the gate's own segmental-SNR fit losing its
+  footing over that many concealed frames in a row is the more accurate account of the
+  negative reading is not settled by this run; what is settled is that a call held on this
+  profile for three minutes clicks, on `main` as it stands, where the same profile briefly
+  does not.
+
 ## What would make these numbers worse
 
-A codec that is not G.711: Opus costs an encode and a decode of its own, and
-is not in the numbers above. Recording a call writes every frame to disk.
-SRTP adds a pass over each packet. Each is worth measuring separately before
-anybody plans around the figures here.
+A codec that is not G.711: Opus and G.729 both cost two hundred and fifty
+times G.711's own per frame, below. Recording a call writes every frame to
+disk. SRTP adds a pass over each packet. Each of the last two is worth
+measuring separately before anybody plans around the figures here.
