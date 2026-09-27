@@ -471,7 +471,8 @@ crates/sipral-core/src/sdp/crypto.rs:KeySalt
 crates/sipral-ua/src/account.rs:Push
 crates/sipral-nat/src/ice/full/mod.rs:Credentials
 crates/sipral-nat/src/ice/sdp.rs:RemoteIce
-crates/sipral/src/ice.rs:Ice"
+crates/sipral/src/ice.rs:Ice
+crates/sipral-diag/src/redact.rs:Mode"
 derived=""
 for pair in $redacting; do
     file=${pair%%:*}
@@ -481,8 +482,9 @@ for pair in $redacting; do
         $file is gone, and $name's redaction with it"
         continue
     fi
-    # the declaration, and whether its own derive list carries Debug
-    line=$(grep -nE "^pub(\(crate\))? struct $name\b" "$file" | head -1 | cut -d: -f1)
+    # the declaration, and whether its own derive list carries Debug -- a
+    # struct or an enum, since Mode::Hash's HMAC key lives in an enum variant
+    line=$(grep -nE "^pub(\(crate\))? (struct|enum) $name\b" "$file" | head -1 | cut -d: -f1)
     if [ -z "$line" ]; then
         derived="$derived
         $file no longer declares $name"

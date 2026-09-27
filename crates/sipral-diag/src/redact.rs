@@ -66,7 +66,7 @@ impl From<ParseError> for RedactError {
 }
 
 /// What a redacted identifier becomes.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Mode {
     /// HMAC-SHA256 keyed with the organisation's own secret, truncated: the
     /// same input always becomes the same output under one key, so a call's
@@ -76,6 +76,19 @@ pub enum Mode {
     /// gets the next placeholder in sequence — stable within that export, so
     /// the flow is still legible, and reproducing nothing across two of them.
     Delete,
+}
+
+// the organisation's HMAC key lives in `Hash`'s payload, so a derived `Debug`
+// would print it in full the first time anything logs a `Mode` or an error
+// context that carries one; `crates/sipral-core/src/sdp/crypto.rs`'s
+// `KeySalt` redacts itself the same way, for the same reason
+impl core::fmt::Debug for Mode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Mode::Hash(_) => f.write_str("Hash(<redacted>)"),
+            Mode::Delete => f.write_str("Delete"),
+        }
+    }
 }
 
 /// Rewrites identifiers as a recording's messages are redacted, remembering
@@ -379,7 +392,7 @@ fn redact_name_addr(addr: NameAddrRef<'_>, red: &mut Redactor) -> String {
         out.push_str(&String::from_utf8_lossy(name));
         if let Some(v) = value {
             out.push('=');
-            out.push_str(&String::from_utf8_lossy(v));
+            out.push_str(&scan_ip_literals_str(&String::from_utf8_lossy(v), red));
         }
     }
     out
@@ -407,11 +420,11 @@ fn redact_uri(uri: UriRef<'_>, red: &mut Redactor) -> String {
             }
             if !u.params_raw().is_empty() {
                 out.push(';');
-                out.push_str(u.params_raw());
+                out.push_str(&scan_ip_literals_str(u.params_raw(), red));
             }
             if !u.headers_raw().is_empty() {
                 out.push('?');
-                out.push_str(u.headers_raw());
+                out.push_str(&scan_ip_literals_str(u.headers_raw(), red));
             }
             out
         }
@@ -483,6 +496,17 @@ fn run_end(chars: &[char], start: usize, class: impl Fn(char) -> bool) -> usize 
         end += 1;
     }
     end
+}
+
+/// [`scan_ip_literals`] over a `&str` rather than raw bytes, for the pieces of
+/// a structurally-parsed address that are copied through as text: a URI's own
+/// parameters (`maddr`, and any extension a gateway adds) and headers, and a
+/// name-addr's parameters (`fs_path` and similar carry a whole embedded URI).
+/// None of those is parsed further here, so an IP literal inside one would
+/// otherwise survive a structural redaction untouched — this is the same
+/// safety net [`scan_ip_literals`] is for everything else.
+fn scan_ip_literals_str(text: &str, red: &mut Redactor) -> String {
+    String::from_utf8(scan_ip_literals(text.as_bytes(), red)).unwrap_or_else(|_| text.to_string())
 }
 
 #[cfg(test)]
@@ -717,6 +741,14 @@ Content-Length: {}\r\n\r\n{sdp}",
     }
 
     #[test]
+    fn debug_formatting_a_hash_mode_never_prints_the_organisation_key() {
+        let mode = Mode::Hash(b"organisation-secret".to_vec());
+        let printed = format!("{mode:?}");
+        assert!(!printed.contains("organisation-secret"));
+        assert_eq!(printed, "Hash(<redacted>)");
+    }
+
+    #[test]
     fn a_version_string_and_a_timestamp_are_not_mistaken_for_addresses() {
         let msg = b"OPTIONS sip:example.com SIP/2.0\r\n\
 From: <sip:a@example.com>;tag=1\r\n\
@@ -729,6 +761,19 @@ Content-Length: 0\r\n\r\n";
         let out = redact(msg, &mut hash_redactor());
         assert!(out.contains("Date: Tue, 15 Sep 2026 20:30:00 GMT"));
         assert!(out.contains("User-Agent: Sipral/0.0.1"));
+    }
+
+    #[test]
+    fn a_maddr_uri_param_ip_literal_is_redacted() {
+        let msg = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+From: <sip:a@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a@b\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@example.com;maddr=192.0.2.55>\r\n\
+Content-Length: 0\r\n\r\n";
+        let out = redact(msg, &mut hash_redactor());
+        assert!(!out.contains("192.0.2.55"), "maddr IP leaked: {out}");
     }
 
     #[test]
