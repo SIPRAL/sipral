@@ -16,23 +16,24 @@
 //! forgets a UDP flow in minutes. In the lab a call 330 seconds after the
 //! REGISTER was dropped at exactly that filter.
 //!
-//! So each account that STUN showed to be behind a NAT sends something to
-//! its registrar's flow every [`DEFAULT_KEEPALIVE`], which is what RFC 5626
-//! §3.5 calls a keep-alive. That RFC names the two ways to write one: a
-//! double CRLF for a connection-oriented flow (§3.5.1) and a STUN Binding
+//! So each account that STUN showed to be behind a NAT sends something to its
+//! registrar's flow every
+//! [`DEFAULT_KEEPALIVE`](crate::keepalive::DEFAULT_KEEPALIVE), which is what
+//! RFC 5626 §3.5 calls a keep-alive. That RFC names the two ways to write one:
+//! a double CRLF for a connection-oriented flow (§3.5.1) and a STUN Binding
 //! request for a datagram one (§3.5.2, §4.4.2), the latter so that the pong
-//! also tells the client whether its mapping moved. Neither is answered by
-//! the registrars this is deployed against on UDP — Asterisk answers no STUN
-//! on its SIP port, and no registrar pongs a CRLF on a datagram — so a STUN
-//! request here would buy nothing a CRLF does not, and would ask a registrar
-//! to parse a protocol it never agreed to. What is sent is the widely
-//! deployed double CRLF on its own, as a datagram: RFC 3261 §7.5 has a
-//! receiver ignore CRLFs ahead of a start line, a datagram holding nothing
-//! else is no message at all, and a registrar drops it — while the NAT on
-//! the way out has seen this end send to the registrar's address and port,
-//! which is the whole of what the filter asks (RFC 4787 §4.3, REQ-6: a
-//! mapping is refreshed by outbound traffic). The mapping itself moving is still caught
-//! by the STUN refresh, which does get an answer.
+//! also tells the client whether its mapping moved. Neither is answered by the
+//! registrars this is deployed against on UDP — Asterisk answers no STUN on its
+//! SIP port, and no registrar pongs a CRLF on a datagram — so a STUN request
+//! here would buy nothing a CRLF does not, and would ask a registrar to parse a
+//! protocol it never agreed to. What is sent is the widely deployed double CRLF
+//! on its own, as a datagram: RFC 3261 §7.5 has a receiver ignore CRLFs ahead
+//! of a start line, a datagram holding nothing else is no message at all, and a
+//! registrar drops it — while the NAT on the way out has seen this end send to
+//! the registrar's address and port, which is the whole of what the filter asks
+//! (RFC 4787 §4.3, REQ-6: a mapping is refreshed by outbound traffic). The
+//! mapping itself moving is still caught by the STUN refresh, which does get an
+//! answer.
 //!
 //! **When.** Only for an account whose `Contact` a STUN answer moved
 //! ([`UserAgent::readdress`]) onto an address that is not the socket's own
@@ -42,16 +43,17 @@
 //! §4.4.1), a trunk has no binding to keep, and an account whose address
 //! STUN found to be its own has no NAT to keep open.
 //!
-//! **How often.** Every [`DEFAULT_KEEPALIVE`] unless set otherwise
-//! ([`UserAgent::keep_registrar_flows_alive`]), each interval drawn between
-//! 80% and 100% of that — the spread RFC 5626 §4.4 asks for around a
-//! server's own figure — so that a registrar does not hear every client in
-//! the same instant. Twenty-five
-//! seconds sits inside RFC 5626 §4.4.2's "random number between 24 and 29
-//! seconds" for UDP, chosen there because "many NATs have UDP timeouts as low
-//! as 30 seconds" — which RFC 4787 REQ-5 forbids and which is deployed all
-//! the same. Longer than [`MAX_KEEPALIVE`] is refused: REQ-5's two minutes
-//! is the shortest a conforming NAT may forget a flow in, so a longer
+//! **How often.** Every
+//! [`DEFAULT_KEEPALIVE`](crate::keepalive::DEFAULT_KEEPALIVE) unless set
+//! otherwise ([`UserAgent::keep_registrar_flows_alive`]), each interval drawn
+//! between 80% and 100% of that — the spread RFC 5626 §4.4 asks for around a
+//! server's own figure — so that a registrar does not hear every client in the
+//! same instant. Twenty-five seconds sits inside RFC 5626 §4.4.2's "random
+//! number between 24 and 29 seconds" for UDP, chosen there because "many NATs
+//! have UDP timeouts as low as 30 seconds" — which RFC 4787 REQ-5 forbids and
+//! which is deployed all the same. Longer than
+//! [`MAX_KEEPALIVE`](crate::keepalive::MAX_KEEPALIVE) is refused: REQ-5's two
+//! minutes is the shortest a conforming NAT may forget a flow in, so a longer
 //! interval keeps nothing open that the REGISTER refresh would not.
 //!
 //! **Not while suspended.** A process the operating system is about to stop
