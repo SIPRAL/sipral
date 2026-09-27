@@ -469,7 +469,14 @@ executions, and no crash, no timeout and no run out of memory on any target.
 The eight media targets, added after that run, had the same gate on 23
 September 2026: 48 runs of 30 minutes each per target, 192 CPU-hours in all,
 about 24 billion executions, and nothing found on any of them.
-`headless_media`, `media_g729` and `turn_client`, the newest, have not had it yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
+`headless_media`, `media_g729` and `turn_client`, the newest three, had it on
+25 September 2026, the same way: 144 runs of 30 minutes, 72 CPU-hours in all,
+and not one run that exited with an error or left an input behind. The
+executions say how differently those three spend a CPU-hour: about 231
+million for `turn_client`, 42 million for `headless_media`, and 0.67 million
+for `media_g729`, which decodes every input and encodes the result again, so
+its 24 hours reached a far smaller share of its input space than any other
+target's did. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
 do on every run is **build** all twenty-nine, under the nightly that `fuzz/` pins, so
