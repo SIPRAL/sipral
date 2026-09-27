@@ -243,3 +243,60 @@ It is also not a replacement for a capture, and does not try to be. D2 in
 `docs/13-client-requirements.md` — the recorded session that replays
 deterministically — is the artefact that holds messages, and it is a separate
 thing with a separate format and its own rules about what it may carry.
+
+## Exporting a call for a NOC: pcapng out of D2
+
+`crates/sipral-diag` and `tools/diag-export` turn a `.sipralrec` recording
+(`docs/18-replay.md`) into a pcapng file, so the tool an operator's NOC
+already knows — Wireshark, or `tshark` on a box with no display — reads a
+recorded call the same way it reads a live capture: SIP messages, decoded by
+method and status, in order, at the offsets they were recorded at.
+
+```bash
+diag-export session.sipralrec session.pcapng
+diag-export --redact --key-file org.key session.sipralrec session.pcapng
+diag-export --redact --delete session.sipralrec session.pcapng
+```
+
+**What is in the file, precisely.** A D2 recording holds what *arrived* at
+the recorded stack and nothing this end sent — `sipral_stack_recording_start`
+is never offered a transmitted byte to keep — so the export is the far end's
+half of the conversation: every `Arrival::Datagram` and `Arrival::StreamData`
+frame becomes one UDP or TCP packet, addressed from the recorded remote to the
+recorded local (a `TransportBound` frame supplies a stream's addresses, since
+a `StreamData` frame carries none of its own), timestamped from the
+recording's own offsets. That is the truth of what a recording holds, not a
+limitation of the exporter; turning it into a full two-way flow needs the
+messages this end would have sent replayed back out through the actual engine
+(`sipral_core::replay::Driven`), which is not built yet. A recording never
+carries RTP either (above), so there is no RTP or RTCP summary to place in the
+pcapng today — `sipral_diag::export::export`'s match over `Arrival` is
+exhaustive, so the day the format gains one, this stops compiling until it is
+taught what to do with it, rather than silently dropping it.
+
+**Redaction, before any of this leaves the organisation.** GDPR's usual list
+for SIP traffic — a URI's user part, a display name, a phone number written
+as either, and every IP literal in a header or in SDP — is rewritten to a
+pseudonym; `Authorization`/`Proxy-Authorization` values and an SDES `inline:`
+key are dropped outright, in every mode, because a hash of a password is
+still a password a large enough dictionary reverses. Two modes:
+
+- **`Hash`** (the default): HMAC-SHA256 keyed with a secret the organisation
+  supplies, truncated. The same value always becomes the same pseudonym under
+  one key, so a call's messages — and the packet addresses alongside them —
+  stay correlatable to each other and to whoever holds the key, and to nobody
+  else.
+- **`Delete`**: no durable identifier at all. Every distinct value seen in one
+  export gets the next placeholder in sequence, stable only for the export
+  that produced it.
+
+`Call-ID` and every `tag` are left alone — the file has to keep correlating a
+dialog's own messages to remain a call flow — and so is a domain name that is
+not a literal address. `sipral_diag::redact::redact_message` is the Rust
+function behind both modes; it takes one message's bytes and a `Redactor` and
+is independent of the C ABI, so a facade that links `sipral-diag` can offer
+the same redaction to an application without a new entry point in
+`sipral.h`. The redacted pcapng still decodes as SIP: `tshark -r out.pcapng -Y
+sip` finds every message, by method and status, same as the unredacted one —
+checked against `tshark` itself, not only against this crate's own tests, on
+the lab VM.

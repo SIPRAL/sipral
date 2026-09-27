@@ -1,0 +1,21 @@
+[package]
+name = "sipral-diag"
+description = "Turns a D2 replay recording into pcapng, and redacts personal data out of a SIP message before it leaves the organisation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+sipral-core = { path = "../sipral-core", version = "0.0.1" }
+# same pin and feature set sipral-dtls already carries these at; nothing new
+# enters the dependency graph, only a second consumer of what is already in it
+hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+
+[lints]
+workspace = true

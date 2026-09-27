@@ -886,6 +886,23 @@ name = "sipral-core"
 version = "0.0.1"
 
 [[package]]
+name = "sipral-diag"
+version = "0.0.1"
+dependencies = [
+ "hmac",
+ "sha2",
+ "sipral-core",
+]
+
+[[package]]
+name = "sipral-diag-export"
+version = "0.0.1"
+dependencies = [
+ "sipral-core",
+ "sipral-diag",
+]
+
+[[package]]
 name = "sipral-dtls"
 version = "0.0.1"
 dependencies = [

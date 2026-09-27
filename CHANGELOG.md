@@ -241,6 +241,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   module's hangup key takes. `Flow::PeerHangup` (key `peerhangup`) is the
   harness's own half: it places the call and only waits, never scheduling
   its own hangup, and passes on `CallEndReason::RemoteHangup` alone.
+- **A call's D2 recording exports as pcapng, redacted for GDPR before it
+  leaves the organisation.** `diag-export` (`tools/diag-export`, on
+  `sipral-diag`) turns a `.sipralrec` file into a pcapng Wireshark and
+  `tshark` read as a SIP call — every message the recording holds, as a UDP
+  or TCP packet at its recorded address and offset. `--redact
+  --key-file <path>` (or `--redact --delete`) rewrites SIP/SDP user parts,
+  display names, phone numbers and IP literals into a stable HMAC-SHA256
+  pseudonym or a placeholder, and drops `Authorization`/`Proxy-Authorization`
+  and SDES keys outright; the redaction is also `sipral_diag::redact::redact_message`,
+  a plain Rust function a facade can call without a new C ABI entry point.
 - **The .NET binding can get a call past a NAT.** `SipralStack`'s
   constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
   `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP

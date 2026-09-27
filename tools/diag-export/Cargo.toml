@@ -1,0 +1,22 @@
+[package]
+name = "sipral-diag-export"
+description = "Turns a D2 replay recording (.sipralrec) into a pcapng file a NOC can open in Wireshark, optionally redacting personal data first."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "diag-export"
+path = "src/main.rs"
+
+[dependencies]
+sipral-core = { path = "../../crates/sipral-core", version = "0.0.1" }
+sipral-diag = { path = "../../crates/sipral-diag", version = "0.0.1" }
+
+[lints]
+workspace = true
