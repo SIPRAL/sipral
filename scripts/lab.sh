@@ -2314,7 +2314,7 @@ drift_under_netem() {
     WHY=""; NETEM=""; REQUIRE=""
     . "$ROOT/interop/impairment/$profile.sh"
     printf '  %-10s %s\n' "$profile" "$WHY"
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         --cap-add NET_ADMIN \
         -e SIPRAL_FLOWS=drift \
         -e SIPRAL_AUDIO_GATE=1 \
@@ -2367,7 +2367,7 @@ fi
 # with two real clocks. interop/harness/src/latency.rs's own module doc says
 # why a round trip halved is what is reported instead.
 latency_flow() {
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=latency \
         -e SIPRAL_LATENCY_MS="${SIPRAL_LATENCY_MS:-120000}" \
         -e SIPRAL_LATENCY_MARK_MS="${SIPRAL_LATENCY_MARK_MS:-2000}" \
@@ -2390,7 +2390,7 @@ fi
 # which this lab's own kamailio.cfg forwards to FreeSWITCH and nowhere else).
 volume_flow() {
     local server="$1"
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=volume \
         -e SIPRAL_VOLUME_CALLS="${SIPRAL_VOLUME_CALLS:-100}" \
         -e SIPRAL_VOLUME_STAGGER_MS="${SIPRAL_VOLUME_STAGGER_MS:-50}" \
