@@ -328,6 +328,33 @@ traces=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.h' '*.c' '*.swift' '*.c
     fail "assistant traces in:"; printf '        %s\n' $traces
 }
 
+# Some names must never reach this tree -- a customer's, a product sold on its
+# own -- and a list of them committed here would publish exactly what it
+# guards. So the list lives in intern/, which the first check keeps out of git,
+# one fixed string per line, matched without regard to case in every file the
+# tree would publish and in every commit message not yet pushed. A checkout
+# without the list cannot check, and says so.
+private_names="$ROOT/intern/ops/private-names.txt"
+if [ -s "$private_names" ]; then
+    named=$(others | while read -r f; do
+        [ -f "$ROOT/$f" ] && grep -IqiF -f "$private_names" "$ROOT/$f" && printf '%s\n' "$f"
+    done)
+    upstream=$(git -C "$ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
+    told=""
+    if [ -n "$upstream" ]; then
+        told=$(git -C "$ROOT" log --format='%h %s%n%b' "$upstream..HEAD" \
+            | grep -iF -f "$private_names" || true)
+    fi
+    if [ -z "$named" ] && [ -z "$told" ]; then
+        pass "no private name in the tree or in an unpushed commit message"
+    else
+        [ -n "$named" ] && { fail "a private name in:"; printf '        %s\n' $named; }
+        [ -n "$told" ] && { fail "a private name in an unpushed commit message:"; printf '%s\n' "$told" | sed 's/^/        /'; }
+    fi
+else
+    skip "private names: intern/ops/private-names.txt is not on this machine"
+fi
+
 # Artwork can carry a signed provenance manifest naming the tool that produced
 # it, in a PNG chunk or an SVG <metadata> element. Base64 inside a binary, so
 # the text scan above never sees it, and an image ships byte for byte to

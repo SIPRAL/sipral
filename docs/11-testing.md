@@ -917,7 +917,10 @@ over all twenty-nine fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,
-language, whether an internal file or a capture has reached the tree, and
+language, whether an internal file or a capture has reached the tree,
+whether a name on the private list kept outside it (in the ignored `intern/`,
+so that the list does not publish what it guards) appears in a file or in a
+commit message not yet pushed, and
 whether the seed corpus still matches the targets it belongs to and holds
 only what the rest of the tree is allowed to hold, the dotnet and Kotlin/JVM
 bindings built and tested, the Swift package built and tested, and a
