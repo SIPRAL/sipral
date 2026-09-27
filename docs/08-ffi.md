@@ -1685,7 +1685,12 @@ list used to name as missing — is `scripts/package/wheels.sh`: it builds
 `_candidates` already looks for one there, and retags the ordinary wheel
 `pyproject.toml`'s own `hatchling` backend built. Nothing above changes to
 make that true; a wheel built this way loads exactly the `cdef` and the
-load-and-check boilerplate this section describes.
+load-and-check boilerplate this section describes. On macOS the library is
+built for macOS 12.0 and later — the minimum every Apple artefact shares,
+set once in `scripts/package/apple.sh` — and the platform tag is read back
+from the library's own load command rather than from the machine that built
+it, so a wheel built on the newest macOS still installs on every release the
+library runs on.
 
 `Stack.__init__`'s `ice`, `nat`, `stun_server`, `turn_server`,
 `turn_username`, `turn_password` and `g729_annex_b` set the matching

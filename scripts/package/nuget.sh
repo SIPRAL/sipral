@@ -110,6 +110,8 @@ OUT="$(cd "$OUT" && pwd)"
 [ "${#RIDS[@]}" -eq 0 ] && RIDS=("${ALL_RIDS[@]}")
 . "$ROOT/scripts/package/features.sh"
 package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
+. "$ROOT/scripts/package/apple.sh"
+APPLE_TARGET="$(apple_target_dir "${CARGO_TARGET_DIR:-$ROOT/target}")"
 PACKAGE_ID="Sipral"
 [ "$WITH_OPUS" -eq 1 ] && PACKAGE_ID="Sipral.Opus"
 
@@ -129,10 +131,17 @@ if [ "$CMD" = "collect" ]; then
                     fail "$rid: $triple not installed (rustup target add $triple)"; continue
                 fi
                 rm -f "$OUT/$rid/$FEATURES_MARKER"
+                # built for apple.sh's oldest macOS, in its own target
+                # directory, and checked object by object in the static
+                # archive the same build writes, libopus's included
                 if cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$triple" \
-                    >"$OUT/.build-$rid.log" 2>&1; then
+                    --target-dir "$APPLE_TARGET" >"$OUT/.build-$rid.log" 2>&1; then
+                    if ! newest=$(apple_min_at_most "$APPLE_TARGET/$triple/release/libsipral_ffi.a" "$APPLE_MACOS_MIN"); then
+                        fail "$rid: an object was built for macOS ${newest:-(no minimum named)}, newer than $APPLE_MACOS_MIN"
+                        continue
+                    fi
                     mkdir -p "$OUT/$rid"
-                    cp "$ROOT/target/$triple/release/$(cargo_artifact_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")"
+                    cp "$APPLE_TARGET/$triple/release/$(cargo_artifact_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")"
                     printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
                     pass "$rid: cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
                 else

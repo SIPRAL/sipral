@@ -54,6 +54,8 @@ if [ -z "$OUT" ]; then
 fi
 . "$ROOT/scripts/package/features.sh"
 package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
+. "$ROOT/scripts/package/apple.sh"
+APPLE_TARGET="$(apple_target_dir "${CARGO_TARGET_DIR:-$ROOT/target}")"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
@@ -104,7 +106,7 @@ if [ "$FAIL" -ne 0 ]; then
     exit 1
 fi
 
-step "building $CRATE, release, per target, $VARIANT_LABEL (features $FFI_FEATURES)"
+step "building $CRATE, release, per target, for macOS $APPLE_MACOS_MIN and iOS $APPLE_IOS_MIN and later, $VARIANT_LABEL (features $FFI_FEATURES)"
 # libopus's C sources compile, for arm64 Apple targets, with calls to
 # ___chkstk_darwin -- part of the arm64 Darwin ABI for a frame over a page,
 # not a bug in the C -- which lives in Apple's own compiler-rt and links
@@ -122,7 +124,8 @@ rustflags_for() {
 for t in "${all_triples[@]}"; do
     extra_rustflags="$(rustflags_for "$t")"
     if env RUSTFLAGS="${RUSTFLAGS:-} $extra_rustflags" \
-        cargo build --release -p "$CRATE" "${FFI_FEATURE_ARGS[@]}" --target "$t" >"$STAGE/build-$t.log" 2>&1; then
+        cargo build --release -p "$CRATE" "${FFI_FEATURE_ARGS[@]}" --target "$t" --target-dir "$APPLE_TARGET" \
+        >"$STAGE/build-$t.log" 2>&1; then
         pass "cargo build --release -p $CRATE ${FFI_FEATURE_ARGS[*]} --target $t"
     else
         fail "cargo build --release -p $CRATE ${FFI_FEATURE_ARGS[*]} --target $t:"
@@ -155,7 +158,20 @@ for s in "${SLICES[@]}"; do
     mkdir -p "$dest"
     inputs=()
     for t in "${triple_arr[@]}"; do
-        inputs+=("$ROOT/target/$t/release/$LIBNAME")
+        inputs+=("$APPLE_TARGET/$t/release/$LIBNAME")
+    done
+    # every object in the archive, Rust's and libopus's alike, built for the
+    # oldest release the Package.swift below declares, or an older one
+    case "$name" in
+        macos) min="$APPLE_MACOS_MIN" ;;
+        *) min="$APPLE_IOS_MIN" ;;
+    esac
+    for input in "${inputs[@]}"; do
+        if newest=$(apple_min_at_most "$input" "$min"); then
+            pass "$name: $(basename "$(dirname "$(dirname "$input")")"), every object for $min or older (newest: $newest)"
+        else
+            fail "$name: an object in $input was built for ${newest:-(no minimum named)}, newer than $min"
+        fi
     done
     if [ "${#inputs[@]}" -eq 1 ]; then
         cp "${inputs[0]}" "$dest/$LIBNAME"
@@ -235,8 +251,9 @@ if [ "$copied" -eq "$expected" ] && [ "$copied" -gt 0 ]; then
 else
     fail "$copied Swift sources copied into spm/Sources/Sipral, $expected in bindings/swift/Sources/Sipral"
 fi
-# Unquoted, for the one line that names the variant; nothing else in it
-# expands.
+# Unquoted, for the lines that name the variant and the platforms (apple.sh's
+# two minimums, which every archive above was checked against); nothing else
+# in it expands.
 cat >"$SPM/Package.swift" <<EOF
 // swift-tools-version: 5.9
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
@@ -268,7 +285,7 @@ import PackageDescription
 
 let package = Package(
     name: "Sipral",
-    platforms: [.macOS(.v12), .iOS(.v15)],
+    platforms: [.macOS(.v${APPLE_MACOS_MIN%%.*}), .iOS(.v${APPLE_IOS_MIN%%.*})],
     products: [
         .library(name: "Sipral", targets: ["Sipral"])
     ],

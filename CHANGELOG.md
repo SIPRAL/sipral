@@ -709,6 +709,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **Apple artefacts are built for the releases they claim.** The macOS
+  wheel was tagged with the building Mac's own version (`macosx_26_0`), so
+  pip refused it on every older macOS the library runs on; and in every
+  `--with-opus` variant cmake built libopus for the Mac's own SDK (macOS or
+  iOS 26.5) while the XCFramework's `Package.swift` promised iOS 15 and
+  macOS 12. `scripts/package/apple.sh` now sets macOS 12.0 and iOS 15.0
+  once for the wheel, the NuGet macOS natives and the XCFramework, each
+  built in a target directory of its own (cargo does not rebuild a C
+  dependency when only the deployment target changes), and each script
+  reads every object in the static archive and fails on one built for a
+  newer release.
 - **An incoming call the caller gave up on before it was taken no longer
   leaves a call that can never end.** `SipralStack.takeIncomingCall` (and
   `answerCall`, which calls it) minted and registered a `Call` for a

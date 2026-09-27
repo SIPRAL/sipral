@@ -489,7 +489,12 @@ than its NAT keeps a mapping is not something this run tested.
 x86_64) — and prints `DIR/spm/Package.swift` over it: the whole `Sipral`
 module from `bindings/swift/Sources/Sipral`, CallKit and PushKit bridges
 included, on a `binaryTarget` instead of the source target, with the
-package's test suite beside it. `bindings/Package.swift` itself stays the
+package's test suite beside it. Every slice is built for iOS 15.0 and macOS
+12.0 and later, the two minimums `scripts/package/apple.sh` sets once and
+the printed `platforms:` line repeats, and the script reads every object in
+each archive — libopus's too, in the `--with-opus` variant, which cmake would
+otherwise build for the Mac's own SDK — and fails on one built for a newer
+release. `bindings/Package.swift` itself stays the
 macOS and Linux package the gate and the lab build: its tests link the
 library `cargo` leaves in `target/release`, which is a macOS or Linux
 library and nothing an iOS target can link. So the suite runs on iOS

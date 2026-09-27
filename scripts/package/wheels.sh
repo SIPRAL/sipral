@@ -103,16 +103,20 @@ if [ "$MANYLINUX" -eq 2 ]; then
     PY=python3
     pass "inside manylinux_2_28_x86_64: tag $TAG"
 elif [ "$UNAME_S" = "Darwin" ]; then
+    # The wheel's platform tag is a promise pip checks before it installs,
+    # so it is the oldest macOS the native is built for (apple.sh), read back
+    # from the library once it exists -- never this host's own version, which
+    # would refuse every older macOS the library runs on.
     case "$UNAME_M" in
         arm64) RUST_TRIPLE="aarch64-apple-darwin"; MACOS_ARCH="arm64" ;;
         x86_64) RUST_TRIPLE="x86_64-apple-darwin"; MACOS_ARCH="x86_64" ;;
         *) fail "unrecognised macOS arch: $UNAME_M"; printf '\nwheels.sh: failed\n'; exit 1 ;;
     esac
-    macos_major=$(sw_vers -productVersion | cut -d. -f1)
-    TAG="macosx_${macos_major}_0_${MACOS_ARCH}"
+    . "$ROOT/scripts/package/apple.sh"
+    TAG=""
     NATIVE="libsipral_ffi.dylib"
     PY=python3
-    pass "macOS $(sw_vers -productVersion) $UNAME_M: tag $TAG"
+    pass "macOS $(sw_vers -productVersion) $UNAME_M: native built for macOS $APPLE_MACOS_MIN and later"
 elif [ "$UNAME_S" = "Linux" ]; then
     case "$UNAME_M" in
         x86_64) RUST_TRIPLE="x86_64-unknown-linux-gnu" ;;
@@ -130,9 +134,11 @@ STAGE="$OUT/_stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+[ "$UNAME_S" = "Darwin" ] && [ "$MANYLINUX" -eq 0 ] && TARGET_DIR="$(apple_target_dir "$TARGET_DIR")"
 
 step "building sipral-ffi, release, $VARIANT_LABEL (features $FFI_FEATURES)"
-if cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$RUST_TRIPLE" >"$STAGE/build.log" 2>&1; then
+if cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$RUST_TRIPLE" \
+    --target-dir "$TARGET_DIR" >"$STAGE/build.log" 2>&1; then
     pass "cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $RUST_TRIPLE"
 else
     fail "cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $RUST_TRIPLE:"
@@ -141,6 +147,27 @@ else
 fi
 NATIVE_PATH="$TARGET_DIR/$RUST_TRIPLE/release/$NATIVE"
 [ -f "$NATIVE_PATH" ] || { fail "$NATIVE_PATH was not produced"; printf '\nwheels.sh: failed\n'; exit 1; }
+
+# On macOS the tag is read back from the library itself, so the wheel
+# promises what was built. The static archive the same build wrote beside it
+# still has every object's own minimum, libopus's included, which the linked
+# library no longer shows: none may be newer than the tag.
+if [ "$UNAME_S" = "Darwin" ] && [ "$MANYLINUX" -eq 0 ]; then
+    built_min=$(apple_min_versions "$NATIVE_PATH" | tail -1)
+    if [ "$built_min" != "$APPLE_MACOS_MIN" ]; then
+        fail "$NATIVE was built for macOS ${built_min:-(none named)}, not $APPLE_MACOS_MIN"
+        printf '\nwheels.sh: failed\n'; exit 1
+    fi
+    ARCHIVE_PATH="$TARGET_DIR/$RUST_TRIPLE/release/libsipral_ffi.a"
+    if ! newest=$(apple_min_at_most "$ARCHIVE_PATH" "$APPLE_MACOS_MIN"); then
+        fail "an object in $ARCHIVE_PATH was built for macOS ${newest:-(none named)}, newer than $APPLE_MACOS_MIN"
+        printf '\nwheels.sh: failed\n'; exit 1
+    fi
+    # pip's tags: from macOS 11 on only the major version counts, and the
+    # minor is always 0
+    TAG="macosx_${built_min%%.*}_0_${MACOS_ARCH}"
+    pass "$NATIVE and every object in its build were built for macOS $APPLE_MACOS_MIN or older: tag $TAG"
+fi
 
 step "a build-only virtualenv for hatchling and wheel"
 "$PY" -m venv "$STAGE/venv" >"$STAGE/venv.log" 2>&1 && pass "$PY -m venv" || {
