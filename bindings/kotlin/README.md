@@ -242,8 +242,37 @@ Split in two, so that the part worth testing needs no Android:
   against the platform's stub jar, with TestNG: every one the framework may
   answer, turn away (`onReject` with no argument, with a reason, or with a
   message), hang up, abort, hold, resume or send a digit through reaches the
-  bridge. What the connection tells the framework cannot be seen there; it
-  was on an emulator, through `dumpsys telecom` (`docs/15-mobile.md`).
+  bridge, a hold says held at once, the framework's mute is reported, and
+  losing the call focus lets every call's device go before the service
+  tells the framework it has. What the connection tells the framework
+  cannot be seen there; it was on an emulator, through `dumpsys telecom`
+  (`docs/15-mobile.md`).
+
+A hold from the framework -- a cellular call answered over this one, a
+headset's or a car's button -- says held at once and holds the far end
+with a re-INVITE: `Connection.onHold` disconnects a connection that is not
+held within two seconds, so held cannot wait for the far end's answer.
+
+The call's audio, and C4 of `docs/13-client-requirements.md` -- the device
+taken away and given back mid-call -- is `CallAudio` in
+`org.sipral.telecom`, over an `AudioDevice`, and on Android
+`SipralCallAudio`, built once a call has media:
+
+```kotlin
+val audio = SipralCallAudio(context, bridge, callId, sip.call(handle)!!.media!!, scope)
+scope.launch { audio.transitions.collect { log(it) } }   // Started, Paused(reasons), Resumed,
+                                                        // RouteChanged, MuteChanged,
+                                                        // DeviceFailed, DeviceRestored, Stopped
+```
+
+It follows the call through the bridge (let go while held, taken back when
+active, closed when it ends), the call focus the framework moves between
+calling applications, the routes and mute the framework applies, and
+`ERROR_DEAD_OBJECT` from `AudioRecord` or `AudioTrack`, after which both are
+built again until they open. The far end is sent silence whenever there is
+no device: `SipralMedia` keeps its own frame clock. `CallAudioCheck.kt` runs
+all of it against a fake device on a plain JVM, and `docs/15-mobile.md`
+("C4") says what the emulator showed.
 
 `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` names the announcement an INVITE answered
 in `event.payload.announce.announcement`. `TelecomBridge` still matches by
@@ -254,8 +283,8 @@ because every announcement waits the same window.
 
 `android/sample` is a Compose skeleton, not a product: register, call, a
 simulated push standing in for a push service, answer and decline, hold, a
-DTMF keypad and the audio routes, with the device's microphone and speaker
-pumped through `SipralMedia` as voice-communication streams.
+DTMF keypad and the audio routes, with each call's microphone and speaker
+kept by `SipralCallAudio` and every audio transition in its log.
 
 `scripts/package/android.sh --out DIR --accept-android-sdk-licenses` builds all
 three -- `sipral.aar`, `sipral-telecom.aar` and the sample's APK -- inside the
@@ -276,6 +305,10 @@ loading both natives, and placing, holding, resuming and hanging up a call
 with the telecom framework following each state, a simulated push ringing
 through the framework and its incoming-call notification, and, registered
 with the lab's Asterisk, a call placed through it and an incoming INVITE
-from it rung, answered in the sample and hung up --
+from it rung, answered in the sample and hung up, a GSM call answered over a
+live call holding it and the call resumed with media both ways, and the
+audio server stopped mid-call and the device rebuilt --
 `docs/15-mobile.md` says what was seen and how to run it again. Not provable
-without a phone: real audio routes, and push delivery.
+without a phone: switching between real audio routes (the emulator offers
+only its speaker), a Bluetooth headset or a car, a carrier's call, and push
+delivery.

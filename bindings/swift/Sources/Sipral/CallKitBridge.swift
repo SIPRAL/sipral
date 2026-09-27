@@ -40,6 +40,8 @@ public final class CallKitBridge: @unchecked Sendable {
     private var callsByUuid: [UUID: Call] = [:]
     private var uuidsByCallHandle: [SipralHandle: UUID] = [:]
     private var watchTasks: [UUID: Task<Void, Never>] = [:]
+    private var audiosByUuid: [UUID: CallAudio] = [:]
+    private var sessionActive = false
 
     public init(provider: any CallKitProviding) {
         self.provider = provider
@@ -137,6 +139,7 @@ public final class CallKitBridge: @unchecked Sendable {
             if let call = callsByUuid.removeValue(forKey: uuid) {
                 uuidsByCallHandle.removeValue(forKey: call.handle)
             }
+            audiosByUuid.removeValue(forKey: uuid)
             watchTasks.removeValue(forKey: uuid)?.cancel()
         }
     }
@@ -164,12 +167,90 @@ public final class CallKitBridge: @unchecked Sendable {
         try call.hangup()
     }
 
+    /// Hold or resume, as CallKit asks: the call's device let go (or taken
+    /// back) at once, since the system is handing the session to another
+    /// call, and the far end told with a re-INVITE.
     public func handleHold(uuid: UUID, onHold: Bool) throws {
         guard let call = call(for: uuid) else { throw CallKitBridgeError.unknownCall(uuid) }
+        let audio = audio(for: uuid)
         if onHold {
+            audio?.pause(.held)
             try call.hold()
         } else {
+            audio?.resume(.held)
             try call.resume()
+        }
+    }
+
+    /// `CXSetMutedCallAction`: the far end is sent silence while muted.
+    public func handleMute(uuid: UUID, muted: Bool) throws {
+        guard call(for: uuid) != nil else { throw CallKitBridgeError.unknownCall(uuid) }
+        audio(for: uuid)?.setMuted(muted)
+    }
+
+    // MARK: - the call's audio
+
+    /// Hand `audio` the call CallKit knows as `uuid`: CallKit's hold, mute
+    /// and audio session reach it from now on. Until the system has
+    /// activated the session (`audioSessionActivated()`) the device stays let
+    /// go -- Apple's rule is that call audio starts in `didActivate`, not
+    /// before -- and it is let go again whenever the system deactivates it.
+    ///
+    /// The session's state is applied under the same lock `audioSessionActivated`
+    /// and `audioSessionDeactivated` take, so an activation arriving while this
+    /// runs is never lost between reading it and applying it.
+    public func attach(_ audio: CallAudio, to uuid: UUID) {
+        stateQueue.sync {
+            audiosByUuid[uuid] = audio
+            if sessionActive {
+                audio.resume(.sessionInactive)
+            } else {
+                audio.pause(.sessionInactive)
+            }
+        }
+    }
+
+    public func audio(for uuid: UUID) -> CallAudio? {
+        stateQueue.sync { audiosByUuid[uuid] }
+    }
+
+    /// `CXProviderDelegate.provider(_:didActivate:)`: the session is the
+    /// calls' now, and every attached call's device is taken back.
+    public func audioSessionActivated() {
+        stateQueue.sync {
+            sessionActive = true
+            for audio in audiosByUuid.values {
+                audio.resume(.sessionInactive)
+            }
+        }
+    }
+
+    /// `CXProviderDelegate.provider(_:didDeactivate:)`: the system took the
+    /// session back -- another call, the calls ending -- and every attached
+    /// call's device is let go.
+    public func audioSessionDeactivated() {
+        stateQueue.sync {
+            sessionActive = false
+            for audio in audiosByUuid.values {
+                audio.pause(.sessionInactive)
+            }
+        }
+    }
+
+    /// `CXProviderDelegate.providerDidReset(_:)`: the system's call service
+    /// restarted and every call it was showing is gone from it, so each is
+    /// ended here too -- hung up, its device let go -- rather than left
+    /// running with no call screen and no audio session.
+    public func providerDidReset() {
+        let (calls, audios) = stateQueue.sync { () -> ([Call], [CallAudio]) in
+            sessionActive = false
+            return (Array(callsByUuid.values), Array(audiosByUuid.values))
+        }
+        for audio in audios {
+            audio.pause(.sessionInactive)
+        }
+        for call in calls {
+            try? call.hangup()
         }
     }
 

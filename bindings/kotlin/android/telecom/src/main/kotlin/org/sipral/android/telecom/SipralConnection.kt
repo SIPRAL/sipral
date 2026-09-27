@@ -14,14 +14,10 @@ import android.telecom.Connection
 import android.telecom.DisconnectCause
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import org.sipral.telecom.AudioRoute
 import org.sipral.telecom.TelecomBridge
 import org.sipral.telecom.TelecomConnection
 import org.sipral.telecom.TelecomDisconnect
-
-/** One place audio can go, as the platform offers it. */
-data class AudioRoute(val id: String, val name: String, val kind: Kind) {
-    enum class Kind { EARPIECE, SPEAKER, WIRED_HEADSET, BLUETOOTH, STREAMING, OTHER }
-}
 
 /**
  * One self-managed call, as the telecom framework sees it.
@@ -30,8 +26,13 @@ data class AudioRoute(val id: String, val name: String, val kind: Kind) {
  * unhold, a DTMF tone -- goes to the [TelecomBridge] by call id; what the
  * bridge says about the call reaches the framework through [port], on the
  * main thread. Audio routing is the platform's: this class only reports the
- * routes the platform offers ([routes], [route]) and passes a choice back
- * ([requestRoute]); it never touches `AudioManager`.
+ * routes the platform offers ([routes], [route]) and the mute it applied
+ * ([muted]), and passes a choice back ([requestRoute]); it never touches
+ * `AudioManager`, which the framework's own guide warns against ("Don't use
+ * the `AudioManager#setCommunicationDevice` or
+ * `AudioManager#startBluetoothSco` APIs to manage audio routes when using
+ * Telecom", developer.android.com/develop/connectivity/telecom/selfManaged).
+ * [SipralCallAudio] is what follows all three with the call's device.
  */
 class SipralConnection internal constructor(
     val id: String,
@@ -48,6 +49,13 @@ class SipralConnection internal constructor(
 
     /** The route the platform is currently using. */
     val route: StateFlow<AudioRoute?> = routeFlow
+
+    private val mutedFlow = MutableStateFlow(false)
+
+    /** Whether the platform has muted this call -- from a Bluetooth
+     * headset's or a car's own control, which reach the call through the
+     * framework and nowhere else. */
+    val muted: StateFlow<Boolean> = mutedFlow
 
     init {
         connectionProperties = PROPERTY_SELF_MANAGED
@@ -161,11 +169,16 @@ class SipralConnection internal constructor(
         routeFlow.value = routeOf(endpoint)
     }
 
+    override fun onMuteStateChanged(isMuted: Boolean) {
+        mutedFlow.value = isMuted
+    }
+
     @Deprecated("Android 14 reports routes through onAvailableCallEndpointsChanged and onCallEndpointChanged")
     override fun onCallAudioStateChanged(state: CallAudioState) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             return
         }
+        mutedFlow.value = state.isMuted
         val offered = LEGACY_ROUTES.filter { (mask, _) -> state.supportedRouteMask and mask != 0 }
             .map { (mask, kind) -> AudioRoute(mask.toString(), kind.name.lowercase().replace('_', ' '), kind) }
         routesFlow.value = offered

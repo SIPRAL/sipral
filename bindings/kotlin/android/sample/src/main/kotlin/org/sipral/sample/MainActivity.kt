@@ -41,8 +41,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import org.sipral.android.telecom.AudioRoute
 import org.sipral.android.telecom.SipralTelecom
+import org.sipral.telecom.AudioRoute
 import org.sipral.telecom.TelecomCall
 import org.sipral.telecom.TelecomDirection
 import org.sipral.telecom.TelecomPhase
@@ -87,7 +87,8 @@ private fun Permissions() {
             add(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
-    // The answer is not kept here: AudioPump asks again when a call starts,
+    // The answer is not kept here: the call's device (AndroidAudioDevice)
+    // asks again every time it opens,
     // and a notification the user refused is simply not shown.
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ -> }
     LaunchedEffect(Unit) { ask.launch(wanted.toTypedArray()) }
@@ -171,6 +172,7 @@ private fun CallCard(model: SampleModel, call: TelecomCall) {
                     append(call.phase.name.lowercase())
                     if (call.announced && call.call == 0L) append(", announced by a push, INVITE not here yet")
                     if (call.remoteHold) append(", held by the far end")
+                    model.audioStates[call.id]?.let { append(", audio ${it.name.lowercase()}") }
                 },
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

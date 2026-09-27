@@ -12,6 +12,47 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A call's audio on Android survives what the platform does to it.**
+  `SipralCallAudio` (in the `ConnectionService` helper) keeps one call's
+  microphone and speaker through a cellular call answered over it — the
+  telecom framework's `onHold` lets the device go at once and the far end
+  is held with a re-INVITE, and `onUnhold` takes it back — through the
+  framework moving the call focus to another calling application
+  (`onConnectionServiceFocusLost`, API 28: the device is stopped before
+  `connectionServiceFocusReleased`), through the audio server dying
+  (`ERROR_DEAD_OBJECT` from `AudioRecord` or `AudioTrack`: both built again
+  until they open, silence sent meanwhile), and through the framework's
+  mute (`onMuteStateChanged`, a headset's or a car's button), with route
+  changes reported. Every change is an `AudioTransition` on
+  `transitions`, and `state` says where the audio stands. The logic is
+  `org.sipral.telecom.CallAudio`, over any `AudioDevice`, in the JVM
+  library; `AndroidAudioDevice` is its `AudioRecord`/`AudioTrack` device,
+  and the Compose sample uses it and shows every transition. Run on an
+  Android 16 emulator against the lab's Asterisk: a GSM call answered over
+  a live call, the call held and resumed with media both ways, and the
+  audio server stopped for 45 seconds mid-call and recovered
+  (`docs/15-mobile.md`).
+- **A call's audio on iOS survives what the system does to it.**
+  `CallAudio` keeps one call's device through `AVAudioSession`
+  interruptions (let go when one begins, taken back when it ends with
+  `.shouldResume`, and left for the application otherwise), CallKit's
+  hold, mute and audio session (`CallKitBridge.attach`: the device starts
+  only after `provider(_:didActivate:)` and is let go at
+  `didDeactivate`), a media services reset (the device built again from
+  nothing) and a device that stops on its own, with route changes and
+  their reason reported — each a `CallAudioTransition`.
+  `AudioSessionObserver` carries the session's notifications onto it, and
+  `VoiceProcessingAudioDevice` is a device over `AVAudioEngine` with the
+  system's voice processing, a new engine on every open.
+  `CallKitAdapter` configures the session's category on answering, handles
+  `CXSetMutedCallAction`, and forwards `didActivate`, `didDeactivate` and
+  `providerDidReset`.
+- **`sipral-io-coreaudio` on iOS reports a unit the system stopped.**
+  `Stream::poll` asks the unit whether it is still running, which is how an
+  `AVAudioSession` interruption or a media services reset shows itself to
+  the unit, and answers `StreamEvent::DeviceLost`; `Stream::recover` builds
+  a new unit, the only thing that works after a reset. It used to answer
+  `None` on iOS whatever had happened.
 - **ICE restarts in the full role, from either end.** A peer's re-offer
   that changes both `ice-ufrag` and `ice-pwd` is answered with new
   credentials of this end's own (RFC 8839 §4.4.2.1) instead of the ones the
@@ -802,6 +843,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A hold from Android's telecom framework says held at once.**
+  `TelecomBridge.hold` sent the re-INVITE and left the connection active
+  until the far end answered it, but `Connection.onHold` documents that a
+  connection not in `STATE_HOLDING` within two seconds is disconnected: a
+  slow far end, or one that refused the re-INVITE, cost the call when a
+  cellular call was answered over it. Hold and unhold now reach the
+  connection before the re-INVITE goes, and what the framework asked for
+  stands until the dialog agrees with it — a refused re-INVITE no longer
+  takes the call off hold under the call that has the microphone.
+- **CallKit's mute and reset reach the call.** `CallKitAdapter` did not
+  handle `CXSetMutedCallAction`, so muting from the system's call screen, a
+  headset or CarPlay did nothing, and its `providerDidReset` was empty, so a
+  call the system's call service forgot kept running with no call screen.
+  Mute now sends the far end silence, and a reset hangs every call up.
 - **A body the agent cannot read is refused 415 on every request that
   carries an offer, not only on the INVITE that opens a call.** A
   re-INVITE, UPDATE or PRACK whose body is not `application/sdp`, or is
@@ -1515,6 +1570,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **`AudioRoute` is `org.sipral.telecom.AudioRoute`.** It moved out of the
+  Android helper into the JVM library beside `CallAudio`, which reports
+  route changes with it; `SipralConnection.routes`, `route` and
+  `requestRoute` take the same type under its new name. The Android
+  sample's own `AudioPump` is gone, replaced by `SipralCallAudio`.
 - **The `sipral` crate's own description of its bindings names all four.**
   `crates/sipral/README.md`, its `Cargo.toml` description and
   `bindings/dotnet/Sipral/README.md` said "Swift, .NET and Kotlin bindings,"

@@ -6,6 +6,7 @@
 // to nothing, and `CallKitPushKitBridgeTests.swift` covers the bridge
 // against a recording provider instead.
 #if canImport(CallKit) && os(iOS)
+@preconcurrency import AVFoundation
 import CallKit
 import XCTest
 @testable import Sipral
@@ -28,6 +29,12 @@ final class RecordingHold: CXSetHeldCallAction, @unchecked Sendable {
 }
 
 final class RecordingDtmf: CXPlayDTMFCallAction, @unchecked Sendable {
+    var outcome = ActionOutcome.pending
+    override func fulfill() { outcome = .fulfilled }
+    override func fail() { outcome = .failed }
+}
+
+final class RecordingMute: CXSetMutedCallAction, @unchecked Sendable {
     var outcome = ActionOutcome.pending
     override func fulfill() { outcome = .fulfilled }
     override func fail() { outcome = .failed }
@@ -101,9 +108,35 @@ final class CallKitAdapterTests: XCTestCase {
         let bobConfirmed = await bobCallEvents.first(within: 5) { $0.kind == .callConfirmed }
         XCTAssertNotNil(bobConfirmed, "the application's reader lost the confirmation to the bridge's")
 
+        // The session configured on answering, and the call's audio started
+        // only once CallKit says it has activated it.
+        let session = AVAudioSession.sharedInstance()
+        XCTAssertEqual(session.category, .playAndRecord, "answering did not configure the call's session")
+        XCTAssertEqual(session.mode, .voiceChat)
+        let device = FakeCallAudioDevice()
+        let audio = CallAudio(
+            sampleRate: 8000, frameSamples: 160, frames: AsyncStream { _ in }, send: { _ in }, device: device,
+            retryDelays: [0]
+        )
+        defer { audio.close() }
+        bridge.attach(audio, to: uuid)
+        audio.start()
+        XCTAssertEqual(audio.pauses, [.sessionInactive])
+        adapter.provider(provider, didActivate: session)
+        let running = await eventually(within: 5) { audio.state == .running }
+        XCTAssertTrue(running, "didActivate did not start the call's audio: \(audio.history)")
+
+        let mute = RecordingMute(call: uuid, muted: true)
+        adapter.provider(provider, perform: mute)
+        XCTAssertEqual(mute.outcome, .fulfilled)
+        XCTAssertEqual(audio.history.last, .muteChanged(true))
+
         let hold = RecordingHold(call: uuid, onHold: true)
         adapter.provider(provider, perform: hold)
         XCTAssertEqual(hold.outcome, .fulfilled)
+        XCTAssertEqual(audio.pauses, [.held], "CallKit's hold did not let the device go")
+        adapter.provider(provider, didDeactivate: session)
+        XCTAssertEqual(audio.pauses, [.held, .sessionInactive])
         let held = await aliceEvents.first(within: 5) { $0.callData?.heldThere == true }
         XCTAssertNotNil(held, "CallKit's hold never reached the caller")
         let heldHere = await bobCallEvents.first(within: 5) { $0.callData?.heldHere == true }
@@ -117,6 +150,9 @@ final class CallKitAdapterTests: XCTestCase {
             $0.kind == .sessionChanged && $0.callData?.heldThere == false
         }
         XCTAssertNotNil(resumed, "CallKit's resume never reached the caller")
+        adapter.provider(provider, didActivate: session)
+        let back = await eventually(within: 5) { device.opened == 2 && audio.state == .running }
+        XCTAssertTrue(back, "the call's audio did not come back after the hold: \(audio.history)")
 
         let dtmf = RecordingDtmf(call: uuid, digits: "7", type: .singleTone)
         adapter.provider(provider, perform: dtmf)
@@ -143,9 +179,12 @@ final class CallKitAdapterTests: XCTestCase {
         adapter.provider(provider, perform: answer)
         let end = RecordingEnd(call: stranger)
         adapter.provider(provider, perform: end)
+        let mute = RecordingMute(call: stranger, muted: true)
+        adapter.provider(provider, perform: mute)
 
         XCTAssertEqual(answer.outcome, .failed)
         XCTAssertEqual(end.outcome, .failed)
+        XCTAssertEqual(mute.outcome, .failed)
     }
 }
 #endif

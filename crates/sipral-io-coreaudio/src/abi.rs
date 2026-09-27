@@ -191,6 +191,13 @@ pub(crate) const PROPERTY_SET_RENDER_CALLBACK: u32 = 23;
 #[cfg(target_os = "macos")]
 pub(crate) const PROPERTY_CURRENT_DEVICE: u32 = 2000;
 
+/// `kAudioOutputUnitProperty_IsRunning`: a `UInt32`, non-zero while the unit's
+/// I/O is running. iOS only here: it is how a stream learns that the system
+/// stopped its unit — an audio session interruption, or the media services
+/// going — which nothing else tells this crate.
+#[cfg(target_os = "ios")]
+pub(crate) const PROPERTY_IS_RUNNING: u32 = 2001;
+
 /// `kAudioOutputUnitProperty_EnableIO`.
 pub(crate) const PROPERTY_ENABLE_IO: u32 = 2003;
 

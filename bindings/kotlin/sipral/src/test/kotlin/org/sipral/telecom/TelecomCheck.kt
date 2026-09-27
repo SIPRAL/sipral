@@ -37,8 +37,9 @@ import org.sipral.idiomatic.SipralClient
 fun main() {
     val said = try {
         val fakes = fakeSequences()
+        val audio = callAudioSequences()
         val real = runBlocking { overLoopback() }
-        "$fakes; $real"
+        "$fakes; $audio; $real"
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)
@@ -51,7 +52,7 @@ fun main() {
 
 /** Everything every fake was asked, in one order, so that "reported before
  * announced" is a comparison of two indices. */
-private class Log {
+internal class Log {
     val lines = mutableListOf<String>()
 
     @Synchronized
@@ -67,7 +68,7 @@ private class Log {
     fun count(prefix: String): Int = snapshot().count { it.startsWith(prefix) }
 }
 
-private class FakePlatform(val log: Log) : TelecomPlatform {
+internal class FakePlatform(val log: Log) : TelecomPlatform {
     var bridge: TelecomBridge? = null
     val connections = mutableMapOf<String, FakeConnection>()
 
@@ -97,7 +98,7 @@ private class FakePlatform(val log: Log) : TelecomPlatform {
     }
 }
 
-private class FakeConnection(val id: String, val log: Log) : TelecomConnection {
+internal class FakeConnection(val id: String, val log: Log) : TelecomConnection {
     @Volatile var state = "new"
 
     @Volatile var farEndHolding = false
@@ -129,7 +130,7 @@ private class FakeConnection(val id: String, val log: Log) : TelecomConnection {
     }
 }
 
-private class FakeSip(val log: Log) : SipCalls {
+internal class FakeSip(val log: Log) : SipCalls {
     var nextAnnounce: SipralAnnounced = SipralAnnounced.Waiting(100)
     var announceFails = false
     var forgetCrosses = false
@@ -178,9 +179,9 @@ private class Rig {
     val bridge = TelecomBridge(platform, sip) { "c${++ids}" }.also { platform.bridge = it }
 }
 
-private const val ACCOUNT = 7L
+internal const val ACCOUNT = 7L
 
-private fun event(kind: SipralEventKind, call: Long = 0, account: Long = 0, message: String? = null) = SipralEvent(
+internal fun event(kind: SipralEventKind, call: Long = 0, account: Long = 0, message: String? = null) = SipralEvent(
     size = 0,
     stack = 1,
     kind = kind.value.toLong(),
@@ -189,7 +190,7 @@ private fun event(kind: SipralEventKind, call: Long = 0, account: Long = 0, mess
     message = message?.toByteArray(Charsets.UTF_8),
 )
 
-private fun invite(from: String) =
+internal fun invite(from: String) =
     "INVITE sip:bob@example.invalid SIP/2.0\r\n" +
         "Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1\r\n" +
         "From: $from;tag=1\r\n" +
@@ -223,10 +224,12 @@ private fun fakeSequences(): String {
         assertEquals("active", conn.state)
         bridge.hold(id)
         assertEquals(1, log.count("hold 900"))
+        assertEquals("held", conn.state, "not held until the re-INVITE was answered")
         sip.hold = true to false
         bridge.onEvent(event(SipralEventKind.SESSION_CHANGED, call = 900))
         assertEquals("held", conn.state)
         bridge.unhold(id)
+        assertEquals("active", conn.state, "not active until the re-INVITE was answered")
         sip.hold = false to true
         bridge.onEvent(event(SipralEventKind.SESSION_CHANGED, call = 900))
         assertEquals("active", conn.state)
@@ -243,6 +246,34 @@ private fun fakeSequences(): String {
         assertEquals(1, log.count("release 900"))
         assertEquals(1, log.count("conn $id disconnected"), "the framework was told twice")
         assertTrue(bridge.calls.value.isEmpty())
+        ran++
+    }
+
+    // The platform holds the call for a cellular one: held at once, and
+    // still held when the far end refuses the re-INVITE, since the
+    // microphone is someone else's until the platform says otherwise. A
+    // hold made on the call directly, not through the framework, is
+    // followed once the framework's own request has been settled.
+    Rig().run {
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 910, account = ACCOUNT, message = invite("<sip:alice@example.invalid>")))
+        val id = bridge.calls.value.single().id
+        val conn = platform.create(id)
+        bridge.answer(id)
+        bridge.onEvent(event(SipralEventKind.CALL_CONFIRMED, call = 910))
+        bridge.hold(id)
+        assertEquals("held", conn.state)
+        assertEquals(TelecomPhase.HELD, bridge.calls.value.single().phase)
+        sip.hold = false to false
+        bridge.onEvent(event(SipralEventKind.SESSION_CHANGE_FAILED, call = 910))
+        assertEquals("held", conn.state, "a refused re-INVITE took the call off hold under the platform")
+        assertEquals(TelecomPhase.HELD, bridge.calls.value.single().phase)
+        bridge.unhold(id)
+        assertEquals("active", conn.state)
+        assertEquals(1, log.count("resume 910"))
+        bridge.onEvent(event(SipralEventKind.SESSION_CHANGED, call = 910))
+        sip.hold = true to false
+        bridge.onEvent(event(SipralEventKind.SESSION_CHANGED, call = 910))
+        assertEquals("held", conn.state, "a hold made on the call itself was not followed")
         ran++
     }
 
@@ -484,7 +515,8 @@ private fun fakeSequences(): String {
     assertEquals(0, statusOf(invite("<sip:a@example.invalid>").toByteArray()))
     ran++
 
-    return "$ran sequences against fake telecom and SIP sides (push before INVITE, answer before INVITE, " +
+    return "$ran sequences against fake telecom and SIP sides (push before INVITE, the platform's hold " +
+        "kept through a refused re-INVITE, answer before INVITE, " +
         "two callers out of order, INVITE before push both ways, decline crossing a match, busy, refused, missed, " +
         "a framework that will not take the call, a late confirmation after a hang-up, a call over before its " +
         "connection existed, every call ended at once)"
@@ -541,11 +573,14 @@ private suspend fun overLoopback(): String {
         placed.waitConfirmed(15_000)
         log.waitFor("the connection to go active") { conn.state == "active" }
 
+        // Held and active again at once, as the framework requires; the far
+        // end follows when the re-INVITE reaches it.
         bridge.hold(id)
-        log.waitFor("the connection to say held") { conn.state == "held" }
-        assertTrue(placed.holdState.second, "the caller does not see itself held")
+        assertEquals("held", conn.state)
+        log.waitFor("the caller to see itself held") { placed.holdState.second }
         bridge.unhold(id)
-        log.waitFor("the connection to come off hold") { conn.state == "active" }
+        assertEquals("active", conn.state)
+        log.waitFor("the caller to see itself resumed") { !placed.holdState.second }
 
         placed.hold()
         log.waitFor("the far end's hold to reach the connection") { conn.farEndHolding }

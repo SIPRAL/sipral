@@ -83,6 +83,61 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertThrowsError(try bridge.handleEnd(uuid: uuid))
         XCTAssertThrowsError(try bridge.handleHold(uuid: uuid, onHold: true))
         XCTAssertThrowsError(try bridge.handleDtmf(uuid: uuid, digits: "1"))
+        XCTAssertThrowsError(try bridge.handleMute(uuid: uuid, muted: true))
+    }
+
+    /// CallKit's hold, mute and audio session reach the call's audio: the
+    /// device shut until the system activates the session, let go the moment
+    /// CallKit holds the call (before the far end has answered the
+    /// re-INVITE), taken back on resume, muted, let go when the system
+    /// deactivates the session, and the call hung up when CallKit's own
+    /// service resets under it.
+    func testCallKitsHoldMuteAndSessionReachTheAttachedCallsAudio() async throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
+        defer { aliceCall.close(); bobCall.close() }
+
+        let bridge = CallKitBridge(provider: RecordingProvider())
+        let uuid = UUID()
+        bridge.bind(uuid: uuid, to: bobCall)
+        let aliceEvents = Recorder(aliceCall.events())
+        try bridge.handleAnswer(uuid: uuid)
+        _ = await aliceEvents.first(within: 5) { $0.kind == .callConfirmed }
+
+        let device = FakeCallAudioDevice()
+        let audio = CallAudio(
+            sampleRate: 8000, frameSamples: 160, frames: AsyncStream { _ in }, send: { _ in }, device: device,
+            retryDelays: [0]
+        )
+        defer { audio.close() }
+        bridge.attach(audio, to: uuid)
+        audio.start()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(device.opened, 0, "the device opened before CallKit activated the session")
+
+        bridge.audioSessionActivated()
+        let running = await eventually(within: 5) { audio.state == .running }
+        XCTAssertTrue(running)
+
+        try bridge.handleHold(uuid: uuid, onHold: true)
+        XCTAssertEqual(audio.pauses, [.held], "the device was not let go before the hold returned")
+        let farEndHeld = await aliceEvents.first(within: 5) { $0.kind == .sessionChanged }
+        XCTAssertNotNil(farEndHeld, "the far end never heard the hold")
+        try bridge.handleHold(uuid: uuid, onHold: false)
+        let resumed = await eventually(within: 5) { device.opened == 2 && audio.state == .running }
+        XCTAssertTrue(resumed)
+
+        try bridge.handleMute(uuid: uuid, muted: true)
+        XCTAssertEqual(audio.history.last, .muteChanged(true))
+
+        bridge.audioSessionDeactivated()
+        XCTAssertEqual(audio.pauses, [.sessionInactive])
+
+        bridge.providerDidReset()
+        let hungUp = await aliceEvents.first(within: 5) { $0.kind == .callEnded }
+        XCTAssertNotNil(hungUp, "a call CallKit forgot was left up")
     }
 
     /// Alice calls Bob over loopback; Bob's call is left ringing, as a call

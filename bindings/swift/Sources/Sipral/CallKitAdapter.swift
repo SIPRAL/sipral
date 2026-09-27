@@ -6,6 +6,7 @@
 // let this file compile-fail on a Mac. `os(iOS)` is what actually has
 // `CXProvider`, and is also true under Mac Catalyst.
 #if canImport(CallKit) && os(iOS)
+@preconcurrency import AVFoundation
 import CallKit
 import Foundation
 
@@ -64,11 +65,39 @@ public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendab
 }
 
 extension CallKitAdapter: CXProviderDelegate {
-    public func providerDidReset(_ provider: CXProvider) {}
+    public func providerDidReset(_ provider: CXProvider) {
+        bridge?.providerDidReset()
+    }
+
+    /// The session a call needs, set before CallKit activates it: Apple's
+    /// guidance for CallKit is to configure the audio session's category and
+    /// mode when answering or starting a call, and leave activating it to the
+    /// system, which then calls `provider(_:didActivate:)`.
+    public static func configureAudioSession(_ session: AVAudioSession = .sharedInstance()) throws {
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
+    }
 
     public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         do {
+            try Self.configureAudioSession()
             try bridge?.handleAnswer(uuid: action.callUUID)
+            action.fulfill()
+        } catch {
+            action.fail()
+        }
+    }
+
+    public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+        bridge?.audioSessionActivated()
+    }
+
+    public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+        bridge?.audioSessionDeactivated()
+    }
+
+    public func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+        do {
+            try bridge?.handleMute(uuid: action.callUUID, muted: action.isMuted)
             action.fulfill()
         } catch {
             action.fail()

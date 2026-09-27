@@ -660,15 +660,24 @@ impl Stream {
             .all(crate::hal::is_alive)
     }
 
-    /// On iOS a route change arrives through `AVAudioSession`, which belongs
-    /// to the application, so there is nothing here to ask.
+    /// Whether the unit is still running, which is what iOS lets this crate
+    /// see of the device being taken away.
+    ///
+    /// The route and its interruptions belong to `AVAudioSession` and are
+    /// delivered to the application, not here. What does reach the unit is
+    /// their effect: the system stops it when an interruption begins — a
+    /// cellular call, another application's session — and one whose media
+    /// services were reset no longer answers at all. Either way the unit is
+    /// not running while the stream still thinks it is.
     #[cfg(target_os = "ios")]
-    #[expect(
-        clippy::unused_self,
-        reason = "the answer is the platform's rather than this stream's, and staying a method keeps the caller free of a cfg"
-    )]
     fn device_present(&self) -> bool {
-        true
+        unit_still_running(get::<u32>(
+            self.unit,
+            "AudioUnitGetProperty",
+            abi::PROPERTY_IS_RUNNING,
+            abi::SCOPE_GLOBAL,
+            0,
+        ))
     }
 
     /// What the stream was opened at.
@@ -788,23 +797,26 @@ impl Stream {
     /// microphone's, which are often not the same object — is still alive, so
     /// an unplugged headset or microphone is reported whether or not anything
     /// was flowing through it, and losing either half is losing the stream.
-    /// On iOS it always answers `None`: the route belongs to `AVAudioSession`, and
-    /// interruptions and route changes are delivered to the application rather
-    /// than to this crate, so anything said here would be a guess dressed as a
-    /// fact.
+    /// On iOS the unit is asked whether it is still running: the system stops
+    /// it when an `AVAudioSession` interruption begins, and a unit whose media
+    /// services were reset does not answer, so both are reported here as the
+    /// device lost. A route change on iOS is not a loss — the unit follows the
+    /// session's route — and is the application's to hear about, from
+    /// `AVAudioSession`. [`Stream::recover`] builds a new unit, which is the
+    /// only thing that works after a reset; while an interruption lasts it
+    /// fails, and is tried again once the application's session is active.
     ///
     /// A stream that has said [`StreamEvent::DeviceLost`] is stopped. What it
     /// had already captured can still be read out; nothing further arrives,
     /// and the speaker ring fills and takes no more. [`Stream::recover`] is
     /// what puts a device back under it.
     ///
-    /// The macOS answer costs two property reads, so it belongs beside
-    /// [`DeviceMonitor::poll`] a few times a second rather than beside
-    /// [`Controls::level`] on every drawn frame. Once the loss has been
-    /// reported it costs a comparison: every answer after the first is `None`,
-    /// because a device does not go twice.
-    ///
-    /// [`DeviceMonitor::poll`]: crate::DeviceMonitor::poll
+    /// The macOS answer costs two property reads and the iOS one a single
+    /// read of the unit, so it belongs beside `DeviceMonitor::poll` (macOS)
+    /// a few times a second rather than beside [`Controls::level`] on every
+    /// drawn frame. Once the loss has been reported it costs a comparison:
+    /// every answer after the first is `None`, because a device does not go
+    /// twice.
     pub fn poll(&mut self) -> Option<StreamEvent> {
         if !self.is_running() || self.device_present() {
             return None;
@@ -1199,6 +1211,15 @@ fn route_of(unit: sys::Unit) -> Route {
         playback: on(abi::BUS_OUTPUT),
         capture: on(abi::BUS_INPUT),
     }
+}
+
+/// What `kAudioOutputUnitProperty_IsRunning` read back says about a unit the
+/// stream started: running only on a non-zero answer. A read that failed is a
+/// unit that is not there to answer — the media services were reset under it —
+/// and that is not a running one either.
+#[cfg(any(target_os = "ios", test))]
+fn unit_still_running(answer: Result<u32, Error>) -> bool {
+    matches!(answer, Ok(running) if running != 0)
 }
 
 /// On iOS the route is the audio session's, and there is no device identifier
@@ -1748,6 +1769,129 @@ mod tests {
         stream.route = gone();
         assert_eq!(stream.poll(), None);
         assert_eq!(stream.health, Health::Stopped);
+    }
+
+    #[test]
+    fn a_unit_is_running_only_while_it_says_so() {
+        use super::unit_still_running;
+        use crate::status::OsStatus;
+
+        assert!(unit_still_running(Ok(1)));
+        // stopped by the system: an interruption began
+        assert!(!unit_still_running(Ok(0)));
+        // not there to answer: the media services were reset under it
+        assert!(!unit_still_running(Err(Error::Call {
+            call: "AudioUnitGetProperty",
+            status: OsStatus::new(-50),
+        })));
+    }
+
+    /// What an `AVAudioSession` interruption does to a running unit, done by
+    /// hand on the iOS simulator — which cannot raise a real interruption:
+    /// the unit stopped behind the stream's back is reported lost once, and
+    /// `recover` puts a new unit under the stream that carries frames again.
+    /// Run with `cargo test --target aarch64-apple-ios-sim --no-run` and the
+    /// test binary under `xcrun simctl spawn <device> <binary> --ignored`.
+    ///
+    /// A voice-processing unit starts only in a session whose category
+    /// records, which an application sets on `AVAudioSession` and a test
+    /// binary has nobody to set: [`record_and_play`] does it the way the
+    /// Objective-C runtime lets C do it.
+    #[cfg(target_os = "ios")]
+    #[test]
+    #[ignore = "opens the real default device"]
+    fn a_unit_the_system_stopped_is_reported_lost_and_recovered_onto_a_new_one() {
+        use super::{Stream, StreamConfig};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        record_and_play();
+        let format = StreamFormat::narrowband();
+        let mut stream = Stream::open(StreamConfig::new(format)).expect("open the default device");
+        stream.start().expect("start");
+        assert_eq!(stream.poll(), None, "a running unit reported lost");
+
+        // SAFETY: the unit is the stream's and open; this is what the system
+        // does to it when an interruption begins.
+        let stopped = unsafe { crate::sys::stop_unit(stream.unit) };
+        assert_eq!(stopped, 0);
+        assert_eq!(stream.poll(), Some(crate::device::StreamEvent::DeviceLost));
+        assert!(!stream.is_running());
+        assert_eq!(stream.poll(), None, "reported twice");
+
+        let old = stream.unit;
+        let mut stream = stream.recover().expect("recover onto a new unit");
+        assert!(stream.is_running());
+        assert_ne!(stream.unit, old, "the stopped unit was reused");
+        assert_eq!(stream.poll(), None);
+
+        let mut frame = vec![0i16; format.frame_samples()];
+        let silence = vec![0i16; format.frame_samples()];
+        let until = Instant::now() + Duration::from_secs(2);
+        let mut arrived = 0;
+        while Instant::now() < until && arrived < 5 {
+            let _ = stream.write(&silence);
+            while stream.read(&mut frame) {
+                arrived += 1;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        println!(
+            "{arrived} frames from the recovered unit, {}",
+            stream.counters()
+        );
+        assert!(arrived >= 5, "the recovered unit carried {arrived} frames");
+        stream.close().expect("close");
+    }
+
+    /// `[[AVAudioSession sharedInstance] setCategory:PlayAndRecord error:nil]`
+    /// and `setActive:YES error:nil`, through the Objective-C runtime's C
+    /// entry points, from Apple's public `objc/message.h` and
+    /// `AVFAudio/AVAudioSessionTypes.h`.
+    #[cfg(target_os = "ios")]
+    fn record_and_play() {
+        use core::ffi::c_char;
+
+        type Id = *mut c_void;
+        #[link(name = "objc")]
+        unsafe extern "C" {
+            fn objc_getClass(name: *const c_char) -> Id;
+            fn sel_registerName(name: *const c_char) -> Id;
+            fn objc_msgSend();
+        }
+        #[link(name = "AVFAudio", kind = "framework")]
+        unsafe extern "C" {
+            static AVAudioSessionCategoryPlayAndRecord: Id;
+        }
+
+        // SAFETY: each message is sent to the object and with the argument
+        // types the header declares for it, through `objc_msgSend` cast to
+        // exactly that signature, which is how the runtime is called from C.
+        unsafe {
+            let get: unsafe extern "C" fn(Id, Id) -> Id =
+                core::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let set_category: unsafe extern "C" fn(Id, Id, Id, *mut Id) -> bool =
+                core::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let set_active: unsafe extern "C" fn(Id, Id, bool, *mut Id) -> bool =
+                core::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let session = get(
+                objc_getClass(c"AVAudioSession".as_ptr()),
+                sel_registerName(c"sharedInstance".as_ptr()),
+            );
+            assert!(!session.is_null(), "no AVAudioSession");
+            assert!(set_category(
+                session,
+                sel_registerName(c"setCategory:error:".as_ptr()),
+                AVAudioSessionCategoryPlayAndRecord,
+                ptr::null_mut(),
+            ));
+            assert!(set_active(
+                session,
+                sel_registerName(c"setActive:error:".as_ptr()),
+                true,
+                ptr::null_mut(),
+            ));
+        }
     }
 
     #[test]

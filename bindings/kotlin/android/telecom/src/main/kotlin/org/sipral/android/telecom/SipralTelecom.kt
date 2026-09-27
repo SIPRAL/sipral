@@ -11,6 +11,8 @@ import android.telecom.TelecomManager
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import org.sipral.telecom.AudioPause
+import org.sipral.telecom.CallAudio
 import org.sipral.telecom.TelecomBridge
 
 /**
@@ -86,6 +88,40 @@ object SipralTelecom {
             .build()
         context.getSystemService(TelecomManager::class.java).registerPhoneAccount(account)
         return handle
+    }
+
+    private val callFocusFlow = MutableStateFlow(true)
+    private val audios = ConcurrentHashMap.newKeySet<CallAudio>()
+
+    /** Whether this application's `ConnectionService` has the call focus:
+     * true until the framework says otherwise, and on releases before
+     * Android 9, which has no call focus, true throughout. */
+    val callFocus: StateFlow<Boolean> = callFocusFlow
+
+    /** The framework moved the call focus. Every call's audio is let go, or
+     * taken back, before this returns. */
+    internal fun callFocusChanged(has: Boolean) {
+        callFocusFlow.value = has
+        for (audio in audios) {
+            applyFocus(audio, has)
+        }
+    }
+
+    internal fun register(audio: CallAudio) {
+        audios.add(audio)
+        applyFocus(audio, callFocusFlow.value)
+    }
+
+    internal fun unregister(audio: CallAudio) {
+        audios.remove(audio)
+    }
+
+    private fun applyFocus(audio: CallAudio, has: Boolean) {
+        if (has) {
+            audio.resume(AudioPause.CALL_FOCUS_LOST)
+        } else {
+            audio.pause(AudioPause.CALL_FOCUS_LOST)
+        }
     }
 
     internal fun created(id: String, connection: SipralConnection) {

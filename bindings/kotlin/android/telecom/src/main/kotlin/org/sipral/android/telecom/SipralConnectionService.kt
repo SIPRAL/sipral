@@ -33,6 +33,23 @@ class SipralConnectionService : ConnectionService() {
         failed(request)
     }
 
+    // The call focus, from Android 9: the framework moves it between calling
+    // applications as the user moves between their calls, and on losing it
+    // "The ConnectionService should release the call resources and invokes
+    // connectionServiceFocusReleased() to inform telecom that it has
+    // released the call resources"
+    // (developer.android.com/reference/android/telecom/ConnectionService#onConnectionServiceFocusLost()).
+    // Every call's device is let go before the framework is told so.
+    override fun onConnectionServiceFocusLost() {
+        SipralTelecom.callFocusChanged(false)
+        connectionServiceFocusReleased()
+    }
+
+    // "The ConnectionService can acquire the call resources at this time."
+    override fun onConnectionServiceFocusGained() {
+        SipralTelecom.callFocusChanged(true)
+    }
+
     private fun create(request: ConnectionRequest): Connection {
         val bridge: TelecomBridge = SipralTelecom.bridge
             ?: return Connection.createFailedConnection(DisconnectCause(DisconnectCause.ERROR, "no bridge installed"))

@@ -20,17 +20,21 @@ import androidx.lifecycle.viewModelScope
 import java.net.Inet4Address
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.sipral.SipralEventKind
 import org.sipral.SipralIce
 import org.sipral.android.telecom.AndroidTelecomPlatform
-import org.sipral.android.telecom.AudioRoute
+import org.sipral.android.telecom.SipralCallAudio
 import org.sipral.android.telecom.SipralTelecom
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.SipralTurnServer
 import org.sipral.idiomatic.natOf
+import org.sipral.telecom.AudioRoute
+import org.sipral.telecom.AudioState
+import org.sipral.telecom.AudioTransition
 import org.sipral.telecom.IdiomaticSipCalls
 import org.sipral.telecom.TelecomBridge
 import org.sipral.telecom.TelecomCall
@@ -71,7 +75,12 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
     private var account: SipralAccount? = null
     private var sip: IdiomaticSipCalls? = null
     private var bridge: TelecomBridge? = null
-    private val pumps = HashMap<String, AudioPump>()
+    private val audio = HashMap<String, SipralCallAudio>()
+    private val audioWatchers = HashMap<String, List<Job>>()
+
+    /** Each call's audio state, by call id, for its card. */
+    var audioStates by mutableStateOf<Map<String, AudioState>>(emptyMap())
+        private set
 
     private fun append(line: String) {
         log.add(0, line)
@@ -223,19 +232,30 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Start a call's audio once it has media, and stop it once the call is
-     * gone; take the incoming-call notification down once nothing rings. */
+     * gone; take the incoming-call notification down once nothing rings.
+     * Everything that happens to a call's audio in between -- held for a
+     * cellular call, the call focus lost, a new route, the audio server
+     * restarting -- is [SipralCallAudio]'s, and shown in the log. */
     private fun reconcile(now: List<TelecomCall>) {
         calls = now
         val sip = sip ?: return
+        val bridge = bridge ?: return
         for (call in now) {
-            if (call.id in pumps || call.call == 0L) {
+            if (call.id in audio || call.call == 0L) {
                 continue
             }
             val media = sip.call(call.call)?.media ?: continue
-            pumps[call.id] = AudioPump(context, media, scope)
+            val started = SipralCallAudio(context, bridge, call.id, media, scope)
+            audio[call.id] = started
+            audioWatchers[call.id] = listOf(
+                scope.launch { started.transitions.collect { append("audio ${describe(it)}") } },
+                scope.launch { started.state.collect { audioStates = audioStates + (call.id to it) } },
+            )
         }
-        for (gone in pumps.keys - now.map { it.id }.toSet()) {
-            pumps.remove(gone)?.close()
+        for (gone in audio.keys - now.map { it.id }.toSet()) {
+            audio.remove(gone)?.close()
+            audioWatchers.remove(gone)?.forEach { it.cancel() }
+            audioStates = audioStates - gone
         }
         if (now.none { it.phase == TelecomPhase.RINGING }) {
             context.getSystemService(NotificationManager::class.java).cancel(INCOMING_NOTIFICATION)
@@ -281,11 +301,24 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
             ?: "127.0.0.1"
     }
 
+    private fun describe(transition: AudioTransition): String = when (transition) {
+        AudioTransition.Started -> "started"
+        is AudioTransition.Paused -> "paused: ${transition.reasons.joinToString { it.name.lowercase() }}"
+        AudioTransition.Resumed -> "resumed"
+        is AudioTransition.RouteChanged -> "route ${transition.route.name}"
+        is AudioTransition.MuteChanged -> if (transition.muted) "muted" else "unmuted"
+        is AudioTransition.DeviceFailed ->
+            "device failed (${transition.direction.name.lowercase()} ${transition.code}" +
+                (transition.detail?.let { ", $it" } ?: "") + ")"
+        is AudioTransition.DeviceRestored -> "device restored after ${transition.attempts} tries"
+        AudioTransition.Stopped -> "stopped"
+    }
+
     override fun onCleared() {
-        for (pump in pumps.values) {
-            pump.close()
+        for (one in audio.values) {
+            one.close()
         }
-        pumps.clear()
+        audio.clear()
         // Before the client goes: once it has, nothing would ever end the
         // calls the framework is still showing.
         bridge?.endAll()

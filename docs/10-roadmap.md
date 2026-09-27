@@ -410,10 +410,20 @@ after it. What is left is platform work, and platform work needs the platform.
 - **C1, D4** — the lifecycle model behind all of them. *Built*, and the reason
   the rest of this phase is now within reach.
 - **C4** — the audio device taken away and given back during a live call,
-  survived unaided, every transition reported. **Not built, and not buildable
-  from here**: it is `AVAudioSession` interruptions, which
-  `sipral-io-coreaudio` leaves to the application on iOS, and `AudioManager`,
-  for which no Android device crate exists yet, and a device to run them on.
+  survived unaided, every transition reported. *Built*, in the layer where
+  each platform delivers the signal: on Android the `ConnectionService`
+  helper's `SipralCallAudio` over `CallAudio` (the framework's hold, the call
+  focus, routes, mute, and the audio server dying under `AudioRecord` and
+  `AudioTrack`), run on an emulator with a GSM call answered over a live
+  call through the lab's Asterisk and the audio server stopped mid-call; on
+  iOS the Swift package's `CallAudio`, `AudioSessionObserver` and
+  `VoiceProcessingAudioDevice` with `CallKitBridge` (interruptions, routes,
+  media services lost and reset, CallKit's hold, mute and audio session),
+  run on the simulator with the system's notifications posted; and
+  `sipral-io-coreaudio` reporting on iOS a unit the system stopped
+  (`docs/15-mobile.md`, "C4"). What needs a phone is the system's own
+  delivery: a carrier's call, a Bluetooth headset, a car, a route switched
+  between real outputs.
 - **`ConnectionService` and the AAR** — C2 carried onto Android's telecom
   framework as a self-managed connection, and the AAR with both natives for
   arm64-v8a, armeabi-v7a and x86_64. *Built, and run on an emulator*: the

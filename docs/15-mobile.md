@@ -19,9 +19,10 @@ refreshed, and always before an INVITE has arrived. That is `C1` in
 `docs/13-client-requirements.md`, and `C2` and `C3` are what an engine owes an
 application that lives under it.
 
-Nothing here is platform code. It is all signalling, it is all in `sipral-ua`,
-and it runs on the same injected `Instant`s as everything else — a wake-up
-chain that takes twenty seconds in the field takes microseconds in a test.
+Up to its section on `C4`, nothing here is platform code. It is all
+signalling, it is all in `sipral-ua`, and it runs on the same injected
+`Instant`s as everything else — a wake-up chain that takes twenty seconds in
+the field takes microseconds in a test.
 
 ## C2 — a call announced out of band
 
@@ -666,18 +667,129 @@ behind drops its own oldest items (past 4096 events or digits, and past 50
 frames — one second at 20 ms — unless it asks for another number) and
 never slows the others.
 
-## What is still owed to phase 4, and is not signalling
+## C4 — the device taken away and given back
 
-**The platform audio session is not here, deliberately.** `C4` — the device
-taken away and given back mid-call by an incoming cellular call, by a Bluetooth
-headset connecting mid-sentence, by a car taking over routing, by the operating
-system reclaiming the session — is not a protocol problem and has no business
-in `sipral-ua`. On iOS and Android it is the application's today
-(`AVAudioSession` on iOS, the telecom framework's audio routes on Android).
-No `sipral-io-*` crate handles either yet. The
-same goes for `C5`'s measurements: what runs while the application is
+`C4` is the device taken away and given back mid-call: by an incoming
+cellular call, by a Bluetooth headset connecting mid-sentence, by a car taking
+over routing, by the operating system reclaiming the session. It is not a
+protocol problem and has no business in `sipral-ua`; each platform delivers
+the signal in a layer of its own, and that layer is where it is handled. What
+the engine contributes is that none of it is fatal to the call: `Media` in
+every binding keeps its own frame clock and sends silence when nothing is
+queued, so a gap in the device is a gap in the sound, never in the RTP
+stream, and the far end, its NAT and its RTP timeout see a call that is still
+there. A hold the platform asks for is carried to the far end as a re-INVITE,
+the same one the application's own hold sends.
+
+### Android
+
+`org.sipral.telecom.CallAudio` (in the JVM library, tested on a plain JVM by
+`CallAudioCheck.kt`) keeps one call's microphone and speaker, over an
+`AudioDevice`; `SipralCallAudio` (in the `ConnectionService` helper) builds
+one for a call with `AndroidAudioDevice`, `AudioRecord` and `AudioTrack` as
+voice-communication streams, and follows the call through the bridge and the
+framework. What a self-managed `ConnectionService` is left to do, and what
+each becomes:
+
+| The platform's signal | What happens |
+|---|---|
+| `Connection.onHold` — a cellular call or another application's call answered over this one, a hold from a headset, a car or a watch | The connection says held at once (the framework disconnects one that has not within two seconds), the device is let go so that the other call has the microphone, and the far end is held with a re-INVITE. What the framework asked for stands until `onUnhold`, even if the far end refuses the re-INVITE |
+| `Connection.onUnhold` | Active at once, a new device opened, the far end resumed |
+| `ConnectionService.onConnectionServiceFocusLost` (API 28) | Every call's device is stopped before `connectionServiceFocusReleased()` tells the framework; the far end is not held, since the framework did not hold the call. `onConnectionServiceFocusGained` takes the devices back |
+| `onAvailableCallEndpointsChanged`, `onCallEndpointChanged` (API 34), `onCallAudioStateChanged` before it | Reported as a route change. Nothing is reopened: the framework routes a voice-communication stream wherever the call went, and the helper never touches `AudioManager` (the framework's own guide warns against `setCommunicationDevice` and `startBluetoothSco` beside it) |
+| `onMuteStateChanged` (API 34), `CallAudioState.isMuted` before it — a headset's or a car's mute | The microphone is still read, silence sent in its place |
+| `ERROR_DEAD_OBJECT` from `AudioRecord.read` or `AudioTrack.write` — the audio server gone | Both streams stopped, released once neither thread is inside them, and built again at once, then after 100 ms, 250 ms, 500 ms, one second and every two seconds, for as long as the call lasts. A device that dies again within two seconds of opening is waited on a step longer each time |
+| Audio focus | Not requested: the framework holds it for a live self-managed connection, which is one that "want[s] to leverage the call and audio routing capabilities of the Telecom framework" (`PhoneAccount.CAPABILITY_SELF_MANAGED`); what it leaves to the application is the call focus above |
+
+Nothing that pauses or resumes waits on the device: stopping it is what
+brings a blocked read back, it is released on a thread of its own, and it is
+opened outside every lock. `onHold` and `onConnectionServiceFocusLost` arrive
+on the main thread, and an audio server that has stopped answering holds a
+read, or an open, for as long as it is gone.
+
+Every change is an `AudioTransition` on `SipralCallAudio.transitions`
+(`Started`, `Paused` with every reason still standing, `Resumed`,
+`RouteChanged`, `MuteChanged`, `DeviceFailed` with the platform's code,
+`DeviceRestored` with the number of tries, `Stopped`), and `state` says
+where the audio stands. The sample logs each one and shows the state on
+the call's card.
+
+**Run on the emulator, 27 September 2026.** The sample's APK
+(`scripts/package/android.sh`, 20,374,994 bytes) on an `android-36`
+`google_apis` arm64 AVD, registered as `labuser-mobile` with the lab's
+Asterisk (`scripts/lab.sh wasapi up`) and calling its echo, 9008:
+
+| | |
+|---|---|
+| The call | Active, the sample's log `audio started`, `audio route Speaker`; Asterisk's `pjsip show channelstats` 543 packets each way at 11 seconds, none lost |
+| A cellular call arrives (`adb emu gsm call`) | Ringing beside ours, which stays active |
+| It is answered (`KEYCODE_CALL`) | The framework holds ours: `ON_HOLD` in `dumpsys telecom`, the GSM call `ACTIVE`; the log `audio paused: held`, then `audio paused: held, call_focus_lost` as the framework moves the call focus, and `session_changed` for the re-INVITE; Asterisk's counts kept rising, the silence the media clock sends |
+| The network ends it (`adb emu gsm cancel`) | Ours stays held: the framework does not resume a call on its own when the other one ends remotely, and the user resumes it from the call's screen, here the sample's Resume |
+| Resumed | `ACTIVE` again, the log `audio paused: call_focus_lost` then `audio resumed` as the focus came back; Asterisk 8,156 packets each way, 8,425 six seconds later, none lost |
+| The audio server killed mid-call (`kill` as root) | The platform's own `AudioTrack` and `AudioRecord` restored themselves within 0.3 s (`restoreTrack_l`, `restoreRecord_l` in logcat) and the helper saw nothing to do, as intended |
+| The audio server stopped for 45 seconds (`stop audioserver`) | The platform gave up restoring after three tries, and `AudioRecord.read` answered `ERROR_DEAD_OBJECT`: the log `audio device failed (capture -6)`; the helper's open blocked, off the main thread, until `start audioserver`, then `audio device restored after 1 tries`; one track and one record for the process afterwards in `dumpsys media.audio_flinger`, the dead ones released. Asterisk counted 1,239 packets each way before, 3,280 after the 45 seconds — the silence the media clock sent while there was no device — and 3,876 twelve seconds after the restart, none lost |
+| Hung up | `call_ended`, `audio stopped`, no channel left at Asterisk |
+
+The emulator's audio policy declares one output, the speaker, so the
+framework offered no other route to move to (`dumpsys media.audio_policy`),
+and its telephony and Bluetooth stacks have no headset or car to connect:
+switching the route between earpiece, speaker, a wired and a Bluetooth
+headset, the framework's mute from a headset button, and a car taking the
+call over need a phone, as does a real carrier's call.
+
+### iOS
+
+`CallAudio` (in the Swift package) keeps one call's device over a
+`CallAudioDevice`; `VoiceProcessingAudioDevice` is one over `AVAudioEngine`
+with the system's voice processing on its input node, and builds a new engine
+on every open. Three things feed it:
+
+| The platform's signal | Carried by | What happens |
+|---|---|---|
+| `AVAudioSession.interruptionNotification`, `.began` | `AudioSessionObserver` | The device let go (`CallAudioPause.interrupted`) |
+| `.ended` with `.shouldResume` | `AudioSessionObserver` | A new device opened. Without `.shouldResume` the interruption stays one of the reasons the device is let go, as Apple asks, until the application calls `resume(.interrupted)`; either way `interruptionEnded(shouldResume:)` is reported |
+| `routeChangeNotification` | `AudioSessionObserver` | Reported with the output the session is on now and why it moved (`newDeviceAvailable`, `oldDeviceUnavailable`, anything else). An engine that stops because of it (`AVAudioEngineConfigurationChange`) is started again in place, and only one that will not start is the device failing |
+| `mediaServicesWereLostNotification`, then `mediaServicesWereResetNotification` | `AudioSessionObserver` | The device let go when the services go, and built again from nothing when they come back: every audio object made before a reset is dead |
+| `CXProviderDelegate.provider(_:didActivate:)`, `didDeactivate` | `CallKitAdapter` to `CallKitBridge` | A call's device starts only once the system has activated the session (`CallAudioPause.sessionInactive` until then), and is let go when the system deactivates it |
+| `CXSetHeldCallAction` — Hold & Accept for a cellular call, CarPlay, a headset | `CallKitBridge.handleHold` | The device let go at once, the far end held with a re-INVITE; the reverse on resume |
+| `CXSetMutedCallAction` | `CallKitBridge.handleMute` | Silence sent in the microphone's place |
+| `providerDidReset` | `CallKitBridge.providerDidReset` | Every call hung up and its device let go: the system's call service no longer knows them |
+
+`CallKitAdapter` also sets the session's category to `.playAndRecord` in
+`.voiceChat` mode when CallKit answers, and leaves activating it to the
+system; an application without CallKit builds its device with
+`VoiceProcessingAudioDevice(managesSession: true)`, which does both itself.
+A device that fails or will not open is opened again on the same schedule
+as on Android. Every change is a `CallAudioTransition`, from
+`CallAudio.transitions()`, with the last 64 kept in `history`.
+
+**Run on the iOS 26.5 simulator.** The simulator cannot raise a real
+interruption, route change or media services reset, so
+`AudioSessionObserverTests` posts each notification as the system posts it —
+same name, same object, same `userInfo` — and checks what reaches the call's
+audio, against a device that records what was asked of it;
+`CallKitAdapterTests` hands the adapter CallKit's own action classes and
+`didActivate`/`didDeactivate` with the real session, and reads the category
+answering set; `CallAudioTests` and `CallKitBridgeTests` run on macOS and
+Linux as well. With `SIPRAL_AUDIO_DEVICE=1`, one test opens
+`VoiceProcessingAudioDevice` on the simulator, which shares the Mac's
+audio: frames from the microphone within the first second, and again from a
+rebuilt engine after a posted media services reset. That test is also what
+found that a voice-processing engine on the simulator reports a
+configuration change as soon as it starts; rebuilding on it had the device
+rebuilt in a loop, and it is now started again in place, with a device that
+dies within two seconds of every open waited on longer each time.
+`sipral-io-coreaudio`, for an application that uses it from Rust, reports
+the same thing on iOS as `StreamEvent::DeviceLost` — the unit the system
+stopped for an interruption, or one a reset left unable to answer — and
+`Stream::recover` builds a new unit, which a test on the simulator checks
+by stopping the unit behind the stream's back.
+
+What the simulator cannot give is the system's own delivery: a real cellular
+call interrupting the session, CallKit calling `didActivate` for a call it
+really placed, a Bluetooth headset or CarPlay taking the route. Those need a
+phone.
+
+The same goes for `C5`'s measurements: what runs while the application is
 backgrounded with no call is a property of the whole process, and the polled
 core is what makes it *possible* to answer, not the answer.
-
-What this document covers is everything about a sleeping device that is
-signalling, and that is the whole of `C2` and `C3`.

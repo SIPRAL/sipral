@@ -11,14 +11,26 @@
 
 package org.sipral.android.telecom
 
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.emptyFlow
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.idiomatic.SipralAnnounced
+import org.sipral.telecom.AudioDevice
+import org.sipral.telecom.AudioPause
+import org.sipral.telecom.AudioState
+import org.sipral.telecom.AudioStreams
+import org.sipral.telecom.CallAudio
 import org.sipral.telecom.SipCalls
 import org.sipral.telecom.TelecomBridge
 import org.sipral.telecom.TelecomPhase
 import org.sipral.telecom.TelecomPlatform
 import org.testng.Assert.assertEquals
+import org.testng.Assert.assertFalse
 import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
 
@@ -130,6 +142,81 @@ class SipralConnectionTest {
             listOf("hold 1", "resume 1", "dtmf 1 9", "hangup 1"),
         )
         assertTrue(rig.ended(1))
+    }
+
+    @Test
+    fun aHoldFromTheFrameworkHoldsAtOnce() {
+        // Connection.onHold: a connection that has not reached STATE_HOLDING
+        // within two seconds is disconnected, so held cannot wait for the
+        // far end to answer the re-INVITE.
+        val rig = Rig()
+        val connection = rig.confirmed(1)
+        connection.onHold()
+        assertEquals(rig.bridge.calls.value.single().phase, TelecomPhase.HELD)
+        connection.onUnhold()
+        assertEquals(rig.bridge.calls.value.single().phase, TelecomPhase.ACTIVE)
+    }
+
+    @Test
+    fun theFrameworksMuteIsReportedOnEveryRelease() {
+        val rig = Rig()
+        val connection = rig.confirmed(1)
+        assertFalse(connection.muted.value)
+        connection.onMuteStateChanged(true)
+        assertTrue(connection.muted.value)
+        connection.onMuteStateChanged(false)
+        assertFalse(connection.muted.value)
+    }
+
+    @Test
+    fun losingTheCallFocusLetsEveryCallsDeviceGoAndGainingItTakesThemBack() {
+        val opened = AtomicInteger()
+        val stopped = AtomicInteger()
+        val closed = AtomicInteger()
+        val device = AudioDevice { _, _ ->
+            opened.incrementAndGet()
+            object : AudioStreams {
+                override val capturing = false
+                override fun read(buffer: ShortArray) = 0
+                override fun write(frame: ShortArray) = frame.size
+                override fun interrupt() {
+                    stopped.incrementAndGet()
+                }
+                override fun close() {
+                    closed.incrementAndGet()
+                }
+            }
+        }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val audio = CallAudio("c1", device, 8000, 160, emptyFlow(), {}, scope)
+        SipralTelecom.register(audio)
+        try {
+            audio.start()
+            waitFor { audio.state.value == AudioState.RUNNING }
+            val service = SipralConnectionService()
+            service.onConnectionServiceFocusLost()
+            // Stopped before the service told the framework it had released
+            // it, and released right after.
+            assertEquals(stopped.get(), 1)
+            waitFor { closed.get() == 1 }
+            assertEquals(audio.pauses.value, setOf(AudioPause.CALL_FOCUS_LOST))
+            assertFalse(SipralTelecom.callFocus.value)
+            service.onConnectionServiceFocusGained()
+            waitFor { opened.get() == 2 && audio.state.value == AudioState.RUNNING }
+            assertTrue(SipralTelecom.callFocus.value)
+        } finally {
+            SipralTelecom.unregister(audio)
+            audio.close()
+            scope.cancel()
+        }
+    }
+
+    private fun waitFor(condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 5000
+        while (!condition()) {
+            assertTrue(System.currentTimeMillis() < deadline, "timed out")
+            Thread.sleep(2)
+        }
     }
 
     @Test

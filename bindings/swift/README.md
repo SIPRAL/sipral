@@ -64,6 +64,12 @@ it, compiled in only where those frameworks actually work
 too, but every type in it is `API_UNAVAILABLE(macos)`, so `canImport` alone
 is not enough to keep this package building there).
 
+`CallAudio` is a call's device kept through interruptions, route changes,
+media services resets and CallKit's hold, mute and audio session, over a
+`CallAudioDevice`; `VoiceProcessingAudioDevice` (wherever `AVFoundation`
+is) and `AudioSessionObserver` (iOS only, as `AVAudioSession` is) are the
+real device and the real notifications behind it.
+
 ## Build and test
 
 ```sh
@@ -163,6 +169,37 @@ then its `events()`, then `answer()`. Under CallKit, bind the ringing `Call`
 into `CallKitBridge` instead, and CallKit's `CXAnswerCallAction` is what
 answers it.
 
+### The call's audio
+
+`CallAudio` keeps one call's microphone and speaker through what iOS does to
+them mid-call -- C4 of `docs/13-client-requirements.md` -- over a
+`CallAudioDevice`; `VoiceProcessingAudioDevice` is one over `AVAudioEngine`
+with the system's voice processing, a new engine on every open:
+
+```swift
+let audio = CallAudio(media: call.media!, device: VoiceProcessingAudioDevice(managesSession: false))
+let observer = AudioSessionObserver(audio: audio)   // interruptions, routes, media services
+bridge.attach(audio, to: uuid)                      // CallKit's hold, mute and audio session
+audio.follow(call)                                  // closed when the call ends
+audio.start()
+for await transition in audio.transitions() {
+    // .started, .paused(reasons), .resumed, .interruptionEnded(shouldResume:),
+    // .routeChanged, .muteChanged, .mediaServicesLost, .mediaServicesReset,
+    // .deviceFailed, .deviceRestored, .stopped
+}
+```
+
+Under CallKit the device starts only once the system has activated the
+session (`CallKitAdapter` forwards `didActivate` and `didDeactivate`, and sets
+the session's category when it answers); without CallKit,
+`VoiceProcessingAudioDevice(managesSession: true)` configures and activates
+the session itself. A device that is let go -- held, interrupted, the
+session deactivated -- is closed, and a new one opened when the last reason
+lifts; one that fails, or whose media services were reset, is built again
+until it opens. The far end hears silence meanwhile, never a stopped stream:
+`Media` keeps its own frame clock. `docs/15-mobile.md` ("C4") has the whole
+table and what the simulator showed.
+
 ### Behind a NAT
 
 ```swift
@@ -235,8 +272,10 @@ there, and it registers no VoIP push without an `aps-environment`
 entitlement. The incoming-call screen and a real VoIP push need a device and
 its provisioning. `CallKitBridge` and `PushKitBridge`, the sequence that
 matters, are tested against a recording `CallKitProviding` on every
-platform. `AVAudioSession` category and interruption handling beyond what
-`SipralSampleMac`'s own `AudioBridge.swift` does. A DNS resolver for
+platform. The system's own delivery of an audio interruption, a route
+change or a media services reset: the simulator raises none of them, so
+`AudioSessionObserverTests` posts each as the system does, and a carrier's
+call, a Bluetooth headset or CarPlay taking the route need a device. A DNS resolver for
 `SipralEventKind.resolveNeeded`: the event is delivered and left unanswered,
 so that a dialog stays on the path its INVITE took; an application with a
 real lookup answers it through `Sipral.stackResolved` — the same gap

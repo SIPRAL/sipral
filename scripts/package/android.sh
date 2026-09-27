@@ -441,7 +441,9 @@ step "sipral-telecom.aar"
 unzip -q "$OUT/sipral-telecom.aar" -d "$X/telecom"
 for class in org/sipral/android/telecom/SipralConnectionService.class \
     org/sipral/android/telecom/SipralConnection.class \
-    org/sipral/android/telecom/AndroidTelecomPlatform.class; do
+    org/sipral/android/telecom/AndroidTelecomPlatform.class \
+    org/sipral/android/telecom/SipralCallAudio.class \
+    org/sipral/android/telecom/AndroidAudioDevice.class; do
     # grep reads to the end rather than -q: under pipefail, grep -q leaving
     # at the first match kills the writer with SIGPIPE and fails the
     # pipeline over a match it found.
@@ -463,8 +465,9 @@ dexes=$(ls "$X/apk"/classes*.dex 2>/dev/null | wc -l)
 [ "$dexes" -gt 0 ] && pass "$APK_NAME: $dexes dex file(s)" || fail "$APK_NAME carries no dex"
 classes=$("$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" dex packages --defined-only "$OUT/$APK_NAME" 2>/dev/null \
     | awk '$1 == "C" {print $NF}')
-for class in org.sipral.telecom.TelecomBridge org.sipral.idiomatic.SipralClient org.sipral.SipralEventListeners \
-    org.sipral.android.telecom.SipralConnectionService org.sipral.sample.MainActivity; do
+for class in org.sipral.telecom.TelecomBridge org.sipral.telecom.CallAudio org.sipral.idiomatic.SipralClient \
+    org.sipral.SipralEventListeners org.sipral.android.telecom.SipralConnectionService \
+    org.sipral.android.telecom.SipralCallAudio org.sipral.sample.MainActivity; do
     printf '%s\n' "$classes" | grep -x "$class" >/dev/null \
         && pass "$APK_NAME: $class" || fail "$APK_NAME is missing $class"
 done

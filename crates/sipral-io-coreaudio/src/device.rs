@@ -162,7 +162,9 @@ impl fmt::Display for DeviceChoice {
 #[non_exhaustive]
 pub enum StreamEvent {
     /// The device the stream was running on is gone — unplugged, switched off,
-    /// or taken away by the operating system.
+    /// or taken away by the operating system: on iOS, the unit stopped by an
+    /// `AVAudioSession` interruption or left unanswering by a media services
+    /// reset.
     ///
     /// The stream stops rather than pretending: nothing more arrives from the
     /// microphone once what it had already captured has been read out, and the

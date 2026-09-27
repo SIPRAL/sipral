@@ -12,7 +12,8 @@
 // -- plus the other direction, the framework's answer/reject/hold/DTMF/
 // disconnect carried onto the call. Audio routing is not here at all: a
 // self-managed connection leaves it to the platform, and the adapter only
-// surfaces what the platform offers.
+// surfaces what the platform offers. The call's audio device follows the
+// phase published here, through CallAudio.follow.
 
 package org.sipral.telecom
 
@@ -122,6 +123,10 @@ class TelecomBridge(
         var endedLocally = false
         var confirmed = false
         var remoteHold = false
+
+        /** Hold or unhold asked for through [hold] or [unhold] and not yet
+         * agreed by the dialog; null once it is, and the dialog followed. */
+        var holdWanted: Boolean? = null
     }
 
     private val lock = Any()
@@ -381,16 +386,42 @@ class TelecomBridge(
         }
     }
 
-    /** The framework asked for hold. The connection says held once the
-     * re-INVITE has been answered, from [onEvent]. */
+    /**
+     * The framework asked for hold -- the user answered a cellular call or
+     * another application's over this one, or pressed hold on a headset,
+     * a car or this application's own screen.
+     *
+     * A live call says held at once, before the re-INVITE that tells the
+     * far end has been answered: `Connection.onHold` documents that the
+     * connection must call `setOnHold` within it, and that one which has
+     * not reached `STATE_HOLDING` within two seconds is disconnected
+     * (developer.android.com/reference/android/telecom/Connection#onHold()).
+     * The call stays held here until [unhold], whatever the far end makes
+     * of the re-INVITE: the framework has given the call's audio to
+     * someone else, and a refused re-INVITE does not give it back.
+     */
     fun hold(id: String): Unit = settle {
-        val call = callOf(id) ?: return@settle
-        quietly { sip.hold(call) }
+        val entry = liveEntry(id) ?: return@settle
+        if (entry.confirmed) {
+            entry.holdWanted = true
+            entry.phase = TelecomPhase.HELD
+            render(entry)
+        }
+        quietly { sip.hold(entry.call) }
     }
 
+    /** The framework asked to take the call off hold. Active at once, as
+     * `ConnectionService`'s own guide asks ("When your app receives an
+     * `onUnhold()` it must call `setActive()`"), with the re-INVITE that
+     * resumes the far end sent after. */
     fun unhold(id: String): Unit = settle {
-        val call = callOf(id) ?: return@settle
-        quietly { sip.resume(call) }
+        val entry = liveEntry(id) ?: return@settle
+        if (entry.confirmed) {
+            entry.holdWanted = false
+            entry.phase = TelecomPhase.ACTIVE
+            render(entry)
+        }
+        quietly { sip.resume(entry.call) }
     }
 
     fun playDtmf(id: String, digit: Char): Unit = settle {
@@ -498,7 +529,12 @@ class TelecomBridge(
         } catch (_: SipralException) {
             return
         }
-        entry.phase = if (here) TelecomPhase.HELD else TelecomPhase.ACTIVE
+        // What the framework asked for stands until the dialog agrees with
+        // it; after that, a hold made on the call directly is followed too.
+        if (entry.holdWanted == here) {
+            entry.holdWanted = null
+        }
+        entry.phase = if (entry.holdWanted ?: here) TelecomPhase.HELD else TelecomPhase.ACTIVE
         render(entry)
         if (entry.remoteHold != there) {
             entry.remoteHold = there
@@ -556,7 +592,9 @@ class TelecomBridge(
         }
     }
 
-    private fun callOf(id: String): Long? = entries[id]?.takeIf { it.call != 0L && !it.closedForTelecom }?.call
+    private fun liveEntry(id: String): Entry? = entries[id]?.takeIf { it.call != 0L && !it.closedForTelecom }
+
+    private fun callOf(id: String): Long? = liveEntry(id)?.call
 
     private fun render(entry: Entry) {
         val connection = entry.connection ?: return
