@@ -1493,9 +1493,10 @@ records becomes an array of tuples, and everything written back becomes what
 the call returns.
 
 What is not printed: the native assets for `osx-arm64`, `osx-x64`, `win-x64`,
-`win-arm64` and `linux-x64`, the `Task`-based surface, `IAsyncEnumerable` for
-event streams, and the `SafeHandle` that makes a missed `Dispose` a leak rather
-than a crash.
+`win-arm64` and `linux-x64` (`linux-arm64` is: `scripts/package/nuget.sh
+collect --rid linux-arm64` cross-compiles it, no arm64 hardware needed), the
+`Task`-based surface, `IAsyncEnumerable` for event streams, and the
+`SafeHandle` that makes a missed `Dispose` a leak rather than a crash.
 
 `SipralStack`, `Account`, `Call` and `CallMedia`, in `bindings/dotnet/Sipral/`,
 are written against `NativeMethods`/`Sipral` by hand, the way

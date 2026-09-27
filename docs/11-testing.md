@@ -960,6 +960,23 @@ of those steps says `skip` and names what to install, and a run with any
 skip has not checked that binding. It must exit zero before a commit
 exists. `--hygiene-only` skips the build for a fast pass.
 
+The linux-arm64 native cross-compiles in an unprivileged Docker container
+(`scripts/package/aarch64-cross.sh`), so what the gate proves of it depends
+on the machine. On a host with Docker, `package --dry-run` runs
+`scripts/package/wheels.sh --linux-arm64 --dry-run` and
+`scripts/package/nuget.sh collect --rid linux-arm64` for real. On a host
+without it, the step neither skips nor pretends: it lints `sipral-ffi` for
+`aarch64-unknown-linux-gnu` with the default package's features, and checks
+that every file the cross path names is there and every script on it
+parses. The container build, its manylinux_2_28 glibc check and the run
+under qemu are then the Linux lab machine's step, run there before a
+release or after a change to anything under `scripts/package/`:
+`scripts/package/wheels.sh --out DIR --linux-arm64` (the wheel, then
+`scripts/package/qemu-verify.sh` running `bindings/c/smoke.c` and
+`bindings/python/tests` against it) and `scripts/package/nuget.sh collect
+--out DIR --rid linux-arm64` (the native `nuget.sh pack` then places under
+`runtimes/linux-arm64/native/`).
+
 The Swift suite also runs on the iOS Simulator, outside the gate: against
 the XCFramework's simulator slice, from the distribution package
 `scripts/package/xcframework.sh` prints, with `xcodebuild test` on a

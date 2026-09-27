@@ -251,6 +251,26 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   pseudonym or a placeholder, and drops `Authorization`/`Proxy-Authorization`
   and SDES keys outright; the redaction is also `sipral_diag::redact::redact_message`,
   a plain Rust function a facade can call without a new C ABI entry point.
+- **linux-arm64 packaging, from a host with no arm64 hardware.**
+  `scripts/package/wheels.sh --linux-arm64` and `scripts/package/nuget.sh
+  collect --rid linux-arm64` cross-compile `sipral-ffi` for
+  `aarch64-unknown-linux-gnu` in an unprivileged Docker container
+  (`scripts/package/docker/aarch64-cross.Dockerfile`: Debian's own cross
+  toolchain, linked against a `manylinux_2_28_aarch64` sysroot taken out
+  of that image with `COPY --from`, never executed) and produce a
+  `manylinux_2_28`-tagged wheel and a `linux-arm64` NuGet runtime, each in
+  the plain and `--with-opus` variant. `scripts/package/qemu-verify.sh`
+  proves the result runs without ever giving it privileges: an
+  unprivileged container installs `qemu-user` and runs the cross-compiled
+  C smoke test and the installed wheel's `bindings/python/tests` through
+  `qemu-aarch64` named explicitly on its command line, with no
+  `--privileged` and no binfmt registered on the host; the native's own
+  glibc symbol versions are checked to confirm none is newer than
+  `GLIBC_2.28`. `scripts/check.sh`'s `package --dry-run` step exercises
+  both scripts' `linux-arm64` path when Docker is present; without Docker
+  it lints `sipral-ffi` for `aarch64-unknown-linux-gnu` and checks the
+  cross path's files instead of skipping, and the container build is the
+  Linux lab machine's step (`docs/11-testing.md`).
 - **The .NET binding can get a call past a NAT.** `SipralStack`'s
   constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
   `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP

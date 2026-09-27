@@ -11,8 +11,13 @@
 #   scripts/package/wheels.sh --out DIR --manylinux [--dry-run] [--publish]
 #       linux-x64, manylinux_2_28: needs Docker, re-execs this script inside
 #       quay.io/pypa/manylinux_2_28_x86_64
+#   scripts/package/wheels.sh --out DIR --linux-arm64 [--dry-run] [--publish]
+#       linux-arm64, manylinux_2_28: needs Docker, no arm64 hardware --
+#       cross-compiles in scripts/package/aarch64-cross.sh's container, and
+#       proves the result runs with scripts/package/qemu-verify.sh (qemu-user,
+#       unprivileged, no binfmt)
 #   ... --with-opus
-#       either of the above, as the variant that carries libopus
+#       any of the above, as the variant that carries libopus
 #
 # Without --with-opus the native is built without sipral-ffi's `opus`
 # feature and every other default kept (features.sh says why and how). With
@@ -51,6 +56,8 @@ OUT=""
 DRY_RUN=0
 PUBLISH=0
 MANYLINUX=0
+LINUX_ARM64=0
+INSIDE_LINUX_ARM64=0
 WITH_OPUS=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -59,11 +66,13 @@ while [ $# -gt 0 ]; do
         --publish) PUBLISH=1; shift ;;
         --manylinux) MANYLINUX=1; shift ;;
         --inside-manylinux) MANYLINUX=2; shift ;; # internal: this run is already inside the container
+        --linux-arm64) LINUX_ARM64=1; shift ;;
+        --inside-linux-arm64) INSIDE_LINUX_ARM64=1; shift ;; # internal: already inside the cross image
         --with-opus) WITH_OPUS=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
-[ -z "$OUT" ] && { printf 'usage: wheels.sh --out DIR [--dry-run] [--publish] [--manylinux] [--with-opus]\n' >&2; exit 2; }
+[ -z "$OUT" ] && { printf 'usage: wheels.sh --out DIR [--dry-run] [--publish] [--manylinux] [--linux-arm64] [--with-opus]\n' >&2; exit 2; }
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 . "$ROOT/scripts/package/features.sh"
@@ -93,10 +102,66 @@ if [ "$MANYLINUX" -eq 1 ]; then
     printf 'wheels.sh: failed\n'; exit 1
 fi
 
+if [ "$LINUX_ARM64" -eq 1 ]; then
+    step "manylinux_2_28_aarch64, cross-compiled (no arm64 hardware), via Docker"
+    command -v docker >/dev/null 2>&1 || { fail "docker not found (linux-arm64 cross-compiles in a container)"; printf '\nwheels.sh: failed\n'; exit 1; }
+    . "$ROOT/scripts/package/aarch64-cross.sh"
+    aarch64_cross_ensure_image || { fail "could not build the aarch64 cross image (scripts/package/docker/aarch64-cross.Dockerfile)"; printf '\nwheels.sh: failed\n'; exit 1; }
+    pass "$AARCH64_CROSS_IMAGE"
+    args=(--out /out --inside-linux-arm64)
+    [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
+    [ "$WITH_OPUS" -eq 1 ] && args+=(--with-opus)
+    CARGO_TARGET="$OUT/cargo-target"
+    mkdir -p "$CARGO_TARGET"
+    # The inner run's own host is this same image, whose Python (unlike
+    # whatever invoked docker) is guaranteed to have a working venv module
+    # -- the same reason --manylinux re-execs into its own container rather
+    # than trusting the outer host's Python either. CARGO_TARGET_DIR is
+    # bind-mounted (not left at the container's default) so the native this
+    # produces is still on the host afterwards, for qemu-verify.sh below.
+    if docker run --rm -v "$ROOT:/work:ro" -v "$OUT:/out" -v "$CARGO_TARGET:/tmp/target" -w /work \
+        -e CARGO_TARGET_DIR=/tmp/target \
+        "$AARCH64_CROSS_IMAGE" \
+        bash scripts/package/wheels.sh "${args[@]}"; then
+        pass "container run"
+    else
+        fail "container run"
+    fi
+    NATIVE_PATH="$CARGO_TARGET/aarch64-unknown-linux-gnu/release/libsipral_ffi.so"
+    FINAL=$(find "$OUT" -maxdepth 1 -name 'sipral*-manylinux_2_28_aarch64.whl' | head -1)
+    if [ "$FAIL" -eq 0 ] && [ -n "$FINAL" ] && [ -s "$NATIVE_PATH" ]; then
+        step "importing it for real (qemu-aarch64, unprivileged)"
+        qv_args=(--native "$NATIVE_PATH" --wheel "$FINAL" --out "$OUT/qemu-verify")
+        [ "$DRY_RUN" -eq 1 ] && qv_args+=(--dry-run)
+        if bash "$ROOT/scripts/package/qemu-verify.sh" "${qv_args[@]}" >"$OUT/qemu-verify.log" 2>&1; then
+            pass "qemu-verify.sh ${qv_args[*]}"
+        else
+            fail "qemu-verify.sh ${qv_args[*]}:"
+            tail -60 "$OUT/qemu-verify.log" | sed 's/^/        /'
+        fi
+    fi
+    if [ "$PUBLISH" -eq 1 ]; then
+        step "publish"
+        printf '  not run: nothing ships to PyPI before the ABI freezes (docs/08-ffi.md).\n'
+        printf '  What the owner runs once it has: twine upload %s\n' "${FINAL:-$OUT/*.whl}"
+    fi
+    printf '\n'
+    [ "$FAIL" -eq 0 ] && { printf 'wheels.sh: done, %s, linux-arm64\n' "${FINAL:-$OUT}"; exit 0; }
+    printf 'wheels.sh: failed\n'; exit 1
+fi
+
+CROSS_AARCH64=0
 step "host"
 UNAME_S="$(uname -s)"
 UNAME_M="$(uname -m)"
-if [ "$MANYLINUX" -eq 2 ]; then
+if [ "$INSIDE_LINUX_ARM64" -eq 1 ]; then
+    TAG="manylinux_2_28_aarch64"
+    RUST_TRIPLE="aarch64-unknown-linux-gnu"
+    NATIVE="libsipral_ffi.so"
+    PY=python3
+    CROSS_AARCH64=1
+    pass "inside the aarch64 cross image: tag $TAG"
+elif [ "$MANYLINUX" -eq 2 ]; then
     TAG="manylinux_2_28_x86_64"
     RUST_TRIPLE="x86_64-unknown-linux-gnu"
     NATIVE="libsipral_ffi.so"
@@ -321,7 +386,13 @@ if [ -n "$FINAL" ]; then
 fi
 [ "$FAIL" -ne 0 ] && { printf '\nwheels.sh: failed\n'; exit 1; }
 
-if [ "$DRY_RUN" -eq 0 ] && [ -n "$FINAL" ]; then
+if [ "$CROSS_AARCH64" -eq 1 ]; then
+    # This container's own Python is x86_64 and cannot import an aarch64
+    # .so: the outer `--linux-arm64` run (scripts/package/wheels.sh itself,
+    # one recursion up) does that with qemu-verify.sh once this inner run
+    # returns the wheel and the native it bundled.
+    :
+elif [ "$DRY_RUN" -eq 0 ] && [ -n "$FINAL" ]; then
     step "importing it for real"
     INSTALL_VENV="$STAGE/install-venv"
     "$PY" -m venv "$INSTALL_VENV" >/dev/null 2>&1

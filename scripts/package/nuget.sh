@@ -51,7 +51,7 @@ fail() { printf '  FAIL  %s\n' "$1"; FAIL=1; }
 note() { printf '  note  %s\n' "$1"; }
 step() { printf '\n%s\n' "$1"; }
 
-ALL_RIDS=(win-x64 win-arm64 osx-arm64 osx-x64 linux-x64)
+ALL_RIDS=(win-x64 win-arm64 osx-arm64 osx-x64 linux-x64 linux-arm64)
 triple_of() {
     case "$1" in
         win-x64) printf 'x86_64-pc-windows-msvc' ;;
@@ -59,6 +59,7 @@ triple_of() {
         osx-arm64) printf 'aarch64-apple-darwin' ;;
         osx-x64) printf 'x86_64-apple-darwin' ;;
         linux-x64) printf 'x86_64-unknown-linux-gnu' ;;
+        linux-arm64) printf 'aarch64-unknown-linux-gnu' ;;
         *) printf ''; return 1 ;;
     esac
 }
@@ -166,6 +167,37 @@ if [ "$CMD" = "collect" ]; then
                     pass "$rid: docker run rust:1.95-trixie, cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
                 else
                     fail "$rid: docker build failed:"
+                    tail -20 "$OUT/.build-$rid.log" | sed 's/^/        /'
+                fi
+                ;;
+            linux-arm64)
+                # No arm64 hardware needed, and not gated on $HOST_OS: this
+                # cross-compiles in scripts/package/aarch64-cross.sh's own
+                # unprivileged container regardless of what this host is,
+                # the same as scripts/package/wheels.sh --linux-arm64.
+                if ! command -v docker >/dev/null 2>&1; then
+                    fail "$rid: docker not found (cross-compiles in a container, no arm64 hardware needed)"
+                    continue
+                fi
+                . "$ROOT/scripts/package/aarch64-cross.sh"
+                if ! aarch64_cross_ensure_image; then
+                    fail "$rid: could not build the aarch64 cross image (scripts/package/docker/aarch64-cross.Dockerfile)"
+                    continue
+                fi
+                rm -f "$OUT/$rid/$FEATURES_MARKER"
+                cross_target="$OUT/.cargo-target-$rid"
+                if aarch64_cross_build "$cross_target" >"$OUT/.build-$rid.log" 2>&1; then
+                    native_so="$cross_target/aarch64-unknown-linux-gnu/release/$(cargo_artifact_of "$rid")"
+                    if highest=$(aarch64_glibc_check "$native_so" 28); then
+                        mkdir -p "$OUT/$rid"
+                        cp "$native_so" "$OUT/$rid/$(native_name_of "$rid")"
+                        printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
+                        pass "$rid: cross-compiled ($AARCH64_CROSS_IMAGE), manylinux_2_28-compatible ($highest)"
+                    else
+                        fail "$rid: $native_so is not manylinux_2_28-compatible: $highest"
+                    fi
+                else
+                    fail "$rid: cross build failed:"
                     tail -20 "$OUT/.build-$rid.log" | sed 's/^/        /'
                 fi
                 ;;

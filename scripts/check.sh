@@ -1622,6 +1622,46 @@ pkg_run "wheels.sh --dry-run" \
 pkg_run "wheels.sh --dry-run --with-opus" \
     scripts/package/wheels.sh --out "$PKG_WORK/wheels-opus" --dry-run --with-opus
 
+# linux-arm64 cross-compiles in an unprivileged Docker container
+# (scripts/package/aarch64-cross.sh), no arm64 hardware needed. A host with
+# Docker runs both scripts' linux-arm64 path for real; a host without it --
+# this Mac -- proves what it can without one, and never skips: sipral-ffi
+# type-checked and linted for aarch64-unknown-linux-gnu with the features
+# the default package builds (the variant with libopus needs a C cross
+# compiler for its vendored build, which is the container's), and every file
+# the cross path names present and parseable. The container build, its
+# glibc check and the qemu run are the Docker host's step, and
+# docs/11-testing.md names it.
+if command -v docker >/dev/null 2>&1; then
+    pkg_run "wheels.sh --linux-arm64 --dry-run" \
+        scripts/package/wheels.sh --out "$PKG_WORK/wheels-arm64" --linux-arm64 --dry-run
+    pkg_run "nuget.sh collect (linux-arm64)" \
+        scripts/package/nuget.sh collect --out "$PKG_WORK/nuget-natives" --rid linux-arm64
+elif ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
+    fail "linux-arm64 without Docker: aarch64-unknown-linux-gnu is not installed: rustup target add aarch64-unknown-linux-gnu"
+else
+    . "$ROOT/scripts/package/features.sh"
+    if ! package_features 0; then
+        fail "linux-arm64 without Docker: no default feature list in crates/sipral-ffi/Cargo.toml"
+    else
+        pkg_run "cargo clippy -p sipral-ffi for linux-arm64 ($FFI_FEATURES)" \
+            cargo clippy -p sipral-ffi --target aarch64-unknown-linux-gnu "${FFI_FEATURE_ARGS[@]}" -- -D warnings
+    fi
+    cross_missing=""
+    for f in scripts/package/aarch64-cross.sh scripts/package/qemu-verify.sh \
+        scripts/package/docker/aarch64-cross.Dockerfile bindings/c/smoke.c \
+        bindings/c/include/sipral.h bindings/python/tests; do
+        [ -e "$f" ] || cross_missing="$cross_missing $f"
+    done
+    for f in scripts/package/aarch64-cross.sh scripts/package/qemu-verify.sh \
+        scripts/package/wheels.sh scripts/package/nuget.sh; do
+        bash -n "$f" 2>/dev/null || cross_missing="$cross_missing $f(syntax)"
+    done
+    [ -z "$cross_missing" ] && pass "linux-arm64's cross path: every file it names is there, and its scripts parse" || {
+        fail "linux-arm64's cross path is broken:"; printf '        %s\n' $cross_missing
+    }
+fi
+
 pkg_run "nuget.sh collect (osx-arm64, osx-x64)" \
     scripts/package/nuget.sh collect --out "$PKG_WORK/nuget-natives" --rid osx-arm64 --rid osx-x64
 pkg_run "nuget.sh pack --dry-run" \
