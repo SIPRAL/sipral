@@ -71,7 +71,9 @@ struct Callee {
 }
 
 impl Callee {
-    fn turn(&mut self, now: Instant) {
+    /// `true` when a SIP datagram arrived this turn, so the caller of both
+    /// roles' `turn` knows whether to sleep rather than spin.
+    fn turn(&mut self, now: Instant) -> bool {
         if !self.asked {
             self.asked = true;
             let _ = self.endpoint.agent.register(self.account, now);
@@ -81,6 +83,7 @@ impl Callee {
         }
         self.endpoint.run_media(now);
         self.endpoint.timers(now);
+        self.endpoint.read_sip(now)
     }
 
     fn on_event(&mut self, event: Event, now: Instant) {
@@ -144,7 +147,9 @@ struct Caller {
 }
 
 impl Caller {
-    fn turn(&mut self, callee_registered: bool, now: Instant) {
+    /// `true` when a SIP datagram arrived this turn, so the caller of both
+    /// roles' `turn` knows whether to sleep rather than spin.
+    fn turn(&mut self, callee_registered: bool, now: Instant) -> bool {
         if !self.asked {
             self.asked = true;
             let _ = self.endpoint.agent.register(self.account, now);
@@ -165,6 +170,7 @@ impl Caller {
             self.hang_up_at = None;
             let _ = self.endpoint.agent.hangup(call, now);
         }
+        self.endpoint.read_sip(now)
     }
 
     fn place(&mut self, now: Instant) {
@@ -298,10 +304,16 @@ pub(crate) fn run(
                 answering.narrowing.up
             ));
         }
-        answering.turn(now);
-        dialling.turn(answering.registered, now);
+        let answering_read = answering.turn(now);
+        let dialling_read = dialling.turn(answering.registered, now);
         if answering.done && dialling.done {
             break;
+        }
+        // no reader thread here, same as `main`'s `drive`: a short sleep
+        // after a quiet read is what keeps this from spinning a whole core
+        // for the thirty seconds `PATIENCE` allows
+        if !answering_read && !dialling_read {
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -380,5 +392,70 @@ fn short(event: &UaEvent) -> &'static str {
         UaEvent::CallEnded { .. } => "ended",
         UaEvent::SessionChanged { .. } => "session changed",
         _ => "something else",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+    use std::time::{Duration, Instant};
+
+    use super::{Callee, Endpoint, Narrowing, account, catalog};
+
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    /// Before the fix this test is named for, neither role's `turn` ever
+    /// called `Endpoint::read_sip`: `pump` only drains events the engine
+    /// already has, and nothing else in the loop `run` drives ever reads
+    /// the socket, so a real server's INVITE would sit on it unread for as
+    /// long as the flow's own patience allowed. A raw datagram from a
+    /// socket standing in for one is enough to prove the read happens now
+    /// -- `turn` does not care whether what arrived parses, only that it
+    /// was there to read, which is exactly what its own `bool` reports.
+    #[test]
+    fn a_turn_reads_whatever_arrived_on_the_sip_socket() {
+        let now = Instant::now();
+        let mut endpoint = Endpoint::bind(
+            [11; 32],
+            [12; 32],
+            SocketAddr::new(LOOPBACK, 0),
+            catalog(),
+            now,
+        )
+        .expect("binding on loopback");
+        let local = endpoint.local;
+        let remote = SocketAddr::new(LOOPBACK, 5060);
+        let account_id = account(
+            &mut endpoint,
+            "example.invalid",
+            remote,
+            "labuser",
+            "labpass",
+        )
+        .expect("adding an account needs no network");
+
+        let peer = UdpSocket::bind(SocketAddr::new(LOOPBACK, 0)).expect("a peer socket");
+        peer.send_to(b"OPTIONS sip:test SIP/2.0\r\n\r\n", local)
+            .expect("sending on loopback");
+        // the kernel's own queue, not this process's: `turn`'s very first
+        // call may run before the datagram sent above has actually landed
+        // on the socket it reads
+        std::thread::sleep(Duration::from_millis(20));
+
+        let mut callee = Callee {
+            endpoint,
+            account: account_id,
+            remote,
+            registered: false,
+            // skips the `register()` this flow's real first turn sends --
+            // this test is about the read, not the registration
+            asked: true,
+            narrowing: Narrowing::default(),
+            done: false,
+        };
+        assert!(
+            callee.turn(now),
+            "a datagram sitting on the socket was never read off it"
+        );
     }
 }

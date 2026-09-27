@@ -935,6 +935,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `convert(to:error:withInputFrom:)`'s own call. `@preconcurrency import
   AVFoundation` takes the framework's own (missing) Sendable annotations as
   given instead of imposing stricter ones on code that predates them.
+- **Kamailio's own forwarded requests no longer carry `Via: SIP/2.0/UDP
+  0.0.0.0`.** Its `listen` directive named the bare wildcard with no
+  `advertise`, so every request it relayed wrote the unreachable address
+  it is bound to, rather than its own name, into the `Via` it added —
+  visible first on a CANCEL, whose 487 had nowhere to come back to, so
+  Kamailio retransmitted the CANCEL and relayed the same 487 more than
+  once. `interop/kamailio/kamailio.cfg`'s `listen` now advertises
+  `kamailio:5060`, the name every peer in the lab already resolves it by.
+- **The lab's own "inbound, narrowed" flow could register but never
+  receive anything.** `interop/harness/src/pair.rs`'s two roles never
+  called `Endpoint::read_sip`, so a datagram arriving on either one's SIP
+  socket — the wide INVITE this flow exists to narrow, among everything
+  else — sat there unread until the flow's own patience ran out. Both
+  roles' `turn` reads the socket now, the same way `main`'s own `drive`
+  does.
 - **An incoming call the caller gave up on before it was taken no longer
   leaves a call that can never end.** `SipralStack.takeIncomingCall` (and
   `answerCall`, which calls it) minted and registered a `Call` for a
