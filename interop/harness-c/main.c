@@ -314,6 +314,8 @@ struct seen {
     uint32_t registration_failure;
     int confirmed;
     int ended;
+    /* why, as `sipral_call_end_reason_t` */
+    uint32_t end_reason;
     int media_started;
     int media_secured;
     int media_failed;
@@ -376,6 +378,13 @@ struct seen {
      * it: the one place this ABI hands an application its own SDP back */
     char registered_with[2048];
     char local_sdp[2048];
+    /* `FLOW_NAT_INCOMING`: the call that came in, the account the library
+     * found its INVITE addressed to -- SIPRAL_HANDLE_NONE when it found none,
+     * and then the call answers from the address it arrived on -- and the
+     * INVITE itself */
+    sipral_handle_t incoming;
+    sipral_handle_t incoming_account;
+    char invited[2048];
     int events;
     char fault[192];
 };
@@ -416,6 +425,11 @@ static void on_event(const sipral_event_t *event, void *user_data)
             keep(seen->registered_with, sizeof seen->registered_with, event->message,
                  event->message_len);
         }
+        break;
+    case SIPRAL_EVENT_KIND_INCOMING_CALL:
+        seen->incoming = event->call;
+        seen->incoming_account = event->account;
+        keep(seen->invited, sizeof seen->invited, event->message, event->message_len);
         break;
     case SIPRAL_EVENT_KIND_CALL_CONFIRMED:
         seen->confirmed = 1;
@@ -477,6 +491,7 @@ static void on_event(const sipral_event_t *event, void *user_data)
         break;
     case SIPRAL_EVENT_KIND_CALL_ENDED:
         seen->ended = 1;
+        seen->end_reason = event->payload.call.end_reason;
         break;
     case SIPRAL_EVENT_KIND_MEDIA_STARTED:
         seen->media_started = 1;
@@ -610,6 +625,10 @@ struct endpoint {
      * whichever queue handed them out, and where the last went */
     unsigned relays_given_back;
     char given_back_to[SIPRAL_ADDRESS_BYTES];
+    /* the last 2xx to an INVITE this end sent, as it left the signalling
+     * socket: `FLOW_NAT_INCOMING` reads its `Contact`, which is where the far
+     * end's ACK and every request it sends in the dialog go */
+    char answered_with[2048];
 
     /* the same four numbers the Rust harness prints, counted the same way:
      * from outside the session, watching what each call returns */
@@ -694,6 +713,13 @@ static void flush_signalling(struct endpoint *end)
         if (address_of(destination, &to) == 0) {
             (void)sendto(end->sip_fd, out, message.len, 0,
                          (const struct sockaddr *)&to, sizeof to);
+        }
+        if (message.len > 12u && memcmp(out, "SIP/2.0 2", 9) == 0) {
+            char head[sizeof end->answered_with];
+            keep(head, sizeof head, out, message.len);
+            if (strstr(head, " INVITE\r\n") != NULL) {
+                keep(end->answered_with, sizeof end->answered_with, head, strlen(head));
+            }
         }
     }
 }
@@ -1512,6 +1538,12 @@ enum flow {
      * SIPRAL_STUN_SERVER names one -- scripts/lab.sh's own `nat` step, which
      * also puts this process behind interop/nat's NAT. */
     FLOW_NAT,
+    /* 8.5.5: the same account behind the same NAT, called: registered at
+     * the address STUN reported, waiting for scripts/lab.sh's `nat` step to
+     * have Asterisk call it, and answering through `sipral_call_answer_media`
+     * -- what a phone's own layer does. Run only when SIPRAL_FLOWS names it,
+     * since nothing calls it otherwise. */
+    FLOW_NAT_INCOMING,
     /* 8.5.5: the calling half of two stacks behind two NATs finding each
      * other with full ICE -- interop/harness/src/ice_nat.rs's own `call`,
      * through this ABI, with the Rust harness answering behind the second
@@ -1557,6 +1589,8 @@ static const char *flow_name(enum flow which)
         return "DTLS-SRTP, phone to phone";
     case FLOW_NAT:
         return "behind a NAT, through STUN";
+    case FLOW_NAT_INCOMING:
+        return "called behind a NAT, through STUN";
     case FLOW_ICE_NAT:
         return "full ICE through two NATs, calling";
     case FLOW_COUNT:
@@ -1602,6 +1636,8 @@ static const char *flow_key(enum flow which)
         return "peerdtls";
     case FLOW_NAT:
         return "nat";
+    case FLOW_NAT_INCOMING:
+        return "natin";
     case FLOW_ICE_NAT:
         return "icenat";
     case FLOW_COUNT:
@@ -1835,6 +1871,14 @@ static int runs_against(enum flow which, const char *server, int for_baresip)
         const char *wanted = getenv("SIPRAL_FLOWS");
         const char *stun = getenv("SIPRAL_STUN_SERVER");
         return wanted != NULL && selected(wanted, "icenat") && stun != NULL
+               && stun[0] != '\0';
+    }
+    case FLOW_NAT_INCOMING: {
+        /* only when named, with a STUN server to ask: somebody has to call,
+         * and only scripts/lab.sh's own `nat` step has Asterisk do it */
+        const char *wanted = getenv("SIPRAL_FLOWS");
+        const char *stun = getenv("SIPRAL_STUN_SERVER");
+        return wanted != NULL && selected(wanted, "natin") && stun != NULL
                && stun[0] != '\0';
     }
     case FLOW_NAT: {
@@ -2322,6 +2366,179 @@ static int flow_nat(struct endpoint *end, const char *server, const char *extens
     return 0;
 }
 
+/* The signalling socket's mapping is in, and the registrar has said it holds
+ * the binding at the address that mapping reported. */
+static int registered_at_public(const struct endpoint *end)
+{
+    char binding[SIPRAL_ADDRESS_BYTES + 2];
+    if (!end->seen.sip_mapped
+        || end->seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        return end->seen.registration == SIPRAL_REGISTRATION_STATE_FAILED;
+    }
+    (void)snprintf(binding, sizeof binding, "@%s>", end->seen.sip_public);
+    return strstr(end->seen.registered_with, binding) != NULL;
+}
+
+/* A call came in. */
+static int called(const struct endpoint *end)
+{
+    return end->seen.incoming != SIPRAL_HANDLE_NONE;
+}
+
+/* The `Contact` line of `message`, copied into `out`, or an empty string. */
+static void contact_of(const char *message, char *out, size_t room)
+{
+    const char *line = strstr(message, "\r\nContact: ");
+    const char *stop;
+    if (line == NULL) {
+        keep(out, room, NULL, 0);
+        return;
+    }
+    line += 2;
+    stop = strstr(line, "\r\n");
+    keep(out, room, line, stop != NULL ? (size_t)(stop - line) : strlen(line));
+}
+
+/* How long a call from Asterisk is waited for once this end says it is ready,
+ * and how long the call is then given to end: scripts/lab.sh's `nat` step
+ * places it within a few seconds, and interop/asterisk's extension 9010
+ * echoes for eight seconds before it hangs up. */
+#define CALLED_PATIENCE_MS 30000u
+#define CALLED_ENDS_MS 20000u
+
+/* Called from behind a NAT, with the stack asking a STUN server where each of
+ * its sockets appears from, and answering the way a phone's own layer does:
+ * the media socket named with `sipral_stack_nat_map` when the call rings, and
+ * the call answered on it with `sipral_call_answer_media`.
+ *
+ * `flow_nat` above proves the half a phone starts; this is the half the
+ * network starts, and every step of it goes to an address this end wrote. The
+ * INVITE arrives at the `Contact` the registrar holds, which has to be the
+ * one STUN reported. The 2xx's own `Contact` is where Asterisk sends its ACK
+ * and, eight seconds on, its BYE (RFC 3261 §12.1.1: the remote target is the
+ * `Contact` of the response that made the dialog), so it has to name the
+ * public address too -- the address the INVITE arrived on is on a network
+ * Asterisk has no route to. The answer's `c=`/`m=` is where Asterisk sends
+ * the echo, and `rtp_symmetric` is off in interop/asterisk, so an echo that
+ * comes back at all found that address. The call is confirmed only by the
+ * ACK, and it ends only by the BYE: both are checked, not assumed.
+ *
+ * scripts/lab.sh calls the URI printed on the `waiting` line, which is the
+ * binding this run registered, rather than the account as a whole: the
+ * account holds ten bindings, and an earlier run's that was never given back
+ * would otherwise take the call.
+ */
+static int flow_nat_incoming(struct endpoint *end)
+{
+    char binding[SIPRAL_ADDRESS_BYTES + 2];
+    char contact[192];
+    const char *user_at;
+    const char *user_end;
+    int stray = 0;
+    sipral_status_t status;
+
+    /* nothing is held back here: the REGISTER that takes a private binding
+     * back is `flow_nat`'s to prove */
+    end->withhold_stun = 0;
+    status = sipral_account_register(end->stack, end->account, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_register", status);
+        return -1;
+    }
+    if (!wait_until(end, registered_at_public, FLOW_PATIENCE_MS)
+        || end->seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        wrong_text("never registered at the address the STUN server reported");
+        printf("%s\n", end->seen.registered_with);
+        return -1;
+    }
+    if (strcmp(end->seen.sip_public, end->sip_address) == 0
+        || !port_moved(end->sip_address, end->seen.sip_public)) {
+        wrong_text("the STUN server saw the signalling socket at its own address or port: "
+                   "nothing translates in front of this end, and the run proves nothing");
+        return -1;
+    }
+    printf("  nat   signalling %s appears as %s\n", end->sip_address, end->seen.sip_public);
+
+    /* the account's user part, off its own address of record */
+    user_at = strchr(end->aor, ':');
+    user_end = user_at != NULL ? strchr(user_at, '@') : NULL;
+    if (user_at == NULL || user_end == NULL) {
+        wrong_text("the account's address of record names no user");
+        return -1;
+    }
+    printf("  nat   waiting for a call to sip:%.*s@%s\n", (int)(user_end - user_at - 1),
+           user_at + 1, end->seen.sip_public);
+    (void)fflush(stdout);
+    if (!wait_until(end, called, CALLED_PATIENCE_MS)) {
+        wrong_text("nobody called");
+        return -1;
+    }
+    end->call = end->seen.incoming;
+    /* carried on past rather than stopped at, so the run shows what a call
+     * nobody recognised answers with */
+    if (end->seen.incoming_account != end->account) {
+        wrong_text("the INVITE was not recognised as this account's");
+        printf("%s\n", end->seen.invited);
+        stray = 1;
+    }
+
+    /* the media socket, asked about as the call rings, the way
+     * org.sipral.idiomatic's own answerCall does it */
+    status = sipral_stack_nat_map(end->stack, end->rtp_address, strlen(end->rtp_address),
+                                  now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_stack_nat_map", status);
+        return -1;
+    }
+    end->mapping_media = 1;
+    if (!wait_until(end, media_mapped, FLOW_PATIENCE_MS)
+        || end->seen.media_mapping != SIPRAL_NAT_MAPPING_LEARNED) {
+        wrong_text("the STUN server never said where the RTP socket is");
+        return -1;
+    }
+    printf("  nat   media %s appears as %s\n", end->rtp_address, end->seen.media_public);
+    status = sipral_call_answer_media(end->stack, end->call, end->rtp_address,
+                                      strlen(end->rtp_address), now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_answer_media", status);
+        return -1;
+    }
+
+    /* confirmed means the ACK arrived, and the ACK went where the 2xx's
+     * `Contact` said */
+    if (!wait_until(end, answered, FLOW_PATIENCE_MS) || end->seen.ended) {
+        char why[sizeof trouble];
+        contact_of(end->answered_with, contact, sizeof contact);
+        (void)snprintf(why, sizeof why, "the 2xx was never acknowledged; it named %s",
+                       contact[0] != '\0' ? contact : "no Contact at all");
+        wrong_text(why);
+        return -1;
+    }
+    contact_of(end->answered_with, contact, sizeof contact);
+    printf("  nat   answered with %s\n", contact);
+    (void)snprintf(binding, sizeof binding, "@%s>", end->seen.sip_public);
+    if (strstr(contact, binding) == NULL) {
+        wrong_text("the 2xx's Contact does not name the address the STUN server reported");
+        return -1;
+    }
+    if (open_media(end, end->call) != 0) {
+        return -1;
+    }
+
+    /* the echo, until the far end hangs up: its BYE is the second request
+     * the 2xx's `Contact` routed */
+    if (!wait_until(end, hung_up, CALLED_ENDS_MS)
+        || end->seen.end_reason != SIPRAL_CALL_END_REASON_REMOTE_HANGUP) {
+        wrong_text("the far end's BYE never arrived");
+        return -1;
+    }
+    if (end->audible == 0) {
+        wrong_text("nothing audible came back to the address the answer named");
+        return -1;
+    }
+    return stray ? -1 : 0;
+}
+
 /* Whether two `host:port`s name the same host, whatever their ports. */
 static int same_host(const char *one, const char *other)
 {
@@ -2527,6 +2744,9 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
     }
     if (which == FLOW_NAT) {
         return flow_nat(end, server, extension);
+    }
+    if (which == FLOW_NAT_INCOMING) {
+        return flow_nat_incoming(end);
     }
     if (which == FLOW_ICE_NAT) {
         return flow_ice_nat(end, server, extension);
@@ -2873,7 +3093,8 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
 static int audio_holds(const struct endpoint *end, enum flow which)
 {
     const char *required = getenv("SIPRAL_REQUIRE_AUDIO");
-    if (which != FLOW_CALL && which != FLOW_SRTP && which != FLOW_NAT && which != FLOW_G729) {
+    if (which != FLOW_CALL && which != FLOW_SRTP && which != FLOW_NAT
+        && which != FLOW_NAT_INCOMING && which != FLOW_G729) {
         return 1;
     }
     if (end->sent == 0) {
@@ -3506,7 +3727,7 @@ int main(int argc, char **argv)
             continue;
         }
         account_for(flow, server, &flow_user, &flow_pass);
-        stun_for_this_flow = flow == FLOW_NAT || flow == FLOW_ICE_NAT
+        stun_for_this_flow = flow == FLOW_NAT || flow == FLOW_NAT_INCOMING || flow == FLOW_ICE_NAT
                                  ? getenv("SIPRAL_STUN_SERVER")
                                  : NULL;
         calling_a_peer = flow == FLOW_ICE_NAT;

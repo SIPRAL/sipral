@@ -149,7 +149,7 @@ flows = [
 name = "STUN (RFC 5389), from behind a NAT"
 implemented = true
 unit_tested = true
-flows = ["behind a NAT, through STUN"]
+flows = ["behind a NAT, through STUN", "called behind a NAT, through STUN"]
 
 [[feature]]
 name = "ICE-lite (RFC 8445 §2.5), harness and Asterisk"

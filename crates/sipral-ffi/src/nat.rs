@@ -1883,6 +1883,87 @@ mod tests {
         );
     }
 
+    /// The half a phone does not start: a registrar with no NAT helper sends
+    /// the INVITE to the `Contact` it holds, which after STUN is the public
+    /// address, and writes the same address in `To`. The call has to be
+    /// recognised as the account's, and answered through
+    /// `sipral_call_answer_media` — what the Kotlin and Swift layers call —
+    /// with that address in the 2xx's own `Contact` as well as in `c=`: the
+    /// ACK, and every request the far end sends in the dialog, go where the
+    /// `Contact` says (RFC 3261 §12.1.1), and the address the INVITE arrived
+    /// on is one nobody outside can reach.
+    #[test]
+    fn a_call_to_the_public_contact_is_the_accounts_and_is_answered_from_it() {
+        let mut observed = Observed::default();
+        let stack = asking_stack(&mut observed);
+        let account = account_on(stack);
+        assert_eq!(
+            unsafe { sipral_account_register(stack, account, 10) },
+            SipralStatus::Ok
+        );
+        let out = signalling_out(stack);
+        assert_eq!(
+            from_server(stack, &answer(&out[0].0, SIP_PUBLIC), 20),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 20);
+        assert_eq!(mapped()[0].accounts, 1, "the account moved");
+        let _ = signalling_out(stack);
+
+        let invite = String::from_utf8_lossy(&crate::call::tests::invitation())
+            .replace(
+                "INVITE sip:alice@192.0.2.10:5060 ",
+                &format!("INVITE sip:alice@{SIP_PUBLIC} "),
+            )
+            .replace("To: <sip:alice@example.com>", "To: <sip:alice@203.0.113.7>");
+        crate::call::tests::deliver(stack, invite.as_bytes(), 1_000);
+        let _ = poll(stack, 1_000);
+        let call = crate::call::tests::called(&observed);
+        let (named_account, _) = observed
+            .named
+            .iter()
+            .zip(observed.events.iter())
+            .find(|(_, event)| event.1 == SipralEventKind::IncomingCall)
+            .map(|(named, _)| *named)
+            .expect("the incoming call was reported");
+        assert_eq!(named_account, account, "the INVITE is the account's");
+        let _ = signalling_out(stack);
+
+        assert_eq!(map_media(stack, 1_100), SipralStatus::Ok);
+        let out = stun_out(stack);
+        assert_eq!(
+            on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 1_110),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 1_110);
+        assert_eq!(
+            unsafe {
+                crate::call::sipral_call_answer_media(
+                    stack,
+                    call,
+                    MEDIA.as_ptr().cast::<c_char>(),
+                    MEDIA.len(),
+                    1_200,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let out = signalling_out(stack);
+        let ok = out
+            .iter()
+            .find(|(message, _)| message.starts_with(b"SIP/2.0 200 "))
+            .expect("the 200 OK went out");
+        assert_eq!(
+            header(&ok.0, "Contact").as_deref(),
+            Some("<sip:alice@203.0.113.7:41000>")
+        );
+        let text = String::from_utf8_lossy(&ok.0).into_owned();
+        assert!(text.contains("c=IN IP4 203.0.113.7\r\n"), "{text}");
+        assert!(text.contains("m=audio 41002 "), "{text}");
+    }
+
     #[test]
     fn a_media_socket_mapped_long_before_its_call_is_described_by_a_fresh_answer() {
         // mapped when the last call ended, placed ten minutes later: the

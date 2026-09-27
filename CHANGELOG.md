@@ -44,6 +44,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   3611 §4.7.1 defines it, a share of packets lost or discarded, which an
   under-run is neither: a fast earpiece rated R 93 and MOS-LQ 4.4 while its
   tone was cut off 1 774 times in two minutes (`docs/19-numbers.md`).
+- **`scripts/lab.sh nat` calls the stack behind the NAT too.** After the
+  call placed from behind `interop/nat`, the C harness registers `labuser`
+  there again with STUN and Asterisk calls the binding it holds, into a new
+  extension (9010) that echoes for eight seconds and hangs up. The INVITE
+  has to be recognised as the account's, the 2xx answered through
+  `sipral_call_answer_media` has to name the public address in its
+  `Contact`, and Asterisk's ACK, its BYE and the echo all have to arrive;
+  the harness says which did not. A C ABI unit test pins the same answer
+  path without the lab.
 - **The .NET binding can get a call past a NAT.** `SipralStack`'s
   constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
   `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP

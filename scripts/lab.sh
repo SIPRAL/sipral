@@ -17,8 +17,8 @@
 #   scripts/lab.sh opensips     the second proxy only
 #   scripts/lab.sh asterisk
 #   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
-#   scripts/lab.sh nat          only the call from behind a NAT, with STUN
-#                               against coturn, through the C ABI
+#   scripts/lab.sh nat          only the calls from and to behind a NAT, with
+#                               STUN against coturn, through the C ABI
 #   scripts/lab.sh ice          only the ICE steps: a call that requires ICE,
 #                               from the harness and from Asterisk, answered
 #                               by the headless agent as an ICE-lite endpoint;
@@ -954,9 +954,35 @@ flows_baresip_c() {
 # that the step also runs under a COMPOSE_PROJECT_NAME of its own -- a second
 # copy of the lab beside one somebody else already has up.
 nat_flow() {
-    local beside natbox gateway coturn stun asterisk status
+    local beside status
     local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    nat_up || return 1
+    printf '  behind %s, STUN at %s:3478, Asterisk at %s\n' "$NAT_GATEWAY" "$NAT_STUN" "$NAT_ASTERISK"
+
+    docker run --rm --network "${project}_inside" \
+        --cap-add NET_ADMIN \
+        --add-host "asterisk:$NAT_ASTERISK" \
+        -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=nat \
+        -e "SIPRAL_STUN_SERVER=$NAT_STUN:3478" \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        sipral-lab-nat sh -c "
+            ip route replace default via $NAT_GATEWAY || exit 1
+            exec /harness-c asterisk 5060 9000"
+    status=$?
+    nat_down
+    return "$status"
+}
+
+# coturn and the NAT, up, with the three addresses a step behind it needs
+# read into NAT_GATEWAY (the NAT's own leg on `inside`, the default route
+# there), NAT_STUN and NAT_ASTERISK (both on the lab network).
+nat_up() {
+    local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    local natbox coturn asterisk
     ( cd interop && docker compose --profile nat up -d --build coturn natbox ) >/dev/null 2>&1 \
         || { printf '  could not start coturn and the NAT\n'; return 1; }
     wait_for natbox "nat: masquerading out of" required nat || return 1
@@ -967,37 +993,86 @@ nat_flow() {
     natbox=$(cd interop && docker compose --profile nat ps -q natbox)
     coturn=$(cd interop && docker compose --profile nat ps -q coturn)
     asterisk=$(cd interop && docker compose ps -q asterisk)
-    gateway=$(docker inspect -f \
+    NAT_GATEWAY=$(docker inspect -f \
         "{{with index .NetworkSettings.Networks \"${project}_inside\"}}{{.IPAddress}}{{end}}" \
         "$natbox")
-    stun=$(docker inspect -f \
+    NAT_STUN=$(docker inspect -f \
         "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
         "$coturn")
-    asterisk=$(docker inspect -f \
+    NAT_ASTERISK=$(docker inspect -f \
         "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
         "$asterisk")
-    if [ -z "$gateway" ] || [ -z "$stun" ] || [ -z "$asterisk" ]; then
+    if [ -z "$NAT_GATEWAY" ] || [ -z "$NAT_STUN" ] || [ -z "$NAT_ASTERISK" ]; then
         printf '  could not read the addresses: NAT %s, coturn %s, Asterisk %s\n' \
-            "${gateway:-?}" "${stun:-?}" "${asterisk:-?}"
+            "${NAT_GATEWAY:-?}" "${NAT_STUN:-?}" "${NAT_ASTERISK:-?}"
+        nat_down
         return 1
     fi
-    printf '  behind %s, STUN at %s:3478, Asterisk at %s\n' "$gateway" "$stun" "$asterisk"
+}
 
-    docker run --rm --network "${project}_inside" \
+nat_down() {
+    ( cd interop && docker compose --profile nat rm -sf coturn natbox ) >/dev/null 2>&1
+}
+
+# The same account behind the same NAT, called rather than calling: the C
+# harness's own `natin` flow registers `labuser` at the address coturn
+# reported and says so on a `waiting for a call to <URI>` line, and Asterisk
+# then calls that URI into extension 9010, which echoes for eight seconds and
+# hangs up. The binding is named rather than `PJSIP/labuser` alone because
+# the account keeps ten, and one an earlier run never gave back would take
+# the call.
+#
+# What it guards is the half of a phone's life the network starts: the
+# INVITE reaching the address STUN reported, the 2xx answering it with that
+# address in its `Contact` too, Asterisk's ACK and BYE both reaching it, and
+# the echo coming back to the `c=`. interop/harness-c's flow_nat_incoming
+# checks each and says which one failed. The harness runs detached, since
+# this script reads its output while it waits for the call; a harness that
+# never says it is waiting, or dies first, fails the step with its log.
+NAT_CALLED_NAME=sipral-lab-nat-called
+nat_called_flow() {
+    local beside uri status tries=0
+    local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    nat_up || return 1
+    printf '  behind %s, STUN at %s:3478, Asterisk at %s\n' "$NAT_GATEWAY" "$NAT_STUN" "$NAT_ASTERISK"
+    docker rm -f "$NAT_CALLED_NAME" >/dev/null 2>&1
+    docker run -d --name "$NAT_CALLED_NAME" --network "${project}_inside" \
         --cap-add NET_ADMIN \
-        --add-host "asterisk:$asterisk" \
-        -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=nat \
-        -e "SIPRAL_STUN_SERVER=$stun:3478" \
+        --add-host "asterisk:$NAT_ASTERISK" \
+        -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=natin \
+        -e "SIPRAL_STUN_SERVER=$NAT_STUN:3478" \
         -e LD_LIBRARY_PATH=/lib-sipral \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS_C:/harness-c:ro" \
         -v "$beside:/lib-sipral:ro" \
         sipral-lab-nat sh -c "
-            ip route replace default via $gateway || exit 1
-            exec /harness-c asterisk 5060 9000"
-    status=$?
-    ( cd interop && docker compose --profile nat rm -sf coturn natbox ) >/dev/null 2>&1
-    return "$status"
+            ip route replace default via $NAT_GATEWAY || exit 1
+            exec /harness-c asterisk 5060 9000" >/dev/null \
+        || { printf '  could not start the harness\n'; nat_down; return 1; }
+    uri=""
+    until [ -n "$uri" ]; do
+        uri=$(docker logs "$NAT_CALLED_NAME" 2>&1 \
+            | sed -n 's/^  nat   waiting for a call to \(sip:[^ ]*\)$/\1/p' | head -1)
+        [ -n "$uri" ] && break
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$NAT_CALLED_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 45 ]; then
+            printf '  the harness never said it was waiting for the call\n'
+            docker logs "$NAT_CALLED_NAME" 2>&1
+            docker rm -f "$NAT_CALLED_NAME" >/dev/null 2>&1
+            nat_down
+            return 1
+        fi
+        sleep 1
+    done
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/labuser/$uri extension 9010@lab" ) >/dev/null 2>&1
+    status=$(timeout 90 docker wait "$NAT_CALLED_NAME" 2>/dev/null || echo 1)
+    docker logs "$NAT_CALLED_NAME" 2>&1
+    docker rm -f "$NAT_CALLED_NAME" >/dev/null 2>&1
+    nat_down
+    [ "$status" = 0 ]
 }
 
 # 8.5.5's ICE-lite steps: the headless application answering as an ICE-lite
@@ -1685,6 +1760,10 @@ if [ "$WANT" = all ] || [ "$WANT" = nat ]; then
     if [ -n "$HARNESS_C" ]; then
         nat_flow && pass "registered and heard from behind the NAT, at the address STUN reported" \
             || fail "behind a NAT"
+        step "called behind a NAT -- STUN against coturn, then Asterisk calls in, in C"
+        nat_called_flow \
+            && pass "called behind the NAT: the 2xx named the address STUN reported, and the ACK, the BYE and the echo reached it" \
+            || fail "called behind a NAT"
     elif [ "$WANT" = nat ]; then
         # the flow is the C harness's, since the setting it proves is the C
         # ABI's: asked for by name, a machine with no C harness fails it

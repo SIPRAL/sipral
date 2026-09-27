@@ -9511,7 +9511,9 @@ fn a_call_answered_after_the_account_moved_behind_a_nat_writes_the_public_contac
     let incoming = pair.ring();
     let public: SocketAddr = "203.0.113.9:41010".parse().expect("an address");
     assert_eq!(
-        pair.callee.agent.readdress(UDP, callee_sip(), public, pair.now),
+        pair.callee
+            .agent
+            .readdress(UDP, callee_sip(), public, pair.now),
         1,
         "the account moves before the call is answered"
     );

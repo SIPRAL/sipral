@@ -61,6 +61,7 @@ FLOW_SECTIONS = {
     "phone to phone -- baresip through the proxy": ("baresip", "rust"),
     "the same, through the C ABI -- baresip through the proxy": ("baresip", "c"),
     "behind a NAT -- STUN against coturn, then register and call Asterisk, in C": ("nat_stun", "c"),
+    "called behind a NAT -- STUN against coturn, then Asterisk calls in, in C": ("nat_stun", "c"),
     "ICE-lite -- a call that requires ICE, placed at the headless agent answering as lite": (
         "ice_lite",
         "rust",
