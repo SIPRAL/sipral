@@ -60,6 +60,37 @@
 #                               SIPRAL_DRIFT_MS=180000
 #                               SIPRAL_DRIFT_REPORT_MS=30000
 #                               SIPRAL_DRIFT_PPM=2000 scripts/lab.sh drift
+#   scripts/lab.sh drift-netem  the same three calls, over a link made bad
+#                               the way `netem` makes one -- PROFILE names
+#                               which of interop/impairment/*.sh, "lossy"
+#                               unless told otherwise -- with the audio
+#                               quality gate engaged on all three, so a
+#                               report line also carries its segmental SNR
+#                               and its splice clicks. The same
+#                               SIPRAL_DRIFT_* variables as `drift` above
+#                               shorten it; docs/19-numbers.md's own run used
+#                               three minutes, not an hour, since a bad link
+#                               moves the buffer's target within seconds, not
+#                               within an hour the way a clean one's drift
+#                               does
+#   scripts/lab.sh latency      the delay from this end's own microphone to
+#                               its own earpiece, on a call to Asterisk's
+#                               echo: a marker frame's round trip, halved,
+#                               every SIPRAL_LATENCY_MARK_MS for
+#                               SIPRAL_LATENCY_MS (two seconds and two
+#                               minutes unless told otherwise) --
+#                               interop/harness/src/latency.rs's own module
+#                               doc says what the three stages it reports are
+#   scripts/lab.sh volume       a hundred calls (SIPRAL_VOLUME_CALLS) through
+#                               Kamailio to Asterisk at once rather than one
+#                               -- SIPRAL_VOLUME_STAGGER_MS apart, held on
+#                               the tone for SIPRAL_VOLUME_HOLD_MS once every
+#                               one that is coming up has, then hung up
+#                               together. Wrapped in /usr/bin/time -v for
+#                               this end's own CPU and peak memory; Asterisk's
+#                               own peak channel count is read over its
+#                               console the way the other steps already read
+#                               it, and printed beside it
 #   scripts/lab.sh wasapi up    bring the lab up reachable from the LAN, for
 #                               a call carried on a Windows machine's real
 #                               WASAPI devices (interop/harness/src/wasapi.rs,
@@ -2171,6 +2202,135 @@ if [ "$WANT" = drift ]; then
     step "an hour on one call -- three calls to Asterisk's echo, their earpieces skewed"
     drift_flow && pass "the jitter buffer kept all three calls level" \
         || fail "an hour of drift"
+fi
+
+# The same three calls as drift_flow, over a link `bad_network`'s own profile
+# shapes -- ifb plus mirred, both directions, exactly the setup bad_network
+# uses, kept here as its own function because drift_flow's own container never
+# takes NET_ADMIN or installs iproute2 and giving it both unconditionally
+# would cost every ordinary `drift` run an apt-get it never needs.
+# SIPRAL_AUDIO_GATE=1 throughout, so interop/harness/src/drift.rs's own
+# verdict carries each leg's segmental SNR and splice clicks beside what the
+# buffer did.
+drift_under_netem() {
+    local profile="$1"
+    # shellcheck disable=SC1090
+    WHY=""; NETEM=""; REQUIRE=""
+    . "$ROOT/interop/impairment/$profile.sh"
+    printf '  %-10s %s\n' "$profile" "$WHY"
+    docker run --rm --network sipral-interop_lab \
+        --cap-add NET_ADMIN \
+        -e SIPRAL_FLOWS=drift \
+        -e SIPRAL_AUDIO_GATE=1 \
+        -e SIPRAL_DRIFT_MS="${SIPRAL_DRIFT_MS:-180000}" \
+        -e SIPRAL_DRIFT_REPORT_MS="${SIPRAL_DRIFT_REPORT_MS:-30000}" \
+        -e SIPRAL_DRIFT_PPM="${SIPRAL_DRIFT_PPM:-250}" \
+        -e "NETEM=$NETEM" -e "REQUIRE=$REQUIRE" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim sh -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y iproute2 >/dev/null 2>&1
+            link=$(ip route | awk "/^default/{print \$5}")
+            ifb=ifb0
+            # shellcheck disable=SC2086
+            tc qdisc add dev "$link" root netem $NETEM
+            ip link add "$ifb" type ifb
+            ip link set "$ifb" up
+            tc qdisc add dev "$link" handle ffff: ingress
+            tc filter add dev "$link" parent ffff: protocol ip u32 \
+                match u32 0 0 action mirred egress redirect dev "$ifb"
+            # shellcheck disable=SC2086
+            tc qdisc add dev "$ifb" root netem $NETEM
+            applied_out=$(tc qdisc show dev "$link")
+            applied_in=$(tc qdisc show dev "$ifb")
+            echo "  out: $applied_out"
+            echo "  in:  $applied_in"
+            impaired=1
+            if [ -n "$REQUIRE" ]; then
+                case "$applied_out" in *"$REQUIRE"*) ;; *) impaired=0 ;; esac
+                case "$applied_in" in *"$REQUIRE"*) ;; *) impaired=0 ;; esac
+            fi
+            if [ "$impaired" -eq 0 ]; then
+                echo "IMPAIRMENT-NOT-APPLIED"; exit 3
+            fi
+            /harness asterisk 5060 9000'
+}
+
+if [ "$WANT" = drift-netem ]; then
+    PROFILE="${PROFILE:-lossy}"
+    step "the drift flow over a bad link -- $PROFILE"
+    drift_under_netem "$PROFILE" \
+        && pass "the jitter buffer and the audio quality gate both held" \
+        || fail "drift under $PROFILE"
+fi
+
+# One call to Asterisk's echo, a marker frame's round trip standing in for a
+# real microphone-to-earpiece measurement this lab has no second host to take
+# with two real clocks. interop/harness/src/latency.rs's own module doc says
+# why a round trip halved is what is reported instead.
+latency_flow() {
+    docker run --rm --network sipral-interop_lab \
+        -e SIPRAL_FLOWS=latency \
+        -e SIPRAL_LATENCY_MS="${SIPRAL_LATENCY_MS:-120000}" \
+        -e SIPRAL_LATENCY_MARK_MS="${SIPRAL_LATENCY_MARK_MS:-2000}" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim /harness asterisk 5060 9000
+}
+
+if [ "$WANT" = latency ]; then
+    step "microphone to earpiece -- a marker's round trip to Asterisk's echo"
+    latency_flow && pass "the markers came back" || fail "microphone to earpiece"
+fi
+
+# A hundred calls (or SIPRAL_VOLUME_CALLS) through the proxy to Asterisk at
+# once, `/usr/bin/time -v` around the whole container for this end's own CPU
+# and peak memory, GNU time is not on debian:trixie-slim's own image so it is
+# installed here the same way bad_network installs iproute2.
+# interop/harness/src/volume.rs's own module doc says what is and is not this
+# process's own to measure.
+volume_flow() {
+    docker run --rm --network sipral-interop_lab \
+        -e SIPRAL_FLOWS=volume \
+        -e SIPRAL_VOLUME_CALLS="${SIPRAL_VOLUME_CALLS:-100}" \
+        -e SIPRAL_VOLUME_STAGGER_MS="${SIPRAL_VOLUME_STAGGER_MS:-50}" \
+        -e SIPRAL_VOLUME_HOLD_MS="${SIPRAL_VOLUME_HOLD_MS:-5000}" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim sh -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y time >/dev/null 2>&1
+            /usr/bin/time -v /harness kamailio 5060 9000'
+}
+
+if [ "$WANT" = volume ]; then
+    step "a volume of calls -- through the proxy to Asterisk at once"
+    PEAK_FILE="$(mktemp)"
+    ( peak=0
+      while :; do
+          seen=$(cd interop && docker compose exec -T asterisk asterisk -rx \
+              "core show channels count" 2>/dev/null \
+              | sed -n 's/^\([0-9][0-9]*\) active channel.*/\1/p')
+          case "$seen" in
+              ''|*[!0-9]*) ;;
+              *) [ "$seen" -gt "$peak" ] && peak="$seen" ;;
+          esac
+          printf '%s\n' "$peak" >"$PEAK_FILE"
+          sleep 1
+      done
+    ) &
+    SAMPLER=$!
+    volume_flow
+    STATUS=$?
+    kill "$SAMPLER" >/dev/null 2>&1
+    wait "$SAMPLER" 2>/dev/null
+    printf '  note  Asterisk'"'"'s own peak channel count: %s\n' \
+        "$(cat "$PEAK_FILE" 2>/dev/null || printf unknown)"
+    rm -f "$PEAK_FILE"
+    [ "$STATUS" -eq 0 ] && pass "the calls came up" || fail "a volume of calls"
 fi
 
 # The Rust run through the proxy carries one flow more than the others: a call

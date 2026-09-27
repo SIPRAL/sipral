@@ -151,9 +151,28 @@ if [ "$many" -gt "$one" ] && [ "$CALLS" -gt 1 ]; then
         "$(( (many - one) / (CALLS - 1) ))" "$CALLS"
 fi
 
+# One codec against another, at the codec layer alone: crates/sipral's own
+# pipeline::tests::cost_of_a_frame_by_codec, encode and decode timed apart
+# for one call, then all of Codec::ALL run at the load test's own shape --
+# CALLS calls (two hundred unless raised above) on four threads. The test
+# always runs at a size `cargo test` can afford; these two variables are
+# what raise it to match the load test's own numbers.
+STATUS=0
+printf '\ncodec cost, by codec\n'
+out="$(mktemp)"
+if SIPRAL_CODEC_BENCH_FRAMES="$FRAMES" SIPRAL_CODEC_BENCH_CALLS="$CALLS" \
+    cargo test --release -q -p sipral --lib -- --nocapture cost_of_a_frame_by_codec \
+    >"$out" 2>&1; then
+    grep -o 'codec cost.*' "$out" | sed 's/^/    /'
+else
+    printf 'codec cost: the test did not pass; its output:\n'
+    sed 's/^/    /' "$out"
+    STATUS=1
+fi
+rm -f "$out"
+
 # The signalling test prints its own line, and fails -- printing everything
 # it said -- if a call ended the wrong way or a message went missing.
-STATUS=0
 for count in $SIGNALLING; do
     printf '\nsignalling, %s calls\n' "$count"
     out="$(mktemp)"

@@ -547,6 +547,173 @@ mod tests {
         }
     }
 
+    /// How many frames of audio a codec's own cost is timed over: five
+    /// seconds' worth, unless `SIPRAL_CODEC_BENCH_FRAMES` raises it —
+    /// `scripts/bench.sh` runs a minute's worth, the same way it raises
+    /// `crates/sipral-ffi`'s own load test.
+    fn bench_frames() -> usize {
+        std::env::var("SIPRAL_CODEC_BENCH_FRAMES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|count: &usize| *count > 0)
+            .unwrap_or(250)
+    }
+
+    /// How many calls' worth of one codec `codec_cost_at_load_shape` runs at
+    /// once, across `LOAD_THREADS` — `crates/sipral-ffi`'s own load test's
+    /// own two hundred and four, unless `SIPRAL_CODEC_BENCH_CALLS` says
+    /// otherwise: the ordinary `cargo test` run keeps this small, since it
+    /// pays for every codec in `Codec::ALL` in turn, and `scripts/bench.sh`
+    /// raises it to two hundred to match the load test's own shape exactly.
+    fn bench_calls() -> usize {
+        std::env::var("SIPRAL_CODEC_BENCH_CALLS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|count: &usize| *count > 0)
+            .unwrap_or(20)
+    }
+
+    const LOAD_THREADS: usize = 4;
+
+    /// One codec, one call: encode and decode timed separately, over
+    /// `bench_frames()` frames after twenty-five to let G.722's filters and
+    /// Opus's encoder settle — the same warm-up
+    /// `every_codec_carries_a_frame_at_its_own_rate` gives every codec above.
+    /// Microseconds per frame, encode and decode each.
+    #[allow(clippy::cast_precision_loss)]
+    fn single_frame_cost(codec: Codec) -> (f64, f64) {
+        let mut pair = Coder::new(codec, DEFAULT_FRAME_MS).unwrap();
+        let frame = codec.frame_samples(DEFAULT_FRAME_MS);
+        let mut samples = vec![0_i16; frame];
+        let mut payload = vec![0_u8; codec.max_payload(DEFAULT_FRAME_MS)];
+        let mut back = vec![0_i16; frame];
+        let mut phase = 0_u32;
+        for _ in 0..25 {
+            tone(&mut samples, codec.sample_rate(), &mut phase);
+            let written = pair.encode(&samples, &mut payload).unwrap().octets;
+            pair.decode(&payload[..written], &mut back).unwrap();
+        }
+        let frames = bench_frames();
+        let mut encode_total = std::time::Duration::ZERO;
+        let mut decode_total = std::time::Duration::ZERO;
+        for _ in 0..frames {
+            tone(&mut samples, codec.sample_rate(), &mut phase);
+            let started = std::time::Instant::now();
+            let written = pair.encode(&samples, &mut payload).unwrap().octets;
+            encode_total += started.elapsed();
+            let started = std::time::Instant::now();
+            pair.decode(&payload[..written], &mut back).unwrap();
+            decode_total += started.elapsed();
+        }
+        (
+            encode_total.as_secs_f64() * 1e6 / frames as f64,
+            decode_total.as_secs_f64() * 1e6 / frames as f64,
+        )
+    }
+
+    /// `bench_calls()` calls' worth of one codec, `LOAD_THREADS` of them
+    /// driven at once — `crates/sipral-ffi`'s own load test's shape, at the
+    /// codec layer rather than the whole stack's: no session, no jitter
+    /// buffer, no socket, one `Coder` a call and a frame of encode and
+    /// decode each turn, `bench_frames()` turns. Microseconds per frame,
+    /// encode and decode together, over every call and every thread.
+    #[allow(clippy::cast_precision_loss)]
+    fn codec_cost_at_load_shape(codec: Codec) -> f64 {
+        let calls = bench_calls();
+        let frames = bench_frames();
+        let frame = codec.frame_samples(DEFAULT_FRAME_MS);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(LOAD_THREADS));
+        let per_thread = calls.div_ceil(LOAD_THREADS);
+        let handles: Vec<_> = (0..LOAD_THREADS)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut coders: Vec<Coder> = (0..per_thread)
+                        .map(|_| Coder::new(codec, DEFAULT_FRAME_MS).unwrap())
+                        .collect();
+                    let mut samples = vec![0_i16; frame];
+                    let mut payload = vec![0_u8; codec.max_payload(DEFAULT_FRAME_MS)];
+                    let mut back = vec![0_i16; frame];
+                    let mut phase = 0_u32;
+                    // twenty-five frames of warm-up, unmeasured, the same
+                    // reason `single_frame_cost` gives one
+                    for _ in 0..25 {
+                        tone(&mut samples, codec.sample_rate(), &mut phase);
+                        for coder in &mut coders {
+                            let written = coder.encode(&samples, &mut payload).unwrap().octets;
+                            coder.decode(&payload[..written], &mut back).unwrap();
+                        }
+                    }
+                    barrier.wait();
+                    let started = std::time::Instant::now();
+                    for _ in 0..frames {
+                        tone(&mut samples, codec.sample_rate(), &mut phase);
+                        for coder in &mut coders {
+                            let written = coder.encode(&samples, &mut payload).unwrap().octets;
+                            coder.decode(&payload[..written], &mut back).unwrap();
+                        }
+                    }
+                    (started.elapsed(), coders.len())
+                })
+            })
+            .collect();
+        let mut total = std::time::Duration::ZERO;
+        let mut done_calls = 0_usize;
+        for handle in handles {
+            let (elapsed, calls) = handle.join().unwrap();
+            total += elapsed;
+            done_calls += calls;
+        }
+        // every thread ran for the same number of frames, so the total time
+        // divided by the total frames every thread carried is the per-frame
+        // cost under the same contention two hundred calls on four threads
+        // gives the load test
+        let total_frames = done_calls * frames;
+        total.as_secs_f64() * 1e6 / total_frames.max(1) as f64
+    }
+
+    /// The numbers `scripts/bench.sh` collects into docs/19-numbers.md's own
+    /// "Opus against G.711" table: every codec this build has, alone and at
+    /// the load test's own shape. Printed rather than asserted against a
+    /// ceiling — the load test itself already asserts a per-frame ceiling
+    /// for G.711 at the whole stack's own shape; this is the codec alone,
+    /// on whatever machine runs it, and the numbers vary by more than a
+    /// fixed ceiling could stay honest about across a laptop and a build
+    /// server. What it does assert is the ordering nothing here should ever
+    /// invert: Opus, doing real signal processing, costs more than G.711
+    /// companding a sample at a time.
+    #[test]
+    fn cost_of_a_frame_by_codec() {
+        let mut by_codec = std::collections::HashMap::new();
+        for codec in Codec::ALL {
+            let (encode, decode) = single_frame_cost(codec);
+            by_codec.insert(codec, encode + decode);
+            println!(
+                "codec cost: {codec} {:.2} us/frame (encode {:.2}, decode {:.2})",
+                encode + decode,
+                encode,
+                decode
+            );
+        }
+        for codec in Codec::ALL {
+            let us = codec_cost_at_load_shape(codec);
+            println!(
+                "codec cost, load shape: {codec} {:.2} us/frame ({} calls, {LOAD_THREADS} threads)",
+                us,
+                bench_calls(),
+            );
+        }
+        #[cfg(feature = "opus")]
+        {
+            let g711 = by_codec.get(&Codec::Pcmu).copied().unwrap_or(0.0);
+            let opus = by_codec.get(&Codec::Opus).copied().unwrap_or(0.0);
+            assert!(
+                opus > g711,
+                "Opus cost {opus:.2} us/frame did not come out above G.711's {g711:.2}"
+            );
+        }
+    }
+
     /// A concealed frame is a whole frame of audio, whichever concealment ran.
     /// A short one is a click in the earpiece and a gap in the recording.
     #[test]

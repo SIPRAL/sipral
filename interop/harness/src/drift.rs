@@ -63,8 +63,8 @@ use sipral::{
     UNAVAILABLE, UaEvent,
 };
 
-use crate::audio::Heard;
-use crate::{Endpoint, catalog, place_call, run_folded, uri};
+use crate::audio::{Heard, Media};
+use crate::{Endpoint, catalog, place_call, quality, run_folded, uri};
 
 /// `interop/asterisk/extensions.conf`'s echo: `Answer(); Echo();`.
 const ECHO_EXTENSION: &str = "9008";
@@ -161,6 +161,7 @@ impl Leg {
 /// # Errors
 /// The first condition that did not hold, per call, the way every other flow
 /// here reports.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run(
     server: &str,
     remote: SocketAddr,
@@ -272,11 +273,20 @@ pub(crate) fn run(
         }
     }
 
+    let gate_reports: Vec<Option<quality::Report>> = legs
+        .iter()
+        .map(|leg| {
+            leg.call
+                .and_then(|call| endpoint.media.get(&call))
+                .and_then(Media::quality_report)
+        })
+        .collect();
     crate::join::give_back(&mut endpoint, account);
     verdict(
         &legs,
         ppm,
         running_since.map(|since| hung_up.unwrap_or(since) - since),
+        &gate_reports,
     )
 }
 
@@ -489,15 +499,32 @@ fn report(endpoint: &mut Endpoint, leg: &mut Leg, since: Instant, every: Duratio
 }
 
 /// Whether every call held, heard and measured what it should have. `ppm`
-/// is the skew the run was given, and [`TOLERANCE`] of it is how far any of
-/// the three — the control included — may measure from its own.
-fn verdict(legs: &[Leg], ppm: i32, ran: Option<Duration>) -> Result<String, String> {
+/// is the skew the run was given, [`TOLERANCE`] of it is how far any of the
+/// three — the control included — may measure from its own, and
+/// `gate_reports` is what the audio quality gate found on each leg's own
+/// call, `None` on a run `SIPRAL_AUDIO_GATE` never engaged for (the ordinary
+/// `drift` word) and `Some` on one that did (`scripts/lab.sh drift-netem`):
+/// a leg's own audio can hold up by every count above and still have
+/// clicked at a concealment splice or measured too noisy to trust, which
+/// only the gate would catch.
+fn verdict(
+    legs: &[Leg],
+    ppm: i32,
+    ran: Option<Duration>,
+    gate_reports: &[Option<quality::Report>],
+) -> Result<String, String> {
     let ran = ran.unwrap_or_default();
     let allowed = f64::from(ppm.unsigned_abs()) * TOLERANCE;
     let mut failed = Vec::new();
     let mut said = format!("   ({} min", ran.as_secs() / 60);
-    for leg in legs {
+    for (leg, gate) in legs.iter().zip(gate_reports) {
         let mut failures = leg.failures.clone();
+        if let Some(report) = gate {
+            let _ = write!(said, "; audio gate: {}", report.summary());
+            if let Err(why) = report.verdict() {
+                failures.push(why);
+            }
+        }
         let result = if let (Some(first), Some(last)) = (leg.first, leg.last) {
             let skew = measured(&first, &last);
             if (skew - leg.skew).abs() > allowed {
@@ -552,7 +579,7 @@ mod tests {
 
     use sipral::Quality;
 
-    use super::{FRAME, Leg, balance, measured, verdict};
+    use super::{FRAME, Leg, balance, measured, quality, verdict};
     use crate::audio::Heard;
 
     fn at(stretched: u64, shrunk: u64, delay: Duration, played: u32) -> (Quality, Heard) {
@@ -647,14 +674,14 @@ mod tests {
     /// nobody hears them: they are within the tolerance, and they pass.
     #[test]
     fn silence_where_the_tone_paused_passes() {
-        assert!(verdict(&[control(3, 0)], 2_000, Some(FRAME * 9_000)).is_ok());
+        assert!(verdict(&[control(3, 0)], 2_000, Some(FRAME * 9_000), &[None]).is_ok());
     }
 
     /// The same frames of silence in the middle of the tone are gaps in the
     /// audio, however well the count of them balances.
     #[test]
     fn silence_that_cut_the_tone_off_fails() {
-        let verdict = verdict(&[control(3, 3)], 2_000, Some(FRAME * 9_000));
+        let verdict = verdict(&[control(3, 3)], 2_000, Some(FRAME * 9_000), &[None]);
         let why = verdict.expect_err("the tone was cut three times");
         assert!(why.contains("cut off 3 times"), "{why}");
     }
@@ -665,8 +692,37 @@ mod tests {
     fn a_stalled_call_fails() {
         let mut leg = control(0, 0);
         leg.stalls = 1;
-        let verdict = verdict(&[leg], 2_000, Some(FRAME * 9_000));
+        let verdict = verdict(&[leg], 2_000, Some(FRAME * 9_000), &[None]);
         let why = verdict.expect_err("the stream stalled");
         assert!(why.contains("stalled"), "{why}");
+    }
+
+    /// A leg that balanced its skew, was never cut and never stalled still
+    /// fails when the audio quality gate — engaged only under
+    /// `scripts/lab.sh drift-netem` — clicked at a concealment splice: a
+    /// count of frames balancing is not the same claim as a waveform
+    /// nothing heard a click in.
+    #[test]
+    fn a_gate_failure_fails_the_leg_even_when_every_count_balances() {
+        let report = quality::Report {
+            segments: 100,
+            mean_seg_snr_db: 20.0,
+            clicks: 1,
+            edges_checked: 4,
+            ..quality::Report::default()
+        };
+        let verdict = verdict(&[control(0, 0)], 2_000, Some(FRAME * 9_000), &[Some(report)]);
+        let why = verdict.expect_err("the gate found a click");
+        assert!(why.contains("1 of 4"), "{why}");
+    }
+
+    /// A leg the gate never ran on — `SIPRAL_AUDIO_GATE` unset, the ordinary
+    /// `drift` word — prints nothing about it and is judged the same as
+    /// before the gate existed.
+    #[test]
+    fn a_leg_with_no_gate_report_is_judged_without_it() {
+        let said = verdict(&[control(0, 0)], 2_000, Some(FRAME * 9_000), &[None])
+            .expect("no gate, nothing else wrong");
+        assert!(!said.contains("audio gate"), "{said}");
     }
 }

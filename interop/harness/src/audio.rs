@@ -49,6 +49,15 @@ const TONE_HZ: u32 = 444;
 /// How loud the tone is: a quarter of full scale.
 const AMPLITUDE: i16 = 8_000;
 
+/// [`Media::arm_mark`]'s own frame: full scale, so it cannot be mistaken for
+/// the tone at a quarter of it, for silence, or for anything concealment
+/// invents from either. `crate::latency` is the one caller.
+const MARK_AMPLITUDE: i16 = i16::MAX;
+
+/// Loud enough that only [`MARK_AMPLITUDE`] reaches it: above the tone's own
+/// [`AMPLITUDE`] by a factor a codec's quantisation cannot close.
+const MARK_LOUDNESS: i32 = 20_000;
+
 /// How long the tone sounds, and how long it then stops for.
 ///
 /// A continuous tone never lets a de-jitter buffer give back the delay it
@@ -117,6 +126,12 @@ pub(crate) fn loudness(samples: &[i16]) -> i32 {
 /// audible are never two different ideas of loud.
 pub(crate) fn is_audible(samples: &[i16]) -> bool {
     loudness(samples) >= AUDIBLE
+}
+
+/// A frame that can only be [`Media::arm_mark`]'s own marker: loud enough
+/// that neither the tone nor concealment reaches it.
+fn is_marker(samples: &[i16]) -> bool {
+    loudness(samples) >= MARK_LOUDNESS
 }
 
 /// What the far end sent back, counted the same way the harness has always
@@ -194,6 +209,36 @@ impl Gaps {
     }
 }
 
+/// A marker [`Media::arm_mark`] has put on the wire, or is waiting for the
+/// next captured frame to carry: `crate::latency`'s own round trip, from the
+/// microphone's own instant to whichever frame comes back at [`MARK_LOUDNESS`].
+#[derive(Clone, Copy)]
+struct PendingMark {
+    /// The instant `arm_mark` was called: the microphone's own moment, so
+    /// the round trip this becomes counts the wait for the next captured
+    /// frame the way a real capture-to-network delay would.
+    armed: Instant,
+    /// The instant a captured frame actually carried it, once one has.
+    sent: Option<Instant>,
+}
+
+/// One marker's completed round trip: `crate::latency` reads three numbers
+/// out of it rather than one, because "the delay" is three stages added
+/// together and only one of them — the buffer's own target when the echo
+/// came back — is `sipral`'s own to ask for.
+pub(crate) struct Mark {
+    /// The wait for the next captured frame: [`PendingMark::sent`] less
+    /// [`PendingMark::armed`], at most one packetisation interval.
+    pub(crate) capture_wait: Duration,
+    /// [`PendingMark::armed`] to the instant this end's own playback took
+    /// the echo back: the whole round trip, capture wait included.
+    pub(crate) round_trip: Duration,
+    /// The jitter buffer's own target delay the instant the echo was taken,
+    /// read off `sipral::MediaSession::statistics` the way every other
+    /// caller of it in this file already does.
+    pub(crate) buffer_target: Duration,
+}
+
 /// G.729's static payload type (RFC 3551 table 4).
 const G729: u8 = 18;
 
@@ -231,6 +276,11 @@ pub(crate) struct Media {
     inbox: [u8; 2_048],
     /// `Some` only when [`AUDIO_GATE_ENV`] is set — see its own doc comment.
     quality: Option<quality::Gate>,
+    /// [`Media::arm_mark`]'s own marker, waiting for a captured frame to
+    /// carry it or for its echo to come back.
+    pending_mark: Option<PendingMark>,
+    /// Marks whose echo has come back since the last [`Media::take_marks`].
+    marks: Vec<Mark>,
 }
 
 impl Media {
@@ -258,7 +308,31 @@ impl Media {
             quality: env::var_os(AUDIO_GATE_ENV)
                 .is_some()
                 .then(quality::Gate::new),
+            pending_mark: None,
+            marks: Vec::new(),
         })
+    }
+
+    /// Arm a marker for the next captured frame in place of whatever else
+    /// this end would have sent, so its own echo can be told apart from the
+    /// tone when it comes back. `now` is the microphone's own instant: the
+    /// round trip [`Media::take_marks`] later reports is measured from here,
+    /// the wait for the next captured frame included, the way a real
+    /// capture-to-network delay would be.
+    ///
+    /// Replaces whatever mark was still waiting: one that has not come back
+    /// by the time the next is armed is lost rather than left to be
+    /// mistaken for this one's own echo.
+    pub(crate) fn arm_mark(&mut self, now: Instant) {
+        self.pending_mark = Some(PendingMark {
+            armed: now,
+            sent: None,
+        });
+    }
+
+    /// Marks whose echo came back since the last call, oldest first.
+    pub(crate) fn take_marks(&mut self) -> Vec<Mark> {
+        std::mem::take(&mut self.marks)
     }
 
     /// Run this call's earpiece on a clock `ppm` parts per million fast (or
@@ -373,6 +447,7 @@ impl Media {
     /// Everything about the codec, the jitter buffer and the concealment is
     /// `session`'s; this only watches what crosses the socket, the way a real
     /// audio device and a real network would.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn turn(&mut self, session: &mut MediaSession, now: Instant) {
         // The socket was bound before the call was placed or answered, so its
         // port could go in the description, and the call may have taken
@@ -391,7 +466,12 @@ impl Media {
         let mut samples = [0_i16; MAX_SAMPLES];
 
         while now >= self.next {
-            if in_spurt(elapsed) {
+            if let Some(pending) = self.pending_mark.as_mut().filter(|mark| mark.sent.is_none()) {
+                if let Some(slot) = samples.get_mut(..frame) {
+                    slot.fill(MARK_AMPLITUDE);
+                }
+                pending.sent = Some(now);
+            } else if in_spurt(elapsed) {
                 tone(
                     samples.get_mut(..frame).unwrap_or_default(),
                     &mut self.phase,
@@ -466,6 +546,20 @@ impl Media {
             if audible {
                 self.heard.audible = self.heard.audible.saturating_add(1);
             }
+            if matches!(outcome, Playback::Packet)
+                && is_marker(room)
+                && let Some(PendingMark {
+                    armed,
+                    sent: Some(sent),
+                }) = self.pending_mark
+            {
+                self.pending_mark = None;
+                self.marks.push(Mark {
+                    capture_wait: sent.saturating_duration_since(armed),
+                    round_trip: now.saturating_duration_since(armed),
+                    buffer_target: session.statistics(now).quality.target_delay,
+                });
+            }
             if matches!(outcome, Playback::ComfortNoise) {
                 self.heard.comfort = self.heard.comfort.saturating_add(1);
             }
@@ -501,7 +595,7 @@ impl Media {
 
 #[cfg(test)]
 mod tests {
-    use super::{Gaps, TONE_HZ, tone};
+    use super::{AMPLITUDE, Gaps, MARK_AMPLITUDE, TONE_HZ, is_marker, tone};
 
     /// Frames as the earpiece took them: `T` the tone, `q` a quiet packet
     /// (the far end's own pause), `s` silence because the buffer had nothing.
@@ -529,6 +623,17 @@ mod tests {
     fn silence_that_runs_on_into_the_tone_is_a_cut() {
         assert_eq!(cuts("TTqqssssTT"), 1);
         assert_eq!(cuts("TTsqqTTssTT"), 2);
+    }
+
+    /// `crate::latency`'s own marker has to read apart from the tone in
+    /// both directions — a codec's own quantisation could in principle move
+    /// either — or a call's own echo of it could be mistaken for the tone,
+    /// or a loud moment of the tone could be mistaken for the echo.
+    #[test]
+    fn the_marker_reads_apart_from_the_tone() {
+        assert!(is_marker(&[MARK_AMPLITUDE; 160]));
+        assert!(!is_marker(&[AMPLITUDE; 160]));
+        assert!(!is_marker(&[0; 160]));
     }
 
     /// The tone has to stay at the same pitch when the rate doubles, or a

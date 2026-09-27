@@ -43,6 +43,7 @@ mod fork;
 mod ice_lite;
 mod ice_nat;
 mod join;
+mod latency;
 #[cfg(test)]
 mod local;
 mod pair;
@@ -50,6 +51,7 @@ mod pair;
 mod pipewire;
 mod quality;
 mod referral;
+mod volume;
 #[cfg(all(feature = "wasapi", target_os = "windows"))]
 mod wasapi;
 
@@ -442,6 +444,7 @@ fn main() -> ExitCode {
 /// inline.
 ///
 /// Returns how many of them failed.
+#[allow(clippy::too_many_lines)]
 fn extra_flows(
     server: &str,
     remote: SocketAddr,
@@ -555,6 +558,29 @@ fn extra_flows(
             Ok(said) => println!("  pass  an hour of drift{said}"),
             Err(why) => {
                 println!("  FAIL  an hour of drift — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // the microphone-to-earpiece delay, and only when named: see
+    // `latency`'s own module doc for why it is a round trip
+    if server == "asterisk" && wanted.split(',').any(|name| name.trim() == "latency") {
+        match latency::run(server, remote, user, pass) {
+            Ok(said) => println!("  pass  microphone to earpiece{said}"),
+            Err(why) => {
+                println!("  FAIL  microphone to earpiece — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // a hundred calls (or however many `SIPRAL_VOLUME_CALLS` asks for)
+    // through the proxy to Asterisk at once, and only when named: see
+    // `volume`'s own module doc
+    if server == "kamailio" && wanted.split(',').any(|name| name.trim() == "volume") {
+        match volume::run(server, remote, user, pass) {
+            Ok(said) => println!("  pass  a volume of calls{said}"),
+            Err(why) => {
+                println!("  FAIL  a volume of calls — {why}");
                 failures += 1;
             }
         }
@@ -2658,6 +2684,10 @@ mod tests {
             pair::DIALLING_MEDIA_SEED => crate::pair::DIALLING_MEDIA_SEED,
             drift::SEED => crate::drift::SEED,
             drift::MEDIA_SEED => crate::drift::MEDIA_SEED,
+            latency::SEED => crate::latency::SEED,
+            latency::MEDIA_SEED => crate::latency::MEDIA_SEED,
+            volume::SEED => crate::volume::SEED,
+            volume::MEDIA_SEED => crate::volume::MEDIA_SEED,
         ];
         #[cfg(all(feature = "pipewire", target_os = "linux"))]
         all.extend(id![
