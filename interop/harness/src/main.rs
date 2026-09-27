@@ -551,7 +551,7 @@ fn extra_flows(
             }
         }
     }
-    // an hour on three calls to the same echo, and only when named: nothing
+    // an hour on six calls to the same echo, and only when named: nothing
     // that runs by default may take an hour (see `drift`)
     if server == "asterisk" && wanted.split(',').any(|name| name.trim() == "drift") {
         match drift::run(server, remote, user, pass) {

@@ -706,6 +706,91 @@ Read together:
   profile for three minutes clicks, on `main` as it stands, where the same profile briefly
   does not.
 
+## 27 September 2026 — `0.0.1`, what a real clock drifts, and a budget for the rest
+
+The sections above made a fast earpiece keep in hand what its pace slips
+over a talk spurt, and at 500 000 ppm that came to 340 ms of delay, past
+the lab flow's 250 ms ceiling, with the tone still run dry 122 times in two
+minutes, every one in the far end's pauses. Three questions were left: what
+skew a real device makes, what the product should do past it, and why the
+lab ran dry in pauses where the crate's simulation did not.
+
+**What a real clock drifts.** An Apple M2 MacBook Air, macOS 26.5.2, read
+for fifteen minutes. Each output device's own sample clock against the
+machine's (`mach_absolute_time`), through an output-only HAL unit rendering
+silence, first and last render timestamps: the built-in loudspeaker ran
++3.13 ppm off it (CoreAudio's own rate scalar said 3.1), and the two virtual
+devices, BlackHole and Microsoft Teams Audio, which are clocked off the
+machine itself, +0.02 ppm, the measure's own floor. The machine's crystal
+against the wall clock the time daemon holds to NTP, over the same fifteen
+minutes: +8.8 ppm. The lab machine's, read off its time daemon's frequency
+correction: +1.3 ppm. Two ends of a call on such hardware drift apart by
+tens of ppm, and the widest a device's clock may be off and meet its bus's
+specification is 2500 ppm, a USB full-speed one's ±0.25 %, and ±500 ppm at
+high speed (USB 2.0 §7.1.11). No microphone or USB device was read: reading
+one asks for a permission this machine's owner grants by hand, and none was
+attached.
+
+**What the product does about it.** What a pause keeps in hand for the
+pace is bounded at 100 ms (`docs/05-media.md`), which carries 2500 ppm
+through a twenty-second spurt. Past it the skew is a stream played at the
+wrong rate, and the buffer runs dry and counts it rather than grow the delay.
+The crate's simulations of the lab's tone, two minutes of the earpiece's
+clock through the facade's own codec, concealment and detector of speech
+(`earpiece_against` in `crates/sipral/src/tests.rs`), after the change:
+
+| Two minutes of the tone | One frame a callback: dry, cuts, deepest | Two frames: dry, cuts, deepest |
+|---|---|---|
+| −10 000, −5000, +500, +2500, +5000, +10 000 ppm | 0, 0, 40–60 ms | 0, 0, 60–100 ms |
+| +20 000 ppm | 1, 0, 60 ms | 1, 0, 100 ms |
+| +50 000 ppm | 5, 3, 100 ms | 5, 4, 100 ms |
+| +500 000 ppm, before | 123, 14, 220 ms held at the end | 97, 16, 300 ms held at the end |
+| +500 000 ppm, after | 1 255, 1 055, 80 ms | 1 274, 1 090, 80 ms |
+
+Every frame run dry there was one the stack counted as an under-run,
+frame for frame, and at 500 000 ppm the call's loss rate ended at 0.25.
+
+**The lab, `scripts/lab.sh drift`**, now six calls: slow, true and fast,
+each once taking one frame a callback and once two at a time, as a 40 ms
+device period on 20 ms packets does — the shape the simulation alone had
+proved the paired-pull fix on. The Linux x86-64 lab machine, the harness
+built with `rustc 1.95.0` in `rust:1.95-trixie`, Asterisk 22.10.1, a report
+every thirty seconds, the same tone.
+
+| | ±2000 ppm, 3 min | ±5000 ppm, 3 min | ±500 000 ppm, 2 min |
+|---|---|---|---|
+| Fast, one frame: stretched, run dry, in the tone | 17, 0, 0 | 43, 0, 0 | 1 036, 1 714, 1 528 |
+| Fast, two frames: stretched, run dry, in the tone | 17, 0, 0 | 43, 0, 0 | 1 008, 1 742, 1 501 |
+| Of the frames run dry, counted by the stack | — | — | 1 714, 1 742 |
+| Fast earpieces' depth at the reports | 20 ms | 0–40 ms | 0–80 ms |
+| Slow, one frame and two: shrunk | 17, 16 | 42, 42 | 358, 329, and 2 392, 2 421 thrown out for overflow at 1 960–1 980 ms |
+| Skew measured, one frame and two | ±2000.0; −1882.4, +2117.6 | −4941.2, +5058.8; −4941.2, +4941.2 | ±500 000.0, both |
+| Score, suffering, R and MOS-LQ | 92–96, no, 93 and 4.4 | 88–96, no, 93 and 4.4 | fast 0, suffering, 93 and 4.4; slow 0, 7 and 1.0 |
+| Verdict | passed | passed | passed, judged as a skew no device runs at |
+
+Neither two-frame earpiece ran dry at a skew a device runs at, and both
+controls read 0.0 ppm with nothing moved. At 500 000 ppm the fast
+earpieces held no more than 80 ms where they held 340, and ran dry on a
+fifth of their frames, cutting the tone; the stack counted each of those
+frames, scored the calls 0 and called them suffering at every report,
+while RTCP-XR, which counts packets, still rated them 93 and 4.4. The
+slow earpieces filled their rings, as they did before. The flow now judges
+such a skew on that: bounded, and reported (`docs/11-testing.md`).
+
+**Why the lab ran dry in pauses where the simulation did not.** The
+verdict the buffer moves on comes from the facade's detector of speech,
+which holds speech for 200 ms after the tone, and the buffer only
+stretches what is called a pause; at 500 000 ppm, which needs every pull of
+a pause stretched, the first ten of each pause ran dry instead. Proved
+before the budget, on the code the lab had measured 122 at: the crate's
+simulation with exact verdicts ran dry 31 times in two minutes, the same
+simulation through the facade's own detector 123 (95 of them in pauses),
+and with exact verdicts held ten frames past the tone 133 — the lab's
+figure, from the one difference between them. After the budget the second
+and third agree to the frame, 1 255 each; exact verdicts give 1 125. At any
+skew a device runs at the hangover costs nothing: up to 10 000 ppm no
+frame ran dry either way.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty

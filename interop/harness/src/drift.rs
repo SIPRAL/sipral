@@ -18,15 +18,19 @@
 //!
 //! Both ends of a call in this lab run on one host, and read one clock, so a
 //! call here drifts by nothing at all. What is measured against nothing
-//! proves nothing, so the drift is made: three calls to Asterisk's echo
+//! proves nothing, so the drift is made: six calls to Asterisk's echo
 //! extension (9008, which sends back exactly what it is sent, as it arrives)
 //! run at once, identical except for the earpiece. One plays on a clock
 //! `SIPRAL_DRIFT_PPM` fast, one on a clock that much slow, and one on the
 //! true clock the microphone and the network run on
-//! (`crate::audio::Media::skew_playout`). The echo comes back at the pace it
+//! (`crate::audio::Media::skew_playout`), and each of the three twice: once
+//! taking one frame at each device callback, and once taking two at a time,
+//! as a 40 ms device period on 20 ms packets does
+//! (`crate::audio::Media::earpiece_frames`), whose second pull of each pair
+//! is the one that finds the queue short. The echo comes back at the pace it
 //! was sent, which is the far end's clock as far as the receiving buffer can
-//! tell, so each call's buffer faces exactly the skew its earpiece was given,
-//! and the one with none is the control.
+//! tell, so each call's buffer faces exactly the skew its earpiece was
+//! given, and the two with none are the controls.
 //!
 //! What the buffer did is then turned back into a skew and set beside the
 //! one it was given: every frame the earpiece played that did not arrive is
@@ -41,17 +45,35 @@
 //!
 //! # What fails it
 //!
-//! A call that ended before the hour was up. A report in which a call's
-//! buffer held more than [`MAX_DELAY`] — a buffer that grows without bound
-//! passes that within minutes at the skews this runs — and one in which a
-//! call played fewer than half the audible frames its tone should have given
-//! it, which is audio that stopped, and a call the stack reported stalled. A
-//! call whose measured skew at the end is further than [`TOLERANCE`] from
-//! the one it was given, the control included: a count that does not add up
-//! is a frame going somewhere nothing here can see. And a call whose buffer
-//! ran dry in the middle of the tone, however well its count balances: that
-//! is the drift absorbed as a gap the ear hears, where the buffer should have
-//! stretched a pause instead.
+//! Whatever the skew: a call that ended before the hour was up, one the
+//! stack reported stalled, and a report in which a call played fewer than
+//! half the audible frames its tone should have given it, which is audio
+//! that stopped. A call whose measured skew at the end is further than
+//! [`TOLERANCE`] from the one it was given, the controls included: a count
+//! that does not add up is a frame going somewhere nothing here can see. And
+//! a report in which the frames the earpiece played as silence and the
+//! frames the stack counted as under-runs (`Quality::underruns`, the C ABI's
+//! `frames_underrun`) differ by more than the run of silence that can be in
+//! progress when a report falls: every frame the listener lost that way is
+//! one the application must be able to read.
+//!
+//! Up to [`ABSORBED_PPM`], a skew any device runs at with room over, the
+//! buffer has to absorb the drift where nobody hears it: a report in which a
+//! call's buffer held more than [`MAX_DELAY`] fails — a buffer that grows
+//! without bound passes that within minutes — and so does a call whose
+//! buffer ran dry in the middle of the tone, however well its count
+//! balances, since that is the drift absorbed as a gap the ear hears.
+//!
+//! Past it the skew is no device's clock but a stream played at the wrong
+//! rate, which no buffer absorbs inaudibly: the fast earpiece runs dry and
+//! the slow one piles up. There the flow asks that the call degrade the way
+//! the product says it does (`docs/05-media.md`) rather than that it not
+//! degrade. Bounded: no buffer deeper than its own ring, [`RING`], and none
+//! deeper than [`MAX_DELAY`] without the stack's own score for the call
+//! falling under half. Reported: every frame run dry counted, as above, and
+//! a call that ran dry on a twentieth of its frames or more said to be
+//! suffering by the stack at some report. The tone may be cut; how often is
+//! printed.
 
 use std::env;
 use std::fmt::Write as _;
@@ -72,17 +94,38 @@ const ECHO_EXTENSION: &str = "9008";
 /// How long the calls take to come up before that is a failure.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// How long the three hangups are waited for.
+/// How long the hangups are waited for.
 const ENDING: Duration = Duration::from_secs(10);
 
 /// How long after audio starts the balance is first taken: long enough for
 /// every buffer to have filled to its target and played from it.
 const SETTLE: Duration = Duration::from_secs(10);
 
-/// The deepest a buffer may be at any report. A lab link adds well under a
-/// frame of jitter, so a buffer at its target sits at a few frames; one that
-/// is not correcting a 250 ppm skew passes this in under twenty minutes.
+/// The deepest a buffer may be at any report of a skew a device runs at. A
+/// lab link adds well under a frame of jitter, so a buffer at its target
+/// sits at a few frames; one that is not correcting a 250 ppm skew passes
+/// this in under twenty minutes.
 const MAX_DELAY: Duration = Duration::from_millis(250);
+
+/// The deepest a buffer may ever be: its own ring, the hundred packets
+/// `sipral_rtp::BufferConfig::new` gives a call, and a frame. Past a skew any
+/// device runs at, a slow earpiece's buffer fills to this and throws out
+/// the oldest for overflow, which RFC 3611's discard rate and the stack's
+/// score both see.
+const RING: Duration = Duration::from_millis(2_020);
+
+/// The widest skew the buffer is held to absorbing without a gap: twice the
+/// widest a device's clock may be off by and meet its bus's specification
+/// (USB 2.0 §7.1.11, ±0.25 % at full speed; ±500 ppm at high speed), and
+/// hundreds of times what any clock measured for `docs/19-numbers.md` ran
+/// at. The crate's own simulation of this flow runs dry nowhere up to
+/// 10 000 ppm, either callback length.
+const ABSORBED_PPM: u32 = 5_000;
+
+/// The share of frames played as nothing at which the stack must have said
+/// a call is suffering: `sipral::StreamStatistics::is_suffering`'s own five
+/// per cent.
+const SUFFERING: f64 = 0.05;
 
 /// How far the skew any call measures at the end may be from the one it was
 /// given, as a fraction of the run's skew. The measure counts whole frames,
@@ -97,6 +140,9 @@ const FRAME: Duration = Duration::from_millis(20);
 /// The share of frames the tone sounds in: 1200 ms on, 600 off
 /// (`crate::audio`'s own cadence).
 const AUDIBLE_SHARE: f64 = 1200.0 / 1800.0;
+
+/// The frames each earpiece takes at a callback: one, and two at once.
+const CALLBACKS: [u32; 2] = [1, 2];
 
 /// This flow's own endpoint identity, folded with the run's own entropy
 /// before anything binds with it (`run_folded`, `main.rs`). Listed in
@@ -120,6 +166,8 @@ fn millis_from(name: &str, fallback: u64) -> Duration {
 struct Leg {
     /// Parts per million asked for.
     asked: i32,
+    /// Frames its earpiece takes at each callback.
+    frames: u32,
     /// And the parts per million actually run, which whole nanoseconds of
     /// pace make a hundredth off.
     skew: f64,
@@ -131,6 +179,8 @@ struct Leg {
     first: Option<(Quality, Heard)>,
     /// And at the report before this one, for the interval's own figures.
     last: Option<(Quality, Heard)>,
+    /// Whether the stack said the call was suffering at any report.
+    suffered: bool,
     /// Session refreshes (RFC 4028) and anything else that changed the
     /// session while it ran.
     changes: u32,
@@ -139,23 +189,30 @@ struct Leg {
 }
 
 impl Leg {
-    const fn new(asked: i32) -> Self {
+    const fn new(asked: i32, frames: u32) -> Self {
         Self {
             asked,
+            frames,
             skew: 0.0,
             call: None,
             started: false,
             ended: false,
             first: None,
             last: None,
+            suffered: false,
             changes: 0,
             stalls: 0,
             failures: Vec::new(),
         }
     }
+
+    /// What its report lines and failures are headed with.
+    fn name(&self) -> String {
+        format!("{:+} ppm x{}", self.asked, self.frames)
+    }
 }
 
-/// Register, place the three calls, hold them for the length asked, report
+/// Register, place the six calls, hold them for the length asked, report
 /// as it goes, and judge.
 ///
 /// # Errors
@@ -174,6 +231,7 @@ pub(crate) fn run(
         .ok()
         .and_then(|text| text.parse().ok())
         .unwrap_or(250);
+    let stressed = ppm.unsigned_abs() > ABSORBED_PPM;
 
     let bind_addr = SocketAddr::new(crate::route_to(remote), 0);
     let now = Instant::now();
@@ -187,14 +245,8 @@ pub(crate) fn run(
     .map_err(|error| format!("cannot bind: {error}"))?;
     let account = endpoint.account(user, pass, server, remote)?;
     let target = uri(&format!("sip:{ECHO_EXTENSION}@{server}"))?;
-    let mut legs = [Leg::new(-ppm), Leg::new(0), Leg::new(ppm)];
-
-    println!(
-        "  drift: three calls to {ECHO_EXTENSION} for {} min, earpieces at -{ppm}, 0 and \
-         +{ppm} ppm, a report every {} s",
-        length.as_secs() / 60,
-        every.as_secs()
-    );
+    let mut legs = legs(ppm);
+    announce(legs.len(), length, every, ppm, stressed);
 
     let _ = endpoint.agent.register(account, now);
     let mut registered = false;
@@ -240,7 +292,7 @@ pub(crate) fn run(
                 if now >= next_report {
                     next_report += every;
                     for leg in &mut legs {
-                        report(&mut endpoint, leg, since, every, now);
+                        report(&mut endpoint, leg, since, every, now, stressed);
                     }
                 }
                 if now >= since + length || legs.iter().any(|leg| leg.ended) {
@@ -251,7 +303,7 @@ pub(crate) fn run(
                     let stale = now.saturating_duration_since(reported) > Duration::from_secs(1);
                     for leg in &mut legs {
                         if stale {
-                            report(&mut endpoint, leg, since, every, now);
+                            report(&mut endpoint, leg, since, every, now, stressed);
                         }
                         if let Some(call) = leg.call {
                             let _ = endpoint.agent.hangup(call, now);
@@ -286,8 +338,36 @@ pub(crate) fn run(
         &legs,
         ppm,
         running_since.map(|since| hung_up.unwrap_or(since) - since),
+        stressed,
         &gate_reports,
     )
+}
+
+/// The six calls: slow, true and fast, each taking one frame and two at a
+/// callback.
+fn legs(ppm: i32) -> Vec<Leg> {
+    CALLBACKS
+        .iter()
+        .flat_map(|&frames| [-ppm, 0, ppm].map(|asked| Leg::new(asked, frames)))
+        .collect()
+}
+
+/// What the run is about to do, and how it will be judged.
+fn announce(calls: usize, length: Duration, every: Duration, ppm: i32, stressed: bool) {
+    println!(
+        "  drift: {calls} calls to {ECHO_EXTENSION} for {} min, earpieces at -{ppm}, 0 and \
+         +{ppm} ppm taking one frame and two at a callback, a report every {} s{}",
+        length.as_secs() / 60,
+        every.as_secs(),
+        if stressed {
+            format!(
+                "; past the {ABSORBED_PPM} ppm any device runs at, judged on staying bounded and \
+                 saying so rather than on never running dry"
+            )
+        } else {
+            String::new()
+        }
+    );
 }
 
 /// What had happened by the time the calls should all have been up.
@@ -296,8 +376,8 @@ fn not_up(registered: bool, legs: &[Leg]) -> String {
         .iter()
         .map(|leg| {
             format!(
-                "{:+} ppm placed {} started {}",
-                leg.asked,
+                "{} placed {} started {}",
+                leg.name(),
                 leg.call.is_some(),
                 leg.started
             )
@@ -323,6 +403,7 @@ fn place(
         Ok(call) => {
             if let Some(media) = endpoint.media.get_mut(&call) {
                 leg.skew = media.skew_playout(leg.asked);
+                media.earpiece_frames(leg.frames);
             }
             leg.call = Some(call);
         }
@@ -417,13 +498,43 @@ fn measured(first: &(Quality, Heard), now: &(Quality, Heard)) -> f64 {
     balance as f64 * 1e6 / arrived as f64
 }
 
-/// One line for one call: the interval's own figures and the call's so far.
+/// The frames of silence the earpiece played from `first` to `now` that
+/// the stack did not count as under-runs, or the other way about, past what
+/// a run of silence still going on when either was taken accounts for: the
+/// stack settles a run only once the packet after it is played.
+fn uncounted(first: &(Quality, Heard), now: &(Quality, Heard)) -> Option<String> {
+    let heard = u64::from(now.1.silent.saturating_sub(first.1.silent));
+    let counted = now.0.underruns.saturating_sub(first.0.underruns);
+    (heard.abs_diff(counted) > u64::from(now.1.longest_silence)).then(|| {
+        format!(
+            "the earpiece played {heard} frames as silence and the stack counted {counted} \
+             under-runs"
+        )
+    })
+}
+
+/// One line for one call: the interval's own figures and the call's so far,
+/// and what in them fails it.
 #[allow(clippy::cast_precision_loss)]
-fn report(endpoint: &mut Endpoint, leg: &mut Leg, since: Instant, every: Duration, now: Instant) {
+fn report(
+    endpoint: &mut Endpoint,
+    leg: &mut Leg,
+    since: Instant,
+    every: Duration,
+    now: Instant,
+    stressed: bool,
+) {
     let (Some(first), Some(last)) = (leg.first, leg.last) else {
         return;
     };
     let Some(taken) = snapshot(endpoint, leg, now) else {
+        return;
+    };
+    let Some(statistics) = leg
+        .call
+        .and_then(|call| endpoint.engine.session(call))
+        .map(|session| session.statistics(now))
+    else {
         return;
     };
     let (quality, heard) = taken;
@@ -434,11 +545,15 @@ fn report(endpoint: &mut Endpoint, leg: &mut Leg, since: Instant, every: Duratio
     let expected = f64::from(played) * AUDIBLE_SHARE;
     let minutes = elapsed.as_secs() / 60;
     let seconds = elapsed.as_secs() % 60;
+    let score = statistics.score();
+    let suffering = statistics.is_suffering();
+    leg.suffered |= suffering;
     let mut line = format!(
-        "  drift {:+5} ppm {minutes:3}:{seconds:02}  delay {:3} ms of {:3} ms, jitter {} ms; \
-         shrunk {}, stretched {}, ran dry {} ({} in the tone), concealed {}, late {}, \
-         overflow {}; played {}, audible {} of {:.0} due; measured {:+.1} ppm",
-        leg.asked,
+        "  drift {:>14} {minutes:3}:{seconds:02}  delay {:3} ms of {:3} ms, jitter {} ms; \
+         shrunk {}, stretched {}, ran dry {} ({} in the tone, {} counted), concealed {}, \
+         late {}, overflow {}; played {}, audible {} of {:.0} due; measured {:+.1} ppm; \
+         score {score:.0}{}",
+        leg.name(),
         quality.delay.as_millis(),
         quality.target_delay.as_millis(),
         quality.jitter.as_millis(),
@@ -446,6 +561,7 @@ fn report(endpoint: &mut Endpoint, leg: &mut Leg, since: Instant, every: Duratio
         quality.stretched.saturating_sub(first.0.stretched),
         heard.silent.saturating_sub(first.1.silent),
         heard.cut.saturating_sub(first.1.cut),
+        quality.underruns.saturating_sub(first.0.underruns),
         heard
             .concealed
             .saturating_sub(first.1.concealed)
@@ -463,11 +579,9 @@ fn report(endpoint: &mut Endpoint, leg: &mut Leg, since: Instant, every: Duratio
         audible,
         expected,
         measured(&first, &taken),
+        if suffering { ", suffering" } else { "" },
     );
-    if let Some(block) = leg
-        .call
-        .and_then(|call| endpoint.engine.session(call))
-        .and_then(|session| session.statistics(now).voip_metrics)
+    if let Some(block) = statistics.voip_metrics
         && block.mos_lq != UNAVAILABLE
     {
         let _ = write!(
@@ -480,10 +594,13 @@ fn report(endpoint: &mut Endpoint, leg: &mut Leg, since: Instant, every: Duratio
     }
     println!("{line}");
 
-    if quality.delay > MAX_DELAY {
+    let at = format!("at {minutes}:{seconds:02}");
+    let held = quality.delay.as_millis();
+    if quality.delay > RING || (!stressed && quality.delay > MAX_DELAY) {
+        leg.failures.push(format!("{at} the buffer held {held} ms"));
+    } else if quality.delay > MAX_DELAY && score >= 50.0 {
         leg.failures.push(format!(
-            "at {minutes}:{seconds:02} the buffer held {} ms",
-            quality.delay.as_millis()
+            "{at} the buffer held {held} ms and the stack still scored the call {score:.0}"
         ));
     }
     // a report that falls just after the last one — the final one, when the
@@ -492,25 +609,32 @@ fn report(endpoint: &mut Endpoint, leg: &mut Leg, since: Instant, every: Duratio
         && f64::from(audible) < expected / 2.0
     {
         leg.failures.push(format!(
-            "at {minutes}:{seconds:02} only {audible} of {expected:.0} frames were audible"
+            "{at} only {audible} of {expected:.0} frames were audible"
         ));
+    }
+    if let Some(why) = uncounted(&first, &taken) {
+        leg.failures.push(format!("{at} {why}"));
     }
     leg.last = Some(taken);
 }
 
 /// Whether every call held, heard and measured what it should have. `ppm`
-/// is the skew the run was given, [`TOLERANCE`] of it is how far any of the
-/// three — the control included — may measure from its own, and
-/// `gate_reports` is what the audio quality gate found on each leg's own
-/// call, `None` on a run `SIPRAL_AUDIO_GATE` never engaged for (the ordinary
-/// `drift` word) and `Some` on one that did (`scripts/lab.sh drift-netem`):
-/// a leg's own audio can hold up by every count above and still have
-/// clicked at a concealment splice or measured too noisy to trust, which
-/// only the gate would catch.
+/// is the skew the run was given, and [`TOLERANCE`] of it is how far any of
+/// the six — the controls included — may measure from its own. `stressed`
+/// is a skew past [`ABSORBED_PPM`], where a tone cut off is what the product
+/// does and a call running dry unreported is what fails. `gate_reports` is
+/// what the audio quality gate found on each leg's own call, `None` on a
+/// run `SIPRAL_AUDIO_GATE` never engaged for (the ordinary `drift` word)
+/// and `Some` on one that did (`scripts/lab.sh drift-netem`): a leg's own
+/// audio can hold up by every count above and still have clicked at a
+/// concealment splice or measured too noisy to trust, which only the gate
+/// would catch.
+#[allow(clippy::cast_precision_loss)]
 fn verdict(
     legs: &[Leg],
     ppm: i32,
     ran: Option<Duration>,
+    stressed: bool,
     gate_reports: &[Option<quality::Report>],
 ) -> Result<String, String> {
     let ran = ran.unwrap_or_default();
@@ -534,21 +658,28 @@ fn verdict(
                 ));
             }
             let cut = last.1.cut.saturating_sub(first.1.cut);
-            if cut > 0 {
+            if cut > 0 && !stressed {
                 failures.push(format!(
                     "the tone was cut off {cut} times by a buffer that ran dry"
                 ));
             }
+            let dry = last.1.silent.saturating_sub(first.1.silent);
+            let played = last.1.played.saturating_sub(first.1.played).max(1);
+            if f64::from(dry) >= f64::from(played) * SUFFERING && !leg.suffered {
+                failures.push(format!(
+                    "ran dry on {dry} of {played} frames and the stack never said the call was \
+                     suffering"
+                ));
+            }
             format!(
-                "{:+} ppm given, {skew:+.1} measured, {} frames balanced of which {} ran dry, \
+                "{} given, {skew:+.1} measured, {} frames balanced of which {dry} ran dry, \
                  {cut} in the tone",
-                leg.asked,
+                leg.name(),
                 balance(&first, &last),
-                last.1.silent.saturating_sub(first.1.silent)
             )
         } else {
             failures.push("no audio ever ran".to_owned());
-            format!("{:+} ppm given, nothing measured", leg.asked)
+            format!("{} given, nothing measured", leg.name())
         };
         if leg.stalls > 0 {
             failures.push(format!(
@@ -562,7 +693,7 @@ fn verdict(
             leg.changes, leg.stalls
         );
         for failure in failures {
-            failed.push(format!("{:+} ppm: {failure}", leg.asked));
+            failed.push(format!("{}: {failure}", leg.name()));
         }
     }
     said.push(')');
@@ -579,7 +710,7 @@ mod tests {
 
     use sipral::Quality;
 
-    use super::{FRAME, Leg, balance, measured, quality, verdict};
+    use super::{FRAME, Leg, balance, measured, quality, uncounted, verdict};
     use crate::audio::Heard;
 
     fn at(stretched: u64, shrunk: u64, delay: Duration, played: u32) -> (Quality, Heard) {
@@ -664,7 +795,7 @@ mod tests {
         let (quality, mut heard) = at(0, 0, FRAME, 9_000);
         heard.silent = silent;
         heard.cut = cut;
-        let mut leg = Leg::new(0);
+        let mut leg = Leg::new(0, 1);
         leg.first = Some(start);
         leg.last = Some((quality, heard));
         leg
@@ -674,16 +805,52 @@ mod tests {
     /// nobody hears them: they are within the tolerance, and they pass.
     #[test]
     fn silence_where_the_tone_paused_passes() {
-        assert!(verdict(&[control(3, 0)], 2_000, Some(FRAME * 9_000), &[None]).is_ok());
+        assert!(verdict(&[control(3, 0)], 2_000, Some(FRAME * 9_000), false, &[None]).is_ok());
     }
 
     /// The same frames of silence in the middle of the tone are gaps in the
     /// audio, however well the count of them balances.
     #[test]
     fn silence_that_cut_the_tone_off_fails() {
-        let verdict = verdict(&[control(3, 3)], 2_000, Some(FRAME * 9_000), &[None]);
+        let verdict = verdict(&[control(3, 3)], 2_000, Some(FRAME * 9_000), false, &[None]);
         let why = verdict.expect_err("the tone was cut three times");
         assert!(why.contains("cut off 3 times"), "{why}");
+    }
+
+    /// Past a skew any device runs at, a tone cut off is what the product
+    /// does, and passes; a call that ran dry on a tenth of its frames and
+    /// that the stack never called suffering is a degradation nobody could
+    /// read, and fails.
+    #[test]
+    fn a_stressed_call_may_be_cut_but_not_unreported() {
+        let mut said = control(900, 400);
+        said.suffered = true;
+        assert!(verdict(&[said], 500_000, Some(FRAME * 9_000), true, &[None]).is_ok());
+        let unsaid = control(900, 400);
+        let why = verdict(&[unsaid], 500_000, Some(FRAME * 9_000), true, &[None])
+            .expect_err("never said it was suffering");
+        assert!(why.contains("never said"), "{why}");
+        assert!(!why.contains("cut off"), "{why}");
+    }
+
+    /// Every frame the earpiece played as silence is one the stack counts as
+    /// an under-run, give or take the run that may be going on when a report
+    /// falls; more than that either way is a frame the application cannot
+    /// read.
+    #[test]
+    fn silence_the_stack_did_not_count_fails() {
+        let start = at(0, 0, FRAME, 0);
+        let (mut quality, mut heard) = at(0, 0, FRAME, 9_000);
+        heard.silent = 40;
+        heard.longest_silence = 3;
+        quality.underruns = 38;
+        assert_eq!(uncounted(&start, &(quality, heard)), None);
+        quality.underruns = 30;
+        let why = uncounted(&start, &(quality, heard)).expect("ten frames went uncounted");
+        assert!(
+            why.contains("played 40") && why.contains("counted 30"),
+            "{why}"
+        );
     }
 
     /// A call the stack itself said had stopped receiving audio fails, even
@@ -692,7 +859,7 @@ mod tests {
     fn a_stalled_call_fails() {
         let mut leg = control(0, 0);
         leg.stalls = 1;
-        let verdict = verdict(&[leg], 2_000, Some(FRAME * 9_000), &[None]);
+        let verdict = verdict(&[leg], 2_000, Some(FRAME * 9_000), false, &[None]);
         let why = verdict.expect_err("the stream stalled");
         assert!(why.contains("stalled"), "{why}");
     }
@@ -711,7 +878,7 @@ mod tests {
             edges_checked: 4,
             ..quality::Report::default()
         };
-        let verdict = verdict(&[control(0, 0)], 2_000, Some(FRAME * 9_000), &[Some(report)]);
+        let verdict = verdict(&[control(0, 0)], 2_000, Some(FRAME * 9_000), false, &[Some(report)]);
         let why = verdict.expect_err("the gate found a click");
         assert!(why.contains("1 of 4"), "{why}");
     }
@@ -721,7 +888,7 @@ mod tests {
     /// before the gate existed.
     #[test]
     fn a_leg_with_no_gate_report_is_judged_without_it() {
-        let said = verdict(&[control(0, 0)], 2_000, Some(FRAME * 9_000), &[None])
+        let said = verdict(&[control(0, 0)], 2_000, Some(FRAME * 9_000), false, &[None])
             .expect("no gate, nothing else wrong");
         assert!(!said.contains("audio gate"), "{said}");
     }

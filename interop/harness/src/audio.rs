@@ -172,6 +172,10 @@ pub(crate) struct Heard {
     /// also counts the sequence numbers it skipped over without playing
     /// anything in their place.
     pub(crate) concealed: u32,
+    /// The longest run of [`Heard::silent`] frames there has been: how far
+    /// the buffer's own count of under-runs, which settles a run only once
+    /// the packet after it is played, can be behind this one at any moment.
+    pub(crate) longest_silence: u32,
 }
 
 /// Where the earpiece's silence falls against the tone, frame by frame.
@@ -269,6 +273,11 @@ pub(crate) struct Media {
     /// How long the earpiece takes to play one frame: [`PACE`], unless
     /// [`Media::skew_playout`] set its clock off by a known amount.
     play_pace: Duration,
+    /// Frames the earpiece takes at each callback: one, unless
+    /// [`Media::earpiece_frames`] made its device period longer.
+    callback_frames: u32,
+    /// The run of silence going on now, for [`Heard::longest_silence`].
+    silence_run: u32,
     /// What decides whether a run of silence is [`Heard::cut`].
     gaps: Gaps,
     phase: u32,
@@ -301,6 +310,8 @@ impl Media {
             next: now,
             next_play: now,
             play_pace: PACE,
+            callback_frames: 1,
+            silence_run: 0,
             gaps: Gaps::default(),
             phase: 0,
             heard: Heard::default(),
@@ -359,6 +370,17 @@ impl Media {
         let nanos = (pace * 1_000_000 / (1_000_000 + i128::from(ppm)).max(1)).max(1);
         self.play_pace = Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX));
         (pace as f64 / nanos as f64 - 1.0) * 1e6
+    }
+
+    /// Take `frames` frames at each of the earpiece's callbacks, all at the
+    /// same instant, and call it that many frames' time later: a device whose
+    /// period is longer than a packet, as a 40 ms callback on 20 ms packets
+    /// is. The jitter buffer then sees two pulls at once for every two
+    /// packets, and the second of each pair is the one that finds the queue
+    /// short (`docs/05-media.md`, "An earpiece that takes two frames at
+    /// once").
+    pub(crate) const fn earpiece_frames(&mut self, frames: u32) {
+        self.callback_frames = if frames == 0 { 1 } else { frames };
     }
 
     /// The port the offer has to advertise.
@@ -527,58 +549,76 @@ impl Media {
         // buffer as fast as packets arrive and leaves it no delay to hold
         let mut played = [0_i16; MAX_SAMPLES];
         while now >= self.next_play {
-            let room = played.get_mut(..frame).unwrap_or_default();
-            // the gate's evidence tells a pause stretched from a packet
-            // concealed, which `Playback` reports alike; the buffer's own
-            // count moving across the frame is what says which it was
-            let stretched = self
-                .quality
-                .is_some()
-                .then(|| session.statistics(now).quality.stretched);
-            let outcome = session.playback(room);
-            if let Some(before) = stretched
-                && session.statistics(now).quality.stretched > before
-                && let Some(gate) = self.quality.as_mut()
-            {
-                gate.stretched();
+            for _ in 0..self.callback_frames {
+                self.play_one(session, &mut played, frame, rate, now);
             }
-            let audible = matches!(outcome, Playback::Packet) && loudness(room) >= AUDIBLE;
-            if audible {
-                self.heard.audible = self.heard.audible.saturating_add(1);
-            }
-            if matches!(outcome, Playback::Packet)
-                && is_marker(room)
-                && let Some(PendingMark {
-                    armed,
-                    sent: Some(sent),
-                }) = self.pending_mark
-            {
-                self.pending_mark = None;
-                self.marks.push(Mark {
-                    capture_wait: sent.saturating_duration_since(armed),
-                    round_trip: now.saturating_duration_since(armed),
-                    buffer_target: session.statistics(now).quality.target_delay,
-                });
-            }
-            if matches!(outcome, Playback::ComfortNoise) {
-                self.heard.comfort = self.heard.comfort.saturating_add(1);
-            }
-            if matches!(outcome, Playback::Concealed) {
-                self.heard.concealed = self.heard.concealed.saturating_add(1);
-            }
-            let silent = matches!(outcome, Playback::Silence);
-            if silent {
-                self.heard.silent = self.heard.silent.saturating_add(1);
-            }
-            if self.gaps.cuts(audible, silent) {
-                self.heard.cut = self.heard.cut.saturating_add(1);
-            }
-            if let Some(gate) = self.quality.as_mut() {
-                gate.observe(outcome, room, rate);
-            }
-            self.heard.played = self.heard.played.saturating_add(1);
-            self.next_play += self.play_pace;
+            self.next_play += self.play_pace * self.callback_frames;
         }
+    }
+
+    /// One frame for the earpiece, and what it was.
+    fn play_one(
+        &mut self,
+        session: &mut MediaSession,
+        played: &mut [i16; MAX_SAMPLES],
+        frame: usize,
+        rate: u32,
+        now: Instant,
+    ) {
+        let room = played.get_mut(..frame).unwrap_or_default();
+        // the gate's evidence tells a pause stretched from a packet
+        // concealed, which `Playback` reports alike; the buffer's own
+        // count moving across the frame is what says which it was
+        let stretched = self
+            .quality
+            .is_some()
+            .then(|| session.statistics(now).quality.stretched);
+        let outcome = session.playback(room);
+        if let Some(before) = stretched
+            && session.statistics(now).quality.stretched > before
+            && let Some(gate) = self.quality.as_mut()
+        {
+            gate.stretched();
+        }
+        let audible = matches!(outcome, Playback::Packet) && loudness(room) >= AUDIBLE;
+        if audible {
+            self.heard.audible = self.heard.audible.saturating_add(1);
+        }
+        if matches!(outcome, Playback::Packet)
+            && is_marker(room)
+            && let Some(PendingMark {
+                armed,
+                sent: Some(sent),
+            }) = self.pending_mark
+        {
+            self.pending_mark = None;
+            self.marks.push(Mark {
+                capture_wait: sent.saturating_duration_since(armed),
+                round_trip: now.saturating_duration_since(armed),
+                buffer_target: session.statistics(now).quality.target_delay,
+            });
+        }
+        if matches!(outcome, Playback::ComfortNoise) {
+            self.heard.comfort = self.heard.comfort.saturating_add(1);
+        }
+        if matches!(outcome, Playback::Concealed) {
+            self.heard.concealed = self.heard.concealed.saturating_add(1);
+        }
+        let silent = matches!(outcome, Playback::Silence);
+        if silent {
+            self.heard.silent = self.heard.silent.saturating_add(1);
+            self.silence_run = self.silence_run.saturating_add(1);
+            self.heard.longest_silence = self.heard.longest_silence.max(self.silence_run);
+        } else {
+            self.silence_run = 0;
+        }
+        if self.gaps.cuts(audible, silent) {
+            self.heard.cut = self.heard.cut.saturating_add(1);
+        }
+        if let Some(gate) = self.quality.as_mut() {
+            gate.observe(outcome, room, rate);
+        }
+        self.heard.played = self.heard.played.saturating_add(1);
     }
 
     /// What came back.

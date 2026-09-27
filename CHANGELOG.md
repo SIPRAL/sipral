@@ -1629,6 +1629,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   so. At 500 000 ppm in the lab the fast earpiece now holds 80 ms at most and
   is scored 0 and suffering at every report (`docs/05-media.md`,
   `docs/19-numbers.md`).
+- **`scripts/lab.sh drift` proves a two-frame earpiece, and judges a skew
+  no device runs at on what the product does with it.** The flow places
+  six calls: slow, true and fast, each taking one frame and two at a
+  callback, as a 40 ms device period on 20 ms packets does. Up to 5000 ppm
+  it fails, as before, on any cut in the tone and on a buffer past 250 ms;
+  past it on a buffer deeper than its own ring, on one deeper than 250 ms
+  that the stack still scores at half or more, and on a call that ran dry
+  on a twentieth of its frames that the stack never called suffering.
+  Every run now fails where the frames the earpiece played as silence and
+  the stack's own under-run count differ by more than a run in progress.
+  The step runs on the Compose project's own network, so a copy of the lab
+  under a `COMPOSE_PROJECT_NAME` of its own runs it against its own
+  Asterisk.
 - **The `sipral` crate's own description of its bindings names all four.**
   `crates/sipral/README.md`, its `Cargo.toml` description and
   `bindings/dotnet/Sipral/README.md` said "Swift, .NET and Kotlin bindings,"

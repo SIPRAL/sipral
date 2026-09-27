@@ -46,8 +46,9 @@
 #                               in interop/pipewire's own image, and not part
 #                               of a run that names nothing, because it
 #                               compiles the facade inside a container
-#   scripts/lab.sh drift        an hour on three calls to Asterisk's echo, with
-#                               each earpiece's clock set off by a known skew,
+#   scripts/lab.sh drift        an hour on six calls to Asterisk's echo, with
+#                               each earpiece's clock set off by a known skew
+#                               and taking one frame or two at a callback,
 #                               reporting what the jitter buffer did every
 #                               five minutes -- not part of a run that names
 #                               nothing, because it takes an hour.
@@ -60,11 +61,15 @@
 #                               SIPRAL_DRIFT_MS=180000
 #                               SIPRAL_DRIFT_REPORT_MS=30000
 #                               SIPRAL_DRIFT_PPM=2000 scripts/lab.sh drift
-#   scripts/lab.sh drift-netem  the same three calls, over a link made bad
+#                               Past 5000 ppm, a skew no device runs at, a
+#                               call is judged on staying bounded and on the
+#                               stack reporting every frame it ran dry, not
+#                               on never running dry
+#   scripts/lab.sh drift-netem  the same six calls, over a link made bad
 #                               the way `netem` makes one -- PROFILE names
 #                               which of interop/impairment/*.sh, "lossy"
 #                               unless told otherwise -- with the audio
-#                               quality gate engaged on all three, so a
+#                               quality gate engaged on all six, so a
 #                               report line also carries its segmental SNR
 #                               and its splice clicks. The same
 #                               SIPRAL_DRIFT_* variables as `drift` above
@@ -2186,12 +2191,15 @@ bad_network() {
             exit $status'
 }
 
-# An hour on three calls to Asterisk's echo (interop/harness/src/drift.rs):
+# An hour on six calls to Asterisk's echo (interop/harness/src/drift.rs):
 # the drift a real pair of clocks makes, which the lab's two ends cannot make
 # on their own since they read one host's clock, made instead by running each
-# call's earpiece a known number of parts per million fast or slow. No
-# capture: three calls for an hour are over a million packets, and what this
-# step proves is in the report lines, not on the wire.
+# call's earpiece a known number of parts per million fast or slow, taking
+# one frame at a callback on three of them and two at once on the other
+# three. No capture: six calls for an hour are over two million packets,
+# and what this step proves is in the report lines, not on the wire. The
+# network is the Compose project's own, so a copy of the lab under a
+# COMPOSE_PROJECT_NAME of its own runs this against its own Asterisk.
 drift_flow() {
     docker run --rm --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=drift \
@@ -2204,12 +2212,12 @@ drift_flow() {
 }
 
 if [ "$WANT" = drift ]; then
-    step "an hour on one call -- three calls to Asterisk's echo, their earpieces skewed"
-    drift_flow && pass "the jitter buffer kept all three calls level" \
+    step "an hour on one call -- six calls to Asterisk's echo, their earpieces skewed"
+    drift_flow && pass "the jitter buffer kept all six calls level" \
         || fail "an hour of drift"
 fi
 
-# The same three calls as drift_flow, over a link `bad_network`'s own profile
+# The same six calls as drift_flow, over a link `bad_network`'s own profile
 # shapes -- ifb plus mirred, both directions, exactly the setup bad_network
 # uses, kept here as its own function because drift_flow's own container never
 # takes NET_ADMIN or installs iproute2 and giving it both unconditionally
