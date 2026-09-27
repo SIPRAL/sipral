@@ -733,6 +733,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   relay was left to lapse on its own ten minutes later. Each layer's own
   NAT tests gained a case with a real (if fake) TURN server that asserts
   the Refresh actually reaches it when the call ends.
+- **`SipralSampleMac` builds under Swift 6 strict concurrency with no
+  warnings.** `AudioBridge.swift`'s two `AVAudioConverter` input callbacks
+  captured an `AVAudioPCMBuffer` — not `Sendable` — in a block the compiler
+  treats as `@Sendable` because it crosses an Objective-C boundary, though
+  AVFoundation's own overlay is not itself audited for Swift 6 concurrency
+  and the block runs synchronously, on the calling thread, within
+  `convert(to:error:withInputFrom:)`'s own call. `@preconcurrency import
+  AVFoundation` takes the framework's own (missing) Sendable annotations as
+  given instead of imposing stricter ones on code that predates them.
 - **An incoming call the caller gave up on before it was taken no longer
   leaves a call that can never end.** `SipralStack.takeIncomingCall` (and
   `answerCall`, which calls it) minted and registered a `Call` for a

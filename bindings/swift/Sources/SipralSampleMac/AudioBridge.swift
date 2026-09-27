@@ -2,7 +2,17 @@
 // Copyright (c) 2026 Tiberiu Balasea
 
 #if canImport(AVFoundation)
-import AVFoundation
+// AVFoundation's own overlay has not been audited for Swift 6 concurrency:
+// `AVAudioConverterInputBlock` is an Objective-C block type, and the
+// compiler treats an imported block parameter as `@Sendable` by default
+// whether or not the framework says so. `micConverter`/`playbackConverter`
+// call the block synchronously, within `convert(to:error:withInputFrom:)`'s
+// own call, on whichever thread called it -- never later and never on
+// another thread -- so the buffer it captures is never actually shared
+// across a concurrency domain; `@preconcurrency` tells the compiler to take
+// AVFoundation's own (missing) Sendable annotations as given rather than
+// impose stricter ones of its own on a framework that predates them.
+@preconcurrency import AVFoundation
 import Sipral
 
 /// Bridges one call's audio (`Media.frames()` / `Media.sendAudio`) to the
