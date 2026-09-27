@@ -30,28 +30,42 @@ the wire this test listens on directly -- RFC 8656 Section 9's mandatory
 server that actually sends the 401, which this fake one deliberately does
 not (checked directly: this test's own server sees nothing but identical
 retransmits of that first request over several seconds of retrying, never
-a second one with `labuser`/`labpass` attached). Proving that leg, and an
-actual relay, both need coturn, which this repository does not run outside
-the lab (`intern/ops/agenti-si-cost.md`); this is as far as a unit test
-gets.
+a second one with `labuser`/`labpass` attached). Proving that leg needs a
+server that actually answers -- `_FakeStunServer(credential=...)` below,
+the same shape `bindings/swift/Tests/SipralTests/NatTests.swift` and
+`bindings/kotlin/.../NatCheck.kt`'s own fake servers are -- which
+`TurnAllocationIsGivenBackWhenTheCallEnds` uses for a real, if fake, relay.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac as hmac_module
 import socket as socket_module
 import struct
 import threading
 import unittest
 
 from sipral import Stack
-from sipral.enums import CallState, EventKind, Ice, Nat
+from sipral.enums import CallState, EventKind, Ice, Nat, NatRelay
 
 _MAGIC_COOKIE = 0x2112A442
+_COOKIE = struct.pack("!I", _MAGIC_COOKIE)
 _BINDING_REQUEST = 0x0001
 _BINDING_SUCCESS = 0x0101
 _XOR_MAPPED_ADDRESS = 0x0020
+_XOR_RELAYED_ADDRESS = 0x0016
+_ERROR_CODE = 0x0009
+_REALM = 0x0014
+_NONCE = 0x0015
+_USERNAME = 0x0006
+_MESSAGE_INTEGRITY = 0x0008
+_LIFETIME = 0x000D
 _ALLOCATE_REQUEST = 0x0003
+_ALLOCATE_SUCCESS = 0x0103
+_ALLOCATE_ERROR = 0x0113
+_REFRESH_REQUEST = 0x0004
 
 
 def _routable_address() -> str | None:
@@ -76,31 +90,114 @@ def _routable_address() -> str | None:
         probe.close()
 
 
-def _xor_mapped_address(transaction_id: bytes, host: str, port: int) -> bytes:
-    """One RFC 5389 Section 15.2 Binding Success Response, IPv4 only."""
-    cookie = struct.pack("!I", _MAGIC_COOKIE)
+def _xor_address(transaction_id: bytes, host: str, port: int) -> bytes:
+    """One RFC 8489 Section 14.2 `XOR-MAPPED-ADDRESS`/`XOR-RELAYED-ADDRESS`
+    value, IPv4 only -- the transaction id is what `XOR-RELAYED-ADDRESS`
+    (RFC 8656 Section 14.5) XORs the address octets with too, same as
+    `XOR-MAPPED-ADDRESS` does; the two share this one encoding."""
     ip_bytes = socket_module.inet_aton(host)
     xport = port ^ (_MAGIC_COOKIE >> 16)
-    xaddr = bytes(a ^ b for a, b in zip(ip_bytes, cookie))
-    attr_value = struct.pack("!BBH", 0, 0x01, xport) + xaddr
+    xaddr = bytes(a ^ b for a, b in zip(ip_bytes, _COOKIE))
+    return struct.pack("!BBH", 0, 0x01, xport) + xaddr
+
+
+def _xor_mapped_address(transaction_id: bytes, host: str, port: int) -> bytes:
+    """One RFC 5389 Section 15.2 Binding Success Response, IPv4 only."""
+    attr_value = _xor_address(transaction_id, host, port)
     body = struct.pack("!HH", _XOR_MAPPED_ADDRESS, len(attr_value)) + attr_value
-    header = struct.pack("!HH", _BINDING_SUCCESS, len(body)) + cookie + transaction_id
+    header = struct.pack("!HH", _BINDING_SUCCESS, len(body)) + _COOKIE + transaction_id
     return header + body
+
+
+def _parse_attributes(data: bytes) -> dict[int, bytes]:
+    attributes: dict[int, bytes] = {}
+    offset = 20
+    while offset + 4 <= len(data):
+        attribute, length = struct.unpack("!HH", data[offset : offset + 4])
+        if offset + 4 + length > len(data):
+            break
+        attributes[attribute] = data[offset + 4 : offset + 4 + length]
+        offset += 4 + (length + 3) // 4 * 4
+    return attributes
+
+
+def _message(msg_type: int, transaction_id: bytes, attributes: list[tuple[int, bytes]]) -> bytes:
+    body = b""
+    for attribute, value in attributes:
+        padding = b"\x00" * ((4 - len(value) % 4) % 4)
+        body += struct.pack("!HH", attribute, len(value)) + value + padding
+    return struct.pack("!HH", msg_type, len(body)) + _COOKIE + transaction_id + body
+
+
+def _long_term_key(username: str, realm: str, password: str) -> bytes:
+    """RFC 8489 Section 9.2.2: MD5 of `username:realm:password`."""
+    return hashlib.md5(f"{username}:{realm}:{password}".encode("utf-8")).digest()
+
+
+def _hmac(data: bytes, key: bytes) -> bytes:
+    return hmac_module.new(key, data, hashlib.sha1).digest()
+
+
+def _integrity_holds(message: bytes, key: bytes) -> bool:
+    """RFC 8489 Section 14.5: the HMAC covers the message up to the
+    attribute, with the header's length counting up to the attribute's
+    end."""
+    offset = 20
+    while offset + 4 <= len(message):
+        attribute, length = struct.unpack("!HH", message[offset : offset + 4])
+        if attribute == _MESSAGE_INTEGRITY and length == 20 and offset + 24 <= len(message):
+            counted = offset + 24 - 20
+            covered = bytearray(message[:offset])
+            covered[2:4] = struct.pack("!H", counted)
+            return _hmac(bytes(covered), key) == message[offset + 4 : offset + 24]
+        offset += 4 + (length + 3) // 4 * 4
+    return False
+
+
+def _signed(msg_type: int, transaction_id: bytes, attributes: list[tuple[int, bytes]], key: bytes) -> bytes:
+    unsigned = bytearray(_message(msg_type, transaction_id, attributes))
+    counted = len(unsigned) - 20 + 24
+    unsigned[2:4] = struct.pack("!H", counted)
+    return bytes(unsigned) + struct.pack("!HH", _MESSAGE_INTEGRITY, 20) + _hmac(bytes(unsigned), key)
 
 
 class _FakeStunServer:
     """A UDP socket that answers every STUN Binding request it reads with
-    the same made-up public address, and records every other STUN message
-    -- a TURN Allocate among them -- it saw instead of answering it."""
+    the same made-up public address.
 
-    def __init__(self, public_host: str, public_port: int) -> None:
+    Without ``credential``, every other message -- a TURN Allocate among
+    them -- is recorded in :attr:`other_requests` and never answered, the
+    way :class:`TurnAllocateRequestLeaves` needs it. With one, it is a real,
+    if fake, TURN server too: an unauthenticated Allocate (RFC 8656 Section
+    7) gets the mandatory 401 with a REALM and a NONCE, a signed one is
+    checked against the long-term key and answered with a relay on
+    ``relay_host``, and a Refresh -- among them the one with a lifetime of
+    zero that gives an allocation back -- is recorded in
+    :attr:`requests` the same way every request is, signed or not, answered
+    or not (`bindings/swift/Tests/SipralTests/NatTests.swift`'s
+    `FakeStunServer` and `bindings/kotlin/.../NatCheck.kt`'s own).
+    """
+
+    REALM = "sipral.test"
+    NONCE = "0123456789abcdef"
+    RELAY_HOST = "198.51.100.9"
+
+    def __init__(
+        self,
+        public_host: str,
+        public_port: int,
+        credential: tuple[str, str] | None = None,
+    ) -> None:
         self.public_host = public_host
         self.public_port = public_port
+        self._credential = credential
         self._socket = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
         self._socket.bind(("127.0.0.1", 0))
         self._socket.settimeout(0.05)
         self.address = f"127.0.0.1:{self._socket.getsockname()[1]}"
         self.other_requests: list[bytes] = []
+        self.requests: list[tuple[int, dict[int, bytes]]] = []
+        self.signed_allocate_verified: bool | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -111,24 +208,77 @@ class _FakeStunServer:
                 data, from_address = self._socket.recvfrom(2048)
             except (socket_module.timeout, OSError):
                 continue
-            if len(data) < 20:
+            if len(data) < 20 or data[4:8] != _COOKIE:
                 continue
             msg_type = struct.unpack("!H", data[0:2])[0]
             transaction_id = data[8:20]
+            attributes = _parse_attributes(data)
+            method = (msg_type & 0x000F) | ((msg_type & 0x00E0) >> 1) | ((msg_type & 0x3E00) >> 2)
+            self.requests.append((method, attributes))
             if msg_type == _BINDING_REQUEST:
                 response = _xor_mapped_address(transaction_id, self.public_host, self.public_port)
                 self._socket.sendto(response, from_address)
-            else:
-                # An Allocate request (or its authenticated retry): recorded,
-                # not answered, so the request this test cares about -- that
-                # it left at all -- is not entangled with a second one, real
-                # relay allocation, this test cannot make.
-                self.other_requests.append(data)
+                continue
+            if method == _ALLOCATE_REQUEST and self._credential is not None:
+                answer = self._answer_allocate(data, transaction_id, attributes, from_address)
+                if answer is not None:
+                    self._socket.sendto(answer, from_address)
+                continue
+            # Without a credential, an Allocate (or its authenticated retry);
+            # a Refresh (with or without a lifetime of zero) with one; and
+            # anything else: recorded above already, answered to nobody -- a
+            # farewell neither waits for nor retries on one.
+            self.other_requests.append(data)
+
+    def _answer_allocate(
+        self, data: bytes, transaction_id: bytes, attributes: dict[int, bytes], from_address: tuple[str, int]
+    ) -> bytes | None:
+        if self._credential is None:
+            return None
+        username, password = self._credential
+        given = attributes.get(_USERNAME)
+        if given is None:
+            return _message(
+                _ALLOCATE_ERROR,
+                transaction_id,
+                [
+                    (_ERROR_CODE, struct.pack("!HBB", 0, 4, 1) + b"Unauthorized"),
+                    (_REALM, self.REALM.encode("utf-8")),
+                    (_NONCE, self.NONCE.encode("utf-8")),
+                ],
+            )
+        key = _long_term_key(username, self.REALM, password)
+        verified = given.decode("utf-8", "replace") == username and _integrity_holds(data, key)
+        self.signed_allocate_verified = verified
+        if not verified:
+            return _message(
+                _ALLOCATE_ERROR, transaction_id, [(_ERROR_CODE, struct.pack("!HBB", 0, 4, 1) + b"Unauthorized")]
+            )
+        _, port = from_address
+        relayed = _xor_address(transaction_id, self.RELAY_HOST, _moved(port, 20000))
+        mapped = _xor_address(transaction_id, self.public_host, _moved(port, 10000))
+        return _signed(
+            _ALLOCATE_SUCCESS,
+            transaction_id,
+            [
+                (_XOR_RELAYED_ADDRESS, relayed),
+                (_XOR_MAPPED_ADDRESS, mapped),
+                (_LIFETIME, struct.pack("!I", 600)),
+            ],
+            key,
+        )
 
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=2.0)
         self._socket.close()
+
+
+def _moved(port: int, distance: int) -> int:
+    """A port well away from ``port`` -- never the port itself, so an
+    address naming the socket's own port cannot pass for the mapped or
+    relayed one."""
+    return port - distance if port > 40000 else port + distance
 
 
 class TwoStacksTalkThroughStun(unittest.IsolatedAsyncioTestCase):
@@ -257,6 +407,129 @@ class TurnAllocateRequestLeaves(unittest.IsolatedAsyncioTestCase):
         msg_type = struct.unpack("!H", self.server.other_requests[0][0:2])[0]
         self.assertEqual(msg_type, _ALLOCATE_REQUEST)
         media_socket.close()
+
+
+class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase):
+    """Task 8.5.5, ``intern/rapoarte/2026-09-25-nat-layers.json``
+    (``natmobile.review.findings[1]``): ``Stack._drain_farewells`` must
+    send what ``sipral_stack_poll_farewell`` hands out to the destination
+    it names -- the TURN server, for the Refresh with a lifetime of zero
+    that gives a relay back (``crates/sipral/src/relay.rs``, "gives it
+    back when the call ends") -- and only fall back to the last address
+    media was heard from when it names none.
+
+    ``crates/sipral/src/relay.rs`` also says: "A call whose peer does no
+    ICE never uses it, and gives it back the same way" -- so this needs
+    nothing more than a call that reaches ``bob``, an ordinary stack with
+    no NAT handling of its own, and is then closed. Were the destination
+    ignored in favour of the far end's own address, as it once was, this
+    fake TURN server would never see the Refresh at all -- and if
+    ``call.media.remote_address`` was still ``None`` at that point, the
+    farewell used to be dropped outright rather than sent anywhere.
+    """
+
+    PUBLIC_HOST = "203.0.113.9"
+    PUBLIC_PORT = 40002
+
+    async def asyncSetUp(self) -> None:
+        host = _routable_address()
+        if host is None:
+            self.skipTest("no routable address on this machine for ICE to gather a host candidate from")
+        self.host = host
+        self.password = "turn-secret-42"
+        self.server = _FakeStunServer(
+            self.PUBLIC_HOST, self.PUBLIC_PORT, credential=("alice-turn", self.password)
+        )
+        self.addAsyncCleanup(self._close_server)
+        loop = asyncio.get_running_loop()
+        # `codecs="PCMU"` keeps the offer's `m=`/`a=rtpmap` short: with three
+        # ICE candidates (host, server-reflexive, relayed) added on top of
+        # every codec this build has by default, the INVITE clears RFC
+        # 3261 Section 18.1.1's 1300-byte line and this loopback pair has no
+        # stream transport open to fall back to.
+        self.alice_stack = Stack(
+            bind_host=host,
+            loop=loop,
+            nat=Nat.STUN,
+            ice=Ice.OFFERED,
+            codecs="PCMU",
+            stun_server=self.server.address,
+            turn_server=self.server.address,
+            turn_username="alice-turn",
+            turn_password=self.password,
+        )
+        self.bob_stack = Stack(bind_host=host, loop=loop, codecs="PCMU")
+        self.addAsyncCleanup(self._close_stacks)
+
+    async def _close_server(self) -> None:
+        self.server.close()
+
+    async def _close_stacks(self) -> None:
+        self.alice_stack.close()
+        self.bob_stack.close()
+
+    async def test_refresh_reaches_the_turn_server_not_the_peer(self) -> None:
+        alice_account = self.alice_stack.add_account(
+            "sip:alice@sipral.invalid",
+            registrar_address=self.bob_stack.bind_address,
+        )
+        self.bob_stack.add_account(
+            "sip:bob@sipral.invalid",
+            registrar_address=self.alice_stack.bind_address,
+        )
+
+        alice_call = self.alice_stack.place_call(
+            alice_account, f"sip:bob@{self.bob_stack.bind_address}", media_host=self.host
+        )
+
+        relay = None
+        while relay is None:
+            event = await asyncio.wait_for(self.alice_stack.events.get(), timeout=8)
+            if event.kind == EventKind.NAT_RELAY:
+                relay = event
+        self.assertEqual(
+            relay.fields["outcome"], NatRelay.ALLOCATED, f"relay failed: {relay.fields}"
+        )
+
+        bob_call = None
+        while bob_call is None:
+            event = await asyncio.wait_for(self.bob_stack.events.get(), timeout=8)
+            if event.kind == EventKind.INCOMING_CALL:
+                bob_call = self.bob_stack.answer_call(event, media_host=self.host)
+        self.addAsyncCleanup(bob_call.close)
+
+        # The session has to actually open -- and the relay actually become
+        # the call's -- before there is anything for a farewell to give
+        # back; a call hung up before its media ever starts leaves the
+        # relay to `Stack._forget_media_socket` instead
+        # (`bindings/python/sipral/call.py`'s `Call.close`).
+        while alice_call.media is None:
+            await asyncio.wait_for(alice_call.events.get(), timeout=8)
+
+        # `Stack.close`, not `Call.close`: hanging up and forgetting the
+        # call right here would race the poll thread's own drain of the
+        # farewell it leaves behind (`Stack.close`'s own doc comment).
+        # `Stack.close` hangs up, gives the poll thread a round to drain
+        # both queues while the call is still tracked, and only then
+        # forgets it.
+        self.alice_stack.close()
+
+        deadline = asyncio.get_running_loop().time() + 5
+        refresh = None
+        while refresh is None and asyncio.get_running_loop().time() < deadline:
+            for method, attributes in self.server.requests:
+                if method == _REFRESH_REQUEST:
+                    refresh = (method, attributes)
+                    break
+            if refresh is None:
+                await asyncio.sleep(0.05)
+        self.assertIsNotNone(
+            refresh,
+            "the TURN server never saw the Refresh that gives the relay back -- "
+            f"the farewell went somewhere other than {self.server.address}",
+        )
+        lifetime = refresh[1].get(_LIFETIME)
+        self.assertEqual(lifetime, struct.pack("!I", 0), "the Refresh does not ask for a lifetime of zero")
 
 
 class TwoStacksTalkThroughIce(unittest.IsolatedAsyncioTestCase):

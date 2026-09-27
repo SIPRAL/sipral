@@ -384,6 +384,88 @@ private suspend fun iceBehindStunCarriesAudio(host: String): String {
     }
 }
 
+/**
+ * Task 8.5.5, `intern/rapoarte/2026-09-25-nat-layers.json`
+ * (`natmobile.review.findings[1]`): `SipralClient.drainFarewells` must send
+ * what `stackPollFarewell` hands out to the destination it names -- the
+ * TURN server, for the Refresh with a lifetime of zero that gives a relay
+ * back (`crates/sipral/src/relay.rs`, "gives it back when the call ends")
+ * -- and only fall back to the last address media was heard from when it
+ * names none. A call whose peer never carries any ICE still had a relay
+ * allocated for it and still gives it back the same way (`relay.rs`: "A
+ * call whose peer does no ICE never uses it, and gives it back the same
+ * way"), so this needs nothing more than a call that reaches both ends and
+ * is then closed -- were the destination ignored in favour of the far
+ * end's own address, as it once was, this fake TURN server would never see
+ * the Refresh at all.
+ */
+private suspend fun turnAllocationIsGivenBackWhenTheCallEnds(host: String): String {
+    val password = "turn-secret-${System.nanoTime() % 1_000_000}"
+    FakeStunServer(host, credential = "alice-turn" to password).use { stun ->
+        stun.open = true
+        // codecs = "PCMU" keeps the offer short: three ICE candidates
+        // (host, server-reflexive, relayed) on top of every codec this
+        // build has by default clears RFC 3261 Section 18.1.1's
+        // 1300-byte line, and this loopback pair has no stream transport
+        // open to fall back to.
+        SipralClient.open(
+            bindHost = host,
+            ice = SipralIce.OFFERED,
+            codecs = "PCMU",
+            stunServer = stun.address,
+            turn = SipralTurnServer(stun.address, "alice-turn", password),
+        ).use { alice ->
+            SipralClient.open(bindHost = host, codecs = "PCMU").use { bob ->
+                val seen = recordEvents(alice, 30_000)
+                val aliceAccount = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
+                bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)
+                val (aliceCall, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+                    alice.placeCall(aliceAccount, target = "sip:bob@${bob.bindAddress}", mediaHost = host)
+                }
+                val relayDeadline = System.currentTimeMillis() + 10_000
+                fun relayEvent() = seen.toList().mapNotNull { relayOf(it) }.firstOrNull()
+                while (relayEvent() == null && System.currentTimeMillis() < relayDeadline) Thread.sleep(20)
+                val relay = assertNotNull(relayEvent(), "no relay event")
+                assertEquals(SipralNatRelay.ALLOCATED.value.toLong(), relay.outcome, "relay failed: ${relay.code} ${relay.reason}")
+
+                val bobCall = bob.answerCall(incoming, mediaHost = host)
+
+                // The session has to actually open -- and the relay
+                // actually become the call's -- before there is anything
+                // for a farewell to give back; bob carries no ICE at all,
+                // so MEDIA_PATH_CHOSEN (an ICE nomination) never fires
+                // here the way it does when both ends require it.
+                val mediaDeadline = System.currentTimeMillis() + 8_000
+                while (aliceCall.media == null && System.currentTimeMillis() < mediaDeadline) delay(20)
+                assertNotNull(aliceCall.media, "alice's media never started")
+
+                // SipralClient.close, not SipralCall.close: hanging up and
+                // forgetting the call right here would race the poll
+                // thread's own drain of the farewell it leaves behind
+                // (SipralClient.close's own doc comment). It hangs up,
+                // gives the poll thread a round to drain both queues
+                // while the call is still tracked, and only then forgets
+                // it.
+                alice.close()
+                bobCall.close()
+
+                val deadline = System.currentTimeMillis() + 5_000
+                while (stun.requests.toList().none { it.method == 0x0004 } && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(20)
+                }
+                val refresh = assertNotNull(
+                    stun.requests.toList().firstOrNull { it.method == 0x0004 },
+                    "the TURN server never saw the Refresh that gives the relay back -- " +
+                        "the farewell went somewhere other than ${stun.address}",
+                )
+                val lifetime = assertNotNull(refresh.attributes[0x000D], "the Refresh carries no LIFETIME")
+                assertTrue(lifetime.contentEquals(byteArrayOf(0, 0, 0, 0)), "the Refresh does not ask for a lifetime of zero")
+                return "the TURN allocation was given back to the server, not the far end, when the call ended"
+            }
+        }
+    }
+}
+
 /** Everything above, for IdiomaticCheck.kt's main. */
 internal suspend fun natChecks(): String {
     val host = hostAddress() ?: error("no interface but loopback: ICE has no host candidate to check with")
@@ -391,5 +473,6 @@ internal suspend fun natChecks(): String {
         stunMappingReachesContactAndSdp(host),
         turnRelayIsAllocatedAndOffered(host),
         iceBehindStunCarriesAudio(host),
+        turnAllocationIsGivenBackWhenTheCallEnds(host),
     ).joinToString(", ")
 }

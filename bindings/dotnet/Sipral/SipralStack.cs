@@ -52,6 +52,7 @@ public sealed class SipralStack : IDisposable
     private readonly IntPtr _transmitDestination = Marshal.AllocHGlobal(AddressBytes);
     private readonly IntPtr _transmitSource = Marshal.AllocHGlobal(AddressBytes);
     private readonly IntPtr _farewellData = Marshal.AllocHGlobal(TransmitBytes);
+    private readonly IntPtr _farewellDestination = Marshal.AllocHGlobal(AddressBytes);
     private readonly IntPtr _stunData = Marshal.AllocHGlobal(TransmitBytes);
     private readonly IntPtr _stunDestination = Marshal.AllocHGlobal(AddressBytes);
     private readonly IntPtr _stunSource = Marshal.AllocHGlobal(AddressBytes);
@@ -465,9 +466,13 @@ public sealed class SipralStack : IDisposable
         }
     }
 
-    /// <summary><c>sipral_stack_poll_farewell</c>: the RTCP BYE a call
-    /// that just ended still owes, sent through that call's own media
-    /// socket and to the last address it was actually heard from.</summary>
+    /// <summary><c>sipral_stack_poll_farewell</c>: what a call that just
+    /// ended still owes -- its RTCP BYE, and with a TURN server the
+    /// Refresh that gives its relay back -- sent through that call's own
+    /// media socket to the address the stack names. Under ICE that is the
+    /// path ICE chose or the TURN server, not necessarily the last address
+    /// media came from, which is only the fallback for a packet that names
+    /// none.</summary>
     private void DrainFarewells()
     {
         while (true)
@@ -475,22 +480,28 @@ public sealed class SipralStack : IDisposable
             var packet = SipralMediaPacket.Sized();
             packet.Data = _farewellData;
             packet.Capacity = TransmitBytes;
-            packet.Destination = IntPtr.Zero;
-            packet.DestinationCapacity = 0;
+            packet.Destination = _farewellDestination;
+            packet.DestinationCapacity = AddressBytes;
             var status = NativeMethods.sipral_stack_poll_farewell(Handle, out var endedCall, ref packet);
             if (status != SipralStatus.Ok || packet.Len == 0)
             {
                 return;
             }
             var media = CallFor(endedCall)?.Media;
-            var remoteAddress = media?.RemoteAddress;
-            if (media is null || remoteAddress is null)
+            if (media is null)
+            {
+                continue;
+            }
+            var address = packet.DestinationLen > 0
+                ? Marshal.PtrToStringUTF8(_farewellDestination, (int)packet.DestinationLen)
+                : media.RemoteAddress;
+            if (address is null)
             {
                 continue;
             }
             var payload = new byte[(int)packet.Len];
             Marshal.Copy(_farewellData, payload, 0, payload.Length);
-            media.SendTo(payload, remoteAddress);
+            media.SendTo(payload, address);
         }
     }
 
@@ -856,6 +867,7 @@ public sealed class SipralStack : IDisposable
         Marshal.FreeHGlobal(_transmitDestination);
         Marshal.FreeHGlobal(_transmitSource);
         Marshal.FreeHGlobal(_farewellData);
+        Marshal.FreeHGlobal(_farewellDestination);
         Marshal.FreeHGlobal(_stunData);
         Marshal.FreeHGlobal(_stunDestination);
         Marshal.FreeHGlobal(_stunSource);

@@ -212,6 +212,9 @@ class Stack:
         self._stun_data = ffi.new(f"uint8_t[{_TRANSMIT_BYTES}]")
         self._stun_destination = ffi.new(f"char[{_ADDRESS_BYTES}]")
         self._stun_source = ffi.new(f"char[{_ADDRESS_BYTES}]")
+        self._farewell = ffi.new("sipral_media_packet_t *")
+        self._farewell_data = ffi.new(f"uint8_t[{_TRANSMIT_BYTES}]")
+        self._farewell_destination = ffi.new(f"char[{_ADDRESS_BYTES}]")
 
         self._closed = threading.Event()
         self._thread = threading.Thread(
@@ -489,32 +492,41 @@ class Stack:
             self._socket.sendto(payload, (host, port))
 
     def _drain_farewells(self) -> None:
-        """`sipral_stack_poll_farewell`: the RTCP BYE a call that just
-        ended still owes, sent through that call's own media socket and
-        to the last address media was actually heard from
-        (`docs/08-ffi.md`, "A call that ends owes the far end an RTCP
-        BYE"). A call whose :class:`sipral.call.Call` was already closed,
-        or that never heard from the far end at all, is skipped: there is
-        nothing left here that could still reach it.
+        """`sipral_stack_poll_farewell`: what a call that just ended still
+        owes -- its RTCP BYE, and with a TURN server the Refresh that gives
+        its relay back -- sent through that call's own media socket to the
+        address the stack names. Under ICE that is the path ICE chose or
+        the TURN server, not necessarily the last address media came from,
+        which is only the fallback for a packet that names none. A call
+        whose :class:`sipral.call.Call` was already closed, or that named
+        no destination and never heard from the far end at all, is
+        skipped: there is nothing left here that could still reach it.
         """
         out_call = ffi.new("sipral_handle_t *")
-        packet = ffi.new("sipral_media_packet_t *")
-        data = ffi.new(f"uint8_t[{_TRANSMIT_BYTES}]")
+        packet = self._farewell
         while True:
             packet.size = ffi.sizeof("sipral_media_packet_t")
-            packet.data = data
+            packet.data = self._farewell_data
             packet.capacity = _TRANSMIT_BYTES
-            packet.destination = ffi.NULL
-            packet.destination_capacity = 0
+            packet.destination = self._farewell_destination
+            packet.destination_capacity = _ADDRESS_BYTES
             status = lib.sipral_stack_poll_farewell(self.handle, out_call, packet)
             if status != lib.SIPRAL_STATUS_OK:
                 return
             if packet.len == 0:
                 return
             call = self.call_for(int(out_call[0]))
-            if call is None or call.media is None or call.media.remote_address is None:
+            if call is None:
                 continue
-            call.media.send_to(bytes(ffi.buffer(packet.data, packet.len)), call.media.remote_address)
+            if packet.destination_len > 0:
+                address = ffi.string(packet.destination, packet.destination_len).decode("utf-8")
+            elif call.media is not None:
+                address = call.media.remote_address
+            else:
+                address = None
+            if call.media is None or address is None:
+                continue
+            call.media.send_to(bytes(ffi.buffer(packet.data, packet.len)), address)
 
     # -- STUN/TURN on a media socket, before it has a call's media handle -
 

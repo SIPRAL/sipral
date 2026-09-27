@@ -428,6 +428,70 @@ final class NatTests: XCTestCase {
             && $0.from != bob.bindAddress }, "no media socket asked the STUN server")
     }
 
+    /// Task 8.5.5, `intern/rapoarte/2026-09-25-nat-layers.json`
+    /// (`natmobile.review.findings[1]`): `SipralStack.drainFarewells` must
+    /// send what `sipral_stack_poll_farewell` hands out to the destination
+    /// it names -- the TURN server, for the Refresh with a lifetime of zero
+    /// that gives a relay back (`crates/sipral/src/relay.rs`, "gives it
+    /// back when the call ends") -- and only fall back to the last address
+    /// media was heard from when it names none. A call whose peer never
+    /// carries any ICE still had a relay allocated for it and still gives
+    /// it back the same way (`relay.rs`: "A call whose peer does no ICE
+    /// never uses it, and gives it back the same way"), so this needs
+    /// nothing more than a call that reaches both ends and is then closed --
+    /// were the destination ignored in favour of the far end's own address,
+    /// as it once was, this fake TURN server would never see the Refresh at
+    /// all.
+    func testTurnAllocationIsGivenBackWhenTheCallEnds() async throws {
+        #if !canImport(CryptoKit)
+        throw XCTSkip("the fake TURN server signs its answers with CryptoKit")
+        #else
+        let password = "turn-secret-\(UInt32.random(in: 100_000...999_999))"
+        let host = try hostAddress()
+        let stun = try FakeStunServer(host: host, credential: ("alice-turn", password))
+        defer { stun.stop() }
+
+        let alice = try SipralStack(
+            bindHost: host, ice: .offered, stunServer: stun.address,
+            turn: TurnServer(address: stun.address, username: "alice-turn", password: password)
+        )
+        let bob = try SipralStack(bindHost: host)
+        defer { alice.close(); bob.close() }
+        let events = alice.events()
+        let bobEvents = bob.events()
+        let aliceAccount = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
+        _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
+        stun.open = true
+        _ = await first(events) { $0.natData?.signalling == true }
+
+        let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)", mediaHost: host)
+        let relayEvent = await first(events) { $0.relayData != nil }
+        let relay = try XCTUnwrap(relayEvent?.relayData, "no relay event")
+        XCTAssertEqual(relay.outcome, .allocated, "relay failed: \(relay.code) \(relay.reason ?? "")")
+
+        let incoming = await first(bobEvents) { $0.kind == .incomingCall }
+        let bobCall = try bob.takeIncomingCall(try XCTUnwrap(incoming, "bob never saw the call"), mediaHost: host)
+        try bobCall.answer()
+        _ = await first(events) { $0.kind == .mediaPathChosen }
+
+        aliceCall.close()
+        bobCall.close()
+
+        let deadline = DispatchTime.now() + 5
+        while DispatchTime.now() < deadline {
+            if stun.requests.contains(where: { $0.method == 0x0004 }) { break }
+            usleep(20_000)
+        }
+        let refresh = try XCTUnwrap(
+            stun.requests.first { $0.method == 0x0004 },
+            "the TURN server never saw the Refresh that gives the relay back -- "
+                + "the farewell went somewhere other than \(stun.address)"
+        )
+        let lifetime = try XCTUnwrap(refresh.attributes[0x000D], "the Refresh carries no LIFETIME")
+        XCTAssertEqual(lifetime, [0, 0, 0, 0], "the Refresh does not ask for a lifetime of zero")
+        #endif
+    }
+
     private func assertIceCarriesAudio(_ alice: SipralStack, _ bob: SipralStack, host: String) async throws {
         let aliceAccount = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
         _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)

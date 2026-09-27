@@ -720,6 +720,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   dependency when only the deployment target changes), and each script
   reads every object in the static archive and fails on one built for a
   newer release.
+- **The Python and .NET layers now give a TURN relay back to the server,
+  not to the last address media came from.** `Stack._drain_farewells`
+  (Python) and `SipralStack.DrainFarewells` (.NET) read
+  `sipral_stack_poll_farewell`'s own `destination` -- what
+  `docs/08-ffi.md` already asked of them -- the way the Swift and Kotlin
+  layers already did; before, both asked for no destination at all and
+  routed every farewell, the Refresh with a lifetime of zero among them,
+  to `call.media.remote_address`. Under ICE or with a peer that never
+  sent any media, that address is the far end or nothing at all, so the
+  Refresh either went to the wrong peer or was silently dropped and the
+  relay was left to lapse on its own ten minutes later. Each layer's own
+  NAT tests gained a case with a real (if fake) TURN server that asserts
+  the Refresh actually reaches it when the call ends.
 - **An incoming call the caller gave up on before it was taken no longer
   leaves a call that can never end.** `SipralStack.takeIncomingCall` (and
   `answerCall`, which calls it) minted and registered a `Call` for a
