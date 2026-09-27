@@ -1240,6 +1240,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **The `sipral` crate's own description of its bindings names all four.**
+  `crates/sipral/README.md`, its `Cargo.toml` description and
+  `bindings/dotnet/Sipral/README.md` said "Swift, .NET and Kotlin bindings,"
+  leaving out Python though the crate has had one as long as the other three.
+  No behaviour changed.
 - **Every Swift event stream now reaches every reader.**
   `SipralStack.events`, `Call.events`, `Call.dtmf` and `Media.frames` were
   each one `AsyncStream`, which hands every item to one reader only: a call

@@ -1,6 +1,6 @@
 [package]
 name = "sipral"
-description = "Sipral - Session Initiation Protocol Rust Audio Layer. A SIP + RTP client stack in one crate: signalling from sipral-ua joined to a media pipeline, with Swift, .NET and Kotlin bindings. Pre-release; the ABI is not frozen."
+description = "Sipral - Session Initiation Protocol Rust Audio Layer. A SIP + RTP client stack in one crate: signalling from sipral-ua joined to a media pipeline, with Swift, .NET, Kotlin and Python bindings. Pre-release; the ABI is not frozen."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
