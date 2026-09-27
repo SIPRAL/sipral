@@ -49,14 +49,44 @@ def respond(pcm: bytes) -> bytes:
     return pcm
 
 
-async def run_call(call: Call) -> bool:
+async def run_call(
+    call: Call, *, patience: float | None = None, dwell: float | None = None
+) -> bool:
     """Talk for the life of one call. `False` when it ended before its
     media ever started -- the lab's own TURN-blocked run
     (`run_direct_call`) needs to tell that apart from an ordinary hangup
-    rather than wait here forever for a `Media` that is never coming."""
+    rather than wait here forever for a `Media` that is never coming, and
+    ``patience`` is what stops that wait itself running forever: a call
+    under `Ice.REQUIRED` with every path blocked is not refused by the
+    library on any timer of its own -- `IceRequired` is only for a peer
+    that answered with no ICE attributes at all -- so the application is
+    what has to give up.
+
+    ``dwell``, given only by `run_direct_call`, is how long this end
+    waits once media has started before it hangs up on its own: the
+    peer there is a lab harness with nothing of its own that would ever
+    send "#" or hang up first, unlike the far end `respond` is written
+    against, which always does one or the other.
+    """
     print(f"answered {call.handle:x}")
-    while call.media is None and not call.ended:
-        await call.events.get()
+
+    async def wait_for_media() -> None:
+        while call.media is None and not call.ended:
+            await call.events.get()
+
+    try:
+        if patience is not None:
+            await asyncio.wait_for(wait_for_media(), timeout=patience)
+        else:
+            await wait_for_media()
+    except TimeoutError:
+        print(f"ended {call.handle:x}: no media within {patience}s -- no path was ever chosen")
+        try:
+            call.hangup()
+        except SipralError:
+            pass
+        call.close()
+        return False
     if call.media is None:
         print(f"ended {call.handle:x}: no media -- the call never connected")
         call.close()
@@ -113,17 +143,33 @@ async def run_call(call: Call) -> bool:
         while not call.ended:
             await call.events.get()
 
+    async def hang_up_after_dwell() -> None:
+        nonlocal stats
+        assert dwell is not None
+        await asyncio.sleep(dwell)
+        try:
+            stats = call.media.statistics()
+        except SipralError:
+            pass
+        call.hangup()
+
     talking = asyncio.create_task(talk())
     polling = asyncio.create_task(poll_statistics())
     hanging_up = asyncio.create_task(listen_for_hangup())
     ending = asyncio.create_task(wait_for_remote_hangup())
+    waiting = {hanging_up, ending}
+    dwelling = asyncio.create_task(hang_up_after_dwell()) if dwell is not None else None
+    if dwelling is not None:
+        waiting.add(dwelling)
     try:
-        await asyncio.wait({hanging_up, ending}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
     finally:
         talking.cancel()
         polling.cancel()
         hanging_up.cancel()
         ending.cancel()
+        if dwelling is not None:
+            dwelling.cancel()
         call.close()
         print(f"ended {call.handle:x}: {stats}")
     return True
@@ -192,7 +238,11 @@ async def run_direct_call() -> bool:
         print(f"call failed: {error!r}")
         stack.close()
         return False
-    ok = await run_call(call)
+    ok = await run_call(
+        call,
+        patience=int(os.environ.get("SIPRAL_PATIENCE_MS", "20000")) / 1000,
+        dwell=int(os.environ.get("SIPRAL_DWELL_MS", "2000")) / 1000,
+    )
     stack.close()
     return ok
 
