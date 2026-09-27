@@ -2415,8 +2415,9 @@ static void contact_of(const char *message, char *out, size_t room)
  * network starts, and every step of it goes to an address this end wrote. The
  * INVITE arrives at the `Contact` the registrar holds, which has to be the
  * one STUN reported. The 2xx's own `Contact` is where Asterisk sends its ACK
- * and, eight seconds on, its BYE (RFC 3261 §12.1.1: the remote target is the
- * `Contact` of the response that made the dialog), so it has to name the
+ * and, eight seconds on, its BYE (RFC 3261 §12.1.2: Asterisk, as UAC, sets
+ * its remote target from the `Contact` of the response that made the
+ * dialog), so it has to name the
  * public address too -- the address the INVITE arrived on is on a network
  * Asterisk has no route to. The answer's `c=`/`m=` is where Asterisk sends
  * the echo, and `rtp_symmetric` is off in interop/asterisk, so an echo that

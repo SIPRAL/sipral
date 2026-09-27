@@ -1890,8 +1890,9 @@ mod tests {
     /// `sipral_call_answer_media` — what the Kotlin and Swift layers call —
     /// with that address in the 2xx's own `Contact` as well as in `c=`: the
     /// ACK, and every request the far end sends in the dialog, go where the
-    /// `Contact` says (RFC 3261 §12.1.1), and the address the INVITE arrived
-    /// on is one nobody outside can reach.
+    /// `Contact` says (RFC 3261 §12.1.2: the far end, as UAC, sets its remote
+    /// target from this response's `Contact`), and the address the INVITE
+    /// arrived on is one nobody outside can reach.
     #[test]
     fn a_call_to_the_public_contact_is_the_accounts_and_is_answered_from_it() {
         let mut observed = Observed::default();
