@@ -563,7 +563,7 @@ opens on demand. What it does, in the order a call meets it:
   FINGERPRINT. One that fails authentication is refused unsigned
   (RFC 8489 §9.1.3). A lite end facing a full one starts controlled (§6.1.1),
   and stays there: a Binding request only ever reaches a lite agent's
-  answering side from a full peer (§8.2 — two lite agents exchange no
+  answering side from a full peer (§6.1.1 — two lite agents exchange no
   connectivity checks at all), and §6.1.1 makes that peer's role controlling
   unconditionally, never controlled, so an ICE-CONTROLLED request naming this
   end's controlled role is answered 487 and the role kept, whatever the

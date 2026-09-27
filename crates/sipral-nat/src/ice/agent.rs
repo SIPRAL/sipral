@@ -248,7 +248,7 @@ impl LiteAgent {
         // signed with the same credentials the peer just proved it holds.
         //
         // A Binding request only ever reaches a lite agent's answering side
-        // when the peer is a full agent (RFC 8445 §8.2: two lite agents
+        // when the peer is a full agent (RFC 8445 §6.1.1: two lite agents
         // exchange no connectivity checks at all, so a lite peer never sends
         // one) — and §6.1.1 makes a full peer's role controlling
         // unconditionally, never controlled. An ICE-CONTROLLED request is
