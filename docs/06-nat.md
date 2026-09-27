@@ -369,7 +369,10 @@ to spend a round trip deleting what the next call on the socket can use. The
 engine hands the allocation back whole (`MediaEngine::poll_returned_relay`,
 taken out of the agent it was drawn into with `IceAgent::into_relays` when it
 got that far), and `Relays::put_back` keeps it alive for the socket it came
-from, as if it had never been taken; the C ABI does both itself. A socket
+from, as if it had never been taken; the C ABI does both itself. The answer
+to a call already rung with media is the same case: its 200 OK carries the
+description the 183 did, so a relay handed to `MediaEngine::answer_with` then
+was named by nothing that left, and comes back whole the same way. A socket
 that will carry no call after all gives its relay back with
 `Relays::release`, or `sipral_stack_nat_unmap` over the C ABI. Destroying a
 C ABI stack sends nothing — the stack owns no socket — so an allocation still

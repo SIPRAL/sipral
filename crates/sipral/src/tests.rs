@@ -5795,6 +5795,62 @@ fn a_relay_handed_to_a_ring_refused_before_it_describes_anything_comes_back() {
     );
 }
 
+/// The 200 OK of a call rung with media carries the 183's description, so a
+/// relay handed to the answer was named by nothing that left: it comes back
+/// whole, as a refused description's does, rather than being deleted.
+#[cfg(feature = "ice")]
+#[test]
+fn a_relay_handed_to_the_answer_of_a_call_rung_with_media_comes_back_whole() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let incoming = pair.ring();
+    let mut relays = relays_with_one_for(&mut pair.callee, callee_media(), pair.now);
+    let relay = relays.take(callee_media()).expect("the relay");
+    pair.callee
+        .engine
+        .ring_with(
+            &mut pair.callee.agent,
+            incoming,
+            callee_media(),
+            CallMedia::new(catalog.clone(), MediaConfig::default()).relay(relay),
+            pair.now,
+        )
+        .expect("the 183 goes");
+    pair.callee.drain(pair.now, false);
+    let other: SocketAddr = "192.0.2.2:40010".parse().expect("an address");
+    let mut others = relays_with_one_for(&mut pair.callee, other, pair.now);
+    let second = others.take(other).expect("a second relay");
+    pair.callee
+        .engine
+        .answer_with(
+            &mut pair.callee.agent,
+            incoming,
+            other,
+            CallMedia::new(catalog, MediaConfig::default()).relay(second),
+            pair.now,
+        )
+        .expect("the 200 goes");
+    pair.callee.drain(pair.now, false);
+    assert!(
+        relays_given_back(&mut pair.callee).is_empty(),
+        "a relay nothing named was deleted rather than handed back"
+    );
+    let back = pair
+        .callee
+        .engine
+        .poll_returned_relay()
+        .expect("the second relay comes back from the answer");
+    assert_eq!(back.local(), other);
+    assert!(pair.callee.engine.poll_returned_relay().is_none());
+
+    // still live: kept for its socket, nothing deleted it
+    others.put_back(back, pair.now);
+    assert!(others.poll_transmit().is_none());
+    assert!(others.take(other).is_some(), "kept for the socket");
+}
+
 /// A phone that rings for longer than the allocation's lifetime less a
 /// minute: the agent waiting with the relay refreshes it, and the answer to
 /// that refresh has a way in before the session opens.

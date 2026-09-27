@@ -758,6 +758,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   answered — and would have taken an UPDATE's offer the ACK's answer then
   landed on. The offer in a 2xx now counts as outstanding until its ACK,
   as RFC 3311 §5.2 has it.
+- **A relay handed to the answer of a call already rung with media comes
+  back whole.** `MediaEngine::answer_with` on a call `ring_with` described
+  reads no relay, since the 200 OK carries the 183's description, and it
+  used to delete the allocation it was given with a Refresh of lifetime
+  zero. It now hands it back through `MediaEngine::poll_returned_relay`,
+  still live on its server, for `Relays::put_back` to keep for the next
+  call on its socket, as every refused description already did.
 - **Apple artefacts are built for the releases they claim.** The macOS
   wheel was tagged with the building Mac's own version (`macosx_26_0`), so
   pip refused it on every older macOS the library runs on; and in every

@@ -325,7 +325,9 @@ impl CallMedia {
     /// an error — sent nothing that named the relay, and hands it back whole
     /// through [`MediaEngine::poll_returned_relay`], still live on its
     /// server, for [`Relays::put_back`](crate::Relays::put_back) to keep for
-    /// the next call on the socket.
+    /// the next call on the socket. So does [`MediaEngine::answer_with`] on a
+    /// call [`MediaEngine::ring_with`] already described: the 200 OK carries
+    /// the description the 183 did, which named the ring's relay or none.
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn relay(mut self, relay: crate::Relay) -> Self {
@@ -511,9 +513,6 @@ impl Handed {
     const fn mapped(&self) -> Option<SocketAddr> {
         None
     }
-
-    #[allow(clippy::unused_self)]
-    const fn unusable(&mut self) {}
 }
 
 /// What a call's first description left of the relay it was given.
@@ -1763,7 +1762,9 @@ impl MediaEngine {
     /// `media` are not read: there is no second negotiation, and reusing that
     /// session and that description is the whole point. What the 200 OK
     /// carries then is decided by how the 183 went out, not by anything
-    /// passed here — see [`MediaEngine::ring_with`].
+    /// passed here — see [`MediaEngine::ring_with`]. A relay `media` carried
+    /// then was named by nothing that left, and comes back whole from
+    /// [`MediaEngine::poll_returned_relay`], whether the answer went or not.
     pub fn answer_with(
         &mut self,
         agent: &mut UserAgent,
@@ -1791,10 +1792,11 @@ impl MediaEngine {
     ) -> Result<(), MediaError> {
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         if managed.rung_with_media {
-            // the call was described when it rang, relay and all; a second
-            // one handed in here has nothing to be and goes back
-            handed.unusable();
-            self.keep(call, handed, now);
+            // the call was described when it rang, relay and all. A second
+            // relay handed in here was named by nothing that left, so it
+            // stays in `handed` and goes back to the application whole from
+            // `answer_with`, as a refused description's does: deleting it
+            // would spend an allocation the socket's next call can use
             return self.answer_after_ring(agent, call, now);
         }
         let CallMedia {
@@ -2118,8 +2120,11 @@ impl MediaEngine {
     /// like every other poll here; ask after any of
     /// [`MediaEngine::place_with`], [`MediaEngine::accept_transfer_with`],
     /// [`MediaEngine::ring_with`] and [`MediaEngine::answer_with`] answers
-    /// with an error. A relay nobody asks for is refreshed by nothing, and
-    /// lapses at its server in the lifetime it was granted.
+    /// with an error, and after [`MediaEngine::answer_with`] on a call
+    /// [`MediaEngine::ring_with`] already described, which reads no relay
+    /// because its description has already left. A relay nobody asks for is
+    /// refreshed by nothing, and lapses at its server in the lifetime it was
+    /// granted.
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn poll_returned_relay(&mut self) -> Option<crate::Relay> {
