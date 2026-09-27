@@ -266,8 +266,9 @@ the compound) and the VoIP Metrics Report Block it carries (§4.7):
 `rtcp_xr::XrPacketBuilder` the same way every other RTCP packet type in
 this crate is. `RtcpPacket::ExtendedReport` is its own variant rather than
 folded into `RtcpPacket::Other`, so a peer's XR packet can be told apart
-from one this crate does not define, though nothing here reads the far
-end's own block back into anything the application sees — see below.
+from one this crate does not define. The far end's own block about this
+session's stream is kept (`RtpSession::far_voip_metrics`) and becomes the
+RFC 6035 report's `RemoteMetrics` set — see below.
 
 **Negotiation.** §5's `a=rtcp-xr` attribute, with the `voip-metrics` token,
 decides whether a stream sends the block at all: `sipral-core`'s
@@ -357,9 +358,20 @@ PUBLISH's own `Expires: 0` closes its published state at once: the report
 describes a call that has already ended and nothing refreshes it, and a
 collector that never answers has cost this end one datagram, never a
 retry. `MediaEvent::QualityReportSent` says whether the attempt went out,
-raised only when there was a collector to publish to at all. Only
-`LocalMetrics` is written; `RemoteMetrics` would be what the far end
-measured about this stream, and this crate has no channel to receive it.
+raised only when there was a collector to publish to at all. `LocalMetrics`
+is always written. `RemoteMetrics` is what the far end measured of the
+stream this end sent it, and the far end says so in its own RTCP XR VoIP
+Metrics block about this end's source: `RtpSession::rtcp_receive` keeps the
+last block whose "SSRC of source" is this session's own
+(`RtpSession::far_voip_metrics`), `MediaSession::quality_report_metrics`
+carries it as `QualityReportMetrics::remote`, and the report writes the set
+from it — the call's span and codec, the far end's jitter buffer, loss,
+burst and gap figures, its delays, its signal and noise levels and
+residual echo return loss where it measured them (RFC 6035 asks for the
+latter from XR in exactly this set), and its ratings, every RFC 3611
+"unavailable" left out rather than written. A call whose far end sent no
+such block has no `RemoteMetrics` set: zeros under that name would claim a
+measurement nobody made.
 
 ### Jitter buffer
 

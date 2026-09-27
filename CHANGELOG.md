@@ -26,6 +26,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   ICE agent is refused with the new `MediaError::NoIce`. Over the C ABI a
   peer's restart is followed the same way; a restart this end starts has
   no entry point there yet.
+- **The quality report says what the far end measured.** The RFC 6035
+  `vq-rtcpxr` report sent on call end carries a `RemoteMetrics` set from
+  the last RTCP XR VoIP Metrics block (RFC 3611 §4.7) the far end sent
+  about this end's stream — its jitter buffer, loss, burst and gap
+  figures, delays, signal and noise levels and echo return loss where it
+  measured them, and its R factor and MOS — and leaves the set out when it
+  sent none. `RtpSession::far_voip_metrics` is the block itself, and
+  `QualityReportMetrics::remote` (`RemoteQualityMetrics`) what the report is
+  written from.
 - **The .NET binding can get a call past a NAT.** `SipralStack`'s
   constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
   `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP

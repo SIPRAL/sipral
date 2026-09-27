@@ -102,7 +102,7 @@ pub use lifecycle::{
 };
 pub use message::{MAX_UNSAFE_BODY_BYTES, MessageHandle};
 pub use mwi::{MessageClass, MessageSummary, MessageSummaryError};
-pub use quality_report::QualityReportMetrics;
+pub use quality_report::{QualityReportMetrics, RemoteQualityMetrics};
 pub use registration::{PushEcho, RegistrarInfo, SnapshotError};
 #[cfg(feature = "reference-loop")]
 pub use runtime::{Control, Handler, Runtime};

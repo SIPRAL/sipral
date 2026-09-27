@@ -209,6 +209,10 @@ pub struct RtpSession {
     cname: String,
     timer: IntervalTimer,
     round_trip: Option<Duration>,
+    /// The last RFC 3611 §4.7 VoIP Metrics block the far end sent about this
+    /// session's own stream: what it measured of the audio it received from
+    /// here.
+    far_voip_metrics: Option<VoipMetricsBlock>,
     /// The SRTP contexts, when the negotiation produced keys. Held here
     /// rather than left to the caller so that the order of §3.3 — protect
     /// after building, verify before believing — is not something a caller
@@ -388,6 +392,7 @@ impl RtpSession {
             cname: config.cname.clone(),
             timer: IntervalTimer::new(config.rtcp_bandwidth, first_report_size, unit_interval),
             round_trip: None,
+            far_voip_metrics: None,
             security: Protection::Clear,
         }
     }
@@ -1428,9 +1433,17 @@ impl RtpSession {
                         goodbye = Some(bye.reason().unwrap_or_default());
                     }
                 }
-                RtcpPacket::SourceDescription(_)
-                | RtcpPacket::ExtendedReport(_)
-                | RtcpPacket::Other { .. } => {}
+                // §4.7: the block names the source it reports on in its own
+                // "SSRC of source" field, and only one about this session's
+                // own stream is the far end's measure of what it sent
+                RtcpPacket::ExtendedReport(xr) => {
+                    if let Some(block) = xr.voip_metrics()
+                        && block.ssrc == self.outbound.ssrc
+                    {
+                        self.far_voip_metrics = Some(block);
+                    }
+                }
+                RtcpPacket::SourceDescription(_) | RtcpPacket::Other { .. } => {}
             }
         }
         match goodbye {
@@ -1513,6 +1526,17 @@ impl RtpSession {
         self.round_trip
     }
 
+    /// What the far end measured of the audio this session sent it: the last
+    /// RFC 3611 §4.7 VoIP Metrics block it sent whose "SSRC of source" is
+    /// this session's own ([`RtpSession::local_ssrc`]). `None` until one
+    /// has arrived, which a far end that does not send RTCP XR never sends;
+    /// this session's own measure of what it receives is
+    /// [`RtpSession::voip_metrics`].
+    #[must_use]
+    pub const fn far_voip_metrics(&self) -> Option<VoipMetricsBlock> {
+        self.far_voip_metrics
+    }
+
     /// When the next periodic RTCP report is scheduled, without the side
     /// effect [`RtpSession::rtcp_due`] has of updating `pmembers` — for a
     /// caller that only wants to know, such as arming a wakeup timer.
@@ -1548,6 +1572,10 @@ mod tests {
         SourceDescriptionBuilder,
     };
     use crate::rtcp_timer::Due;
+    use crate::rtcp_xr::{
+        JitterBufferAdaptive, PacketLossConcealment, RxConfig, UNAVAILABLE, VoipMetricsBlock,
+        XrPacketBuilder,
+    };
     use crate::srtp::{Master, Policy, Security, SrtpError, Suite};
     use crate::wire::{BuildError, PacketBuilder, PacketError, RtpHeader, RtpPacket};
 
@@ -2536,6 +2564,73 @@ mod tests {
             session.round_trip_time(),
             Some(Duration::new(6, 125_000_000))
         );
+    }
+
+    /// A compound RTCP packet from `ssrc` carrying an XR VoIP Metrics block
+    /// (RFC 3611 §4.7) about `about`.
+    fn far_metrics_report(out: &mut [u8], ssrc: u32, about: u32) -> (usize, VoipMetricsBlock) {
+        let block = VoipMetricsBlock {
+            ssrc: about,
+            loss_rate: 12,
+            discard_rate: 3,
+            burst_density: 84,
+            gap_density: 10,
+            burst_duration_ms: 120,
+            gap_duration_ms: 520,
+            round_trip_delay_ms: 45,
+            end_system_delay_ms: 0,
+            signal_level_dbm0: UNAVAILABLE.cast_signed(),
+            noise_level_dbm0: UNAVAILABLE.cast_signed(),
+            rerl_db: UNAVAILABLE,
+            gmin: 16,
+            r_factor: 82,
+            ext_r_factor: UNAVAILABLE,
+            mos_lq: 38,
+            mos_cq: 36,
+            rx_config: RxConfig {
+                plc: PacketLossConcealment::Standard,
+                jba: JitterBufferAdaptive::Adaptive,
+                jb_rate: 5,
+            },
+            jb_nominal_ms: 40,
+            jb_maximum_ms: 60,
+            jb_abs_max_ms: 500,
+        };
+        let rr = ReceiverReportBuilder { ssrc, reports: &[] };
+        let sdes = SourceDescriptionBuilder {
+            chunks: &[cname_chunk(ssrc)],
+        };
+        let n = CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes)
+            .with_xr(XrPacketBuilder {
+                ssrc,
+                voip_metrics: Some(block),
+            })
+            .write(out)
+            .expect("room");
+        (n, block)
+    }
+
+    #[test]
+    fn the_far_ends_own_voip_metrics_about_this_stream_are_kept() {
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+        assert_eq!(session.far_voip_metrics(), None, "nothing has said yet");
+
+        // a block about some other source is not a measure of this stream
+        let mut incoming = [0_u8; 256];
+        let (n, _) = far_metrics_report(&mut incoming, 7, 0x0bad_f00d);
+        assert_eq!(
+            session.rtcp_receive(&mut incoming[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Report
+        );
+        assert_eq!(session.far_voip_metrics(), None);
+
+        let (n, block) = far_metrics_report(&mut incoming, 7, session.local_ssrc());
+        assert_eq!(
+            session.rtcp_receive(&mut incoming[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Report
+        );
+        assert_eq!(session.far_voip_metrics(), Some(block));
     }
 
     #[test]

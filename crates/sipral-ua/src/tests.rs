@@ -3062,6 +3062,7 @@ fn quality_metrics() -> crate::QualityReportMetrics {
         r_factor: None,
         mos_lq_x10: None,
         mos_cq_x10: None,
+        remote: None,
     }
 }
 

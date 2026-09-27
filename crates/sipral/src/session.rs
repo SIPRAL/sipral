@@ -51,9 +51,9 @@ use sipral_rtp::srtp::{Master, Policy, Rekeyed};
 use sipral_rtp::{
     Activity, BufferConfig, BuildError, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
     PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpSession, StreamConfig, StreamFormat,
-    UNAVAILABLE, is_rtcp,
+    UNAVAILABLE, VoipMetricsBlock, is_rtcp,
 };
-use sipral_ua::QualityReportMetrics;
+use sipral_ua::{QualityReportMetrics, RemoteQualityMetrics};
 
 use crate::clock::WallClock;
 use crate::codec::{Codec, CodecCandidate};
@@ -733,6 +733,7 @@ impl MediaSession {
             r_factor: (block.r_factor != UNAVAILABLE).then_some(block.r_factor),
             mos_lq_x10: (block.mos_lq != UNAVAILABLE).then_some(block.mos_lq),
             mos_cq_x10: (block.mos_cq != UNAVAILABLE).then_some(block.mos_cq),
+            remote: self.rtp.far_voip_metrics().as_ref().map(remote_metrics),
         })
     }
 
@@ -747,6 +748,37 @@ impl MediaSession {
             epoch + Duration::from_secs(self.clock.unix_at(self.origin)),
             epoch + Duration::from_secs(self.clock.unix_at(now)),
         )
+    }
+}
+
+/// The RFC 6035 `RemoteMetrics` set, from the far end's own RFC 3611 §4.7
+/// block about this end's stream, each "unavailable" sentinel (§4.7.4,
+/// §4.7.5) left out rather than written as a reading.
+fn remote_metrics(block: &VoipMetricsBlock) -> RemoteQualityMetrics {
+    let known = |value: u8| (value != UNAVAILABLE).then_some(value);
+    let level = |value: i8| (value != UNAVAILABLE.cast_signed()).then_some(value);
+    RemoteQualityMetrics {
+        loss_rate: block.loss_rate,
+        discard_rate: block.discard_rate,
+        burst_density: block.burst_density,
+        burst_duration_ms: block.burst_duration_ms,
+        gap_density: block.gap_density,
+        gap_duration_ms: block.gap_duration_ms,
+        gmin: block.gmin,
+        round_trip_delay_ms: block.round_trip_delay_ms,
+        end_system_delay_ms: block.end_system_delay_ms,
+        signal_level_dbm0: level(block.signal_level_dbm0),
+        noise_level_dbm0: level(block.noise_level_dbm0),
+        rerl_db: known(block.rerl_db),
+        jitter_buffer_adaptive: block.rx_config.jba as u8,
+        jitter_buffer_rate: block.rx_config.jb_rate,
+        jitter_buffer_nominal_ms: block.jb_nominal_ms,
+        jitter_buffer_maximum_ms: block.jb_maximum_ms,
+        jitter_buffer_abs_max_ms: block.jb_abs_max_ms,
+        r_factor: known(block.r_factor),
+        ext_r_factor: known(block.ext_r_factor),
+        mos_lq_x10: known(block.mos_lq),
+        mos_cq_x10: known(block.mos_cq),
     }
 }
 

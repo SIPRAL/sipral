@@ -16,11 +16,14 @@
 //! crate depends on nothing that measures RTP, so every number in
 //! [`QualityReportMetrics`] is the caller's to supply.
 //!
-//! Only the `LocalMetrics` set is written. `RemoteMetrics` is "the same
+//! The `LocalMetrics` set is always written. `RemoteMetrics` is "the same
 //! metrics ... but reported for or by the node connected via the
 //! interface" (SS4.6), i.e. what the *far end* measured about *this*
-//! stream — data this stack has no channel to receive, so writing a set of
-//! zeros under that name would claim a measurement nobody made.
+//! stream, and the far end says so in its own RTCP XR VoIP Metrics block
+//! (RFC 3611 SS4.7) about this end's source: the set is written from the
+//! last such block when the call received one
+//! ([`QualityReportMetrics::remote`]), and left out when it did not, since
+//! a set of zeros under that name would claim a measurement nobody made.
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -135,6 +138,144 @@ pub struct QualityReportMetrics {
     pub mos_lq_x10: Option<u8>,
     /// RFC 3611 SS4.7.5's MOS-CQ, in tenths, or `None` for "unavailable".
     pub mos_cq_x10: Option<u8>,
+    /// What the far end measured of the stream this end sent it, from the
+    /// last RTCP XR VoIP Metrics block it sent about this end's source
+    /// (`local_ssrc`): the `RemoteMetrics` set. `None` when no such block
+    /// arrived in the call, and the set is left out.
+    pub remote: Option<RemoteQualityMetrics>,
+}
+
+/// The far end's own RFC 3611 SS4.7 VoIP Metrics block about the stream this
+/// end sent, as scalars for the same reason [`QualityReportMetrics`] is. The
+/// session's span and its codec are the call's, and are written from
+/// [`QualityReportMetrics`].
+#[derive(Clone, Debug)]
+pub struct RemoteQualityMetrics {
+    /// RFC 3611 SS4.7.1's loss rate, as its own 256ths.
+    pub loss_rate: u8,
+    /// RFC 3611 SS4.7.1's discard rate, as its own 256ths.
+    pub discard_rate: u8,
+    /// RFC 3611 SS4.7.2's burst density, as its own 256ths.
+    pub burst_density: u8,
+    /// RFC 3611 SS4.7.2's mean burst duration, in milliseconds.
+    pub burst_duration_ms: u16,
+    /// RFC 3611 SS4.7.2's gap density, as its own 256ths.
+    pub gap_density: u8,
+    /// RFC 3611 SS4.7.2's mean gap duration, in milliseconds.
+    pub gap_duration_ms: u16,
+    /// RFC 3611 SS4.7.2's `Gmin`.
+    pub gmin: u8,
+    /// RFC 3611 SS4.7.3's round-trip delay, in milliseconds, as the far end
+    /// measured it.
+    pub round_trip_delay_ms: u16,
+    /// RFC 3611 SS4.7.3's end-system delay, in milliseconds.
+    pub end_system_delay_ms: u16,
+    /// RFC 3611 SS4.7.4's signal level, in dBm0, or `None` for its
+    /// "unavailable" sentinel.
+    pub signal_level_dbm0: Option<i8>,
+    /// RFC 3611 SS4.7.4's noise level, in dBm0, or `None`.
+    pub noise_level_dbm0: Option<i8>,
+    /// RFC 3611 SS4.7.4's residual echo return loss, in dB, or `None`.
+    pub rerl_db: Option<u8>,
+    /// RFC 3611 SS4.7.6's jitter buffer adaptive flag.
+    pub jitter_buffer_adaptive: u8,
+    /// RFC 3611 SS4.7.6's jitter buffer adjustment rate, `0..=15`.
+    pub jitter_buffer_rate: u8,
+    /// RFC 3611 SS4.7.7's nominal jitter buffer delay, in milliseconds.
+    pub jitter_buffer_nominal_ms: u16,
+    /// RFC 3611 SS4.7.7's current maximum jitter buffer delay, in
+    /// milliseconds.
+    pub jitter_buffer_maximum_ms: u16,
+    /// RFC 3611 SS4.7.7's absolute maximum jitter buffer delay, in
+    /// milliseconds.
+    pub jitter_buffer_abs_max_ms: u16,
+    /// RFC 3611 SS4.7.5's R factor, or `None` for "unavailable".
+    pub r_factor: Option<u8>,
+    /// RFC 3611 SS4.7.5's external R factor, or `None`.
+    pub ext_r_factor: Option<u8>,
+    /// RFC 3611 SS4.7.5's MOS-LQ, in tenths, or `None`.
+    pub mos_lq_x10: Option<u8>,
+    /// RFC 3611 SS4.7.5's MOS-CQ, in tenths, or `None`.
+    pub mos_cq_x10: Option<u8>,
+}
+
+/// One `Metrics` set's figures (SS4.6.1), whichever end measured them.
+struct Figures {
+    jitter_buffer: [u16; 5],
+    loss_rate: u8,
+    discard_rate: u8,
+    burst_density: u8,
+    burst_duration_ms: u16,
+    gap_density: u8,
+    gap_duration_ms: u16,
+    gmin: u8,
+    round_trip_delay_ms: u16,
+    end_system_delay_ms: u16,
+    signal: (Option<i8>, Option<i8>, Option<u8>),
+    r_factor: Option<u8>,
+    ext_r_factor: Option<u8>,
+    mos_lq_x10: Option<u8>,
+    mos_cq_x10: Option<u8>,
+}
+
+impl Figures {
+    fn local(metrics: &QualityReportMetrics) -> Self {
+        Self {
+            jitter_buffer: [
+                u16::from(metrics.jitter_buffer_adaptive),
+                u16::from(metrics.jitter_buffer_rate),
+                metrics.jitter_buffer_nominal_ms,
+                metrics.jitter_buffer_maximum_ms,
+                metrics.jitter_buffer_abs_max_ms,
+            ],
+            loss_rate: metrics.loss_rate,
+            discard_rate: metrics.discard_rate,
+            burst_density: metrics.burst_density,
+            burst_duration_ms: metrics.burst_duration_ms,
+            gap_density: metrics.gap_density,
+            gap_duration_ms: metrics.gap_duration_ms,
+            gmin: metrics.gmin,
+            round_trip_delay_ms: metrics.round_trip_delay_ms,
+            end_system_delay_ms: metrics.end_system_delay_ms,
+            // nothing upstream of this crate reports a signal or noise level
+            // or a residual echo return loss for this end
+            signal: (None, None, None),
+            r_factor: metrics.r_factor,
+            ext_r_factor: None,
+            mos_lq_x10: metrics.mos_lq_x10,
+            mos_cq_x10: metrics.mos_cq_x10,
+        }
+    }
+
+    fn remote(metrics: &RemoteQualityMetrics) -> Self {
+        Self {
+            jitter_buffer: [
+                u16::from(metrics.jitter_buffer_adaptive),
+                u16::from(metrics.jitter_buffer_rate),
+                metrics.jitter_buffer_nominal_ms,
+                metrics.jitter_buffer_maximum_ms,
+                metrics.jitter_buffer_abs_max_ms,
+            ],
+            loss_rate: metrics.loss_rate,
+            discard_rate: metrics.discard_rate,
+            burst_density: metrics.burst_density,
+            burst_duration_ms: metrics.burst_duration_ms,
+            gap_density: metrics.gap_density,
+            gap_duration_ms: metrics.gap_duration_ms,
+            gmin: metrics.gmin,
+            round_trip_delay_ms: metrics.round_trip_delay_ms,
+            end_system_delay_ms: metrics.end_system_delay_ms,
+            signal: (
+                metrics.signal_level_dbm0,
+                metrics.noise_level_dbm0,
+                metrics.rerl_db,
+            ),
+            r_factor: metrics.r_factor,
+            ext_r_factor: metrics.ext_r_factor,
+            mos_lq_x10: metrics.mos_lq_x10,
+            mos_cq_x10: metrics.mos_cq_x10,
+        }
+    }
 }
 
 impl UserAgent {
@@ -271,7 +412,8 @@ fn parties(identity: &CallIdentity, direction: Direction) -> (&[u8], &[u8]) {
 }
 
 /// The RFC 6035 SS4.6.1 body: one `VQSessionReport:CallTerm`, its
-/// `SessionInfo`, and a `LocalMetrics` block built from `metrics`.
+/// `SessionInfo`, a `LocalMetrics` block built from `metrics`, and a
+/// `RemoteMetrics` block from what the far end reported, when it did.
 fn body(identity: &CallIdentity, direction: Direction, metrics: &QualityReportMetrics) -> Vec<u8> {
     let (local, remote) = parties(identity, direction);
     let mut out = String::new();
@@ -302,7 +444,14 @@ fn body(identity: &CallIdentity, direction: Direction, metrics: &QualityReportMe
         &addr_line(metrics.remote_addr, metrics.remote_ssrc),
     );
     out.push_str("LocalMetrics:\r\n");
-    write_metrics(&mut out, metrics);
+    write_metrics(&mut out, metrics, &Figures::local(metrics));
+    if let Some(remote) = &metrics.remote {
+        // the same session and the same codec: this stack sends what it
+        // negotiated to receive, and the far end measured it over the
+        // same span
+        out.push_str("RemoteMetrics:\r\n");
+        write_metrics(&mut out, metrics, &Figures::remote(remote));
+    }
     out.into_bytes()
 }
 
@@ -320,12 +469,13 @@ fn addr_line(addr: SocketAddr, ssrc: u32) -> String {
     format!("IP={} PORT={} SSRC=0x{:x}", addr.ip(), addr.port(), ssrc)
 }
 
-/// One `Metrics` block (SS4.6.1): `Timestamps`, then every optional line
-/// this stack has a figure for, in the order the worked example of SS4.7.1
-/// uses. `Signal` is left out: nothing upstream of this crate reports a
-/// signal or noise level or a residual echo return loss, and the line is
-/// optional in the grammar.
-fn write_metrics(out: &mut String, metrics: &QualityReportMetrics) {
+/// One `Metrics` block (SS4.6.1): `Timestamps` and `SessionDesc` from the
+/// session, then every optional line there is a figure for in `figures`,
+/// in the order the worked example of SS4.7.1 uses. A line with no figure
+/// at all, `Signal` for this end's own set, is left out, as the grammar
+/// allows and SS4.6 asks ("exclude any parameters for which values are not
+/// available").
+fn write_metrics(out: &mut String, metrics: &QualityReportMetrics, figures: &Figures) {
     let _ = write!(
         out,
         "Timestamps:START={} STOP={}\r\n",
@@ -337,46 +487,68 @@ fn write_metrics(out: &mut String, metrics: &QualityReportMetrics) {
         "SessionDesc:PT={} PD={} SR={}\r\n",
         metrics.payload_type, metrics.payload_desc, metrics.sample_rate
     );
+    let [jba, jbr, jbn, jbm, jbx] = figures.jitter_buffer;
     let _ = write!(
         out,
-        "JitterBuffer:JBA={} JBR={} JBN={} JBM={} JBX={}\r\n",
-        metrics.jitter_buffer_adaptive,
-        metrics.jitter_buffer_rate,
-        metrics.jitter_buffer_nominal_ms,
-        metrics.jitter_buffer_maximum_ms,
-        metrics.jitter_buffer_abs_max_ms
+        "JitterBuffer:JBA={jba} JBR={jbr} JBN={jbn} JBM={jbm} JBX={jbx}\r\n"
     );
     let _ = write!(
         out,
         "PacketLoss:NLR={} JDR={}\r\n",
-        percent_from_256ths(metrics.loss_rate),
-        percent_from_256ths(metrics.discard_rate)
+        percent_from_256ths(figures.loss_rate),
+        percent_from_256ths(figures.discard_rate)
     );
     let _ = write!(
         out,
         "BurstGapLoss:BLD={} BD={} GLD={} GD={} GMIN={}\r\n",
-        percent_from_256ths(metrics.burst_density),
-        metrics.burst_duration_ms,
-        percent_from_256ths(metrics.gap_density),
-        metrics.gap_duration_ms,
-        metrics.gmin
+        percent_from_256ths(figures.burst_density),
+        figures.burst_duration_ms,
+        percent_from_256ths(figures.gap_density),
+        figures.gap_duration_ms,
+        figures.gmin
     );
     let _ = write!(
         out,
         "Delay:RTD={} ESD={}\r\n",
-        metrics.round_trip_delay_ms, metrics.end_system_delay_ms
+        figures.round_trip_delay_ms, figures.end_system_delay_ms
     );
+    let (signal_level, noise_level, rerl) = figures.signal;
+    let mut signal = String::from("Signal:");
+    let mut wrote = false;
+    if let Some(level) = signal_level {
+        let _ = write!(signal, "SL={level}");
+        wrote = true;
+    }
+    if let Some(level) = noise_level {
+        push_wsp(&mut signal, &mut wrote);
+        let _ = write!(signal, "NL={level}");
+    }
+    if let Some(rerl) = rerl {
+        push_wsp(&mut signal, &mut wrote);
+        let _ = write!(signal, "RERL={rerl}");
+    }
+    if wrote {
+        out.push_str(&signal);
+        out.push_str("\r\n");
+    }
     let mut quality = String::from("QualityEst:");
     let mut wrote = false;
-    if let Some(r) = metrics.r_factor {
+    if let Some(r) = figures.r_factor {
         let _ = write!(quality, "RCQ={r}");
         wrote = true;
     }
-    if let Some(mos_lq) = metrics.mos_lq_x10 {
+    // SS4.6.1's `ExternalR-In` is "measured by the local endpoint for
+    // incoming connection on the 'other' side of this endpoint", which is
+    // what RFC 3611 SS4.7.5's external R factor is for the end reporting it
+    if let Some(r) = figures.ext_r_factor {
+        push_wsp(&mut quality, &mut wrote);
+        let _ = write!(quality, "EXTRI={r}");
+    }
+    if let Some(mos_lq) = figures.mos_lq_x10 {
         push_wsp(&mut quality, &mut wrote);
         let _ = write!(quality, "MOSLQ={}", tenths(mos_lq));
     }
-    if let Some(mos_cq) = metrics.mos_cq_x10 {
+    if let Some(mos_cq) = figures.mos_cq_x10 {
         push_wsp(&mut quality, &mut wrote);
         let _ = write!(quality, "MOSCQ={}", tenths(mos_cq));
     }
@@ -475,8 +647,8 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CallIdentity, Direction, QualityReportMetrics, body, civil_from_days, parties,
-        percent_from_256ths, rfc3339, tenths,
+        CallIdentity, Direction, QualityReportMetrics, RemoteQualityMetrics, body, civil_from_days,
+        parties, percent_from_256ths, rfc3339, tenths,
     };
     use crate::UserAgent;
     use crate::account::Account;
@@ -514,6 +686,35 @@ mod tests {
             r_factor: Some(85),
             mos_lq_x10: Some(41),
             mos_cq_x10: Some(40),
+            remote: None,
+        }
+    }
+
+    /// RFC 6035 SS4.7.1's worked example's own `RemoteMetrics` figures, as
+    /// the far end's RTCP XR VoIP Metrics block would carry them.
+    fn far_end() -> RemoteQualityMetrics {
+        RemoteQualityMetrics {
+            loss_rate: 12,
+            discard_rate: 5,
+            burst_density: 0,
+            burst_duration_ms: 0,
+            gap_density: 5,
+            gap_duration_ms: 500,
+            gmin: 16,
+            round_trip_delay_ms: 200,
+            end_system_delay_ms: 140,
+            signal_level_dbm0: Some(-21),
+            noise_level_dbm0: Some(-45),
+            rerl_db: Some(55),
+            jitter_buffer_adaptive: 3,
+            jitter_buffer_rate: 2,
+            jitter_buffer_nominal_ms: 40,
+            jitter_buffer_maximum_ms: 80,
+            jitter_buffer_abs_max_ms: 120,
+            r_factor: Some(85),
+            ext_r_factor: Some(90),
+            mos_lq_x10: Some(43),
+            mos_cq_x10: Some(42),
         }
     }
 
@@ -634,6 +835,49 @@ mod tests {
         assert!(text.contains("BurstGapLoss:BLD=0.0 BD=0 GLD=1.9 GD=500 GMIN=16\r\n"));
         assert!(text.contains("Delay:RTD=200 ESD=140\r\n"));
         assert!(text.contains("QualityEst:RCQ=85 MOSLQ=4.1 MOSCQ=4.0\r\n"));
+    }
+
+    #[test]
+    fn a_call_the_far_end_reported_on_carries_its_remote_metrics() {
+        let mut reported = metrics();
+        reported.remote = Some(far_end());
+        let text = String::from_utf8(body(&identity(), Direction::Outgoing, &reported))
+            .expect("the body is ASCII");
+        let (local, remote) = text
+            .split_once("RemoteMetrics:\r\n")
+            .expect("a RemoteMetrics set after the local one");
+        assert!(local.contains("LocalMetrics:\r\n"));
+        assert!(!local.contains("Signal:"), "this end measures no signal");
+        assert_eq!(
+            remote,
+            "Timestamps:START=2005-10-10T18:23:43Z STOP=2005-10-10T18:26:02Z\r\n\
+             SessionDesc:PT=0 PD=PCMU SR=8000\r\n\
+             JitterBuffer:JBA=3 JBR=2 JBN=40 JBM=80 JBX=120\r\n\
+             PacketLoss:NLR=4.6 JDR=1.9\r\n\
+             BurstGapLoss:BLD=0.0 BD=0 GLD=1.9 GD=500 GMIN=16\r\n\
+             Delay:RTD=200 ESD=140\r\n\
+             Signal:SL=-21 NL=-45 RERL=55\r\n\
+             QualityEst:RCQ=85 EXTRI=90 MOSLQ=4.3 MOSCQ=4.2\r\n"
+        );
+    }
+
+    #[test]
+    fn a_call_the_far_end_never_reported_on_has_no_remote_metrics() {
+        let text = String::from_utf8(body(&identity(), Direction::Outgoing, &metrics()))
+            .expect("the body is ASCII");
+        assert!(!text.contains("RemoteMetrics"));
+
+        // and a far end that measured no signal says nothing about one
+        let mut quiet = far_end();
+        quiet.signal_level_dbm0 = None;
+        quiet.noise_level_dbm0 = None;
+        quiet.rerl_db = None;
+        let mut reported = metrics();
+        reported.remote = Some(quiet);
+        let text = String::from_utf8(body(&identity(), Direction::Outgoing, &reported))
+            .expect("the body is ASCII");
+        assert!(text.contains("RemoteMetrics:\r\n"));
+        assert!(!text.contains("Signal:"));
     }
 
     #[test]
