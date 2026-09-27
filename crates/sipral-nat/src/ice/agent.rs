@@ -24,8 +24,8 @@ pub enum Role {
     /// Reachable for a lite agent only as the initial role against a peer
     /// this session believes is lite too (§6.1.1); it is never the outcome
     /// of answering a Binding request; a full peer is always controlling
-    /// (§6.1.1), so that answering side never lets a role-conflict message
-    /// move this agent into it (see [`super::server::resolve_role`]).
+    /// (§6.1.1), so that answering side's role-conflict handling never lets
+    /// a message move this agent into it.
     Controlling,
     /// This agent waits for a nomination and accepts it.
     Controlled,
