@@ -81,16 +81,21 @@
 #                               minutes unless told otherwise) --
 #                               interop/harness/src/latency.rs's own module
 #                               doc says what the three stages it reports are
-#   scripts/lab.sh volume       a hundred calls (SIPRAL_VOLUME_CALLS) through
-#                               Kamailio to Asterisk at once rather than one
-#                               -- SIPRAL_VOLUME_STAGGER_MS apart, held on
-#                               the tone for SIPRAL_VOLUME_HOLD_MS once every
-#                               one that is coming up has, then hung up
-#                               together. Wrapped in /usr/bin/time -v for
-#                               this end's own CPU and peak memory; Asterisk's
-#                               own peak channel count is read over its
-#                               console the way the other steps already read
-#                               it, and printed beside it
+#   scripts/lab.sh volume       a hundred calls (SIPRAL_VOLUME_CALLS) at once
+#                               rather than one -- SIPRAL_VOLUME_STAGGER_MS
+#                               apart, held on the tone for
+#                               SIPRAL_VOLUME_HOLD_MS once every one that is
+#                               coming up has, then hung up together. Run
+#                               twice, straight at Asterisk and through
+#                               Kamailio to FreeSWITCH (there is no route
+#                               from Kamailio to Asterisk in this lab) --
+#                               SIPRAL_VOLUME_SERVER="asterisk" or
+#                               "kamailio" runs one alone. Wrapped in
+#                               /usr/bin/time -v for this end's own CPU and
+#                               peak memory; the real server's own peak
+#                               channel count is read over its console the
+#                               way the other steps already read it, and
+#                               printed beside it
 #   scripts/lab.sh wasapi up    bring the lab up reachable from the LAN, for
 #                               a call carried on a Windows machine's real
 #                               WASAPI devices (interop/harness/src/wasapi.rs,
@@ -2285,13 +2290,15 @@ if [ "$WANT" = latency ]; then
     latency_flow && pass "the markers came back" || fail "microphone to earpiece"
 fi
 
-# A hundred calls (or SIPRAL_VOLUME_CALLS) through the proxy to Asterisk at
-# once, `/usr/bin/time -v` around the whole container for this end's own CPU
-# and peak memory, GNU time is not on debian:trixie-slim's own image so it is
+# A hundred calls (or SIPRAL_VOLUME_CALLS) at once rather than one,
+# `/usr/bin/time -v` around the whole container for this end's own CPU and
+# peak memory, GNU time is not on debian:trixie-slim's own image so it is
 # installed here the same way bad_network installs iproute2.
-# interop/harness/src/volume.rs's own module doc says what is and is not this
-# process's own to measure.
+# interop/harness/src/volume.rs's own module doc says why SIPRAL_VOLUME_SERVER
+# is "asterisk" (straight at the PBX, no proxy) or "kamailio" (the proxy,
+# which this lab's own kamailio.cfg forwards to FreeSWITCH and nowhere else).
 volume_flow() {
+    local server="$1"
     docker run --rm --network sipral-interop_lab \
         -e SIPRAL_FLOWS=volume \
         -e SIPRAL_VOLUME_CALLS="${SIPRAL_VOLUME_CALLS:-100}" \
@@ -2303,34 +2310,52 @@ volume_flow() {
             export DEBIAN_FRONTEND=noninteractive
             apt-get -qq update >/dev/null 2>&1
             apt-get -qq install -y time >/dev/null 2>&1
-            /usr/bin/time -v /harness kamailio 5060 9000'
+            /usr/bin/time -v /harness '"$server"' 5060 9000'
+}
+
+# Peak channel count on whichever real server is carrying the calls, sampled
+# once a second while `volume_flow` runs, printed the way `scripts/lab.sh`'s
+# other steps already read a server's own console rather than trust this
+# end's own count of calls still up.
+volume_peak() {
+    local server="$1" peak=0 seen
+    while :; do
+        if [ "$server" = asterisk ]; then
+            seen=$(cd interop && docker compose exec -T asterisk asterisk -rx \
+                "core show channels count" 2>/dev/null \
+                | sed -n 's/^\([0-9][0-9]*\) active channel.*/\1/p')
+        else
+            seen=$(cd interop && docker compose exec -T freeswitch fs_cli \
+                -x 'show channels count' 2>/dev/null \
+                | sed -n 's/^\([0-9][0-9]*\) total.*/\1/p')
+        fi
+        case "$seen" in
+            ''|*[!0-9]*) ;;
+            *) [ "$seen" -gt "$peak" ] && peak="$seen" ;;
+        esac
+        printf '%s\n' "$peak" >"$PEAK_FILE"
+        sleep 1
+    done
 }
 
 if [ "$WANT" = volume ]; then
-    step "a volume of calls -- through the proxy to Asterisk at once"
-    PEAK_FILE="$(mktemp)"
-    ( peak=0
-      while :; do
-          seen=$(cd interop && docker compose exec -T asterisk asterisk -rx \
-              "core show channels count" 2>/dev/null \
-              | sed -n 's/^\([0-9][0-9]*\) active channel.*/\1/p')
-          case "$seen" in
-              ''|*[!0-9]*) ;;
-              *) [ "$seen" -gt "$peak" ] && peak="$seen" ;;
-          esac
-          printf '%s\n' "$peak" >"$PEAK_FILE"
-          sleep 1
-      done
-    ) &
-    SAMPLER=$!
-    volume_flow
-    STATUS=$?
-    kill "$SAMPLER" >/dev/null 2>&1
-    wait "$SAMPLER" 2>/dev/null
-    printf '  note  Asterisk'"'"'s own peak channel count: %s\n' \
-        "$(cat "$PEAK_FILE" 2>/dev/null || printf unknown)"
-    rm -f "$PEAK_FILE"
-    [ "$STATUS" -eq 0 ] && pass "the calls came up" || fail "a volume of calls"
+    for server in ${SIPRAL_VOLUME_SERVER:-asterisk kamailio}; do
+        behind="asterisk, no proxy"
+        [ "$server" = kamailio ] && behind="kamailio, to FreeSWITCH"
+        step "a volume of calls -- $behind"
+        PEAK_FILE="$(mktemp)"
+        volume_peak "$server" &
+        SAMPLER=$!
+        volume_flow "$server"
+        STATUS=$?
+        kill "$SAMPLER" >/dev/null 2>&1
+        wait "$SAMPLER" 2>/dev/null
+        printf '  note  peak channel count on the real server: %s\n' \
+            "$(cat "$PEAK_FILE" 2>/dev/null || printf unknown)"
+        rm -f "$PEAK_FILE"
+        [ "$STATUS" -eq 0 ] && pass "the calls came up ($behind)" \
+            || fail "a volume of calls ($behind)"
+    done
 fi
 
 # The Rust run through the proxy carries one flow more than the others: a call

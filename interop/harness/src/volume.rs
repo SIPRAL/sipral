@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
-//! A hundred calls through a real proxy and PBX at once, rather than one
-//! call between two stacks this file also runs.
+//! A hundred calls through a real proxy and a real PBX at once, rather than
+//! one call between two stacks this file also runs.
 //!
-//! Every other flow in this table proves one call is right. Kamailio
-//! forwards each one it is given without holding it up — `crate::fork`'s
-//! own module doc says what it does hold up, and it is a different user —
-//! so nothing here proves the proxy scales; it is Asterisk on the other end
-//! that has to answer a hundred `Dial()`s into `Local/9002@lab`'s own tone
-//! at once; a real PBX bridging a real channel a hundred times over,
-//! against this end's own hundred RTP sessions run on one thread the way
+//! Every other flow in this table proves one call is right. Two real
+//! backends answer it: `server` "asterisk" places straight at Asterisk, no
+//! proxy in front of it, the same reasoning `scripts/lab.sh asterisk` gives;
+//! "kamailio" places at Kamailio instead, which this lab's own
+//! `interop/kamailio/kamailio.cfg` forwards to FreeSWITCH and nowhere
+//! else — there is no route from Kamailio to Asterisk in this lab, so "a
+//! hundred calls through a real proxy and PBX" is two separate runs here,
+//! not one, and `scripts/lab.sh volume` reports both. Either way it is a
+//! real server bridging a real channel a hundred times over, against this
+//! end's own hundred RTP sessions run on one thread the way
 //! `crates/sipral-ffi`'s own load test runs two hundred, in-process, on
 //! four. What this end costs doing it — its own process's CPU and peak
 //! memory — is read from outside this binary, by `scripts/lab.sh`'s own
@@ -24,10 +27,10 @@
 //! tone for `SIPRAL_VOLUME_HOLD_MS` once every call that came up has started
 //! its media, then hung up together. What is reported is how many came up,
 //! how long each took from being placed to its own first frame, and how
-//! many failed and why; Asterisk's own count of channels at the busiest
+//! many failed and why; the far end's own count of channels at the busiest
 //! moment, read over its console the way `scripts/lab.sh`'s other steps
-//! already do, is `scripts/lab.sh`'s own to print beside it — asking
-//! Asterisk what it thinks it is carrying is worth more than this end
+//! already do, is `scripts/lab.sh`'s own to print beside it — asking the
+//! server what it thinks it is carrying is worth more than this end
 //! guessing from its own count of calls still up.
 
 use std::env;
@@ -38,8 +41,9 @@ use sipral::{CallHandle, CallMedia, Event, MediaConfig, MediaEvent, OutgoingCall
 
 use crate::{Endpoint, catalog, place_call, run_folded, uri};
 
-/// The tone extension every ordinary flow in this table dials
-/// (`interop/asterisk/extensions.conf`), through the proxy.
+/// The tone extension every ordinary flow in this table dials — Asterisk's
+/// own `interop/asterisk/extensions.conf`, or FreeSWITCH's
+/// `interop/freeswitch/lab.xml`, whichever `server` is reached.
 const EXTENSION: &str = "9000";
 
 /// This flow's own endpoint identity. Listed in `main.rs`'s

@@ -573,10 +573,14 @@ fn extra_flows(
             }
         }
     }
-    // a hundred calls (or however many `SIPRAL_VOLUME_CALLS` asks for)
-    // through the proxy to Asterisk at once, and only when named: see
-    // `volume`'s own module doc
-    if server == "kamailio" && wanted.split(',').any(|name| name.trim() == "volume") {
+    // a hundred calls (or however many `SIPRAL_VOLUME_CALLS` asks for) at
+    // once rather than one, and only when named: see `volume`'s own module
+    // doc for why `server` is "kamailio" for the proxy and FreeSWITCH behind
+    // it, or "asterisk" for the PBX with no proxy in front of it — this
+    // lab's `kamailio.cfg` has no route to Asterisk at all
+    if (server == "kamailio" || server == "asterisk")
+        && wanted.split(',').any(|name| name.trim() == "volume")
+    {
         match volume::run(server, remote, user, pass) {
             Ok(said) => println!("  pass  a volume of calls{said}"),
             Err(why) => {
