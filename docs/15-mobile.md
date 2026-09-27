@@ -474,12 +474,34 @@ emulator asked a STUN server on the lab machine, through its own NAT and the
 VPN's, and was answered: the lab machine saw the Binding request and every
 REGISTER after it come from one public address and port, the one the answer
 names, so a `Contact` written from the answer is the address the registrar
-can reach. The REGISTERs' content was not captured, and Asterisk had been
-taken down by then and answered none of them, so the binding it stores and
-an incoming call on `labuser` with STUN are still to be shown;
-`NatTests.swift` and `NatCheck.kt` show the `Contact` and `c=` on the wire. The NAT's mapping is not kept open by
-anything but the phone's own traffic, since UDP has no keepalive here and
-the registration refreshes once an hour: a call to a phone left idle longer
+can reach. That run went further on a later attempt, this time with
+Asterisk's own registrar port reachable one-to-one rather than remapped —
+the lab's own `wasapi` override otherwise publishes a different host port
+onto Asterisk's internal 5060, which a request Asterisk itself originates
+(an incoming INVITE, unlike a REGISTER's reply) leaves the host under its
+container-internal port instead of the published one, so a phone's
+port-restricted NAT, whose only open pinhole is toward the published port,
+never lets it in: `pjsip show contacts` on `labuser` reads
+`labuser/sip:labuser@<VPN concentrator's public address>:<port>`, never
+`10.0.2.x`. `channel originate` to that contact then reaches the phone:
+`SET_RINGING` in the sample's own event log and in the telecom framework,
+and the dialog completes at the SIP layer — INVITE, 100 Trying, the
+sample's 200 OK, Asterisk's ACK, the channel `Up`. No audio crossed either
+way on that call, though: the 200 OK's own SDP already names the mapped
+public address for `c=`/`m=`, but its `Contact` header still names the
+private one, so the ACK Asterisk sends goes to an address nothing reads —
+this is `sipral-ua`'s answer path, not the sample or the Kotlin layer
+(which only relay what it emits), and is flagged here rather than fixed.
+Placing a call the other way, from that same registered `labuser` account
+back through the same STUN mapping, shows what the incoming one could not:
+audio both ways, Asterisk's own counters climbing throughout (408 packets
+each way 9 seconds in, 1,497 at 32 seconds, none lost either direction),
+ended by the sample's own hangup — BYE, 200 OK, no channel left.
+`NatTests.swift` and `NatCheck.kt` show the `Contact` and `c=` on the wire
+under a controlled test; this is the same address, written the same way,
+under a live registrar. The NAT's mapping is not kept open by anything but
+the phone's own traffic, since UDP has no keepalive here and the
+registration refreshes once an hour: a call to a phone left idle longer
 than its NAT keeps a mapping is not something this run tested.
 
 ## The Swift package on iOS
