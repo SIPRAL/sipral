@@ -135,12 +135,12 @@ codec and audio layer downstream of RTP (`media_resample`, `media_plc`,
 `media_drift`, `media_comfort_noise`, `media_vad`, `media_g722`,
 `media_g729`, `media_mix`, `media_opus`), and one for what the headless
 socket's messages do to a bridged session (`headless_media`). The exit gate
-is 24 hours per target with no crash and no hang, and every target but
-`ice_lite`, the newest, has had it run: the first eighteen on 21 and 22
-September 2026, about 37 billion executions, the eight media ones before
-`media_g729` on 23 September, about 24 billion, and `headless_media`,
-`media_g729` and `turn_client` on 25 September, about 273 million, nothing
-found on any (`docs/11-testing.md`). `media_g729` covers the
+is 24 hours per target with no crash and no hang, and every target has had
+it run: the first eighteen on 21 and 22 September 2026, about 37 billion
+executions, the eight media ones before `media_g729` on 23 September, about
+24 billion, `headless_media`, `media_g729` and `turn_client` on 25
+September, about 273 million, and `ice_lite` on 27 September, about 254
+million, nothing found on any (`docs/11-testing.md`). `media_g729` covers the
 G.729 decoder — speech frames, Annex B's SID frames, frames not sent and
 frames lost — the payload reader and an encoder with Annex B's DTX; it
 decodes and re-encodes every input, so its 24 hours came to about 0.67

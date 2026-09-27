@@ -493,7 +493,9 @@ executions say how differently those three spend a CPU-hour: about 231
 million for `turn_client`, 42 million for `headless_media`, and 0.67 million
 for `media_g729`, which decodes every input and encodes the result again, so
 its 24 hours reached a far smaller share of its input space than any other
-target's did. `ice_lite`, the newest, has not had it yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
+target's did. `ice_lite`, the newest, had it on 27 September 2026, the same
+way: 48 runs of 30 minutes, 24 CPU-hours, about 254 million executions, and
+not one run that exited with an error or left an input behind. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
 do on every run is **build** all thirty, under the nightly that `fuzz/` pins, so
