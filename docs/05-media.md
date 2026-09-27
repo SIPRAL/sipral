@@ -274,7 +274,14 @@ RFC 6035 report's `RemoteMetrics` set — see below.
 decides whether a stream sends the block at all: `sipral-core`'s
 `sdp::plan::MediaCapabilities::voip_metrics_xr` writes it into every offer
 this stack makes (on by default — every build of this crate can generate
-and read the block), `sdp::plan::MediaPlan::voip_metrics_xr` reads it back
+and read the block), and the facade's answer (`sipral`'s `MediaEngine`)
+writes the same line whenever those capabilities ask for it, since §5.2
+lets "the answerer ... include the 'rtcp-xr' attribute in its response ...
+to request that the offerer send the corresponding XR blocks" and the
+offer's own line asks only the answerer to send: without it a call this
+end answered never heard what the far end measured of its audio, and its
+quality report had no `RemoteMetrics` set to write.
+`sdp::plan::MediaPlan::voip_metrics_xr` reads it back
 off whichever description asked for it — the peer's, since §5.2 has each
 side's own line request the block *from the other party* — falling back
 from the media level to the session level per §5.1, and

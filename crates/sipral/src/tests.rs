@@ -2634,6 +2634,260 @@ fn the_round_trip_time_comes_back_from_rtcp() {
     );
 }
 
+/// RFC 3611 §5.2: the offerer's `a=rtcp-xr` asks the answerer to send the
+/// named blocks, and only the answer's own line asks the offerer to send
+/// them back. An answer that left it out had the offerer send no VoIP
+/// Metrics block at all, so a call this end answered never learned what the
+/// far end measured of its audio.
+#[test]
+fn an_answer_asks_the_offerer_for_its_voip_metrics_too() {
+    let mut pair = Pair::new(CodecCatalog::with_order(&["PCMU"]).expect("an order"));
+    let _ = pair.connect();
+    let offer = one_stream(&pair.callee.offer_received().expect("an offer"));
+    let answer = one_stream(&pair.caller.answer_received().expect("an answer"));
+    for (side, stream) in [("offer", &offer), ("answer", &answer)] {
+        assert_eq!(
+            stream
+                .attribute("rtcp-xr")
+                .and_then(|line| line.value.as_deref()),
+            Some("voip-metrics"),
+            "the {side} does not ask for the other end's blocks"
+        );
+    }
+}
+
+/// What RFC 6035's `RemoteMetrics` set must say for `block`, the far end's
+/// own RFC 3611 §4.7 block: each figure as the block carries it, and each
+/// field §4.7.4 and §4.7.5 let a block leave "unavailable" (127) left out
+/// rather than written as a reading.
+fn assert_remote_metrics_are(
+    remote: &sipral_ua::RemoteQualityMetrics,
+    block: &crate::VoipMetricsBlock,
+) {
+    let known = |value: u8| (value != crate::UNAVAILABLE).then_some(value);
+    let level = |value: i8| (value.cast_unsigned() != crate::UNAVAILABLE).then_some(value);
+    assert_eq!(remote.loss_rate, block.loss_rate, "loss rate");
+    assert_eq!(remote.discard_rate, block.discard_rate, "discard rate");
+    assert_eq!(remote.burst_density, block.burst_density, "burst density");
+    assert_eq!(
+        remote.burst_duration_ms, block.burst_duration_ms,
+        "burst duration"
+    );
+    assert_eq!(remote.gap_density, block.gap_density, "gap density");
+    assert_eq!(
+        remote.gap_duration_ms, block.gap_duration_ms,
+        "gap duration"
+    );
+    assert_eq!(remote.gmin, block.gmin, "Gmin");
+    assert_eq!(
+        remote.round_trip_delay_ms, block.round_trip_delay_ms,
+        "round trip"
+    );
+    assert_eq!(
+        remote.end_system_delay_ms, block.end_system_delay_ms,
+        "end system delay"
+    );
+    assert_eq!(
+        remote.signal_level_dbm0,
+        level(block.signal_level_dbm0),
+        "signal level"
+    );
+    assert_eq!(
+        remote.noise_level_dbm0,
+        level(block.noise_level_dbm0),
+        "noise level"
+    );
+    assert_eq!(remote.rerl_db, known(block.rerl_db), "RERL");
+    assert_eq!(
+        remote.jitter_buffer_adaptive, block.rx_config.jba as u8,
+        "JBA"
+    );
+    assert_eq!(
+        remote.jitter_buffer_rate, block.rx_config.jb_rate,
+        "JB rate"
+    );
+    assert_eq!(
+        remote.jitter_buffer_nominal_ms, block.jb_nominal_ms,
+        "JB nominal"
+    );
+    assert_eq!(
+        remote.jitter_buffer_maximum_ms, block.jb_maximum_ms,
+        "JB maximum"
+    );
+    assert_eq!(
+        remote.jitter_buffer_abs_max_ms, block.jb_abs_max_ms,
+        "JB abs max"
+    );
+    assert_eq!(remote.r_factor, known(block.r_factor), "R factor");
+    assert_eq!(
+        remote.ext_r_factor,
+        known(block.ext_r_factor),
+        "external R factor"
+    );
+    assert_eq!(remote.mos_lq_x10, known(block.mos_lq), "MOS-LQ");
+    assert_eq!(remote.mos_cq_x10, known(block.mos_cq), "MOS-CQ");
+}
+
+/// One tick of a call whose caller's audio loses one packet in ten on the
+/// way: a frame each way, each played, and every report either side has due
+/// delivered to the other. Returns the VoIP Metrics block each end put in a
+/// report it sent this tick, the caller's first: the one its sender would
+/// read of itself at that moment, since both are built from the same state.
+fn lossy_tick(
+    pair: &mut Pair,
+    call: CallHandle,
+    remote: CallHandle,
+    samples: &[i16],
+    tick: u32,
+) -> (
+    Option<crate::VoipMetricsBlock>,
+    Option<crate::VoipMetricsBlock>,
+) {
+    let outbound = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .capture(samples, pair.now)
+        .expect("it encodes")
+        .map(|out| out.payload.to_vec());
+    {
+        let mut session = pair.callee.engine.session(remote).expect("media");
+        if let Some(mut datagram) = outbound
+            && tick % 10 != 5
+        {
+            session.receive(&mut datagram, caller_media(), pair.now);
+        }
+        let mut played = vec![0_i16; session.frame_samples()];
+        session.playback(&mut played);
+    }
+    let back = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("media")
+        .capture(samples, pair.now)
+        .expect("it encodes")
+        .map(|out| out.payload.to_vec());
+    {
+        let mut session = pair.caller.engine.session(call).expect("media");
+        if let Some(mut datagram) = back {
+            session.receive(&mut datagram, callee_media(), pair.now);
+        }
+        let mut played = vec![0_i16; session.frame_samples()];
+        session.playback(&mut played);
+    }
+
+    let mut pending = Vec::new();
+    let mut sent = (None, None);
+    {
+        let mut session = pair.caller.engine.session(call).expect("media");
+        let block = session.statistics(pair.now).voip_metrics;
+        while let Some(datagram) = session.poll_rtcp(pair.now) {
+            pending.push((datagram.payload.to_vec(), true));
+            sent.0 = block;
+        }
+    }
+    {
+        let mut session = pair.callee.engine.session(remote).expect("media");
+        let block = session.statistics(pair.now).voip_metrics;
+        while let Some(datagram) = session.poll_rtcp(pair.now) {
+            pending.push((datagram.payload.to_vec(), false));
+            sent.1 = block;
+        }
+    }
+    for (mut datagram, from_caller) in pending {
+        let (mut session, from) = if from_caller {
+            (
+                pair.callee.engine.session(remote).expect("media"),
+                "192.0.2.1:40001".parse().expect("an address"),
+            )
+        } else {
+            (
+                pair.caller.engine.session(call).expect("media"),
+                "192.0.2.2:40003".parse().expect("an address"),
+            )
+        };
+        assert_eq!(
+            session.receive(&mut datagram, from, pair.now),
+            Arrival::Control,
+            "a report was refused at tick {tick}"
+        );
+    }
+    pair.advance();
+    sent
+}
+
+/// Two sessions on one call, each sending the other RTCP XR VoIP Metrics
+/// (RFC 3611 §4.7, which both ask for by default), and each end's quality
+/// report carrying as its `RemoteMetrics` set (RFC 6035 §4.7) exactly what
+/// the other measured of the stream it sent: the last block the far end
+/// built about this end's source, figure for figure. The caller's audio
+/// loses one packet in ten on the way, so the callee's block has loss,
+/// bursts and a rating off its best to carry, and the two ends' blocks
+/// differ; the caller has no set before the callee's block has crossed.
+#[test]
+fn each_end_reports_as_remote_what_the_other_measured_of_its_stream() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    // what each end last sent the other, in the report that carried it
+    let (mut from_alice, mut from_bob) = (None, None);
+    let mut early = None;
+    for tick in 0..1_000_u32 {
+        if from_bob.is_none() {
+            early = early.or(pair
+                .caller
+                .engine
+                .session(call)
+                .expect("media")
+                .quality_report_metrics(pair.now)
+                .and_then(|metrics| metrics.remote));
+        }
+        tone(&mut samples, 8_000, &mut phase);
+        let (alice, bob) = lossy_tick(&mut pair, call, remote, &samples, tick);
+        from_alice = alice.or(from_alice);
+        from_bob = bob.or(from_bob);
+    }
+    assert!(
+        early.is_none(),
+        "a remote set appeared before any block crossed"
+    );
+
+    let bobs: crate::VoipMetricsBlock = from_bob.expect("the callee sent a VoIP Metrics block");
+    let alices: crate::VoipMetricsBlock = from_alice.expect("the caller sent one too");
+    assert!(bobs.loss_rate > 0, "the callee saw none of the loss");
+    assert_eq!(alices.loss_rate, 0, "the caller's audio arrived whole");
+    assert_ne!(
+        bobs.r_factor, alices.r_factor,
+        "the two blocks cannot be told apart"
+    );
+
+    for (end, handle, far) in [("caller", call, &bobs), ("callee", remote, &alices)] {
+        let engine = if end == "caller" {
+            &mut pair.caller.engine
+        } else {
+            &mut pair.callee.engine
+        };
+        let report = engine
+            .session(handle)
+            .expect("media")
+            .quality_report_metrics(pair.now)
+            .expect("a source to report on");
+        let set = report
+            .remote
+            .unwrap_or_else(|| panic!("the {end} heard no block about its own stream"));
+        assert_remote_metrics_are(&set, far);
+        // and its own figures are its own, not the other's
+        let own = if end == "caller" { &alices } else { &bobs };
+        assert_eq!(report.loss_rate, own.loss_rate, "the {end}'s own loss rate");
+    }
+}
+
 /// RFC 3550 §6.6: a stream that is ending says so, and the far end stops
 /// expecting audio at once rather than waiting for its own timeout.
 #[test]

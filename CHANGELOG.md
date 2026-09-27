@@ -888,6 +888,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   headset or CarPlay did nothing, and its `providerDidReset` was empty, so a
   call the system's call service forgot kept running with no call screen.
   Mute now sends the far end silence, and a reset hangs every call up.
+- **A call this end answered hears what the far end measured of its
+  audio.** The answer never carried `a=rtcp-xr:voip-metrics`, and the
+  offer's own line asks only the answerer to send (RFC 3611 §5.2), so the
+  caller sent no VoIP Metrics block and the callee's RFC 6035 quality
+  report never had a `RemoteMetrics` set. The answer now asks for the block
+  whenever the catalogue's capabilities do, as the offer always has; two
+  sessions exchanging reports now each carry the other's block, figure for
+  figure, as their `RemoteMetrics`.
 - **A body the agent cannot read is refused 415 on every request that
   carries an offer, not only on the INVITE that opens a call.** A
   re-INVITE, UPDATE or PRACK whose body is not `application/sdp`, or is

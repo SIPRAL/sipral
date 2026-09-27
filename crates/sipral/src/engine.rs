@@ -3849,8 +3849,19 @@ fn take_stream(
     // it, so the answer says so only if the offer did and this catalogue
     // wants it — or if this answer is keyed by a handshake, since RFC 5764
     // §4.2 would otherwise need a second one on the RTCP port
-    if (catalog.capabilities().rtcp_mux || handshake.is_some()) && offered.has_rtcp_mux() {
+    let capabilities = catalog.capabilities();
+    if (capabilities.rtcp_mux || handshake.is_some()) && offered.has_rtcp_mux() {
         accepted = accepted.with_attribute(Attribute::flag("rtcp-mux"));
+    }
+    // RFC 3611 §5.2: "For 'sendrecv' offers, the answerer MAY include the
+    // 'rtcp-xr' attribute in its response, and specify any unilateral
+    // parameters in order to request that the offerer send the
+    // corresponding XR blocks. The offerer SHOULD send these blocks." The
+    // offer's own line only asks this end to send; without this one a call
+    // this end answered never hears what the far end measured of its audio,
+    // and its quality report has no `RemoteMetrics` set to write
+    if capabilities.voip_metrics_xr {
+        accepted = accepted.with_attribute(Attribute::with_value("rtcp-xr", "voip-metrics"));
     }
     if let Some(line) = crypto {
         accepted = accepted.with_attribute(line.attribute());
