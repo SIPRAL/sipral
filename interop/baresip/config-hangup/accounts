@@ -1,0 +1,19 @@
+#
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# One account, in a config of its own rather than a fourth line in
+# interop/baresip/config/accounts: docs/11-testing.md's "call, ended by the
+# far end" needs baresip to hang up a call it just answered, and the only way
+# this build of it can be made to (interop/baresip/config-hangup/config's own
+# reasoning) is `ctrl_tcp` answering a command on a TCP port -- a module the
+# shared container's config never loads, so the three phone-to-phone flows
+# that peer already carries (interop/baresip/config/accounts) see no new
+# account and no new port, whether or not this one's own flow ever runs.
+#
+# Same password as the other three (interop/kamailio/kamailio.cfg's own
+# BARESIP_PASS): one more account sharing it costs this file nothing, and
+# Kamailio already keys REGISTER and INVITE routing off the user part, not
+# the password.
+#
+<sip:baresip-hangup@kamailio>;auth_pass=baresippass;answermode=auto;answerdelay=0;audio_codecs=pcmu,pcma;dtmfmode=rtpevent

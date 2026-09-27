@@ -1,0 +1,69 @@
+#
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# baresip's own configuration for the lab's one self-hanging-up peer
+# (interop/baresip/config-hangup/accounts). Everything below but
+# ctrl_tcp_listen and the module_app line that loads it is
+# interop/baresip/config/config's own copy, unchanged: the two containers
+# share one image (interop/baresip/Dockerfile), so what differs between them
+# has to live here, not in a flag scripts/lab.sh passes at run time.
+#
+
+# SIP. 4 forced on the command line (-4): the lab's bridge network is IPv4
+# only, and AF_UNSPEC left to guess costs a DNS round trip this network has
+# no server for.
+sip_listen		0.0.0.0:5060
+
+# Call. Left at their defaults, the same as the shared peer's: a call this
+# lab places dwells a few seconds at most, nowhere near call_local_timeout's
+# own 120, and nothing here asks baresip to place a second one while the
+# first is up. This account's own call is never left for it to time out --
+# call_local_timeout only ever refuses a call nobody answered
+# (src/call.c's own tmr_inv, cancelled the instant one is), which is why this
+# file loads ctrl_tcp below instead.
+call_local_timeout	120
+call_max_calls		4
+call_accept		no
+
+# Audio. No device anywhere near this container: the source is a sine tone
+# loud enough to clear the harness's own audible threshold, and the player
+# writes whatever it decodes to a WAV file nobody reads -- the lab's own
+# harnesses judge what left this container, not what arrived at it.
+audio_source		ausine,440
+audio_player		aufile,/tmp/sipral-lab-rx.wav
+audio_telev_pt		101		# the default, named so it cannot drift
+
+# Control. 0.0.0.0:4444 is modules/ctrl_tcp/ctrl_tcp.c's own default, named
+# here rather than left to it so a later baresip release changing that
+# default cannot change what this container answers on. scripts/lab.sh's own
+# baresip_ctrl_hangup sends one netstring-wrapped JSON command here --
+# {"command":"hangup"} -- the moment this account's call is confirmed, which
+# baresip answers by hanging that call up through the same code path its own
+# menu module's "b" key would.
+ctrl_tcp_listen	0.0.0.0:4444
+
+#------------------------------------------------------------------------------
+# Modules
+#
+# Exactly what interop/baresip/Dockerfile's own -DMODULES built, in the two
+# groups baresip's own sample config uses: `module` for the media stack,
+# `module_app` for the three that read accounts, answer calls and take this
+# one command. No ICE, no STUN or TURN -- every peer in this lab shares one
+# bridge network with no NAT between them -- and no video, GUI or
+# hardware-audio module: none of them was built, and naming one here would
+# only be a load failure at startup for a module this container carries.
+
+module_path		/usr/local/lib/baresip/modules
+
+module			g711.so
+module			auconv.so
+module			auresamp.so
+module			ausine.so
+module			aufile.so
+module			srtp.so
+module			dtls_srtp.so
+
+module_app		account.so
+module_app		menu.so
+module_app		ctrl_tcp.so

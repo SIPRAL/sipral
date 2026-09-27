@@ -474,6 +474,23 @@ Refresh of lifetime zero by the time the call has ended, rather than left to
 lapse. The path ICE chose and what the relay cost the call's start are under
 [What ICE costs a call's start, measured](#what-ice-costs-a-calls-start-measured).
 
+The same pair proves an idiomatic binding, not only the two harnesses:
+`bindings/python/examples/agent.py`, told the peer's address directly rather
+than a registrar (`SIPRAL_PEER_HOST`), reads `SIPRAL_STUN_SERVER` and
+`SIPRAL_TURN_SERVER`/`_USER`/`_PASSWORD` into `Stack`'s own `nat`/
+`stun_server`/`turn_server` constructor arguments exactly as an application
+would, and `SIPRAL_ICE=required` into `Ice.REQUIRED`. It fails to find a path
+without TURN the same way the two harnesses do, and completes with a relay
+the same way once one is offered, `scripts/lab.sh`'s own `nat_pair_call`
+driving it with `NAT_PAIR_CALLER=python`. The Kotlin, .NET and Swift lab
+agents (`bindings/kotlin/examples/Agent.kt`,
+`bindings/dotnet/samples/Sipral.Sample.Agent/Program.cs`,
+`bindings/swift/Sources/SipralLabAgent`) still only register through
+Asterisk (`docs/11-testing.md`'s own lab table): their own idiomatic layers
+already take a TURN server, its credential and an ICE policy — the entries
+above this one — but no agent built on any of the three reads them from an
+environment variable yet, so none is wired into this NAT pair.
+
 ## ICE-lite
 
 RFC 8445 for the lite role's behaviour; the SDP side, `a=ice-lite` and the

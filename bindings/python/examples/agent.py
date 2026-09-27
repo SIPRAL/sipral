@@ -25,7 +25,7 @@ import os
 import socket
 
 from sipral import Call, Stack
-from sipral.enums import EventKind
+from sipral.enums import EventKind, Ice, Nat
 from sipral.errors import SipralError
 
 
@@ -49,10 +49,18 @@ def respond(pcm: bytes) -> bytes:
     return pcm
 
 
-async def run_call(call: Call) -> None:
+async def run_call(call: Call) -> bool:
+    """Talk for the life of one call. `False` when it ended before its
+    media ever started -- the lab's own TURN-blocked run
+    (`run_direct_call`) needs to tell that apart from an ordinary hangup
+    rather than wait here forever for a `Media` that is never coming."""
     print(f"answered {call.handle:x}")
-    while call.media is None:
+    while call.media is None and not call.ended:
         await call.events.get()
+    if call.media is None:
+        print(f"ended {call.handle:x}: no media -- the call never connected")
+        call.close()
+        return False
 
     async def talk() -> None:
         while True:
@@ -118,6 +126,7 @@ async def run_call(call: Call) -> None:
         ending.cancel()
         call.close()
         print(f"ended {call.handle:x}: {stats}")
+    return True
 
 
 def report_failure(task: asyncio.Task) -> None:
@@ -131,7 +140,72 @@ def report_failure(task: asyncio.Task) -> None:
         print(f"call failed: {task.exception()!r}")
 
 
+async def run_direct_call() -> bool:
+    """Dial a peer straight at its address, no registrar between them --
+    the lab's own two-NAT pair (`scripts/lab.sh`'s ``ice_turn_flow``),
+    where the far end is the harness's own ``iceanswer`` role rather
+    than a server. ``SIPRAL_PEER_HOST``/``SIPRAL_PEER_PORT`` name it, and
+    the account this end adds is one `Account.add`'s own docstring
+    describes: "an account that never registers", ``registrar`` left
+    unset so `sipral_account_config_t::registrar_len` is zero.
+
+    ``SIPRAL_STUN_SERVER`` turns on `Nat.STUN` the same way
+    :class:`sipral.stack.Stack` already offers any application;
+    ``SIPRAL_TURN_SERVER``/``SIPRAL_TURN_USER``/``SIPRAL_TURN_PASSWORD``
+    ride on it, and ``SIPRAL_ICE=required`` asks `Ice.REQUIRED` of every
+    call this account places, which is what makes a call that cannot
+    find a path fail outright rather than fall back to the address this
+    end bound to -- the one thing that would let a run through a blocked
+    NAT pair pass by accident.
+    """
+    loop = asyncio.get_running_loop()
+    peer_host = os.environ["SIPRAL_PEER_HOST"]
+    peer_port = os.environ.get("SIPRAL_PEER_PORT", "5060")
+    peer_user = os.environ.get("SIPRAL_PEER_USER", "callee")
+    peer = f"{peer_host}:{peer_port}"
+    host = route_to(peer)
+
+    stun_server = os.environ.get("SIPRAL_STUN_SERVER")
+    turn_server = os.environ.get("SIPRAL_TURN_SERVER")
+    stack = Stack(
+        bind_host=host,
+        loop=loop,
+        nat=Nat.STUN if stun_server else 0,
+        stun_server=stun_server,
+        turn_server=turn_server,
+        turn_username=os.environ.get("SIPRAL_TURN_USER"),
+        turn_password=os.environ.get("SIPRAL_TURN_PASSWORD"),
+        ice=Ice.REQUIRED if os.environ.get("SIPRAL_ICE") == "required" else 0,
+    )
+    account = stack.add_account(
+        f"sip:caller@{stack.bind_address}", registrar_address=peer
+    )
+    print(f"dialling sip:{peer_user}@{peer} from {stack.bind_address}")
+    try:
+        call = stack.place_call(
+            account,
+            f"sip:{peer_user}@{peer}",
+            media_host=host,
+            destination=peer,
+        )
+    except SipralError as error:
+        print(f"call failed: {error!r}")
+        stack.close()
+        return False
+    ok = await run_call(call)
+    stack.close()
+    return ok
+
+
 async def main() -> None:
+    # The lab's own NAT-pair flow (`ice_turn_flow`) runs this mode instead
+    # of the registrar-and-listen one below: `SIPRAL_PEER_HOST` is what
+    # tells the two apart, since a real registrar address never doubles
+    # as one.
+    if os.environ.get("SIPRAL_PEER_HOST"):
+        if not await run_direct_call():
+            raise SystemExit(1)
+        return
     loop = asyncio.get_running_loop()
     registrar_address = os.environ["SIPRAL_REGISTRAR_ADDRESS"]
     host = route_to(registrar_address)

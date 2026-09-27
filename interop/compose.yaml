@@ -100,6 +100,24 @@ services:
       - ./baresip/config/accounts:/etc/sipral-baresip/accounts:ro
     networks: [lab]
 
+  # The same image, a config of its own (interop/baresip/config-hangup's own
+  # reasoning): one account, and ctrl_tcp loaded so scripts/lab.sh can make
+  # baresip hang its own call up rather than this end asking for it --
+  # docs/11-testing.md's "call, ended by the far end", the one row every
+  # other phone-to-phone flow in this file proves the opposite of. A
+  # container of its own rather than a fourth account beside the other
+  # three: this is the only one ctrl_tcp's command port ever reaches, so a
+  # command sent here can never land on whichever of the shared peer's own
+  # calls happens to be active at the time.
+  baresip-hangup:
+    build:
+      context: ./baresip
+    profiles: ["baresip"]
+    volumes:
+      - ./baresip/config-hangup/config:/etc/sipral-baresip/config:ro
+      - ./baresip/config-hangup/accounts:/etc/sipral-baresip/accounts:ro
+    networks: [lab]
+
   # 8.5.5's pair: a STUN server on the lab network, and a NAT between it and
   # a network of its own, `inside`, where scripts/lab.sh's `nat` step puts
   # the C harness. Behind the NAT, what coturn reports for a socket differs

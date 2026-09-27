@@ -63,10 +63,11 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sipral::{
-    Account, AccountId, CallHandle, CallMedia, CallState, Codec, CodecCatalog, Credentials,
-    DEFAULT_DIGIT, Digit, DtmfInfoForm, EndpointConfig, Event, Input, MediaConfig, MediaEngine,
-    MediaEvent, OutgoingCall, Quality, SrtpPolicy, StreamStatistics, Subscribe, TransportId,
-    TransportProtocol, UNAVAILABLE, UaEvent, Uri, UserAgent, VoipMetricsBlock, WallClock,
+    Account, AccountId, CallEndReason, CallHandle, CallMedia, CallState, Codec, CodecCatalog,
+    Credentials, DEFAULT_DIGIT, Digit, DtmfInfoForm, EndpointConfig, Event, Input, MediaConfig,
+    MediaEngine, MediaEvent, OutgoingCall, Quality, SrtpPolicy, StreamStatistics, Subscribe,
+    TransportId, TransportProtocol, UNAVAILABLE, UaEvent, Uri, UserAgent, VoipMetricsBlock,
+    WallClock,
 };
 use sipral_core::msg::{HeaderName, OwnedMessage};
 
@@ -388,6 +389,15 @@ fn main() -> ExitCode {
         flows.push(Flow::PeerSrtp);
         flows.push(Flow::PeerDtls);
     }
+    // a second, dedicated peer (interop/baresip/config-hangup), never the
+    // three phone-to-phone flows' own "baresip": `Flow::PeerHangup` needs
+    // `scripts/lab.sh`'s own `baresip_ctrl_hangup` reaching a `ctrl_tcp`
+    // port nothing else in this lab exposes, and a run of the ordinary
+    // three flows above must never share it, or a command meant for this
+    // flow's own call could land on one of theirs instead.
+    if env::var("SIPRAL_PEER").as_deref() == Ok("baresip-hangup") {
+        flows.push(Flow::PeerHangup);
+    }
 
     let mut failures = 0;
     for flow in flows {
@@ -626,6 +636,17 @@ enum Flow {
     /// Asterisk's and FreeSWITCH's, on the far side of a call this stack
     /// placed rather than one it answered.
     PeerDtls,
+    /// A call to the peer's `baresip-hangup` account
+    /// (`interop/baresip/config-hangup/accounts`), left up rather than
+    /// hung up at [`dwell`]: every other flow in this file proves this end
+    /// ending a call cleanly, and none proves the opposite half of that,
+    /// the far end's own BYE arriving on a call this end never asked to
+    /// end. `scripts/lab.sh`'s own `baresip_ctrl_hangup` is what makes
+    /// baresip do that a couple of seconds after the call is confirmed
+    /// (`interop/baresip/config-hangup/config`'s own reasoning for why
+    /// nothing in baresip's own account or call configuration can); this
+    /// flow only has to still be waiting when it arrives.
+    PeerHangup,
     /// A call offering G.729 and nothing else, as Asterisk's own
     /// `labuser-g729` (the one endpoint that allows it), to the lab's echo
     /// extension (9008): the tone this end's G.729 encoder writes goes to
@@ -654,6 +675,7 @@ impl Flow {
             Self::Mwi => "message waiting indication",
             Self::PeerSrtp => "SRTP, phone to phone",
             Self::PeerDtls => "DTLS-SRTP, phone to phone",
+            Self::PeerHangup => "call, ended by the far end",
             Self::G729 => "G.729, echoed",
         }
     }
@@ -675,6 +697,7 @@ impl Flow {
             Self::Mwi => "mwi",
             Self::PeerSrtp => "peersrtp",
             Self::PeerDtls => "peerdtls",
+            Self::PeerHangup => "peerhangup",
             Self::G729 => "g729",
         }
     }
@@ -711,6 +734,10 @@ enum Fact {
     CodecChanged,
     /// We asked for the call to end, rather than watching it end by itself.
     Ours,
+    /// The far end asked for the call to end -- `Flow::PeerHangup`'s own
+    /// claim, the mirror of `Ours`: `CallEndReason::RemoteHangup` on the
+    /// `UaEvent::CallEnded` that carried it.
+    RemoteEnded,
     Over,
     /// `Flow::Message`'s own MESSAGE was answered 200 or 202.
     MessageAccepted,
@@ -1159,6 +1186,9 @@ impl Script {
                 ..
             } => {
                 self.seen.saw(Fact::Over);
+                if *reason == CallEndReason::RemoteHangup {
+                    self.seen.saw(Fact::RemoteEnded);
+                }
                 if !self.seen.has(Fact::Up) {
                     self.seen.refused = Some(match status {
                         // a refusal usually says why in the reason phrase or a
@@ -1458,6 +1488,13 @@ impl Script {
                 self.listen_until = Some(now + dwell() + Duration::from_secs(2));
             }
             Step::Talking if self.flow == Flow::DtmfInfo => self.send_dtmf_by_info(endpoint, now),
+            // no `listen_until`, unlike every flow in the arm above: this
+            // one's own claim is that it never asks for the call to end
+            // (`Fact::Ours`, `owed`'s own "the far end ended the call before
+            // we asked" read backwards) -- `patience()` is the only bound,
+            // and `scripts/lab.sh`'s own `baresip_ctrl_hangup` is what is
+            // expected to end it first
+            Step::Talking if self.flow == Flow::PeerHangup => {}
             Step::Talking | Step::Resuming | Step::Dialling | Step::Transferring => {
                 self.hang_up(endpoint, now);
             }
@@ -1637,6 +1674,7 @@ impl Script {
             Flow::G729 => "9008".to_owned(),
             Flow::PeerSrtp => "baresip-srtp".to_owned(),
             Flow::PeerDtls => "baresip-dtls".to_owned(),
+            Flow::PeerHangup => "baresip-hangup".to_owned(),
             _ => self.extension.clone(),
         }
     }
@@ -1739,8 +1777,10 @@ impl Script {
         // as what they came to prove has happened. The SRTP call dwells on the
         // same tone, and a stream that agreed a key and never decrypted a frame
         // is the failure that flow exists to find.
-        if matches!(self.flow, Flow::Call | Flow::Srtp | Flow::PeerSrtp)
-            && require_audio
+        if matches!(
+            self.flow,
+            Flow::Call | Flow::Srtp | Flow::PeerSrtp | Flow::PeerHangup
+        ) && require_audio
             && heard.audible == 0
         {
             return Err(format!(
@@ -1869,6 +1909,15 @@ impl Script {
                 (Fact::Held, "the hold was not agreed"),
                 (Fact::Resumed, "the resume was not agreed"),
                 (Fact::Ours, "the far end ended the call before we asked"),
+                (Fact::Over, "the call did not end"),
+            ],
+            Flow::PeerHangup => &[
+                (Fact::Registered, "no binding was granted"),
+                (Fact::Up, "the call did not connect"),
+                (
+                    Fact::RemoteEnded,
+                    "the call ended, but not by the far end's own BYE",
+                ),
                 (Fact::Over, "the call did not end"),
             ],
             Flow::Message => owed_message(),
@@ -2144,6 +2193,7 @@ const fn seed(flow: Flow) -> [u8; 32] {
         Flow::Mwi => [113; 32],
         Flow::PeerSrtp => [131; 32],
         Flow::PeerDtls => [137; 32],
+        Flow::PeerHangup => [149; 32],
         Flow::G729 => [139; 32],
     }
 }
@@ -2170,6 +2220,7 @@ const fn media_seed(flow: Flow) -> [u8; 32] {
         Flow::Mwi => [223; 32],
         Flow::PeerSrtp => [227; 32],
         Flow::PeerDtls => [229; 32],
+        Flow::PeerHangup => [157; 32],
         Flow::G729 => [233; 32],
     }
 }
@@ -2179,7 +2230,10 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
     use std::time::{Duration, Instant};
 
-    use sipral::{CallMedia, Codec, Direction, Event, MediaConfig, MediaEvent, OutgoingCall};
+    use sipral::{
+        CallEndReason, CallMedia, Codec, Direction, Event, MediaConfig, MediaEvent, OutgoingCall,
+        UaEvent,
+    };
 
     use super::{Endpoint, Fact, Flow, Script, Step, catalog, drive, media_seed, place_call, seed};
     use crate::audio::Heard;
@@ -2463,6 +2517,85 @@ mod tests {
         assert_eq!(script.verdict(after, true), Ok(()));
     }
 
+    /// `Flow::PeerHangup`'s own claim, `CallEndReason::RemoteHangup` read
+    /// off a real `UaEvent::CallEnded` rather than seeded by hand: the far
+    /// end's own BYE is what `Fact::RemoteEnded` has to come from, and
+    /// nothing here ever asks this end's own `hang_up` to run, so
+    /// `Fact::Ours` must stay unset. Revert the `if *reason ==
+    /// CallEndReason::RemoteHangup` line in `on_signalling`'s own
+    /// `CallEnded` arm and this fails: `RemoteEnded` never lands, and
+    /// `owed`'s "the call ended, but not by the far end's own BYE" is what
+    /// `verdict` then reports.
+    #[test]
+    fn the_far_ends_own_bye_is_what_peerhangup_owes() {
+        let (mut endpoint, mut script) =
+            scripted(Flow::PeerHangup, SocketAddr::new(LOOPBACK, 5060));
+        let now = Instant::now();
+        script.seen.saw(Fact::Registered);
+        script.place_primary_call(&mut endpoint, now);
+        let call = script
+            .call
+            .expect("an INVITE queues a call handle even with nobody listening");
+        assert_eq!(
+            script.step,
+            Step::Talking,
+            "placing the call did not reach Talking"
+        );
+        // `CallConfirmed` arrives, and is answered, before `CallEnded` ever
+        // could: `Up` first is what tells `on_signalling`'s own `CallEnded`
+        // arm this was not a refusal.
+        script.seen.saw(Fact::Up);
+
+        script.on_signalling(
+            &mut endpoint,
+            &UaEvent::CallEnded {
+                call,
+                reason: CallEndReason::RemoteHangup,
+                status: None,
+                response: None,
+            },
+            now,
+        );
+
+        assert!(
+            script.seen.has(Fact::RemoteEnded),
+            "the far end's own BYE was not recognised as one"
+        );
+        assert!(
+            !script.seen.has(Fact::Ours),
+            "PeerHangup must never end its own call"
+        );
+        assert_eq!(
+            script.verdict(Heard::default(), false),
+            Ok(()),
+            "a call the far end ended on its own should owe nothing more"
+        );
+    }
+
+    /// The other half of the same claim: reaching `Step::Talking` must
+    /// never schedule this flow's own hangup the way `Flow::Call` and its
+    /// kin do (`advance`'s own arm above the catch-all), or a slow
+    /// `scripts/lab.sh baresip_ctrl_hangup` would lose the race to this
+    /// end's own `dwell`, and the flow would prove nothing about the far
+    /// end ending calls at all.
+    #[test]
+    fn peerhangups_own_talking_step_schedules_no_hangup_of_its_own() {
+        let (mut endpoint, mut script) =
+            scripted(Flow::PeerHangup, SocketAddr::new(LOOPBACK, 5060));
+        let now = Instant::now();
+        script.step = Step::Talking;
+        script.advance(&mut endpoint, now);
+        assert_eq!(
+            script.listen_until, None,
+            "PeerHangup scheduled its own hangup at Talking"
+        );
+        assert_eq!(
+            script.step,
+            Step::Talking,
+            "PeerHangup left Talking on its own"
+        );
+    }
+
     /// Every fixed endpoint identity byte this crate binds an endpoint with
     /// — the flow table's own [`seed`]/[`media_seed`] and each step's own
     /// constants — has to be distinct from every other one, or two flows (or
@@ -2492,6 +2625,7 @@ mod tests {
             Flow::Mwi,
             Flow::PeerSrtp,
             Flow::PeerDtls,
+            Flow::PeerHangup,
             Flow::G729,
         ];
         // name, value -- a step new to this list adds its own constants

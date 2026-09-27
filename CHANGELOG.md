@@ -85,6 +85,26 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `scripts/lab.sh icelite` point the Rust harness at it: a REFER from outside
   any call refused, then taken and placed to Asterisk's echo, and a call that
   requires ICE answered by `SIPRAL_ICE_LITE`.
+- **The lab proves TURN and ICE through the Python bindings too, not only
+  the two harnesses.** `bindings/python/examples/agent.py` can now dial a
+  peer straight at its address, no registrar between them
+  (`SIPRAL_PEER_HOST`/`_PORT`/`_USER`), with `SIPRAL_STUN_SERVER` and
+  `SIPRAL_TURN_SERVER`/`_USER`/`_PASSWORD` turning on `Stack`'s own NAT
+  traversal and `SIPRAL_ICE=required` asking `Ice.REQUIRED` of the call —
+  `scripts/lab.sh`'s `ice_turn_flow` runs it behind the same two-NAT pair
+  the Rust and C harnesses already prove TURN through, without and then
+  with a relay, both ends' allocations given back read off coturn's own
+  log exactly as the other two drivers' are.
+- **The far end can end a call on its own, and the lab proves it.** A
+  fourth baresip peer, `baresip-hangup` (`interop/baresip/config-hangup`),
+  loads `ctrl_tcp` — nothing in account or call configuration can make
+  baresip hang an already-answered call up by itself, its own
+  `call_local_timeout` cancelling the instant one is answered — so
+  `scripts/lab.sh`'s `baresip_ctrl_hangup` sends it one command a couple
+  of seconds into the call instead, the same code path its own menu
+  module's hangup key takes. `Flow::PeerHangup` (key `peerhangup`) is the
+  harness's own half: it places the call and only waits, never scheduling
+  its own hangup, and passes on `CallEndReason::RemoteHangup` alone.
 - **The .NET binding can get a call past a NAT.** `SipralStack`'s
   constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
   `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP

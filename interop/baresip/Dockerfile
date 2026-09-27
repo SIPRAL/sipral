@@ -60,6 +60,17 @@ RUN curl -fsSL -o re.tar.gz \
 # (interop/baresip/config/accounts). No video, no ICE/STUN/TURN -- this lab
 # has no NAT to cross -- and no GUI or audio-hardware modules that would
 # pull in libraries this image never uses.
+#
+# ctrl_tcp is the odd one out: nothing in interop/baresip/config/config loads
+# it, only interop/baresip/config-hangup/config does, for the one account
+# that flow adds (docs/11-testing.md's "call, ended by the far end"). baresip
+# has no config or account parameter that hangs an already-answered call up
+# by itself -- src/call.c's own call_local_timeout is cancelled the moment a
+# call is answered, so it can only ever refuse one nobody picked up -- so
+# that flow's own script reaches this module's TCP command port instead
+# (modules/ctrl_tcp/ctrl_tcp.c's own netstring-wrapped JSON, "hangup") the
+# moment the call is confirmed, which is baresip ending it through its own
+# control interface rather than this lab forging a BYE on its behalf.
 RUN curl -fsSL -o baresip.tar.gz \
         https://github.com/baresip/baresip/archive/refs/tags/v4.11.0.tar.gz \
     && echo "e170ad5857994dfed0c84c4c04eb904fa410f3ec2d5a6c789b50b3fda47ba98c  baresip.tar.gz" \
@@ -70,7 +81,7 @@ RUN curl -fsSL -o baresip.tar.gz \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_INSTALL_LIBDIR=lib \
         -DCMAKE_PREFIX_PATH=/usr/local \
-        -DMODULES="account;menu;g711;auconv;auresamp;ausine;aufile;srtp;dtls_srtp" \
+        -DMODULES="account;menu;g711;auconv;auresamp;ausine;aufile;srtp;dtls_srtp;ctrl_tcp" \
     && cmake --build baresip/build -j"$(nproc)" \
     && cmake --install baresip/build
 

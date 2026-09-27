@@ -958,6 +958,54 @@ flows_baresip_c() {
             exit \$status"
 }
 
+# docs/11-testing.md's "call, ended by the far end": one netstring-wrapped
+# JSON command, {"command":"hangup"}, to baresip-hangup's own ctrl_tcp port
+# (interop/baresip/config-hangup/config's own module_app ctrl_tcp.so, on
+# baresip's own default 4444) -- baresip answering it by hanging the one
+# call it has up through the same code path its own menu module's "b" key
+# would. Nothing in baresip's own account or call configuration can do this
+# to a call already answered: src/call.c's own call_local_timeout is
+# cancelled the instant one is (interop/baresip/config-hangup/config's own
+# reasoning), so this is what stands in for a person on that phone deciding
+# to hang up.
+baresip_ctrl_hangup() {
+    local json='{"command":"hangup","params":"","token":"lab"}'
+    local len=${#json}
+    docker run --rm --network sipral-interop_lab \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y netcat-openbsd >/dev/null 2>&1
+            printf '%s:%s,' '$len' '$json' | nc -w2 baresip-hangup 4444" \
+        >/dev/null 2>&1
+}
+
+# The Rust harness's own half of the same flow (`Flow::PeerHangup`, key
+# "peerhangup"): places the call and then only waits -- no `listen_until`
+# ever schedules its own hangup, unlike every other flow this file runs
+# against baresip -- so `baresip_ctrl_hangup`, backgrounded two seconds in
+# (comfortably inside SIPRAL_PATIENCE_MS's default twenty), has to be what
+# ends it. The trigger runs concurrently with the harness, which blocks for
+# the whole call; its own status is waited on after so a slow image pull or
+# `apt-get install` inside it can never outlive this function's caller.
+#
+# The C harness has no flow of its own here yet (`not_done` names why); this
+# one runs the Rust harness only.
+flows_baresip_hangup() {
+    local status trigger_pid
+    ( sleep 2; baresip_ctrl_hangup ) &
+    trigger_pid=$!
+    docker run --rm --network sipral-interop_lab \
+        -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip-hangup \
+        -e SIPRAL_FLOWS=peerhangup \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim sh -c "/harness kamailio 5060 baresip-hangup"
+    status=$?
+    wait "$trigger_pid" 2>/dev/null
+    return "$status"
+}
+
 # 8.5.5's own step: the C harness behind a NAT, registering and calling
 # Asterisk with the stack asking coturn where its sockets appear from
 # (SIPRAL_NAT_STUN). interop/nat is the NAT -- a container with a leg on the
@@ -1478,7 +1526,12 @@ nat_pair_down() {
 # C harness instead (interop/harness-c's own FLOW_ICE_NAT, the same flow key
 # and the same variables), with the Rust harness still answering; with
 # NAT_PAIR_CALLER_TURN=1 as well, that caller alone is given the relay
-# step's TURN server and credential.
+# step's TURN server and credential. NAT_PAIR_CALLER=python places it from
+# bindings/python/examples/agent.py's own run_direct_call instead --
+# SIPRAL_PEER_HOST/_PORT naming the callee directly, no registrar, the same
+# shape `docs/08-ffi.md`'s "An account with no registrar never registers"
+# gives a trunk -- proving the idiomatic layer takes TURN and ICE the way an
+# application actually would, not only the harnesses written for this lab.
 nat_pair_call() {
     local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
     local callee callee_status status=0 tries=0 beside
@@ -1547,6 +1600,32 @@ nat_pair_call() {
                 ip route replace default via $NAT_PAIR_GATEWAY || exit 1
                 exec /harness-c $NAT_PAIR_OUTSIDE2 5060 callee"
         status=$?
+    elif [ "$status" -eq 0 ] && [ "${NAT_PAIR_CALLER:-rust}" = python ]; then
+        if [ -z "$HARNESS_C" ]; then
+            # the library the Python bindings load rides beside the C
+            # harness (the build step both need is the same one), the same
+            # gate python_agent() already takes
+            printf '  note  no C harness built, so there is no libsipral for the Python agent -- skipped\n'
+            status=1
+        else
+            beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+            docker run --rm --network "${project}_inside" \
+                --cap-add NET_ADMIN \
+                -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_PEER_HOST=$NAT_PAIR_OUTSIDE2" -e SIPRAL_PEER_PORT=5060 \
+                -e SIPRAL_ICE=required \
+                -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
+                ${1+"$@"} \
+                ${caller_only[@]+"${caller_only[@]}"} \
+                -v "$beside:/lib-sipral:ro" \
+                -v "$ROOT/bindings/python:/python:ro" \
+                sipral-lab-nat sh -c "
+                    ip route replace default via $NAT_PAIR_GATEWAY || exit 1
+                    apt-get -qq update >/dev/null 2>&1 || exit 1
+                    apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1 || exit 1
+                    exec python3 -u /python/examples/agent.py"
+            status=$?
+        fi
     elif [ "$status" -eq 0 ]; then
         docker run --rm --network "${project}_inside" \
             --cap-add NET_ADMIN \
@@ -1661,6 +1740,34 @@ ice_turn_flow() {
         fi
         if [ "$status" -eq 0 ]; then
             turn_given_back 5 || status=1
+        fi
+    fi
+    if [ "$status" -eq 0 ] && [ -z "$HARNESS_C" ]; then
+        if [ "$WANT" = turn ]; then
+            # the Python bindings load the same library the C ABI step
+            # above needs, so no C harness means no relayed call to place
+            # through them either
+            printf '  there is no C harness, so there is no libsipral for the relayed call through the Python bindings\n'
+            status=1
+        else
+            printf '  note  no C harness, so the relayed call through the Python bindings is skipped with the other C flows\n'
+        fi
+    elif [ "$status" -eq 0 ]; then
+        printf '  without TURN, through the Python bindings: the call has to find no path\n'
+        if NAT_PAIR_CALLER=python nat_pair_call; then
+            printf '  the call through the Python bindings connected with the path between the NATs blocked: the block does not hold\n'
+            status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            printf '  with TURN, through the Python bindings: the call has to go through coturn\n'
+            NAT_PAIR_CALLER=python nat_pair_call \
+                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
+                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
+                || status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            turn_given_back 7 || status=1
         fi
     fi
     nat_pair_down -f compose.yaml -f turn/compose.override.yaml
@@ -1898,7 +2005,8 @@ fi
 # do.
 if [ "$WANT" = all ] || [ "$WANT" = baresip ]; then
     step "phone to phone -- baresip through the proxy"
-    if ( cd interop && docker compose --profile baresip up -d baresip ) >/dev/null 2>&1; then
+    if ( cd interop && docker compose --profile baresip up -d baresip baresip-hangup ) \
+            >/dev/null 2>&1; then
         pass "baresip: built and started"
         # the plain account is required -- without it neither flow below has
         # anyone to call -- and the SRTP and DTLS-SRTP ones are read the same
@@ -1926,11 +2034,19 @@ if [ "$WANT" = all ] || [ "$WANT" = baresip ]; then
                     || fail "sipral to baresip, in C"
             fi
         fi
+        # a container and an account of its own (interop/baresip/config-hangup),
+        # so this one flow's own ctrl_tcp command can never reach whichever
+        # of the three flows above happens to have a call up at the time
+        if wait_for baresip-hangup "baresip-hangup@kamailio: (prio 0) {0/UDP/v4} 200 OK" \
+                required baresip; then
+            flows_baresip_hangup && pass "baresip hangs the call up on its own" \
+                || fail "baresip hangs the call up on its own"
+        fi
     else
-        fail "docker compose up baresip"
+        fail "docker compose up baresip baresip-hangup"
     fi
-    ( cd interop && docker compose stop baresip && docker compose rm -f baresip ) \
-        >/dev/null 2>&1
+    ( cd interop && docker compose stop baresip baresip-hangup \
+        && docker compose rm -f baresip baresip-hangup ) >/dev/null 2>&1
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = nat ]; then
