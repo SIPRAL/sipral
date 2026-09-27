@@ -2108,6 +2108,25 @@ made: which address a call was described by is in the description itself,
 and a stack that asks a STUN server says what each socket learned as
 `SIPRAL_EVENT_KIND_NAT_MAPPING` (`docs/06-nat.md`).
 
+On a call running ICE the path is a decision the call makes, and
+`MediaSession::path_candidates` explains it the way `codec_candidates`
+explains the codec: every candidate pair the agent's checklist held and every
+relay it held (`PathCandidate`), each with what became of it
+(`PathOutcome`) — the pair selected and the relay it runs through; a pair
+whose check was never answered, or that the far end refused with a STUN error
+(the code), or whose answer came back from somewhere else (RFC 8445
+§7.2.5.2.1, a NAT rewriting it); a relayed pair the relay would not let the
+far end through for, with the TURN server's reason; a pair that worked and was
+outranked by the one selected, or that another was nominated ahead of (§8.1.2
+takes the unfinished ones off the checklist at the selection); a pair never
+checked, discarded by the pair limit or overtaken by the end of its
+checklist; and a relay held and unused, given back (§8.3.1), or lost with the
+server's reason. The agent writes each outcome down as the transaction that
+decides it ends (`IceAgent::pair_report`, `IceAgent::relay_report`), so the
+list survives the checklist it describes; a restart (RFC 8445 §9) starts it
+again with the new session. A call not using ICE has one path, the address
+its description named, and an empty list.
+
 ## A local conference of two calls
 
 Nothing like a SIP conference server, and nothing that reaches `sipral-ua`:

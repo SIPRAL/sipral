@@ -516,6 +516,9 @@ pub struct TurnClient {
     permissions: Vec<Permission>,
     channels: Vec<Channel>,
     quarantine: Vec<Quarantine>,
+    /// Peers [`TurnClient::withdraw`] stopped letting through, whose
+    /// permission an answer already on its way must not install again.
+    withdrawn: Vec<IpAddr>,
     /// Whether the reservation attributes were dropped after a 508.
     drop_reservation: bool,
     /// Whether DONT-FRAGMENT was dropped after a 420 naming it.
@@ -544,6 +547,7 @@ impl TurnClient {
             permissions: Vec::new(),
             channels: Vec::new(),
             quarantine: Vec::new(),
+            withdrawn: Vec::new(),
             drop_reservation: false,
             drop_dont_fragment: false,
             dont_fragment: false,
@@ -618,6 +622,7 @@ impl TurnClient {
     /// The request goes out at once when there is an allocation and an id to
     /// send it under, and otherwise as soon as there is.
     pub fn permit(&mut self, peer: IpAddr, now: Instant) {
+        self.withdrawn.retain(|entry| *entry != peer);
         if !self.permissions.iter().any(|entry| entry.peer == peer) {
             self.permissions.push(Permission {
                 peer,
@@ -626,6 +631,67 @@ impl TurnClient {
             });
         }
         self.schedule(now);
+    }
+
+    /// Stop keeping a peer's address let through: its permission, and every
+    /// channel bound to a port on it, are no longer refreshed.
+    ///
+    /// For an allocation that outlives the reason a peer was let in — one
+    /// shared by the branches of a forked call, of which one has ended. RFC
+    /// 8656 §2.3 gives no way to take either back ("there is no way to
+    /// explicitly delete a permission", "no way to explicitly delete a
+    /// channel binding; the client must simply wait for it to time out"), so
+    /// both are left to lapse at the server, five and ten minutes on. A
+    /// channel keeps its number out of use until five minutes after it
+    /// lapses, as §12 asks of one that expires, and an answer to a
+    /// CreatePermission already on its way installs nothing. A later
+    /// [`TurnClient::permit`] or [`TurnClient::bind_channel`] asks again.
+    pub fn withdraw(&mut self, peer: IpAddr, now: Instant) {
+        self.permissions.retain(|entry| entry.peer != peer);
+        if !self.withdrawn.contains(&peer) {
+            self.withdrawn.push(peer);
+        }
+        let (gone, kept): (Vec<Channel>, Vec<Channel>) = core::mem::take(&mut self.channels)
+            .into_iter()
+            .partition(|entry| entry.peer.ip() == peer);
+        self.channels = kept;
+        for entry in gone {
+            let lapses = entry
+                .until
+                .unwrap_or_else(|| now.checked_add(CHANNEL_LIFETIME).unwrap_or(now));
+            self.quarantine.push(Quarantine {
+                number: entry.number,
+                peer: entry.peer,
+                until: lapses.checked_add(CHANNEL_QUARANTINE).unwrap_or(lapses),
+            });
+        }
+    }
+
+    /// Who sent a relayed datagram, and where their packet is in it, without
+    /// taking it: `None` for anything [`TurnClient::handle_input`] would not
+    /// answer with [`Input::Data`] — the server's answers to this client's
+    /// own requests among them.
+    ///
+    /// For an allocation several ICE sessions use at once, whose relayed
+    /// data has to reach the session that knows the peer before any of them
+    /// reads it.
+    #[must_use]
+    pub fn peek(&self, bytes: &[u8]) -> Option<(SocketAddr, core::ops::Range<usize>)> {
+        let input = match bytes.first() {
+            Some(0..=3) => {
+                let message = Message::parse(bytes).ok()?;
+                if message.class() != Class::Indication {
+                    return None;
+                }
+                self.on_indication(&message)
+            }
+            Some(64..=79) => self.on_channel_data(bytes),
+            _ => return None,
+        };
+        match input {
+            Input::Data { peer, range } => Some((peer, range)),
+            Input::Consumed | Input::Unreachable { .. } | Input::Foreign => None,
+        }
     }
 
     /// Bind a channel to a peer, and install the permission it needs.
@@ -638,6 +704,7 @@ impl TurnClient {
             return Some(existing.number);
         }
         let number = self.free_channel(peer, now)?;
+        self.withdrawn.retain(|entry| *entry != peer.ip());
         self.channels.push(Channel {
             number,
             peer,
@@ -1322,6 +1389,9 @@ impl TurnClient {
     /// permission of its own (§12.1), so a peer whose CreatePermission was
     /// refused a moment ago can come back through the channel it is bound to.
     fn install_permission(&mut self, peer: IpAddr, now: Instant) {
+        if self.withdrawn.contains(&peer) {
+            return;
+        }
         let until = now.checked_add(PERMISSION_LIFETIME);
         let due = now
             .checked_add(renew_after(PERMISSION_LIFETIME))
@@ -2511,6 +2581,118 @@ mod tests {
         };
         assert_eq!(from, peer());
         assert_eq!(&indication[range], b"voice");
+    }
+
+    /// A client with a bound channel to `peer()` and a permission for
+    /// `other_peer()`, both confirmed.
+    fn with_two_peers(now: Instant) -> (TurnClient, Ids, ChannelNumber) {
+        let (mut client, mut ids) = ready(now);
+        ids.feed(&mut client);
+        let number = client.bind_channel(peer(), now).unwrap();
+        client.permit(other_peer().ip(), now);
+        while let Some(bytes) = client.poll_transmit() {
+            let request = Message::parse(&bytes).unwrap();
+            client.handle_input(&success(&request, |_| {}), now);
+        }
+        let _seen = events(&mut client);
+        (client, ids, number)
+    }
+
+    fn data_indication(from: SocketAddr, payload: &[u8]) -> Vec<u8> {
+        let mut builder =
+            MessageBuilder::new(Class::Indication, method::DATA, TransactionId::new([7; 12]));
+        builder
+            .add_xor_address(AttributeType::XOR_PEER_ADDRESS, from)
+            .unwrap();
+        builder.add(AttributeType::DATA, payload).unwrap();
+        builder.finish()
+    }
+
+    #[test]
+    fn peeking_names_the_peer_of_relayed_data_and_takes_nothing() {
+        let now = Instant::now();
+        let (mut client, _ids, number) = with_two_peers(now);
+        let mut frame = Vec::new();
+        ChannelData::encode(number, b"voice", Transport::Udp, &mut frame).unwrap();
+        let (from, range) = client.peek(&frame).expect("a bound channel's data");
+        assert_eq!(from, peer());
+        assert_eq!(&frame[range], b"voice");
+        let indication = data_indication(other_peer(), b"hello");
+        let (from, range) = client.peek(&indication).expect("a permitted peer's data");
+        assert_eq!(from, other_peer());
+        assert_eq!(&indication[range], b"hello");
+
+        // an answer to the client's own request is the client's to take, and
+        // looking at it does not take it
+        client.permit(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 152)), 1).ip(),
+            now,
+        );
+        let request = sent(&mut client);
+        let request = Message::parse(&request).unwrap();
+        let answer = success(&request, |_| {});
+        assert_eq!(client.peek(&answer), None);
+        assert_eq!(client.handle_input(&answer, now), Input::Consumed);
+        assert_eq!(client.peek(b"not turn at all"), None);
+    }
+
+    #[test]
+    fn a_withdrawn_peer_is_no_longer_refreshed_or_believed() {
+        let now = Instant::now();
+        let (mut client, mut ids, number) = with_two_peers(now);
+        client.withdraw(peer().ip(), now);
+        assert!(!client.has_permission(peer().ip()));
+        assert_eq!(client.channel(peer()), None);
+        let mut frame = Vec::new();
+        ChannelData::encode(number, b"voice", Transport::Udp, &mut frame).unwrap();
+        assert_eq!(client.handle_input(&frame, now), Input::Foreign);
+        assert_eq!(client.peek(&data_indication(peer(), b"x")), None);
+
+        // the other peer's permission is renewed as before, and the withdrawn
+        // one's never is
+        ids.feed(&mut client);
+        let renewal = now + Duration::from_secs(240);
+        client.handle_timeout(renewal);
+        let mut renewed = Vec::new();
+        while let Some(bytes) = client.poll_transmit() {
+            let request = Message::parse(&bytes).unwrap();
+            renewed.extend(
+                request
+                    .find_all(AttributeType::XOR_PEER_ADDRESS)
+                    .filter_map(|value| {
+                        crate::stun::address::decode_xor(value, request.transaction_id())
+                    })
+                    .map(|address| address.ip()),
+            );
+        }
+        assert_eq!(renewed, vec![other_peer().ip()]);
+
+        // and the number stays out of use until five minutes after the
+        // binding would have lapsed at the server (§12)
+        let third = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 153)), 4000);
+        let later = now + Duration::from_secs(600 + 299);
+        assert_ne!(client.bind_channel(third, later), Some(number));
+    }
+
+    #[test]
+    fn a_permission_answered_after_its_peer_was_withdrawn_installs_nothing() {
+        let now = Instant::now();
+        let (mut client, mut ids) = ready(now);
+        ids.feed(&mut client);
+        client.permit(peer().ip(), now);
+        let request = sent(&mut client);
+        let request = Message::parse(&request).unwrap();
+        client.withdraw(peer().ip(), now);
+        client.handle_input(&success(&request, |_| {}), now);
+        assert!(!client.has_permission(peer().ip()));
+        assert!(events(&mut client).is_empty());
+        // asked for again, it is let through again
+        ids.feed(&mut client);
+        client.permit(peer().ip(), now);
+        let request = sent(&mut client);
+        let request = Message::parse(&request).unwrap();
+        client.handle_input(&success(&request, |_| {}), now);
+        assert!(client.has_permission(peer().ip()));
     }
 
     #[test]

@@ -175,6 +175,8 @@ pub use headless::{
     HeadlessMediaError, HeadlessSession, call_state_of, dtmf_received_of, send_digit,
 };
 pub use ice::IcePolicy;
+#[cfg(feature = "ice")]
+pub use ice::{CandidateKind, PathCandidate, PathKind, PathOutcome};
 pub use join::{MixOutcome, mix_two};
 pub use keying::SrtpPolicy;
 #[cfg(feature = "stun")]

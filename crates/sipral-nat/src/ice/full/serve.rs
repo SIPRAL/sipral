@@ -12,7 +12,9 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use super::{ChecklistState, Early, IceAgent, MAX_EARLY, Phase, Remote, priority_in_range};
+use super::{
+    Awaiting, ChecklistState, Early, IceAgent, MAX_EARLY, Phase, Remote, priority_in_range,
+};
 use crate::ice::agent::Role;
 use crate::ice::candidate::{Candidate, CandidateType, Foundation};
 use crate::ice::checklist::PairState;
@@ -49,6 +51,17 @@ impl IceAgent {
             }
             Verdict::Accept(accepted) => accepted,
         };
+        // RFC 8839 §7: a forked offer's answers are each "an independent
+        // offer/answer exchange, with its own set of local candidates,
+        // pairs, checklists, states", all under the one set of local
+        // credentials the offer carried. A check signed with them and naming
+        // a peer fragment other than the one this session holds is another
+        // branch's session's, which answers it and checks back; answering it
+        // here as well would tell that branch's phone a pair works whose
+        // triggered check nobody sends, and take its nomination for nothing
+        if !is_previous && self.names_another_session(local, accepted.remote_ufrag) {
+            return;
+        }
 
         // PRIORITY "MUST be included in a Binding request" (RFC 8445 §7.1.1);
         // without it there is no priority for the peer-reflexive candidate
@@ -125,6 +138,88 @@ impl IceAgent {
             remote_ufrag: accepted.remote_ufrag.to_vec(),
         };
         self.after_accept(early, now);
+    }
+
+    /// Whether the peer fragment a check names is not the one the session of
+    /// the candidate it reached holds: another ICE session's, sharing this
+    /// one's local credentials.
+    fn names_another_session(&self, via: usize, remote_ufrag: &[u8]) -> bool {
+        self.locals
+            .get(via)
+            .and_then(|local| self.streams.get(local.stream))
+            .and_then(|stream| stream.remote.as_ref())
+            .is_some_and(|remote| remote.ufrag.as_bytes() != remote_ufrag)
+    }
+
+    /// Keep a check signed with the credentials a restart this agent was
+    /// told of offered ([`IceAgent::expect_restart`]), for the moment the
+    /// restart is taken up.
+    ///
+    /// The peer starts checking under them as soon as it has sent its answer
+    /// — "the answerer [...] would begin connectivity checks" (RFC 8839
+    /// §4.4.2.1, §7.1) — and its first checks can reach this end before the
+    /// answer does. Answered under the credentials still in force they are
+    /// an unsigned 401 (RFC 8489 §9.1.3: an unknown USERNAME), which the
+    /// peer's agent discards and retransmits after, costing the new session
+    /// up to one RTO before it has a pair. Kept, they are answered — and
+    /// checked back on — the moment the restart is followed, well inside the
+    /// peer's transaction for them.
+    pub(super) fn awaits_restart(
+        &mut self,
+        via: usize,
+        from: SocketAddr,
+        data: &[u8],
+        message: &Message<'_>,
+        now: Instant,
+    ) -> bool {
+        let Some(pending) = &self.pending else {
+            return false;
+        };
+        let username = message.username().unwrap_or_default();
+        if server::remote_ufrag(username, pending.ufrag.as_bytes()).is_none() {
+            return false;
+        }
+        // anything that does not authenticate under the offered credentials
+        // is refused by `serve` exactly as it would be without a restart
+        if !matches!(
+            server::authenticate(message, pending.ufrag.as_bytes(), pending.pwd.as_bytes()),
+            Verdict::Accept(_)
+        ) {
+            return false;
+        }
+        let id = message.transaction_id();
+        self.awaiting.retain(|kept| kept.id != id);
+        if self.awaiting.len() >= MAX_EARLY {
+            self.awaiting.remove(0);
+        }
+        self.awaiting.push(Awaiting {
+            via,
+            from,
+            id,
+            data: data.to_vec(),
+            at: now,
+        });
+        true
+    }
+
+    /// Answer the checks [`Self::awaits_restart`] kept, once the restart they
+    /// were signed for is the session in force; one older than the peer's
+    /// whole transaction for it (RFC 8489 §6.2.1's 39.5 seconds) has no one
+    /// waiting for the answer and is dropped.
+    pub(super) fn replay_restarted(&mut self, now: Instant) {
+        if self.pending.is_some() || self.awaiting.is_empty() {
+            return;
+        }
+        for kept in core::mem::take(&mut self.awaiting) {
+            let live = kept
+                .at
+                .checked_add(crate::turn::DEFAULT_TI)
+                .is_some_and(|until| now < until);
+            if live {
+                let length = kept.data.len();
+                let _ = self.arrive(kept.via, kept.from, &kept.data, 0..length, now);
+            }
+        }
     }
 
     /// The steps after the response (§7.3.1.3 to §7.3.1.5), now if the peer's

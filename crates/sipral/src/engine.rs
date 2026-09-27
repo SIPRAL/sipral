@@ -321,9 +321,9 @@ impl CallMedia {
     /// binds the channel the media needs, keeps the allocation and the NAT
     /// binding under it alive, and gives it back to the server (a Refresh
     /// with a lifetime of zero, RFC 8656 §8) when the call ends, ICE settles
-    /// on another pair, or the peer turns out to do no ICE at all — though a
-    /// forked call's branch that ends hands it to another branch of the fork
-    /// that can use it instead. What that
+    /// on another pair, or the peer turns out to do no ICE at all — though
+    /// the branches of a forked call each hold it with an agent of their
+    /// own, and it goes back only when the last of them lets go. What that
     /// sends comes out of [`MediaEngine::poll_transmit`] while the call is
     /// being set up and [`MediaEngine::poll_farewell`] once it is over, for
     /// the socket the relay was allocated from.
@@ -483,10 +483,15 @@ pub struct MediaEngine {
     #[cfg(feature = "ice")]
     returned: VecDeque<crate::Relay>,
     /// Every branch a proxy forked off a call this engine placed, and the
-    /// call the first description was written for: which of them may take
-    /// the relay that description named ([`MediaEngine::claim_relay`]).
+    /// call the first description was written for: the fork the branch is
+    /// one of.
     #[cfg(feature = "ice")]
     branches: BTreeMap<CallHandle, CallHandle>,
+    /// The allocation a call's first description named, by that call, for
+    /// as long as any branch of its fork is left: what the agent of every
+    /// branch holds beside the others ([`crate::ice::LocalIce::shared_agent`]).
+    #[cfg(feature = "ice")]
+    fork_relays: BTreeMap<CallHandle, sipral_nat::ice::SharedRelay>,
 }
 
 /// The relay a description was handed, for as long as the description can
@@ -526,6 +531,18 @@ impl Handed {
     const fn mapped(&self) -> Option<SocketAddr> {
         None
     }
+}
+
+/// Who a datagram on a socket calls were described on goes to
+/// ([`MediaEngine::branch_for`]).
+#[cfg(feature = "ice")]
+enum Branch {
+    /// A call's session.
+    Session(share::Held),
+    /// An agent still waiting for its session.
+    Waiting,
+    /// Nobody described there has a session or an agent yet.
+    None,
 }
 
 /// What a call's first description left of the relay it was given.
@@ -581,6 +598,8 @@ impl MediaEngine {
             returned: VecDeque::new(),
             #[cfg(feature = "ice")]
             branches: BTreeMap::new(),
+            #[cfg(feature = "ice")]
+            fork_relays: BTreeMap::new(),
         }
     }
 
@@ -908,6 +927,12 @@ impl MediaEngine {
     fn keep(&mut self, call: CallHandle, handed: &mut Handed, now: Instant) {
         match handed.kept.take() {
             Some(Kept::Agent(ice)) => {
+                // the offer that named the relay goes to every branch a proxy
+                // forks it to, and each branch's agent holds the one
+                // allocation beside the others
+                if let Some(relay) = ice.shared_relay() {
+                    self.fork_relays.insert(call, relay);
+                }
                 // `first_ice` draws a relayed agent only for a call that has
                 // drawn no candidates yet, so none is waiting here; were one
                 // ever replaced, its allocation goes back rather than being
@@ -955,152 +980,70 @@ impl MediaEngine {
     #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
     const fn hand_back(&mut self, _handed: Handed) {}
 
-    /// The relay a call's waiting agent holds, for a call that ended before
-    /// its session opened: to `heir`, another branch of its fork that wants
-    /// it ([`MediaEngine::heir`]), or back to its server among the call's
-    /// farewells.
+    /// The agent a call described with a relay was waiting with, for a call
+    /// that ended before its session opened: it lets go of the relay, which
+    /// goes back to its server among the call's farewells unless another
+    /// branch of its fork still holds it (RFC 8445 §8.3.1).
     #[cfg(feature = "ice")]
-    fn let_go(&mut self, call: CallHandle, heir: Option<CallHandle>, now: Instant) {
+    fn let_go(&mut self, call: CallHandle, now: Instant) {
         let Some(mut ice) = self.gathered.remove(&call) else {
             return;
         };
-        match heir {
-            Some(heir) => self.bequeath(call, heir, ice.into_relays(), now),
-            None => {
-                for (destination, payload) in ice.release(now) {
-                    self.farewells.push_back((call, destination, payload));
-                }
-            }
+        for (destination, payload) in ice.release(now) {
+            self.farewells.push_back((call, destination, payload));
         }
     }
 
-    /// The branch of `call`'s fork that is to have the relay `call` holds
-    /// when `call` ends, if one wants it.
+    /// The fork `call` is a branch of: the call its first description was
+    /// written for.
+    #[cfg(feature = "ice")]
+    fn root_of(&self, call: CallHandle) -> CallHandle {
+        self.branches.get(&call).copied().unwrap_or(call)
+    }
+
+    /// An agent for a branch of a forked call, holding the relay the fork's
+    /// offer named beside every other branch's agent — or `None` when the
+    /// fork has no relay left for it.
     ///
     /// One offer went to every branch, with one relayed candidate in it, and
-    /// one allocation stands behind it — one per socket and server, since the
-    /// server knows an allocation by the addresses it runs between: "If the
-    /// client wishes to allocate a second relayed transport address, it must
-    /// create a second allocation using a different 5-tuple" (RFC 8656
-    /// §3.2), and the offer named the one socket. So while two
-    /// branches run at once only one of them holds it
-    /// ([`MediaEngine::claim_relay`]), and when that one ends, the relay is
-    /// worth more to a branch still going than to the server: a branch whose
-    /// session runs a full agent that holds no relay and has found no path —
-    /// the one kept after early media on the one that ends, or the other
-    /// leg of [`ForkPolicy::KeepAll`] — and failing that, a branch still
-    /// ringing, whose session will open with it.
-    ///
-    /// [`ForkPolicy::KeepAll`]: sipral_ua::ForkPolicy::KeepAll
+    /// one allocation stands behind it: the server knows an allocation by
+    /// the addresses it runs between, and "If the client wishes to allocate
+    /// a second relayed transport address, it must create a second
+    /// allocation using a different 5-tuple" (RFC 8656 §3.2), while the
+    /// offer named the one socket. It serves them all the same — "TURN
+    /// supports multiple peers per relayed transport address" (RFC 8656 §2)
+    /// — and each branch runs its own ICE session over it (RFC 8839 §7).
     #[cfg(feature = "ice")]
-    fn heir(&self, call: CallHandle) -> Option<CallHandle> {
-        let root = self.branches.get(&call).copied().or_else(|| {
-            self.branches
-                .values()
-                .any(|root| *root == call)
-                .then_some(call)
-        })?;
-        let family: Vec<CallHandle> = std::iter::once(root)
-            .chain(
-                self.branches
-                    .iter()
-                    .filter(|(_, first)| **first == root)
-                    .map(|(branch, _)| *branch),
-            )
-            .filter(|branch| *branch != call)
-            .filter(|branch| {
-                self.calls.get(branch).is_some_and(|managed| {
-                    managed.address.is_some()
-                        && managed.ice.as_ref().is_some_and(|ice| !ice.is_lite())
-                })
-            })
-            .collect();
-        let running = family.iter().copied().find(|branch| {
-            self.sessions
-                .get(branch)
-                .is_some_and(|held| share::lock(held).session.wants_relay())
-        });
-        running.or_else(|| {
-            family.iter().copied().find(|branch| {
-                !self.sessions.contains_key(branch) && !self.gathered.contains_key(branch)
-            })
-        })
-    }
-
-    /// Hand the relays `call` held to `heir`, another branch of its fork: an
-    /// agent rebuilt around the one the offer named, in place of the one
-    /// `heir`'s session runs, or waiting for its session to open. What
-    /// cannot be handed over goes back to its server among `call`'s
-    /// farewells, from the same socket.
-    ///
-    /// The rebuilt agent is `heir`'s own — the fork's credentials, the
-    /// candidates its offer named — and is told what `heir`'s peer described
-    /// before it runs, so it installs that peer's permissions on the relay
-    /// and checks every pair again, the relayed ones included.
-    #[cfg(feature = "ice")]
-    fn bequeath(
+    fn branch_agent(
         &mut self,
         call: CallHandle,
-        heir: CallHandle,
-        relays: Vec<crate::Relay>,
         now: Instant,
-    ) {
-        let mut relays = relays.into_iter();
-        let mut relay = relays.next();
-        // the fork's offer named one relay; an agent holding another had it
-        // from nowhere this engine put it, and it goes back
-        for extra in relays {
-            self.relay_farewell(call, extra, now);
-        }
-        let taken = self.calls.get(&heir).and_then(|managed| {
-            let local = managed.ice.clone()?;
-            let address = managed.address?;
-            let peer = managed.remote.as_ref().and_then(|remote| {
-                remote
-                    .media
-                    .iter()
-                    .find(|stream| !stream.is_rejected())
-                    .and_then(|stream| sipral_nat::ice::parse_remote(remote, stream))
-            });
-            Some((local, address, peer))
-        });
-        let Some((local, address, peer)) = taken else {
-            if let Some(relay) = relay {
-                self.relay_farewell(call, relay, now);
-            }
-            return;
+    ) -> Result<Option<crate::ice::Ice>, MediaError> {
+        let root = self.root_of(call);
+        let Some(relay) = self.fork_relays.get(&root).cloned() else {
+            return Ok(None);
         };
-        let built = if relay.as_ref().is_some_and(|held| held.local() == address) {
-            local.relayed_agent(address, &mut relay, &mut self.keys, now)
-        } else {
-            Ok(None)
+        let Some((local, address)) = self
+            .calls
+            .get(&call)
+            .and_then(|managed| Some((managed.ice.clone()?, managed.address?)))
+        else {
+            return Ok(None);
         };
-        if let Ok(Some(mut ice)) = built {
-            match self.sessions.get(&heir).map(Arc::clone) {
-                Some(held) => match peer.map(|peer| ice.set_remote(&peer, now)) {
-                    Some(Ok(())) => share::lock(&held).session.inherit_ice(ice, now),
-                    _ => {
-                        for (destination, payload) in ice.release(now) {
-                            self.farewells.push_back((call, destination, payload));
-                        }
-                    }
-                },
-                None => {
-                    self.gathered.insert(heir, ice);
-                }
-            }
-        }
-        if let Some(relay) = relay {
-            self.relay_farewell(call, relay, now);
-        }
+        local.shared_agent(address, &relay, &mut self.keys, now)
     }
 
-    /// Give a relay back to its server among `call`'s farewells.
+    /// Forget a branch of a fork that has ended, and the fork's relay with
+    /// the last of its branches. The allocation itself went back, or not,
+    /// with the agents that held it.
     #[cfg(feature = "ice")]
-    fn relay_farewell(&mut self, call: CallHandle, relay: crate::Relay, now: Instant) {
-        let server = relay.server();
-        for payload in relay.release(now) {
-            self.farewells.push_back((call, server, payload));
+    fn forget_branch(&mut self, call: CallHandle) {
+        let root = self.root_of(call);
+        self.branches.remove(&call);
+        let left =
+            self.calls.contains_key(&root) || self.branches.values().any(|first| *first == root);
+        if !left {
+            self.fork_relays.remove(&root);
         }
     }
 
@@ -1154,6 +1097,31 @@ impl MediaEngine {
                 held.restarted(&mut self.keys, running).map(Some)
             }
             _ => Ok(Some(held)),
+        }
+    }
+
+    /// What this call says about ICE from the answer to a re-offer on: the
+    /// lines [`MediaEngine::reoffer_ice`] wrote into it.
+    ///
+    /// When they are a restart this end has just accepted, the far end
+    /// checks under this end's new credentials as soon as the answer reaches
+    /// it — possibly before the exchange is complete here and the agent has
+    /// taken the restart up — so the agent is told of them, and keeps those
+    /// checks for that moment rather than refusing them.
+    #[cfg(feature = "ice")]
+    fn answered_ice(&mut self, call: CallHandle, ice: Option<crate::ice::LocalIce>) {
+        let Some(managed) = self.calls.get_mut(&call) else {
+            return;
+        };
+        let restarted = match (&managed.ice, &ice) {
+            (Some(before), Some(after)) => before.credentials() != after.credentials(),
+            _ => false,
+        };
+        managed.ice = ice;
+        if restarted && let Some(held) = self.sessions.get(&call) {
+            share::lock(held)
+                .session
+                .expect_ice_restart(managed.ice.as_ref());
         }
     }
 
@@ -1294,7 +1262,12 @@ impl MediaEngine {
         if matches!(plan.rtcp, RtcpPlan::SeparatePort { .. }) {
             return Err(MediaError::IceNeedsRtcpMux);
         }
+        // the agent that waited with the relay, one holding the relay the
+        // fork's offer named beside the other branches', or one built from
+        // what was written down
         let mut ice = if let Some(ice) = held.take() {
+            ice
+        } else if let Some(ice) = self.branch_agent(call, now)? {
             ice
         } else {
             let seed = self.keys.block();
@@ -2230,6 +2203,14 @@ impl MediaEngine {
         offer.origin.version = version;
 
         agent.change_formats(call, &offer.to_bytes(), now)?;
+        // the far end checks under the new credentials from the moment it
+        // has answered, and its first checks can arrive before its answer
+        // does: the agent keeps them for the moment the restart is taken up
+        if let Some(held) = self.sessions.get(&call) {
+            share::lock(held)
+                .session
+                .expect_ice_restart(Some(&restarted));
+        }
         if let Some(managed) = self.calls.get_mut(&call) {
             managed.restarting = Some(restarted);
         }
@@ -2328,7 +2309,7 @@ impl MediaEngine {
     /// the Refresh with a lifetime of zero that deletes the allocation (RFC
     /// 8656 §8), addressed to the TURN server, when the call ends — whether
     /// or not its session ever opened, and unless another branch of its fork
-    /// takes the relay over — or as soon as the call is known not to use it.
+    /// still holds the relay — or as soon as the call is known not to use it.
     #[must_use]
     pub fn poll_farewell(&mut self) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
         self.farewells.pop_front()
@@ -2439,14 +2420,30 @@ impl MediaEngine {
     /// asks of a check that arrives before the agent has the peer's
     /// candidates.
     ///
+    /// It is also how the datagrams on a socket the branches of a forked
+    /// call share find their branch, sessions and all, for as long as the
+    /// branches last: one offer described them all on the one socket, and
+    /// only the datagram says which phone it came from (RFC 8839 §7.3). A
+    /// session claims a check naming its own peer's fragment, an answer to
+    /// its own check, and anything else from an address among its peer's
+    /// candidates, what the TURN server relays from such an address
+    /// included; one running no ICE claims what comes from the address its
+    /// description named.
+    ///
     /// In this order, the first that takes it:
     ///
+    /// - the session of a call described there that claims it; with one
+    ///   session there and no agent waiting beside it, that session takes
+    ///   everything, audio and checks alike, exactly as through the share,
+    ///   and `false` is a datagram the session dropped;
     /// - the agent of a call described there with a relay and still waiting
     ///   for its session, as [`MediaEngine::receive_waiting`] — which answers
-    ///   the far end's checks itself, as well as its TURN server;
-    /// - the session of a call described there that has one: everything goes
-    ///   to it, audio and checks alike, exactly as through the share, and
-    ///   `false` is a datagram the session dropped;
+    ///   the far end's checks itself, as well as its TURN server — for what
+    ///   it claims, for its TURN server's answers when no session holds the
+    ///   same relay, and for a check no session claims: a branch whose phone
+    ///   has not answered yet;
+    /// - the first session of a call described there, for anything nobody
+    ///   claims;
     /// - a call described there using ICE that has no session yet: a Binding
     ///   request whose `USERNAME` names this call's fragment and whose
     ///   `MESSAGE-INTEGRITY` checks out under the password its description
@@ -2468,17 +2465,24 @@ impl MediaEngine {
         now: Instant,
     ) -> bool {
         #[cfg(feature = "ice")]
-        if self.receive_waiting(local, from, data, now) {
-            return true;
-        }
-        let open = self.calls.iter().find_map(|(call, managed)| {
-            (managed.address == Some(local))
-                .then(|| self.sessions.get(call))
-                .flatten()
-        });
+        let open = match self.branch_for(local, from, data) {
+            Branch::Session(held) => Some(held),
+            Branch::Waiting => return self.receive_waiting(local, from, data, now),
+            Branch::None => None,
+        };
+        #[cfg(not(feature = "ice"))]
+        let open = self
+            .calls
+            .iter()
+            .find_map(|(call, managed)| {
+                (managed.address == Some(local))
+                    .then(|| self.sessions.get(call))
+                    .flatten()
+            })
+            .map(Arc::clone);
         if let Some(held) = open {
             let mut datagram = data.to_vec();
-            let arrival = share::lock(held).session.receive(&mut datagram, from, now);
+            let arrival = share::lock(&held).session.receive(&mut datagram, from, now);
             return !matches!(
                 arrival,
                 crate::session::Arrival::Dropped(_) | crate::session::Arrival::ControlRefused
@@ -2492,6 +2496,67 @@ impl MediaEngine {
         {
             false
         }
+    }
+
+    /// Which of the calls described on `local` a datagram from `from` is
+    /// for — a session, or an agent still waiting for its session — when
+    /// there may be more than one: the branches of a forked call, which one
+    /// offer described on one socket.
+    ///
+    /// "The connectivity checks which occur prior to transmission of media
+    /// carry username fragments which in turn are correlated to a specific
+    /// callee. Subsequent media packets that arrive on the same candidate
+    /// pair as the connectivity check will be associated with that same
+    /// callee" (RFC 8839 §7.3). So a session's ICE agent claims a check that
+    /// names its own peer's fragment, an answer to its own check, and
+    /// anything else from an address among its peer's candidates — what the
+    /// TURN server relays from such an address included — and a session
+    /// running no ICE claims what comes from the address its description
+    /// named. The TURN server's answers to the requests of the allocation
+    /// the branches share go to whichever of them holds it. A check no
+    /// session claims is a branch's that has not been answered yet, and goes
+    /// to an agent still waiting for its session, which answers it (RFC 8445
+    /// §7.3); anything else nobody claims goes where it always went, the
+    /// first session described there.
+    #[cfg(feature = "ice")]
+    fn branch_for(&self, local: SocketAddr, from: SocketAddr, data: &[u8]) -> Branch {
+        use sipral_nat::ice::Claim;
+
+        let sessions: Vec<&share::Held> = self
+            .calls
+            .iter()
+            .filter(|(_, managed)| managed.address == Some(local))
+            .filter_map(|(call, _)| self.sessions.get(call))
+            .collect();
+        let waiting: Vec<&crate::ice::Ice> = self
+            .gathered
+            .values()
+            .filter(|ice| ice.local() == local)
+            .collect();
+        let session_claiming = |wanted: Claim| {
+            sessions
+                .iter()
+                .find(|held| share::lock(held).session.claims(from, data) == wanted)
+                .map(|held| Arc::clone(held))
+        };
+        if let Some(held) = session_claiming(Claim::Mine) {
+            return Branch::Session(held);
+        }
+        if waiting
+            .iter()
+            .any(|ice| ice.claims(from, data) == Claim::Mine)
+        {
+            return Branch::Waiting;
+        }
+        if let Some(held) = session_claiming(Claim::Shared) {
+            return Branch::Session(held);
+        }
+        if !waiting.is_empty() {
+            return Branch::Waiting;
+        }
+        sessions
+            .first()
+            .map_or(Branch::None, |held| Branch::Session(Arc::clone(held)))
     }
 
     /// Keep a connectivity check for the call described on `local` that has
@@ -2600,15 +2665,13 @@ impl MediaEngine {
     fn absorb(&mut self, event: &UaEvent, agent: &mut UserAgent, now: Instant) {
         match event {
             UaEvent::IncomingCall { call, request, .. } => self.arrived(*call, request, agent),
-            UaEvent::CallForked { call, sibling } => self.forked(*call, *sibling, agent),
+            UaEvent::CallForked { call, sibling } => self.forked(*call, *sibling, agent, now),
             UaEvent::CallProgress { call, response, .. } => {
                 // a 183 with a description is early media: a network
                 // announcement the caller has to hear before anybody answers
                 self.take_body(*call, Some(response), now);
             }
             UaEvent::CallConfirmed { call, response, .. } => {
-                #[cfg(feature = "ice")]
-                self.claim_relay(*call, agent);
                 self.take_body(*call, response.as_ref(), now);
             }
             UaEvent::SessionChanged {
@@ -2629,10 +2692,13 @@ impl MediaEngine {
                 if let Some(managed) = self.calls.get_mut(call) {
                     managed.pending = None;
                     // and an ICE restart refused is one that never happened
-                    // (RFC 8839 §4.4): the agent goes on as it was
+                    // (RFC 8839 §4.4): the agent goes on as it was, and keeps
+                    // nothing for credentials that will never be in force
                     #[cfg(feature = "ice")]
+                    if managed.restarting.take().is_some()
+                        && let Some(held) = self.sessions.get(call)
                     {
-                        managed.restarting = None;
+                        share::lock(held).session.expect_ice_restart(None);
                     }
                 }
             }
@@ -2714,7 +2780,21 @@ impl MediaEngine {
     /// own to start from — the catalogue and configuration included, since a
     /// fork is the same call reaching two destinations, not two calls that
     /// happen to have started together.
-    fn forked(&mut self, call: CallHandle, sibling: CallHandle, agent: &mut UserAgent) {
+    ///
+    /// The offer named the fork's relay to this branch as much as to the
+    /// first, so the branch takes it up at once, with an agent of its own
+    /// waiting for its session beside the first branch's
+    /// ([`MediaEngine::branch_agent`]): it keeps the allocation from going
+    /// back to the server while this phone rings though every other branch
+    /// may end or settle on a pair that needs no relay (RFC 8445 §8.3.1), and
+    /// its session opens holding it.
+    fn forked(
+        &mut self,
+        call: CallHandle,
+        sibling: CallHandle,
+        agent: &mut UserAgent,
+        now: Instant,
+    ) {
         let Some(parent) = self.calls.get(&call).cloned() else {
             return;
         };
@@ -2729,52 +2809,14 @@ impl MediaEngine {
         );
         #[cfg(feature = "ice")]
         {
-            let first = self.branches.get(&call).copied().unwrap_or(call);
+            let first = self.root_of(call);
             self.branches.insert(sibling, first);
+            if let Ok(Some(ice)) = self.branch_agent(sibling, now) {
+                self.gathered.insert(sibling, ice);
+            }
         }
-    }
-
-    /// A branch a proxy forked off was answered and kept: when the agent
-    /// holding the relay the offer named is still waiting on another branch
-    /// that has no session, it moves to this one.
-    ///
-    /// One offer went to every branch, with one relayed candidate in it, and
-    /// one allocation stands behind that candidate: the server relays for the
-    /// one client that holds it, so only one branch's agent can answer the
-    /// checks the candidate draws. It waits with the branch the call was
-    /// placed on, the one whose early media runs on it, and goes to the first
-    /// other branch that is answered and kept before that one has opened a
-    /// session — two phones ringing and the second picked up, which
-    /// [`ForkPolicy::KeepFirst`] keeps as surely as `KeepAll` does. The user
-    /// agent reports that branch up before it ends the one the call was
-    /// placed on, so the relay has moved by the time that ending would give
-    /// it back. A branch that answers after another was kept never becomes a
-    /// call. One whose session already runs on the relay keeps it until it
-    /// ends, and [`MediaEngine::heir`] names who has it then.
-    ///
-    /// [`ForkPolicy::KeepFirst`]: sipral_ua::ForkPolicy::KeepFirst
-    #[cfg(feature = "ice")]
-    fn claim_relay(&mut self, call: CallHandle, agent: &UserAgent) {
-        let Some(first) = self.branches.get(&call).copied() else {
-            return;
-        };
-        if self.gathered.contains_key(&call)
-            || self.sessions.contains_key(&call)
-            || agent.call_state(call) != Some(CallState::Confirmed)
-        {
-            return;
-        }
-        let holder = std::iter::once(first)
-            .chain(
-                self.branches
-                    .iter()
-                    .filter(|(_, root)| **root == first)
-                    .map(|(branch, _)| *branch),
-            )
-            .find(|branch| *branch != call && self.gathered.contains_key(branch));
-        if let Some(ice) = holder.and_then(|holder| self.gathered.remove(&holder)) {
-            self.gathered.insert(call, ice);
-        }
+        #[cfg(not(feature = "ice"))]
+        let _ = now;
     }
 
     /// A response arrived: if it described a session, that is the far end's
@@ -2984,9 +3026,7 @@ impl MediaEngine {
                     }
                     managed.dtls = dtls.map(|(_, setup)| (Side::Answering, setup));
                     #[cfg(feature = "ice")]
-                    {
-                        managed.ice = ice;
-                    }
+                    self.answered_ice(call, ice);
                     // the descriptions themselves arrive back as
                     // UaEvent::SessionChanged, which is what settles the plan
                 }
@@ -3026,14 +3066,12 @@ impl MediaEngine {
         let _ = address;
         // a call that ends before its session opened — cancelled while it
         // rang, refused, never answered — still holds the relay it was
-        // described with, and the server would hold it for minutes more
-        // — to another branch of its fork that can use it, when there is one
-        #[cfg(feature = "ice")]
-        let heir = self.heir(call);
+        // described with, and the server would hold it for minutes more,
+        // unless another branch of its fork still holds it too
         #[cfg(feature = "ice")]
         {
-            self.let_go(call, heir, now);
-            self.branches.remove(&call);
+            self.let_go(call, now);
+            self.forget_branch(call);
         }
         let Some(held) = self.sessions.remove(&call) else {
             return;
@@ -3074,18 +3112,14 @@ impl MediaEngine {
             }
         }
         // and last, because the goodbyes above may have left through it: the
-        // relay goes to another branch of the fork that can use it, or back
-        // to its server (RFC 8656 §8), rather than holding a port and the
-        // account's quota there until its lifetime runs out
+        // relay goes back to its server (RFC 8656 §8) rather than holding a
+        // port and the account's quota there until its lifetime runs out —
+        // or, while another branch of the fork still holds it, stays theirs,
+        // and stops letting this branch's peer through
         #[cfg(feature = "ice")]
-        let bequest = if heir.is_some() {
-            session.take_relays()
-        } else {
-            for (destination, payload) in session.release_relays(now) {
-                self.farewells.push_back((call, destination, payload));
-            }
-            Vec::new()
-        };
+        for (destination, payload) in session.release_relays(now) {
+            self.farewells.push_back((call, destination, payload));
+        }
         // Best effort, and never fatal: a call that has already ended is
         // not going to un-end because a collector could not be reached.
         // `Ok(false)` is `send_quality_report`'s own silent no-op for an
@@ -3105,11 +3139,6 @@ impl MediaEngine {
         }
         self.events
             .push_back((call, MediaEvent::Ended(session.statistics(now))));
-        drop(slot);
-        #[cfg(feature = "ice")]
-        if let Some(heir) = heir {
-            self.bequeath(call, heir, bequest, now);
-        }
     }
 }
 

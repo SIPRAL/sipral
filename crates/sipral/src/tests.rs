@@ -6315,9 +6315,9 @@ fn a_forked_branch_answered_and_kept_takes_the_relay_its_offer_named() {
     );
     assert!(!sent.contains(&call), "{sent:?}");
 
-    // when it ends, the first branch still ringing inherits it rather than
-    // the server: under KeepAll it may yet answer, and its session will
-    // open on the relay the offer named
+    // when it ends, the relay does not go back to the server: the first
+    // branch, still ringing, holds it too — under KeepAll it may yet
+    // answer, and its session will open on the relay the offer named
     pair.caller
         .agent
         .hangup(sibling, pair.now)
@@ -6358,7 +6358,7 @@ fn as_early_media(response: &[u8]) -> Vec<u8> {
 
 #[cfg(feature = "ice")]
 #[test]
-fn the_branch_kept_after_early_media_on_another_inherits_the_relay_it_held() {
+fn the_branch_kept_after_early_media_on_another_keeps_the_relay_the_other_lets_go_of() {
     use crate::relay::tests::SERVER;
 
     let catalog = CodecCatalog::with_order(&["PCMU"])
@@ -6405,8 +6405,9 @@ fn the_branch_kept_after_early_media_on_another_inherits_the_relay_it_held() {
         relays_given_back(&mut pair.caller).is_empty(),
         "the relay went back with the branch that lost"
     );
-    // the kept branch's agent holds it now: what it checks and asks for on
-    // the relay goes to the TURN server
+    // the kept branch's agent held it beside the other's from its session
+    // on, and holds it alone now: what it checks and asks for on the relay
+    // goes to the TURN server
     let sent = sent_to_the_server_over(&mut pair);
     assert!(
         sent.contains(&sibling),
@@ -6424,7 +6425,7 @@ fn the_branch_kept_after_early_media_on_another_inherits_the_relay_it_held() {
 
 #[cfg(feature = "ice")]
 #[test]
-fn when_the_branch_holding_the_relay_ends_the_other_answered_one_takes_it() {
+fn when_one_answered_branch_ends_the_other_still_holds_the_relay() {
     use crate::relay::tests::SERVER;
 
     let catalog = CodecCatalog::with_order(&["PCMU"])
@@ -6432,8 +6433,8 @@ fn when_the_branch_holding_the_relay_ends_the_other_answered_one_takes_it() {
         .with_ice(crate::IcePolicy::Offered);
     let mut pair = Pair::new(catalog);
     let (call, answered) = rung_with_a_relay(&mut pair, crate::ForkPolicy::KeepAll);
-    // both phones answer, and both are kept: one allocation, one socket, so
-    // the first one's agent holds the relay and the second runs without
+    // both phones answer, and both are kept: one allocation, one socket, and
+    // both branches' agents hold it, each for its own peer (RFC 8839 §7)
     pair.caller.deliver(&answered, callee_sip(), pair.now);
     pair.caller.drain(pair.now, false);
     pair.caller
@@ -6448,14 +6449,22 @@ fn when_the_branch_holding_the_relay_ends_the_other_answered_one_takes_it() {
             _ => None,
         })
         .expect("the 2xx came from a second dialog");
-    assert!(pair.caller.engine.session(call).is_some(), "media");
-    assert!(pair.caller.engine.session(sibling).is_some(), "media");
-    let sent = sent_to_the_server(&mut pair.caller, pair.now);
-    assert!(sent.contains(&call), "{sent:?}");
-    assert!(!sent.contains(&sibling), "{sent:?}");
+    let held = |pair: &mut Pair, branch: CallHandle| {
+        pair.caller
+            .engine
+            .session(branch)
+            .expect("media")
+            .path_candidates()
+            .iter()
+            .filter(|path| path.kind == crate::PathKind::Relay)
+            .map(|path| path.outcome)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(held(&mut pair, call), vec![crate::PathOutcome::Held]);
+    assert_eq!(held(&mut pair, sibling), vec![crate::PathOutcome::Held]);
 
-    // the first leg hangs up: the second, which found no path of its own,
-    // takes the relay over instead of the server getting it back
+    // the first leg hangs up: the second still holds the relay, so the
+    // server does not get it back
     pair.caller.agent.hangup(call, pair.now).expect("the BYE");
     pair.caller.drain(pair.now, false);
     assert!(
@@ -6581,6 +6590,511 @@ fn a_branch_that_answers_after_one_was_kept_leaves_the_relay_where_it_is() {
     pair.caller.drain(pair.now, false);
     let server: SocketAddr = SERVER.parse().expect("an address");
     assert_eq!(relays_given_back(&mut pair.caller), vec![(call, server)]);
+}
+
+/// The TURN server of the forked-call tests: it answers every request with
+/// success (`crate::relay::tests::answer`), keeps the permissions and
+/// channels it is asked for, and relays — which the other tests here never
+/// need, since their two ends reach each other directly.
+#[cfg(feature = "ice")]
+#[derive(Default)]
+struct Relaying {
+    permitted: Vec<std::net::IpAddr>,
+    channels: Vec<(u16, SocketAddr)>,
+}
+
+/// What the TURN server does with a datagram from the client.
+#[cfg(feature = "ice")]
+enum FromClient {
+    /// Answer it.
+    Reply(Vec<u8>),
+    /// Relay its payload to this peer, from the relayed address.
+    Relay(SocketAddr, Vec<u8>),
+    /// Drop it.
+    Nothing,
+}
+
+/// An XOR-PEER-ADDRESS's IPv4 address (RFC 8489 §14.2).
+#[cfg(feature = "ice")]
+fn xor_peer(value: &[u8]) -> Option<SocketAddr> {
+    let port = u16::from_be_bytes([*value.get(2)?, *value.get(3)?]) ^ 0x2112;
+    let ip = value.get(4..8)?;
+    let cookie = [0x21_u8, 0x12, 0xa4, 0x42];
+    let octets: Vec<u8> = ip.iter().zip(cookie).map(|(a, b)| a ^ b).collect();
+    Some(SocketAddr::new(
+        std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]).into(),
+        port,
+    ))
+}
+
+#[cfg(feature = "ice")]
+impl Relaying {
+    fn on_client(&mut self, data: &[u8]) -> FromClient {
+        use sipral_nat::stun::{AttributeType, Class, Message};
+        use sipral_nat::turn::{ChannelData, method};
+
+        if data
+            .first()
+            .is_some_and(|byte| (0x40..=0x4f).contains(byte))
+        {
+            let Ok(frame) = ChannelData::parse_frame(data) else {
+                return FromClient::Nothing;
+            };
+            return self
+                .channels
+                .iter()
+                .find(|(number, _)| *number == frame.channel().get())
+                .map_or(FromClient::Nothing, |(_, peer)| {
+                    FromClient::Relay(*peer, frame.data().to_vec())
+                });
+        }
+        let Ok(message) = Message::parse(data) else {
+            return FromClient::Nothing;
+        };
+        if message.class() == Class::Indication && message.method() == method::SEND {
+            let peer = message
+                .find(AttributeType::XOR_PEER_ADDRESS)
+                .and_then(xor_peer);
+            let payload = message.find(AttributeType::DATA);
+            return match (peer, payload) {
+                (Some(peer), Some(payload)) if self.permitted.contains(&peer.ip()) => {
+                    FromClient::Relay(peer, payload.to_vec())
+                }
+                _ => FromClient::Nothing,
+            };
+        }
+        if message.method() == method::CREATE_PERMISSION || message.method() == method::CHANNEL_BIND
+        {
+            for peer in message
+                .find_all(AttributeType::XOR_PEER_ADDRESS)
+                .filter_map(xor_peer)
+            {
+                if !self.permitted.contains(&peer.ip()) {
+                    self.permitted.push(peer.ip());
+                }
+                if let Some(number) = message.find(AttributeType::CHANNEL_NUMBER) {
+                    let number = u16::from_be_bytes([number[0], number[1]]);
+                    self.channels.retain(|(_, bound)| *bound != peer);
+                    self.channels.push((number, peer));
+                }
+            }
+        }
+        crate::relay::tests::answer(data).map_or(FromClient::Nothing, FromClient::Reply)
+    }
+
+    /// What the server hands the client for a datagram `peer` sent to the
+    /// relayed address, if its permission lets it through.
+    fn for_client(&self, peer: SocketAddr, data: &[u8]) -> Option<Vec<u8>> {
+        use sipral_nat::stun::{AttributeType, Class, MessageBuilder, TransactionId};
+        use sipral_nat::turn::{ChannelData, ChannelNumber, Transport, method};
+
+        if !self.permitted.contains(&peer.ip()) {
+            return None;
+        }
+        if let Some((number, _)) = self.channels.iter().find(|(_, bound)| *bound == peer) {
+            let mut frame = Vec::new();
+            ChannelData::encode(
+                ChannelNumber::new(*number)?,
+                data,
+                Transport::Udp,
+                &mut frame,
+            )
+            .ok()?;
+            return Some(frame);
+        }
+        let mut builder = MessageBuilder::new(
+            Class::Indication,
+            method::DATA,
+            TransactionId::new([0xd1; 12]),
+        );
+        builder
+            .add_xor_address(AttributeType::XOR_PEER_ADDRESS, peer)
+            .ok()?;
+        builder.add(AttributeType::DATA, data).ok()?;
+        Some(builder.finish())
+    }
+}
+
+/// The mobile of the forked-call tests: a second phone the proxy rang, at
+/// an address of its own.
+#[cfg(feature = "ice")]
+fn mobile_sip() -> SocketAddr {
+    "192.0.2.3:5060".parse().expect("an address")
+}
+
+#[cfg(feature = "ice")]
+fn mobile_media() -> SocketAddr {
+    "192.0.2.3:40004".parse().expect("an address")
+}
+
+/// A call placed with a relay and forked by a proxy to a desk phone and a
+/// mobile, both of which answer and are kept ([`ForkPolicy::KeepAll`]).
+/// The caller sits behind a NAT neither phone can cross, so the relay the
+/// one offer named is the only path to either; the phones reach the relay
+/// directly.
+#[cfg(feature = "ice")]
+struct Fork {
+    caller: Stack,
+    phones: [Stack; 2],
+    /// The caller's branch for each phone.
+    branches: [CallHandle; 2],
+    /// Each phone's side of its call.
+    answered: [CallHandle; 2],
+    turn: Relaying,
+    now: Instant,
+}
+
+#[cfg(feature = "ice")]
+impl Fork {
+    fn new() -> Self {
+        let now = Instant::now();
+        let catalog = CodecCatalog::with_order(&["PCMU"])
+            .expect("an order")
+            .with_ice(crate::IcePolicy::Offered);
+        let mut caller = Stack::new(11, caller_sip(), caller_media(), catalog.clone(), now);
+        let mut phones = [
+            Stack::new(22, callee_sip(), callee_media(), catalog.clone(), now),
+            Stack::new(33, mobile_sip(), mobile_media(), catalog, now),
+        ];
+        let account = caller.account("alice", callee_sip());
+        for phone in &mut phones {
+            let _ = phone.account("bob", caller_sip());
+        }
+        let mut relays = relays_with_one_for(&mut caller, caller_media(), now);
+        let relay = relays.take(caller_media()).expect("the relay");
+        let catalog = CodecCatalog::with_order(&["PCMU"])
+            .expect("an order")
+            .with_ice(crate::IcePolicy::Offered);
+        let root = caller
+            .engine
+            .place_with(
+                &mut caller.agent,
+                account,
+                OutgoingCall::new(uri("sip:bob@example.com"))
+                    .to_address(UDP, callee_sip())
+                    .forks(crate::ForkPolicy::KeepAll),
+                caller_media(),
+                CallMedia::new(catalog, MediaConfig::default()).relay(relay),
+                now,
+            )
+            .expect("the INVITE goes");
+        caller.drain(now, false);
+        // the proxy hands the one INVITE to both phones, and both pick up
+        let invite = caller.outbound();
+        let mut answers = Vec::new();
+        for phone in &mut phones {
+            for datagram in &invite {
+                phone.deliver(datagram, caller_sip(), now);
+            }
+            phone.drain(now, true);
+            answers.extend(
+                phone
+                    .outbound()
+                    .into_iter()
+                    .filter(|datagram| datagram.starts_with(b"SIP/2.0 200")),
+            );
+        }
+        for answer in &answers {
+            caller.deliver(answer, callee_sip(), now);
+        }
+        caller.drain(now, false);
+        let sibling = caller
+            .heard
+            .iter()
+            .find_map(|event| match event {
+                Event::Signalling(UaEvent::CallForked { sibling, .. }) => Some(*sibling),
+                _ => None,
+            })
+            .expect("the mobile's 2xx came from a second dialog");
+        for ack in caller.outbound() {
+            let to_mobile = String::from_utf8_lossy(&ack).contains("192.0.2.3");
+            phones[usize::from(to_mobile)].deliver(&ack, caller_sip(), now);
+        }
+        let answered = [
+            phones[0].call().expect("the desk's call"),
+            phones[1].call().expect("the mobile's call"),
+        ];
+        for phone in &mut phones {
+            phone.drain(now, false);
+        }
+        Self {
+            caller,
+            phones,
+            branches: [root, sibling],
+            answered,
+            turn: Relaying::default(),
+            now,
+        }
+    }
+
+    /// Which phone, by the address it sends from.
+    fn phone_at(address: SocketAddr) -> Option<usize> {
+        [callee_media(), mobile_media()]
+            .iter()
+            .position(|media| media.ip() == address.ip())
+    }
+
+    /// Move everything every end has queued one hop, and say whether
+    /// anything moved. What the caller sends anywhere but its TURN server is
+    /// lost at its NAT, and so is what reaches its own addresses from
+    /// outside; everything the TURN server passes on reaches the caller
+    /// through `MediaEngine::receive_early`, which finds the branch.
+    fn step(&mut self) -> bool {
+        let server: SocketAddr = crate::relay::tests::SERVER.parse().expect("an address");
+        let relayed: SocketAddr = crate::relay::tests::RELAYED.parse().expect("an address");
+        let mut moved = false;
+        while let Some((_, destination, payload)) = self.caller.engine.poll_transmit(self.now) {
+            moved = true;
+            if destination != server {
+                continue;
+            }
+            match self.turn.on_client(&payload) {
+                FromClient::Reply(reply) => {
+                    self.caller
+                        .engine
+                        .receive_early(caller_media(), server, &reply, self.now);
+                }
+                FromClient::Relay(peer, mut data) => {
+                    if let Some(phone) = Self::phone_at(peer) {
+                        let answered = self.answered[phone];
+                        if let Some(mut session) = self.phones[phone].engine.session(answered) {
+                            session.receive(&mut data, relayed, self.now);
+                        }
+                    }
+                }
+                FromClient::Nothing => {}
+            }
+        }
+        for phone in 0..2 {
+            let source = [callee_media(), mobile_media()][phone];
+            while let Some((_, destination, payload)) =
+                self.phones[phone].engine.poll_transmit(self.now)
+            {
+                moved = true;
+                if destination == relayed
+                    && let Some(wrapped) = self.turn.for_client(source, &payload)
+                {
+                    self.caller
+                        .engine
+                        .receive_early(caller_media(), server, &wrapped, self.now);
+                }
+            }
+        }
+        moved
+    }
+
+    fn advance(&mut self) {
+        self.now += TICK;
+        self.caller.engine.handle_timeout(self.now);
+        self.caller.drain(self.now, false);
+        for phone in &mut self.phones {
+            phone.engine.handle_timeout(self.now);
+            phone.drain(self.now, false);
+        }
+    }
+
+    /// Run until both branches, and both phones, have a path.
+    fn connect(&mut self) {
+        for _ in 0..500 {
+            while self.step() {}
+            let chosen = self.branches.iter().all(|branch| {
+                self.caller
+                    .engine
+                    .session(*branch)
+                    .is_some_and(|session| session.ice_path().is_some())
+            }) && (0..2).all(|phone| {
+                self.phones[phone]
+                    .engine
+                    .session(self.answered[phone])
+                    .is_some_and(|session| session.ice_path().is_some())
+            });
+            if chosen {
+                return;
+            }
+            self.advance();
+        }
+        panic!("the forked call found no path through the relay");
+    }
+
+    /// One frame of `samples` from `phone` to its branch through the relay,
+    /// and what each of the caller's branches played after it.
+    fn heard_from(&mut self, phone: usize, samples: &[i16]) -> [i64; 2] {
+        let server: SocketAddr = crate::relay::tests::SERVER.parse().expect("an address");
+        let source = [callee_media(), mobile_media()][phone];
+        let sent = self.phones[phone]
+            .engine
+            .session(self.answered[phone])
+            .expect("the phone's media")
+            .capture(samples, self.now)
+            .expect("the frame encodes")
+            .map(|datagram| datagram.payload.to_vec());
+        if let Some(sent) = sent
+            && let Some(wrapped) = self.turn.for_client(source, &sent)
+        {
+            self.caller
+                .engine
+                .receive_early(caller_media(), server, &wrapped, self.now);
+        }
+        let mut loudness_of = [0; 2];
+        for (index, branch) in self.branches.into_iter().enumerate() {
+            if let Some(mut session) = self.caller.engine.session(branch) {
+                let mut played = vec![0_i16; session.frame_samples()];
+                session.playback(&mut played);
+                loudness_of[index] = loudness(&played);
+            }
+        }
+        loudness_of
+    }
+
+    /// Eight frames of a tone from `phone`, and how loud each branch played
+    /// the last of them.
+    fn tone_from(&mut self, phone: usize) -> [i64; 2] {
+        let mut samples = vec![0_i16; 160];
+        let mut phase = 0_u32;
+        let mut heard = [0; 2];
+        for _ in 0..8 {
+            tone(&mut samples, 8_000, &mut phase);
+            heard = self.heard_from(phone, &samples);
+            self.advance();
+            while self.step() {}
+        }
+        heard
+    }
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn two_answered_branches_of_a_fork_both_run_on_the_one_relay_until_one_hangs_up() {
+    use crate::relay::tests::{RELAYED, SERVER};
+
+    let mut fork = Fork::new();
+    let [desk_branch, mobile_branch] = fork.branches;
+    fork.connect();
+    let relayed: SocketAddr = RELAYED.parse().expect("an address");
+    // both branches' agents checked their own phone over the one relay
+    for (branch, phone) in [
+        (desk_branch, callee_media()),
+        (mobile_branch, mobile_media()),
+    ] {
+        let path = fork
+            .caller
+            .engine
+            .session(branch)
+            .expect("the branch's media")
+            .ice_path()
+            .expect("a path");
+        assert_eq!(path, (relayed, phone), "{branch:?}");
+    }
+    // one allocation, with both phones let through
+    for phone in [callee_media(), mobile_media()] {
+        assert!(fork.turn.permitted.contains(&phone.ip()), "{phone}");
+    }
+
+    // media on both, each phone heard on its own branch and on no other
+    let [desk_heard, mobile_heard] = fork.tone_from(0);
+    assert!(desk_heard > 4_000, "the desk's branch heard {desk_heard}");
+    assert!(
+        mobile_heard < 500,
+        "the mobile's branch heard the desk: {mobile_heard}"
+    );
+    let [desk_heard, mobile_heard] = fork.tone_from(1);
+    assert!(
+        mobile_heard > 4_000,
+        "the mobile's branch heard {mobile_heard}"
+    );
+    assert!(
+        desk_heard < 500,
+        "the desk's branch heard the mobile: {desk_heard}"
+    );
+
+    // the desk hangs up: its branch lets go of the relay, which the mobile's
+    // branch still holds, so nothing goes back to the server yet
+    fork.caller
+        .agent
+        .hangup(desk_branch, fork.now)
+        .expect("the BYE");
+    fork.caller.drain(fork.now, false);
+    assert!(
+        relays_given_back(&mut fork.caller).is_empty(),
+        "the relay went back while the mobile's branch runs on it"
+    );
+    let [_, mobile_heard] = fork.tone_from(1);
+    assert!(
+        mobile_heard > 4_000,
+        "the mobile's branch heard {mobile_heard} after"
+    );
+
+    // and the mobile's branch, the last to hold it, gives it back
+    fork.caller
+        .agent
+        .hangup(mobile_branch, fork.now)
+        .expect("the BYE");
+    fork.caller.drain(fork.now, false);
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    assert_eq!(
+        relays_given_back(&mut fork.caller),
+        vec![(mobile_branch, server)]
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_call_behind_a_nat_says_which_paths_it_tried_and_why_each_lost() {
+    use crate::relay::tests::{RELAYED, SERVER};
+    use crate::{CandidateKind, PathKind, PathOutcome};
+
+    let mut fork = Fork::new();
+    fork.connect();
+    let paths = fork
+        .caller
+        .engine
+        .session(fork.branches[0])
+        .expect("the desk's branch")
+        .path_candidates();
+    let relayed: SocketAddr = RELAYED.parse().expect("an address");
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    // the pair the media runs on: from the relayed candidate, to the desk
+    let selected: Vec<_> = paths
+        .iter()
+        .filter(|path| path.kind == PathKind::Pair && path.outcome == PathOutcome::Selected)
+        .collect();
+    assert_eq!(selected.len(), 1, "{paths:#?}");
+    assert_eq!(selected[0].local, Some(relayed));
+    assert_eq!(selected[0].local_kind, CandidateKind::Relayed);
+    assert_eq!(selected[0].remote, callee_media());
+    // the direct pair lost: its checks crossed no NAT, and the relayed pair
+    // was nominated before they could run out (RFC 8445 §8.1.2)
+    let direct = paths
+        .iter()
+        .find(|path| {
+            path.kind == PathKind::Pair
+                && path.local == Some(caller_media())
+                && path.remote == callee_media()
+        })
+        .expect("the host pair was formed");
+    assert_eq!(direct.local_kind, CandidateKind::Host);
+    assert_eq!(
+        direct.outcome,
+        PathOutcome::NominatedElsewhere,
+        "{paths:#?}"
+    );
+    assert!(
+        paths
+            .iter()
+            .all(|path| path.outcome != PathOutcome::Waiting),
+        "a pair was left undecided once the path was chosen: {paths:#?}"
+    );
+    // and the relay, which carries it
+    let relays: Vec<_> = paths
+        .iter()
+        .filter(|path| path.kind == PathKind::Relay)
+        .map(|path| (path.local, path.remote, path.outcome))
+        .collect();
+    assert_eq!(
+        relays,
+        vec![(Some(relayed), server, PathOutcome::Selected)],
+        "{paths:#?}"
+    );
 }
 
 /// Early media from the desk phone a proxy rang, at an address of its own.
@@ -6783,23 +7297,18 @@ fn an_ice_restart_between_two_full_agents_checks_again_on_new_credentials_and_ke
     let offering = ice_value(&restart_offer, "ice-ufrag").expect("a fragment");
     let answering = ice_value(&restart_answer, "ice-ufrag").expect("a fragment");
     let new_pwd = ice_value(&restart_answer, "ice-pwd").expect("a password");
-    assert_ne!(
-        offering, offered_before,
-        "RFC 8839 §4.4.1.1.1: the offer changes both"
-    );
-    assert_ne!(
-        ice_value(&restart_offer, "ice-pwd"),
-        ice_value(&first, "ice-pwd"),
-        "RFC 8839 §4.4.1.1.1: the offer changes both"
-    );
-    assert_ne!(
-        answering, answered_before,
-        "RFC 8839 §4.4.2.1: the answer changes both"
-    );
-    assert_ne!(
-        new_pwd, old_pwd,
-        "RFC 8839 §4.4.2.1: the answer changes both"
-    );
+    // RFC 8839 §4.4.1.1.1 has the offer change both, §4.4.2.1 the answer
+    for (now, before) in [
+        (Some(offering.clone()), Some(offered_before)),
+        (
+            ice_value(&restart_offer, "ice-pwd"),
+            ice_value(&first, "ice-pwd"),
+        ),
+        (Some(answering.clone()), Some(answered_before)),
+        (Some(new_pwd), Some(old_pwd)),
+    ] {
+        assert_ne!(now, before, "a restart kept a credential");
+    }
     for (what, description, before) in [
         ("offer", &restart_offer, &first),
         ("answer", &restart_answer, &answer),
@@ -6857,10 +7366,7 @@ fn an_ice_restart_between_two_full_agents_checks_again_on_new_credentials_and_ke
         "the restart did not reach the caller's agent"
     );
     let heard = tone_after(&mut pair, call, remote);
-    assert!(
-        heard > 4_000,
-        "the tone came back at {heard} during the restart"
-    );
+    assert!(heard > 4_000, "the tone came back at {heard} mid-restart");
 
     // and the checks run to a new selection on both ends
     pair.check_paths(call, remote);
@@ -6875,10 +7381,7 @@ fn an_ice_restart_between_two_full_agents_checks_again_on_new_credentials_and_ke
         "the callee's new session selected nothing"
     );
     let heard = tone_after(&mut pair, call, remote);
-    assert!(
-        heard > 4_000,
-        "the tone came back at {heard} after the restart"
-    );
+    assert!(heard > 4_000, "the tone came back at {heard} after it");
     assert!(failures(&pair).is_empty(), "{:?}", failures(&pair));
 }
 
@@ -6964,6 +7467,107 @@ fn a_restart_asked_of_a_call_without_ice_is_refused_and_sends_nothing() {
     assert!(pair.caller.outbound().is_empty(), "an offer went out");
 }
 
+/// The class of every STUN answer among `sent` to the request `id`.
+#[cfg(feature = "ice")]
+fn answers_to(sent: &[(CallHandle, SocketAddr, Vec<u8>)], id: &[u8]) -> Vec<String> {
+    use sipral_nat::stun::{Class, Message};
+
+    sent.iter()
+        .filter_map(|(_, _, datagram)| Message::parse(datagram).ok())
+        .filter(|message| {
+            message.class() != Class::Request && message.transaction_id().as_bytes() == id
+        })
+        .map(|message| format!("{:?} {:?}", message.class(), message.error_code()))
+        .collect()
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn checks_under_a_restart_this_end_offered_are_answered_once_its_answer_arrives() {
+    use sipral_nat::stun::Message;
+
+    let (mut pair, call, remote) = ice_call();
+    pair.check_paths(call, remote);
+    pair.caller
+        .engine
+        .restart_ice(&mut pair.caller.agent, call, pair.now)
+        .expect("a call running ICE restarts");
+    pair.caller.drain(pair.now, false);
+    // the far end takes the restart and answers it, and its 200 is still on
+    // the way when its first checks under the new credentials arrive
+    for datagram in pair.caller.outbound() {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    let held_back: Vec<Vec<u8>> = pair.callee.outbound();
+    assert!(
+        held_back
+            .iter()
+            .any(|datagram| datagram.starts_with(b"SIP/2.0 200")),
+        "the far end did not answer the restart"
+    );
+    let (restart_answer, restart_offer) =
+        last_described(&pair.callee).expect("the callee answered the restart");
+    let new_names = format!(
+        "{}:{}",
+        ice_value(&restart_offer, "ice-ufrag").expect("a fragment"),
+        ice_value(&restart_answer, "ice-ufrag").expect("a fragment")
+    );
+    pair.advance();
+    pair.callee.engine.handle_timeout(pair.now);
+    let early: Vec<Vec<u8>> = checks_sent(&mut pair.callee, pair.now)
+        .into_iter()
+        .filter(|(_, username)| *username == new_names)
+        .map(|(datagram, _)| datagram)
+        .collect();
+    assert!(
+        !early.is_empty(),
+        "the far end sent no check under the restart"
+    );
+    let ids: Vec<Vec<u8>> = early
+        .iter()
+        .map(|datagram| {
+            Message::parse(datagram)
+                .expect("STUN")
+                .transaction_id()
+                .as_bytes()
+                .to_vec()
+        })
+        .collect();
+    for datagram in &early {
+        let mut datagram = datagram.clone();
+        let _ = pair.caller.engine.session(call).expect("media").receive(
+            &mut datagram,
+            callee_media(),
+            pair.now,
+        );
+    }
+    let before: Vec<_> =
+        std::iter::from_fn(|| pair.caller.engine.poll_transmit(pair.now)).collect();
+    for id in &ids {
+        assert_eq!(
+            answers_to(&before, id),
+            Vec::<String>::new(),
+            "answered before the restart was taken up: an unsigned 401"
+        );
+    }
+
+    // the 200 arrives: the restart is taken up, and the checks that came
+    // first are answered then, well inside the far end's transactions
+    for datagram in held_back {
+        pair.caller.deliver(&datagram, callee_sip(), pair.now);
+    }
+    pair.caller.drain(pair.now, false);
+    let after: Vec<_> = std::iter::from_fn(|| pair.caller.engine.poll_transmit(pair.now)).collect();
+    for id in &ids {
+        assert_eq!(
+            answers_to(&after, id),
+            vec!["Success None".to_owned()],
+            "a check kept for the restart was not answered when it came"
+        );
+    }
+}
+
 /// A caller that will carry no audio on a path ICE did not check, and a
 /// headless agent answering it as a lite endpoint.
 #[cfg(all(feature = "ice", feature = "headless"))]
@@ -7044,6 +7648,61 @@ fn ask_lite(pair: &mut Pair, remote: CallHandle, from: SocketAddr, check: &[u8])
     );
     pair.callee.drain(pair.now, true);
     answer
+}
+
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn a_lite_end_that_restarts_keeps_the_checks_that_beat_the_answer_back() {
+    use sipral_nat::stun::{Class, Integrity, Message};
+
+    let (mut pair, call, remote) = lite_call();
+    pair.check_paths(call, remote);
+    pair.callee
+        .engine
+        .restart_ice(&mut pair.callee.agent, remote, pair.now)
+        .expect("a lite end restarts too");
+    pair.callee.drain(pair.now, false);
+    let offer = pair
+        .callee
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("the re-offer");
+    let described = parse(&wire_message_body(&offer)).expect("a description");
+    let ufrag = ice_value(&described, "ice-ufrag").expect("a fragment");
+    let pwd = ice_value(&described, "ice-pwd").expect("a password");
+    pair.caller.deliver(&offer, callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    let answer = pair.caller.outbound();
+
+    // the full end checks under the new credentials before its 200 is in
+    let mut early = check_to_lite(&ufrag, &pwd, 41, false);
+    let arrival = pair.callee.engine.session(remote).expect("media").receive(
+        &mut early,
+        caller_media(),
+        pair.now,
+    );
+    assert_eq!(arrival, Arrival::Check);
+    assert!(
+        pair.callee.engine.poll_transmit(pair.now).is_none(),
+        "answered before the restart was taken up: an unsigned 401"
+    );
+
+    // the 200 arrives, and the check is answered, signed with the new key
+    for datagram in answer {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, false);
+    let (_, destination, reply) = pair
+        .callee
+        .engine
+        .poll_transmit(pair.now)
+        .expect("the kept check is answered");
+    assert_eq!(destination, caller_media());
+    let reply = Message::parse(&reply).expect("STUN");
+    assert_eq!(reply.class(), Class::Success);
+    assert_eq!(reply.transaction_id().as_bytes(), [41; 12]);
+    assert_eq!(reply.verify_integrity(pwd.as_bytes()), Integrity::Valid);
 }
 
 /// An ICE attribute's value on a description's one stream.

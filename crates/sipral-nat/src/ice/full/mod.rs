@@ -32,7 +32,9 @@
 mod checks;
 mod consent;
 mod gather;
+mod report;
 mod serve;
+mod shared;
 #[cfg(test)]
 mod tests;
 
@@ -45,9 +47,14 @@ use super::agent::Role;
 use super::candidate::{Candidate, CandidateType, ComponentId};
 use super::checklist::{MAX_PRIORITY, PairState};
 use super::sdp::RemoteIce;
+use super::server;
 use crate::demux::{Demux, classify};
 use crate::stun::{BindingClient, Class, LongTermCredentials, Message, TransactionId};
-use crate::turn::{Input, TurnClient};
+use crate::turn::Input;
+
+pub use report::{PairOutcome, PairReport, RelayOutcome, RelayReport};
+use shared::Held;
+pub use shared::SharedRelay;
 
 /// Ta, the pacing timer: "ICE agents SHOULD use a default Ta value, 50 ms"
 /// (RFC 8445 §14.2).
@@ -337,6 +344,19 @@ pub enum Received {
     Foreign,
 }
 
+/// Whose a datagram on a socket several ICE sessions share is
+/// ([`IceAgent::claims`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// This session's.
+    Mine,
+    /// The TURN server's answer to a request of an allocation this session
+    /// holds with others: whichever of them is handed it takes it for all.
+    Shared,
+    /// Not this session's.
+    Not,
+}
+
 /// A selected pair, as the caller needs it: what to put in `c=` and `m=`, and
 /// where the media goes (RFC 8839 §4.2.1.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -558,14 +578,18 @@ struct Gatherer {
     refresh_at: Option<Instant>,
 }
 
-/// A TURN allocation from one base on one server.
+/// A TURN allocation from one base on one server: gathered by this agent,
+/// handed to it whole ([`IceAgent::add_relayed`]), or shared with the agents
+/// of a fork's other branches ([`IceAgent::add_shared_relay`]).
 struct Allocation {
     base: usize,
     server: SocketAddr,
     relay_preference: u16,
     reflexive_preference: u16,
-    client: TurnClient,
+    client: Held,
     progress: Progress,
+    /// How it ended, when the server ended it.
+    fate: Option<RelayOutcome>,
     candidate: Option<usize>,
     /// When to send the next Binding indication to the server, so that the
     /// NAT mapping towards it outlives a long wait for the answer.
@@ -667,6 +691,17 @@ struct Early {
     remote_ufrag: Vec<u8>,
 }
 
+/// A check signed with the credentials of a restart this agent offered and
+/// has not taken up yet ([`IceAgent::expect_restart`]), whole, for the
+/// moment it does.
+struct Awaiting {
+    via: usize,
+    from: SocketAddr,
+    id: TransactionId,
+    data: Vec<u8>,
+    at: Instant,
+}
+
 /// A selected pair from before a restart, still carrying data and still
 /// under consent until the new session selects (RFC 8445 §12.1, RFC 7675
 /// §5.1).
@@ -702,11 +737,17 @@ pub struct IceAgent {
     relays: Vec<Allocation>,
     gathering_until: Option<Instant>,
     pairs: Vec<Pair>,
+    /// Every pair the checklists took in, and how each one ended.
+    tried: Vec<report::Tried>,
     next_pair: u32,
     learned: u32,
     valid: Vec<Valid>,
     checks: Vec<Check>,
     early: Vec<Early>,
+    /// The credentials of a restart offered and not yet taken up.
+    pending: Option<Credentials>,
+    /// Checks signed with them, kept until the restart is taken up.
+    awaiting: Vec<Awaiting>,
     previous: Vec<PreviousRoute>,
     next_paced: Option<Instant>,
     last_paced: Option<Instant>,
@@ -756,11 +797,14 @@ impl IceAgent {
             relays: Vec::new(),
             gathering_until: None,
             pairs: Vec::new(),
+            tried: Vec::new(),
             next_pair: 0,
             learned: 0,
             valid: Vec::new(),
             checks: Vec::new(),
             early: Vec::new(),
+            pending: None,
+            awaiting: Vec::new(),
             previous: Vec::new(),
             next_paced: None,
             last_paced: None,
@@ -938,7 +982,28 @@ impl IceAgent {
             self.form_checklist(index, now);
             self.replay_early(index, now);
         }
+        self.replay_restarted(now);
         Ok(())
+    }
+
+    /// Say which credentials a restart this agent's side has offered carries,
+    /// before the restart is taken up with [`Self::restart`] — or, with
+    /// `None`, that the offer failed and there will be no restart (RFC 8839
+    /// §4.4: "ICE processing continues as if the subsequent offer had never
+    /// been made").
+    ///
+    /// The peer starts its checks under them as soon as it has answered, and
+    /// those can arrive before its answer does. Until the restart is taken
+    /// up, a check signed with them is kept rather than refused, the newest
+    /// thirty-two of them, and answered — and checked back on — when
+    /// [`Self::restart`] takes up the same credentials and the peer's side
+    /// of the exchange arrives through [`Self::set_remote`]. A restart with
+    /// other credentials, or `None` here, drops what was kept.
+    pub fn expect_restart(&mut self, pending: Option<Credentials>) {
+        if self.pending != pending {
+            self.awaiting.clear();
+        }
+        self.pending = pending;
     }
 
     /// Restart ICE on every stream (RFC 8445 §9) with new credentials.
@@ -959,8 +1024,14 @@ impl IceAgent {
             return Err(IceError::SameCredentials);
         }
         self.keep_previous_routes();
+        // the checks kept for these credentials are this session's; any kept
+        // for others were for an offer that is not the one taken up
+        if self.pending.take().as_ref() != Some(&local) {
+            self.awaiting.clear();
+        }
         self.local = local;
         self.pairs.clear();
+        self.tried.clear();
         self.valid.clear();
         self.remotes.clear();
         self.early.clear();
@@ -1026,6 +1097,100 @@ impl IceAgent {
         self.arrive(host, from, data, 0..data.len(), now)
     }
 
+    /// Whose a datagram that arrived on one of the host sockets is, when
+    /// other ICE sessions share the socket — the sessions of a forked call's
+    /// branches, all run under the one offer's credentials and candidates —
+    /// asked before it is handed to any of them, and changing nothing.
+    ///
+    /// "The connectivity checks which occur prior to transmission of media
+    /// carry username fragments which in turn are correlated to a specific
+    /// callee. Subsequent media packets that arrive on the same candidate
+    /// pair as the connectivity check will be associated with that same
+    /// callee" (RFC 8839 §7.3). So a check is this session's when the peer
+    /// fragment in its USERNAME is the one this session holds (or the one
+    /// its selected pair was checked under before a restart), or when it is
+    /// signed for a restart this session offered; an answer is this
+    /// session's when it answers one of its own checks; and anything else is
+    /// this session's when it comes from an address among its peer's
+    /// candidates, or one its checks learned. What a TURN server relays is
+    /// asked the same questions about the packet inside, from the peer it
+    /// came from; the server's answers to an allocation's own requests are
+    /// [`Claim::Shared`], for whichever of its holders is handed them.
+    #[must_use]
+    pub fn claims(&self, local: SocketAddr, from: SocketAddr, data: &[u8]) -> Claim {
+        let Some(base) = self.bases.iter().position(|entry| entry.address == local) else {
+            return Claim::Not;
+        };
+        if let Some(entry) = self
+            .relays
+            .iter()
+            .find(|entry| entry.base == base && entry.server == from)
+        {
+            if entry.progress == Progress::Freed {
+                return Claim::Not;
+            }
+            return match entry.client.relay().peek(data) {
+                Some((peer, range)) => {
+                    let inner = data.get(range).unwrap_or_default();
+                    self.claims_from(peer, inner)
+                }
+                None => Claim::Shared,
+            };
+        }
+        if self
+            .gatherers
+            .iter()
+            .any(|entry| entry.base == base && entry.server == from)
+        {
+            return Claim::Mine;
+        }
+        self.claims_from(from, data)
+    }
+
+    /// [`Self::claims`], for what `peer` sent.
+    fn claims_from(&self, peer: SocketAddr, data: &[u8]) -> Claim {
+        let known = || {
+            self.remotes
+                .iter()
+                .any(|remote| remote.candidate.address == peer)
+                || self.previous.iter().any(|route| route.destination == peer)
+        };
+        if classify(data) != Demux::Stun {
+            return if known() { Claim::Mine } else { Claim::Not };
+        }
+        let Ok(message) = Message::parse(data) else {
+            return Claim::Not;
+        };
+        let mine = match message.class() {
+            Class::Request => {
+                let username = message.username().unwrap_or_default();
+                let current = server::remote_ufrag(username, self.local.ufrag.as_bytes())
+                    .is_some_and(|theirs| {
+                        self.streams.iter().any(|stream| {
+                            stream
+                                .remote
+                                .as_ref()
+                                .is_some_and(|remote| remote.ufrag.as_bytes() == theirs)
+                        })
+                    });
+                let before = self.previous.iter().any(|route| {
+                    server::remote_ufrag(username, route.local.ufrag.as_bytes())
+                        .is_some_and(|theirs| route.remote.ufrag.as_bytes() == theirs)
+                });
+                let offered = self.pending.as_ref().is_some_and(|pending| {
+                    server::remote_ufrag(username, pending.ufrag.as_bytes()).is_some()
+                });
+                current || before || offered
+            }
+            Class::Success | Class::Error => self
+                .checks
+                .iter()
+                .any(|check| check.id == message.transaction_id()),
+            Class::Indication => known(),
+        };
+        if mine { Claim::Mine } else { Claim::Not }
+    }
+
     /// Take the passing of time. Harmless to call early.
     pub fn handle_timeout(&mut self, now: Instant) {
         self.gathering_timeout(now);
@@ -1033,6 +1198,7 @@ impl IceAgent {
         self.consider_nomination(now);
         self.consent_timeout(now);
         self.free_if_due(now);
+        self.replay_restarted(now);
         if self.next_paced.is_some_and(|at| at <= now) {
             self.paced(now);
         }
@@ -1044,11 +1210,18 @@ impl IceAgent {
     /// owes, which is always a transaction id.
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
+        // checks kept for a restart that has since been taken up are due now
+        let restarted = self
+            .awaiting
+            .first()
+            .filter(|_| self.pending.is_none())
+            .map(|kept| kept.at);
         [
             self.gathering_deadline(),
             self.checks_deadline(),
             self.consent_deadline(),
             self.next_paced,
+            restarted,
         ]
         .into_iter()
         .flatten()
@@ -1240,7 +1413,12 @@ impl IceAgent {
         let Some(entry) = self.relays.get_mut(relay) else {
             return Received::Foreign;
         };
+        // an allocation this agent let go of may still be held by the other
+        // branches of a fork: the server's answers still finish what was
+        // asked, a deletion among them, but what it relays is theirs
+        let released = entry.progress == Progress::Freed;
         let delivered = match entry.client.handle_input(data, now) {
+            Input::Data { .. } if released => return Received::Foreign,
             Input::Data { peer, range } => entry.candidate.map(|local| (local, peer, range)),
             Input::Consumed | Input::Unreachable { .. } => None,
             Input::Foreign => return Received::Foreign,
@@ -1282,6 +1460,7 @@ impl IceAgent {
             return Received::Consumed;
         };
         match message.class() {
+            Class::Request if self.awaits_restart(local, from, data, &message, now) => {}
             Class::Request => self.serve(local, from, &message, now),
             Class::Success | Class::Error => self.on_response(local, from, &message, now),
             // a keepalive (RFC 8445 §11): its only job was to cross the NAT

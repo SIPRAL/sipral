@@ -182,6 +182,248 @@ fn the_peer_changing_its_credentials_without_a_restart_is_refused() {
     );
 }
 
+/// A check signed with `local`'s password, naming `username`.
+fn check_named(id: u8, username: &[u8], local: &Credentials) -> Vec<u8> {
+    let mut builder = MessageBuilder::new(
+        Class::Request,
+        Method::BINDING,
+        TransactionId::new([id; 12]),
+    );
+    builder
+        .add(AttributeType::USERNAME, username)
+        .expect("username");
+    builder
+        .add_u32(AttributeType::PRIORITY, PEER_PRIORITY)
+        .expect("priority");
+    builder
+        .add_u64(AttributeType::ICE_CONTROLLED, 20)
+        .expect("role");
+    builder
+        .add_message_integrity(local.pwd().as_bytes())
+        .expect("integrity");
+    builder.add_fingerprint().expect("fingerprint");
+    builder.finish()
+}
+
+/// What an agent sent back to `to` for the transaction `id`.
+fn answers_to(sent: &[Transmit], to: SocketAddr, id: u8) -> Vec<Class> {
+    sent.iter()
+        .filter(|transmit| transmit.destination == to)
+        .filter_map(|transmit| Message::parse(&transmit.data).ok())
+        .filter(|message| {
+            message.class() != Class::Request
+                && message.transaction_id() == TransactionId::new([id; 12])
+        })
+        .map(|message| message.class())
+        .collect()
+}
+
+#[test]
+fn a_check_for_another_branch_of_the_fork_is_neither_answered_nor_claimed() {
+    // two phones answered one forked offer, so two sessions hold this end's
+    // credentials; this one's peer is B, and C's checks are the other one's
+    let (mut agent, stream, mut ids, now) = gathered(Role::Controlling, config(false, false));
+    agent
+        .set_remote(
+            stream,
+            &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    ids.feed(&mut agent);
+    agent.handle_timeout(now);
+    drain(&mut agent);
+    let sibling = address("198.51.100.30:7000");
+    let theirs = check_named(21, b"Afrag:Cfrag", &credentials("A"));
+    assert_eq!(
+        agent.claims(address(LOCAL), sibling, &theirs),
+        crate::ice::Claim::Not
+    );
+    agent.handle_datagram(address(LOCAL), sibling, &theirs, now);
+    assert!(
+        answers_to(&drain(&mut agent), sibling, 21).is_empty(),
+        "the other branch's check was answered here"
+    );
+
+    // this session's own peer is claimed, answered, and checked back
+    let ours = check_named(22, b"Afrag:Bfrag", &credentials("A"));
+    assert_eq!(
+        agent.claims(address(LOCAL), address(PEER), &ours),
+        crate::ice::Claim::Mine
+    );
+    agent.handle_datagram(address(LOCAL), address(PEER), &ours, now);
+    assert_eq!(
+        answers_to(&drain(&mut agent), address(PEER), 22),
+        vec![Class::Success]
+    );
+    // and so is media from an address among its peer's candidates, which
+    // the other branch's peer is not
+    assert_eq!(
+        agent.claims(address(LOCAL), address(PEER), b"\x80\x00media"),
+        crate::ice::Claim::Mine
+    );
+    assert_eq!(
+        agent.claims(address(LOCAL), sibling, b"\x80\x00media"),
+        crate::ice::Claim::Not
+    );
+}
+
+#[test]
+fn checks_signed_for_a_restart_this_end_offered_wait_for_it_rather_than_being_refused() {
+    let (mut agent, stream, mut ids, now) = gathered(Role::Controlling, config(false, false));
+    agent
+        .set_remote(
+            stream,
+            &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    ids.feed(&mut agent);
+    agent.handle_timeout(now);
+    drain(&mut agent);
+
+    // this end offered a restart; the peer answered and started checking
+    // under the new credentials before its answer got here
+    let offered = credentials("Anew");
+    agent.expect_restart(Some(offered.clone()));
+    let early = check_named(31, b"Anewfrag:Dfrag", &offered);
+    assert_eq!(
+        agent.claims(address(LOCAL), address(PEER), &early),
+        crate::ice::Claim::Mine
+    );
+    agent.handle_datagram(address(LOCAL), address(PEER), &early, now);
+    assert!(
+        answers_to(&drain(&mut agent), address(PEER), 31).is_empty(),
+        "answered under the credentials still in force: an unsigned 401"
+    );
+
+    // the answer arrives: the restart is taken up and the check answered,
+    // signed with the password it was sent under, and checked back
+    let later = now + Duration::from_millis(40);
+    agent.restart(offered.clone()).expect("a restart");
+    ids.feed(&mut agent);
+    let mut answer = from_peer(vec![host(PEER, PEER_PRIORITY, "1")]);
+    answer.ufrag = "Dfrag".to_owned();
+    answer.pwd = credentials("D").pwd().to_owned();
+    agent
+        .set_remote(stream, &answer, later)
+        .expect("the answer");
+    let sent = drain(&mut agent);
+    assert_eq!(answers_to(&sent, address(PEER), 31), vec![Class::Success]);
+    let reply = sent
+        .iter()
+        .filter_map(|transmit| Message::parse(&transmit.data).ok())
+        .find(|message| message.transaction_id() == TransactionId::new([31; 12]))
+        .expect("the answer");
+    assert_eq!(
+        reply.verify_integrity(offered.pwd().as_bytes()),
+        Integrity::Valid
+    );
+
+    // a restart offered and refused keeps nothing for it
+    agent.expect_restart(Some(credentials("Athird")));
+    let stray = check_named(32, b"Athirdfrag:Efrag", &credentials("Athird"));
+    agent.handle_datagram(address(LOCAL), address(PEER), &stray, later);
+    agent.expect_restart(None);
+    agent.handle_timeout(later);
+    assert!(answers_to(&drain(&mut agent), address(PEER), 32).is_empty());
+}
+
+#[test]
+fn every_pair_tried_says_what_became_of_it() {
+    use crate::ice::PairOutcome;
+
+    // four candidates from the peer, best first: one that never answers,
+    // one that refuses, the one that is chosen, and one that works but is
+    // worth less. The nomination waits long enough for the silent one's
+    // check to run out (RFC 8489 §6.2.1's 39.5 seconds)
+    let patient = IceConfig {
+        nomination_wait: Duration::from_secs(60),
+        ..config(false, false)
+    };
+    let (mut agent, stream, mut ids, mut now) = gathered(Role::Controlling, patient);
+    let silent = address("198.51.100.40:6000");
+    let refusing = address("198.51.100.41:6000");
+    let worse = address("198.51.100.42:6000");
+    agent
+        .set_remote(
+            stream,
+            &from_peer(vec![
+                host("198.51.100.40:6000", PEER_PRIORITY + 30, "1"),
+                host("198.51.100.41:6000", PEER_PRIORITY + 20, "2"),
+                host(PEER, PEER_PRIORITY, "3"),
+                host("198.51.100.42:6000", PEER_PRIORITY - 10, "4"),
+            ]),
+            now,
+        )
+        .expect("the answer");
+    assert!(
+        agent
+            .pair_report(stream)
+            .iter()
+            .all(|pair| pair.outcome == PairOutcome::Waiting)
+    );
+    for _ in 0..1_000 {
+        ids.feed(&mut agent);
+        agent.handle_timeout(now);
+        for transmit in drain(&mut agent) {
+            let Ok(request) = Message::parse(&transmit.data) else {
+                continue;
+            };
+            if request.class() != Class::Request {
+                continue;
+            }
+            let id = request.transaction_id();
+            let reply = if transmit.destination == refusing {
+                response(id, Class::Error, |builder| {
+                    builder
+                        .add_error_code(error_code::BAD_REQUEST, b"no")
+                        .expect("code");
+                })
+            } else if transmit.destination == silent {
+                continue;
+            } else {
+                response(id, Class::Success, |builder| {
+                    builder
+                        .add_xor_address(AttributeType::XOR_MAPPED_ADDRESS, address(LOCAL))
+                        .expect("mapped");
+                })
+            };
+            agent.handle_datagram(address(LOCAL), transmit.destination, &reply, now);
+        }
+        if agent.selected_pair(stream, ComponentId::RTP).is_some() {
+            break;
+        }
+        now += Duration::from_millis(50);
+    }
+    let report = agent.pair_report(stream);
+    let outcome = |remote: SocketAddr| {
+        report
+            .iter()
+            .find(|pair| pair.remote == remote)
+            .map(|pair| pair.outcome)
+    };
+    assert_eq!(outcome(silent), Some(PairOutcome::TimedOut), "{report:?}");
+    assert_eq!(
+        outcome(refusing),
+        Some(PairOutcome::Refused {
+            code: error_code::BAD_REQUEST
+        }),
+        "{report:?}"
+    );
+    assert_eq!(
+        outcome(address(PEER)),
+        Some(PairOutcome::Selected),
+        "{report:?}"
+    );
+    assert_eq!(outcome(worse), Some(PairOutcome::Outranked), "{report:?}");
+    assert!(report.iter().all(|pair| pair.local == address(LOCAL)
+        && pair.local_kind == CandidateType::Host
+        && pair.remote_kind == CandidateType::Host));
+    // no relay here, and so none to report
+    assert!(agent.relay_report().is_empty());
+}
+
 #[test]
 fn loopback_unspecified_and_deprecated_addresses_are_not_host_candidates() {
     let mut agent =
@@ -990,7 +1232,9 @@ fn a_nomination_the_agent_will_not_act_on_is_refused_on_every_path() {
     );
 
     // signed with this agent's password, but naming a peer fragment this
-    // stream does not hold, so there is no password to check back with
+    // stream does not hold: not a request from this session's peer at all,
+    // but another session's that shares the credentials — a fork's other
+    // branch (RFC 8839 §7) — and left for it, unanswered
     let (mut agent, stream, mut ids, now) = gathered(Role::Controlled, config(false, false));
     agent
         .set_remote(
@@ -1002,13 +1246,19 @@ fn a_nomination_the_agent_will_not_act_on_is_refused_on_every_path() {
     ids.feed(&mut agent);
     agent.handle_timeout(now);
     drain(&mut agent);
-    assert_refused(
-        &mut agent,
+    agent.handle_datagram(
         address(LOCAL),
         address(PEER),
         &nomination_from_peer(5, b"Afrag:Cfrag"),
         now,
-        "another peer's fragment",
+    );
+    assert!(
+        drain(&mut agent)
+            .iter()
+            .all(|transmit| transmit.destination != address(PEER)
+                || Message::parse(&transmit.data)
+                    .is_ok_and(|message| message.class() == Class::Request)),
+        "another session's nomination was answered"
     );
 
     // a component the stream no longer has: the peer offered component 1

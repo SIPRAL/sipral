@@ -36,9 +36,10 @@ pub use candidate::{
 };
 pub use checklist::{PairState, pair_priority};
 pub use full::{
-    CONSENT_EXPIRY, Credentials, DEFAULT_CONSENT_INTERVAL, DEFAULT_KEEPALIVE, DEFAULT_MAX_PAIRS,
-    DEFAULT_TA, IceAgent, IceConfig, IceError, IceEvent, IceState, REFUSAL_CEILING, Received,
-    Route, SelectedPair, SendError, StreamId, TRANSMIT_CEILING, Transmit, TurnServer,
+    CONSENT_EXPIRY, Claim, Credentials, DEFAULT_CONSENT_INTERVAL, DEFAULT_KEEPALIVE,
+    DEFAULT_MAX_PAIRS, DEFAULT_TA, IceAgent, IceConfig, IceError, IceEvent, IceState, PairOutcome,
+    PairReport, REFUSAL_CEILING, Received, RelayOutcome, RelayReport, Route, SelectedPair,
+    SendError, SharedRelay, StreamId, TRANSMIT_CEILING, Transmit, TurnServer,
 };
 pub use sdp::{
     RemoteIce, ice_mismatch, parse_remote, write_media, write_pacing, write_session, write_stream,

@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use super::checks::Paced;
 use super::{
-    Allocation, Gatherer, IceAgent, IceError, IceEvent, LocalCandidate, Phase, Progress, StreamId,
-    Transmit,
+    Allocation, Gatherer, IceAgent, IceError, IceEvent, LocalCandidate, PairOutcome, Phase,
+    Progress, RelayOutcome, SharedRelay, StreamId, Transmit,
 };
 use crate::ice::candidate::{
     Candidate, CandidateType, ComponentId, Foundation, candidate_priority,
@@ -120,12 +120,17 @@ impl IceAgent {
                     server: server.address,
                     relay_preference: below(top, 1 + stun.len() + offset),
                     reflexive_preference: below(top, 1 + stun.len() + turn.len() + offset),
-                    client: TurnClient::new(TurnConfig {
-                        credentials: server.credentials.clone(),
-                        rto,
-                        ..TurnConfig::default()
-                    }),
+                    client: SharedRelay::new(
+                        server.address,
+                        TurnClient::new(TurnConfig {
+                            credentials: server.credentials.clone(),
+                            rto,
+                            ..TurnConfig::default()
+                        }),
+                    )
+                    .hold(),
                     progress: Progress::Pending,
+                    fate: None,
                     candidate: None,
                     refresh_at: None,
                 });
@@ -356,7 +361,47 @@ impl IceAgent {
         component: ComponentId,
         base: SocketAddr,
         server: SocketAddr,
-        mut client: TurnClient,
+        client: TurnClient,
+        now: Instant,
+    ) -> Result<(), IceError> {
+        self.add_shared_relay(
+            stream,
+            component,
+            base,
+            &SharedRelay::new(server, client),
+            now,
+        )
+    }
+
+    /// A relayed candidate on an allocation other ICE sessions hold too: the
+    /// agents of the other branches of a forked call, which were all offered
+    /// the one relayed candidate (RFC 8839 §7, RFC 8656 §2).
+    ///
+    /// The candidate is the one [`IceAgent::add_relayed`] makes of the same
+    /// allocation, with the same priority and foundation, so an agent built
+    /// for each branch from the same host addresses advertises what the
+    /// offer did. From here on this agent is one of the allocation's holders:
+    /// it asks the server to let its own peer's candidates through and binds
+    /// a channel for its own selected pair, hears what the server relays from
+    /// its own peer, and keeps the allocation and the NAT binding under it
+    /// alive as a holder of its own would. Letting go of it — ICE concluding
+    /// on a pair that does not use it (RFC 8445 §8.3.1), or
+    /// [`IceAgent::release_relays`] — gives it back to the server only when
+    /// no other holder is left: "Once all ICE sessions have ceased using a
+    /// given local candidate [...] the agent can free that candidate". Until
+    /// then it only stops keeping the peers no other holder asked for let
+    /// through.
+    ///
+    /// # Errors
+    ///
+    /// As [`IceAgent::add_relayed`], and [`IceError::NotAllocated`] for an
+    /// allocation its last holder has already given back.
+    pub fn add_shared_relay(
+        &mut self,
+        stream: StreamId,
+        component: ComponentId,
+        base: SocketAddr,
+        relay: &SharedRelay,
         now: Instant,
     ) -> Result<(), IceError> {
         let entry = self.streams.get(stream.0).ok_or(IceError::UnknownStream)?;
@@ -376,24 +421,18 @@ impl IceAgent {
         if self.relays.len() >= super::MAX_SERVERS {
             return Err(IceError::TooMany);
         }
-        let relayed = client
-            .relayed_addresses()
-            .iter()
-            .find(|relayed| relayed.is_ipv4() == base.is_ipv4())
-            .copied()
-            .filter(|_| client.is_allocated())
-            .ok_or(IceError::NotAllocated)?;
-        let mapped = client.mapped_address();
-        while client.poll_event().is_some() {}
+        let relayed = relay.relayed(base).ok_or(IceError::NotAllocated)?;
+        let mapped = relay.mapped();
         let top = self.bases.get(index).map_or(0, |held| held.top);
         let servers = 1 + self.config.stun_servers.len() + 2 * self.config.turn_servers.len();
         self.relays.push(Allocation {
             base: index,
-            server,
+            server: relay.server(),
             relay_preference: below(top, servers),
             reflexive_preference: below(top, servers + 1),
-            client,
+            client: relay.hold(),
             progress: Progress::Done,
+            fate: None,
             candidate: None,
             refresh_at: now.checked_add(self.config.keepalive),
         });
@@ -403,8 +442,21 @@ impl IceAgent {
         Ok(())
     }
 
+    /// The allocations this agent holds and has not let go of, as handles
+    /// another agent can take up with [`IceAgent::add_shared_relay`].
+    #[must_use]
+    pub fn shared_relays(&self) -> Vec<SharedRelay> {
+        self.relays
+            .iter()
+            .filter(|entry| entry.progress != Progress::Freed && entry.client.is_allocated())
+            .map(|entry| entry.client.relay().clone())
+            .collect()
+    }
+
     /// Give every allocation back to its server: a Refresh with a lifetime of
-    /// zero (RFC 8656 §8), for the call that has ended.
+    /// zero (RFC 8656 §8), for the call that has ended — or, for one other
+    /// ICE sessions still hold ([`IceAgent::add_shared_relay`]), let go of it
+    /// and leave it to them.
     ///
     /// A relay left to lapse holds a port and the account's quota on the
     /// server for up to ten minutes after the call that used it is gone, and
@@ -440,13 +492,18 @@ impl IceAgent {
     /// its server, for the next call on the same socket. Whatever the agent
     /// had queued for the server is dropped with it; the client's own
     /// refresh timer is untouched, and keeps the allocation from lapsing once
-    /// its new owner drives it.
+    /// its new owner drives it. An allocation other agents still hold stays
+    /// theirs, and is not among what comes back.
     #[must_use]
     pub fn into_relays(self) -> Vec<(SocketAddr, TurnClient)> {
         self.relays
             .into_iter()
             .filter(|entry| entry.progress != Progress::Freed && entry.client.is_allocated())
-            .map(|entry| (entry.server, entry.client))
+            .filter_map(|entry| {
+                let relay = entry.client.relay().clone();
+                drop(entry);
+                relay.into_parts().ok()
+            })
             .collect()
     }
 
@@ -539,7 +596,9 @@ impl IceAgent {
             } => self.allocated(relay, relayed, mapped, now),
             Event::Closed(error) => self.relay_closed(relay, error, now),
             Event::PermissionInstalled { .. } => self.wake_pacer(now),
-            Event::PermissionFailed { peer, .. } => self.permission_failed(relay, peer, now),
+            Event::PermissionFailed { peer, reason } => {
+                self.permission_failed(relay, peer, reason, now);
+            }
             Event::Deleted
             | Event::AlsoAllocated { .. }
             | Event::FamilyRefused { .. }
@@ -640,6 +699,11 @@ impl IceAgent {
         };
         let was_running = entry.progress == Progress::Running;
         if entry.progress != Progress::Freed {
+            entry.fate = Some(if was_running {
+                RelayOutcome::Refused(error)
+            } else {
+                RelayOutcome::Lost(error)
+            });
             entry.progress = Progress::Done;
         }
         entry.refresh_at = None;
@@ -669,11 +733,12 @@ impl IceAgent {
 
     /// The relay would not let a peer's address through, so no check from
     /// the relayed candidate to that address can ever be sent.
-    fn permission_failed(&mut self, relay: usize, peer: IpAddr, now: Instant) {
+    fn permission_failed(&mut self, relay: usize, peer: IpAddr, reason: TurnError, now: Instant) {
         let Some(local) = self.relays.get(relay).and_then(|entry| entry.candidate) else {
             return;
         };
         let remotes = &self.remotes;
+        let mut refused = Vec::new();
         for pair in &mut self.pairs {
             if pair.local == local
                 && matches!(pair.state, PairState::Frozen | PairState::Waiting)
@@ -682,7 +747,11 @@ impl IceAgent {
                     .is_some_and(|remote| remote.candidate.address.ip() == peer)
             {
                 pair.state = PairState::Failed;
+                refused.push(pair.id);
             }
+        }
+        for id in refused {
+            self.settle_pair(id, PairOutcome::RelayRefused(reason));
         }
         for stream in 0..self.streams.len() {
             self.update_checklist(stream, now);

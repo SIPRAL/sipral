@@ -374,7 +374,7 @@ refreshed before they lapse, and a Binding indication towards the server every
 Tr so that the NAT binding under all of it survives. It is given back — a
 Refresh with a lifetime of zero (RFC 8656 §8) — three seconds after ICE
 concludes on a pair that does not use it (RFC 8445 §8.3.1), when the call
-ends — unless another branch of a forked call can use it, below — and at once
+ends — unless another branch of a forked call still holds it, below — and at once
 when the call cannot use it: a peer that answered without
 ICE, a catalogue that offers none, the lite role. A relay left to lapse holds a
 port and the account's quota on the server for up to ten minutes, and a user
@@ -429,39 +429,58 @@ never arrives loses the relay, and the call goes on with the candidates that
 need none.
 
 A forked INVITE sent one offer, with one relayed candidate in it, to every
-branch, and one allocation stands behind that candidate: the server relays for
-the one client that holds it, so only one branch's agent can answer the checks
-it draws. Nor can a second one stand beside it for another branch: the server
-knows an allocation by the addresses it runs between, and "If the client
-wishes to allocate a second relayed transport address, it must create a second
-allocation using a different 5-tuple" (RFC 8656 §3.2) — while the offer named
-one socket for every branch. The agent waits with the branch the call was
-placed on, and moves to the first other branch that is answered and kept while
-that first branch has no session yet: two phones ringing, and the second picked
-up — which `ForkPolicy::KeepFirst` keeps, since it answered first. The user
-agent reports the branch kept before it ends the one the call was placed on
-with `ForkLost`, so the relay has moved before that ending could give it back,
-and a branch that answers after one was kept is hung up without ever becoming a
-call, so it never takes the relay either. A branch whose session opens while
-another already runs the relay — both answered under `ForkPolicy::KeepAll`, or
-early media on the first before the second answers — runs an agent rebuilt
-from the description, without the relay, and its checks towards the relayed
-candidate go unanswered for as long as the other one holds it; ICE finds the
-paths that need none.
+branch, and one allocation stands behind that candidate. It cannot be one per
+branch: the server knows an allocation by the addresses it runs between, and
+"If the client wishes to allocate a second relayed transport address, it must
+create a second allocation using a different 5-tuple" (RFC 8656 §3.2) — while
+the offer named one socket for every branch. It does not have to be: "Since
+SIP supports forking, TURN supports multiple peers per relayed transport
+address" (RFC 8656 §2), and RFC 8839 §7 runs each answer as "an independent
+offer/answer exchange, with its own set of local candidates, pairs,
+checklists, states". So every branch runs an ICE agent of its own — the one
+offer's credentials and candidates, and a checklist formed from its own
+phone's answer — and every one of them holds the one allocation
+(`sipral_nat::ice::SharedRelay`, `IceAgent::add_shared_relay`). Each asks the
+server to let its own phone's candidates through, binds a channel for its own
+selected pair, and keeps the allocation and the NAT binding under it alive;
+what the client reports — a permission installed or refused, the allocation
+lost — reaches every agent that holds it, whichever of them was handed the
+server's answer. A branch takes the relay up the moment the user agent reports
+it (`UaEvent::CallForked`), with an agent waiting for its session as the
+branch the call was placed on waits for its own, so a phone that rings on is
+never left without it however the other branches go.
 
-The relay is the fork's rather than the branch's, so the branch that holds it
-does not give it back to the server while another branch can use it. When it
-ends — the one that played early media losing to the one that answered, one
-leg of `KeepAll` hanging up, or the answered leg ending while another still
-rings — the relay goes to the branch whose agent holds none and has found no
-path of its own: that agent is rebuilt around it, with the same credentials
-and candidates the offer named, and told its peer's description again, so it
-asks the server for that peer's permissions and checks every pair again, the
-relayed ones included. What it had under way without the relay goes with the
-agent it replaces. Failing such a branch, one still ringing keeps it waiting
-for its session, refreshed as the branch the call was placed on kept it. Only
-when no branch is left that can use it does it go back with a Refresh of
-lifetime zero. A branch that has already found a path keeps the agent it has.
+The branches share one socket, so what arrives on it has to find its branch
+before any agent reads it — "The connectivity checks which occur prior to
+transmission of media carry username fragments which in turn are correlated
+to a specific callee. Subsequent media packets that arrive on the same
+candidate pair as the connectivity check will be associated with that same
+callee" (RFC 8839 §7.3). `IceAgent::claims` answers for each agent without
+changing anything: a check is a session's when the peer fragment after the
+colon of its USERNAME is the one that session holds (RFC 8445 §7.3.1.4: the
+agent "can check the candidates received from its peer (there may be more than
+one in cases of forking) and find this username fragment"), an answer is the
+session's whose check it answers, and anything else is the session's whose
+peer has that address among its candidates, or revealed it in a check. What
+the TURN server relays is asked the same about the packet inside, from the
+peer it names (`TurnClient::peek`), and the server's answers to the
+allocation's own requests go to whichever agent holds it.
+`MediaEngine::receive_early` — `sipral_stack_receive_stun` over the C ABI —
+hands each datagram on a socket several branches share to the one that claims
+it, a check nobody claims to a branch still waiting for its session (a phone
+whose answer has not arrived yet), and anything else to the first branch
+described there, as before. An agent handed a check that names another
+session's peer fragment anyway leaves it unanswered: answering it would tell
+that phone a pair works whose triggered check nobody sends.
+
+A branch that ends, or whose agent concludes on a pair that does not use the
+relay, lets go of it: the permissions only its own phone needed are no longer
+renewed (RFC 8656 §2.3 has no way to take one back, so they lapse at the
+server in five minutes, a channel in ten), and the allocation stays with the
+branches still holding it. The last to let go gives it back with a Refresh of
+lifetime zero — "Once all ICE sessions have ceased using a given local
+candidate (a candidate may be used by multiple ICE sessions, e.g., in forking
+scenarios), the agent can free that candidate" (RFC 8445 §8.3.1).
 
 Not done yet: TURN over TCP or TLS to the server, for the network that lets
 nothing out but 443. The client has the framing; the agent's datagram model
@@ -803,6 +822,18 @@ What it does, in the order a session meets it:
   network change the application sees first. The C ABI has no entry point
   for it yet: a restart from this end is the Rust API's.
 
+  The far end checks under its new credentials as soon as it has answered,
+  and those checks can reach this end before the answer does — every time,
+  through a proxy that is slower than the media path. Until the restart is
+  taken up they name credentials this end has offered but is not using, and
+  answered then they are an unsigned 401 (RFC 8489 §9.1.3) that the far end
+  discards and retransmits after, which costs the new session up to one RTO
+  before it has a pair. So once this end has offered or answered a restart,
+  its agent keeps a check signed with the new credentials — the newest
+  thirty-two, full role or lite — and answers it, and checks back on it, the
+  moment the restart is taken up; a restart refused drops what was kept, and
+  so does waiting longer than the far end's transaction, 39.5 seconds.
+
 Not done yet: TURN over TCP or TLS (the TURN client has the framing; the
 agent's datagram model does not carry it), and
 `a=remote-candidates` (RFC 8839 §4.4.1.2.2). The last is not written because
@@ -819,8 +850,11 @@ It is proven against itself and against the lite agent over a simulated
 network: endpoint-independent mapping with address-dependent filtering, a
 symmetric NAT on both sides that leaves only the relay, a symmetric NAT facing
 a filtering one that meets on a peer-reflexive candidate, role conflicts from
-both starting roles, a restart, consent lost and revoked, and a path losing 30%
-of its packets. `fuzz/fuzz_targets/ice.rs` drives the same agent from the other
+both starting roles, a restart, consent lost and revoked, a path losing 30%
+of its packets, and a forked call: two agents on one socket behind a
+symmetric NAT, holding one allocation, each finding a relayed path to its own
+phone and carrying its own media, the branch that ends letting go of the
+relay without taking it from the other, and the last giving it back. `fuzz/fuzz_targets/ice.rs` drives the same agent from the other
 side — arbitrary datagrams from arbitrary sources on the media port, which is
 what this port is open to before any key exists — seeded with checks signed the
 way the agent will check them, because an unsigned datagram dies in the
@@ -829,7 +863,13 @@ proven between two stacks in process (`crates/sipral/src/tests.rs`): one
 restarts, both halves of the exchange carry new credentials and the same
 candidates, both agents check again under them while the tone goes on
 crossing the old pair, and both select again; a restart the far end refuses
-leaves the pair and the credentials as they were.
+leaves the pair and the credentials as they were; and the far end's checks
+under a restart this end offered, delivered before its answer, are answered
+when the answer comes rather than refused. A forked call is proven there the
+same way: two phones answer the one offer, the caller reaches either only
+through its relay, both branches find their paths over it and each hears its
+own phone and not the other, and the desk hanging up leaves the relay with
+the mobile's branch until that one hangs up too.
 
 And it is proven in the lab (`scripts/lab.sh ice`), between two stacks each
 behind a NAT of its own: the interop harness as caller behind `interop/nat`'s

@@ -13,7 +13,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use crate::ice::{ComponentId, IceAgent, IceEvent, LiteAgent, Received, StreamId};
+use crate::ice::{Claim, ComponentId, IceAgent, IceEvent, LiteAgent, Received, StreamId};
 use crate::stun::address::decode_xor;
 use crate::stun::{AttributeType, Class, Message, MessageBuilder, Method, TransactionId};
 use crate::turn::{ChannelData, ChannelNumber, Transport, TurnClient, TurnConfig, method};
@@ -161,7 +161,7 @@ pub(super) enum Node {
 pub(super) struct RelayAllocation {
     client: SocketAddr,
     pub(super) relayed: SocketAddr,
-    permissions: Vec<IpAddr>,
+    pub(super) permissions: Vec<IpAddr>,
     pub(super) channels: Vec<(ChannelNumber, SocketAddr)>,
 }
 
@@ -715,8 +715,42 @@ impl Network {
     /// Hand a datagram to the node that owns the socket, provided that node
     /// sits where the packet arrived: behind this NAT, or on the open
     /// Internet. A private address is not reachable from anywhere else.
+    ///
+    /// Several full agents may own one socket: the ICE sessions of a forked
+    /// call's branches. The datagram goes to the one that claims it, the way
+    /// an application sharing the socket between them hands it on
+    /// ([`IceAgent::claims`]); failing a claim, to the first.
     fn deliver(&mut self, socket: SocketAddr, from: SocketAddr, data: &[u8], nat: Option<usize>) {
         let now = self.now;
+        let owners: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                matches!(node, Node::Full(peer) if peer.nat == nat && peer.sockets.contains(&socket))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if owners.len() > 1 {
+            let claim = |wanted: Claim| {
+                owners.iter().copied().find(|index| {
+                    matches!(&self.nodes[*index], Node::Full(peer)
+                        if peer.agent.claims(socket, from, data) == wanted)
+                })
+            };
+            let chosen = claim(Claim::Mine)
+                .or_else(|| claim(Claim::Shared))
+                .unwrap_or(owners[0]);
+            if let Node::Full(peer) = &mut self.nodes[chosen] {
+                peer.feed();
+                if let Received::Data { range, .. } =
+                    peer.agent.handle_datagram(socket, from, data, now)
+                {
+                    peer.received.push(data[range].to_vec());
+                }
+            }
+            return;
+        }
         for node in &mut self.nodes {
             match node {
                 Node::Full(peer) if peer.nat == nat && peer.sockets.contains(&socket) => {

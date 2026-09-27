@@ -11,8 +11,8 @@ use super::sim_tests::{Filtering, Mapping, Network, address};
 use super::{agent, config, credentials, remote_of};
 use crate::ice::full::checks::build_check;
 use crate::ice::{
-    CandidateType, ComponentId, HostAddresses, IceConfig, IceEvent, IceState, LiteAgent, RemoteIce,
-    Role, SelectedPair, SendError, gather,
+    CandidateType, ComponentId, HostAddresses, IceConfig, IceEvent, IceState, LiteAgent,
+    RelayOutcome, RemoteIce, Role, SelectedPair, SendError, SharedRelay, gather,
 };
 use crate::stun::{Class, Message, MessageBuilder, Method, TransactionId, error_code};
 
@@ -994,4 +994,200 @@ fn the_peer_arriving_before_gathering_ends_still_reaches_the_relay() {
         && completed(n, b)));
     assert_eq!(selected(&net, a).local_kind, CandidateType::Relay);
     assert_media_flows(&mut net, a, b);
+}
+
+const C_HOST: &str = "10.2.0.2:7000";
+
+/// A forked call on the caller's side: one socket behind a symmetric NAT,
+/// one allocation made from it, and an agent per branch — the same
+/// credentials, the same candidates, the relay shared — facing two phones,
+/// each behind a symmetric NAT of its own with only a server-reflexive
+/// candidate to offer. The relay is the one path to either phone.
+fn forked_over_one_relay(net: &mut Network) -> ([usize; 2], [usize; 2], SharedRelay) {
+    let nat_a = net.add_nat(
+        "192.0.2.1",
+        Mapping::AddressAndPortDependent,
+        Filtering::AddressAndPortDependent,
+    );
+    let mut branches = [0; 2];
+    for slot in &mut branches {
+        let (branch, stream) = agent(
+            config(false, false),
+            "A",
+            Role::Controlling,
+            10,
+            address(A_HOST),
+        );
+        *slot = net.add_full(branch, stream, &[address(A_HOST)], Some(nat_a));
+    }
+    let mut phones = [0; 2];
+    for (slot, (name, host, public)) in phones
+        .iter_mut()
+        .zip([("B", B_HOST, "192.0.2.2"), ("C", C_HOST, "192.0.2.3")])
+    {
+        let nat = net.add_nat(
+            public,
+            Mapping::AddressAndPortDependent,
+            Filtering::AddressAndPortDependent,
+        );
+        let (phone, stream) = agent(
+            config(true, false),
+            name,
+            Role::Controlled,
+            20,
+            address(host),
+        );
+        *slot = net.add_full(phone, stream, &[address(host)], Some(nat));
+    }
+    for index in branches.into_iter().chain(phones) {
+        let now = net.now;
+        net.peer_mut(index)
+            .agent
+            .gather(now)
+            .expect("gathering starts");
+    }
+    let client = net.allocate_outside(branches[0], address(A_HOST));
+    let relay = SharedRelay::new(net_turn(), client);
+    for branch in branches {
+        let now = net.now;
+        let peer = net.peer_mut(branch);
+        let stream = peer.stream;
+        peer.agent
+            .add_shared_relay(stream, ComponentId::RTP, address(A_HOST), &relay, now)
+            .expect("a live allocation is taken up");
+    }
+    assert!(net.run_until(Duration::from_secs(10), |n| {
+        phones.iter().all(|phone| gathered(n, *phone))
+    }));
+    (branches, phones, relay)
+}
+
+/// Every peer address a CreatePermission to the TURN server named over the
+/// next `span` of simulated time.
+fn permissions_asked_over(net: &mut Network, span: Duration) -> Vec<std::net::IpAddr> {
+    net.capture = true;
+    net.captured.clear();
+    net.run_for(span);
+    net.capture = false;
+    net.captured
+        .iter()
+        .filter(|packet| packet.destination == net_turn())
+        .filter_map(|packet| Message::parse(&packet.data).ok())
+        .filter(|message| message.method() == crate::turn::method::CREATE_PERMISSION)
+        .flat_map(|message| {
+            message
+                .find_all(crate::stun::AttributeType::XOR_PEER_ADDRESS)
+                .filter_map(|value| {
+                    crate::stun::address::decode_xor(value, message.transaction_id())
+                })
+                .map(|peer| peer.ip())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[test]
+fn two_branches_of_a_fork_each_run_their_own_checks_over_one_relay() {
+    let mut net = Network::new(41);
+    let (branches, phones, relay) = forked_over_one_relay(&mut net);
+    let [first, second] = branches;
+    // one offer went to both phones: both agents advertise what it named
+    let offered = |index: usize| {
+        let peer = net.peer(index);
+        peer.agent.local_candidates(peer.stream)
+    };
+    assert_eq!(offered(first), offered(second));
+    assert!(
+        offered(first)
+            .iter()
+            .any(|candidate| candidate.kind == CandidateType::Relay)
+    );
+    assert_eq!(relay.holders(), 2);
+
+    // each phone answers its own branch (RFC 8839 §7)
+    for (branch, phone) in branches.into_iter().zip(phones) {
+        exchange(&mut net, branch, phone);
+    }
+    assert!(net.run_until(Duration::from_secs(60), |n| {
+        branches
+            .iter()
+            .chain(&phones)
+            .all(|index| completed(n, *index))
+    }));
+    let [b, c] = phones;
+    for (branch, phone) in [(first, b), (second, c)] {
+        let pair = selected(&net, branch);
+        assert_eq!(pair.local_kind, CandidateType::Relay, "{pair:?}");
+        // the pair each branch found leads to its own phone
+        assert_eq!(pair.remote.ip(), selected(&net, phone).local.ip());
+    }
+    // one allocation carries both, with each phone's address let through
+    assert_eq!(net.turn.allocations.len(), 1);
+    let allocation = &net.turn.allocations[0];
+    for public in ["192.0.2.2", "192.0.2.3"] {
+        let public: std::net::IpAddr = public.parse().unwrap();
+        assert!(allocation.permissions.contains(&public), "{public}");
+    }
+
+    // media on both, each to its own branch and never to the other's
+    for (index, payload) in [
+        (first, &b"\x80\x00to b"[..]),
+        (second, b"\x80\x00to c"),
+        (b, b"\x80\x00from b"),
+        (c, b"\x80\x00from c"),
+    ] {
+        talk(&mut net, index, payload).expect("a route");
+    }
+    net.run_for(Duration::from_millis(200));
+    let heard = |index: usize, what: &[u8]| {
+        net.peer(index)
+            .received
+            .iter()
+            .any(|data| data.as_slice() == what)
+    };
+    assert!(heard(b, b"\x80\x00to b") && !heard(b, b"\x80\x00to c"));
+    assert!(heard(c, b"\x80\x00to c") && !heard(c, b"\x80\x00to b"));
+    assert!(heard(first, b"\x80\x00from b") && !heard(first, b"\x80\x00from c"));
+    assert!(heard(second, b"\x80\x00from c") && !heard(second, b"\x80\x00from b"));
+
+    // the second branch loses: it lets go of the relay, and the first one's
+    // call goes on through it
+    let now = net.now;
+    net.peer_mut(second).agent.release_relays(now);
+    net.run_for(Duration::from_millis(200));
+    assert_eq!(relay.holders(), 1);
+    let fate = |index: usize| {
+        net.peer(index)
+            .agent
+            .relay_report()
+            .iter()
+            .map(|relay| relay.outcome)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fate(second), vec![RelayOutcome::Released]);
+    assert_eq!(fate(first), vec![RelayOutcome::Selected]);
+    assert_eq!(
+        net.turn.allocations.len(),
+        1,
+        "given back while a branch still used it"
+    );
+    net.peer_mut(b).received.clear();
+    net.peer_mut(first).received.clear();
+    assert_media_flows(&mut net, first, b);
+    // and the phone that lost is left to lapse at the server (RFC 8656
+    // §2.3 has no way to take a permission back): the renewals name only
+    // the phone still in the call
+    let renewed = permissions_asked_over(&mut net, Duration::from_secs(301));
+    let lost: std::net::IpAddr = "192.0.2.3".parse().unwrap();
+    let kept: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+    assert!(renewed.contains(&kept), "{renewed:?}");
+    assert!(!renewed.contains(&lost), "{renewed:?}");
+    assert_media_flows(&mut net, first, b);
+
+    // the call ends: the last holder gives it back
+    let now = net.now;
+    net.peer_mut(first).agent.release_relays(now);
+    net.run_for(Duration::from_millis(200));
+    assert!(net.turn.allocations.is_empty(), "a Refresh of lifetime 0");
+    assert_eq!(relay.holders(), 0);
 }

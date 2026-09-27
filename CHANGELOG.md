@@ -84,6 +84,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `"frames_underrun"` in both of Python's statistics dicts, and the
   struct's own member in Swift (`frames_underrun`) and Kotlin
   (`framesUnderrun`).
+- **A call running ICE says which paths it tried, and why each lost** — D5's
+  transport and NAT half. `MediaSession::path_candidates` lists every
+  candidate pair the agent's checklist held and every relay it held
+  (`PathCandidate`), each with its outcome (`PathOutcome`): selected; valid
+  and outranked by the pair selected, or nominated past; never answered;
+  refused by the far end, with the STUN code; answered from another address
+  (RFC 8445 §7.2.5.2.1); refused by the relay, with the TURN server's
+  reason; never checked; and for a relay, held, given back unused (§8.3.1),
+  or lost with the server's reason. The agent writes each outcome down as
+  the transaction that decides it ends (`IceAgent::pair_report`,
+  `IceAgent::relay_report`), so the list outlives the checklist §8.1.2
+  prunes at the selection; a restart starts it again.
 - **ICE restarts in the full role, from either end.** A peer's re-offer
   that changes both `ice-ufrag` and `ice-pwd` is answered with new
   credentials of this end's own (RFC 8839 §4.4.2.1) instead of the ones the
@@ -896,6 +908,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   whenever the catalogue's capabilities do, as the offer always has; two
   sessions exchanging reports now each carry the other's block, figure for
   figure, as their `RemoteMetrics`.
+- **The far end's checks under a restart's new credentials are kept until
+  the restart is taken up, not refused.** Once this end has offered or
+  answered an ICE restart, the far end checks under the new credentials as
+  soon as it has answered, and those checks often arrive before its answer
+  does. They were answered with an unsigned 401 (RFC 8489 §9.1.3), which
+  the far end discards and retransmits after, costing the new session up to
+  one RTO. The agent now keeps them — the newest thirty-two, in the full
+  role (`IceAgent::expect_restart`) and the lite one alike — and answers and
+  checks back on them the moment the restart is taken up; a restart refused
+  drops them, and so does waiting past the far end's 39.5-second
+  transaction.
 - **A body the agent cannot read is refused 415 on every request that
   carries an offer, not only on the INVITE that opens a call.** A
   re-INVITE, UPDATE or PRACK whose body is not `application/sdp`, or is
@@ -945,19 +968,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   answered — and would have taken an UPDATE's offer the ACK's answer then
   landed on. The offer in a 2xx now counts as outstanding until its ACK,
   as RFC 3311 §5.2 has it.
-- **A forked call's relay goes to the branch that is left, not back to the
-  server.** A forked INVITE's one offer named one relayed candidate, and
-  one allocation stands behind it: a second from the same socket to the
-  same server is refused by the server (RFC 8656 §3.2), so only one
-  branch's agent can hold it at a time. The branch kept after early media
-  on another, or the second leg of `ForkPolicy::KeepAll`, ran without it,
-  and when the branch that held it ended the relay was deleted, leaving a
-  call that only a relay could carry with no path at all. Now, when that
-  branch ends, a branch whose agent holds no relay and has found no path
-  gets an agent rebuilt around it, which checks every pair again, relayed
-  ones included; failing that, a branch still ringing keeps it waiting for
-  its session. Only when no branch can use it does it go back with a
-  Refresh of lifetime zero.
+- **Every branch of a forked call runs ICE over the one relay its offer
+  named.** A forked INVITE's one offer named one relayed candidate, and one
+  allocation stands behind it — a second from the same socket is refused by
+  the server (RFC 8656 §3.2) — so the branch kept after early media on
+  another, or the second leg of `ForkPolicy::KeepAll`, ran without it, and a
+  call only a relay could carry had a path on one branch at most. Now every
+  branch holds the one allocation with an agent of its own
+  (`sipral_nat::ice::SharedRelay`, `IceAgent::add_shared_relay`), from the
+  moment `UaEvent::CallForked` reports it: each asks the relay to let its own
+  phone through, runs its own checklist under the offer's credentials (RFC
+  8839 §7), and hears only its own phone's checks and media —
+  `IceAgent::claims` says whose a datagram on the shared socket is, by the
+  peer fragment in a check's USERNAME, the check an answer answers, or the
+  peer address, relayed or not, and `MediaEngine::receive_early` hands each
+  one to the branch that claims it. An agent handed another branch's check
+  no longer answers it. A branch that ends lets go of the relay, and stops
+  renewing the permissions only its phone needed (`TurnClient::withdraw`);
+  the last to let go gives it back with a Refresh of lifetime zero (RFC 8445
+  §8.3.1).
 - **A relay handed to the answer of a call already rung with media comes
   back whole.** `MediaEngine::answer_with` on a call `ring_with` described
   reads no relay, since the 200 OK carries the 183's description, and it

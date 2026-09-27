@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use super::{
-    CONSENT_EXPIRY, Check, ChecklistState, Consent, Credentials, IceAgent, IceEvent, Pair, Phase,
-    Purpose, Remote, Valid, link_local, priority_in_range,
+    CONSENT_EXPIRY, Check, ChecklistState, Consent, Credentials, IceAgent, IceEvent, Pair,
+    PairOutcome, Phase, Purpose, Remote, Valid, link_local, priority_in_range,
 };
 use crate::ice::agent::Role;
 use crate::ice::candidate::{
@@ -126,6 +126,7 @@ impl IceAgent {
 
         let first = self.next_pair;
         for (priority, local, remote, component) in formed {
+            let id = self.next_pair;
             self.pairs.push(Pair {
                 id: self.next_pair,
                 stream,
@@ -139,6 +140,7 @@ impl IceAgent {
                 valid: None,
             });
             self.next_pair = self.next_pair.saturating_add(1);
+            self.remember(id);
         }
         self.sort_pairs();
         self.enforce_pair_limit();
@@ -182,6 +184,7 @@ impl IceAgent {
             .flat_map(|entry| entry.triggered.iter().copied())
             .collect();
         let mut seen = vec![0_usize; sizes.len()];
+        let mut discarded = Vec::new();
         self.pairs.retain(|pair| {
             let Some(count) = seen.get_mut(pair.stream) else {
                 return false;
@@ -191,8 +194,15 @@ impl IceAgent {
                 && !pair.nominate
                 && !pair.nominate_on_success
                 && !queued.contains(&pair.id);
-            !untouched || *count <= kept.get(pair.stream).copied().unwrap_or(0)
+            let keep = !untouched || *count <= kept.get(pair.stream).copied().unwrap_or(0);
+            if !keep {
+                discarded.push(pair.id);
+            }
+            keep
         });
+        for id in discarded {
+            self.settle_pair(id, PairOutcome::NotChecked);
+        }
         let live: Vec<u32> = self.pairs.iter().map(|pair| pair.id).collect();
         for entry in &mut self.streams {
             entry.triggered.retain(|id| live.contains(id));
@@ -572,7 +582,11 @@ impl IceAgent {
                     (true, Class::Error, Some(error_code::ROLE_CONFLICT)) => {
                         self.role_conflict(&check, pair, now);
                     }
-                    _ => self.check_failed(&check, pair, now),
+                    (true, Class::Error, code) => {
+                        let code = code.unwrap_or(0);
+                        self.check_failed(&check, pair, PairOutcome::Refused { code }, now);
+                    }
+                    _ => self.check_failed(&check, pair, PairOutcome::NotSymmetric, now),
                 }
             }
         }
@@ -581,9 +595,10 @@ impl IceAgent {
     /// §7.2.5.3.
     fn check_succeeded(&mut self, check: &Check, id: u32, message: &Message<'_>, now: Instant) {
         let Some(mapped) = message.xor_mapped_address() else {
-            self.check_failed(check, id, now);
+            self.check_failed(check, id, PairOutcome::Unusable, now);
             return;
         };
+        self.reopen_pair(id);
         let Some(pair) = self.pair(id) else {
             return;
         };
@@ -676,8 +691,9 @@ impl IceAgent {
         self.wake_pacer(now);
     }
 
-    /// §7.2.5.2.
-    fn check_failed(&mut self, check: &Check, id: u32, now: Instant) {
+    /// §7.2.5.2, and `why` is written down as what became of the pair.
+    fn check_failed(&mut self, check: &Check, id: u32, why: PairOutcome, now: Instant) {
+        self.settle_pair(id, why);
         let Some(pair) = self.pair_mut(id) else {
             return;
         };
@@ -745,6 +761,7 @@ impl IceAgent {
         if let Some(pair) = self.pair_mut(id) {
             pair.state = PairState::Waiting;
         }
+        self.reopen_pair(id);
         self.enqueue(stream, id);
         self.wake_pacer(now);
     }
@@ -783,6 +800,7 @@ impl IceAgent {
             nominate_on_success: false,
             valid: None,
         });
+        self.remember(id);
         self.sort_pairs();
         self.enqueue(stream, id);
         self.wake_pacer(now);
@@ -892,6 +910,7 @@ impl IceAgent {
             .collect();
         for id in &removed {
             self.cancel_checks_of(*id, now);
+            self.settle_pair(*id, PairOutcome::NominatedElsewhere);
         }
         self.pairs.retain(|pair| !removed.contains(&pair.id));
         for pair in &mut self.pairs {
@@ -996,6 +1015,21 @@ impl IceAgent {
             if check.stream == stream && matches!(check.purpose, Purpose::Connectivity { .. }) {
                 check.cancelled = true;
             }
+        }
+        let unfinished: Vec<u32> = self
+            .pairs
+            .iter()
+            .filter(|pair| {
+                pair.stream == stream
+                    && matches!(
+                        pair.state,
+                        PairState::Frozen | PairState::Waiting | PairState::InProgress
+                    )
+            })
+            .map(|pair| pair.id)
+            .collect();
+        for id in unfinished {
+            self.settle_pair(id, PairOutcome::NotChecked);
         }
         self.events.push_back(IceEvent::StreamFailed {
             stream: super::StreamId(stream),
@@ -1118,7 +1152,7 @@ impl IceAgent {
             if let Purpose::Connectivity { pair } = check.purpose
                 && !check.cancelled
             {
-                self.check_failed(&check, pair, now);
+                self.check_failed(&check, pair, PairOutcome::TimedOut, now);
             }
         }
         self.patience_timeout(now);

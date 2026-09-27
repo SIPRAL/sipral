@@ -1890,33 +1890,48 @@ impl MediaSession {
         followed
     }
 
-    /// Whether this session's agent would take a relay another branch of its
-    /// fork gave up. See [`crate::ice::Ice::wants_relay`].
+    /// Whether a datagram that arrived on this call's socket is this
+    /// session's, when the branches of a forked call share the socket.
+    ///
+    /// A session running ICE answers as its agent does
+    /// ([`sipral_nat::ice::IceAgent::claims`]): a check naming its own
+    /// peer's fragment, an answer to its own check, anything from an address
+    /// among its peer's candidates. One that is not claims what comes from
+    /// the address its description named, which is how early media from two
+    /// phones on one socket is told apart when neither does ICE.
     #[cfg(feature = "ice")]
-    pub(crate) fn wants_relay(&self) -> bool {
-        self.ice.as_ref().is_some_and(crate::ice::Ice::wants_relay)
+    pub(crate) fn claims(&self, from: SocketAddr, data: &[u8]) -> sipral_nat::ice::Claim {
+        use sipral_nat::ice::Claim;
+        match &self.ice {
+            Some(ice) => ice.claims(from, data),
+            None if from == self.destination() || Some(from) == self.control_destination() => {
+                Claim::Mine
+            }
+            None => Claim::Not,
+        }
     }
 
-    /// Run `ice` from here on in place of the agent this session had: the
-    /// same credentials and candidates, with the relay another branch of the
-    /// fork held added back. What the agent it replaces had under way —
-    /// checks without a relay, on a session no pair has been found for —
-    /// goes with it; the new one checks every pair again.
+    /// Every candidate pair this call's ICE agent checked and every relay it
+    /// held, with what became of each: D5's transport and NAT half, beside
+    /// [`MediaSession::codec_candidates`]. Empty for a call not using ICE,
+    /// whose one path is the address its description named.
     #[cfg(feature = "ice")]
-    pub(crate) fn inherit_ice(&mut self, ice: crate::ice::Ice, now: Instant) {
-        self.ice = Some(ice);
-        self.drain_ice(now);
-    }
-
-    /// The relays this session's agent holds, whole and live on their
-    /// servers, for a call that has ended and whose fork has another branch
-    /// to hand them to; the agent goes with them.
-    #[cfg(feature = "ice")]
-    pub(crate) fn take_relays(&mut self) -> Vec<crate::relay::Relay> {
+    #[must_use]
+    pub fn path_candidates(&self) -> Vec<crate::PathCandidate> {
         self.ice
-            .take()
-            .map(crate::ice::Ice::into_relays)
+            .as_ref()
+            .map(crate::ice::Ice::path_candidates)
             .unwrap_or_default()
+    }
+
+    /// Tell the agent which credentials a restart offered, or answered, on
+    /// this call carries, or with `None` that it will not happen. See
+    /// [`crate::ice::Ice::expect_restart`].
+    #[cfg(feature = "ice")]
+    pub(crate) fn expect_ice_restart(&mut self, restarting: Option<&crate::ice::LocalIce>) {
+        if let Some(ice) = self.ice.as_mut() {
+            ice.expect_restart(restarting);
+        }
     }
 
     /// The candidates this session's full agent still holds, for a restart
