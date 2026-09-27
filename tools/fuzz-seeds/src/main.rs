@@ -1785,6 +1785,100 @@ fn ice_seeds() -> Result<Vec<Seed>, Wrong> {
         .collect())
 }
 
+/// The two bytes `fuzz_targets/ice_lite.rs` reads off the front before
+/// anything else is a datagram: the shape of the session and how wide a
+/// datagram is cut.
+///
+/// Zero is the ordinary call in every bit of the shape -- this end did not
+/// offer and the peer is a full agent, so `Role::initial` starts this agent
+/// controlled, the shape RFC 8445 §6.1.1 gives the pairing this target
+/// exists to hold to.
+const LITE_ORDINARY: [u8; 2] = [0, 220];
+
+/// The password this agent publishes in `a=ice-pwd`; has to match what
+/// `fuzz_targets/ice_lite.rs` hands `LiteAgent::new`, or every signed seed
+/// below dies in the authenticator and reaches none of the code the target
+/// exists to reach.
+const LITE_LOCAL_PWD: &[u8] = b"asd88fgpdd777uzjYhagZg";
+
+/// `USERNAME` on a check arriving here: this agent's fragment first, then
+/// the peer's (RFC 8445 §7.1.2.3, the same order `ice_seeds` uses).
+const LITE_USERNAME: &[u8] = b"8hhY:9uB6";
+
+fn ice_lite_seeds() -> Result<Vec<Seed>, Wrong> {
+    let peer = TransactionId::new([
+        0x4a, 0x1c, 0x87, 0xe2, 0x3f, 0x90, 0xb1, 0x66, 0x0d, 0x5e, 0x2a, 0x71,
+    ]);
+    let mut out = Vec::new();
+
+    // the ordinary call: a full peer's check, correctly controlling, which
+    // is not a conflict for a controlled agent to answer (§6.1.1)
+    let mut check = MessageBuilder::new(Class::Request, StunMethod::BINDING, peer);
+    check
+        .add(AttributeType::USERNAME, LITE_USERNAME)
+        .and_then(|()| check.add_u32(AttributeType::PRIORITY, 0x7E7F_00FF))
+        .and_then(|()| check.add_u64(AttributeType::ICE_CONTROLLING, 0x1122_3344_5566_7788))
+        .and_then(|()| check.add_message_integrity(LITE_LOCAL_PWD))
+        .and_then(|()| check.add_fingerprint())
+        .map_err(|why| Wrong(format!("the ice_lite check seed does not build: {why:?}")))?;
+    out.push(("check-signed", check.finish()));
+
+    // the same, nominating: the pair this agent then holds for the component
+    let mut nominating = MessageBuilder::new(Class::Request, StunMethod::BINDING, peer);
+    nominating
+        .add(AttributeType::USERNAME, LITE_USERNAME)
+        .and_then(|()| nominating.add_u32(AttributeType::PRIORITY, 0x7E7F_00FF))
+        .and_then(|()| nominating.add_u64(AttributeType::ICE_CONTROLLING, 0x1122_3344_5566_7788))
+        .and_then(|()| nominating.add(AttributeType::USE_CANDIDATE, &[]))
+        .and_then(|()| nominating.add_message_integrity(LITE_LOCAL_PWD))
+        .and_then(|()| nominating.add_fingerprint())
+        .map_err(|why| {
+            Wrong(format!(
+                "the ice_lite nomination seed does not build: {why:?}"
+            ))
+        })?;
+    out.push(("check-use-candidate", nominating.finish()));
+
+    // a full peer with the roles backwards: ICE-CONTROLLED naming a
+    // tiebreaker this agent's own (drawn from the shape byte, zero here)
+    // would have lost to under the general §7.3.1.1 arithmetic -- the seed
+    // the defence in `crates/sipral-nat/src/ice/agent.rs` exists for, since
+    // a lite agent must never answer this by switching to controlling
+    // (§6.1.1, §8.2)
+    let mut backwards = MessageBuilder::new(Class::Request, StunMethod::BINDING, peer);
+    backwards
+        .add(AttributeType::USERNAME, LITE_USERNAME)
+        .and_then(|()| backwards.add_u32(AttributeType::PRIORITY, 0x7E7F_00FF))
+        .and_then(|()| backwards.add_u64(AttributeType::ICE_CONTROLLED, u64::MAX))
+        .and_then(|()| backwards.add_message_integrity(LITE_LOCAL_PWD))
+        .and_then(|()| backwards.add_fingerprint())
+        .map_err(|why| {
+            Wrong(format!(
+                "the ice_lite role-conflict seed does not build: {why:?}"
+            ))
+        })?;
+    out.push(("check-role-conflict-backwards", backwards.finish()));
+
+    for (name, bytes) in &out {
+        Message::parse(bytes)
+            .map_err(|why| Wrong(format!("the {name} seed does not parse: {why:?}")))?;
+    }
+
+    // the other half of what arrives on the socket, which this agent has to
+    // leave alone rather than read: a truncated STUN header
+    out.push(("not-stun", vec![0x00, 0x01, 0x00, 0x00]));
+
+    Ok(out
+        .into_iter()
+        .map(|(name, bytes)| {
+            let mut seed = LITE_ORDINARY.to_vec();
+            seed.push(0); // marker: no restart, RTP, the peer's own source
+            seed.extend_from_slice(&bytes);
+            (name, seed)
+        })
+        .collect())
+}
+
 fn turn_seeds() -> Result<Vec<Seed>, Wrong> {
     let channel = ChannelNumber::new(0x4001)
         .ok_or_else(|| Wrong("0x4001 is inside the channel range".to_owned()))?;
@@ -2563,6 +2657,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("headless", headless_seeds()?),
         ("headless_media", headless_media_seeds()?),
         ("ice", ice_seeds()?),
+        ("ice_lite", ice_lite_seeds()?),
         ("media_comfort_noise", media_comfort_noise_seeds()?),
         ("media_drift", media_drift_seeds()?),
         ("media_g722", media_g722_seeds()?),

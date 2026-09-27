@@ -8,11 +8,11 @@
 #   scripts/fuzz.sh 3600       an hour a target
 #   scripts/fuzz.sh 60 parse   one target, one minute
 #
-# Not a part of scripts/check.sh: sixteen targets at five minutes each would
-# add an hour to every commit and buy very little, since the corpus only grows
-# when something new reaches it. The gate builds them instead, so they cannot
-# rot uncompiled. Run this before a release, and overnight on a machine that
-# has nothing better to do.
+# Not a part of scripts/check.sh: thirty targets at five minutes each would
+# add two and a half hours to every commit and buy very little, since the
+# corpus only grows when something new reaches it. The gate builds them
+# instead, so they cannot rot uncompiled. Run this before a release, and
+# overnight on a machine that has nothing better to do.
 #
 # `fuzz/` is a workspace of its own with its own nightly pin, because libFuzzer
 # needs one and the rest of the tree does not.

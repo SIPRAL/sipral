@@ -119,30 +119,33 @@ reason phrase names the field (`Bad <field>`, RFC 3261 §8.2.x), and the
 refusal is noted in the diagnostic record. An ACK that fails it is dropped,
 since nothing answers an ACK.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Twenty-nine
+**Fuzzing covers the doors an attacker's bytes come through.** Thirty
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
 `replay`, `dialoginfo`, `mwi`, `headless`, `rtcp`, `rtp_dtmf`,
 `srtp_unprotect`, `stun`, `turn`), two for DTLS (`dtls_record`,
 `dtls_handshake`), one for
-DTMF over SIP INFO (`dtmf_info`), one for the ICE agent (`ice`), one for the
-TURN client driven by a relay that answers anything (`turn_client`), nine
-over `sipral-media`'s DSP once it was the turn of the codec and audio layer
-downstream of RTP (`media_resample`, `media_plc`, `media_drift`,
-`media_comfort_noise`, `media_vad`, `media_g722`, `media_g729`, `media_mix`,
-`media_opus`), and one for what the headless socket's messages do to a
-bridged session (`headless_media`). The exit gate is 24 hours per target
-with no crash and no hang, and every target has had it run: the first
-eighteen on 21 and 22 September 2026, about 37 billion executions, the eight
-media ones before `media_g729` on 23 September, about 24 billion, and
-`headless_media`, `media_g729` and `turn_client` on 25 September, about 273
-million, nothing found on any (`docs/11-testing.md`). `media_g729` covers the
+DTMF over SIP INFO (`dtmf_info`), two for ICE — the full agent (`ice`) and the
+lite agent's own state machine (`ice_lite`), which `ice` never drives
+directly since it only ever reaches `LiteAgent` across a simulated network —
+one for the TURN client driven by a relay that answers anything
+(`turn_client`), nine over `sipral-media`'s DSP once it was the turn of the
+codec and audio layer downstream of RTP (`media_resample`, `media_plc`,
+`media_drift`, `media_comfort_noise`, `media_vad`, `media_g722`,
+`media_g729`, `media_mix`, `media_opus`), and one for what the headless
+socket's messages do to a bridged session (`headless_media`). The exit gate
+is 24 hours per target with no crash and no hang, and every target but
+`ice_lite`, the newest, has had it run: the first eighteen on 21 and 22
+September 2026, about 37 billion executions, the eight media ones before
+`media_g729` on 23 September, about 24 billion, and `headless_media`,
+`media_g729` and `turn_client` on 25 September, about 273 million, nothing
+found on any (`docs/11-testing.md`). `media_g729` covers the
 G.729 decoder — speech frames, Annex B's SID frames, frames not sent and
 frames lost — the payload reader and an encoder with Annex B's DTX; it
 decodes and re-encodes every input, so its 24 hours came to about 0.67
 million executions, the thinnest coverage of any target. `scripts/check.sh`
-builds all twenty-nine on every run so none of them rots uncompiled between
+builds all thirty on every run so none of them rots uncompiled between
 releases.
 
 `ice` covers the one seam that is open to anybody before a
@@ -152,7 +155,14 @@ stranger earlier than SRTP, earlier than the DTLS handshake, earlier than
 anything that could say who the peer is. Its seeds carry checks signed the way
 the agent will check them, which is the difference between fuzzing the state
 machine and fuzzing the authenticator in front of it: the seeds alone reach
-more of the agent than several hundred thousand random runs did.
+more of the agent than several hundred thousand random runs did. `ice_lite`
+answers on the same seam from the lite side, where every byte still runs
+before anything has proven who the peer is, and drives
+`LiteAgent::restart` mid-run as well: it is the target the defence in
+`crates/sipral-nat/src/ice/agent.rs` is fuzzed under, since a controlled lite
+agent must never answer a role-conflicting request by switching to
+controlling (RFC 8445 §6.1.1, §8.2) — a full peer that gets the roles
+backwards, or forges the claim, does not get to strand the call.
 
 ## The refusals that exist on purpose
 

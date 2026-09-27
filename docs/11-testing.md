@@ -293,7 +293,7 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Twenty-nine targets, one per door an attacker's bytes come through.
+Thirty targets, one per door an attacker's bytes come through.
 
 The four over SIP itself. `parse` walks every typed accessor after a
 successful parse, because a message that parses can still hold a field nobody
@@ -379,6 +379,23 @@ every probe leaves from a socket it was given, `send` appends to the caller's
 buffer instead of overwriting it, and a datagram the agent reports as
 `Foreign` has not moved the selected pair.
 
+And one for the lite role's own state machine, which `ice` above never
+drives directly: `IceAgent` reaches `LiteAgent` only across a simulated
+network in `sipral-nat`'s own tests, not with a fuzzer's bytes. `ice_lite`
+builds a `LiteAgent` the way the crate insists on being built — `new`, and
+`restart` on the input's say-so, mid-run, under credentials the target keeps
+signing requests against, old and new — and feeds `answer_binding_request`
+arbitrary datagrams for both components from a source the input chooses. Past
+authentication is the same seam `ice` fuzzes for the full role: every byte of
+it runs before anything has proven who the peer is. What it asserts beyond
+not panicking is the one invariant a lite agent has no checklist to fall back
+on for: an answer parses back as STUN, a datagram this agent did not answer
+has not moved the component's valid pair, and a session that started
+controlled never becomes controlling, since RFC 8445 §6.1.1 makes a full
+peer's role controlling unconditionally and this is the only peer a lite
+agent's answering side ever hears from at all (§8.2 — two lite agents
+exchange no connectivity checks).
+
 And one for the TURN client, since `turn` reads only its
 framing. `turn_client` is a program: a configuration byte, then instructions
 that answer the last request the client sent, hand it a datagram of the
@@ -429,7 +446,7 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than twenty-nine runs beginning at
+targets with something to start from rather than thirty runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
@@ -437,8 +454,8 @@ an unprotector holding the target's own key, the DTLS runs through ends built
 as the target builds them — so a seed that is not what it claims to be fails
 the generator rather than sitting in the corpus doing nothing — the
 `turn_client` programs through a client driven the way the target drives
-one, each required to end with an allocation. Twenty-eight of
-the twenty-nine families go through that check; the one that does not is `builder`,
+one, each required to end with an allocation. Twenty-nine of
+the thirty families go through that check; the one that does not is `builder`,
 whose input is not a message but the five field
 values the target cuts it into, so what is checked there is the cut. The
 generator also owns the directory: what it does not write, it removes, since
@@ -476,10 +493,10 @@ executions say how differently those three spend a CPU-hour: about 231
 million for `turn_client`, 42 million for `headless_media`, and 0.67 million
 for `media_g729`, which decodes every input and encodes the result again, so
 its 24 hours reached a far smaller share of its input space than any other
-target's did. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
+target's did. `ice_lite`, the newest, has not had it yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all twenty-nine, under the nightly that `fuzz/` pins, so
+do on every run is **build** all thirty, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -913,7 +930,7 @@ file that fails on the machine it runs on — `clippy` and `rustdoc` over the Wi
 `clippy` over the lab harness's own WASAPI flow, which no other step
 compiles, and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all twenty-nine fuzz targets under their own nightly — which nothing else
+over all thirty fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,

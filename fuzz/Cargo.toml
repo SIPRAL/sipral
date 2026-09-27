@@ -192,6 +192,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "ice_lite"
+path = "fuzz_targets/ice_lite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "media_resample"
 path = "fuzz_targets/media_resample.rs"
 test = false
