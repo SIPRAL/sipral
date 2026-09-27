@@ -180,6 +180,17 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "reason": _text(relay.reason, relay.reason_len),
         }
 
+    # A REFER outside any dialog (`Stack.accept_referral`), or -- with
+    # `status_code` set and nothing else -- the word that one lapsed.
+    if kind == lib.SIPRAL_EVENT_KIND_REFERRAL:
+        referral = payload.referral
+        return {
+            "status_code": int(referral.status_code),
+            "attended": bool(referral.attended),
+            "target": _text(referral.target, referral.target_len),
+            "referred_by": _text(referral.referred_by, referral.referred_by_len),
+        }
+
     # Unknown or not yet decoded here: the caller still has `message` and
     # the raw `kind`/`kind_name`, which is what a generic event is for.
     return {}

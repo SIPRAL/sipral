@@ -935,6 +935,41 @@ impl Endpoint {
         Some(dialog)
     }
 
+    /// Open the dialog this end's 2xx to a request outside one creates, the
+    /// answering side's own half of [`Endpoint::open_dialog`] (RFC 3261
+    /// §12.1.1).
+    ///
+    /// The method that needs it is REFER. RFC 3515 §2.4.4 has the NOTIFYs a
+    /// REFER asks for carry "the dialog identifiers (To, From, and Call-ID)
+    /// ... of the REFER as they would if the REFER had been a SUBSCRIBE
+    /// request", and one that arrived outside any dialog has no `To` tag to
+    /// read them from: the tag is the one this end is about to write into its
+    /// answer. So the dialog is built around that tag — the same one
+    /// [`Endpoint::respond`] then writes, because both draw it from the one
+    /// kept for this transaction — and the far end's own `From` tag.
+    ///
+    /// `None` when the transaction has gone, when the request already names a
+    /// dialog (a `To` tag it carries is a dialog this end does not have, and
+    /// nothing is opened around somebody else's), or when it cannot open one:
+    /// no `Contact`, or one that will not parse.
+    ///
+    /// Call it **before** answering the request, for the reason
+    /// [`Endpoint::open_dialog`] gives.
+    #[must_use]
+    pub fn open_dialog_answering(
+        &mut self,
+        transaction: TransactionId<NonInviteServer>,
+    ) -> Option<DialogId> {
+        let entry = self.transactions.non_invite_server(transaction)?;
+        let flow = entry.flow;
+        let request = entry.request.clone();
+        if request.as_raw().to().ok()?.tag().is_some() {
+            return None;
+        }
+        let tag = self.tag_or_mint(AnyTransactionId::NonInviteServer(transaction));
+        self.open_uas_dialog(&request, &tag, StatusCode::OK, flow)
+    }
+
     /// Forget a dialog whose usage is over, when nothing on the wire ends it
     /// (RFC 6665 §4.4.1).
     ///

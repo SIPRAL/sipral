@@ -66,6 +66,15 @@ FLOW_SECTIONS = {
         "ice_lite",
         "rust",
     ),
+    "ICE-lite -- the same call, placed at a C ABI stack answering as lite": ("ice_lite", "c"),
+    "a REFER from outside any call -- refused by a C ABI stack that does not take them": (
+        "asterisk",
+        "c",
+    ),
+    "a REFER from outside any call -- taken by a C ABI stack, calling Asterisk's echo": (
+        "asterisk",
+        "c",
+    ),
     "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them": ("full_ice", "rust"),
 }
 # The one FLOW_SECTIONS header lab.sh runs through nat_pair_call (ice_nat_flow)

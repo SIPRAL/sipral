@@ -226,8 +226,9 @@ Rules for the ABI:
   `..._MESSAGE_RECEIVED`, `..._MESSAGE_SENT` and `..._MESSAGES_WAITING`
   (RFC 3428, RFC 3842), 37 to `..._QUALITY_REPORT_SENT` for the RTCP-XR
   quality reports, and 38 to `..._MEDIA_UNJOINED` for the local conference's
-  own survivor notice. 39 and 40 went to `..._NAT_MAPPING` and `..._NAT_RELAY`.
-  The next free number is 41.
+  own survivor notice. 39 and 40 went to `..._NAT_MAPPING` and `..._NAT_RELAY`,
+  and 41 to `..._REFERRAL`, a REFER outside any dialog. The next free number is
+  42.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
@@ -634,6 +635,25 @@ A relay is used only by a call that runs ICE, and ICE is off by default. Set
 back as soon as the call is described. `docs/06-nat.md` has the policy
 values.
 
+**`SIPRAL_ICE_LITE` (4) is the server's value, never the phone's.** It makes
+the call an ICE-lite endpoint (RFC 8445 §2.5): the description carries
+`a=ice-lite`, its credentials and one host candidate — the media socket, or the
+public address `sipral_stack_nat_map` learned for it — and the stack answers
+the full peer's checks and puts the call on the pair the peer nominates,
+reporting it as `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN` the way a full agent
+does. The answers to the checks leave through `sipral_media_poll_transmit`, as
+a full agent's own checks do; a lite end sends no check of its own. It is right
+only for a host reachable at the address it advertises — a voice agent in a
+data centre on a public address, or behind a one-to-one NAT — answering a
+WebRTC gateway or any other full-ICE peer; RFC 8445 Appendix A says ICE "will
+not function when a lite implementation is placed behind a NAT", and a peer
+told this end is lite stops looking for another path, so a softphone never
+names it. A relay is no use to a lite call, which offers a host candidate and
+nothing else. `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+`SIPRAL_FEATURE_ICE`, as the other two ICE values are. The Rust facade names it
+only with its `ice-lite` feature (or `headless` beside `ice`), which this crate
+turns on; nothing of `sipral-headless` comes with it.
+
 Nothing new to call. The Allocate and its authenticated second attempt come
 out of `sipral_stack_poll_stun` after the Binding request, and the answers go
 back through `sipral_stack_receive_stun`, which hands each to the transaction
@@ -980,6 +1000,40 @@ nothing sent. The signature changed outright rather than growing a
 `sipral_call_config_t *` beside the old parameters, because nothing outside
 this tree calls it yet and a fifth parameter nobody could set would be a
 promise this ABI cannot keep before the offer this task exists to carry.
+`sipral_call_reject_transfer` takes a refusal, 300 to 699: a 1xx or 2xx would
+tell the far end the REFER was taken, and is `SIPRAL_STATUS_INVALID_ARGUMENT`
+with nothing sent.
+
+**A REFER outside any dialog is a referral, and it is off by default.**
+`referrals` on `sipral_stack_config_t` (appended at the tail; `MIN_SIZE`
+unmoved), a `sipral_toggle_t`, and `sipral_stack_settings_t::referrals` says
+what it came to. Left at the default every such REFER — click-to-dial from a
+switchboard, RFC 3515 §4.1 — is refused 403 before anything reads it, because
+a peer that can make a phone dial can make it dial a premium-rate number and
+this stack authenticates no peer to tell the two apart. On, each one is
+screened as an INVITE is (the rate limit, `sipral_stack_screen`'s policy) and
+then raised as **`SIPRAL_EVENT_KIND_REFERRAL` (41)**: `call` is the referral's
+handle, `account` the line it arrived for, `message` the REFER, and
+`payload.referral` its `target`, whether it is `attended` (its `Refer-To`
+carried a `Replaces`) and its `referred_by`, which is what the sender wrote
+and never proof of who it is. The handle is of the call kind — one table, one
+number space, so it never collides with a call — and it names a request, not a
+call: `sipral_call_state` on it is `SIPRAL_STATUS_WRONG_STATE`. It is answered
+with the two calls a transfer already is: `sipral_call_accept_transfer`, which
+answers 202, opens the subscription's dialog, sends the 100 NOTIFY, places the
+call exactly as for a transfer — from the event's account, with the REFER's own
+target, `Replaces` and `Referred-By` — writes the placed call's handle and
+reports every answer that call gets as a NOTIFY until the last; or
+`sipral_call_reject_transfer` with the application's refusal. Either spends the
+referral's handle; one refused before anything was sent — a header, a
+`target` — is still there to take. The application answers neither before the
+REFER's transaction runs out, 64·T1 on, and the stack has answered 408 for it:
+kind 41 is raised again for the same handle with `payload.referral.status_code`
+set and nothing else, and the handle is stale after that poll. Nothing about
+the referral's own subscription reaches the application: the far end's
+refreshes and unsubscription, `Refer-Sub: false` (RFC 4488) and the dialog's
+end are the stack's. `docs/04-ua.md`, "A REFER from outside any call", has the
+refusals and why.
 
 **Four calls carry the packets**, each on a call's media handle, and none of
 them opens a socket or touches a device: `sipral_media_receive` for a datagram
@@ -1314,7 +1368,11 @@ and the macOS sample's own microphone/speaker bridge (`AudioBridge.swift`,
 owns. `SipralStack`'s initialiser takes `ice`, `stunServer`, `turn` and
 `g729AnnexB`, and with a STUN server it runs the media-socket loop "Behind a
 NAT" describes on its own poll thread; `SipralEvent.natData` and `relayData`
-carry the two events that loop waits for.
+carry the two events that loop waits for. It takes `referrals` too, off by
+default: `SipralEvent.referralData` carries `SipralEventKind.referral`, and
+`acceptReferral` opens the placed call's media socket the way `placeCall`
+does, takes the referral and returns that call as a `Call`, while
+`rejectReferral` refuses it.
 
 One gotcha worth knowing before reaching for `sipral_stack_receive_datagram`
 from Swift directly: its generated `to: String` parameter has no way to carry
@@ -1392,7 +1450,10 @@ today's behaviour, and `PlaceCall` grew `ice`, the same additions
 made, kept to the same option names in each language's own idiom.
 `SipralEventArgs` grew `Nat`/`Relay`, decoding
 `SipralEventKind.NatMapping`/`NatRelay`'s payloads the same way every
-other kind already there does. A media socket is the harder half, since
+other kind already there does. It grew `Referral` the same way, and the
+constructor `referrals` (off by default), with `AcceptReferral` — a media
+socket opened and the referral taken, the placed call returned as a `Call` —
+and `RejectReferral` beside `AnswerCall` and `RejectCall`. A media socket is the harder half, since
 it is the application's own and exists before its call: `SipralStack`
 tracks every one `sipral_stack_nat_map` names — from `PlaceCall` or
 `AnswerCall`, once built with `nat: SipralNat.Stun` — in a
@@ -1567,7 +1628,10 @@ writes into, cross as a `Long`, so `mediaCapture`, `mediaPollRtcp`,
 shim; `org.sipral.idiomatic` reaches all of them through a second,
 hand-written one (`idiomatic_media.c`) linked into the same library, and
 `SipralClient.open` takes `ice`, `stunServer`, `turn` and `g729AnnexB` and runs
-the media-socket loop "Behind a NAT" describes. `sipral.aar`, built by
+the media-socket loop "Behind a NAT" describes. It takes `referrals` as well,
+off by default; `referralOf` reads `SIPRAL_EVENT_KIND_REFERRAL`'s payload, and
+`acceptReferral`/`rejectReferral` take or refuse it, the first returning the
+placed call as a `SipralCall` with its own media socket. `sipral.aar`, built by
 `scripts/package/aar.sh`, carries a `proguard.txt` with the keep rules R8
 needs for the three listener keepers' `deliver`, which nothing but native code
 calls, and for every `external fun`. Coroutines and `Flow` for events are
@@ -1693,9 +1757,11 @@ it, so a wheel built on the newest macOS still installs on every release the
 library runs on.
 
 `Stack.__init__`'s `ice`, `nat`, `stun_server`, `turn_server`,
-`turn_username`, `turn_password` and `g729_annex_b` set the matching
-`sipral_stack_config_t` fields, all defaulting to today's behaviour
-(everything off). `sipral.enums.Ice`/`Nat`/`NatMapping`/`NatRelay` are
+`turn_username`, `turn_password`, `g729_annex_b` and `referrals` set the
+matching `sipral_stack_config_t` fields, all defaulting to today's behaviour
+(everything off). `Stack.accept_referral` and `Stack.reject_referral` take and
+refuse the `SIPRAL_EVENT_KIND_REFERRAL` that last one lets through, the first
+opening the placed call's media socket the way `place_call` does. `sipral.enums.Ice`/`Nat`/`NatMapping`/`NatRelay` are
 built the same reflective way every other enum here is, and
 `sipral.events._decode_payload` grew the two cases `sipral_nat_event_t`
 and `sipral_nat_relay_event_t` need. The harder half is a *media* socket:

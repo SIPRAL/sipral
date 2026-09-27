@@ -85,13 +85,25 @@ class Stack:
         turn_username: str | None = None,
         turn_password: str | None = None,
         g729_annex_b: bool | None = None,
+        referrals: bool | None = None,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
 
         ``ice`` and ``nat`` are :class:`sipral.enums.Ice` /
         :class:`sipral.enums.Nat` values, or ``0`` for this build's own
         default (`SIPRAL_ICE_OFF`, `SIPRAL_NAT_OFF` -- exactly today's
-        behaviour). ``nat=Nat.STUN`` needs ``stun_server`` as ``host:port``;
+        behaviour). ``Ice.LITE`` is for a server reachable at the address
+        it advertises and nowhere else: it answers a full ICE peer's checks
+        and never sends its own (`docs/06-nat.md`, "ICE-lite").
+
+        ``referrals=True`` hands a REFER outside any dialog -- click-to-dial
+        from a switchboard -- to the application as
+        `SIPRAL_EVENT_KIND_REFERRAL`, to take with :meth:`accept_referral`
+        or refuse with :meth:`reject_referral`. Off by default, when every
+        one is refused 403: a peer that can make a phone dial is a
+        toll-fraud vector, so each one is the application's decision.
+
+        ``nat=Nat.STUN`` needs ``stun_server`` as ``host:port``;
         ``turn_server`` rides on it and needs ``turn_username`` and
         ``turn_password`` with it (`docs/06-nat.md`, `docs/08-ffi.md`
         "Behind a NAT"). The TURN credentials are copied into the library
@@ -197,6 +209,7 @@ class Stack:
         if turn_password_buf is not None:
             config.turn_password = turn_password_buf
             config.turn_password_len = len(turn_password.encode("utf-8"))
+        config.referrals = _toggle(referrals)
 
         out_stack = ffi.new("sipral_handle_t *")
         check(lib.sipral_stack_create(config, out_stack), "sipral_stack_create")
@@ -394,6 +407,69 @@ class Stack:
         _retry(
             lambda: lib.sipral_call_reject(self.handle, event.call, code, self.now_ms()),
             "sipral_call_reject",
+        )
+
+    def accept_referral(
+        self,
+        event: _events.Event,
+        *,
+        media_host: str = "127.0.0.1",
+        media_port: int = 0,
+        srtp: int = 0,
+        ice: int = 0,
+    ) -> Call:
+        """Take a REFER outside any dialog and place the call it asks for.
+
+        ``event`` is the `SIPRAL_EVENT_KIND_REFERRAL` a listener read off
+        :attr:`events`, with ``event.fields["status_code"]`` zero. This is
+        `sipral_call_accept_transfer` on the referral's handle: the stack
+        answers 202, reports on the call to whoever asked, and places it
+        from the account the event names -- to ``event.fields["target"]``,
+        which is the REFER's and never the caller's. A media socket is
+        opened for it here, the way :meth:`place_call` opens one, and the
+        :class:`Call` returned is that placed call. Taking one is a decision
+        with a bill attached -- whoever sent it can make this line dial
+        anything -- so it is never made on the application's behalf.
+        """
+        media_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        media_socket.bind((media_host, media_port))
+        media_socket.setblocking(False)
+        media_address = format_address(*media_socket.getsockname())
+        self._map_media_socket(media_socket, media_address)
+
+        media_address_buf = ffi.new("char[]", media_address.encode("utf-8"))
+        config = ffi.new("sipral_call_config_t *")
+        config.size = ffi.sizeof("sipral_call_config_t")
+        config.media_address = media_address_buf
+        config.media_address_len = len(media_address.encode("utf-8"))
+        config.srtp = srtp
+        config.ice = ice
+
+        out_placed = ffi.new("sipral_handle_t *")
+        try:
+            _retry(
+                lambda: lib.sipral_call_accept_transfer(
+                    self.handle, event.call, config, out_placed, self.now_ms()
+                ),
+                "sipral_call_accept_transfer",
+            )
+        except Exception:
+            self._forget_media_socket(media_address)
+            media_socket.close()
+            raise
+        call = Call(self, int(out_placed[0]), media_socket, media_address)
+        with self._lock:
+            self._calls[call.handle] = call
+        return call
+
+    def reject_referral(self, event: _events.Event, code: int = 603) -> None:
+        """Refuse a REFER outside any dialog with ``code``, 300 to 699:
+        `sipral_call_reject_transfer` on the referral's handle."""
+        _retry(
+            lambda: lib.sipral_call_reject_transfer(
+                self.handle, event.call, code, self.now_ms()
+            ),
+            "sipral_call_reject_transfer",
         )
 
     def call_for(self, handle: int) -> Call | None:

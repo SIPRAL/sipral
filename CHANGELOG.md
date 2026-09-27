@@ -53,6 +53,38 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `Contact`, and Asterisk's ACK, its BYE and the echo all have to arrive;
   the harness says which did not. A C ABI unit test pins the same answer
   path without the lab.
+- **A REFER from outside any call can be taken — when the application asks.**
+  Click-to-dial from a switchboard or a CRM (RFC 3515 §4.1) is a REFER that
+  names no dialog. With `UserAgent::allow_referrals(true)` — the C ABI's
+  `sipral_stack_config_t::referrals`, and `referrals` in every binding — it
+  meets the same screening an INVITE does and reaches the application as
+  `UaEvent::ReferralRequested` (`SIPRAL_EVENT_KIND_REFERRAL`, 41) with the
+  target, whether it is attended, its `Referred-By`, the account it arrived
+  for and the REFER itself; `accept_transfer` / `sipral_call_accept_transfer`
+  answers 202, opens the implicit subscription's dialog, sends `100 Trying`
+  and places the call exactly as a transfer does, reporting every answer to
+  the referrer until the last, and `reject_transfer` refuses it. The
+  referral is a call-kind handle that names a request, not a call. One left
+  unanswered for 64·T1 is answered 408 and reported as
+  `UaEvent::ReferralLapsed` (kind 41 again, with its status). Off by default,
+  and refused 403 then: a peer that can make a phone dial is a toll-fraud
+  vector. Python `Stack.accept_referral`, Swift `SipralStack.acceptReferral`,
+  Kotlin `SipralClient.acceptReferral` and .NET `SipralStack.AcceptReferral`
+  open the placed call's media socket and return it; `reject_referral` and its
+  siblings refuse.
+- **RFC 4488's `Refer-Sub: false` is granted** to every REFER this end takes,
+  in a call or out of one: the 202 says so and no subscription, NOTIFY or
+  dialog follows. `norefersub` is an option tag this end understands.
+- **`SIPRAL_ICE_LITE` (4) crosses the C ABI**, on the stack's `ice` or a
+  call's own, for a server reachable at the address it advertises answering
+  full ICE peers; `Ice.LITE`, `.lite`, `SipralIce.LITE` and `SipralIce.Lite`
+  in the four bindings. The facade's new `ice-lite` feature names
+  `IcePolicy::Lite` without `headless`, and `sipral-ffi` turns it on.
+- **The C harness listens.** `harness-c listen` answers a call or takes a
+  referral through the C ABI, and `scripts/lab.sh referral` and
+  `scripts/lab.sh icelite` point the Rust harness at it: a REFER from outside
+  any call refused, then taken and placed to Asterisk's echo, and a call that
+  requires ICE answered by `SIPRAL_ICE_LITE`.
 - **The .NET binding can get a call past a NAT.** `SipralStack`'s
   constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
   `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP
@@ -847,6 +879,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `labuser` account, an incoming call now rings and carries audio both ways
   (`docs/15-mobile.md`); the earlier report of that call answered with a
   private `Contact` did not reproduce, on the emulator or in the lab.
+- **A REFER that names no dialog is refused 403, not 481.** 481 said it named
+  a dialog this end lacks, which RFC 3515 §4.1's own REFER never does; one
+  whose `To` does carry a tag is still 481. A SUBSCRIBE for the `refer`
+  package that names no subscription is 403 too, as §2.4.4 requires, rather
+  than 405.
+- **The subscription a taken REFER opens says how long it runs, and ends.**
+  Every `active` NOTIFY carries the `expires` RFC 6665 §4.2.2 makes
+  compulsory (an hour, since the INVITE placed carries none); the referrer may
+  refresh it or end it with a SUBSCRIBE of its own, answered with a NOTIFY of
+  the whole state, and one nobody refreshed ends `terminated;reason=timeout`
+  without touching the call. A call a taken REFER could not even send ends the
+  subscription with §2.4.5's 503 instead of leaving the referrer on a 100 and
+  the call unable to take another REFER.
 - **Apple artefacts are built for the releases they claim.** The macOS
   wheel was tagged with the building Mac's own version (`macosx_26_0`), so
   pip refused it on every older macOS the library runs on; and in every
@@ -1402,6 +1447,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `bindings/dotnet/Sipral/README.md` said "Swift, .NET and Kotlin bindings,"
   leaving out Python though the crate has had one as long as the other three.
   No behaviour changed.
+- **ABI 0.27.** `sipral_stack_config_t` and `sipral_stack_settings_t` grew
+  `referrals` at the tail, `SIPRAL_EVENT_KIND_REFERRAL` (41) and
+  `sipral_referral_event_t` are new, `SIPRAL_ICE_LITE` is 4, and
+  `sipral_call_reject_transfer` refuses a code under 300. A binding built
+  against 0.26 is refused by this library, and the Kotlin agent's jar has to
+  be rebuilt.
 - **Every Swift event stream now reaches every reader.**
   `SipralStack.events`, `Call.events`, `Call.dtmf` and `Media.frames` were
   each one `AsyncStream`, which hands every item to one reader only: a call

@@ -388,6 +388,48 @@ pub enum UaEvent {
         /// The final status the far end reported.
         status: StatusCode,
     },
+    /// Somebody outside any call asked this end to place one (RFC 3515, a
+    /// REFER with no dialog): click-to-dial from a switchboard or a CRM.
+    ///
+    /// Raised only with
+    /// [`UserAgent::allow_referrals`](crate::UserAgent::allow_referrals) on,
+    /// and only for a REFER the same screening an INVITE meets let through.
+    /// Take it with
+    /// [`UserAgent::accept_transfer`](crate::UserAgent::accept_transfer) on
+    /// `referral`, which answers 202, reports on the call it places, and
+    /// places it from `account`; refuse it with
+    /// [`UserAgent::reject_transfer`](crate::UserAgent::reject_transfer).
+    /// Taking one is the application's decision every time, because a peer
+    /// that can make a phone dial is a toll-fraud vector: see
+    /// [`crate::referral`]. One left unanswered for 64·T1 is
+    /// [`UaEvent::ReferralLapsed`].
+    ReferralRequested {
+        /// The referral: a handle of the call kind that names no call, only
+        /// this request, until it is answered or lapses.
+        referral: CallHandle,
+        /// The line it was addressed to, by its Request-URI or its `To`, and
+        /// the one the call it asks for is placed from.
+        account: AccountId,
+        /// Who to call.
+        target: sipral_core::msg::Uri,
+        /// Whether its `Refer-To` named a dialog to replace (RFC 3891).
+        attended: bool,
+        /// Its `Referred-By`, when it carried exactly one (RFC 3892 §2.1):
+        /// who the sender says is asking. Written by the sender, so it is
+        /// context for a decision and never proof of anything.
+        referred_by: Option<Box<[u8]>>,
+        /// The REFER, whole.
+        request: OwnedMessage,
+    },
+    /// A referral nobody took or refused before its transaction ran out
+    /// (RFC 3515 §2.4.2), answered by the stack itself. Its handle names
+    /// nothing from here on.
+    ReferralLapsed {
+        /// The referral.
+        referral: CallHandle,
+        /// What the REFER was answered with.
+        status: StatusCode,
+    },
     /// A SUBSCRIBE is on its way and nothing has answered yet (RFC 6665
     /// §4.1.2.1).
     Subscribing {

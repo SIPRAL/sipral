@@ -123,7 +123,16 @@ class SipralClient private constructor(
          * server for each of those media sockets, offered as the call's
          * relayed ICE candidate ([relayOf]); it needs [stunServer] too, and
          * a call only uses the relay under ICE. [g729AnnexB] allows G.729's
-         * silence compression, on by default.
+         * silence compression, on by default. `SipralIce.LITE` is for a
+         * server reachable at the address it advertises, answering full ICE
+         * peers, and nothing else (`docs/06-nat.md`, "ICE-lite").
+         *
+         * [referrals] set to true hands a REFER outside any dialog --
+         * click-to-dial from a switchboard -- to the application as
+         * `SIPRAL_EVENT_KIND_REFERRAL` (read with [referralOf]), to take with
+         * [acceptReferral] or refuse with [rejectReferral]. Off by default,
+         * when every one is refused 403: a peer that can make a phone dial
+         * is a toll-fraud vector, so each one is the application's decision.
          */
         fun open(
             bindHost: String = "127.0.0.1",
@@ -134,13 +143,14 @@ class SipralClient private constructor(
             stunServer: String? = null,
             turn: SipralTurnServer? = null,
             g729AnnexB: Boolean? = null,
+            referrals: Boolean? = null,
         ): SipralClient {
             val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost))
             socket.soTimeout = 20
             val bindAddress = formatAddress(socket.localAddress.hostAddress, socket.localPort)
             val client = SipralClient(socket, bindAddress, stunServer, turn?.address)
             try {
-                client.start(userAgent, codecs, ice, turn, g729AnnexB)
+                client.start(userAgent, codecs, ice, turn, g729AnnexB, referrals)
             } catch (refused: Exception) {
                 socket.close()
                 throw refused
@@ -155,7 +165,14 @@ class SipralClient private constructor(
         }
     }
 
-    private fun start(userAgent: String?, codecs: String?, ice: SipralIce?, turn: SipralTurnServer?, g729AnnexB: Boolean?) {
+    private fun start(
+        userAgent: String?,
+        codecs: String?,
+        ice: SipralIce?,
+        turn: SipralTurnServer?,
+        g729AnnexB: Boolean?,
+        referrals: Boolean?,
+    ) {
         val random = SecureRandom()
         val entropy = ByteArray(32).also { random.nextBytes(it) }
         val mediaSeed = ByteArray(32).also { random.nextBytes(it) }
@@ -175,6 +192,7 @@ class SipralClient private constructor(
             turnServer = turn?.address,
             turnUsername = turn?.username,
             turnPassword = turn?.password,
+            referrals = toggle(referrals),
         )
         handle = Sipral.stackCreate(config)
         thread = Thread(::run, "sipral-client-$bindAddress").apply {
@@ -299,6 +317,53 @@ class SipralClient private constructor(
     /** [rejectCall] by call handle. */
     fun rejectCall(callHandle: Long, code: Long = 486) {
         retryBusy { Sipral.callReject(handle, callHandle, code, nowMs()) }
+    }
+
+    /**
+     * Take a REFER outside any dialog and place the call it asks for:
+     * `sipral_call_accept_transfer` on the referral's handle. `event` is the
+     * `SIPRAL_EVENT_KIND_REFERRAL` read off [events], whose [referralOf]
+     * has a zero `statusCode`.
+     *
+     * The stack answers 202, reports on the call to whoever asked, and
+     * places it from the account the event names, to the REFER's own target
+     * -- never the caller's. A media socket is opened for it here, the way
+     * [placeCall] opens one, and the [SipralCall] returned is that placed
+     * call. Whoever sent the REFER can make this line dial anything, so this
+     * is never done on the application's behalf. With a [stunServer] it
+     * waits for the mapping as [placeCall] does, so call it off the main
+     * thread.
+     */
+    fun acceptReferral(
+        event: SipralEvent,
+        mediaHost: String = "127.0.0.1",
+        mediaPort: Int = 0,
+        srtp: Long = 0,
+        ice: SipralIce? = null,
+    ): SipralCall {
+        val mediaSocket = DatagramSocket(mediaPort, InetAddress.getByName(mediaHost))
+        val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
+        val config = SipralCallConfig(
+            mediaAddress = mediaAddress,
+            srtp = srtp,
+            ice = (ice?.value ?: 0).toLong(),
+        )
+        val placed = try {
+            mapMediaSocket(mediaSocket, mediaAddress)
+            retryBusy { Sipral.callAcceptTransfer(handle, event.call, config, nowMs()) }
+        } catch (refused: Exception) {
+            giveBackMediaSocket(mediaSocket, mediaAddress)
+            throw refused
+        }
+        val call = SipralCall(this, placed, mediaSocket, mediaAddress)
+        calls[placed] = call
+        return call
+    }
+
+    /** Refuse a REFER outside any dialog with [code], 300 to 699:
+     * `sipral_call_reject_transfer` on the referral's handle. */
+    fun rejectReferral(event: SipralEvent, code: Long = 603) {
+        retryBusy { Sipral.callRejectTransfer(handle, event.call, code, nowMs()) }
     }
 
     /** `sipral_announcement_forget`: the user dismissed a screen a push

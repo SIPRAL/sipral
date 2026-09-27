@@ -58,12 +58,14 @@ public sealed class SipralEventArgs : EventArgs
     public SipralNatEventInfo? Nat { get; }
     /// <summary>Set for <see cref="SipralEventKind.NatRelay"/>.</summary>
     public SipralNatRelayEventInfo? Relay { get; }
+    /// <summary>Set for <see cref="SipralEventKind.Referral"/>.</summary>
+    public SipralReferralEventInfo? Referral { get; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
         SipralRegistrationEventInfo? registration, SipralCallEventInfo? callInfo,
         SipralMediaEventInfo? media, SipralTransferEventInfo? transfer, SipralResolveEventInfo? resolve,
-        SipralNatEventInfo? nat, SipralNatRelayEventInfo? relay)
+        SipralNatEventInfo? nat, SipralNatRelayEventInfo? relay, SipralReferralEventInfo? referral)
     {
         Kind = kind;
         KindName = kindName;
@@ -78,6 +80,7 @@ public sealed class SipralEventArgs : EventArgs
         Resolve = resolve;
         Nat = nat;
         Relay = relay;
+        Referral = referral;
     }
 
     private static readonly SipralEventKind[] CallKinds =
@@ -119,6 +122,7 @@ public sealed class SipralEventArgs : EventArgs
         SipralResolveEventInfo? resolve = null;
         SipralNatEventInfo? nat = null;
         SipralNatRelayEventInfo? relay = null;
+        SipralReferralEventInfo? referral = null;
 
         if (kind == SipralEventKind.RegistrationChanged)
         {
@@ -172,9 +176,15 @@ public sealed class SipralEventArgs : EventArgs
                 ReadUtf8(r.Local, r.LocalLen), ReadUtf8(r.Relayed, r.RelayedLen),
                 ReadUtf8(r.Mapped, r.MappedLen), ReadUtf8(r.Reason, r.ReasonLen));
         }
+        else if (kind == SipralEventKind.Referral)
+        {
+            var r = evt.Payload.Referral;
+            referral = new SipralReferralEventInfo(r.StatusCode, r.Attended != 0,
+                ReadUtf8(r.Target, r.TargetLen), ReadUtf8(r.ReferredBy, r.ReferredByLen));
+        }
 
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
-            registration, callInfo, media, transfer, resolve, nat, relay);
+            registration, callInfo, media, transfer, resolve, nat, relay, referral);
     }
 
     private static SipralStreamStatistics? ReadStatistics(IntPtr ptr)

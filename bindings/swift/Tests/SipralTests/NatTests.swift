@@ -409,6 +409,17 @@ final class NatTests: XCTestCase {
         try await assertIceCarriesAudio(alice, bob, host: host)
     }
 
+    /// `SipralIce.lite` answering a full agent that requires ICE (RFC 8445
+    /// §2.5): the lite end offers its one host candidate and answers the
+    /// checks, the full end nominates, and audio crosses the pair both ways.
+    func testALiteStackAnsweringAFullOneCarriesAudioBothWays() async throws {
+        let host = try hostAddress()
+        let alice = try SipralStack(bindHost: host, ice: .required)
+        let bob = try SipralStack(bindHost: host, ice: .lite)
+        defer { alice.close(); bob.close() }
+        try await assertIceCarriesAudio(alice, bob, host: host)
+    }
+
     /// The same call with both ends behind the STUN server: every media
     /// socket is mapped before its call is described, so the far end's first
     /// checks arrive while the socket is still the stack's to read, and go

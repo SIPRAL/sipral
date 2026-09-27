@@ -49,6 +49,7 @@ mod pair;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 mod pipewire;
 mod quality;
+mod referral;
 #[cfg(all(feature = "wasapi", target_os = "windows"))]
 mod wasapi;
 
@@ -448,6 +449,25 @@ fn extra_flows(
             Err(why) => {
                 println!("  FAIL  ICE required, against {server} — {why}");
                 failures += 1;
+            }
+        }
+    }
+    // a REFER from outside any call, at the stack `server` names -- `harness-c
+    // listen`, started by `scripts/lab.sh`'s referral step -- asking its line
+    // `user` at the lab's Asterisk to call `extension`, a whole URI here: once
+    // with the listener's referrals off and once with them on (see `referral`)
+    for (flow, expect) in [
+        ("referraloff", referral::Expect::Refused),
+        ("referral", referral::Expect::Taken),
+    ] {
+        if wanted.split(',').any(|name| name.trim() == flow) {
+            let domain = env::var("SIPRAL_REFER_DOMAIN").unwrap_or_else(|_| "asterisk".to_owned());
+            match referral::run(remote, user, &domain, extension, expect) {
+                Ok(said) => println!("  pass  a REFER from outside any call, {flow}{said}"),
+                Err(why) => {
+                    println!("  FAIL  a REFER from outside any call, {flow} — {why}");
+                    failures += 1;
+                }
             }
         }
     }

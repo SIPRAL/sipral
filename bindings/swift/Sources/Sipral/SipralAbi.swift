@@ -206,6 +206,27 @@ public enum SipralIce: UInt32, Sendable {
     /// media with `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling
     /// back. That is the whole difference between this and `Offered`.
     case required = 3
+    /// IcePolicy::Lite: be an ICE-lite endpoint (RFC 8445 §2.5) —
+    /// write `a=ice-lite` and one host candidate, answer the checks a
+    /// full peer sends, and put the audio on the pair it nominates.
+    ///
+    /// **Only for a server reachable at the address it advertises**: the
+    /// media socket's own, or the public address a one-to-one NAT in
+    /// front of it forwards (`sipral_stack_nat_map`'s mapping, when that
+    /// is what STUN reports). A WebRTC gateway or any other full-ICE peer
+    /// calling a voice agent in a data centre is the case it is for. RFC
+    /// 8445 Appendix A says ICE "will not function when a lite
+    /// implementation is placed behind a NAT", and a peer told this end
+    /// is lite stops doing the work that would have found another path —
+    /// so a softphone never names it. A peer that does no ICE, or is lite
+    /// itself, gets the call on the signalled address, as under
+    /// `Offered`; the application drains `sipral_media_poll_transmit`
+    /// for the answers to the checks exactly as it does for a full
+    /// agent's.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+    /// `SIPRAL_FEATURE_ICE`.
+    case lite = 4
 }
 
 /// One codec this ABI has a number for. Names for every member that says
@@ -717,6 +738,33 @@ public enum SipralEventKind: UInt32, Sendable {
     /// answer is awaited. Failed, the call goes without one. `account`
     /// and `call` are `SIPRAL_HANDLE_NONE`: a socket is neither.
     case natRelay = 40
+    /// A REFER outside any dialog asked this end to place a call (RFC
+    /// 3515): click-to-dial from a switchboard, a CRM or an operator
+    /// console. Only on a stack created with
+    /// `sipral_stack_config_t::referrals` on, and only for one the same
+    /// screening an INVITE meets let through.
+    ///
+    /// `call` is the referral's handle: a handle of the call kind that
+    /// names this request rather than a call — `sipral_call_state`
+    /// answers `SIPRAL_STATUS_WRONG_STATE` about it, and nothing but the
+    /// two calls below takes it. `account` is the line it arrived for,
+    /// which the call it asks for is placed from; `message` is the REFER.
+    /// `payload.referral` says who to call, whether that is an attended
+    /// transfer's target, and who the sender says is asking.
+    ///
+    /// Take it with `sipral_call_accept_transfer`, which answers 202,
+    /// places the call exactly as it does for a transfer inside a call and
+    /// writes the placed call's handle; refuse it with
+    /// `sipral_call_reject_transfer`. Either spends the handle. **Taking
+    /// it is the application's decision each time**: a peer that can make
+    /// a phone dial can make it dial anything, and `referred_by` is what
+    /// the sender wrote, never proof of who it is.
+    ///
+    /// Raised a second time, with `payload.referral.status_code` set and
+    /// nothing else, when the application answered neither before the
+    /// REFER's transaction ran out: the stack answered it with that status
+    /// and the handle is stale from here on.
+    case referral = 41
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1469,7 +1517,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 26
+    public static let abiVersionMinor: UInt32 = 27
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2945,6 +2993,18 @@ public enum Sipral {
     /// `sipral_call_place`: the answer to an offerless INVITE has nowhere to
     /// go but the ACK, and this ABI hands nothing back from there.
     ///
+    /// `call` may be a referral's handle instead — the `call` of a
+    /// `SIPRAL_EVENT_KIND_REFERRAL`, a REFER outside any dialog — and it is
+    /// taken exactly the same way, the call placed from the account the
+    /// event names. The 202 opens the dialog its NOTIFYs travel in, and the
+    /// handle is spent once this has answered the REFER: it is stale
+    /// afterwards, whether the call then went or not. One refused before
+    /// anything was sent — a header, a target — is still there to take.
+    ///
+    /// A call that cannot be sent once the 202 has gone ends the REFER's
+    /// subscription with RFC 3515 §2.4.5's 503, so the far end is told, and
+    /// this answers `SIPRAL_STATUS_NOT_SENT` as it would for any call.
+    ///
     /// Safety
     ///
     /// `config` must point at a `sipral_call_config_t` whose `size` member
@@ -2979,7 +3039,9 @@ public enum Sipral {
     ///
     /// A call that is over answers `SIPRAL_CALL_STATE_TERMINATED` until the
     /// poll that delivers `SIPRAL_EVENT_KIND_CALL_ENDED` retires its handle, and
-    /// `SIPRAL_STATUS_STALE_HANDLE` after that.
+    /// `SIPRAL_STATUS_STALE_HANDLE` after that. A referral's handle
+    /// (`SIPRAL_EVENT_KIND_REFERRAL`) is `SIPRAL_STATUS_WRONG_STATE`: it
+    /// names a request, and there is no call yet to be anywhere.
     ///
     /// Safety
     ///

@@ -56,6 +56,18 @@ public sealed record SipralTransferEventInfo(
     bool Attended,
     string? Target);
 
+/// <summary>What a <see cref="SipralEventKind.Referral"/> event carries
+/// — the fields of <c>sipral_referral_event_t</c>: a REFER outside any
+/// dialog, with <see cref="StatusCode"/> zero, or the word that one lapsed,
+/// with the status the stack answered it with and nothing else.
+/// <see cref="ReferredBy"/> is what the sender wrote, never proof of who it
+/// is.</summary>
+public sealed record SipralReferralEventInfo(
+    uint StatusCode,
+    bool Attended,
+    string? Target,
+    string? ReferredBy);
+
 /// <summary>What <see cref="SipralEventKind.ResolveNeeded"/> carries.</summary>
 public sealed record SipralResolveEventInfo(
     ulong Dialog,

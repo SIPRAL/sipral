@@ -63,6 +63,12 @@ unit_tested = true
 flows = ["attended transfer"]
 
 [[feature]]
+name = "REFER from outside any call (RFC 3515 §4.1), off unless asked for"
+implemented = true
+unit_tested = true
+flows = ["a REFER from outside any call, referraloff", "a REFER from outside any call, referral"]
+
+[[feature]]
 name = "DTMF, RFC 4733"
 implemented = true
 unit_tested = true

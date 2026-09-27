@@ -471,6 +471,21 @@ record! {
         pub turn_password: *const c_char,
         /// How many bytes of it.
         pub turn_password_len: usize,
+        /// Whether a REFER outside any dialog — somebody asking this end to
+        /// place a call it is not in, which is what click-to-dial from a
+        /// switchboard or a CRM sends (RFC 3515 §4.1) — reaches the
+        /// application, as a `SipralToggle`. **Off by default**, and then
+        /// every one is refused 403 before anything reads it: a peer that can
+        /// make a phone dial is a peer that can make it dial a premium-rate
+        /// number, and this stack authenticates no peer to tell the two
+        /// apart. On, each one is screened as an INVITE is and then raised as
+        /// `SIPRAL_EVENT_KIND_REFERRAL`, and the application takes it with
+        /// `sipral_call_accept_transfer` or refuses it with
+        /// `sipral_call_reject_transfer`, one request at a time.
+        ///
+        /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub referrals: u32,
     }
 }
 
@@ -582,6 +597,12 @@ record! {
         /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
         /// unmoved.
         pub g729_annex_b: u32,
+        /// Whether a REFER outside any dialog reaches the application, as a
+        /// `SipralToggle`, with the default — off — filled in.
+        ///
+        /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub referrals: u32,
     }
 }
 
@@ -1279,6 +1300,7 @@ pub(crate) unsafe fn create_on(
     let engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
     let mut agent = UserAgent::new(endpoint, seed)
         .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))?;
+    agent.allow_referrals(toggled(config.referrals, "referrals", false)?);
     // the socket is the caller's; what the stack is told is the address
     // the far end will answer to, which is what goes in every Via
     let bound = agent.receive(
@@ -1436,6 +1458,7 @@ entry! {
                 silence_suppression: toggle_of(state.media.silence_suppression),
                 media_stall_ms: state.media.stall_after.map_or(0, millis),
                 g729_annex_b: toggle_of(catalog.g729_annex_b()),
+                referrals: toggle_of(state.agent.allows_referrals()),
             })
         })?;
         unsafe { write_versioned(out_settings, settings) }?;
@@ -1633,6 +1656,7 @@ fn drain(
 ) {
     let mut ended: Vec<CallHandle> = Vec::new();
     let mut messages_sent: Vec<sipral_ua::MessageHandle> = Vec::new();
+    let mut lapsed: Vec<CallHandle> = Vec::new();
     while let Some(event) = state.engine.poll_event(&mut state.agent, now) {
         match event {
             Event::Signalling(said) => {
@@ -1666,6 +1690,9 @@ fn drain(
                 }
                 if let UaEvent::MessageSent { message, .. } = said {
                     messages_sent.push(message);
+                }
+                if let UaEvent::ReferralLapsed { referral, .. } = said {
+                    lapsed.push(referral);
                 }
                 signalling(stack, state, said, raised, unclaimed);
             }
@@ -1706,6 +1733,10 @@ fn drain(
     // queued, which is the only place it still needed to be found
     for message in messages_sent {
         state.messages.forget(message);
+    }
+    // and a referral nobody answered: its lapse is the last word about it
+    for referral in lapsed {
+        state.calls.forget(referral);
     }
 }
 
@@ -1884,6 +1915,8 @@ pub(crate) mod tests {
         pub(crate) subscriptions: Vec<Watched>,
         /// What every resolve request carried, in the order they arrived.
         pub(crate) resolves: Vec<Asked>,
+        /// What every referral event carried, in the order they arrived.
+        pub(crate) referrals: Vec<Referring>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -2059,6 +2092,43 @@ pub(crate) mod tests {
         }
     }
 
+    /// What one `SIPRAL_EVENT_KIND_REFERRAL` said, copied out while its
+    /// pointers are still the library's to read.
+    #[derive(Clone, Debug)]
+    pub(crate) struct Referring {
+        pub(crate) account: SipralHandle,
+        pub(crate) referral: SipralHandle,
+        pub(crate) status_code: u32,
+        pub(crate) attended: u32,
+        pub(crate) target: String,
+        pub(crate) referred_by: Option<String>,
+        pub(crate) message_len: usize,
+    }
+
+    /// The referral arm of one event's payload.
+    ///
+    /// # Safety
+    ///
+    /// `event` must be the kind that fills that arm in.
+    unsafe fn referred(event: &SipralEvent) -> Referring {
+        let payload = unsafe { event.payload.referral };
+        let text = |pointer: *const c_char, len: usize| {
+            (!pointer.is_null()).then(|| {
+                let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), len) };
+                String::from_utf8_lossy(bytes).into_owned()
+            })
+        };
+        Referring {
+            account: event.account,
+            referral: event.call,
+            status_code: payload.status_code,
+            attended: payload.attended,
+            target: text(payload.target, payload.target_len).unwrap_or_default(),
+            referred_by: text(payload.referred_by, payload.referred_by_len),
+            message_len: event.message_len,
+        }
+    }
+
     /// The subscription arm of one event's payload.
     ///
     /// # Safety
@@ -2104,6 +2174,10 @@ pub(crate) mod tests {
         if event.kind == SipralEventKind::ResolveNeeded {
             let asked = unsafe { asked(event) };
             observed.resolves.push(asked);
+        }
+        if event.kind == SipralEventKind::Referral {
+            let referred = unsafe { referred(event) };
+            observed.referrals.push(referred);
         }
     }
 
@@ -2183,6 +2257,7 @@ pub(crate) mod tests {
             turn_username_len: 0,
             turn_password: ptr::null(),
             turn_password_len: 0,
+            referrals: 0,
         }
     }
 
@@ -2342,6 +2417,7 @@ pub(crate) mod tests {
             silence_suppression: u32::MAX,
             media_stall_ms: u64::MAX,
             g729_annex_b: u32::MAX,
+            referrals: u32::MAX,
         }
     }
 
@@ -2364,6 +2440,29 @@ pub(crate) mod tests {
         assert_eq!(read.timer_t2_ms, 4_000);
         assert_eq!(read.timer_t4_ms, 5_000);
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A REFER outside any dialog reaches nobody unless the stack was made
+    /// to take them, and the setting reads back as what it came to.
+    #[test]
+    fn referrals_are_off_unless_asked_for_and_read_back_as_they_came_to() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        assert_eq!(read_settings(handle).referrals, SipralToggle::Off as u32);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let mut on = config(record, &mut observed);
+        on.referrals = SipralToggle::On as u32;
+        let (status, handle) = create(&on);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(read_settings(handle).referrals, SipralToggle::On as u32);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let mut wrong = config(record, &mut observed);
+        wrong.referrals = 3;
+        assert_eq!(create(&wrong).0, SipralStatus::InvalidArgument);
     }
 
     #[test]

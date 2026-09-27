@@ -207,7 +207,9 @@ impl Default for Rate {
 /// What has been refused, cumulative since the agent was made.
 ///
 /// Only ever grows, because the question an operator has is "how often has
-/// this happened", not "how often since somebody last looked".
+/// this happened", not "how often since somebody last looked". A REFER
+/// outside any dialog that the floor or the policy turned away
+/// ([`crate::referral`]) is counted as the INVITE it would have become.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Refusals {
@@ -382,6 +384,11 @@ pub enum Screening {
 /// gets the strict rule RFC 3891 §3 is read as here, unchanged.
 pub trait Screen {
     /// An INVITE has arrived.
+    ///
+    /// Or a REFER outside any dialog, once
+    /// [`UserAgent::allow_referrals`] is on: somebody asking this end to
+    /// place a call is screened as a call arriving is, and
+    /// `invite.request()` says which of the two this is.
     fn on_invite(&mut self, invite: &Incoming<'_>) -> Screening;
 
     /// And its `Replaces` names one of this end's live calls (RFC 3891 §3).
@@ -708,7 +715,11 @@ impl Guard {
 
     /// What happens to this INVITE: `None` to let it through, or the status to
     /// refuse it with.
-    fn decide(&mut self, request: &OwnedMessage, now: Instant) -> Option<StatusCode> {
+    ///
+    /// A REFER outside any dialog is asked the same, once the application
+    /// takes them at all ([`crate::referral`]): it is a call this end would
+    /// place, which is what the floor and the policy both ration.
+    pub(crate) fn decide(&mut self, request: &OwnedMessage, now: Instant) -> Option<StatusCode> {
         // The floor comes first. It is two numbers and a short scan, where the
         // policy is arbitrary application code — and code called once per
         // INVITE by whoever is sending them is the second attack.

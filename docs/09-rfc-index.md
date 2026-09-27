@@ -29,10 +29,11 @@ whether it is met; *in part* is followed by what is missing.
 | 3311 | The UPDATE method | sipral-ua | phase 1 |
 | 4028 | Session timers | sipral-ua | phase 1 |
 | 8760 | Digest with SHA-256 and SHA-512/256 | sipral-core | phase 1 |
-| 3515 | The REFER method | sipral-ua | phase 1 |
+| 3515 | The REFER method: inside a call, and outside any dialog (§4.1) where the application turns it on (`allow_referrals`, `sipral_stack_config_t::referrals`), off and refused 403 by default | sipral-ua | phase 1 |
+| 4488 | REFER without an implicit subscription: `Refer-Sub: false` granted, `norefersub` understood | sipral-ua | phase 1 |
 | 3891 | The Replaces header | sipral-ua | phase 1 |
 | 3892 | The `Referred-By` header, copied onto the INVITE a REFER triggers (§2.2). The signed token that would authenticate it is not implemented, so the header proves nothing | sipral-ua | phase 1 |
-| 6665 | Event notification framework: the subscriber, with the dialog the NOTIFY opens, refresh, expiry, Timer N, forking and re-subscription. The notifier role is `refer` alone (RFC 3515), and `Allow-Events` is read but not yet advertised | sipral-ua | phase 2 |
+| 6665 | Event notification framework: the subscriber, with the dialog the NOTIFY opens, refresh, expiry, Timer N, forking and re-subscription. The notifier role is `refer` alone (RFC 3515) — its `expires`, a subscriber's refresh and unsubscription, and the timeout that ends one nobody refreshed — and `Allow-Events` is read but not yet advertised | sipral-ua | phase 2 |
 | 3842 | Message waiting indication: the subscription is the framework's, and the `application/simple-message-summary` body is parsed into per-class counts, `UaEvent::MessagesWaiting` reporting the `voice-message` one | sipral-ua | phase 2, built |
 | 3428 | The MESSAGE method, pager-mode instant messaging in both directions, in and out of a dialog, with the §8 size policy and 200/202/415/413 | sipral-ua | phase 2, built |
 | 3608 | Service-Route, learned from the 200 OK to REGISTER and preloaded on the INVITEs and SUBSCRIBEs the account starts towards its registrar; not on the REGISTER itself | sipral-ua | phase 2, built |
@@ -99,7 +100,7 @@ whether it is met; *in part* is followed by what is missing.
 | 8489 | STUN | sipral-nat, sipral, sipral-ua | phase 2; done — the Binding client reached through `sipral::Mappings` and `SIPRAL_NAT_STUN`, its answer in the `Contact` and in `c=`/`m=` |
 | 5389 | STUN, previous version, for compatibility | sipral-nat | phase 2; the same client, which reads a server that has not moved |
 | 8656 | TURN | sipral-nat, sipral | phase 4; over UDP, a relay allocated before the call by `sipral::Relays` (`turn_server` in the C ABI) and taken over by the full ICE agent as the relayed candidate; TCP and TLS to the server written in the client, not carried by the agent |
-| 8445 | ICE, lite role | sipral-nat | phase 2; done: `IcePolicy::Lite`, in a build with the `headless` feature, for a host reachable at the address it advertises (the headless agent on a server) |
+| 8445 | ICE, lite role | sipral-nat | phase 2; done: `IcePolicy::Lite`, in a build with the `ice-lite` feature or `headless` beside `ice`, and `SIPRAL_ICE_LITE` over the C ABI, for a host reachable at the address it advertises (the headless agent on a server) |
 | 8445 | ICE, full role: gathering, checks, nomination, role conflicts, restarts. Off by default on a desktop | sipral-nat, sipral | phase 4; a host candidate, a server-reflexive one from the stack's own STUN mapping of the socket, and a relayed one from a TURN allocation made before the call; the agent asks no server itself before the offer |
 | 7675 | STUN consent freshness, for a session ICE established | sipral-nat, sipral | phase 4 |
 | 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2; no separate code; the RFC 8445 agents answer an RFC 5245 peer (RFC 8445 §10) |

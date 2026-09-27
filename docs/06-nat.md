@@ -48,7 +48,7 @@ So the switch is not a preference:
 
 | Deployment | ICE |
 |---|---|
-| Headless agent on a server with a public address | `a=ice-lite`. A full-ICE peer, typically a WebRTC gateway, can then complete a session against it — which is the entire reason the role exists here |
+| Headless agent on a server with a public address | `a=ice-lite` (`IcePolicy::Lite`; `SIPRAL_ICE_LITE` over the C ABI). A full-ICE peer, typically a WebRTC gateway, can then complete a session against it — which is the entire reason the role exists here |
 | Softphone behind a NAT | None by default. No `a=ice-lite`, no candidate lines. `rport`, symmetric RTP with latching and keepalive are what carry that path, and steps 1 to 3 above are what make them enough |
 | Phone on a carrier-grade NAT, or any endpoint whose peer requires ICE | Full ICE with TURN, phase 4, switched on per stack or per call. Off by default everywhere else |
 
@@ -489,12 +489,23 @@ and no more. That constraint, and the one about NAT, are why this role belongs
 to the headless build and not to the softphone.
 
 It is reached from a call as `IcePolicy::Lite`, and that value exists only in
-a build with both `ice` and `headless`: the softphone's build, and the C ABI
-built on it, cannot name it, so the rule in the table is kept by the compiler
-rather than by a default somebody could change. Nothing turns it on but the
-application asking, per call or on the engine's catalogue;
-`headless-socket-agent --ice-lite` is the reference. What it does, in the
-order a call meets it:
+a build that asks for it: the facade's `ice-lite` feature, or `headless`
+beside `ice`. The softphone's default build cannot name it, so for a Rust
+softphone the rule in the table is kept by the compiler rather than by a
+default somebody could change. The C ABI can name it — `SIPRAL_ICE_LITE`, on
+`sipral_stack_config_t::ice` or a call's own — because the server that wants
+the role is as often a C, Python, .NET, Swift or Kotlin program as a Rust one;
+there the rule is the application's, written beside the value in
+`docs/08-ffi.md`, and nothing of `sipral-headless` comes with it. Nothing turns
+it on but the application asking, per call or on the engine's catalogue;
+`headless-socket-agent --ice-lite` is the Rust reference and
+`harness-c listen` with `SIPRAL_ICE=lite` the C one. **When it is the right
+choice:** the host is reachable at the address it advertises — a public
+address, or a one-to-one NAT that forwards one to it — and its peers run full
+ICE and will not send media anywhere they have not checked: a voice agent in a
+data centre answering a WebRTC gateway. Not a phone, not a desktop behind a
+home router, and not a server whose only way in is a port range a firewall
+opens on demand. What it does, in the order a call meets it:
 
 - **The description.** `a=ice-lite` at session level (RFC 8839 §4.2.1.4) and
   no `a=ice-pacing` (§4.3.1 forbids a lite end one); a username fragment and
@@ -548,7 +559,7 @@ order a call meets it:
   it — the peer's consent checks — go on being answered, until the peer
   nominates under the new ones (RFC 8445 §9).
 
-Proven three ways. `sipral-nat`'s own tests drive the lite agent through
+Proven four ways. `sipral-nat`'s own tests drive the lite agent through
 authentication, role conflicts, nomination and a restart. In process, a
 facade under `IcePolicy::Required` calls one under `IcePolicy::Lite`
 (`crates/sipral/src/tests.rs`): the full end opens a stream only because the
@@ -563,6 +574,13 @@ agent registered to it, and Asterisk's RTP debug has to show its audio going
 out through its completed ICE session ("via ICE"). The application's own log
 cannot show that: Asterisk nominates as it checks, and it sends to the lite
 end's candidate, which is also its `c=`, whether its checks succeeded or not.
+And through the C ABI: `sipral-ffi`'s own test answers a full offer under
+`SIPRAL_ICE_LITE` and checks the answer, the check it answers without checking
+back and the pair it takes; each binding's tests put a lite stack under a full
+one that requires ICE and carry audio both ways (`test_referral.py`,
+`NatTests.swift`, `NatCheck.kt`, `ReferralAndLiteTests.cs`); and in the lab
+the interop harness places the same ICE-required call at `harness-c listen`
+answering under `SIPRAL_ICE_LITE`, whose echo comes back on the chosen pair.
 
 ## ICE, full role
 

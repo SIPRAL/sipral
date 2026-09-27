@@ -33,6 +33,20 @@ public struct SipralEvent: Sendable {
     public let natData: NatEventData?
     /// `payload.relay`, for `SipralEventKind.natRelay` only.
     public let relayData: RelayEventData?
+    /// `payload.referral`, for `SipralEventKind.referral` only.
+    public let referralData: ReferralEventData?
+}
+
+/// A REFER outside any dialog (`sipral_referral_event_t`): take it with
+/// `SipralStack.acceptReferral`, refuse it with `SipralStack.rejectReferral`.
+/// `statusCode` is zero while it waits; set, it is the word that it lapsed
+/// unanswered, with what the stack answered it with and nothing else.
+/// `referredBy` is what the sender wrote, never proof of who it is.
+public struct ReferralEventData: Sendable {
+    public let statusCode: UInt32
+    public let attended: Bool
+    public let target: String?
+    public let referredBy: String?
 }
 
 /// What a STUN server said about one of this stack's sockets
@@ -251,6 +265,15 @@ enum SipralEventDecoder {
         )
     }
 
+    private static func referralData(_ referral: sipral_referral_event_t) -> ReferralEventData {
+        ReferralEventData(
+            statusCode: referral.status_code,
+            attended: referral.attended != 0,
+            target: textC(referral.target, referral.target_len),
+            referredBy: textC(referral.referred_by, referral.referred_by_len)
+        )
+    }
+
     /// Copies one `sipral_event_t` out into a standalone `SipralEvent`.
     ///
     /// Called from inside the C callback, and nowhere else: `raw` points at
@@ -265,11 +288,14 @@ enum SipralEventDecoder {
         var announceData: AnnounceEventData?
         var natData: NatEventData?
         var relayData: RelayEventData?
+        var referralData: ReferralEventData?
 
         if kindRaw == SipralEventKind.natMapping.rawValue {
             natData = self.natData(raw.payload.nat)
         } else if kindRaw == SipralEventKind.natRelay.rawValue {
             relayData = self.relayData(raw.payload.relay)
+        } else if kindRaw == SipralEventKind.referral.rawValue {
+            referralData = self.referralData(raw.payload.referral)
         } else if kindRaw == SipralEventKind.registrationChanged.rawValue {
             registrationData = self.registrationData(raw.payload.registration)
         } else if callKinds.contains(kindRaw) {
@@ -294,7 +320,8 @@ enum SipralEventDecoder {
             registrationData: registrationData,
             announceData: announceData,
             natData: natData,
-            relayData: relayData
+            relayData: relayData,
+            referralData: referralData
         )
     }
 }

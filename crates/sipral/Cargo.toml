@@ -57,11 +57,20 @@ publish = true
 # server — `docs/06-nat.md` says what it costs then. A build that will only
 # ever run on a network with no NAT in front of it leaves it out, and
 # `Capabilities::stun` says so.
+#
+# `ice-lite` is the fifth, and it is not in the default for the reason
+# `IcePolicy::Lite` gives: the lite role is right only for a host reachable
+# at the address it advertises, a server, and a softphone that could name it
+# could advertise it from behind a NAT. It brings nothing `ice` does not; it
+# only makes the policy nameable. `headless` beside `ice` names it too, and
+# `sipral-ffi` turns this on, because a server behind that ABI is written in
+# whatever language its owner chose and still wants the role.
 default = ["opus", "dtls", "ice", "stun"]
 opus = ["sipral-media/opus"]
 dtls = ["dep:sipral-dtls", "dep:sipral-nat"]
 ice = ["dep:sipral-nat"]
 stun = ["dep:sipral-nat"]
+ice-lite = ["ice"]
 # `tls.rs` alone: a feature cannot turn on a dev-dependency, only a normal
 # one, so `rustls` sits here, optional, reached by nothing this crate ships.
 # It is how that one example supplies the TLS this crate never links itself

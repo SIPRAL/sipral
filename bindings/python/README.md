@@ -103,9 +103,27 @@ same socket, and the same two calls then wait out its
 event and error this package raises. `ice=Ice.OFFERED`/`Ice.REQUIRED`
 (`sipral.enums.Ice`), per stack or per `place_call`, is what actually puts
 a relay to use — off by default, the same as `nat`, which
-`docs/06-nat.md` explains. `g729_annex_b=False` on the stack turns off
+`docs/06-nat.md` explains. `Ice.LITE` is the server's value, never the
+phone's: an ICE-lite endpoint (RFC 8445 §2.5) for a host reachable at the
+address it advertises, answering full ICE peers — a voice agent in a data
+centre answering a WebRTC gateway. `g729_annex_b=False` on the stack turns off
 G.729's Annex B silence compression (`annexb=no`) if that codec runs at
 all.
+
+## A REFER from outside any call
+
+`Stack(referrals=True)` hands a REFER that names no dialog — click-to-dial
+from a switchboard or a CRM, RFC 3515 §4.1 — to the application as
+`EventKind.REFERRAL`, with `event.fields["target"]`, `["attended"]` and
+`["referred_by"]`, and `event.account` the line it arrived for.
+`stack.accept_referral(event)` answers 202, reports on the call to whoever
+asked and places it from that line, returning the placed `Call` with a media
+socket of its own; `stack.reject_referral(event, 603)` refuses it. **Off by
+default, and then every one is refused 403**: a peer that can make a phone
+dial can make it dial a premium-rate number, and `referred_by` is what the
+sender wrote, so taking one is the application's decision each time. One left
+unanswered comes back as a second `EventKind.REFERRAL` with
+`fields["status_code"]` set to the 408 the stack answered it with.
 
 ## Test
 
@@ -124,7 +142,11 @@ with `nat=Nat.STUN` learns and advertises the mapping, records what a
 two stacks with `ice=Ice.REQUIRED` against each other on this host's own
 routable address (never `127.0.0.1` — RFC 8445 Section 5.1.1.1 rules a
 loopback address out as a host candidate) to prove media starts, both
-ways, through a full ICE checklist and nomination.
+ways, through a full ICE checklist and nomination. `tests/test_referral.py`
+sends a REFER from outside any call by hand, from a plain socket, and proves
+the 403 without `referrals=True` and, with it, the 202, the NOTIFYs from
+`100 Trying` to the placed call's `200 OK` and the call itself; and puts an
+`Ice.LITE` stack under one that requires ICE, audio crossing both ways.
 
 `examples/agent.py` is also run by the interop lab (`scripts/lab.sh`), as
 its own docstring says to run it: registered at the lab's Asterisk, called

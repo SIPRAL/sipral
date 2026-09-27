@@ -771,15 +771,28 @@ fn a_request_for_a_dialog_this_agent_does_not_have_is_481() {
         ("BYE", "<sip:user@example.com>;tag=gone"),
         ("INFO", "<sip:user@example.com>;tag=gone"),
         ("SUBSCRIBE", "<sip:user@example.com>;tag=gone"),
+        ("REFER", "<sip:user@example.com>;tag=gone"),
         ("FOO", "<sip:user@example.com>;tag=gone"),
         ("BYE", "<sip:user@example.com>"),
         ("UPDATE", "<sip:user@example.com>"),
-        ("REFER", "<sip:user@example.com>"),
         ("INFO", "<sip:user@example.com>"),
     ] {
         let answer = answered(&out_of_dialog(method, to, &format!("{method}{}", to.len())));
         assert_eq!(status(&answer), 481, "{method} to {to}");
     }
+}
+
+#[test]
+fn a_refer_that_names_no_dialog_is_refused_on_policy_rather_than_481() {
+    // RFC 3515 §4.1's own REFER has no To tag and names no dialog, so 481
+    // would claim something untrue of it; an agent that has not been told
+    // to take them understands it and will not act on it (§21.4.4)
+    let answer = answered(&out_of_dialog(
+        "REFER",
+        "<sip:user@example.com>",
+        "refer403",
+    ));
+    assert_eq!(status(&answer), 403);
 }
 
 #[test]

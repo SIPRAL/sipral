@@ -45,6 +45,7 @@ use crate::headers::HeadersFor;
 use crate::lifecycle::Machine;
 use crate::message::{MessageHandle, SentMessage};
 use crate::parked::Parked;
+use crate::referral::Referrals;
 use crate::registration::{
     Registration, backoff_delay, echoed, granted_expiry, min_expires, read_registrar_info,
     retry_after,
@@ -155,6 +156,9 @@ pub struct UserAgent {
     /// What an incoming INVITE meets before anything else here does, and the
     /// count of what it turned away.
     pub(crate) guard: Guard,
+    /// The REFERs outside any dialog this agent holds, and whether it takes
+    /// any ([`crate::referral`]).
+    pub(crate) referrals: Referrals,
     /// 64·T1, read off the configuration once. RFC 6665 §4.1.2.4's Timer N is
     /// the only deadline this layer takes from the transaction timings, and
     /// the endpoint does not hand its configuration back out.
@@ -265,6 +269,7 @@ impl UserAgent {
             parked: Vec::new(),
             events: VecDeque::new(),
             guard: Guard::default(),
+            referrals: Referrals::default(),
             timer_n,
             sdp_limits,
             life: Machine::default(),

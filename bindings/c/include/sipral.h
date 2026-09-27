@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)26)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)27)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -290,6 +290,7 @@ typedef struct sipral_resolve_event sipral_resolve_event_t;
 typedef struct sipral_message_event sipral_message_event_t;
 typedef struct sipral_nat_event sipral_nat_event_t;
 typedef struct sipral_nat_relay_event sipral_nat_relay_event_t;
+typedef struct sipral_referral_event sipral_referral_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -572,6 +573,29 @@ enum {
      * back. That is the whole difference between this and `Offered`.
      */
     SIPRAL_ICE_REQUIRED = 3,
+    /**
+     * IcePolicy::Lite: be an ICE-lite endpoint (RFC 8445 §2.5) —
+     * write `a=ice-lite` and one host candidate, answer the checks a
+     * full peer sends, and put the audio on the pair it nominates.
+     *
+     * **Only for a server reachable at the address it advertises**: the
+     * media socket's own, or the public address a one-to-one NAT in
+     * front of it forwards (`sipral_stack_nat_map`'s mapping, when that
+     * is what STUN reports). A WebRTC gateway or any other full-ICE peer
+     * calling a voice agent in a data centre is the case it is for. RFC
+     * 8445 Appendix A says ICE "will not function when a lite
+     * implementation is placed behind a NAT", and a peer told this end
+     * is lite stops doing the work that would have found another path —
+     * so a softphone never names it. A peer that does no ICE, or is lite
+     * itself, gets the call on the signalled address, as under
+     * `Offered`; the application drains `sipral_media_poll_transmit`
+     * for the answers to the checks exactly as it does for a full
+     * agent's.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+     * `SIPRAL_FEATURE_ICE`.
+     */
+    SIPRAL_ICE_LITE = 4,
 };
 
 /**
@@ -1289,6 +1313,35 @@ enum {
      * and `call` are `SIPRAL_HANDLE_NONE`: a socket is neither.
      */
     SIPRAL_EVENT_KIND_NAT_RELAY = 40,
+    /**
+     * A REFER outside any dialog asked this end to place a call (RFC
+     * 3515): click-to-dial from a switchboard, a CRM or an operator
+     * console. Only on a stack created with
+     * `sipral_stack_config_t::referrals` on, and only for one the same
+     * screening an INVITE meets let through.
+     *
+     * `call` is the referral's handle: a handle of the call kind that
+     * names this request rather than a call — `sipral_call_state`
+     * answers `SIPRAL_STATUS_WRONG_STATE` about it, and nothing but the
+     * two calls below takes it. `account` is the line it arrived for,
+     * which the call it asks for is placed from; `message` is the REFER.
+     * `payload.referral` says who to call, whether that is an attended
+     * transfer's target, and who the sender says is asking.
+     *
+     * Take it with `sipral_call_accept_transfer`, which answers 202,
+     * places the call exactly as it does for a transfer inside a call and
+     * writes the placed call's handle; refuse it with
+     * `sipral_call_reject_transfer`. Either spends the handle. **Taking
+     * it is the application's decision each time**: a peer that can make
+     * a phone dial can make it dial anything, and `referred_by` is what
+     * the sender wrote, never proof of who it is.
+     *
+     * Raised a second time, with `payload.referral.status_code` set and
+     * nothing else, when the application answered neither before the
+     * REFER's transaction ran out: the stack answered it with that status
+     * and the handle is stale from here on.
+     */
+    SIPRAL_EVENT_KIND_REFERRAL = 41,
 };
 
 /**
@@ -2557,6 +2610,23 @@ struct sipral_stack_config {
      * How many bytes of it.
      */
     size_t turn_password_len;
+    /**
+     * Whether a REFER outside any dialog — somebody asking this end to
+     * place a call it is not in, which is what click-to-dial from a
+     * switchboard or a CRM sends (RFC 3515 §4.1) — reaches the
+     * application, as a `SipralToggle`. **Off by default**, and then
+     * every one is refused 403 before anything reads it: a peer that can
+     * make a phone dial is a peer that can make it dial a premium-rate
+     * number, and this stack authenticates no peer to tell the two
+     * apart. On, each one is screened as an INVITE is and then raised as
+     * `SIPRAL_EVENT_KIND_REFERRAL`, and the application takes it with
+     * `sipral_call_accept_transfer` or refuses it with
+     * `sipral_call_reject_transfer`, one request at a time.
+     *
+     * Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    uint32_t referrals;
 };
 
 /**
@@ -2679,6 +2749,14 @@ struct sipral_stack_settings {
      * unmoved.
      */
     uint32_t g729_annex_b;
+    /**
+     * Whether a REFER outside any dialog reaches the application, as a
+     * `SipralToggle`, with the default — off — filled in.
+     *
+     * Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    uint32_t referrals;
 };
 
 /**
@@ -4219,6 +4297,45 @@ struct sipral_nat_relay_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_REFERRAL carries: a REFER outside any
+ * dialog, or the word that one lapsed.
+ */
+struct sipral_referral_event {
+    /**
+     * Zero while the referral waits for the application. Set on the
+     * event that says it lapsed, to what the stack answered it with —
+     * 408, once its transaction ran out unanswered — and then every
+     * other member is zero or null.
+     */
+    uint32_t status_code;
+    /**
+     * Whether its `Refer-To` named a dialog to replace (RFC 3891), which
+     * makes it an attended transfer's second half rather than a plain
+     * request to dial.
+     */
+    uint32_t attended;
+    /**
+     * Who to call, as UTF-8. Not NUL-terminated.
+     */
+    const char *target;
+    /**
+     * How many bytes of it.
+     */
+    size_t target_len;
+    /**
+     * Its `Referred-By` (RFC 3892), as UTF-8 and as the sender wrote it:
+     * who it says is asking. Context for the decision, never proof of
+     * anything. Null when the REFER carried none, or more than the one
+     * §2.1 allows. Not NUL-terminated.
+     */
+    const char *referred_by;
+    /**
+     * How many bytes of it.
+     */
+    size_t referred_by_len;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -4279,6 +4396,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_NAT_RELAY.
      */
     sipral_nat_relay_event_t relay;
+    /**
+     * For SIPRAL_EVENT_KIND_REFERRAL.
+     */
+    sipral_referral_event_t referral;
 };
 
 /**
@@ -5606,6 +5727,18 @@ sipral_status_t sipral_call_transfer_to(sipral_handle_t stack, sipral_handle_t c
  * `sipral_call_place`: the answer to an offerless INVITE has nowhere to
  * go but the ACK, and this ABI hands nothing back from there.
  *
+ * `call` may be a referral's handle instead — the `call` of a
+ * `SIPRAL_EVENT_KIND_REFERRAL`, a REFER outside any dialog — and it is
+ * taken exactly the same way, the call placed from the account the
+ * event names. The 202 opens the dialog its NOTIFYs travel in, and the
+ * handle is spent once this has answered the REFER: it is stale
+ * afterwards, whether the call then went or not. One refused before
+ * anything was sent — a header, a target — is still there to take.
+ *
+ * A call that cannot be sent once the 202 has gone ends the REFER's
+ * subscription with RFC 3515 §2.4.5's 503, so the far end is told, and
+ * this answers `SIPRAL_STATUS_NOT_SENT` as it would for any call.
+ *
  * Safety
  *
  * `config` must point at a `sipral_call_config_t` whose `size` member
@@ -5628,7 +5761,9 @@ sipral_status_t sipral_call_reject_transfer(sipral_handle_t stack, sipral_handle
  *
  * A call that is over answers `SIPRAL_CALL_STATE_TERMINATED` until the
  * poll that delivers `SIPRAL_EVENT_KIND_CALL_ENDED` retires its handle, and
- * `SIPRAL_STATUS_STALE_HANDLE` after that.
+ * `SIPRAL_STATUS_STALE_HANDLE` after that. A referral's handle
+ * (`SIPRAL_EVENT_KIND_REFERRAL`) is `SIPRAL_STATUS_WRONG_STATE`: it
+ * names a request, and there is no call yet to be anywhere.
  *
  * Safety
  *

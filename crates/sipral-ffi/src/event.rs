@@ -477,6 +477,33 @@ event_kinds! {
         /// answer is awaited. Failed, the call goes without one. `account`
         /// and `call` are `SIPRAL_HANDLE_NONE`: a socket is neither.
         40 = NatRelay, c"nat relay";
+        /// A REFER outside any dialog asked this end to place a call (RFC
+        /// 3515): click-to-dial from a switchboard, a CRM or an operator
+        /// console. Only on a stack created with
+        /// `sipral_stack_config_t::referrals` on, and only for one the same
+        /// screening an INVITE meets let through.
+        ///
+        /// `call` is the referral's handle: a handle of the call kind that
+        /// names this request rather than a call — `sipral_call_state`
+        /// answers `SIPRAL_STATUS_WRONG_STATE` about it, and nothing but the
+        /// two calls below takes it. `account` is the line it arrived for,
+        /// which the call it asks for is placed from; `message` is the REFER.
+        /// `payload.referral` says who to call, whether that is an attended
+        /// transfer's target, and who the sender says is asking.
+        ///
+        /// Take it with `sipral_call_accept_transfer`, which answers 202,
+        /// places the call exactly as it does for a transfer inside a call and
+        /// writes the placed call's handle; refuse it with
+        /// `sipral_call_reject_transfer`. Either spends the handle. **Taking
+        /// it is the application's decision each time**: a peer that can make
+        /// a phone dial can make it dial anything, and `referred_by` is what
+        /// the sender wrote, never proof of who it is.
+        ///
+        /// Raised a second time, with `payload.referral.status_code` set and
+        /// nothing else, when the application answered neither before the
+        /// REFER's transaction ran out: the stack answered it with that status
+        /// and the handle is stale from here on.
+        41 = Referral, c"referral";
     }
 }
 
@@ -539,6 +566,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::MediaUnjoined, "media"),
     (SipralEventKind::NatMapping, "nat"),
     (SipralEventKind::NatRelay, "relay"),
+    (SipralEventKind::Referral, "referral"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -841,6 +869,34 @@ record! {
 }
 
 record! {
+    /// What a [`SipralEventKind::Referral`] carries: a REFER outside any
+    /// dialog, or the word that one lapsed.
+    #[derive(Clone, Copy)]
+    pub struct SipralReferralEvent {
+        /// Zero while the referral waits for the application. Set on the
+        /// event that says it lapsed, to what the stack answered it with —
+        /// 408, once its transaction ran out unanswered — and then every
+        /// other member is zero or null.
+        pub status_code: u32,
+        /// Whether its `Refer-To` named a dialog to replace (RFC 3891), which
+        /// makes it an attended transfer's second half rather than a plain
+        /// request to dial.
+        pub attended: u32,
+        /// Who to call, as UTF-8. Not NUL-terminated.
+        pub target: *const c_char,
+        /// How many bytes of it.
+        pub target_len: usize,
+        /// Its `Referred-By` (RFC 3892), as UTF-8 and as the sender wrote it:
+        /// who it says is asking. Context for the decision, never proof of
+        /// anything. Null when the REFER carried none, or more than the one
+        /// §2.1 allows. Not NUL-terminated.
+        pub referred_by: *const c_char,
+        /// How many bytes of it.
+        pub referred_by_len: usize,
+    }
+}
+
+record! {
     /// What a media event carries.
     ///
     /// As with a call event, not every member means something in every kind, and
@@ -1129,6 +1185,8 @@ record! {
         pub nat: SipralNatEvent,
         /// For [`SipralEventKind::NatRelay`].
         pub relay: SipralNatRelayEvent,
+        /// For [`SipralEventKind::Referral`].
+        pub referral: SipralReferralEvent,
     }
 }
 
@@ -1983,6 +2041,60 @@ fn about_a_transfer(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipra
             call,
             reported(status.get()),
         )),
+        UaEvent::ReferralRequested {
+            referral,
+            account,
+            ref target,
+            attended,
+            ref referred_by,
+            ref request,
+        } => {
+            let uri = target.as_bytes();
+            let (by, by_len) = referred_by
+                .as_deref()
+                .map_or((std::ptr::null(), 0), |field| {
+                    (field.as_ptr().cast::<c_char>(), field.len())
+                });
+            let payload = SipralReferralEvent {
+                status_code: 0,
+                attended: u32::from(attended),
+                target: uri.as_ptr().cast::<c_char>(),
+                target_len: uri.len(),
+                referred_by: by,
+                referred_by_len: by_len,
+            };
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::Referral,
+                payload!(referral: payload),
+            );
+            // minted here, the way an incoming call's handle is: the
+            // referral's is what the two calls that answer it take
+            out.call = known.calls.name_of(referral).unwrap_or(SIPRAL_HANDLE_NONE);
+            out.account = known
+                .accounts
+                .name_of(account)
+                .unwrap_or(SIPRAL_HANDLE_NONE);
+            attach(&mut out, Some(request));
+            Some(out)
+        }
+        UaEvent::ReferralLapsed { referral, status } => {
+            let payload = SipralReferralEvent {
+                status_code: u32::from(status.get()),
+                attended: 0,
+                target: std::ptr::null(),
+                target_len: 0,
+                referred_by: std::ptr::null(),
+                referred_by_len: 0,
+            };
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::Referral,
+                payload!(referral: payload),
+            );
+            out.call = known.calls.name_of(referral).unwrap_or(SIPRAL_HANDLE_NONE);
+            Some(out)
+        }
         // a protocol event this stack has no policy for and this ABI has no
         // word for; the poll result counts it, and the layer below is free to
         // grow a vocabulary faster than this one.
@@ -2596,7 +2708,8 @@ mod tests {
         assert_eq!(SipralEventKind::MediaUnjoined as u32, 38);
         assert_eq!(SipralEventKind::NatMapping as u32, 39);
         assert_eq!(SipralEventKind::NatRelay as u32, 40);
-        assert_eq!(SipralEventKind::ALL.len(), 39, "and there are no others");
+        assert_eq!(SipralEventKind::Referral as u32, 41);
+        assert_eq!(SipralEventKind::ALL.len(), 40, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2666,7 +2779,8 @@ mod tests {
         assert_eq!(name(38).as_deref(), Some("media unjoined"), "38 is live");
         assert_eq!(name(39).as_deref(), Some("nat mapping"), "39 is live");
         assert_eq!(name(40).as_deref(), Some("nat relay"), "40 is live");
-        assert_eq!(name(41), None, "past the last kind");
+        assert_eq!(name(41).as_deref(), Some("referral"), "41 is live");
+        assert_eq!(name(42), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

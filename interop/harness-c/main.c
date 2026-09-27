@@ -23,6 +23,15 @@
  *
  *     harness-c <server> [port] [extension] [other]
  *
+ * and one mode that waits instead of calling, for the lab steps where the
+ * stack under test is the one called or asked:
+ *
+ *     harness-c listen <server> [port]
+ *
+ * which binds port 5060, answers the first call that arrives by echoing it,
+ * and takes the first REFER from outside any dialog by calling where it says
+ * through `<server>` -- see `run_listen` for the variables that shape it.
+ *
  * The lab passes no credentials in the environment -- it calls the harness
  * with three arguments and nothing else -- so the account names below are the
  * same built-in defaults `interop/harness/src/main.rs` carries, and for the
@@ -378,13 +387,19 @@ struct seen {
      * it: the one place this ABI hands an application its own SDP back */
     char registered_with[2048];
     char local_sdp[2048];
-    /* `FLOW_NAT_INCOMING`: the call that came in, the account the library
-     * found its INVITE addressed to -- SIPRAL_HANDLE_NONE when it found none,
-     * and then the call answers from the address it arrived on -- and the
-     * INVITE itself */
+    /* the call that came in: `FLOW_NAT_INCOMING`'s, and `harness-c listen`'s */
     sipral_handle_t incoming;
+    /* `FLOW_NAT_INCOMING`: the account the library found its INVITE
+     * addressed to -- SIPRAL_HANDLE_NONE when it found none, and then the
+     * call answers from the address it arrived on -- and the INVITE itself */
     sipral_handle_t incoming_account;
     char invited[2048];
+    /* `harness-c listen`: the REFER from outside any dialog that asked this
+     * end to place a call -- its handle and target while it waits, and the
+     * status the stack answered it with if nobody took it in time */
+    sipral_handle_t referral;
+    char referral_target[192];
+    uint32_t referral_lapsed;
     int events;
     char fault[192];
 };
@@ -427,9 +442,12 @@ static void on_event(const sipral_event_t *event, void *user_data)
         }
         break;
     case SIPRAL_EVENT_KIND_INCOMING_CALL:
-        seen->incoming = event->call;
-        seen->incoming_account = event->account;
-        keep(seen->invited, sizeof seen->invited, event->message, event->message_len);
+        /* the first call only: a flow that takes one keeps taking that one */
+        if (seen->incoming == SIPRAL_HANDLE_NONE) {
+            seen->incoming = event->call;
+            seen->incoming_account = event->account;
+            keep(seen->invited, sizeof seen->invited, event->message, event->message_len);
+        }
         break;
     case SIPRAL_EVENT_KIND_CALL_CONFIRMED:
         seen->confirmed = 1;
@@ -556,6 +574,19 @@ static void on_event(const sipral_event_t *event, void *user_data)
         seen->mailbox_notified = 1;
         seen->mailbox_new_count = event->payload.message.new_messages;
         break;
+    case SIPRAL_EVENT_KIND_REFERRAL:
+        /* one kind for both: asked, with the status zero, and lapsed, with
+         * the status the stack answered it with and nothing else */
+        if (event->payload.referral.status_code == 0u) {
+            if (seen->referral == SIPRAL_HANDLE_NONE) {
+                seen->referral = event->call;
+                keep(seen->referral_target, sizeof seen->referral_target,
+                     event->payload.referral.target, event->payload.referral.target_len);
+            }
+        } else {
+            seen->referral_lapsed = event->payload.referral.status_code;
+        }
+        break;
     default:
         break;
     }
@@ -642,6 +673,10 @@ struct endpoint {
      * that the library refused */
     unsigned early;
     unsigned early_refused;
+    /* `harness-c listen` answering a call: what this end hears is what it
+     * says back, frame for frame, instead of the tone -- the echo the
+     * caller judges the path by */
+    int echoing;
 
     struct seen seen;
 };
@@ -673,6 +708,14 @@ static const char *codecs_for_this_flow;
  * sockets on ephemeral ports whose STUN answers go straight in. `FLOW_NAT`
  * asks the same STUN server and is none of those things. */
 static int calling_a_peer;
+
+/* `harness-c listen`: the signalling socket on the one port a caller or a
+ * referrer is told to reach it at, `sipral_stack_config_t::ice` and
+ * `::referrals` as SIPRAL_ICE and SIPRAL_REFERRALS name them. Zero on every
+ * other flow, which is the stack's own default for both. */
+static int listening;
+static uint32_t ice_for_this_flow;
+static uint32_t referrals_for_this_flow;
 
 static void wrong(const char *what, sipral_status_t status)
 {
@@ -830,6 +873,7 @@ static void run_media(struct endpoint *end, uint64_t now)
     static uint8_t out[DATAGRAM];
     static char destination[SIPRAL_ADDRESS_BYTES];
     static int16_t samples[MAX_FRAME_SAMPLES];
+    static int16_t heard[MAX_FRAME_SAMPLES];
     sipral_media_packet_t packet;
 
     if (end->media == SIPRAL_HANDLE_NONE) {
@@ -893,21 +937,27 @@ static void run_media(struct endpoint *end, uint64_t now)
         if (room > MAX_FRAME_SAMPLES) {
             room = MAX_FRAME_SAMPLES;
         }
+        memset(heard, 0, room * sizeof heard[0]);
         if (sipral_media_playback(end->media, samples, room, &written, &source)
                 == SIPRAL_STATUS_OK
-            && source == SIPRAL_PLAYBACK_PACKET
-            && loudness(samples, written) >= AUDIBLE) {
-            end->audible++;
+            && source == SIPRAL_PLAYBACK_PACKET) {
+            if (loudness(samples, written) >= AUDIBLE) {
+                end->audible++;
+            }
+            memcpy(heard, samples, written * sizeof samples[0]);
         }
     }
 
-    /* and the microphone */
+    /* and the microphone: the tone, or what was just heard when this end
+     * is the echo */
     {
         size_t room = end->frame_samples;
         if (room > MAX_FRAME_SAMPLES) {
             room = MAX_FRAME_SAMPLES;
         }
-        if (in_spurt(now - end->media_since_ms)) {
+        if (end->echoing) {
+            memcpy(samples, heard, room * sizeof samples[0]);
+        } else if (in_spurt(now - end->media_since_ms)) {
             tone(samples, room, end->sample_rate, &end->phase);
         } else {
             memset(samples, 0, room * sizeof samples[0]);
@@ -1354,8 +1404,11 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
         wrong_text("no route to the lab network");
         return -1;
     }
-    /* behind the lab's NAT, at the two ports it moves (NAT_SIP_PORT) */
-    end->sip_fd = bind_udp_at(&sip_local, end->withhold_stun ? NAT_SIP_PORT : 0u);
+    /* behind the lab's NAT, at the two ports it moves (NAT_SIP_PORT); a
+     * listener at the port its caller is told to use */
+    end->sip_fd = bind_udp_at(&sip_local, end->withhold_stun ? NAT_SIP_PORT
+                                          : listening        ? 5060u
+                                                             : 0u);
     end->rtp_fd = bind_udp_at(&rtp_local, end->withhold_stun ? NAT_RTP_PORT : 0u);
     if (end->sip_fd < 0 || end->rtp_fd < 0) {
         wrong_text("cannot bind a socket");
@@ -1386,6 +1439,8 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     config.codecs = "PCMU,PCMA";
     config.codecs_len = strlen("PCMU,PCMA");
     config.media_clock_unix_seconds = (uint64_t)time(NULL);
+    config.ice = ice_for_this_flow;
+    config.referrals = referrals_for_this_flow;
     if (stun_for_this_flow != NULL) {
         config.nat = SIPRAL_NAT_STUN;
         config.stun_server = stun_for_this_flow;
@@ -3644,6 +3699,144 @@ done:
     return outcome;
 }
 
+/* The listener's own verdict line: printed once, after the call it answered
+ * or placed has ended, in the shape scripts/lab.sh reads -- and returned as
+ * the exit code, nonzero when nothing crossed. */
+static int listener_done(struct endpoint *end)
+{
+    printf("ended packets_sent=%u packets_received=%u audible=%u refused=%u\n", end->sent,
+           end->received, end->audible, end->refused);
+    (void)fflush(stdout);
+    return end->sent > 0u && end->received > 0u ? 0 : 1;
+}
+
+/* `harness-c listen <server> [port]`: the stack under test as the one that is
+ * called or asked, rather than the one that calls.
+ *
+ * Its signalling socket is on 5060 at the address the route to `server`
+ * picks, and its one account is the lab's own at `server`, never registered:
+ * nothing needs to reach it through the registrar, and a REFER that asks it
+ * to call goes through `server` as every call the account places does.
+ *
+ *   SIPRAL_ICE=lite      the stack's calls are ICE-lite (`SIPRAL_ICE_LITE`)
+ *   SIPRAL_REFERRALS=on  a REFER from outside any dialog reaches this program
+ *                        (`sipral_stack_config_t::referrals`); off otherwise,
+ *                        which is the default, and the stack refuses it 403
+ *   SIPRAL_LISTEN_MS     how long to wait for either, 60 seconds unless set
+ *
+ * The first call that arrives is answered with this end's media and echoed
+ * back frame for frame, until the far end hangs up. The first referral is
+ * taken with `sipral_call_accept_transfer`, which places the call it names
+ * with this end's media, and the tone is played into it for `DWELL_MS` before
+ * this end hangs up. Every step prints a line scripts/lab.sh reads. */
+static int run_listen(const char *server, uint16_t port, const char *user, const char *pass)
+{
+    struct sockaddr_in remote;
+    struct endpoint end;
+    const char *ice = getenv("SIPRAL_ICE");
+    const char *referrals = getenv("SIPRAL_REFERRALS");
+    const char *patience = getenv("SIPRAL_LISTEN_MS");
+    uint64_t deadline;
+    uint64_t hang_up_at = 0;
+    int placed = 0;
+    int told_path = 0;
+
+    if (resolve(server, port, &remote) != 0) {
+        printf("cannot resolve %s:%u\n", server, (unsigned)port);
+        return 1;
+    }
+    listening = 1;
+    ice_for_this_flow = ice != NULL && strcmp(ice, "lite") == 0 ? SIPRAL_ICE_LITE : 0u;
+    referrals_for_this_flow = referrals != NULL && strcmp(referrals, "on") == 0
+                                  ? SIPRAL_TOGGLE_ON
+                                  : SIPRAL_TOGGLE_OFF;
+    trouble[0] = '\0';
+    if (open_endpoint(&end, 99u, server, &remote, user, pass) != 0) {
+        printf("cannot listen: %s\n", trouble);
+        return 1;
+    }
+    printf("waiting for a call or a referral at %s (ice %s, referrals %s)\n", end.sip_address,
+           ice_for_this_flow == SIPRAL_ICE_LITE ? "lite" : "off",
+           referrals_for_this_flow == SIPRAL_TOGGLE_ON ? "on" : "off");
+    (void)fflush(stdout);
+
+    deadline = now_ms() + (patience != NULL ? (uint64_t)strtoul(patience, NULL, 10) : 60000u);
+    for (;;) {
+        uint64_t now = now_ms();
+        sipral_status_t status;
+        pump(&end, now);
+        if (end.call == SIPRAL_HANDLE_NONE && end.seen.incoming != SIPRAL_HANDLE_NONE) {
+            end.call = end.seen.incoming;
+            end.echoing = 1;
+            status = sipral_call_answer_media(end.stack, end.call, end.rtp_address,
+                                              strlen(end.rtp_address), now);
+            printf("answered: %s\n", sipral_status_name(status));
+            (void)fflush(stdout);
+            if (status != SIPRAL_STATUS_OK) {
+                break;
+            }
+        }
+        if (end.call == SIPRAL_HANDLE_NONE && end.seen.referral != SIPRAL_HANDLE_NONE) {
+            sipral_call_config_t config;
+            memset(&config, 0, sizeof config);
+            config.size = sizeof config;
+            config.media_address = end.rtp_address;
+            config.media_address_len = strlen(end.rtp_address);
+            printf("referral asked: %s\n", end.seen.referral_target);
+            status = sipral_call_accept_transfer(end.stack, end.seen.referral, &config,
+                                                 &end.call, now);
+            printf("referral taken: %s\n", sipral_status_name(status));
+            (void)fflush(stdout);
+            if (status != SIPRAL_STATUS_OK) {
+                break;
+            }
+            placed = 1;
+        }
+        if (end.seen.referral_lapsed != 0u) {
+            printf("referral lapsed: %u\n", (unsigned)end.seen.referral_lapsed);
+            (void)fflush(stdout);
+            break;
+        }
+        if (end.call != SIPRAL_HANDLE_NONE && end.seen.confirmed
+            && end.media == SIPRAL_HANDLE_NONE) {
+            if (open_media(&end, end.call) != 0) {
+                printf("no media: %s\n", trouble);
+                break;
+            }
+            printf("confirmed\n");
+            (void)fflush(stdout);
+            if (placed) {
+                hang_up_at = now + DWELL_MS;
+            }
+        }
+        if (end.seen.path_chosen && !told_path) {
+            told_path = 1;
+            printf("path chosen\n");
+            (void)fflush(stdout);
+        }
+        if (hang_up_at != 0u && now >= hang_up_at) {
+            hang_up_at = 0;
+            (void)sipral_call_hangup(end.stack, end.call, now);
+        }
+        if (end.seen.ended) {
+            int verdict = listener_done(&end);
+            /* the BYE this end sent, or the 200 to the far end's, and the
+             * RTCP goodbye: a moment for them to leave */
+            (void)wait_until(&end, NULL, 300u);
+            close_endpoint(&end);
+            return verdict;
+        }
+        if (now >= deadline) {
+            printf("nothing arrived in time\n");
+            break;
+        }
+        sleep_ms(5);
+    }
+    (void)fflush(stdout);
+    close_endpoint(&end);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     const char *server = argc > 1 ? argv[1] : "kamailio";
@@ -3685,13 +3878,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (resolve(server, port, &remote) != 0
-        || address_text(&remote, remote_text, sizeof remote_text) != 0) {
-        printf("cannot resolve %s:%u\n", server, (unsigned)port);
-        return 1;
+    listening = strcmp(server, "listen") == 0;
+    if (!listening) {
+        if (resolve(server, port, &remote) != 0
+            || address_text(&remote, remote_text, sizeof remote_text) != 0) {
+            printf("cannot resolve %s:%u\n", server, (unsigned)port);
+            return 1;
+        }
+        printf("lab: %s:%u at %s, extension %s, as %s\n", server, (unsigned)port,
+               remote_text, extension, user);
     }
-    printf("lab: %s:%u at %s, extension %s, as %s\n", server, (unsigned)port,
-           remote_text, extension, user);
 
     /* `g_run_seed`, once, before the loop below ever calls `seeds_for`:
      * pinned by `SIPRAL_HARNESS_SEED` (64 hex digits) so a failing run can be
@@ -3712,6 +3908,13 @@ int main(int argc, char **argv)
         }
         seed_hex(g_run_seed, hex);
         printf("seed: %s\n", hex);
+    }
+
+    /* `harness-c listen <server> [port]`: the words move one to the right */
+    if (listening) {
+        uint16_t listen_port = (uint16_t)(argc > 3 ? atoi(argv[3]) : 5060);
+        return run_listen(argc > 2 ? argv[2] : "asterisk",
+                          listen_port == 0 ? 5060u : listen_port, user, pass);
     }
 
     for (which = 0; which < (int)FLOW_COUNT; which++) {

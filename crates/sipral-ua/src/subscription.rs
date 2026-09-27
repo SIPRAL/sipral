@@ -862,13 +862,21 @@ impl UserAgent {
                 Waiting::Retry => self.start_subscription(subscription, now),
             }
         }
+
+        // the notifier's side: the subscriptions a REFER this end took
+        // opened, and the referrals nobody has answered yet
+        self.fire_refer_subscriptions(now);
+        self.fire_referral_timers(now);
     }
 
-    /// When this layer next has something to do about a subscription.
+    /// When this layer next has something to do about a subscription, on
+    /// either side of one.
     pub(crate) fn subscription_deadline(&self) -> Option<Instant> {
         self.subscriptions
             .values()
             .filter_map(Subscription::deadline)
+            .chain(self.refer_subscription_deadline())
+            .chain(self.referral_deadline())
             .min()
     }
 

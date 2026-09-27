@@ -3496,4 +3496,141 @@ mod tests {
             "the check reached the call's agent: {sent:?}"
         );
     }
+
+    /// A full peer's offer: its credentials, `a=rtcp-mux`, and one host
+    /// candidate that is also where its checks come from. No `a=ice-lite`.
+    #[cfg(feature = "ice")]
+    fn full_offer() -> Vec<u8> {
+        format!(
+            "v=0\r\n\
+             o=bob 1 1 IN IP4 203.0.113.5\r\n\
+             s=-\r\n\
+             c=IN IP4 203.0.113.5\r\n\
+             t=0 0\r\n\
+             m=audio 41000 RTP/AVP 0\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtcp-mux\r\n\
+             a=ice-ufrag:{PEER_UFRAG}\r\n\
+             a=ice-pwd:{PEER_PWD}\r\n\
+             a=candidate:1 1 UDP 2130706431 203.0.113.5 41000 typ host\r\n\
+             a=sendrecv\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// The full peer's check towards a lite end: it is the controlling side
+    /// (RFC 8445 §6.1.1), and it nominates with `USE-CANDIDATE` (§8.1.1).
+    #[cfg(feature = "ice")]
+    fn nominating_check(ufrag: &str, pwd: &str, id: [u8; 12]) -> Vec<u8> {
+        use sipral_nat::stun::{AttributeType, Class, MessageBuilder, Method, TransactionId};
+        let mut builder =
+            MessageBuilder::new(Class::Request, Method::BINDING, TransactionId::new(id));
+        builder
+            .add(
+                AttributeType::USERNAME,
+                format!("{ufrag}:{PEER_UFRAG}").as_bytes(),
+            )
+            .expect("room for USERNAME");
+        builder
+            .add_u32(AttributeType::PRIORITY, 0x6e00_01ff)
+            .expect("room for PRIORITY");
+        builder
+            .add_u64(AttributeType::ICE_CONTROLLING, 7)
+            .expect("room for ICE-CONTROLLING");
+        builder
+            .add(AttributeType::USE_CANDIDATE, &[])
+            .expect("room for USE-CANDIDATE");
+        builder
+            .add_message_integrity(pwd.as_bytes())
+            .expect("room for MESSAGE-INTEGRITY");
+        builder.add_fingerprint().expect("room for FINGERPRINT");
+        builder.finish()
+    }
+
+    /// `SIPRAL_ICE_LITE` through this ABI (RFC 8445 §2.5): a stack whose
+    /// calls are lite answers a full peer's offer with `a=ice-lite` and the
+    /// one host candidate its media socket is, answers the peer's checks
+    /// without ever checking back — a lite end sends none — and puts the call
+    /// on the pair the peer nominates, which `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`
+    /// reports as it does for a full agent.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_lite_stack_answers_a_full_offer_and_takes_the_pair_the_peer_nominates() {
+        let mut observed = Observed::default();
+        let (stack, _) = crate::call::tests::media_line(&mut observed, |config| {
+            config.ice = crate::media::SipralIce::Lite as u32;
+        });
+        let offer = full_offer();
+        let mut invite = b"INVITE sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-lite-in\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:gateway@example.com>;tag=gateway\r\n\
+To: <sip:alice@example.com>\r\n\
+Call-ID: lite-in@203.0.113.5\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:gateway@203.0.113.5:5060>\r\n\
+Content-Type: application/sdp\r\n"
+            .to_vec();
+        invite.extend_from_slice(format!("Content-Length: {}\r\n\r\n", offer.len()).as_bytes());
+        invite.extend_from_slice(&offer);
+        crate::call::tests::deliver(stack, &invite, 10);
+        let _ = poll(stack, 10);
+        let call = crate::call::tests::called(&observed);
+        let _ = signalling_out(stack);
+
+        let (media_address, media_address_len) = as_text(MEDIA);
+        let status = unsafe {
+            crate::call::sipral_call_answer_media(stack, call, media_address, media_address_len, 20)
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let ok = signalling_out(stack)
+            .into_iter()
+            .find(|(message, _)| message.starts_with(b"SIP/2.0 200 "))
+            .expect("the 200")
+            .0;
+        let text = String::from_utf8_lossy(&ok).into_owned();
+        assert!(text.contains("a=ice-lite\r\n"), "RFC 8839 §5.3: {text}");
+        let candidates: Vec<&str> = text
+            .split("\r\n")
+            .filter(|line| line.starts_with("a=candidate:"))
+            .collect();
+        assert_eq!(candidates.len(), 1, "one host candidate: {candidates:?}");
+        assert!(
+            candidates[0].ends_with("192.0.2.10 40000 typ host"),
+            "{candidates:?}"
+        );
+        let ufrag = attribute(&text, "ice-ufrag");
+        let pwd = attribute(&text, "ice-pwd");
+
+        crate::call::tests::deliver(stack, &crate::call::tests::acknowledged(&ok), 30);
+        let _ = poll(stack, 30);
+        let media = media_of(stack, call);
+
+        let nominated = [4_u8; 12];
+        let mut datagram = nominating_check(&ufrag, &pwd, nominated);
+        let mut arrival = u32::MAX;
+        let status = unsafe {
+            crate::media::sipral_media_receive(
+                media,
+                datagram.as_mut_ptr(),
+                datagram.len(),
+                PEER_CHECKS_FROM.as_ptr().cast::<c_char>(),
+                PEER_CHECKS_FROM.len(),
+                40,
+                &raw mut arrival,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let sent = media_over(stack, media, 40);
+        assert_eq!(
+            answered_and_triggered(&sent, nominated),
+            (true, false),
+            "answered, and never checked back: a lite end sends no checks: {sent:?}"
+        );
+        assert!(
+            observed.kinds().contains(&SipralEventKind::MediaPathChosen),
+            "the pair the peer nominated carries the call: {:?}",
+            observed.kinds()
+        );
+    }
 }

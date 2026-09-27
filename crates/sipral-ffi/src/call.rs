@@ -1457,6 +1457,18 @@ entry! {
     /// `sipral_call_place`: the answer to an offerless INVITE has nowhere to
     /// go but the ACK, and this ABI hands nothing back from there.
     ///
+    /// `call` may be a referral's handle instead — the `call` of a
+    /// `SIPRAL_EVENT_KIND_REFERRAL`, a REFER outside any dialog — and it is
+    /// taken exactly the same way, the call placed from the account the
+    /// event names. The 202 opens the dialog its NOTIFYs travel in, and the
+    /// handle is spent once this has answered the REFER: it is stale
+    /// afterwards, whether the call then went or not. One refused before
+    /// anything was sent — a header, a target — is still there to take.
+    ///
+    /// A call that cannot be sent once the 202 has gone ends the REFER's
+    /// subscription with RFC 3515 §2.4.5's 503, so the far end is told, and
+    /// this answers `SIPRAL_STATUS_NOT_SENT` as it would for any call.
+    ///
     /// # Safety
     ///
     /// `config` must point at a `sipral_call_config_t` whose `size` member
@@ -1487,6 +1499,12 @@ entry! {
         let codecs = unsafe { codec_order(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
+            // a referral answered is spent, however the call it asked for
+            // then went, and its handle is retired below rather than left
+            // naming nothing; one refused before anything was sent is still
+            // waiting, and keeps it
+            let referral = state.agent.referral_waiting(id);
+            let mut accept = || -> Result<SipralHandle, Fail> {
             let (destination, forks) = unsafe { destination_and_forks(state, &config) }?;
             let asked = unsafe {
                 supplied(
@@ -1564,6 +1582,12 @@ entry! {
                 .calls
                 .name_of(placed)
                 .map_err(|status| fail(status, "no room for another call on this stack"))
+            };
+            let placed = accept();
+            if referral && !state.agent.referral_waiting(id) {
+                state.calls.forget(id);
+            }
+            placed
         })?;
         unsafe { out_placed.write(handle) };
         Ok(())
@@ -1585,10 +1609,26 @@ entry! {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             let status = status_code(code)?;
-            state
+            // RFC 3515 §2.4.2 allows "any appropriate 4xx-6xx class response"
+            // here, and a 3xx redirects; anything under 300 would tell the
+            // far end the REFER was taken, or is being worked on, when it is
+            // being refused
+            if status.get() < 300 {
+                return Err(fail(
+                    SipralStatus::InvalidArgument,
+                    format!("{code} does not refuse anything: a refusal is 300 to 699"),
+                ));
+            }
+            let referral = state.agent.referral_waiting(id);
+            let refused = state
                 .agent
                 .reject_transfer(id, status, now)
-                .map_err(|error| ua_failed(&error))
+                .map_err(|error| ua_failed(&error));
+            // a referral refused is spent, and so is its handle
+            if referral && !state.agent.referral_waiting(id) {
+                state.calls.forget(id);
+            }
+            refused
         })
     }
 }
@@ -1598,7 +1638,9 @@ entry! {
     ///
     /// A call that is over answers `SIPRAL_CALL_STATE_TERMINATED` until the
     /// poll that delivers `SIPRAL_EVENT_KIND_CALL_ENDED` retires its handle, and
-    /// `SIPRAL_STATUS_STALE_HANDLE` after that.
+    /// `SIPRAL_STATUS_STALE_HANDLE` after that. A referral's handle
+    /// (`SIPRAL_EVENT_KIND_REFERRAL`) is `SIPRAL_STATUS_WRONG_STATE`: it
+    /// names a request, and there is no call yet to be anywhere.
     ///
     /// # Safety
     ///
@@ -1609,6 +1651,14 @@ entry! {
         }
         let state = with_stack(stack, |state| {
             let id = state.calls.get(call).map_err(handle_failed)?;
+            if state.agent.referral_waiting(id) {
+                return Err(fail(
+                    SipralStatus::WrongState,
+                    "the handle names a referral, which is a request to place a call rather than \
+                     a call: take it with sipral_call_accept_transfer or refuse it with \
+                     sipral_call_reject_transfer",
+                ));
+            }
             let where_it_is = state.agent.call_state(id).map_or(
                 // the handle is still ours and the layer below has let the
                 // call go, which is what being over looks like from here
@@ -1663,8 +1713,9 @@ pub(crate) mod tests {
         sipral_call_accept_transfer, sipral_call_answer, sipral_call_answer_media,
         sipral_call_change_codecs, sipral_call_consult, sipral_call_hangup, sipral_call_hold,
         sipral_call_hold_state, sipral_call_place, sipral_call_reject, sipral_call_reject_session,
-        sipral_call_resume, sipral_call_ring, sipral_call_ring_media, sipral_call_send_dtmf,
-        sipral_call_state, sipral_call_transfer, sipral_call_transfer_to, tone_length,
+        sipral_call_reject_transfer, sipral_call_resume, sipral_call_ring, sipral_call_ring_media,
+        sipral_call_send_dtmf, sipral_call_state, sipral_call_transfer, sipral_call_transfer_to,
+        tone_length,
     };
     use crate::account::{
         SipralAccountConfig, sipral_account_add, sipral_account_register, sipral_account_remove,
@@ -5420,6 +5471,184 @@ a=sendrecv\r\n";
         with_forks.keep_all_forks = 1;
         assert_ring_media_refuses(handle, call, &with_forks, "keep_all_forks");
 
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A REFER outside any dialog (RFC 3515 §4.1): a switchboard asking this
+    /// end's line to ring Carol.
+    fn referral(branch: &str) -> Vec<u8> {
+        format!(
+            "REFER sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-{branch}\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:switchboard@example.com>;tag=sb-{branch}\r\n\
+To: <sip:alice@example.com>\r\n\
+Call-ID: {branch}@203.0.113.5\r\n\
+CSeq: 7 REFER\r\n\
+Contact: <sip:switchboard@203.0.113.5:5060>\r\n\
+Refer-To: <sip:carol@example.com>\r\n\
+Referred-By: <sip:switchboard@example.com>\r\n\
+Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// A stack that takes referrals, with its one line, the referral
+    /// delivered and reported.
+    fn referred(observed: &mut Observed, branch: &str) -> (SipralHandle, SipralHandle) {
+        let (handle, account) = media_line(observed, |config| {
+            config.referrals = crate::media::SipralToggle::On as u32;
+        });
+        deliver(handle, &referral(branch), 1_000);
+        poll(handle, 1_000);
+        let asked = observed
+            .referrals
+            .first()
+            .expect("the referral was reported");
+        assert_eq!(asked.account, account, "the line it arrived for");
+        assert_eq!(asked.status_code, 0, "waiting, not lapsed");
+        assert!(
+            sent(handle)
+                .iter()
+                .all(|message| !start_line(message).starts_with("SIP/2.0 ")),
+            "nothing is answered on the application's behalf"
+        );
+        (handle, asked.referral)
+    }
+
+    fn call_state_status(stack: SipralHandle, call: SipralHandle) -> SipralStatus {
+        let mut state = u32::MAX;
+        unsafe { sipral_call_state(stack, call, &raw mut state) }
+    }
+
+    #[test]
+    fn a_referral_is_refused_403_on_a_stack_that_did_not_take_them() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        deliver(handle, &referral("off"), 1_000);
+        poll(handle, 1_000);
+        assert_eq!(start_line(&one(handle)), "SIP/2.0 403 Forbidden");
+        assert!(observed.referrals.is_empty(), "and nobody is asked");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_referral_says_what_it_asks_and_is_taken_like_a_transfer() {
+        let mut observed = Observed::default();
+        let (handle, referral) = referred(&mut observed, "take");
+        let asked = observed.referrals[0].clone();
+        assert_ne!(referral, SIPRAL_HANDLE_NONE);
+        assert_eq!(asked.target, "sip:carol@example.com");
+        assert_eq!(asked.attended, 0);
+        assert_eq!(
+            asked.referred_by.as_deref(),
+            Some("<sip:switchboard@example.com>")
+        );
+        assert!(asked.message_len > 0, "the REFER rides along whole");
+        assert_eq!(
+            call_state_status(handle, referral),
+            SipralStatus::WrongState,
+            "a referral is not a call: {}",
+            last_error_text()
+        );
+
+        let mut placed = SIPRAL_HANDLE_NONE;
+        let status = unsafe {
+            sipral_call_accept_transfer(
+                handle,
+                referral,
+                ptr::from_ref(&managed_transfer_config()),
+                &raw mut placed,
+                1_100,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_ne!(placed, SIPRAL_HANDLE_NONE);
+        assert_ne!(placed, referral, "the call placed is a call of its own");
+        let out = sent(handle);
+        let lines: Vec<String> = out.iter().map(|message| start_line(message)).collect();
+        assert!(
+            lines.iter().any(|line| line == "SIP/2.0 202 Accepted"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("NOTIFY sip:switchboard@203.0.113.5:5060")),
+            "{lines:?}"
+        );
+        let invite = out
+            .iter()
+            .find(|message| start_line(message).starts_with("INVITE sip:carol@example.com"))
+            .expect("the call it asked for");
+        assert_eq!(
+            field(invite, HeaderName::ReferredBy),
+            b"<sip:switchboard@example.com>"
+        );
+        assert_eq!(state_of(handle, placed), SipralCallState::Calling as u32);
+
+        // the referral's handle is spent with its answer
+        assert_eq!(
+            call_state_status(handle, referral),
+            SipralStatus::StaleHandle
+        );
+        let again = unsafe {
+            sipral_call_accept_transfer(
+                handle,
+                referral,
+                ptr::from_ref(&managed_transfer_config()),
+                &raw mut placed,
+                1_200,
+            )
+        };
+        assert_eq!(again, SipralStatus::StaleHandle);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_referral_is_refused_with_a_refusal_and_its_handle_goes_with_it() {
+        let mut observed = Observed::default();
+        let (handle, referral) = referred(&mut observed, "refuse");
+        // RFC 3515 §2.4.2's refusals are 4xx to 6xx; a 2xx would say it was
+        // taken
+        assert_eq!(
+            unsafe { sipral_call_reject_transfer(handle, referral, 200, 1_100) },
+            SipralStatus::InvalidArgument
+        );
+        assert!(sent(handle).is_empty(), "and nothing went");
+        assert_eq!(
+            unsafe { sipral_call_reject_transfer(handle, referral, 603, 1_100) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(start_line(&one(handle)), "SIP/2.0 603 Decline");
+        assert_eq!(
+            call_state_status(handle, referral),
+            SipralStatus::StaleHandle
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_referral_nobody_answers_is_reported_lapsed_and_its_handle_goes() {
+        let mut observed = Observed::default();
+        let (handle, referral) = referred(&mut observed, "lapse");
+        poll(handle, 1_000 + 32_000);
+        let lapsed = observed.referrals.get(1).expect("the lapse was reported");
+        assert_eq!(lapsed.referral, referral, "about the same referral");
+        assert_eq!(lapsed.status_code, 408);
+        assert!(lapsed.target.is_empty() && lapsed.referred_by.is_none());
+        assert!(
+            sent(handle)
+                .iter()
+                .any(|message| start_line(message) == "SIP/2.0 408 Request Timeout"),
+            "the REFER was answered for the application"
+        );
+        assert_eq!(
+            call_state_status(handle, referral),
+            SipralStatus::StaleHandle
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 }

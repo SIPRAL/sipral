@@ -41,14 +41,16 @@ use crate::renegotiate::ALLOW;
 /// Everything this agent will always answer `Require` for.
 ///
 /// `100rel` because this module implements it, `timer` because
-/// [`crate::timers`] does, `replaces` because [`crate::transfer`] does, and
-/// nothing else unconditionally. RFC 3261 §8.2.2.3 answers a `Require` outside
-/// this list with a 420 and says which token it was -- except `gruu`, which
+/// [`crate::timers`] does, `replaces` because [`crate::transfer`] does,
+/// `norefersub` because it grants RFC 4488's `Refer-Sub: false` to every
+/// REFER it takes, and nothing else unconditionally. RFC 3261 §8.2.2.3
+/// answers a `Require` outside this list with a 420 and says which token it
+/// was -- except `gruu`, which
 /// [`unsupported`] also accepts once the account the request is addressed to
 /// has asked its own registrar for one (RFC 5627 §4.4 is written from a UA's
 /// own use of GRUUs, but an account that understands the mechanism well
 /// enough to ask for one has no reason to refuse a peer that names it).
-pub(crate) const UNDERSTOOD: [&[u8]; 3] = [b"100rel", b"timer", b"replaces"];
+pub(crate) const UNDERSTOOD: [&[u8]; 4] = [b"100rel", b"timer", b"replaces", b"norefersub"];
 
 /// §21.4.15, and the only status §8.2.2.3 allows for an option tag this agent
 /// has not implemented.

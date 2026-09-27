@@ -586,7 +586,7 @@ public sealed class NatTests
     /// machine. <see cref="Socket.Connect(string, int)"/> on a UDP
     /// socket asks the kernel to pick a source address for a
     /// destination without ever sending a packet.</summary>
-    private static string? RoutableAddress()
+    internal static string? RoutableAddress()
     {
         try
         {

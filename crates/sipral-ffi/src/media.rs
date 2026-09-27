@@ -207,6 +207,27 @@ codes! {
         /// media with `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling
         /// back. That is the whole difference between this and `Offered`.
         Required = 3,
+        /// [`IcePolicy::Lite`]: be an ICE-lite endpoint (RFC 8445 §2.5) —
+        /// write `a=ice-lite` and one host candidate, answer the checks a
+        /// full peer sends, and put the audio on the pair it nominates.
+        ///
+        /// **Only for a server reachable at the address it advertises**: the
+        /// media socket's own, or the public address a one-to-one NAT in
+        /// front of it forwards (`sipral_stack_nat_map`'s mapping, when that
+        /// is what STUN reports). A WebRTC gateway or any other full-ICE peer
+        /// calling a voice agent in a data centre is the case it is for. RFC
+        /// 8445 Appendix A says ICE "will not function when a lite
+        /// implementation is placed behind a NAT", and a peer told this end
+        /// is lite stops doing the work that would have found another path —
+        /// so a softphone never names it. A peer that does no ICE, or is lite
+        /// itself, gets the call on the signalled address, as under
+        /// `Offered`; the application drains `sipral_media_poll_transmit`
+        /// for the answers to the checks exactly as it does for a full
+        /// agent's.
+        ///
+        /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+        /// `SIPRAL_FEATURE_ICE`.
+        Lite = 4,
     }
 }
 
@@ -1006,8 +1027,10 @@ pub(crate) fn ice_policy(value: u32, name: &'static str) -> Result<Option<IcePol
         2 => Ok(Some(IcePolicy::Offered)),
         #[cfg(feature = "ice")]
         3 => Ok(Some(IcePolicy::Required)),
+        #[cfg(feature = "ice")]
+        4 => Ok(Some(IcePolicy::Lite)),
         #[cfg(not(feature = "ice"))]
-        2 | 3 => Err(fail(
+        2..=4 => Err(fail(
             SipralStatus::NotSupported,
             format!(
                 "{name} names ICE and this build has none: SIPRAL_FEATURE_ICE is clear in \
@@ -1018,7 +1041,7 @@ pub(crate) fn ice_policy(value: u32, name: &'static str) -> Result<Option<IcePol
             SipralStatus::InvalidArgument,
             format!(
                 "{name} is {other}, and ice is 0 to leave it unspecified, 1 for off, 2 for \
-                 offered or 3 for required"
+                 offered, 3 for required or 4 for lite"
             ),
         )),
     }

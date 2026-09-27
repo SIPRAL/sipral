@@ -34,6 +34,7 @@ use sipral_core::msg::{
 
 use crate::agent::UserAgent;
 use crate::renegotiate::ALLOW;
+use crate::transfer::{FORBIDDEN, names_a_dialog};
 
 /// §21.4.6, which §8.2.1 answers a method this agent does not implement
 /// with.
@@ -145,9 +146,16 @@ impl UserAgent {
 ///   does not have (§12.2.2: "it MUST respond to the request with a 481
 ///   (Call/Transaction Does Not Exist) status code"), whatever its method.
 /// - **481** for a method this agent implements only inside a dialog —
-///   BYE (§15.1.2), UPDATE, REFER, INFO and PRACK — since a request that
-///   names no dialog has none of this agent's to act in. All but INFO are
-///   in [`ALLOW`], so a 405 would list the very method it refused.
+///   BYE (§15.1.2), UPDATE, INFO and PRACK — since a request that names no
+///   dialog has none of this agent's to act in. All but INFO are in
+///   [`ALLOW`], so a 405 would list the very method it refused.
+/// - **403** for a REFER, which names no dialog and asks this end to place
+///   a call of its own (RFC 3515 §4.1's own example is one). It reaches here
+///   only when the application has not taken them on
+///   ([`crate::referral`]), and then it is refused on policy: "the server
+///   understood the request, but is refusing to fulfill it" (§21.4.4). Not
+///   481, which would claim it names a dialog, and not 405, which would
+///   claim this agent does not do REFER at all when it does inside a call.
 /// - **405** with [`ALLOW`] for any other method RFC 3261 and its
 ///   extensions define that this agent does not take outside a dialog:
 ///   SUBSCRIBE (it is no notifier) and PUBLISH (it is no event state
@@ -159,10 +167,10 @@ impl UserAgent {
 ///   not recognized ... the UAS SHOULD generate a 501 (Not Implemented)"
 ///   (§21.5.2).
 fn unclaimed_refusal(request: &RawMessage<'_>) -> OutgoingResponse {
-    let names_a_dialog = request.to().is_ok_and(|to| to.tag().is_some());
     match request.method() {
-        _ if names_a_dialog => OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST),
-        Some(Method::Bye | Method::Update | Method::Refer | Method::Info | Method::Prack) => {
+        _ if names_a_dialog(request) => OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST),
+        Some(Method::Refer) => OutgoingResponse::new(FORBIDDEN),
+        Some(Method::Bye | Method::Update | Method::Info | Method::Prack) => {
             OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST)
         }
         Some(Method::Extension(_)) | None => OutgoingResponse::new(NOT_IMPLEMENTED),

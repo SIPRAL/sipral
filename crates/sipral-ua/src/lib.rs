@@ -4,12 +4,14 @@
 //! User agent layer.
 //!
 //! Registration with refresh, outgoing and incoming calls, hold and resume,
-//! blind and attended transfer, the SUBSCRIBE/NOTIFY subscriptions behind
-//! message waiting and busy lamp field, the policy that decides whether an
-//! INVITE off the internet is ever heard at all, and what all of that stops
-//! being worth when the machine underneath it goes to sleep: a call announced
-//! by a push before there is a transport, a registration that can be written
-//! down and read back, and a lifecycle that says which of the two is which.
+//! blind and attended transfer — and, where the application allows it, a
+//! REFER from outside any call ([`referral`]) — the SUBSCRIBE/NOTIFY
+//! subscriptions behind message waiting and busy lamp field, the policy that
+//! decides whether an INVITE off the internet is ever heard at all, and what
+//! all of that stops being worth when the machine underneath it goes to
+//! sleep: a call announced by a push before there is a transport, a
+//! registration that can be written down and read back, and a lifecycle that
+//! says which of the two is which.
 //!
 //! Also sans-I/O: this is policy and sequencing over [`sipral_core`], not
 //! transport. The five calls are the endpoint's five calls, so the same event
@@ -65,6 +67,9 @@ mod mwi;
 mod options;
 mod parked;
 mod quality_report;
+pub mod referral;
+#[cfg(test)]
+mod referral_tests;
 mod registration;
 mod reliable;
 mod renegotiate;

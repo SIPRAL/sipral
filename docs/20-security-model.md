@@ -341,6 +341,27 @@ implemented, and the field is a plain header a sender writes like any other.
 Anyone who can reach an existing dialog can ask this stack to call a third
 party on that dialog's behalf.
 
+**A REFER from outside any call is toll fraud waiting to happen, so it is
+off.** RFC 3515 §4.1's own REFER names no dialog: it is a stranger asking this
+phone to dial, from this phone's own line and at its owner's expense, a number
+of the stranger's choosing — a premium-rate one at three in the morning is the
+classic. With nobody authenticated and `Referred-By` a header the sender
+wrote, nothing on the wire can tell a switchboard's click-to-dial from that.
+So `UserAgent::allow_referrals` is off in every new agent and
+`sipral_stack_config_t::referrals` is off by default: every such REFER is
+refused 403 in `crates/sipral-ua/src/admission.rs` before anything reads it.
+Turned on, each one still meets the INVITE's own screening — the per-source
+rate limit and the application's `Screen`, whose refusals count in
+`refusals()` — then the refusals `crates/sipral-ua/src/referral.rs` makes
+without asking (no line it names here is 404, a target that is not SIP, SIPS or
+tel is 403, sixteen held at once is the ceiling), and only then reaches the
+application as `ReferralRequested` / `SIPRAL_EVENT_KIND_REFERRAL`, to be taken
+or refused one request at a time. Nothing is taken on the application's
+behalf, and one it leaves alone is answered 408 when its transaction runs out
+rather than held. An application that turns it on owns the policy: accept only
+from the proxy its line runs over, only targets it would dial itself, only
+after a person has said yes.
+
 **`Replaces`.** RFC 3891 §3 asks a UA to verify that whoever sent a `Replaces`
 is authorised to take over the dialog it names, and §8 wants that only over an
 authenticated peer — which this stack, per the paragraph above, never has. So
@@ -547,7 +568,8 @@ authenticator refuses anything not signed under the short-term credential
 (`stun/message.rs`, `constant_time_eq`); what has not happened is a person
 reading the checklist and nomination machinery with an attacker's eye. The
 default is `Off`, so a deployment that has not asked for ICE is where it was.
-`IcePolicy::Lite`, on a headless build, puts the lite agent there instead: a
+`IcePolicy::Lite`, on a build with `ice-lite` or `headless` (and
+`SIPRAL_ICE_LITE` over the C ABI), puts the lite agent there instead: a
 much smaller surface — no checklist, no timers, nothing sent but answers —
 behind the same authenticator (`ice/server.rs`, which the `ice` target
 reaches through the full agent), with nothing past it but a nomination. It has

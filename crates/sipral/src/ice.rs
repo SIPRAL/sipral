@@ -67,9 +67,14 @@
 //! headless agent on a server whose address the world can reach, answering a
 //! full-ICE peer — a WebRTC gateway, typically — that will not send media
 //! anywhere it has not checked. RFC 8445 Appendix A limits the role to
-//! exactly that host, which is why the policy exists only in a build with the
-//! `headless` feature: the softphone's build cannot name it, so a softphone
-//! behind a NAT cannot advertise it by mistake.
+//! exactly that host, which is why the policy exists only in a build that
+//! asks for it: the `ice-lite` feature, or `headless` beside `ice`. The
+//! softphone's default build cannot name it, so a softphone behind a NAT
+//! cannot advertise it by mistake. `sipral-ffi` turns `ice-lite` on, because
+//! the server that wants the role is as often a C, Python or .NET program as
+//! a Rust one, and over that ABI `SIPRAL_ICE_LITE` is still a value nothing
+//! sets but the application — the socket stays the application's, and
+//! nothing of `sipral-headless` comes with it.
 //!
 //! A lite end writes `a=ice-lite`, its credentials and one host candidate —
 //! the address the socket is bound to, or the public address a one-to-one NAT
@@ -179,13 +184,14 @@ pub enum IcePolicy {
     /// softphone: RFC 8445 Appendix A says ICE "will not function when a lite
     /// implementation is placed behind a NAT", and the peer, told this end is
     /// lite, stops doing the work that would have found another path. So it
-    /// exists only with the `headless` feature, and nothing turns it on but
-    /// the application asking. A peer that does no ICE, or is lite itself,
+    /// exists only with the `ice-lite` feature, or `headless` beside `ice`,
+    /// and nothing turns it on but the application asking. A peer that does
+    /// no ICE, or is lite itself,
     /// gets the call on `c=`/`m=` and symmetric RTP, as under
     /// [`IcePolicy::Offered`].
     ///
     /// [`CallMedia::public_address`]: crate::CallMedia::public_address
-    #[cfg(all(feature = "ice", feature = "headless"))]
+    #[cfg(any(feature = "ice-lite", all(feature = "ice", feature = "headless")))]
     Lite,
 }
 
@@ -197,7 +203,7 @@ impl IcePolicy {
             Self::Off => false,
             #[cfg(feature = "ice")]
             Self::Offered | Self::Required => true,
-            #[cfg(all(feature = "ice", feature = "headless"))]
+            #[cfg(any(feature = "ice-lite", all(feature = "ice", feature = "headless")))]
             Self::Lite => true,
         }
     }
@@ -207,7 +213,7 @@ impl IcePolicy {
     #[must_use]
     pub(crate) const fn lite(self) -> bool {
         match self {
-            #[cfg(feature = "headless")]
+            #[cfg(any(feature = "ice-lite", feature = "headless"))]
             Self::Lite => true,
             Self::Off | Self::Offered | Self::Required => false,
         }
@@ -227,7 +233,7 @@ impl IcePolicy {
             Self::Required => true,
             #[cfg(feature = "ice")]
             Self::Offered => false,
-            #[cfg(feature = "headless")]
+            #[cfg(any(feature = "ice-lite", feature = "headless"))]
             Self::Lite => false,
             Self::Off => false,
         }

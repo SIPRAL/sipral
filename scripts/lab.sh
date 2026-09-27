@@ -19,9 +19,18 @@
 #   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
 #   scripts/lab.sh nat          only the calls from and to behind a NAT, with
 #                               STUN against coturn, through the C ABI
+#   scripts/lab.sh referral     only a REFER from outside any call, sent at a
+#                               stack driven through the C ABI: refused while
+#                               it does not take them, taken when it does,
+#                               the call placed to Asterisk's echo (part of
+#                               the Asterisk run too)
+#   scripts/lab.sh icelite      only the call that requires ICE placed at a
+#                               C ABI stack answering as ICE-lite (part of
+#                               the ice run too)
 #   scripts/lab.sh ice          only the ICE steps: a call that requires ICE,
 #                               from the harness and from Asterisk, answered
-#                               by the headless agent as an ICE-lite endpoint;
+#                               by the headless agent as an ICE-lite endpoint,
+#                               and the harness's through the C ABI;
 #                               then two stacks behind two NATs completing
 #                               full ICE on what coturn told them, then the
 #                               same two with the path between them blocked,
@@ -1262,6 +1271,139 @@ ice_lite_asterisk() {
             "$via_ice"; return 1; }
 }
 
+# 8.4.13's steps through the C ABI where the stack under test is the one
+# called or asked rather than the one calling: `harness-c listen`
+# (interop/harness-c's own run_listen) in a container on the lab network, at
+# port 5060 of its own address there, with SIPRAL_REFERRALS and SIPRAL_ICE
+# shaping its stack, and the Rust harness reaching it. Its account is the
+# lab's own at Asterisk, never registered: a referral it takes calls through
+# Asterisk as every call the account places does.
+C_LISTENER_NAME=sipral-lab-c-listener
+start_c_listener() {
+    local referrals="$1" ice="$2" beside tries
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    docker rm -f "$C_LISTENER_NAME" >/dev/null 2>&1
+    docker run -d --name "$C_LISTENER_NAME" --network sipral-interop_lab \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        -e "SIPRAL_REFERRALS=$referrals" -e "SIPRAL_ICE=$ice" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        debian:trixie-slim /harness-c listen asterisk 5060 >/dev/null \
+        || { printf '  could not start the C listener\n'; return 1; }
+    tries=0
+    until docker logs "$C_LISTENER_NAME" 2>&1 | grep -q '^waiting for a call or a referral'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$C_LISTENER_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 30 ]; then
+            printf '  the C listener never came up\n'
+            docker logs "$C_LISTENER_NAME" 2>&1 | tail -20
+            docker rm -f "$C_LISTENER_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+# Where the listener is on the lab network, for the harness to reach.
+c_listener_address() {
+    docker inspect -f \
+        '{{with index .NetworkSettings.Networks "sipral-interop_lab"}}{{.IPAddress}}{{end}}' \
+        "$C_LISTENER_NAME"
+}
+
+# Wait up to $1 seconds for the listener to finish with its call, then print
+# what it said.
+c_listener_log() {
+    local tries=0
+    until docker logs "$C_LISTENER_NAME" 2>&1 | grep -Eq '^(ended |nothing arrived|referral lapsed)'; do
+        tries=$((tries + 1))
+        [ "$tries" -ge "$1" ] && break
+        sleep 1
+    done
+    docker logs "$C_LISTENER_NAME" 2>&1
+}
+
+# What the listener said, indented, and the container gone.
+stop_c_listener() {
+    docker logs "$C_LISTENER_NAME" 2>&1 | sed 's/^/    c      /'
+    docker rm -f "$C_LISTENER_NAME" >/dev/null 2>&1
+}
+
+# The Rust harness, as the switchboard that sends a REFER from outside any
+# call (interop/harness/src/referral.rs), at the listener: `flow` is
+# `referraloff` or `referral`, and the extension it asks for is Asterisk's
+# echo, 9008.
+refer_the_listener() {
+    local flow="$1" address
+    address=$(c_listener_address)
+    docker run --rm --network sipral-interop_lab \
+        -e "SIPRAL_FLOWS=$flow" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim /harness "$address" 5060 "sip:9008@asterisk"
+}
+
+# A stack that was never told to take referrals: the REFER is refused 403
+# and the program driving the stack never hears of it.
+referral_refused_flow() {
+    local status log
+    start_c_listener off off || return 1
+    refer_the_listener referraloff
+    status=$?
+    log=$(docker logs "$C_LISTENER_NAME" 2>&1)
+    stop_c_listener
+    [ "$status" -eq 0 ] || return 1
+    if printf '%s\n' "$log" | grep -q '^referral asked'; then
+        printf '  the program heard a referral its stack was never told to take\n'
+        return 1
+    fi
+}
+
+# A stack told to take them: the program hears the referral, takes it, and
+# the call it places reaches Asterisk's echo -- the switchboard is told 202,
+# then 100 and 200 in `message/sipfrag`, and the program hears its own tone
+# come back.
+referral_taken_flow() {
+    local status log audible
+    start_c_listener on off || return 1
+    refer_the_listener referral
+    status=$?
+    log=$(c_listener_log 15)
+    stop_c_listener
+    [ "$status" -eq 0 ] || return 1
+    printf '%s\n' "$log" | grep -q '^referral taken: ok$' \
+        || { printf '  the program never took the referral\n'; return 1; }
+    audible=$(printf '%s\n' "$log" | sed -n 's/^ended .*audible=\([0-9]*\).*/\1/p')
+    [ "${audible:-0}" -ge 25 ] \
+        || { printf '  the call the referral placed heard %s audible frame(s) of the echo\n' \
+            "${audible:-no}"; return 1; }
+}
+
+# ICE-lite through the C ABI: the listener's stack under SIPRAL_ICE_LITE,
+# called by the Rust harness as the full agent a WebRTC gateway would be,
+# requiring ICE -- interop/harness/src/ice_lite.rs's own flow, pointed at the
+# C listener instead of `headless-socket-agent --ice-lite`. The listener
+# echoes what it hears, which is the tone the harness judges the path by.
+ice_lite_c_flow() {
+    local address status log
+    start_c_listener off lite || return 1
+    address=$(c_listener_address)
+    docker run --rm --network sipral-interop_lab \
+        -e SIPRAL_FLOWS=icelite \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim /harness "$address" 5060 agent
+    status=$?
+    log=$(c_listener_log 10)
+    stop_c_listener
+    [ "$status" -eq 0 ] || return 1
+    printf '%s\n' "$log" | grep -q '^path chosen' \
+        || { printf '  the lite end never took a nominated pair\n'; return 1; }
+    printf '%s\n' "$log" | grep -Eq '^ended packets_sent=[1-9]' \
+        || { printf '  the lite end sent no audio on the pair\n'; return 1; }
+}
+
 # 8.6.16's step: two stacks, each behind a NAT of its own, completing full
 # ICE on the server-reflexive candidates coturn gave them
 # (interop/harness/src/ice_nat.rs). The Rust harness twice, as caller on
@@ -1728,6 +1870,25 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
     fi
 fi
 
+# A REFER from outside any call, sent by the Rust harness at a stack driven
+# through the C ABI (`harness-c listen`): refused where the stack was never
+# told to take them, taken where it was, the call it asks for placed through
+# Asterisk to its echo. Part of the Asterisk run, and a word of its own.
+if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = referral ]; then
+    if [ -n "$HARNESS_C" ]; then
+        step "a REFER from outside any call -- refused by a C ABI stack that does not take them"
+        referral_refused_flow && pass "refused 403, and the program never heard of it" \
+            || fail "a REFER from outside any call, refused"
+        step "a REFER from outside any call -- taken by a C ABI stack, calling Asterisk's echo"
+        referral_taken_flow && pass "taken; 202, then 100 and 200 to the switchboard, and the echo heard" \
+            || fail "a REFER from outside any call, taken"
+    elif [ "$WANT" = referral ]; then
+        fail "a REFER from outside any call: there is no C harness to listen with"
+    else
+        printf '  note  no C harness, so the REFER from outside any call is skipped with the other C flows\n'
+    fi
+fi
+
 # The one step in this file where the far end is a client stack rather than
 # a server: baresip, started and registered for this step alone
 # (interop/compose.yaml's own "baresip" profile) and removed straight after
@@ -1803,6 +1964,21 @@ if [ "$WANT" = all ] || [ "$WANT" = ice ]; then
     else
         printf '  note  no socket-framed agent, so the ICE-lite steps are skipped with its own\n'
     fi
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = ice ] || [ "$WANT" = icelite ]; then
+    step "ICE-lite -- the same call, placed at a C ABI stack answering as lite"
+    if [ -n "$HARNESS_C" ]; then
+        ice_lite_c_flow && pass "the full caller chose a path on SIPRAL_ICE_LITE, and the tone came back on it" \
+            || fail "ICE-lite, through the C ABI"
+    elif [ "$WANT" = icelite ]; then
+        fail "ICE-lite through the C ABI: there is no C harness to answer with"
+    else
+        printf '  note  no C harness, so ICE-lite through the C ABI is skipped with the other C flows\n'
+    fi
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = ice ]; then
     step "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them"
     ice_nat_flow && pass "the call found its path through both NATs, and the tone crossed it both ways" \
         || fail "full ICE through two NATs"

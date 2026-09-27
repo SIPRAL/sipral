@@ -126,7 +126,16 @@ public final class SipralStack: @unchecked Sendable {
     /// server for each of those media sockets, offered as the call's relayed
     /// ICE candidate; it needs `stunServer` too, and a call only uses the
     /// relay under ICE. `g729AnnexB` allows G.729's silence compression
-    /// (on by default).
+    /// (on by default). `SipralIce.lite` is for a server reachable at the
+    /// address it advertises, answering full ICE peers, and nothing else
+    /// (`docs/06-nat.md`, "ICE-lite").
+    ///
+    /// `referrals: true` hands a REFER outside any dialog -- click-to-dial
+    /// from a switchboard -- to the application as `SipralEventKind.referral`,
+    /// to take with `acceptReferral` or refuse with `rejectReferral`. Off by
+    /// default, when every one is refused 403: a peer that can make a phone
+    /// dial is a toll-fraud vector, so each one is the application's
+    /// decision.
     public init(
         bindHost: String = "127.0.0.1",
         bindPort: UInt16 = 0,
@@ -138,7 +147,8 @@ public final class SipralStack: @unchecked Sendable {
         ice: SipralIce? = nil,
         stunServer: String? = nil,
         turn: TurnServer? = nil,
-        g729AnnexB: Bool? = nil
+        g729AnnexB: Bool? = nil,
+        referrals: Bool? = nil
     ) throws {
         let socket = try UDPSocket(host: bindHost, port: bindPort)
         self.socket = socket
@@ -181,6 +191,7 @@ public final class SipralStack: @unchecked Sendable {
                     config.srtp = srtp?.rawValue ?? 0
                     config.ice = ice?.rawValue ?? 0
                     config.g729_annex_b = SipralStack.toggle(g729AnnexB)
+                    config.referrals = SipralStack.toggle(referrals)
                     if let stunPointer = parts[3].pointer {
                         config.nat = SipralNat.stun.rawValue
                         config.stun_server = stunPointer
@@ -374,6 +385,59 @@ public final class SipralStack: @unchecked Sendable {
     public func rejectCall(_ event: SipralEvent, code: UInt32 = 486) throws {
         try retryingBusy {
             try Sipral.callReject(stack: handle, call: event.call, code: code, nowMs: nowMs())
+        }
+    }
+
+    /// Take a REFER outside any dialog and place the call it asks for:
+    /// `sipral_call_accept_transfer` on the referral's handle. `event` is the
+    /// `SipralEventKind.referral` a listener read off `events()`, with a
+    /// zero `referralData.statusCode`.
+    ///
+    /// The stack answers 202, reports on the call to whoever asked, and
+    /// places it from the account the event names, to the REFER's own
+    /// target -- never the caller's. A media socket is opened for it here,
+    /// the way `placeCall` opens one, and the `Call` returned is that placed
+    /// call. Whoever sent the REFER can make this line dial anything, so
+    /// this is never done on the application's behalf.
+    public func acceptReferral(
+        _ event: SipralEvent,
+        mediaHost: String = "127.0.0.1",
+        mediaPort: UInt16 = 0,
+        srtp: SipralSrtp? = nil,
+        ice: SipralIce? = nil
+    ) throws -> Call {
+        let mediaSocket = try UDPSocket(host: mediaHost, port: mediaPort)
+        let stackHandle = handle
+        let placed: SipralHandle
+        do {
+            try mapMediaSocket(mediaSocket)
+            let now = nowMs()
+            placed = try CStrings.with([mediaSocket.localAddress]) { parts in
+                var config = sipral_call_config_t.sized()
+                config.media_address = parts[0].pointer
+                config.media_address_len = parts[0].count
+                config.srtp = srtp?.rawValue ?? 0
+                config.ice = ice?.rawValue ?? 0
+                return try retryingBusy {
+                    try Sipral.callAcceptTransfer(
+                        stack: stackHandle, call: event.call, config: config, configHeaders: [], nowMs: now
+                    )
+                }
+            }
+        } catch {
+            giveBackMediaSocket(mediaSocket)
+            throw error
+        }
+        let call = Call(stack: self, handle: placed, mediaSocket: mediaSocket)
+        registerCall(call)
+        return call
+    }
+
+    /// Refuse a REFER outside any dialog with `code`, 300 to 699:
+    /// `sipral_call_reject_transfer` on the referral's handle.
+    public func rejectReferral(_ event: SipralEvent, code: UInt32 = 603) throws {
+        try retryingBusy {
+            try Sipral.callRejectTransfer(stack: handle, call: event.call, code: code, nowMs: nowMs())
         }
     }
 

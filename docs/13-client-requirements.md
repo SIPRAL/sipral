@@ -416,7 +416,10 @@ chance not to have this problem rather than to document it.
 
 A8's policy hook, plus rate limiting per source, plus counters for what was
 refused. Every softphone reachable from the internet needs this and every one
-builds it separately.
+builds it separately. A REFER from outside any call is the same attack with a
+bill attached — a stranger making the phone dial — so it is refused unless the
+application turns it on, and meets the same hook, limit and counters when it
+does (`docs/04-ua.md`, "A REFER from outside any call").
 
 ### D8 · Honest capability reporting · P0
 

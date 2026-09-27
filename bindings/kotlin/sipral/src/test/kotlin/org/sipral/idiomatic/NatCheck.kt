@@ -385,6 +385,50 @@ private suspend fun iceBehindStunCarriesAudio(host: String): String {
 }
 
 /**
+ * `SipralIce.LITE` answering a full agent that requires ICE (RFC 8445
+ * §2.5): the lite end offers its one host candidate and answers the checks,
+ * the full end nominates, both ends report the pair, and audio crosses it
+ * both ways.
+ */
+private suspend fun liteAnsweringAFullAgentCarriesAudio(host: String): String {
+    SipralClient.open(bindHost = host, ice = SipralIce.REQUIRED).use { alice ->
+        SipralClient.open(bindHost = host, ice = SipralIce.LITE).use { bob ->
+            val aliceAccount = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
+            bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)
+            val (aliceCall, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+                alice.placeCall(aliceAccount, target = "sip:bob@${bob.bindAddress}", mediaHost = host)
+            }
+            val offer = String(assertNotNull(incoming.message, "the INVITE rode along"), Charsets.UTF_8)
+            assertFalse(offer.contains("a=ice-lite"), "the caller is the full agent:\n$offer")
+            aliceCall.use {
+                val (bobCall, chosenAtBob) = bob.events.awaitNext(SipralEventKind.MEDIA_PATH_CHOSEN, timeoutMs = 15_000) {
+                    bob.answerCall(incoming, mediaHost = host)
+                }
+                bobCall.use {
+                    assertEquals(bobCall.handle, chosenAtBob.call, "the lite end took the pair on its own call")
+                    val deadline = System.currentTimeMillis() + 5_000
+                    while ((aliceCall.media == null || bobCall.media == null) && System.currentTimeMillis() < deadline) {
+                        delay(20)
+                    }
+                    val aliceMedia = assertNotNull(aliceCall.media, "alice's media never started")
+                    val bobMedia = assertNotNull(bobCall.media, "bob's media never started")
+                    val until = System.currentTimeMillis() + 5_000
+                    while (System.currentTimeMillis() < until &&
+                        (aliceMedia.statistics().packetsReceived < 10 || bobMedia.statistics().packetsReceived < 10)
+                    ) {
+                        delay(50)
+                    }
+                    val heardByAlice = aliceMedia.statistics().packetsReceived
+                    val heardByBob = bobMedia.statistics().packetsReceived
+                    assertTrue(heardByAlice >= 10 && heardByBob >= 10, "RTP both ways: $heardByAlice and $heardByBob")
+                    return "a lite client answering a full one carried $heardByAlice and $heardByBob RTP packets"
+                }
+            }
+        }
+    }
+}
+
+/**
  * Task 8.5.5, `intern/rapoarte/2026-09-25-nat-layers.json`
  * (`natmobile.review.findings[1]`): `SipralClient.drainFarewells` must send
  * what `stackPollFarewell` hands out to the destination it names -- the
@@ -473,6 +517,7 @@ internal suspend fun natChecks(): String {
         stunMappingReachesContactAndSdp(host),
         turnRelayIsAllocatedAndOffered(host),
         iceBehindStunCarriesAudio(host),
+        liteAnsweringAFullAgentCarriesAudio(host),
         turnAllocationIsGivenBackWhenTheCallEnds(host),
     ).joinToString(", ")
 }

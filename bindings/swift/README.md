@@ -190,9 +190,25 @@ hands everything arriving there — the servers' answers, the far end's first
 ICE checks — to `sipral_stack_receive_stun`. The relay is offered only as an
 ICE candidate, so it is used only with `ice`. `TurnServer`'s password stays
 out of its `description` and of `dump()`. `g729AnnexB: false` turns off
-G.729's silence compression. `Tests/SipralTests/NatTests.swift` proves each
-on the wire against a STUN and TURN server inside the test, and carries a
-call between two stacks that require ICE.
+G.729's silence compression. `ice: .lite` is the server's value, never the
+phone's: an ICE-lite endpoint (RFC 8445 §2.5) for a host reachable at the
+address it advertises, answering full ICE peers. `Tests/SipralTests/NatTests.swift`
+proves each on the wire against a STUN and TURN server inside the test, and
+carries a call between two stacks that require ICE and one between a lite
+stack and a full one.
+
+### A REFER from outside any call
+
+`SipralStack(referrals: true)` hands a REFER that names no dialog —
+click-to-dial from a switchboard, RFC 3515 §4.1 — to the application as
+`SipralEventKind.referral`, `event.referralData` saying who to call, whether
+it is attended and who the sender says is asking. `stack.acceptReferral(event)`
+answers 202, reports on the call to whoever asked and places it from the line
+it arrived for, returning that `Call`; `stack.rejectReferral(event, code: 603)`
+refuses it. **Off by default, and then every one is refused 403**: a peer that
+can make a phone dial is a toll-fraud vector, so each one is the
+application's decision. `Tests/SipralTests/ReferralTests.swift` proves both
+halves on the wire.
 
 ## Samples
 

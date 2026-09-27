@@ -182,10 +182,26 @@ has media, the poll thread reads that socket, sends what
 `sipral_stack_receive_stun`. The relay is offered only as an ICE candidate,
 so it is used only with `ice`. `SipralTurnServer.toString()` leaves the
 password out. `g729AnnexB = false` turns off G.729's silence compression.
+`ice = SipralIce.LITE` is the server's value, never the phone's: an ICE-lite
+endpoint (RFC 8445 §2.5) for a host reachable at the address it advertises,
+answering full ICE peers.
 `src/test/kotlin/org/sipral/idiomatic/NatCheck.kt`, run by `scripts/check.sh`
 with `IdiomaticCheck.kt`, proves each on the wire against a STUN and TURN
 server inside the check, and carries a call between two clients that require
-ICE.
+ICE and one between a lite client and a full one.
+
+### A REFER from outside any call
+
+`SipralClient.open(referrals = true)` hands a REFER that names no dialog —
+click-to-dial from a switchboard, RFC 3515 §4.1 — to the application as
+`SIPRAL_EVENT_KIND_REFERRAL`; `referralOf(event)` reads who to call, whether
+it is attended and who the sender says is asking. `client.acceptReferral(event)`
+answers 202, reports on the call to whoever asked and places it from the line
+it arrived for, returning that `SipralCall`; `client.rejectReferral(event, 603)`
+refuses it. **Off by default, and then every one is refused 403**: a peer that
+can make a phone dial is a toll-fraud vector, so each one is the
+application's decision. `ReferralCheck.kt`, run with `IdiomaticCheck.kt`,
+proves both halves on the wire.
 
 ## The ConnectionService helper
 

@@ -120,7 +120,17 @@ public sealed class SipralStack : IDisposable
     /// with <paramref name="turnUsername"/>/<paramref name="turnPassword"/>
     /// (`docs/06-nat.md`, `docs/08-ffi.md` "Behind a NAT"). Neither
     /// credential is written to any log, event or exception this package
-    /// raises.</summary>
+    /// raises. <see cref="SipralIce.Lite"/> is for a server reachable at the
+    /// address it advertises, answering full ICE peers, and nothing else
+    /// (`docs/06-nat.md`, "ICE-lite").
+    ///
+    /// <paramref name="referrals"/> set to <see langword="true"/> hands a
+    /// REFER outside any dialog — click-to-dial from a switchboard — to the
+    /// application as <see cref="SipralEventKind.Referral"/>, to take with
+    /// <see cref="AcceptReferral"/> or refuse with <see cref="RejectReferral"/>.
+    /// Off by default, when every one is refused 403: a peer that can make
+    /// a phone dial is a toll-fraud vector, so each one is the
+    /// application's decision.</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -135,7 +145,8 @@ public sealed class SipralStack : IDisposable
         string? turnServer = null,
         string? turnUsername = null,
         string? turnPassword = null,
-        bool? g729AnnexB = null)
+        bool? g729AnnexB = null,
+        bool? referrals = null)
     {
         _nat = nat;
         _turn = turnServer is not null;
@@ -214,6 +225,7 @@ public sealed class SipralStack : IDisposable
             config.TurnUsernameLen = (nuint)(turnUsernameBytes?.Length ?? 0);
             config.TurnPassword = turnPasswordPin.Pointer;
             config.TurnPasswordLen = (nuint)(turnPasswordBytes?.Length ?? 0);
+            config.Referrals = ToggleOf(referrals);
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }
@@ -353,6 +365,61 @@ public sealed class SipralStack : IDisposable
     public void RejectCall(SipralEventArgs args, uint code = 486)
     {
         SipralErrors.Call(() => NativeMethods.sipral_call_reject(Handle, args.Call, code, NowMs), "sipral_call_reject");
+    }
+
+    /// <summary>
+    /// Takes a REFER outside any dialog and places the call it asks for:
+    /// <c>sipral_call_accept_transfer</c> on the referral's handle.
+    /// <paramref name="args"/> is the <see cref="SipralEventKind.Referral"/>
+    /// event with a zero <see cref="SipralReferralEventInfo.StatusCode"/>.
+    /// The stack answers 202, reports on the call to whoever asked, and
+    /// places it from the account the event names, to the REFER's own
+    /// target; a media socket is opened for it here the way
+    /// <see cref="PlaceCall"/> opens one, and the <see cref="Call"/>
+    /// returned is that placed call. Whoever sent the REFER can make this
+    /// line dial anything, so this is never done on the application's
+    /// behalf.
+    /// </summary>
+    public Call AcceptReferral(SipralEventArgs args, string mediaHost = "127.0.0.1", int mediaPort = 0, SipralSrtp srtp = 0, SipralIce ice = 0)
+    {
+        var mediaSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        mediaSocket.Bind(new IPEndPoint(IPAddress.Parse(mediaHost), mediaPort));
+        mediaSocket.Blocking = false;
+        var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
+        MapMediaSocket(mediaSocket, mediaAddress);
+
+        var mediaAddressBytes = Encoding.UTF8.GetBytes(mediaAddress);
+        ulong placed = 0;
+        using (var mediaPin = Pin(mediaAddressBytes))
+        {
+            var config = SipralCallConfig.Sized();
+            config.MediaAddress = mediaPin.Pointer;
+            config.MediaAddressLen = (nuint)mediaAddressBytes.Length;
+            config.Srtp = (uint)srtp;
+            config.Ice = (uint)ice;
+            try
+            {
+                SipralErrors.Call(() => NativeMethods.sipral_call_accept_transfer(Handle, args.Call, config, out placed, NowMs), "sipral_call_accept_transfer");
+            }
+            catch
+            {
+                ForgetMediaSocket(mediaAddress);
+                mediaSocket.Dispose();
+                throw;
+            }
+        }
+
+        var call = new Call(this, placed, mediaSocket, mediaAddress);
+        _calls[call.Handle] = call;
+        return call;
+    }
+
+    /// <summary>Refuses a REFER outside any dialog with
+    /// <paramref name="code"/>, 300 to 699:
+    /// <c>sipral_call_reject_transfer</c> on the referral's handle.</summary>
+    public void RejectReferral(SipralEventArgs args, uint code = 603)
+    {
+        SipralErrors.Call(() => NativeMethods.sipral_call_reject_transfer(Handle, args.Call, code, NowMs), "sipral_call_reject_transfer");
     }
 
     internal Call? CallFor(ulong handle) => _calls.TryGetValue(handle, out var call) ? call : null;

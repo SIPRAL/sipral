@@ -262,9 +262,11 @@ does not need the whole of it: it is the ICE-lite endpoint RFC 8445 describes,
 which advertises where it is, answers the checks the full peer sends, and
 carries the audio on the pair that peer nominates. `sipral::IcePolicy::Lite`
 is that, on a call's codec catalogue, and it exists only in a build with
-`headless` (and `ice`) — the softphone's build cannot turn it on, because
-behind a NAT it is worse than no ICE at all. `docs/06-nat.md#ice-lite` has
-what it does on the wire, and why.
+`headless` (and `ice`) or the facade's own `ice-lite` — the softphone's build
+cannot turn it on, because behind a NAT it is worse than no ICE at all. An
+agent driven through the C ABI instead asks for it as `SIPRAL_ICE_LITE`, and
+brings none of `sipral-headless` with it. `docs/06-nat.md#ice-lite` has what
+it does on the wire, and why.
 
 It is off unless the application asks. `headless-socket-agent --ice-lite`
 asks, and answers every call with it; `--public ip` is for a server behind a

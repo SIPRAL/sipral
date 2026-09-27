@@ -163,9 +163,11 @@ and each is cheaper before the ABI carries it than after:
   `SIPRAL_NAT_STUN` and `stun_server` carry it across the C ABI, and the lab
   proves it through a NAT against coturn and Asterisk. ICE-lite for the
   headless profile is wired too: `IcePolicy::Lite`, only in a build with
-  `headless`, answers a full peer's checks and carries the audio on the pair
-  it nominates, proven in process and in the lab against the harness and
-  Asterisk (`docs/06-nat.md#ice-lite`). TURN is wired too: `sipral::Relays`
+  `headless` or `ice-lite`, answers a full peer's checks and carries the audio
+  on the pair it nominates, proven in process and in the lab against the
+  harness and Asterisk (`docs/06-nat.md#ice-lite`); `SIPRAL_ICE_LITE` carries
+  it across the C ABI, proven in every binding and in the lab through
+  `harness-c listen`. TURN is wired too: `sipral::Relays`
   and `turn_server` allocate a relay for a media socket before its call, and
   the full agent carries it as the relayed candidate, proven in the lab
   between two NATs that let nothing else through (`docs/06-nat.md#turn`);

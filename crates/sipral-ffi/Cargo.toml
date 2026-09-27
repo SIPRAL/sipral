@@ -48,7 +48,10 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 # `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN` are in every build of it. A build
 # without the feature answers `SIPRAL_STATUS_NOT_SUPPORTED` to the policies
 # and never emits the event, and `SIPRAL_FEATURE_ICE` says so before an
-# application asks.
+# application asks. It carries the facade's `ice-lite` with it, so that
+# `SIPRAL_ICE_LITE` names a policy wherever `SIPRAL_ICE_OFFERED` does: the
+# lite role is chosen per stack or per call like the other two, and nothing
+# of `sipral-headless` comes with it.
 #
 # `stun` is the fourth, and branches here for the same reason: the stack's
 # mappings are the facade's `Mappings`. `SIPRAL_NAT_STUN`, the four
@@ -59,7 +62,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 default = ["opus", "dtls", "ice", "stun"]
 opus = ["sipral/opus"]
 dtls = ["sipral/dtls"]
-ice = ["sipral/ice"]
+ice = ["sipral/ice", "sipral/ice-lite"]
 stun = ["sipral/stun"]
 
 [dependencies]

@@ -59,7 +59,11 @@ for it, and runs two stacks with `ice: SipralIce.Required` against each
 other on this host's own routable address (never `127.0.0.1` — RFC 8445
 Section 5.1.1.1 rules a loopback address out as a host candidate) to
 prove media starts, both ways, through a full ICE checklist and
-nomination.
+nomination. `ReferralAndLiteTests.cs` sends a REFER from outside any call by
+hand and proves the 403 without `referrals: true` and, with it, the 202, the
+NOTIFYs from `100 Trying` to the placed call's `200 OK` and the call itself;
+and puts a `SipralIce.Lite` stack under one that requires ICE, audio crossing
+both ways.
 
 ## Use
 
@@ -111,9 +115,23 @@ then wait out its `SipralEventKind.NatRelay` too. Both credentials stay
 out of every log, event and exception this package raises.
 `ice: SipralIce.Offered`/`SipralIce.Required`, on the stack or on
 `PlaceCall`, is what actually puts a relay to use — off by default, the
-same as `nat`, which `docs/06-nat.md` explains. `g729AnnexB: false` on
-the stack turns off G.729's Annex B silence compression (`annexb=no`) if
-that codec runs at all.
+same as `nat`, which `docs/06-nat.md` explains. `SipralIce.Lite` is the
+server's value, never the phone's: an ICE-lite endpoint (RFC 8445 §2.5) for
+a host reachable at the address it advertises, answering full ICE peers.
+`g729AnnexB: false` on the stack turns off G.729's Annex B silence
+compression (`annexb=no`) if that codec runs at all.
+
+### A REFER from outside any call
+
+`new SipralStack(referrals: true)` hands a REFER that names no dialog —
+click-to-dial from a switchboard, RFC 3515 §4.1 — to the application as
+`SipralEventKind.Referral`, `args.Referral` saying who to call, whether it
+is attended and who the sender says is asking. `stack.AcceptReferral(args)`
+answers 202, reports on the call to whoever asked and places it from the line
+it arrived for, returning that `Call`; `stack.RejectReferral(args, 603)`
+refuses it. **Off by default, and then every one is refused 403**: a peer that
+can make a phone dial is a toll-fraud vector, so each one is the
+application's decision.
 
 ## Samples
 

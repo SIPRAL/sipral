@@ -616,6 +616,7 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralMessageEvent::ABI,
         crate::nat::SipralNatEvent::ABI,
         crate::nat::SipralNatRelayEvent::ABI,
+        crate::event::SipralReferralEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -921,6 +922,7 @@ mod tests {
             "SipralMessageEvent",
             "SipralNatEvent",
             "SipralNatRelayEvent",
+            "SipralReferralEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];
