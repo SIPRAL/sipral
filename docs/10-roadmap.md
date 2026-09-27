@@ -373,8 +373,11 @@ property through before it reaches C.
   application skeleton that makes a call. *Built*: Swift, C#, Kotlin and
   Python, each with a sample (`bindings/README.md`);
 - the artefacts each platform consumes, built locally: an `.xcframework`, an
-  AAR with the shared object for each Android ABI, a NuGet with native runtimes,
-  wheels — with publishing left to a person, and each of them built without
+  AAR with the shared object for each Android ABI, a NuGet with native runtimes
+  (`win-x64`, `osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64` --
+  `linux-arm64` cross-compiled, no arm64 hardware needed), wheels including a
+  `manylinux_2_28_aarch64` one built the same cross-compiled way — with
+  publishing left to a person, and each of them built without
   the `opus` feature unless `--with-opus` asks for the second variant, whose
   name says it carries libopus so that nobody ships the wrong one without
   noticing, because a binary somebody downloads instead of compiling is the
