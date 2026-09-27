@@ -1,6 +1,6 @@
 [package]
 name = "sipral-ffi"
-description = "Stable C ABI over the Sipral stack, and the base for the Swift, .NET and Kotlin bindings."
+description = "Stable C ABI over the Sipral stack, and the base for the Swift, .NET, Kotlin and Python bindings."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

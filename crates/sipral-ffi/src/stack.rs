@@ -8,7 +8,7 @@
 //! and the callback runs inside [`sipral_stack_poll`] and nowhere else. That
 //! is the whole reason poll exists. A stack that called back from a thread of
 //! its own would make every binding reason about which thread it is on, and
-//! Swift, .NET and Kotlin each answer that question differently; a stack that
+//! Swift, .NET, Kotlin and Python each answer that question differently; a stack that
 //! calls back only where it was polled has nothing to answer.
 //!
 //! The clock arrives the same way. Nothing here reads one — except once, at

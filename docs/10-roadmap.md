@@ -270,8 +270,8 @@ trusts.
   media, and INFO with either body, chosen per send because which one a peer
   accepts is a fact about the peer. The signalling trace A10 asked for is
   superseded by **D1**, which is built.
-- **B7** — the ABI's single source of truth, with the Swift, Kotlin and .NET
-  bindings generated from it and `scripts/check.sh` failing when one is
+- **B7** — the ABI's single source of truth, with the Swift, Kotlin, .NET and
+  Python bindings generated from it and `scripts/check.sh` failing when one is
   missing. *Built* as declarations; **not yet as platforms**: on 10 September
   2026 the tree built no C-linkable library at all, three of the four printed
   bindings did not compile, and the gate could not tell, because it compared

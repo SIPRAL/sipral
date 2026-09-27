@@ -37,7 +37,7 @@
 //!
 //! Every one of those declares itself through a macro from [`abi`], which
 //! emits the declaration and, beside it, what the declaration was made of. The
-//! C header and the Swift, Kotlin and .NET bindings are printed from that and
+//! C header and the Swift, Kotlin, .NET and Python bindings are printed from that and
 //! committed, so a function added here and forgotten in a binding is a build
 //! failure rather than a crash on one platform in the field.
 //!
