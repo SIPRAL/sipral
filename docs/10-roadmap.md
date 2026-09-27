@@ -465,7 +465,10 @@ in-process session. *Built* (`docs/07-headless.md#real-media`).
   dials a public test IVR, plays the menu through the device crate or into a
   file, presses a digit and hears it read back; the other examples register,
   call, hold, transfer, and run over TLS with the transport the application
-  brings. *Built*;
+  brings. *Built*, and timed on 27 September 2026 by a reader given only the
+  README, in a fresh Linux container: a connected call in about two minutes,
+  most of it the first build — after a stop the README then did not prevent,
+  CMake missing for libopus, which it now names;
 - **numbers** rather than adjectives: library size per platform, memory and CPU
   per call for G.711 and Opus, end-to-end latency in the lab, in a dated
   document produced by a script. *Built*: `docs/19-numbers.md`,

@@ -44,7 +44,9 @@ media: see [`docs/07-headless.md`](docs/07-headless.md#real-media) and
 
 No account, no server to run, nothing to configure. With Rust installed
 (from [rustup.rs](https://rustup.rs); the right toolchain is fetched on the
-first build), from the repository root:
+first build) and [CMake](https://cmake.org), which builds libopus for the Opus
+codec the stack compiles in by default (`brew install cmake` on macOS,
+`apt install cmake` on Debian and Ubuntu), from the repository root:
 
 ```bash
 cargo run --example call
@@ -68,8 +70,10 @@ sending 2
 sending 1234#
 ```
 
-and, when it wrote a file, `wrote N samples (call.wav)` at the end: about
-twenty-five seconds of the IVR talking.
+The codec on the third line is whichever of PCMU and PCMA the IVR chose that
+day; both are a working call. When it wrote a file, `wrote N samples
+(call.wav)` comes at the end: fifteen to twenty-five seconds of the IVR
+talking, a 16-bit mono WAV any player opens.
 
 That one example is also the shortest way to read what embedding this stack
 looks like: a `sipral::UserAgent` and a `sipral::MediaEngine` (both in
