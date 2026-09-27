@@ -915,6 +915,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A Python call closed the moment it ends still gives its relay back.**
+  `Stack` sent a call's farewells — its RTCP BYE and the TURN Refresh with a
+  lifetime of zero — only after the poll that ended the call had delivered
+  all its events, so an application that closed the call as soon as it saw
+  `Call.ended` could forget it first, and the relay lapsed on its server; the
+  lab's TURN step counted one allocation fewer given back than made, now and
+  then. They now leave before `SIPRAL_EVENT_KIND_CALL_ENDED` reaches the call.
 - **A hold from Android's telecom framework says held at once.**
   `TelecomBridge.hold` sent the re-INVITE and left the connection active
   until the far end answered it, but `Connection.onHold` documents that a

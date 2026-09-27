@@ -596,6 +596,128 @@ class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(lifetime, struct.pack("!I", 0), "the Refresh does not ask for a lifetime of zero")
 
 
+class TurnAllocationIsGivenBackWhenTheCallIsClosedAtItsEnd(unittest.IsolatedAsyncioTestCase):
+    """The relay a call held is given back even when the application
+    closes the call the instant it hears the call ended.
+
+    The Refresh with a lifetime of zero is queued in the same poll that
+    raises `SIPRAL_EVENT_KIND_CALL_ENDED`, and used to be sent only after
+    that poll's events had all been delivered. An application that closed
+    the call as soon as it saw `Call.ended` -- `examples/agent.py`'s
+    `run_call`, whose wait for the far end's hangup and whose own hangup
+    both end on it -- could forget the call and close its socket before
+    the poll thread got to the farewell, and the relay was left to lapse
+    on its server: the lab's TURN step counted one allocation fewer given
+    back than made, now and then. Here the close happens on the poll
+    thread itself, inside the delivery of the event, which is the order
+    that race could only sometimes produce.
+
+    Both ends run full ICE, so the relay stays the call's until it ends
+    rather than going back as soon as a peer without ICE answers
+    (`TurnAllocationIsGivenBackWhenTheCallEnds`).
+    """
+
+    PUBLIC_HOST = "203.0.113.9"
+    PUBLIC_PORT = 40004
+
+    async def asyncSetUp(self) -> None:
+        host = _routable_address()
+        if host is None:
+            self.skipTest("no routable address on this machine for ICE to gather a host candidate from")
+        self.host = host
+        self.password = "turn-secret-43"
+        self.server = _FakeStunServer(
+            self.PUBLIC_HOST, self.PUBLIC_PORT, credential=("alice-turn", self.password)
+        )
+        self.addAsyncCleanup(self._close_server)
+        loop = asyncio.get_running_loop()
+        self.alice_stack = Stack(
+            bind_host=host,
+            loop=loop,
+            nat=Nat.STUN,
+            ice=Ice.REQUIRED,
+            codecs="PCMU",
+            stun_server=self.server.address,
+            turn_server=self.server.address,
+            turn_username="alice-turn",
+            turn_password=self.password,
+        )
+        self.bob_stack = Stack(bind_host=host, loop=loop, ice=Ice.REQUIRED, codecs="PCMU")
+        self.addAsyncCleanup(self._close_stacks)
+
+    async def _close_server(self) -> None:
+        self.server.close()
+
+    async def _close_stacks(self) -> None:
+        self.alice_stack.close()
+        self.bob_stack.close()
+
+    def _refreshes(self) -> int:
+        return sum(1 for method, _ in list(self.server.requests) if method == _REFRESH_REQUEST)
+
+    async def test_refresh_leaves_before_the_end_is_heard(self) -> None:
+        alice_account = self.alice_stack.add_account(
+            "sip:alice@sipral.invalid",
+            registrar_address=self.bob_stack.bind_address,
+        )
+        self.bob_stack.add_account(
+            "sip:bob@sipral.invalid",
+            registrar_address=self.alice_stack.bind_address,
+        )
+        alice_call = self.alice_stack.place_call(
+            alice_account,
+            f"sip:bob@{self.bob_stack.bind_address}",
+            media_host=self.host,
+            ice=Ice.REQUIRED,
+        )
+        self.addAsyncCleanup(alice_call.close)
+
+        bob_call = None
+        while bob_call is None:
+            event = await asyncio.wait_for(self.bob_stack.events.get(), timeout=8)
+            if event.kind == EventKind.INCOMING_CALL:
+                bob_call = self.bob_stack.answer_call(event, media_host=self.host)
+        self.addAsyncCleanup(bob_call.close)
+
+        chosen = False
+        while not chosen:
+            event = await asyncio.wait_for(alice_call.events.get(), timeout=10)
+            chosen = event.kind == EventKind.MEDIA_PATH_CHOSEN
+        # the relay event is the stack's, not the call's
+        relay = None
+        while relay is None:
+            event = await asyncio.wait_for(self.alice_stack.events.get(), timeout=8)
+            if event.kind == EventKind.NAT_RELAY:
+                relay = event
+        self.assertEqual(
+            relay.fields["outcome"], NatRelay.ALLOCATED, f"relay failed: {relay.fields}"
+        )
+        self.assertEqual(self._refreshes(), 0, "the relay went back while the call still held it")
+
+        # the application closing the call the moment it is told the call
+        # ended: on the poll thread, inside the delivery of the event itself
+        deliver = alice_call.deliver
+
+        def close_at_the_end(event) -> None:
+            deliver(event)
+            if event.kind == EventKind.CALL_ENDED:
+                alice_call.close()
+
+        alice_call.deliver = close_at_the_end
+        bob_call.hangup()
+
+        deadline = asyncio.get_running_loop().time() + 5
+        while self._refreshes() == 0 and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+        self.assertTrue(alice_call.ended, "alice never heard the call end")
+        self.assertEqual(
+            self._refreshes(),
+            1,
+            "the TURN server never saw the Refresh that gives the relay back: the call was "
+            "closed before its farewell was sent",
+        )
+
+
 class TwoStacksTalkThroughIce(unittest.IsolatedAsyncioTestCase):
     """`ice=Ice.REQUIRED`, no NAT and no server at all: two stacks bound to
     this host's own routable address (never `127.0.0.1` -- RFC 8445

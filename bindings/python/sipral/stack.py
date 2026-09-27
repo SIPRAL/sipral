@@ -540,6 +540,17 @@ class Stack:
                     waiters[key].set()
 
         call = self.call_for(event.call) if event.call else None
+        if call is not None and event.kind == lib.SIPRAL_EVENT_KIND_CALL_ENDED:
+            # What the call still owes -- its RTCP BYE, and the Refresh that
+            # gives its relay back -- was queued by the poll delivering this
+            # event, and goes out through the call's own socket before
+            # anything can hear that the call ended: an application that
+            # closes the call the moment it does would otherwise forget it
+            # and close that socket ahead of the drain after the poll, and
+            # the relay would lapse on its server instead. Nothing is held
+            # while the callback runs, so the library may be re-entered
+            # from inside it (`docs/08-ffi.md`, "The shape").
+            self._drain_farewells()
         if call is not None:
             call.deliver(event)
 
