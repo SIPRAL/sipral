@@ -98,7 +98,11 @@ public sealed record SipralNatRelayEventInfo(
 
 /// <summary>A snapshot of <c>sipral_stream_stats_t</c>, copied field by
 /// field — never the library's own pointer, which is valid only for the
-/// callback that carried it.</summary>
+/// callback that carried it. <see cref="FramesUnderrun"/> is
+/// <c>frames_underrun</c>: frames the earpiece played as nothing because
+/// the jitter buffer had run dry while the far end was still sending, which
+/// <see cref="LossRate"/>, <see cref="Score"/> and <see cref="Suffering"/>
+/// take in and no RTCP-XR figure does.</summary>
 public sealed record SipralStreamStatistics(
     SipralCodec Codec,
     ulong? RoundTripUs,
@@ -116,4 +120,5 @@ public sealed record SipralStreamStatistics(
     double LossRate,
     double Score,
     bool Suffering,
-    ulong SilentForMs);
+    ulong SilentForMs,
+    ulong FramesUnderrun);

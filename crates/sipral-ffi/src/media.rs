@@ -698,6 +698,18 @@ record! {
         /// RFC 3611 SS4.7.5's estimated conversational-quality MOS, in
         /// tenths.
         pub voip_mos_cq_x10: u32,
+        /// Frames played as nothing because the jitter buffer had run dry
+        /// while the far end was still sending: the earpiece asked for audio
+        /// before it had arrived, and heard silence or comfort noise in its
+        /// place, wherever that fell. A frame the far end never sent, in its
+        /// own pause, is not one, and nor is a packet lost on the way, which
+        /// is `packets_lost`. No packet is lost or discarded by it, so none of
+        /// the `voip_*` rates above sees it (RFC 3611 SS4.7.1 counts packets);
+        /// `loss_rate`, `score` and `suffering` do.
+        ///
+        /// Appended at the tail; the pinned `MIN_SIZE` is unmoved, and a
+        /// caller built before it existed never reads it.
+        pub frames_underrun: u64,
     }
 }
 
@@ -927,6 +939,7 @@ pub(crate) fn stream_stats(record: &StreamStatistics) -> SipralStreamStats {
         voip_mos_lq_x10: voip.map_or(0, |block| u32::from(block.mos_lq)),
         has_voip_mos_cq: u32::from(voip.is_some_and(|block| block.mos_cq != UNAVAILABLE)),
         voip_mos_cq_x10: voip.map_or(0, |block| u32::from(block.mos_cq)),
+        frames_underrun: quality.underruns,
     }
 }
 
@@ -2725,6 +2738,7 @@ a=sendrecv\r\n";
             voip_mos_lq_x10: u32::MAX,
             has_voip_mos_cq: u32::MAX,
             voip_mos_cq_x10: u32::MAX,
+            frames_underrun: u64::MAX,
         }
     }
 
@@ -3478,6 +3492,73 @@ a=sendrecv\r\n";
             after.packets_received
         );
         assert_eq!(after.silent_for_ms, 100, "since the last one arrived");
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// An earpiece that asks for frames faster than the far end sends them
+    /// runs the buffer dry, and plays silence where the far end was still
+    /// talking. The frames it played that way are counted where the C
+    /// caller reads the call's quality, as `frames_underrun`, and they are
+    /// the frames of silence between the last packet played and the next
+    /// one on the far end's clock, no more.
+    #[test]
+    fn frames_played_as_nothing_while_the_far_end_talked_are_counted_as_under_runs() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
+        let timestamp = |sequence: u16| 8_000 + u32::from(sequence - 100) * 160;
+        // each on time for its timestamp, so the path has no jitter to
+        // blame and the buffer's target stays where a clean path puts it
+        let due = |sequence: u16| 1_100 + u64::from(sequence - 100) * 20;
+
+        for sequence in 100..104_u16 {
+            let mut packet = rtp(sequence, timestamp(sequence));
+            arrive(media, &mut packet, PEER_MEDIA, due(sequence));
+        }
+        let mut played = 0;
+        let mut dry = 0;
+        for _ in 0..10 {
+            match play_one(media) {
+                SipralPlayback::Packet => played += 1,
+                SipralPlayback::Silence if played > 0 => dry += 1,
+                _ => {}
+            }
+        }
+        // one of the four may go to shortening the far end's pause, since
+        // what the mu-law silence decodes to is a pause
+        assert!(played >= 3, "only {played} of four packets played");
+        assert!(dry > 0, "the earpiece never ran ahead of the far end");
+        assert_eq!(
+            statistics(media, due(103)).frames_underrun,
+            0,
+            "nothing says yet whether that silence was the far end's pause"
+        );
+
+        // the far end's clock ran on unbroken: the silence was its words,
+        // and so is whatever the buffer waits out before it plays again
+        for sequence in 104..110_u16 {
+            let mut packet = rtp(sequence, timestamp(sequence));
+            arrive(media, &mut packet, PEER_MEDIA, due(sequence));
+        }
+        loop {
+            match play_one(media) {
+                SipralPlayback::Packet => break,
+                SipralPlayback::Silence if dry < 30 => dry += 1,
+                other => panic!("{other:?} after {dry} frames of silence"),
+            }
+        }
+        let stats = statistics(media, due(110));
+        assert_eq!(stats.frames_underrun, dry);
+        assert_eq!(stats.packets_lost, 0, "nothing was lost on the way");
+        assert!(
+            stats.loss_rate > 0.0 && stats.suffering == 1,
+            "the silence counts where the call's quality is read: loss rate {}, suffering {}",
+            stats.loss_rate,
+            stats.suffering
+        );
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok

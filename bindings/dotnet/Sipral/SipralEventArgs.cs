@@ -187,7 +187,7 @@ public sealed class SipralEventArgs : EventArgs
             registration, callInfo, media, transfer, resolve, nat, relay, referral);
     }
 
-    private static SipralStreamStatistics? ReadStatistics(IntPtr ptr)
+    internal static SipralStreamStatistics? ReadStatistics(IntPtr ptr)
     {
         if (ptr == IntPtr.Zero)
         {
@@ -198,7 +198,7 @@ public sealed class SipralEventArgs : EventArgs
             (SipralCodec)s.Codec, s.HasRoundTrip != 0 ? s.RoundTripUs : null, s.PacketsSent, s.OctetsSent,
             s.PacketsReceived, s.PacketsLost, s.PacketsLate, s.PacketsOverflowed, s.PacketsDuplicated,
             s.PacketsReordered, s.DelayUs, s.TargetDelayUs, s.JitterUs, s.LossRate, s.Score,
-            s.Suffering != 0, s.SilentForMs);
+            s.Suffering != 0, s.SilentForMs, s.FramesUnderrun);
     }
 
     private static byte[]? ReadBytes(IntPtr ptr, nuint len)

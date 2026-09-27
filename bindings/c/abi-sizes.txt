@@ -24,7 +24,7 @@ sipral_push_echo_t 24 24
 sipral_screen_request_t - 48
 sipral_stack_config_t 176 272
 sipral_stack_settings_t 72 80
-sipral_stream_stats_t 152 256
+sipral_stream_stats_t 152 264
 sipral_subscribe_config_t 88 88
 sipral_suspending_t 32 32
 sipral_transmit_t 88 88

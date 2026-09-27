@@ -2716,9 +2716,23 @@ data class SipralStreamStats(
      * tenths.
      */
     val voipMosCqX10: Long,
+    /**
+     * Frames played as nothing because the jitter buffer had run dry
+     * while the far end was still sending: the earpiece asked for audio
+     * before it had arrived, and heard silence or comfort noise in its
+     * place, wherever that fell. A frame the far end never sent, in its
+     * own pause, is not one, and nor is a packet lost on the way, which
+     * is `packets_lost`. No packet is lost or discarded by it, so none of
+     * the `voip_*` rates above sees it (RFC 3611 SS4.7.1 counts packets);
+     * `loss_rate`, `score` and `suffering` do.
+     *
+     * Appended at the tail; the pinned `MIN_SIZE` is unmoved, and a
+     * caller built before it existed never reads it.
+     */
+    val framesUnderrun: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 39
+        const val SLOTS: Int = 40
 
         fun of(slots: LongArray): SipralStreamStats = SipralStreamStats(
             slots[0],
@@ -2760,6 +2774,7 @@ data class SipralStreamStats(
             slots[36],
             slots[37],
             slots[38],
+            slots[39],
         )
     }
 }
@@ -5084,7 +5099,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 27)
+        agree(0, 28)
     }
 
     /**
@@ -5234,7 +5249,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 27
+    const val ABI_VERSION_MINOR: Long = 28
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.

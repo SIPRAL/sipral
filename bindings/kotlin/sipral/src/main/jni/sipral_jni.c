@@ -241,11 +241,11 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
         }
     }
     if (built && (event->kind == SIPRAL_EVENT_KIND_MEDIA_STATISTICS || event->kind == SIPRAL_EVENT_KIND_MEDIA_STALLED || event->kind == SIPRAL_EVENT_KIND_MEDIA_STARTED || event->kind == SIPRAL_EVENT_KIND_MEDIA_CHANGED || event->kind == SIPRAL_EVENT_KIND_MEDIA_RESUMED || event->kind == SIPRAL_EVENT_KIND_MEDIA_FAILED || event->kind == SIPRAL_EVENT_KIND_RECORDING_STOPPED || event->kind == SIPRAL_EVENT_KIND_DIGIT_RECEIVED || event->kind == SIPRAL_EVENT_KIND_MEDIA_SECURED || event->kind == SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN || event->kind == SIPRAL_EVENT_KIND_QUALITY_REPORT_SENT || event->kind == SIPRAL_EVENT_KIND_MEDIA_UNJOINED) && JNI_REACHES(event, sipral_event_t, payload.media.statistics) && event->payload.media.statistics != NULL) {
-        payloadMediaStatistics = (*env)->NewLongArray(env, 39);
+        payloadMediaStatistics = (*env)->NewLongArray(env, 40);
         if (payloadMediaStatistics == NULL) {
             built = 0;
         } else {
-            jlong slots[39];
+            jlong slots[40];
             slots[0] = (jlong)event->payload.media.statistics->size;
             slots[1] = (jlong)event->payload.media.statistics->codec;
             slots[2] = (jlong)event->payload.media.statistics->has_round_trip;
@@ -293,7 +293,8 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
             slots[36] = (jlong)event->payload.media.statistics->voip_mos_lq_x10;
             slots[37] = (jlong)event->payload.media.statistics->has_voip_mos_cq;
             slots[38] = (jlong)event->payload.media.statistics->voip_mos_cq_x10;
-            (*env)->SetLongArrayRegion(env, payloadMediaStatistics, 0, 39, slots);
+            slots[39] = (jlong)event->payload.media.statistics->frames_underrun;
+            (*env)->SetLongArrayRegion(env, payloadMediaStatistics, 0, 40, slots);
         }
     }
     if (built && (event->kind == SIPRAL_EVENT_KIND_TRANSPORT_WANTED) && JNI_REACHES(event, sipral_event_t, payload.transport_wanted.destination_len) && event->payload.transport_wanted.destination != NULL) {
@@ -2155,7 +2156,7 @@ Java_org_sipral_SipralNative_sipral_1media_1statistics(JNIEnv *env, jobject self
     stats_value.size = sizeof stats_value;
     sipral_status_t status = sipral_media_statistics((sipral_handle_t)media, (uint64_t)nowMs, &stats_value);
     {
-        jlong slots[39];
+        jlong slots[40];
         slots[0] = (jlong)stats_value.size;
         slots[1] = (jlong)stats_value.codec;
         slots[2] = (jlong)stats_value.has_round_trip;
@@ -2203,7 +2204,8 @@ Java_org_sipral_SipralNative_sipral_1media_1statistics(JNIEnv *env, jobject self
         slots[36] = (jlong)stats_value.voip_mos_lq_x10;
         slots[37] = (jlong)stats_value.has_voip_mos_cq;
         slots[38] = (jlong)stats_value.voip_mos_cq_x10;
-        (*env)->SetLongArrayRegion(env, stats, 0, 39, slots);
+        slots[39] = (jlong)stats_value.frames_underrun;
+        (*env)->SetLongArrayRegion(env, stats, 0, 40, slots);
     }
     return (jint)status;
 }

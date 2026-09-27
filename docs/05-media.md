@@ -335,9 +335,11 @@ shares of packets, and a frame played as nothing because nothing had
 arrived yet is no packet lost or discarded — the packet arrives, late for
 its frame, and is played in the next one. Where that degradation shows is
 where an application reads a call's quality: `Quality::underruns` counts
-those frames, `Quality::loss_rate` takes them as it takes a concealed one,
-and `StreamStatistics::score` and `StreamStatistics::is_suffering`, and
-the C ABI's `loss_rate`, `score` and `suffering`, are read from it. `emodel::codec_quality_model` tabulates G.113 Table
+those frames, and the C ABI carries the count as
+`sipral_stream_stats_t::frames_underrun`; `Quality::loss_rate` takes them
+as it takes a concealed one, and `StreamStatistics::score` and
+`StreamStatistics::is_suffering`, and the C ABI's `loss_rate`, `score` and
+`suffering`, are read from it. `emodel::codec_quality_model` tabulates G.113 Table
 I.4 for the one codec family it covers (G.711); the facade
 (`Codec::quality_model` in `sipral`) maps this crate's own codec catalogue
 onto it, `None` for G.722 and Opus, which G.113 does not tabulate — RFC

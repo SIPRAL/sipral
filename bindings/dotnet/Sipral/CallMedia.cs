@@ -126,7 +126,7 @@ public sealed class CallMedia : IDisposable
             stats.OctetsSent, stats.PacketsReceived, stats.PacketsLost, stats.PacketsLate,
             stats.PacketsOverflowed, stats.PacketsDuplicated, stats.PacketsReordered, stats.DelayUs,
             stats.TargetDelayUs, stats.JitterUs, stats.LossRate, stats.Score, stats.Suffering != 0,
-            stats.SilentForMs);
+            stats.SilentForMs, stats.FramesUnderrun);
     }
 
     // -- the two frame-carrying calls, as Span/ReadOnlySpan ---------------

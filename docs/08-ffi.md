@@ -1086,6 +1086,20 @@ deep would be reached — and each drop is counted in
 `sipral_counters_t::farewells_dropped`, appended at the struct's tail the
 same way `events_dropped` was.
 
+**A buffer that ran dry is a count a C caller reads, not only a score that
+fell.** `sipral_stream_stats_t::frames_underrun`, appended at the tail at
+minor 28 (`MIN_SIZE` unmoved), is `Quality::underruns`: frames the earpiece
+played as nothing because the jitter buffer had run dry while the far end was
+still sending — an earpiece whose clock runs faster than the far end's, or
+audio held up on the way. `loss_rate`, `score` and `suffering` already fell
+with them; none of the `voip_*` figures does, since RFC 3611 §4.7.1 counts
+packets lost or discarded and an under-run is neither (`docs/05-media.md`).
+The same struct reaches `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`, so the count
+is in a call's last word as well. Every binding carries it:
+`SipralStreamStatistics.FramesUnderrun` in .NET, `"frames_underrun"` in
+Python's two dicts, and the struct's own member in Swift and Kotlin
+(`frames_underrun`, `framesUnderrun`).
+
 **Recording is where a path becomes a file**, and the file belongs to the media
 session from then on. C never sees the file handle, so it cannot leak it or
 close it underneath the stack. The one thing that had to be arranged rather than

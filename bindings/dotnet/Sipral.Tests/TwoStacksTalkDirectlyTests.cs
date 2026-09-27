@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Sipral;
@@ -122,11 +123,47 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
 
             var stats = aliceCall.Media.Statistics();
             Assert.True(stats.PacketsSent > 0);
+
+            // the record copies frames_underrun, not a neighbour of it: the
+            // library's own count, read either side, brackets it
+            var before = SipralStreamStats.Sized();
+            Assert.Equal(SipralStatus.Ok,
+                NativeMethods.sipral_media_statistics(aliceCall.Media.Handle, 0, ref before));
+            var read = aliceCall.Media.Statistics();
+            var after = SipralStreamStats.Sized();
+            Assert.Equal(SipralStatus.Ok,
+                NativeMethods.sipral_media_statistics(aliceCall.Media.Handle, 0, ref after));
+            Assert.InRange(read.FramesUnderrun, before.FramesUnderrun, after.FramesUnderrun);
         }
         finally
         {
             aliceCall.Close();
             bobCall.Close();
+        }
+    }
+
+    /// <summary>The end-of-call record a MEDIA_STATISTICS event carries
+    /// copies <c>frames_underrun</c> into
+    /// <see cref="SipralStreamStatistics.FramesUnderrun"/>, the member
+    /// beside it untouched.</summary>
+    [Fact]
+    public void AnUnderRunCountCrossesIntoTheEventsRecord()
+    {
+        var native = SipralStreamStats.Sized();
+        native.FramesUnderrun = 7;
+        native.SilentForMs = 11;
+        var pointer = Marshal.AllocHGlobal(Marshal.SizeOf<SipralStreamStats>());
+        try
+        {
+            Marshal.StructureToPtr(native, pointer, false);
+            var record = SipralEventArgs.ReadStatistics(pointer);
+            Assert.NotNull(record);
+            Assert.Equal(7UL, record!.FramesUnderrun);
+            Assert.Equal(11UL, record.SilentForMs);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
         }
     }
 

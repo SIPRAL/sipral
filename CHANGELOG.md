@@ -74,6 +74,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   and passes on `end_reason == SIPRAL_CALL_END_REASON_REMOTE_HANGUP` alone —
   the same claim the Rust harness already proved, now proved from both
   drivers on every run of `scripts/lab.sh baresip`.
+- **A buffer that ran dry is a count the C ABI and every binding carry.**
+  `sipral_stream_stats_t::frames_underrun`, appended at the tail (ABI
+  0.28, `MIN_SIZE` unmoved), is `Quality::underruns`: the frames the
+  earpiece played as nothing because the jitter buffer had run dry while
+  the far end was still sending. It reaches `sipral_media_statistics` and
+  the record `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` carries, and every
+  binding reads it: `SipralStreamStatistics.FramesUnderrun` in .NET,
+  `"frames_underrun"` in both of Python's statistics dicts, and the
+  struct's own member in Swift (`frames_underrun`) and Kotlin
+  (`framesUnderrun`).
 - **ICE restarts in the full role, from either end.** A peer's re-offer
   that changes both `ice-ufrag` and `ice-pwd` is answered with new
   credentials of this end's own (RFC 8839 §4.4.2.1) instead of the ones the

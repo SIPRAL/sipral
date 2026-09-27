@@ -153,6 +153,23 @@ final class CallLoopbackTests: XCTestCase {
 
         let stats = try media.statistics()
         XCTAssertGreaterThan(stats.packets_sent, 0)
+
+        // frames_underrun is the library's own count: read either side of
+        // statistics(), it brackets what statistics() returned
+        let before = try Sipral.mediaStatistics(media: media.handle, nowMs: 0).frames_underrun
+        let read = try media.statistics().frames_underrun
+        let after = try Sipral.mediaStatistics(media: media.handle, nowMs: 0).frames_underrun
+        XCTAssertLessThanOrEqual(before, read)
+        XCTAssertLessThanOrEqual(read, after)
+        XCTAssertEqual(
+            Self.offset(of: \.frames_underrun, in: stats),
+            MemoryLayout.size(ofValue: stats) - MemoryLayout<UInt64>.size,
+            "appended at the tail, where a caller built before it never reads"
+        )
+    }
+
+    private static func offset<T>(of member: PartialKeyPath<T>, in _: T) -> Int? {
+        MemoryLayout<T>.offset(of: member)
     }
 
     /// Two readers of one call, both taken before anything happens on it,

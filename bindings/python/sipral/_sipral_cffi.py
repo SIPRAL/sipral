@@ -63,7 +63,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR 27
+#define SIPRAL_ABI_VERSION_MINOR 28
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -3494,6 +3494,20 @@ struct sipral_stream_stats {
      * tenths.
      */
     uint32_t voip_mos_cq_x10;
+    /**
+     * Frames played as nothing because the jitter buffer had run dry
+     * while the far end was still sending: the earpiece asked for audio
+     * before it had arrived, and heard silence or comfort noise in its
+     * place, wherever that fell. A frame the far end never sent, in its
+     * own pause, is not one, and nor is a packet lost on the way, which
+     * is `packets_lost`. No packet is lost or discarded by it, so none of
+     * the `voip_*` rates above sees it (RFC 3611 SS4.7.1 counts packets);
+     * `loss_rate`, `score` and `suffering` do.
+     *
+     * Appended at the tail; the pinned `MIN_SIZE` is unmoved, and a
+     * caller built before it existed never reads it.
+     */
+    uint64_t frames_underrun;
 };
 
 /**

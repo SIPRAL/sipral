@@ -19,7 +19,9 @@ import asyncio
 import unittest
 
 from sipral import Stack
+from sipral._sipral_cffi import ffi, lib
 from sipral.enums import CallState, EventKind
+from sipral.events import _statistics
 
 
 class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
@@ -103,6 +105,31 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
         stats = alice_call.media.statistics()
         self.assertGreater(stats["packets_sent"], 0)
         self.assertIn("score", stats)
+
+        # the dict copies frames_underrun, not a neighbour of it: the
+        # library's own count, read either side, brackets it
+        def raw() -> int:
+            out = ffi.new("sipral_stream_stats_t *")
+            out.size = ffi.sizeof("sipral_stream_stats_t")
+            self.assertEqual(lib.sipral_media_statistics(alice_call.media.handle, 0, out), 0)
+            return int(out.frames_underrun)
+
+        before = raw()
+        read = alice_call.media.statistics()["frames_underrun"]
+        self.assertLessEqual(before, read)
+        self.assertLessEqual(read, raw())
+
+    def test_an_under_run_count_crosses_into_the_events_record(self) -> None:
+        """The end-of-call record a MEDIA_STATISTICS event carries copies
+        `frames_underrun` under its own name, the member beside it untouched."""
+        native = ffi.new("sipral_stream_stats_t *")
+        native.size = ffi.sizeof("sipral_stream_stats_t")
+        native.frames_underrun = 7
+        native.silent_for_ms = 11
+        record = _statistics(native)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["frames_underrun"], 7)
+        self.assertEqual(record["silent_for_ms"], 11)
 
     async def _close_calls(self, *calls) -> None:
         for call in calls:

@@ -55,6 +55,7 @@ def _statistics(pointer) -> dict[str, object] | None:
         "score": float(stats.score),
         "suffering": bool(stats.suffering),
         "silent_for_ms": int(stats.silent_for_ms),
+        "frames_underrun": int(stats.frames_underrun),
     }
 
 

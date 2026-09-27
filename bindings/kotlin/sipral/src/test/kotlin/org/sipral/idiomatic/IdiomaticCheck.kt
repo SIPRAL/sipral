@@ -254,9 +254,21 @@ private suspend fun everything(): String {
         val mediaB = assertNotNull(callB.media)
 
         // Give the frame threads several round trips to exchange real RTP.
+        val mediaSince = System.nanoTime()
         delay(600)
         val statsA = mediaA.statistics()
         val statsB = mediaB.statistics()
+        // frames_underrun crosses JNI in its own slot: a count of frames the
+        // earpiece played as nothing, so never more than the frames a frame
+        // thread can have played since the media started, and never a
+        // neighbour's microseconds or rates read in its place
+        val framesSince = (System.nanoTime() - mediaSince) / 20_000_000 + 50
+        for (stats in listOf(statsA, statsB)) {
+            assertTrue(
+                stats.framesUnderrun in 0..framesSince,
+                "framesUnderrun ${stats.framesUnderrun} is not a count of frames played",
+            )
+        }
         assertTrue(statsA.packetsSent > 0, "callA's media never sent a frame")
         assertTrue(statsB.packetsSent > 0, "callB's media never sent a frame")
         assertTrue(statsA.packetsReceived > 0, "callA never heard callB's silence")

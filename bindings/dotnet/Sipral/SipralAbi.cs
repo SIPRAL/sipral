@@ -3337,6 +3337,20 @@ public struct SipralStreamStats
     /// tenths.
     /// </summary>
     public uint VoipMosCqX10;
+    /// <summary>
+    /// Frames played as nothing because the jitter buffer had run dry
+    /// while the far end was still sending: the earpiece asked for audio
+    /// before it had arrived, and heard silence or comfort noise in its
+    /// place, wherever that fell. A frame the far end never sent, in its
+    /// own pause, is not one, and nor is a packet lost on the way, which
+    /// is `packets_lost`. No packet is lost or discarded by it, so none of
+    /// the `voip_*` rates above sees it (RFC 3611 SS4.7.1 counts packets);
+    /// `loss_rate`, `score` and `suffering` do.
+    ///
+    /// Appended at the tail; the pinned `MIN_SIZE` is unmoved, and a
+    /// caller built before it existed never reads it.
+    /// </summary>
+    public ulong FramesUnderrun;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -5162,7 +5176,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 27;
+    public const uint AbiVersionMinor = 28;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.

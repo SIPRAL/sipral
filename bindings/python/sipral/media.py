@@ -132,7 +132,12 @@ class Media:
         }
 
     def statistics(self) -> dict[str, object]:
-        """`sipral_media_statistics`, as a plain `dict`."""
+        """`sipral_media_statistics`, as a plain `dict`.
+
+        ``frames_underrun`` counts frames the earpiece played as nothing
+        because the jitter buffer had run dry while the far end was still
+        sending; ``loss_rate``, ``score`` and ``suffering`` take them in.
+        """
         out = ffi.new("sipral_stream_stats_t *")
         out.size = ffi.sizeof("sipral_stream_stats_t")
         _call(
@@ -151,6 +156,7 @@ class Media:
             "loss_rate": float(out.loss_rate),
             "score": float(out.score),
             "suffering": bool(out.suffering),
+            "frames_underrun": int(out.frames_underrun),
         }
 
     def send_audio(self, pcm: bytes | memoryview) -> None:
