@@ -152,6 +152,20 @@ async def run_call(
         except SipralError:
             pass
         call.hangup()
+        # Waited out here, not left to the caller's own `finally`: a
+        # relayed call's farewell -- the TURN Refresh that gives its
+        # allocation back, not only the RTCP BYE -- is queued once the
+        # far end's 200 to this end's own BYE is read
+        # (`Stack._drain_farewells`, on the poll thread), and `call.close`
+        # right behind `call.hangup` would tear the socket down before
+        # that thread's next turn ever ran. `Stack.close`'s own docstring
+        # gives the same reasoning for the same sleep. Polled rather than
+        # read off `call.events`: `wait_for_remote_hangup` reads that same
+        # queue concurrently, and the one `CALL_ENDED` on it is only ever
+        # delivered to whichever of the two calls `get()` first.
+        while not call.ended:
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
 
     talking = asyncio.create_task(talk())
     polling = asyncio.create_task(poll_statistics())
