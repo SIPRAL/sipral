@@ -463,8 +463,10 @@ pub(crate) enum Author {
 pub(crate) struct Answering {
     /// The transaction to answer on.
     pub(crate) transaction: AnyTransactionId,
-    /// The offer, when it was a session description this stack could read.
-    pub(crate) offer: Option<SessionDescription>,
+    /// The offer: a session description this stack could read, since a
+    /// body of any other type is refused 415 or ignored before a change is
+    /// handed over.
+    pub(crate) offer: SessionDescription,
 }
 
 /// What `current_contact` (`crate::calls`) needs to answer for a call besides
@@ -492,12 +494,13 @@ pub(crate) struct ContactContext {
 
 /// The branch [`ForkPolicy::KeepFirst`] kept out of one INVITE's fork, or the
 /// first to answer an INVITE the user had already put down, which is hung up
-/// like every branch after it.
+/// like every branch after it — or none at all, once every call the INVITE
+/// made is over while its transaction can still pass up a 2xx.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct KeptBranch {
     /// Its dialog. A 2xx in any other dialog of the same INVITE is one this
-    /// end acknowledges and hangs up.
-    pub(crate) dialog: DialogId,
+    /// end acknowledges and hangs up, and with `None` that is every 2xx.
+    pub(crate) dialog: Option<DialogId>,
     /// Whether the INVITE carried an offer. When it did not, a 2xx carries
     /// the offer and its ACK has to carry an answer that only the
     /// application could write, for a branch it is no longer told about.

@@ -829,6 +829,7 @@ impl UserAgent {
                 }
             }
         }
+        self.let_go_of_invite(call);
         self.by_invite.retain(|_, held| *held != call);
         self.by_server.retain(|_, held| *held != call);
         self.by_dialog.retain(|_, held| *held != call);
@@ -850,6 +851,50 @@ impl UserAgent {
         // call, and its answer is still this layer's rather than the
         // application's. `on_transaction_over` clears the entry when the
         // transaction it names ends, which is what bounds the map
+    }
+
+    /// A call placed by this end is going, and the INVITE that placed it may
+    /// still be answered.
+    ///
+    /// §13.2.2.4: "If, after acknowledging any 2xx response to an INVITE, the
+    /// UAC does not want to continue with that dialog, then the UAC MUST
+    /// terminate the dialog by sending a BYE request". The client transaction
+    /// passes up every 2xx until timer M, or timer D after a refusal (RFC
+    /// 6026 §8.4), and the call it would have belonged to is found through
+    /// `by_invite` — which is about to lose it. A sibling still up takes the
+    /// INVITE over, so a later branch is minted beside it as before; with
+    /// none left, whatever answers next is let go by
+    /// [`UserAgent::let_go_late_branch`], ACK and BYE, under either
+    /// [`ForkPolicy`]. Once the transaction is retired nothing more can come,
+    /// and nothing is kept.
+    fn let_go_of_invite(&mut self, call: CallHandle) {
+        let Some(held) = self.calls.get(&call) else {
+            return;
+        };
+        let Some(invite) = held.invite else {
+            return;
+        };
+        let offered = held.session.has_local();
+        let sibling = self
+            .calls
+            .iter()
+            .find(|(handle, other)| **handle != call && other.invite == Some(invite))
+            .map(|(handle, _)| *handle);
+        if let Some(sibling) = sibling {
+            if self.by_invite.get(&invite) == Some(&call) {
+                self.by_invite.insert(invite, sibling);
+            }
+            return;
+        }
+        // no dialog is exempt: a 2xx on one this end has acknowledged is
+        // answered with the same ACK by the core and never gets here, and one
+        // on a dialog that never was is a call nobody is on
+        if self.endpoint.transaction_state(invite).is_some() {
+            self.kept_branches.entry(invite).or_insert(KeptBranch {
+                dialog: None,
+                offered,
+            });
+        }
     }
 
     /// The account an incoming INVITE was addressed to, when it can be told.
@@ -1114,9 +1159,10 @@ impl UserAgent {
             .calls
             .get(&call)
             .is_some_and(|held| held.session.has_local());
-        self.kept_branches
-            .entry(invite)
-            .or_insert(KeptBranch { dialog, offered });
+        self.kept_branches.entry(invite).or_insert(KeptBranch {
+            dialog: Some(dialog),
+            offered,
+        });
         self.ack_by_itself(dialog, now);
         if let Some(held) = self.calls.get_mut(&call) {
             held.acknowledged = true;
@@ -1315,7 +1361,7 @@ impl UserAgent {
             && self
                 .kept_branches
                 .get(&invite)
-                .is_some_and(|kept| kept.dialog != dialog)
+                .is_some_and(|kept| kept.dialog != Some(dialog))
         {
             return None;
         }
@@ -1606,9 +1652,10 @@ impl UserAgent {
         // same, so that a later one is let go even after this one has gone
         let kept = match invite {
             Some(invite) if giving_up => {
-                self.kept_branches
-                    .entry(invite)
-                    .or_insert(KeptBranch { dialog, offered });
+                self.kept_branches.entry(invite).or_insert(KeptBranch {
+                    dialog: Some(dialog),
+                    offered,
+                });
                 None
             }
             Some(invite) if forks == ForkPolicy::KeepFirst => {
@@ -1662,8 +1709,13 @@ impl UserAgent {
         dialog: DialogId,
         offered: bool,
     ) {
-        self.kept_branches
-            .insert(invite, KeptBranch { dialog, offered });
+        self.kept_branches.insert(
+            invite,
+            KeptBranch {
+                dialog: Some(dialog),
+                offered,
+            },
+        );
         let Some(placed) = self.calls.get(&call).and_then(|held| held.forked_from) else {
             return;
         };
@@ -1734,7 +1786,7 @@ impl UserAgent {
         let Some(kept) = self.kept_branches.get(&invite).copied() else {
             return false;
         };
-        if kept.dialog == dialog {
+        if kept.dialog == Some(dialog) {
             return false;
         }
         // the same 2xx again, while its ACK waits for a stream: the BYE is

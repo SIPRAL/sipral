@@ -64,9 +64,10 @@ const UNSUPPORTED_URI_SCHEME: StatusCode = match StatusCode::new(416) {
     Err(_) => StatusCode::SERVER_ERROR,
 };
 
-/// The one body type this agent reads in an INVITE, which is also what a
-/// 415 lists in `Accept` (§8.2.3: "the response MUST contain an Accept
-/// header field listing the types of all bodies it understands").
+/// The one body type this agent reads in an INVITE, a re-INVITE, an UPDATE
+/// or a PRACK, which is also what a 415 lists in `Accept` (§8.2.3: "the
+/// response MUST contain an Accept header field listing the types of all
+/// bodies it understands").
 const ACCEPT: &[u8] = b"application/sdp";
 
 /// The one content coding this agent reads, which is none at all.
@@ -206,6 +207,21 @@ fn scheme_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
 ///
 /// Asked after §8.2.2.3's `Require`, which is the order §8.2 puts them in.
 pub(crate) fn content_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
+    body_refusal(request)
+        .or_else(|| (!takes_sdp(request)).then(|| OutgoingResponse::new(NOT_ACCEPTABLE)))
+}
+
+/// §8.2.3 alone, for every request whose body this agent reads: the INVITE
+/// that opens a call, and the re-INVITE, UPDATE and PRACK that carry an offer
+/// inside one. `None` when the body is one this agent understands, or there
+/// is none, or its sender said it may be ignored.
+///
+/// §8.2 is what a UAS asks of any request before it acts on it, not only of
+/// the first: a re-INVITE whose body is not a session description cannot be
+/// answered as an offer, and handing it on had it answered later with
+/// whatever the application made of it — a 488 at best, which says the
+/// session was read and refused.
+pub(crate) fn body_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
     // "If there are any bodies whose type (indicated by the Content-Type),
     // language (indicated by the Content-Language) or encoding (indicated by
     // the Content-Encoding) are not understood, and that body part is not
@@ -231,13 +247,9 @@ pub(crate) fn content_refusal(request: &RawMessage<'_>) -> Option<OutgoingRespon
         && !request
             .content_type()
             .is_ok_and(|kind| kind.is("application", "sdp"));
-    if unreadable {
-        return Some(
-            OutgoingResponse::new(StatusCode::UNSUPPORTED_MEDIA_TYPE)
-                .header(HeaderName::Accept, ACCEPT),
-        );
-    }
-    (!takes_sdp(request)).then(|| OutgoingResponse::new(NOT_ACCEPTABLE))
+    unreadable.then(|| {
+        OutgoingResponse::new(StatusCode::UNSUPPORTED_MEDIA_TYPE).header(HeaderName::Accept, ACCEPT)
+    })
 }
 
 /// Whether the body is one the sender marked as safe to ignore: §20.11's
@@ -259,21 +271,30 @@ fn optional_body(request: &RawMessage<'_>) -> bool {
 /// §20.1: an absent `Accept` means `application/sdp`, and "an empty Accept
 /// header field means that no formats are acceptable". The ranges that
 /// cover SDP are `application/sdp`, `application/*` and `*/*`, and §20.1
-/// keeps HTTP's semantics for them: "If more than one media range applies
-/// to a given type, the most specific reference has precedence" (RFC 2616
-/// §14.1). SDP is taken when the most specific of those present does not
-/// carry a `q` of zero, which is how those rules say "not this".
+/// keeps HTTP's semantics for them: "Media ranges can be overridden by more
+/// specific media ranges or specific media types. If more than one media
+/// range applies to a given type, the most specific reference has
+/// precedence" (RFC 2616 §14.1), whose own example ranks `text/html;level=1`
+/// above `text/html`. So a range is as specific as its type and subtype
+/// say, and then more so for each media-type parameter it names. SDP is
+/// taken when the most specific of those present does not carry a `q` of
+/// zero, which is how those rules say "not this".
+///
+/// A parameter on `application/sdp` is read as naming the SDP this agent
+/// writes: RFC 4566 §8.1 registers the type with no parameters at all, so
+/// none can single out a description this one is not, and §20.1's own
+/// example, `application/sdp;level=1`, is a peer asking for SDP.
 fn takes_sdp(request: &RawMessage<'_>) -> bool {
     if request.header_count(HeaderName::Accept) == 0 {
         return true;
     }
     // (how specific the range is, whether a range that specific takes SDP)
-    let mut deciding: Option<(u8, bool)> = None;
+    let mut deciding: Option<(Specificity, bool)> = None;
     for range in request.accept() {
         let Ok(kind) = MediaTypeRef::parse(range) else {
             continue;
         };
-        let specificity = if kind.is("application", "sdp") {
+        let tier = if kind.is("application", "sdp") {
             2
         } else if kind.is("application", "*") {
             1
@@ -282,9 +303,19 @@ fn takes_sdp(request: &RawMessage<'_>) -> bool {
         } else {
             continue;
         };
-        let taken = !kind.params().any(|(name, value)| {
-            name.eq_ignore_ascii_case(b"q") && value.is_some_and(is_zero_quality)
-        });
+        // `accept-params = ";" "q" "=" qvalue *( accept-extension )`: what
+        // comes before the `q` belongs to the media type, and what comes
+        // after it says nothing about which type this is
+        let mut parameters = 0_usize;
+        let mut taken = true;
+        for (name, value) in kind.params() {
+            if name.eq_ignore_ascii_case(b"q") {
+                taken = !value.is_some_and(is_zero_quality);
+                break;
+            }
+            parameters = parameters.saturating_add(1);
+        }
+        let specificity = Specificity { tier, parameters };
         deciding = match deciding {
             Some((held, before)) if held > specificity => Some((held, before)),
             Some((held, before)) if held == specificity => Some((held, before || taken)),
@@ -292,6 +323,15 @@ fn takes_sdp(request: &RawMessage<'_>) -> bool {
         };
     }
     deciding.is_some_and(|(_, taken)| taken)
+}
+
+/// How specific a media range is, compared field by field in this order:
+/// `application/sdp` over `application/*` over `*/*`, and then a range that
+/// names more media-type parameters over one that names fewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Specificity {
+    tier: u8,
+    parameters: usize,
 }
 
 /// `qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )`: zero when
@@ -406,6 +446,35 @@ Contact: <sip:bob@192.0.2.9>\r\n\
             "Accept: application/*;q=0, application/sdp\r\n",
             "Accept: */*;q=0, application/*\r\n",
             "Accept: text/plain;q=0, */*\r\n",
+        ] {
+            assert!(accepts_sdp(taken), "{taken}");
+        }
+    }
+
+    #[test]
+    fn a_media_type_parameter_makes_a_range_more_specific() {
+        // RFC 2616 §14.1, which §20.1 keeps: "text/html;level=1" takes
+        // precedence over "text/html". So `application/sdp;level=1;q=0` is
+        // the more specific word on SDP than a bare `application/sdp`, and
+        // the other way round
+        for refused in [
+            "Accept: application/sdp;level=1;q=0, application/sdp\r\n",
+            "Accept: application/sdp\r\nAccept: application/sdp;level=1;q=0\r\n",
+            "Accept: application/sdp;level=1;version=2;q=0, application/sdp;level=1\r\n",
+            "Accept: application/*;x=1;q=0, application/*, */*\r\n",
+        ] {
+            assert!(!accepts_sdp(refused), "{refused}");
+        }
+        for taken in [
+            "Accept: application/sdp;level=1, application/sdp;q=0\r\n",
+            "Accept: application/sdp;level=1;version=2, application/sdp;level=1;q=0\r\n",
+            // RFC 3261 §20.1's own example
+            "Accept: application/sdp;level=1, application/x-private, text/html\r\n",
+            // what follows the q is an accept-extension, not the type's
+            "Accept: application/sdp;q=0;ext=1;more=2, application/sdp;level=1\r\n",
+            // however many parameters a wider range names, a narrower type
+            // outranks it
+            "Accept: application/*;a=1;b=2;q=0, application/sdp\r\n",
         ] {
             assert!(accepts_sdp(taken), "{taken}");
         }

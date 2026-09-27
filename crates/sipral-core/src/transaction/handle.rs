@@ -97,7 +97,8 @@ pub enum InviteClientState {
     /// A 2xx arrived and more may follow.
     Accepted,
     /// A final response other than 2xx arrived; the ACK is being retransmitted
-    /// for as long as the response is.
+    /// for as long as the response is, and a 2xx from another branch still
+    /// goes up.
     Completed,
     /// Done.
     Terminated,

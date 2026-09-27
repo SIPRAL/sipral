@@ -324,7 +324,9 @@ pub enum UaEvent {
         remote: Option<Arc<[u8]>>,
     },
     /// The far end offered a change this layer has no policy for: a codec
-    /// swap, a stream added, a body that is not a session description.
+    /// swap, a stream added. A body that is not a session description never
+    /// arrives here: RFC 3261 §8.2.3 has it refused 415 first, or ignored
+    /// when its sender marked it optional.
     ///
     /// The transaction is held open for it. Answer with
     /// [`UserAgent::accept_reoffer`](crate::UserAgent::accept_reoffer) or

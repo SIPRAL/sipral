@@ -235,7 +235,11 @@ Four state machines from RFC 3261 §17, implemented from the diagrams in the RFC
 | non-INVITE server | J |
 
 RFC 6026's `Accepted` state keeps both INVITE machines alive for 64·T1 after
-a 2xx.
+a 2xx. A 2xx that reaches an INVITE client in `Completed` — another branch
+answering after one refused, which a proxy forwards whatever it has already
+sent upstream (RFC 3261 §16.7 step 5) — goes up like one in `Accepted`,
+without an ACK: RFC 6026 §8.4 re-sends the stored ACK only for a
+retransmitted 300-699, and the ACK for a 2xx is the dialog's (§13.2.2.4).
 
 `T1 = 500 ms`, `T2 = 4 s`, `T4 = 5 s`, all configurable, because carriers exist
 where they must be. `t1` and `t2` are the two the endpoint refuses to be

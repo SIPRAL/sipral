@@ -3349,6 +3349,167 @@ fn keeping_every_branch_hangs_none_of_them_up() {
     assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
 }
 
+#[test]
+fn keeping_every_branch_still_hangs_up_one_that_answers_after_the_call_is_over() {
+    // §13.2.2.4: every 2xx is acknowledged, and "if, after acknowledging any
+    // 2xx response to an INVITE, the UAC does not want to continue with that
+    // dialog, then the UAC MUST terminate the dialog by sending a BYE". The
+    // call this INVITE placed has been hung up; the transaction still passes
+    // the mobile's 2xx up inside timer M, and nobody here wants it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent
+        .call(id, &outgoing().forks(ForkPolicy::KeepAll), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    agent.hangup(call, t0).expect("the BYE goes");
+    let bye = sent(&mut agent);
+    deliver(&mut agent, &reply(&bye, 200, "OK", ""), t0);
+    events(&mut agent);
+
+    let later = t0 + Duration::from_secs(2);
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        later,
+    );
+    let out = transmits(&mut agent);
+    assert!(
+        out.iter()
+            .any(|bytes| bytes.starts_with(b"ACK ") && tagged(bytes, "mobile")),
+        "every 2xx is acknowledged: {out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|bytes| bytes.starts_with(b"BYE sip:bob@192.0.2.77 ") && tagged(bytes, "mobile")),
+        "and the dialog nobody wants is ended: {out:?}"
+    );
+    let said = events(&mut agent);
+    assert!(confirmed_calls(&said).is_empty(), "{said:?}");
+
+    // the window closes with the transaction, and nothing is kept past it
+    agent.handle_timeout(t0 + Duration::from_secs(64));
+    transmits(&mut agent);
+    events(&mut agent);
+    assert!(agent.kept_branches.is_empty());
+}
+
+#[test]
+fn keeping_every_branch_mints_a_late_one_beside_the_sibling_still_up() {
+    // the call placed is over, its sibling is not: a third branch answering
+    // now is one more leg of the fork the application asked to keep whole
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent
+        .call(id, &outgoing().forks(ForkPolicy::KeepAll), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    let mobile = confirmed_calls(&events(&mut agent))
+        .into_iter()
+        .find(|confirmed| *confirmed != call)
+        .expect("the mobile is a call of its own");
+    agent.hangup(call, t0).expect("the BYE goes");
+    transmits(&mut agent);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "voicemail", Some(ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(
+        out.iter()
+            .any(|bytes| bytes.starts_with(b"ACK ") && tagged(bytes, "voicemail")),
+        "{out:?}"
+    );
+    assert!(
+        !out.iter().any(|bytes| bytes.starts_with(b"BYE ")),
+        "every leg is wanted: {out:?}"
+    );
+    let said = events(&mut agent);
+    let forked = said.iter().find_map(|event| match *event {
+        UaEvent::CallForked { call, sibling } if call == mobile => Some(sibling),
+        _ => None,
+    });
+    let forked = forked.expect("a sibling of the leg still up");
+    assert_eq!(confirmed_calls(&said), [forked]);
+    assert_eq!(agent.call_state(mobile), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_2xx_after_the_call_was_refused_is_acknowledged_and_hung_up() {
+    // a proxy forwards every 2xx, even after the 486 it already sent
+    // upstream (§16.7 step 5); the transaction passes it up (RFC 6026 §8.4),
+    // and the call it would have been is over. §13.2.2.4: ACK, then BYE
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 486, "Busy Here", "desk", None),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::Refused)
+    );
+
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(
+        out.iter()
+            .any(|bytes| bytes.starts_with(b"ACK sip:bob@192.0.2.77 ") && tagged(bytes, "mobile")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|bytes| bytes.starts_with(b"BYE sip:bob@192.0.2.77 ") && tagged(bytes, "mobile")),
+        "{out:?}"
+    );
+    let said = events(&mut agent);
+    assert!(confirmed_calls(&said).is_empty(), "{said:?}");
+    assert!(
+        !said
+            .iter()
+            .any(|event| matches!(event, UaEvent::Unclaimed(Event::Established { .. }))),
+        "{said:?}"
+    );
+
+    // timer D ends the transaction, and the window with it
+    agent.handle_timeout(t0 + Duration::from_secs(32));
+    transmits(&mut agent);
+    events(&mut agent);
+    assert!(agent.kept_branches.is_empty());
+}
+
 /// What the second phone a proxy forked the INVITE to describes: a session
 /// of its own, at an address of its own.
 const MOBILE_ANSWER: &[u8] = b"v=0\r\no=- 3 3 IN IP4 192.0.2.77\r\ns=-\r\n\
@@ -5664,6 +5825,176 @@ fn the_far_ends_offer_in_the_wait_after_a_491_is_answered_not_refused() {
     );
 }
 
+#[test]
+fn a_reinvite_asking_for_an_offer_in_the_wait_after_a_491_holds_the_retry_until_its_ack() {
+    // the far end's re-INVITE with no description asks this end to offer in
+    // the 2xx (§14.1), and the answer to that offer can only come in the ACK
+    // (§13.2.2.4, RFC 3264 §4: no new offer before the last is answered). Our
+    // hold's retry falls due while that answer is still owed, so it waits;
+    // the ACK brings the answer, and the retry then goes, written over the
+    // session the answer settled rather than the one the 491 interrupted
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack, wait) = hold_told_to_wait(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "askoffer", 2, None),
+        t0,
+    );
+    let ok = last(&mut agent);
+    assert!(
+        ok.starts_with(b"SIP/2.0 200 "),
+        "{}",
+        String::from_utf8_lossy(&ok)
+    );
+    let offered = body_of(&ok);
+    assert!(
+        offered.contains("o=- 1 3 IN IP4 192.0.2.1\r\n"),
+        "{offered}"
+    );
+    assert!(
+        !offered.contains("a=sendonly"),
+        "the offer in the 2xx is the session as agreed, not the hold still waiting: {offered}"
+    );
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + wait);
+    assert!(
+        invites_in(&transmits(&mut agent)).is_empty(),
+        "an offer of ours is still unanswered, so no second one goes"
+    );
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::SessionChangeFailed { .. })),
+        "and the hold has not failed, it waits"
+    );
+    assert_eq!(
+        agent.hold_state(call),
+        Some(Hold {
+            local: false,
+            remote: false
+        })
+    );
+
+    // the ACK carries the answer to the offer in our 2xx
+    let answer: &[u8] = b"v=0\r\no=- 2 3 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 0\r\n";
+    let acked = t0 + wait + Duration::from_millis(100);
+    deliver(
+        &mut agent,
+        &reversed(&ack, "ACK", "askofferack", 2, Some(answer)),
+        acked,
+    );
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "an ACK is never answered, and the retry is not due yet"
+    );
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: false,
+            remote: false
+        }),
+        "the answer in the ACK is taken"
+    );
+
+    let later = acked + Duration::from_secs(5);
+    agent.handle_timeout(later);
+    let again = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the hold goes once the offer in our 2xx has its answer");
+    let offer = body_of(&again);
+    assert!(offer.contains("a=sendonly\r\n"), "{offer}");
+    assert!(
+        offer.contains("o=- 1 4 IN IP4 192.0.2.1\r\n"),
+        "one past the offer written in the wait: {offer}"
+    );
+    deliver(
+        &mut agent,
+        &answered(&again, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        later,
+    );
+    transmits(&mut agent);
+    assert_eq!(
+        agent.hold_state(call),
+        Some(Hold {
+            local: true,
+            remote: false
+        })
+    );
+}
+
+#[test]
+fn an_offer_that_arrives_before_the_ack_carrying_the_answer_to_ours_is_refused_491() {
+    // RFC 3311 §5.2, which this agent applies to both requests: "if an UPDATE
+    // is received that contains an offer, and the UAS has generated an offer
+    // (in an UPDATE, PRACK or INVITE) to which it has not yet received an
+    // answer, the UAS MUST reject the UPDATE with a 491 response". An offer
+    // this end put in a 2xx is unanswered until the ACK arrives, and a
+    // request that overtakes that ACK — or asks for a second offer, which
+    // RFC 3264 §4 forbids before the first is answered — is told to wait
+    for (method, body) in [
+        ("INVITE", None),
+        ("INVITE", Some(THEIR_HOLD)),
+        ("UPDATE", Some(THEIR_HOLD)),
+    ] {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        let (call, ack) = call_up(&mut agent, id, t0);
+        deliver(
+            &mut agent,
+            &reversed(&ack, "INVITE", "askoffer", 2, None),
+            t0,
+        );
+        let ok = last(&mut agent);
+        assert!(ok.starts_with(b"SIP/2.0 200 "), "{method}");
+        events(&mut agent);
+
+        deliver(
+            &mut agent,
+            &reversed(&ack, method, "overtaking", 3, body),
+            t0,
+        );
+        let refusal = last(&mut agent);
+        assert!(
+            refusal.starts_with(b"SIP/2.0 491 "),
+            "{method} {}: {}",
+            body.is_some(),
+            String::from_utf8_lossy(&refusal)
+        );
+        assert!(
+            !events(&mut agent).iter().any(|event| matches!(
+                event,
+                UaEvent::Reoffer { .. } | UaEvent::SessionChanged { .. }
+            )),
+            "{method}"
+        );
+
+        // and once the ACK has brought the answer, the same change is taken
+        let answer: &[u8] = b"v=0\r\no=- 2 3 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 0\r\n";
+        deliver(
+            &mut agent,
+            &reversed(&ack, "ACK", "askofferack", 2, Some(answer)),
+            t0,
+        );
+        transmits(&mut agent);
+        events(&mut agent);
+        deliver(&mut agent, &reversed(&ack, method, "again", 4, body), t0);
+        let taken = last(&mut agent);
+        assert!(
+            taken.starts_with(b"SIP/2.0 200 "),
+            "{method}: {}",
+            String::from_utf8_lossy(&taken)
+        );
+        assert!(agent.call_state(call).is_some());
+    }
+}
+
 /// The application's answer to `THEIR_NEW_CODEC`, one version past our hold.
 const OUR_PCMA_ANSWER: &[u8] = b"v=0\r\no=- 1 3 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
 t=0 0\r\nm=audio 8000 RTP/AVP 8\r\n";
@@ -6902,6 +7233,354 @@ fn an_offer_in_a_reliable_response_is_answered_in_the_prack() {
     assert!(body_of(&prack).contains("m=audio 8000 RTP/AVP 0\r\n"));
 }
 
+/// The same request carrying `body` under `content_type`, and `extra` header
+/// fields, in place of whatever body it had.
+fn carrying(request: &[u8], content_type: &str, extra: &str, body: &str) -> Vec<u8> {
+    let text = String::from_utf8(request.to_vec()).expect("text");
+    let end = text.find("\r\n\r\n").expect("a header section");
+    let head = text[..end]
+        .split("\r\n")
+        .filter(|line| !line.starts_with("Content-Type:") && !line.starts_with("Content-Length:"))
+        .fold(String::new(), |mut head, line| {
+            head.push_str(line);
+            head.push_str("\r\n");
+            head
+        });
+    format!(
+        "{head}Content-Type: {content_type}\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+/// A body of a type this agent does not read: the ISDN User Part message a
+/// SIP-T gateway sends beside, or instead of, a session description.
+const ISUP: &str = "\u{1}\u{2}\u{3}";
+
+#[test]
+fn a_prack_with_a_body_this_agent_cannot_read_is_refused_415_and_still_acknowledges() {
+    // RFC 3261 §8.2.3 comes before anything a request's method asks for, a
+    // PRACK's 2xx included: a body that is not a session description is
+    // refused with an Accept that says what is read. The PRACK has matched
+    // its provisional all the same (RFC 3262 §3), so the 2xx held behind that
+    // provisional goes
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_100rel("rel415", true), t0);
+    agent
+        .ring(call, Some(Arc::from(ANSWER)), t0)
+        .expect("183 with early media");
+    let progress = sent(&mut agent);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("the answer is taken");
+    assert!(transmits(&mut agent).is_empty());
+
+    let rseq = String::from_utf8_lossy(&header(&progress, HeaderName::RSeq)).into_owned();
+    let prack = carrying(
+        &in_dialog(&progress, "PRACK", "rel415prack", 2),
+        "application/isup",
+        &format!("RAck: {rseq} 1 INVITE\r\n"),
+        ISUP,
+    );
+    deliver(&mut agent, &prack, t0);
+    let written = transmits(&mut agent);
+    let refusal = written
+        .iter()
+        .find(|bytes| header(bytes, HeaderName::CSeq) == b"2 PRACK")
+        .expect("the PRACK is answered");
+    assert!(
+        refusal.starts_with(b"SIP/2.0 415 "),
+        "{}",
+        String::from_utf8_lossy(refusal)
+    );
+    assert_eq!(header(refusal, HeaderName::Accept), b"application/sdp");
+    assert!(
+        written
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 200 OK\r\n")
+                && header(bytes, HeaderName::CSeq) == b"1 INVITE"),
+        "the 2xx the provisional held goes"
+    );
+}
+
+#[test]
+fn a_reinvite_or_update_with_a_body_this_agent_cannot_read_is_refused_415() {
+    // RFC 3261 §8.2.3, asked of every request and not only the INVITE that
+    // opens a call: "the UAS MUST reject the request with a 415", with an
+    // Accept "listing the types of all bodies it understands". Handed over,
+    // the body was answered later with whatever the application made of it
+    for method in ["INVITE", "UPDATE"] {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        let (call, ack) = call_up(&mut agent, id, t0);
+        let before = agent.hold_state(call);
+        let request = carrying(
+            &reversed(&ack, method, "isup", 2, None),
+            "application/isup",
+            "Session-Expires: 1800;refresher=uas\r\n",
+            ISUP,
+        );
+        deliver(&mut agent, &request, t0);
+        let answer = last(&mut agent);
+        assert!(
+            answer.starts_with(b"SIP/2.0 415 "),
+            "{method}: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        assert_eq!(header(&answer, HeaderName::Accept), b"application/sdp");
+        let said = events(&mut agent);
+        assert!(
+            !said.iter().any(|event| matches!(
+                event,
+                UaEvent::Reoffer { .. } | UaEvent::SessionChanged { .. }
+            )),
+            "{method}: {said:?}"
+        );
+        assert_eq!(agent.hold_state(call), before, "{method}");
+
+        // encoded the way this agent does not decode, it is refused with the
+        // encodings this agent does
+        let request = carrying(
+            &reversed(&ack, method, "gzip", 3, None),
+            "application/sdp",
+            "Content-Encoding: gzip\r\n",
+            "v=0\r\n",
+        );
+        deliver(&mut agent, &request, t0);
+        let answer = last(&mut agent);
+        assert!(answer.starts_with(b"SIP/2.0 415 "), "{method}");
+        assert_eq!(
+            header(&answer, HeaderName::Extension("Accept-Encoding")),
+            b"identity"
+        );
+    }
+}
+
+#[test]
+fn a_body_its_sender_marked_optional_is_ignored_rather_than_refused() {
+    // §8.2.3 refuses a body "not optional (as indicated by the
+    // Content-Disposition header field)", and §20.11's handling=optional is
+    // the sender saying it may be ignored: a re-INVITE carrying nothing else
+    // asks for an offer (§14.1), and an UPDATE only refreshes the target
+    for (method, offers) in [("INVITE", true), ("UPDATE", false)] {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        let (_, ack) = call_up(&mut agent, id, t0);
+        let request = carrying(
+            &reversed(&ack, method, "optional", 2, None),
+            "application/isup",
+            "Content-Disposition: signal;handling=optional\r\n",
+            ISUP,
+        );
+        deliver(&mut agent, &request, t0);
+        let answer = last(&mut agent);
+        assert!(
+            answer.starts_with(b"SIP/2.0 200 "),
+            "{method}: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        assert_eq!(
+            body_of(&answer).contains("m=audio"),
+            offers,
+            "{method}: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        assert!(
+            !events(&mut agent)
+                .iter()
+                .any(|event| matches!(event, UaEvent::Reoffer { .. })),
+            "{method}"
+        );
+    }
+}
+
+/// One request of `method`, arriving where this agent takes it, and what the
+/// agent wrote and said about it: the handler behind each entry of `Allow`.
+fn allowed_request_arriving(method: &str) -> (Vec<Vec<u8>>, Vec<UaEvent>) {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let out_of_dialog = |method: &str, extra: &str, body: &str| {
+        let request = peer_request(
+            "<sip:bob@example.com>;tag=allowed",
+            "<sip:alice@example.com>",
+            &format!("allowed-{method}"),
+            method,
+            &format!("allowed{method}"),
+            1,
+            None,
+        );
+        if body.is_empty() {
+            plus(&request, extra)
+        } else {
+            carrying(&request, "text/plain", extra, body)
+        }
+    };
+    let request = match method {
+        "INVITE" => incoming_invite("allowedinvite", Some(OFFER)),
+        "ACK" => {
+            let call = call_arriving(&mut agent, &incoming_invite("allowedack", Some(OFFER)), t0);
+            agent
+                .answer(call, Some(Arc::from(ANSWER)), t0)
+                .expect("200 goes");
+            in_dialog(&sent(&mut agent), "ACK", "allowedack", 1)
+        }
+        "CANCEL" => {
+            let invite = incoming_invite("allowedcancel", Some(OFFER));
+            call_arriving(&mut agent, &invite, t0);
+            String::from_utf8(incoming_invite("allowedcancel", None))
+                .expect("text")
+                .replacen("INVITE ", "CANCEL ", 1)
+                .replace("CSeq: 1 INVITE", "CSeq: 1 CANCEL")
+                .into_bytes()
+        }
+        "PRACK" => {
+            let call = call_arriving(&mut agent, &incoming_100rel("allowedprack", true), t0);
+            agent.ring(call, None, t0).expect("180 goes");
+            let ringing = sent(&mut agent);
+            let rseq = text(&ringing, HeaderName::RSeq);
+            plus(
+                &in_dialog(&ringing, "PRACK", "allowedprack", 2),
+                &format!("RAck: {rseq} 1 INVITE\r\n"),
+            )
+        }
+        "OPTIONS" => out_of_dialog("OPTIONS", "", ""),
+        "MESSAGE" => out_of_dialog("MESSAGE", "", "hello"),
+        // §4.1.3 of RFC 6665 answers one nobody subscribed to, and that
+        // answer is the subscription handler's
+        "NOTIFY" => out_of_dialog(
+            "NOTIFY",
+            "Event: message-summary\r\nSubscription-State: active\r\n",
+            "",
+        ),
+        in_a_call => {
+            let (_, ack) = call_up(&mut agent, id, t0);
+            let request = reversed(&ack, in_a_call, "allowedincall", 2, None);
+            match in_a_call {
+                "BYE" | "UPDATE" => request,
+                "REFER" => plus(&request, "Refer-To: <sip:carol@example.com>\r\n"),
+                "INFO" => carrying(
+                    &request,
+                    "application/dtmf-relay",
+                    "",
+                    "Signal=7\r\nDuration=200\r\n",
+                ),
+                other => panic!("Allow lists {other}, and nothing here says what takes it"),
+            }
+        }
+    };
+    transmits(&mut agent);
+    events(&mut agent);
+    deliver(&mut agent, &request, t0);
+    (transmits(&mut agent), events(&mut agent))
+}
+
+#[test]
+fn allow_lists_exactly_the_methods_this_agent_has_a_handler_for() {
+    // §20.5: "The Allow header field lists the set of methods supported by
+    // the UA generating the message", and a 405 carries it (§21.4.6). Each
+    // method listed arrives where it is taken and is neither refused as
+    // unsupported nor left to the application, which has no way to answer
+    // it; each one RFC 3261 and its extensions define that is not listed is
+    // refused 405 with that same list
+    let listed: Vec<&str> = std::str::from_utf8(crate::renegotiate::ALLOW)
+        .expect("text")
+        .split(',')
+        .map(str::trim)
+        .collect();
+    for method in &listed {
+        let (written, said) = allowed_request_arriving(method);
+        let answers: Vec<u16> = written
+            .iter()
+            .filter(|bytes| bytes.starts_with(b"SIP/2.0 "))
+            .filter(|bytes| text(bytes, HeaderName::CSeq).ends_with(method))
+            .map(|bytes| with(bytes, |m| m.status().map_or(0, StatusCode::get)))
+            .collect();
+        assert!(
+            answers
+                .iter()
+                .all(|status| *status != 405 && *status != 501),
+            "{method} is listed and refused: {answers:?}"
+        );
+        assert!(
+            !said.iter().any(|event| matches!(
+                event,
+                UaEvent::Unclaimed(
+                    Event::IncomingOutOfDialog { .. }
+                        | Event::IncomingInDialog { .. }
+                        | Event::IncomingInvite { .. }
+                        | Event::IncomingReinvite { .. }
+                )
+            )),
+            "{method} is listed and nothing here took it: {said:?}"
+        );
+        let expected: &[u16] = match *method {
+            // an ACK is never answered (§17.1.1.3), and an INVITE or a
+            // REFER waits on the application, with only a 100 on the wire
+            "ACK" | "REFER" => &[],
+            "INVITE" => &[100],
+            "NOTIFY" => &[481],
+            _ => &[200],
+        };
+        let mut answers = answers;
+        answers.sort_unstable();
+        assert_eq!(answers, expected, "{method}");
+    }
+
+    // every method RFC 3261 and the extensions this stack reads define, so
+    // that one taken and left out of the list is caught as surely as one
+    // listed and not taken
+    let defined = [
+        "INVITE",
+        "ACK",
+        "CANCEL",
+        "BYE",
+        "OPTIONS",
+        "REGISTER",
+        "PRACK",
+        "SUBSCRIBE",
+        "NOTIFY",
+        "PUBLISH",
+        "INFO",
+        "REFER",
+        "MESSAGE",
+        "UPDATE",
+    ];
+    assert!(
+        listed.iter().all(|method| defined.contains(method)),
+        "{listed:?}"
+    );
+    let t0 = Instant::now();
+    for unlisted in defined
+        .into_iter()
+        .filter(|method| !listed.contains(method))
+    {
+        let mut agent = agent(t0);
+        agent.add_account(account());
+        let request = peer_request(
+            "<sip:bob@example.com>;tag=unlisted",
+            "<sip:alice@example.com>",
+            &format!("unlisted-{unlisted}"),
+            unlisted,
+            &format!("unlisted{unlisted}"),
+            1,
+            None,
+        );
+        deliver(&mut agent, &request, t0);
+        let answer = last(&mut agent);
+        assert!(answer.starts_with(b"SIP/2.0 405 "), "{unlisted}");
+        assert_eq!(
+            header(&answer, HeaderName::Allow),
+            crate::renegotiate::ALLOW,
+            "{unlisted}"
+        );
+    }
+}
+
 #[test]
 fn an_early_answer_past_the_configured_sdp_bound_is_refused() {
     let t0 = Instant::now();
@@ -7136,6 +7815,70 @@ fn a_source_dialling_faster_than_the_limit_stops_being_heard() {
     );
     transmits(&mut agent);
     assert_eq!(ringing(&mut agent), 1);
+}
+
+#[test]
+fn a_stream_with_no_far_end_named_is_limited_as_itself() {
+    // a connection the application bound without saying who was at the other
+    // end has no address on its bytes; counted by address it was not counted
+    // at all, and a scanner on it rang the phone as fast as it could write
+    let t0 = Instant::now();
+    let mut agent = UserAgent::new(EndpointConfig::default(), [13; 32]).unwrap();
+    let anonymous = |transport| Input::TransportBound {
+        transport,
+        protocol: TransportProtocol::Tcp,
+        local: local(),
+        remote: None,
+    };
+    let on = |agent: &mut UserAgent, transport, bytes: &[u8], now| {
+        agent
+            .receive(
+                Input::StreamData {
+                    transport,
+                    data: bytes,
+                },
+                now,
+            )
+            .expect("bytes on a stream");
+    };
+    let other = TransportId(3);
+    for transport in [TCP, other] {
+        agent.receive(anonymous(transport), t0).expect("bound");
+    }
+    agent.add_account(account());
+    agent.limit_invites(Rate::new(1, Duration::from_secs(30)).expect("a usable rate"));
+
+    on(&mut agent, TCP, &incoming_invite("anon1", Some(OFFER)), t0);
+    transmits(&mut agent);
+    assert_eq!(ringing(&mut agent), 1, "the first is inside the burst");
+
+    on(&mut agent, TCP, &incoming_invite("anon2", Some(OFFER)), t0);
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 480 "));
+    assert_eq!(ringing(&mut agent), 0);
+    assert_eq!(agent.refusals().by_rate, 1);
+
+    // another connection is another caller, as another address would be
+    on(
+        &mut agent,
+        other,
+        &incoming_invite("anon3", Some(OFFER)),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(ringing(&mut agent), 1);
+
+    // and a connection that closed takes what it spent with it: the next one
+    // handed the same identifier starts with a full allowance
+    agent
+        .receive(Input::StreamClosed { transport: TCP }, t0)
+        .expect("closed");
+    agent.receive(anonymous(TCP), t0).expect("bound again");
+    transmits(&mut agent);
+    events(&mut agent);
+    on(&mut agent, TCP, &incoming_invite("anon4", Some(OFFER)), t0);
+    transmits(&mut agent);
+    assert_eq!(ringing(&mut agent), 1);
+    assert_eq!(agent.refusals().by_rate, 1);
 }
 
 #[test]

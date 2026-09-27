@@ -185,18 +185,37 @@ impl UserAgent {
         // transaction left for an application to answer into. Saying so is
         // what this comment is for, and it is the one thing this path owes
         // that it does not yet pay.
-        let body = request.as_raw().body().to_vec();
-        let answer = if body.is_empty() {
-            None
+        //
+        // Before any of that, RFC 3261 §8.2.3, which a UAS asks of every
+        // request ahead of what its method would have it do: a body that is
+        // not a session description, and that its sender did not mark
+        // optional, is refused 415 rather than answered as though it were an
+        // offer. The PRACK has still done what §3 has one do — the endpoint
+        // matched it to the provisional and stopped retransmitting that — so
+        // what the provisional held back is let go below all the same.
+        let raw = request.as_raw();
+        let response = if let Some(refusal) = crate::admission::body_refusal(&raw) {
+            refusal
         } else {
-            self.answer_for(call, &body)
+            // only a session description is an offer; a body of another type
+            // that got this far was marked optional, and is ignored
+            let offered = !raw.body().is_empty()
+                && raw
+                    .content_type()
+                    .is_ok_and(|kind| kind.is("application", "sdp"));
+            let answer = if offered {
+                self.answer_for(call, raw.body())
+            } else {
+                None
+            };
+            // §3: "it MUST be responded to with a 2xx response"
+            let mut response =
+                OutgoingResponse::new(StatusCode::OK).header(HeaderName::Allow, ALLOW);
+            if let Some(ref answer) = answer {
+                response = response.body(b"application/sdp", Arc::clone(answer));
+            }
+            response
         };
-
-        // §3: "it MUST be responded to with a 2xx response"
-        let mut response = OutgoingResponse::new(StatusCode::OK).header(HeaderName::Allow, ALLOW);
-        if let Some(ref answer) = answer {
-            response = response.body(b"application/sdp", Arc::clone(answer));
-        }
         self.endpoint.respond(transaction, &response, now).ok();
 
         let waiting = self

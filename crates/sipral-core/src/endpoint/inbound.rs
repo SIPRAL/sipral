@@ -1104,6 +1104,17 @@ impl Endpoint {
             self.answer(cancel, &owned, StatusCode::CALL_DOES_NOT_EXIST, now);
             return;
         };
+        // §9.2: "The To tag of the response to the CANCEL and the To tag in
+        // the response to the original request SHOULD be the same." Every
+        // server transaction is given its tag when it arrives, so this is the
+        // one its 180 carried and its 487 below will; minting the CANCEL a
+        // tag of its own gave the far end two names for one dialog
+        let original = match matched {
+            Server::Invite(id) => AnyTransactionId::InviteServer(id),
+            Server::NonInvite(id) => AnyTransactionId::NonInviteServer(id),
+        };
+        let tag = self.tag_or_mint(original);
+        self.remember_tag(AnyTransactionId::NonInviteServer(cancel), tag);
         self.answer(cancel, &owned, StatusCode::OK, now);
         // "A CANCEL request has no impact on the processing of transactions
         // with any other method defined in this specification"

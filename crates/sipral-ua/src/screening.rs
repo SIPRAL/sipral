@@ -33,7 +33,10 @@
 //! phone that rings fifty times a second and one that rings a few times a
 //! minute; the precise answer is the policy hook, which knows things this
 //! layer cannot, and [`UserAgent::limit_invites`] is there for a deployment
-//! whose one address is genuinely busy.
+//! whose one address is genuinely busy. A byte stream the application bound
+//! without naming its far end has no address to count by, and is counted as
+//! itself — one allowance per connection, for as long as it stays open —
+//! rather than not counted at all.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -422,13 +425,26 @@ impl<F: FnMut(&Incoming<'_>) -> Screening> Screen for F {
     }
 }
 
-/// One source, and how much of its allowance is left.
-#[derive(Clone, Copy, Debug)]
-struct Watched {
+/// What an allowance is kept against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
     /// The address without the port. A source port costs an attacker nothing
     /// to change, and counting per port would read one scanner as sixty
     /// thousand polite strangers.
-    source: IpAddr,
+    Address(IpAddr),
+    /// A byte stream the application bound without saying who was at the
+    /// other end of it. Nothing on its bytes names a sender, so the
+    /// connection is the sender: every INVITE on it spends from one bucket,
+    /// and it is the one thing a caller on it cannot change without opening
+    /// another connection, which is the application's to accept or not.
+    Stream(TransportId),
+}
+
+/// One source, and how much of its allowance is left.
+#[derive(Clone, Copy, Debug)]
+struct Watched {
+    /// Who is spending.
+    source: Origin,
     /// Tokens left.
     tokens: u32,
     /// What the tokens were last counted from. Not "when it last called": the
@@ -440,7 +456,7 @@ struct Watched {
 
 impl Watched {
     /// A source seen for the first time, spending the call that revealed it.
-    fn new(source: IpAddr, rate: Rate, now: Instant) -> Self {
+    fn new(source: Origin, rate: Rate, now: Instant) -> Self {
         Self {
             source,
             tokens: rate.burst.saturating_sub(1),
@@ -504,7 +520,7 @@ struct Sources {
 
 impl Sources {
     /// Whether this source may offer one more call, spending a token if so.
-    fn admit(&mut self, source: IpAddr, rate: Rate, now: Instant) -> Admission {
+    fn admit(&mut self, source: Origin, rate: Rate, now: Instant) -> Admission {
         if let Some(known) = self.watched.iter_mut().find(|seat| seat.source == source) {
             known.refill(rate, now);
             return if known.spend() {
@@ -535,6 +551,13 @@ impl Sources {
         *seat = Watched::new(source, rate, now);
         Admission::Take
     }
+
+    /// A stream has closed, and the allowance kept against it with it: its
+    /// identifier names nobody from here on, and one handed to the next
+    /// connection must not come with what the last one spent.
+    fn forget(&mut self, source: Origin) {
+        self.watched.retain(|seat| seat.source != source);
+    }
 }
 
 /// The policy an INVITE meets before anything else does.
@@ -547,6 +570,9 @@ pub(crate) struct Guard {
     /// The far end of the bytes being worked through. Set before every
     /// [`UserAgent::receive`], and an INVITE only ever arrives during one.
     source: Option<SocketAddr>,
+    /// The stream the bytes being worked through arrived on, set beside
+    /// `source`: what the rate limit counts by when `source` is `None`.
+    stream: Option<TransportId>,
     /// The far end of each connected transport, for the INVITEs that arrive on
     /// a stream where the address is not on the packet. Bounded by the
     /// transports the application opened, which is not something a stranger
@@ -619,12 +645,25 @@ impl Guard {
             }
             Input::StreamClosed { transport } | Input::TransportFailed { transport, .. } => {
                 self.connected.remove(&transport);
+                self.sources.forget(Origin::Stream(transport));
                 None
             }
             // the enum is non-exhaustive across crate versions, and a source
             // this one cannot read is one it will not pretend to know
             _ => None,
         };
+        self.stream = match *input {
+            Input::StreamData { transport, .. } => Some(transport),
+            _ => None,
+        };
+    }
+
+    /// What the rate limit counts the bytes being worked through against:
+    /// the address they came from, or failing that the stream they came on.
+    fn origin(&self) -> Option<Origin> {
+        self.source
+            .map(|source| Origin::Address(source.ip()))
+            .or_else(|| self.stream.map(Origin::Stream))
     }
 
     /// Where the bytes being worked through came from, as far as the
@@ -673,8 +712,8 @@ impl Guard {
         // The floor comes first. It is two numbers and a short scan, where the
         // policy is arbitrary application code — and code called once per
         // INVITE by whoever is sending them is the second attack.
-        if let Some(source) = self.source {
-            match self.sources.admit(source.ip(), self.rate, now) {
+        if let Some(origin) = self.origin() {
+            match self.sources.admit(origin, self.rate, now) {
                 Admission::Take => (),
                 Admission::TooFast => {
                     self.refusals.by_rate = self.refusals.by_rate.saturating_add(1);
@@ -780,12 +819,12 @@ impl UserAgent {
 
 #[cfg(test)]
 mod tests {
-    use super::{Admission, Rate, RateError, Sources, UNAVAILABLE, WATCHED};
+    use super::{Admission, Origin, Rate, RateError, Sources, UNAVAILABLE, WATCHED};
     use std::net::IpAddr;
     use std::time::{Duration, Instant};
 
-    fn source(last: u8) -> IpAddr {
-        IpAddr::from([192, 0, 2, last])
+    fn source(last: u8) -> Origin {
+        Origin::Address(IpAddr::from([192, 0, 2, last]))
     }
 
     /// A rate that is not one of the two the constructor refuses.
@@ -876,7 +915,11 @@ mod tests {
         let rate = rate(2, Duration::from_secs(2));
         let mut sources = Sources::default();
         for last in 0..=255u8 {
-            sources.admit(IpAddr::from([198, 51, 100, last]), rate, t0);
+            sources.admit(
+                Origin::Address(IpAddr::from([198, 51, 100, last])),
+                rate,
+                t0,
+            );
         }
         assert_eq!(sources.watched.len(), WATCHED);
     }
@@ -887,7 +930,12 @@ mod tests {
         let rate = rate(2, Duration::from_secs(60));
         let mut sources = Sources::default();
         for last in 0..WATCHED {
-            let filling = IpAddr::from([198, 51, 100, u8::try_from(last).unwrap_or(0)]);
+            let filling = Origin::Address(IpAddr::from([
+                198,
+                51,
+                100,
+                u8::try_from(last).unwrap_or(0),
+            ]));
             // twice each, so that no seat has anything left
             assert_eq!(sources.admit(filling, rate, t0), Admission::Take);
             assert_eq!(sources.admit(filling, rate, t0), Admission::Take);
@@ -905,7 +953,12 @@ mod tests {
         let rate = rate(2, Duration::from_secs(60));
         let mut sources = Sources::default();
         for last in 0..WATCHED {
-            let filling = IpAddr::from([198, 51, 100, u8::try_from(last).unwrap_or(0)]);
+            let filling = Origin::Address(IpAddr::from([
+                198,
+                51,
+                100,
+                u8::try_from(last).unwrap_or(0),
+            ]));
             assert_eq!(sources.admit(filling, rate, t0), Admission::Take);
             assert_eq!(sources.admit(filling, rate, t0), Admission::Take);
         }

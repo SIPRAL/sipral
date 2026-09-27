@@ -34,7 +34,9 @@
 //!
 //! A retransmitted final response in `Completed` re-sends the ACK and is *not*
 //! passed up again. The far end did not hear the ACK; the user does not need
-//! to hear about it twice.
+//! to hear about it twice. A 2xx in `Completed` is not one of those: it is a
+//! branch that answered after another refused, and it goes up without an ACK,
+//! exactly as in `Accepted`.
 
 use std::time::Instant;
 
@@ -171,9 +173,23 @@ impl InviteClientMachine {
                 // machine stays where it is
                 Effects::notify(Notify::Response)
             }
+            InviteClientState::Completed if status.is_success() => {
+                // not a retransmission of the refusal but a dialog: a proxy
+                // forwards every 2xx, even after a final response from another
+                // branch (§16.7 step 5). RFC 6026 §8.4 has the ACK re-sent
+                // only for "retransmissions of a response with status code
+                // 300-699", and the ACK built for one of those is not an ACK
+                // for this; §13.2.2.4 gives the ACK for a 2xx to the TU,
+                // which needs to hear of it to send one and then end the
+                // dialog it did not want
+                Effects::notify(Notify::Response)
+            }
             InviteClientState::Completed if !status.is_provisional() => {
-                // the far end did not hear the ACK. Send it again and say
-                // nothing: the user heard about this response already
+                // "Any retransmissions of a response with status code 300-699
+                // that are received while in the "Completed" state MUST cause
+                // the ACK to be re-passed to the transport layer for
+                // retransmission, but the newly received response MUST NOT be
+                // passed up to the TU" (RFC 6026 §8.4)
                 Effects {
                     send: self.ack.clone(),
                     ..Effects::default()
@@ -487,6 +503,44 @@ mod tests {
             "the user heard about this response already"
         );
         assert_eq!(machine.state(), InviteClientState::Completed);
+    }
+
+    #[test]
+    fn a_2xx_after_a_refusal_goes_up_and_is_not_answered_with_the_refusals_ack() {
+        // RFC 6026 §8.4 re-sends the ACK only for "retransmissions of a
+        // response with status code 300-699". A 2xx that follows a 486 is
+        // another branch's dialog, forwarded by a proxy that forwards every
+        // 2xx (§16.7 step 5): its ACK is the TU's (§13.2.2.4), and the TU
+        // can only send one if it hears of it
+        let (mut machine, _, now, _) = start(false);
+        let busy = feed(&mut machine, &response(486, Some(b"a6c85cf")), now);
+        let refusal_ack = busy.send.expect("the refusal is acknowledged here");
+
+        let late = feed(
+            &mut machine,
+            &response(200, Some(b"other-fork")),
+            now + Duration::from_millis(40),
+        );
+        assert_eq!(late.notify, Some(Notify::Response), "the 2xx goes up");
+        assert!(
+            late.send.is_none(),
+            "not the ACK built for the 486: {:?}",
+            late.send.map(|ack| ack.as_raw().as_bytes().to_vec())
+        );
+        assert!(!late.terminated);
+        assert_eq!(machine.state(), InviteClientState::Completed);
+
+        // and the refusal retransmitted after it is still the refusal
+        let again = feed(
+            &mut machine,
+            &response(486, Some(b"a6c85cf")),
+            now + Duration::from_millis(500),
+        );
+        assert_eq!(again.notify, None);
+        assert_eq!(
+            again.send.map(|ack| ack.as_raw().as_bytes().to_vec()),
+            Some(refusal_ack.as_raw().as_bytes().to_vec())
+        );
     }
 
     #[test]

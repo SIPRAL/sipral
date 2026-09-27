@@ -681,6 +681,59 @@ fn a_refused_call_is_acknowledged_by_the_transaction_and_reported_once() {
 }
 
 #[test]
+fn a_2xx_after_a_refusal_is_reported_as_the_dialog_it_opened() {
+    // a proxy forwards every 2xx, even after it has sent a final response
+    // upstream (§16.7 step 5), and RFC 6026 §8.4 re-sends the refusal's ACK
+    // only for a retransmitted 300-699. This one opens a dialog the layer
+    // above has to acknowledge and end (§13.2.2.4); answering it with the
+    // 486's ACK left it retransmitting at the far end with nobody told
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let id = endpoint
+        .invite(&request(Method::Invite), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &respond_to(&bytes, 486, "Busy Here", Some("desk")),
+        t0,
+    );
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    deliver(
+        &mut endpoint,
+        &respond_to(&bytes, 200, "OK", Some("mobile")),
+        t0,
+    );
+    assert!(
+        transmits(&mut endpoint).is_empty(),
+        "the 486's ACK is not an ACK for a 2xx"
+    );
+    let dialog = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Established { invite, dialog, .. } if invite == id => Some(dialog),
+            _ => None,
+        })
+        .expect("the 2xx is reported");
+    endpoint
+        .ack_2xx(dialog, None, t0)
+        .expect("the dialog it opened takes its ACK");
+    let ack = sent(&mut endpoint);
+    assert!(ack.starts_with(b"ACK "));
+    assert!(
+        String::from_utf8_lossy(&header(&ack, HeaderName::To)).contains("tag=mobile"),
+        "{}",
+        String::from_utf8_lossy(&ack)
+    );
+    assert_eq!(
+        endpoint.transaction_state(id),
+        Some(InviteClientState::Completed)
+    );
+}
+
+#[test]
 fn a_cancel_asked_for_too_early_waits_for_the_first_provisional() {
     // 9.1: the server could receive the CANCEL before the INVITE
     let t0 = Instant::now();
@@ -978,6 +1031,65 @@ fn a_cancel_that_arrives_is_answered_and_the_call_is_terminated() {
             .iter()
             .any(|event| matches!(event, Event::IncomingCancel { .. }))
     );
+}
+
+#[test]
+fn the_200_to_a_cancel_carries_the_tag_of_the_invites_own_responses() {
+    // §9.2: "The To tag of the response to the CANCEL and the To tag in the
+    // response to the original request SHOULD be the same"
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    deliver(&mut endpoint, &incoming("INVITE", "in9", ""), t0);
+    transmits(&mut endpoint);
+    let invite = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::IncomingInvite { transaction, .. } => Some(transaction),
+            _ => None,
+        })
+        .expect("the INVITE is handed up");
+    endpoint
+        .respond_invite(
+            invite,
+            &OutgoingResponse::new(StatusCode::RINGING).contact(b"<sip:alice@192.0.2.1>"),
+            t0,
+        )
+        .expect("it rings");
+    let ringing = sent(&mut endpoint);
+
+    deliver(&mut endpoint, &incoming("CANCEL", "in9", ""), t0);
+    let out = transmits(&mut endpoint);
+    let tag_of = |bytes: &[u8]| {
+        with(bytes, |m| {
+            m.to().ok().and_then(|to| to.tag().map(|t| t.to_vec()))
+        })
+    };
+    let tags: Vec<_> = out
+        .iter()
+        .map(|transmit| tag_of(&transmit.payload))
+        .collect();
+    let rung = tag_of(&ringing).expect("the 180 is tagged");
+    assert_eq!(
+        tags,
+        vec![Some(rung.clone()), Some(rung)],
+        "200 to the CANCEL, then 487"
+    );
+
+    // and a CANCEL for an INVITE nothing but a 100 has answered shares the
+    // tag with the 487 all the same
+    let mut endpoint = self::endpoint(t0);
+    deliver(&mut endpoint, &incoming("INVITE", "in10", ""), t0);
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+    deliver(&mut endpoint, &incoming("CANCEL", "in10", ""), t0);
+    let out = transmits(&mut endpoint);
+    let tags: Vec<_> = out
+        .iter()
+        .map(|transmit| tag_of(&transmit.payload))
+        .collect();
+    assert_eq!(tags.len(), 2);
+    assert!(tags.first().is_some_and(Option::is_some));
+    assert_eq!(tags.first(), tags.get(1), "{tags:?}");
 }
 
 #[test]

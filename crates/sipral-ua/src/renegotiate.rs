@@ -313,9 +313,7 @@ impl UserAgent {
             return Err(error);
         }
         if let Some(held) = self.calls.get_mut(&call) {
-            if let Some(offer) = answering.offer {
-                held.session.set_remote(offer);
-            }
+            held.session.set_remote(answering.offer);
             if let Some(answer) = written {
                 held.session.set_local(answer);
             }
@@ -1081,6 +1079,15 @@ impl UserAgent {
         now: Instant,
     ) {
         let raw = request.as_raw();
+        // RFC 3261 §8.2.3 before anything acts on it, a session timer
+        // included: a body this agent cannot read is refused 415 with the
+        // `Accept` that says what it can, and a refused request refreshed
+        // nothing: RFC 4028 §9 times the session from "the most recent 2xx
+        // response to a session refresh request"
+        if let Some(refusal) = crate::admission::body_refusal(&raw) {
+            self.answer_with(call, transaction, &refusal, now).ok();
+            return;
+        }
         self.note_allow(call, &raw);
         // RFC 4028 §7.4: any request inside the dialog that carries a
         // Session-Expires is a refresh, whatever else it is doing
@@ -1104,11 +1111,18 @@ impl UserAgent {
         // INVITE "in progress", and one already refused with a 491 is over.
         // The far end's retry lands in exactly that wait — §14.1 draws the
         // two ends' intervals so that it does — and refusing it would leave
-        // its change failed for good
+        // its change failed for good. An offer this end put in a 2xx is one
+        // of ours too, unanswered until the ACK brings the answer (§5.2's
+        // "an offer (in an UPDATE, PRACK or INVITE) to which it has not yet
+        // received an answer"): a request that overtakes that ACK is told to
+        // wait, rather than answered with a second offer RFC 3264 §4 forbids
+        // or taken as an offer the ACK's answer would then land on
         if self.calls.get(&call).is_some_and(|held| {
-            held.offering
-                .as_ref()
-                .is_some_and(|offer| offer.transaction.is_some())
+            held.session.answer_owed
+                || held
+                    .offering
+                    .as_ref()
+                    .is_some_and(|offer| offer.transaction.is_some())
         }) {
             let pending = OutgoingResponse::new(StatusCode::REQUEST_PENDING);
             self.answer_with(call, transaction, &pending, now).ok();
@@ -1132,10 +1146,9 @@ impl UserAgent {
                     .header(HeaderName::Warning, WHY_488);
                 self.answer_with(call, transaction, &refusal, now).ok();
             }
-            Arriving::Foreign => self.hand_over(call, transaction, None, request),
             Arriving::Offer(offer) => {
                 if !self.take_offer(call, transaction, &offer, now) {
-                    self.hand_over(call, transaction, Some(*offer), request);
+                    self.hand_over(call, transaction, *offer, request);
                 }
             }
         }
@@ -1249,7 +1262,7 @@ impl UserAgent {
         &mut self,
         call: CallHandle,
         transaction: AnyTransactionId,
-        offer: Option<SessionDescription>,
+        offer: SessionDescription,
         request: &OwnedMessage,
     ) {
         if let Some(held) = self.calls.get_mut(&call) {
@@ -1289,14 +1302,12 @@ impl UserAgent {
 
 /// What a request that could change the session actually carried.
 enum Arriving {
-    /// No body at all.
+    /// No body, or none this agent has to read.
     Nothing,
-    /// A session description, boxed because it dwarfs the other three.
+    /// A session description, boxed because it dwarfs the other two.
     Offer(Box<SessionDescription>),
     /// Bytes that claim to be one and are not.
     Unreadable,
-    /// A body of some other type, which is the application's to read.
-    Foreign,
 }
 
 fn arriving(request: &RawMessage<'_>, limits: sdp::Limits) -> Arriving {
@@ -1309,7 +1320,10 @@ fn arriving(request: &RawMessage<'_>, limits: sdp::Limits) -> Arriving {
             .map_or(Arriving::Unreadable, |offer| {
                 Arriving::Offer(Box::new(offer))
             }),
-        _ => Arriving::Foreign,
+        // a body of any other type got past `body_refusal` only because its
+        // sender marked it optional (RFC 3261 §20.11), and §8.2.3 refuses
+        // only the bodies that are not: one that is, this agent ignores
+        _ => Arriving::Nothing,
     }
 }
 

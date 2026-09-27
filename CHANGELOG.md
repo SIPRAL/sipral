@@ -709,6 +709,55 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A body the agent cannot read is refused 415 on every request that
+  carries an offer, not only on the INVITE that opens a call.** A
+  re-INVITE, UPDATE or PRACK whose body is not `application/sdp`, or is
+  content-coded, is answered 415 with `Accept: application/sdp` or
+  `Accept-Encoding: identity` before anything acts on it (RFC 3261 §8.2.3),
+  so it no longer arrives as `UaEvent::Reoffer` for the application — or
+  the facade's 488 — to answer, and it refreshes no session timer. One its
+  sender marked `handling=optional` is ignored: a re-INVITE carrying only
+  that asks for an offer, an UPDATE only refreshes the target. A PRACK
+  refused this way still acknowledges its provisional, so a 2xx held
+  behind it goes.
+- **A media-type parameter in `Accept` counts toward the most specific
+  range.** The 406 decision ranked `application/sdp`, `application/*` and
+  `*/*` and stopped there, so `application/sdp;level=1;q=0,
+  application/sdp` took SDP; RFC 2616 §14.1, which RFC 3261 §20.1 keeps,
+  puts a range with parameters above the same range without, and the
+  parameterised one now decides. Parameters after `q` are accept-extensions
+  and are not counted.
+- **The INVITE rate limit counts a stream the application bound without
+  naming its far end.** It only bucketed INVITEs it could attribute to a
+  source address, so every INVITE on such a connection went straight to
+  the policy and the application however fast it came. The connection is
+  now the caller: one bucket per stream, dropped when the stream closes.
+- **A 2xx that arrives after the call it would have joined is over is
+  acknowledged and hung up under `ForkPolicy::KeepAll` too.** Once the
+  call placed had ended, a later branch's 2xx inside the answer window
+  was dropped with no ACK and no BYE, leaving a dialog up at a far end
+  that answered (RFC 3261 §13.2.2.4). A sibling still up now takes the
+  INVITE over, so a late branch is minted beside it; with none left, the
+  2xx is acknowledged and hung up, as `KeepFirst` already did.
+- **A 2xx after a refusal is passed up and hung up instead of being
+  answered with the refusal's ACK.** The INVITE client transaction
+  re-sent the ACK it built for a 486 or 603 to any final response in
+  `Completed`, including another branch's 2xx that a proxy forwards
+  regardless (RFC 3261 §16.7); RFC 6026 §8.4 re-sends that ACK only for a
+  retransmitted 300-699. The 2xx now reaches the dialog layer, which
+  acknowledges it, and the user agent ends it with a BYE, since the call
+  was already reported `Refused`.
+- **The 200 to a CANCEL carries the `To` tag of the INVITE it cancels.**
+  It was given a tag of its own, so a lab capture showed the 180, the 487
+  and the 200 to the CANCEL naming two different dialogs; RFC 3261 §9.2
+  has them share one.
+- **An offer that overtakes the ACK carrying the answer to ours is refused
+  491.** After answering a re-INVITE that carried no description with an
+  offer in the 2xx, the agent answered a second one that arrived before the
+  ACK with another offer — which RFC 3264 §4 forbids before the first is
+  answered — and would have taken an UPDATE's offer the ACK's answer then
+  landed on. The offer in a 2xx now counts as outstanding until its ACK,
+  as RFC 3311 §5.2 has it.
 - **Apple artefacts are built for the releases they claim.** The macOS
   wheel was tagged with the building Mac's own version (`macosx_26_0`), so
   pip refused it on every older macOS the library runs on; and in every

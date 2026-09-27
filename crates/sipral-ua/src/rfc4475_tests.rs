@@ -808,3 +808,70 @@ fn what_a_handler_claims_outside_a_dialog_is_still_its_own() {
             .all(|answer| status(answer) != 405 && status(answer) != 501)
     );
 }
+
+#[test]
+fn an_unclaimed_request_is_answered_as_it_arrives_and_left_to_no_timer() {
+    // §8.2.1 on the wire, end to end: a PUBLISH or a method nobody knows,
+    // outside a dialog, is answered the moment it arrives rather than left
+    // until the endpoint's own 408 at 64·T1. Its retransmission is answered
+    // from the transaction (§17.2.2), and when 64·T1 has passed nothing else
+    // is written: the answer given was the last word. A SUBSCRIBE carrying a
+    // body this agent cannot read is still a 405 and not a 415, because §8.2
+    // asks about the method before it asks about the body
+    for (method, body, expected) in [
+        ("PUBLISH", None, 405),
+        ("FOO", None, 501),
+        ("SUBSCRIBE", Some("\u{1}\u{2}"), 405),
+    ] {
+        let now = Instant::now();
+        let mut agent = agent(now);
+        let mut request = String::from_utf8(out_of_dialog(
+            method,
+            "<sip:user@example.com>",
+            &format!("wire{}", method.len()),
+        ))
+        .expect("text");
+        if let Some(body) = body {
+            request = request.replace(
+                "Content-Length: 0\r\n\r\n",
+                &format!(
+                    "Event: presence\r\nContent-Type: application/isup\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            );
+        }
+        receive(&mut agent, request.as_bytes(), Over::Udp, now).expect("a message that parses");
+        let first = written(&mut agent);
+        assert_eq!(first.len(), 1, "{method}");
+        let answer = first.first().expect("an answer");
+        assert_eq!(status(answer), expected, "{method}");
+
+        let later = now + std::time::Duration::from_secs(1);
+        receive(&mut agent, request.as_bytes(), Over::Udp, later).expect("the same again");
+        assert_eq!(
+            written(&mut agent),
+            first,
+            "{method}: the same answer, once more"
+        );
+
+        agent.handle_timeout(now + std::time::Duration::from_secs(33));
+        // the stream transports this harness binds are pinged meanwhile
+        // (RFC 5626 §4.4.1), and a ping is not an answer
+        let after: Vec<String> = written(&mut agent)
+            .iter()
+            .filter(|m| m.as_slice() != b"\r\n\r\n")
+            .map(|m| String::from_utf8_lossy(m).into_owned())
+            .collect();
+        assert!(
+            after.is_empty(),
+            "{method}: nothing more when the 408 would have gone: {after:?}"
+        );
+        let reported = events(&mut agent);
+        assert!(
+            !reported
+                .iter()
+                .any(|event| matches!(event, UaEvent::Unclaimed(_))),
+            "{method}: {reported:?}"
+        );
+    }
+}
