@@ -130,7 +130,16 @@ public sealed class SipralStack : IDisposable
     /// <see cref="AcceptReferral"/> or refuse with <see cref="RejectReferral"/>.
     /// Off by default, when every one is refused 403: a peer that can make
     /// a phone dial is a toll-fraud vector, so each one is the
-    /// application's decision.</summary>
+    /// application's decision.
+    ///
+    /// <paramref name="registrarKeepalive"/> keeps the registrar's flow
+    /// open behind a NAT: every account <paramref name="stunServer"/>
+    /// showed to be behind one sends its registrar a double CRLF every
+    /// <paramref name="registrarKeepaliveMs"/> (<c>0</c> for 25 seconds,
+    /// 1 000 to 120 000), so that a NAT filtering by address and port still
+    /// lets the registrar's INVITE in minutes after the REGISTER. On by
+    /// default; <see langword="false"/> turns it off, and an interval with
+    /// it off is refused. Nothing is sent while the stack is suspended.</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -146,7 +155,9 @@ public sealed class SipralStack : IDisposable
         string? turnUsername = null,
         string? turnPassword = null,
         bool? g729AnnexB = null,
-        bool? referrals = null)
+        bool? referrals = null,
+        bool? registrarKeepalive = null,
+        ulong registrarKeepaliveMs = 0)
     {
         _nat = nat;
         _turn = turnServer is not null;
@@ -226,6 +237,8 @@ public sealed class SipralStack : IDisposable
             config.TurnPassword = turnPasswordPin.Pointer;
             config.TurnPasswordLen = (nuint)(turnPasswordBytes?.Length ?? 0);
             config.Referrals = ToggleOf(referrals);
+            config.RegistrarKeepalive = ToggleOf(registrarKeepalive);
+            config.RegistrarKeepaliveMs = registrarKeepaliveMs;
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }

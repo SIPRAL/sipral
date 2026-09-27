@@ -55,6 +55,18 @@ pub(super) struct Sent {
     pub(super) give_up_at: Instant,
     /// The scheduled retransmission, so that a PRACK can take it down.
     pub(super) timer: Option<TimerHandle>,
+    /// Whether a PRACK matched it and was not refused: §3's "remove it from
+    /// the list of unacknowledged provisional responses". Kept rather than
+    /// forgotten until the INVITE or the dialog ends, because a PRACK the
+    /// layer above refuses under RFC 3261 §8.2 — a `Require` it cannot
+    /// honour, a body it cannot read, an offer it will not take — has
+    /// acknowledged nothing, and the retry that follows has to find it again
+    /// ([`super::Endpoint::refuse_prack`]).
+    pub(super) acknowledged: bool,
+    /// Whether the INVITE has had its final response, after which §3 has
+    /// the retransmissions stop for good: "it SHOULD NOT continue to
+    /// retransmit the unacknowledged reliable provisional responses".
+    pub(super) quiet: bool,
 }
 
 /// One reliable provisional response, on whichever side of it we are.
@@ -85,7 +97,8 @@ impl Reliable {
     /// sequence number from the CSeq, and the sequence number from the RSeq of
     /// the reliable provisional response."
     fn answered_by(&self, dialog: DialogId, rack: &RAck<'_>) -> bool {
-        self.dialog == dialog
+        self.sent.as_ref().is_none_or(|sent| !sent.acknowledged)
+            && self.dialog == dialog
             && self.rseq == rack.response_num
             && self.cseq == rack.cseq_num
             && *self.method == *rack.method.as_str().as_bytes()
@@ -180,7 +193,14 @@ impl Reliables {
     /// §3: "The UAS MUST NOT send a second reliable provisional response until
     /// the first is acknowledged."
     pub(super) fn outstanding_on(&self, invite: TransactionId<InviteServer>) -> bool {
-        self.of_invite.contains_key(&invite)
+        self.of_invite.get(&invite).is_some_and(|held| {
+            held.iter().any(|raw| {
+                self.entries
+                    .get(*raw)
+                    .and_then(|reliable| reliable.sent.as_ref())
+                    .is_some_and(|sent| !sent.acknowledged)
+            })
+        })
     }
 
     /// The next number in this INVITE's series.
@@ -395,11 +415,30 @@ mod tests {
                 attempt: 0,
                 give_up_at: std::time::Instant::now(),
                 timer: None,
+                acknowledged: false,
+                quiet: false,
             }),
             ..heard(0, 700)
         });
         assert!(store.outstanding_on(invite));
         assert!(!store.outstanding_on(invite_server(1)));
+
+        // acknowledged, it no longer holds the next one back, and a refused
+        // PRACK that takes the acknowledgement back holds it again
+        let mark = |store: &mut Reliables, acknowledged: bool| {
+            if let Some(sent) = store.get_mut(held).and_then(|held| held.sent.as_mut()) {
+                sent.acknowledged = acknowledged;
+            }
+        };
+        mark(&mut store, true);
+        assert!(!store.outstanding_on(invite));
+        assert_eq!(store.answered_by(dialog(0), &rack("700 1 INVITE")), None);
+        mark(&mut store, false);
+        assert!(store.outstanding_on(invite));
+        assert_eq!(
+            store.answered_by(dialog(0), &rack("700 1 INVITE")),
+            Some(held)
+        );
 
         store.forget(held);
         assert!(!store.outstanding_on(invite));
@@ -458,6 +497,8 @@ Content-Length: 0\r\n\
             attempt: 0,
             give_up_at: std::time::Instant::now(),
             timer: None,
+            acknowledged: false,
+            quiet: false,
         };
         let first = store.keep(Reliable {
             sent: Some(sent()),

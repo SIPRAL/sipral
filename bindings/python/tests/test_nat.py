@@ -350,6 +350,61 @@ class TwoStacksTalkThroughStun(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"{self.PUBLIC_HOST}:{self.PUBLIC_PORT}".encode("ascii"), event.message)
 
 
+class RegistrarFlowKeptOpenBehindTheNat(unittest.IsolatedAsyncioTestCase):
+    """`registrar_keepalive`/`registrar_keepalive_ms`: an account the STUN
+    answer showed behind a NAT sends its registrar a double CRLF, alone in a
+    datagram, so that a NAT filtering by address and port keeps letting the
+    registrar's INVITE in (`docs/06-nat.md`, "Refresh"); none goes with it
+    off."""
+
+    PUBLIC_HOST = "203.0.113.7"
+    PUBLIC_PORT = 40000
+
+    async def _pings(self, keepalive: bool) -> list[bytes]:
+        server = _FakeStunServer(self.PUBLIC_HOST, self.PUBLIC_PORT)
+        registrar = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+        registrar.bind(("127.0.0.1", 0))
+        registrar.settimeout(0.1)
+        loop = asyncio.get_running_loop()
+        stack = Stack(
+            loop=loop,
+            nat=Nat.STUN,
+            stun_server=server.address,
+            registrar_keepalive=keepalive,
+            registrar_keepalive_ms=1000 if keepalive else 0,
+        )
+        try:
+            event = None
+            while event is None or event.kind != EventKind.NAT_MAPPING:
+                event = await asyncio.wait_for(stack.events.get(), timeout=5)
+            account = stack.add_account(
+                "sip:alice@sipral.invalid",
+                registrar_address="127.0.0.1:%d" % registrar.getsockname()[1],
+                registrar="sip:sipral.invalid",
+            )
+            account.register()
+            pings: list[bytes] = []
+            deadline = loop.time() + 4
+            while loop.time() < deadline:
+                try:
+                    data = await loop.run_in_executor(None, registrar.recv, 2048)
+                except (socket_module.timeout, OSError):
+                    continue
+                if data == b"\r\n\r\n":
+                    pings.append(data)
+            return pings
+        finally:
+            stack.close()
+            registrar.close()
+            server.close()
+
+    async def test_the_registrar_hears_a_keepalive_every_interval(self) -> None:
+        self.assertGreaterEqual(len(await self._pings(True)), 2)
+
+    async def test_none_goes_with_it_off(self) -> None:
+        self.assertEqual(await self._pings(False), [])
+
+
 class TurnAllocateRequestLeaves(unittest.IsolatedAsyncioTestCase):
     """`turn_server`/`turn_username`/`turn_password`: proof bounded by what
     a unit test can see without a real relay (module docstring)."""

@@ -501,16 +501,34 @@ impl UserAgent {
 // -- receiving -------------------------------------------------------------
 
 impl UserAgent {
+    /// Hand every INFO in a call that is not one of the two DTMF forms to
+    /// the application, unanswered, as
+    /// [`UaEvent::Unclaimed`](crate::UaEvent::Unclaimed) — RFC 5168's media
+    /// control, a vendor's Info Package — for it to answer through
+    /// [`UserAgent::endpoint`]. Off by default.
+    ///
+    /// Off, each one is answered here by RFC 6086 §4.2.2: 469 when it names
+    /// an Info Package, 415 for a body this agent cannot read, 200 for one
+    /// with no body (see `crate::admission`). That is the only answer an
+    /// application with no way to answer can give, and the C ABI is one: an
+    /// INFO it counts as unclaimed and never answers is retransmitted for
+    /// thirty-two seconds, and RFC 3261 §12.2.1.2 then has the far end
+    /// terminate the call. Turn this on only with something that answers
+    /// every INFO it is handed.
+    pub const fn hand_over_info(&mut self, handed_over: bool) {
+        self.info_handed_over = handed_over;
+    }
+
     /// `None` when the event was an incoming INFO this handled; the event
     /// back otherwise.
     ///
     /// Only an INFO whose `Content-Type` is `application/dtmf-relay` or
-    /// `application/dtmf` is this stack's to claim (8.3.11-bis): RFC 6086
+    /// `application/dtmf` is this stack's to read (8.3.11-bis): RFC 6086
     /// does not reserve INFO for DTMF, so every other one — RFC 5168's media
     /// control, a vendor Info-Package, one with no body at all — is left for
-    /// the event chain below this to claim or, failing that, for the
-    /// application, exactly as it was before this module read a dialog's
-    /// INFO by method alone.
+    /// the event chain below this, which answers it by RFC 6086 §4.2.2 at
+    /// its end unless [`UserAgent::hand_over_info`] gave it to the
+    /// application.
     pub(crate) fn on_dtmf_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         let Event::IncomingInDialog {
             transaction,

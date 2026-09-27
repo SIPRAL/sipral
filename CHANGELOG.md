@@ -102,6 +102,28 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `sipral_candidate_kind_t` naming the numbers (ABI 0.28); each binding
   has it as `pathCandidates()` / `path_candidates()` / `PathCandidates()`
   on a call's media.
+- **An idle phone behind a NAT stays reachable over UDP.** Behind a NAT
+  that filters by address and port (RFC 4787 §5), the registrar's INVITE
+  gets in only while the NAT remembers this end sending to it, and the only
+  thing sent while idle — the STUN refresh every 25 s — goes to the STUN
+  server: in the lab a call 330 s after the REGISTER was dropped at the NAT.
+  Every account whose `Contact` a STUN answer moved onto an address that is
+  not the socket's own now sends its registrar a double CRLF, alone in a
+  datagram, every 20 to 25 s while it holds a binding or is getting one;
+  registrars drop it (RFC 3261 §7.5). RFC 5626 §3.5 names STUN for a UDP
+  flow's keep-alive, but Asterisk answers none on its SIP port, so the
+  double CRLF buys the same and asks the registrar to parse nothing. On by
+  default, `UserAgent::keep_registrar_flows_alive` (`None` for off, 1 to 120
+  s, `UaError::InvalidKeepalive` otherwise; `sipral_ua::keepalive`), and
+  suspended with the stack (`UserAgent::suspending`), since a sleeping phone
+  is woken by push. The C ABI's `sipral_stack_config_t` grew
+  `registrar_keepalive` and `registrar_keepalive_ms` and
+  `sipral_stack_settings_t` `registrar_keepalive_ms`, with
+  `registrarKeepalive` in Swift and Kotlin, `registrar_keepalive` in Python
+  and `RegistrarKeepalive` in .NET. `scripts/lab.sh nat-idle` places the
+  call 330 s after the REGISTER behind the lab's NAT, with the keep-alive on
+  and then off. `Endpoint::bound_transport` says what a bound transport
+  speaks and where it is bound.
 - **ICE restarts in the full role, from either end.** A peer's re-offer
   that changes both `ice-ufrag` and `ice-pwd` is answered with new
   credentials of this end's own (RFC 8839 §4.4.2.1) instead of the ones the
@@ -926,6 +948,51 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   checks back on them the moment the restart is taken up; a restart refused
   drops them, and so does waiting past the far end's 39.5-second
   transaction.
+- **A request inside a dialog that nothing claims is answered, not left to
+  time out.** A SUBSCRIBE or PUBLISH inside a call reached the application
+  as `UaEvent::Unclaimed`, which neither the facade nor the C ABI can
+  answer, so the peer retransmitted it until its own timer gave up — and
+  RFC 3261 §12.2.1.2 then has it end the dialog, the call with it. Each is
+  now answered by the usage RFC 5057 §5.3 matches it to: 405 with `Allow`
+  for a method this agent recognises and does not take there, 501 for one
+  it does not recognise, 481 for an UPDATE, INFO, PRACK or re-INVITE in a
+  dialog that holds no call, 403 for a REFER there, 200 for a PRACK that
+  matches a provisional of a call already gone (RFC 3262 §3). An OPTIONS
+  inside a dialog is answered as one outside it (§11.2). An INFO in a call
+  that is not DTMF — RFC 5168's media control, a vendor Info Package, one
+  with no body — is answered by RFC 6086 §4.2.2: 469 with an empty
+  `Recv-Info` for an Info Package, 415 with `Accept:
+  application/dtmf-relay, application/dtmf` for a body this agent cannot
+  read, 200 for none. A Rust application that answers those itself calls
+  the new `UserAgent::hand_over_info(true)` and receives them as before.
+- **A PRACK is asked its `Require`, and a refused PRACK acknowledges
+  nothing.** RFC 3262 §3 has a PRACK processed by RFC 3261 §8.2 like any
+  request, and §8.2.2.3 was never asked of one: a PRACK demanding an
+  extension this agent lacks is now answered 420 naming it. A PRACK refused
+  for any reason — 420, 415 for its body, 488, 491 or 500 for its offer —
+  goes through the new `Endpoint::refuse_prack`, which answers it and puts
+  its provisional back on the list of unacknowledged ones, retransmitting
+  it again until the INVITE has its final response: the PRACK the far end
+  sends again (§8.1.3.5) is matched on the same `RAck` rather than answered
+  481, which ends the dialog, and a 2xx held behind the provisional waits
+  for it instead of going for a PRACK that acknowledged nothing.
+- **An offer in a PRACK is answered, and an answer in one is taken.** An
+  offer the agent could not answer itself got a 2xx with no body and was
+  never reported, although RFC 3262 §5 puts its answer in that 2xx. It now
+  goes the way a re-offer does: a hold, a resume or a moved address is
+  answered in the PRACK's 2xx, and anything else — another codec, a secure
+  profile — arrives as `UaEvent::Reoffer` with the PRACK held open, for
+  `accept_reoffer` (whose 2xx carries the answer alone) or `reject_reoffer`
+  (which leaves the provisional unacknowledged, as above); a managed call's
+  engine answers it itself. And when the reliable provisional carried this
+  end's own offer — an INVITE that came without one — the description in
+  the PRACK is the answer, and becomes the call's far end instead of being
+  read as a new offer and dropped.
+- **An in-dialog REFER nobody answered in time frees the call for the
+  next one.** Left unanswered for 64·T1, it was answered 408 by the
+  endpoint but kept as a transfer still being decided, so every later REFER
+  on the call got 491; the end of its transaction now lets it go, and
+  `accept_transfer` or `reject_transfer` on it is `UaError::WrongState`.
 - **A body the agent cannot read is refused 415 on every request that
   carries an offer, not only on the INVITE that opens a call.** A
   re-INVITE, UPDATE or PRACK whose body is not `application/sdp`, or is
@@ -935,8 +1002,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the facade's 488 — to answer, and it refreshes no session timer. One its
   sender marked `handling=optional` is ignored: a re-INVITE carrying only
   that asks for an offer, an UPDATE only refreshes the target. A PRACK
-  refused this way still acknowledges its provisional, so a 2xx held
-  behind it goes.
+  refused this way acknowledges nothing, and a 2xx held behind its
+  provisional waits for the PRACK sent again.
 - **A media-type parameter in `Accept` counts toward the most specific
   range.** The 406 decision ranked `application/sdp`, `application/*` and
   `*/*` and stopped there, so `application/sdp;level=1;q=0,
@@ -1678,6 +1745,27 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   The step runs on the Compose project's own network, so a copy of the lab
   under a `COMPOSE_PROJECT_NAME` of its own runs it against its own
   Asterisk.
+- **ABI 0.28.** `sipral_stack_config_t` grew `registrar_keepalive` and
+  `registrar_keepalive_ms` at the tail, and `sipral_stack_settings_t`
+  `registrar_keepalive_ms`; `sipral_call_accept_session` refuses a null
+  `sdp`. A binding built against 0.27 is refused by this library, and the
+  Kotlin agent's jar has to be rebuilt.
+- **`UserAgent::accept_reoffer` takes the answer, not an `Option` of one.**
+  Every `UaEvent::Reoffer` carries an offer — a re-INVITE without one is
+  answered with this end's own offer before anything is handed up — and
+  RFC 3264 §5 has an offer answered, so `None` sent a 2xx with no body that
+  answered nothing. The signature is now `sdp: &[u8]`, and the C ABI's
+  `sipral_call_accept_session` refuses a null or empty `sdp` with
+  `SIPRAL_STATUS_INVALID_ARGUMENT`, the request still waiting to be answered
+  or refused.
+- **A re-INVITE or UPDATE whose only body is of a type the agent does not
+  read, marked `handling=optional`, no longer reaches the application.** It
+  used to arrive as a `UaEvent::Reoffer` carrying no offer; RFC 3204 §6,
+  which defines the parameter RFC 3261 §20.11 points to, has "the UAS MUST
+  ignore the message body" when it is optional, so the request is answered
+  as the one it would be without it: a re-INVITE with this end's own offer
+  (§14.1), an UPDATE as a target refresh. A body without that marking is
+  refused 415, as above.
 - **The `sipral` crate's own description of its bindings names all four.**
   `crates/sipral/README.md`, its `Cargo.toml` description and
   `bindings/dotnet/Sipral/README.md` said "Swift, .NET and Kotlin bindings,"

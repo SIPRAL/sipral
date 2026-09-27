@@ -121,6 +121,14 @@ a host reachable at the address it advertises, answering full ICE peers.
 `g729AnnexB: false` on the stack turns off G.729's Annex B silence
 compression (`annexb=no`) if that codec runs at all.
 
+Behind a NAT, every account `stunServer` showed to be behind one keeps its
+registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
+seconds, so that a NAT filtering by address and port keeps letting the
+registrar's INVITE in long after the REGISTER (`docs/06-nat.md`).
+`registrarKeepalive: false` turns it off and `registrarKeepaliveMs` sets the
+interval, 1 000 to 120 000; nothing goes while the stack is suspended.
+`Sipral.Tests/NatTests.cs` proves both on the wire.
+
 ### A REFER from outside any call
 
 `new SipralStack(referrals: true)` hands a REFER that names no dialog —

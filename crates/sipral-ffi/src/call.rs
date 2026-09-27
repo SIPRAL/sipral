@@ -193,6 +193,7 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         | UaError::NoRegistrar
         | UaError::Header(_)
         | UaError::InvalidDtmf(_)
+        | UaError::InvalidKeepalive(_)
         | UaError::MessageTooLarge { .. } => SipralStatus::InvalidArgument,
         // an out-of-dialog MESSAGE to this target is already in flight; the
         // object this call is about is busy with a request of its own, the
@@ -1159,10 +1160,14 @@ entry! {
     /// Accept a change the far end offered, reported as
     /// `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
     ///
-    /// `sdp` is the answer to the offer it carried, and is left out only for a
-    /// request that carried none. A re-INVITE nobody answers is retransmitted
-    /// and then ends the call, so this or [`sipral_call_reject_session`] has
-    /// to follow that event.
+    /// `sdp` is the answer to the offer it carried, and is required: every
+    /// such event carries an offer, and RFC 3264 §5 has an offer answered,
+    /// so a null or empty `sdp` is `SIPRAL_STATUS_INVALID_ARGUMENT` and the
+    /// request is still waiting for this or its refusal. A re-INVITE nobody
+    /// answers is retransmitted and then ends the call, so this or
+    /// [`sipral_call_reject_session`] has to follow that event. An offer that
+    /// arrived in a PRACK (RFC 3262 §5) is answered the same way, in the
+    /// PRACK's 2xx.
     ///
     /// Only for a call the application describes. One this stack describes
     /// answers its own re-offers, from the same codec order, before the poll
@@ -1182,7 +1187,13 @@ entry! {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             describes_its_own(state, id)?;
-            let answer = unsafe { bytes(sdp, sdp_len, "sdp") }?;
+            let answer = unsafe { bytes(sdp, sdp_len, "sdp") }?.ok_or_else(|| {
+                fail(
+                    SipralStatus::InvalidArgument,
+                    "sdp is required: the far end's change carried an offer, and an offer is \
+                     answered with a session description (RFC 3264 §5)",
+                )
+            })?;
             state
                 .agent
                 .accept_reoffer(id, answer, now)
@@ -3583,11 +3594,13 @@ Content-Length: 0\r\n\r\n";
     }
 
     /// 8.3.11-bis(a): only `application/dtmf-relay` and `application/dtmf`
-    /// are this stack's own; an INFO carrying anything else — RFC 5168's
-    /// media control here, and one with no body at all — reaches the
-    /// application unclaimed, and the stack answers neither.
+    /// are read as a digit. An INFO carrying anything else — RFC 5168's
+    /// media control here, and one with no body at all — is answered by the
+    /// stack by RFC 6086 §4.2.2, because an application on this ABI has no
+    /// way to answer one: counted as unclaimed and left, it was retransmitted
+    /// for thirty-two seconds and then, by RFC 3261 §12.2.1.2, ended the call.
     #[test]
-    fn an_info_that_is_not_dtmf_reaches_the_application_unanswered() {
+    fn an_info_that_is_not_dtmf_is_answered_by_the_stack() {
         let mut observed = Observed::default();
         let (handle, account) = line(&mut observed);
         let (status, _call) = place(handle, account, &call_config(), 1_000);
@@ -3609,15 +3622,18 @@ Content-Length: 0\r\n\r\n";
             2_000,
         );
         let result = poll(handle, 2_000);
+        let answer = sent(handle);
         assert!(
-            sent(handle).is_empty(),
-            "a body this stack does not read is not this stack's to answer"
+            answer
+                .iter()
+                .any(|bytes| bytes.starts_with(b"SIP/2.0 415 ")),
+            "a body this stack does not read is refused 415: {:?}",
+            answer
+                .iter()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                .collect::<Vec<_>>()
         );
-        assert!(
-            result.events_unclaimed >= 1,
-            "expected an unclaimed event, got {}",
-            result.events_unclaimed
-        );
+        assert_eq!(result.events_unclaimed, 0);
 
         deliver(
             handle,
@@ -3626,14 +3642,12 @@ Content-Length: 0\r\n\r\n";
         );
         let result = poll(handle, 2_100);
         assert!(
-            sent(handle).is_empty(),
-            "an INFO with no body this stack reads is not this stack's either"
+            sent(handle)
+                .iter()
+                .any(|bytes| bytes.starts_with(b"SIP/2.0 200 ")),
+            "an INFO with no body is answered 200"
         );
-        assert!(
-            result.events_unclaimed >= 1,
-            "expected an unclaimed event, got {}",
-            result.events_unclaimed
-        );
+        assert_eq!(result.events_unclaimed, 0);
 
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
@@ -3894,12 +3908,66 @@ Content-Length: 0\r\n\r\n";
         let mut observed = Observed::default();
         let (handle, call) = connected(&mut observed);
         assert_eq!(
-            unsafe { sipral_call_accept_session(handle, call, ptr::null(), 0, 2_000) },
+            unsafe {
+                sipral_call_accept_session(handle, call, ANSWER.as_ptr(), ANSWER.len(), 2_000)
+            },
             SipralStatus::WrongState
         );
         assert_eq!(
             unsafe { sipral_call_reject_session(handle, call, 488, 2_000) },
             SipralStatus::WrongState
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// Every change the far end offers carries an offer, and RFC 3264 §5 has
+    /// an offer answered: accepting one with no description used to send a
+    /// 2xx with no body. It is refused as an argument instead, and the
+    /// request is still there to be answered properly.
+    #[test]
+    fn a_change_the_far_end_offered_is_accepted_only_with_an_answer() {
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+        let (status, call) = place(handle, account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle);
+
+        deliver(handle, &reoffer(&invite, REOFFERED), 1_200);
+        poll(handle, 1_200);
+        assert!(
+            observed.kinds().contains(&SipralEventKind::SessionOffered),
+            "{:?}",
+            observed.kinds()
+        );
+        let _ = sent(handle);
+
+        assert_eq!(
+            unsafe { sipral_call_accept_session(handle, call, ptr::null(), 0, 1_300) },
+            SipralStatus::InvalidArgument
+        );
+        assert!(
+            sent(handle).is_empty(),
+            "an answer went out with no description in it"
+        );
+        assert_eq!(
+            unsafe {
+                sipral_call_accept_session(handle, call, ANSWER.as_ptr(), ANSWER.len(), 1_300)
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let out = sent(handle);
+        assert!(
+            out.iter()
+                .any(|bytes| bytes.starts_with(b"SIP/2.0 200 ") && bytes.ends_with(ANSWER)),
+            "{:?}",
+            out.iter()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                .collect::<Vec<_>>()
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }

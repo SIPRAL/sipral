@@ -344,6 +344,24 @@ impl Endpoint {
         self.tokens.token()
     }
 
+    /// What a bound transport speaks and the address it was bound at — the
+    /// one that goes in its `Via` — or `None` for one that is not bound.
+    ///
+    /// For a layer above that has to know whether a flow is a datagram one
+    /// and where it is bound, without having kept its own copy of what it
+    /// said when it bound it: keeping a UDP flow's NAT binding open is that
+    /// layer's, and only when the address the flow is seen from outside is
+    /// not the one it is bound at.
+    #[must_use]
+    pub fn bound_transport(
+        &self,
+        transport: TransportId,
+    ) -> Option<(TransportProtocol, SocketAddr)> {
+        self.transports
+            .get(transport)
+            .map(|bound| (bound.protocol, bound.local))
+    }
+
     /// How many transactions and dialogs are live, for a caller that wants to
     /// know whether it can shut down.
     #[must_use]

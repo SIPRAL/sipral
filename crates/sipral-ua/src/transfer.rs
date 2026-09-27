@@ -397,7 +397,9 @@ impl UserAgent {
     /// # Errors
     /// [`UaError::Header`] for a field in `extra.headers` refused as above,
     /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when nothing was
-    /// asked, [`UaError::NoSuchAccount`], or [`UaError::Send`].
+    /// asked — or when what was asked went unanswered until its transaction
+    /// ended, 64·T1 after it arrived, and the stack answered it 408 —
+    /// [`UaError::NoSuchAccount`], or [`UaError::Send`].
     pub fn accept_transfer(
         &mut self,
         call: CallHandle,
@@ -628,6 +630,26 @@ impl UserAgent {
                 .held
                 .get(&owner)
                 .map(|referral| referral.notifier),
+        }
+    }
+
+    /// A REFER the far end sent inside a call, which nobody took or refused
+    /// before its transaction ended: RFC 3515 §2.4.2 has the answer go
+    /// "before the REFER transaction expires", and past 64·T1 the endpoint
+    /// has answered it 408 itself. It opened no subscription (only a 2xx
+    /// does, §2.4.2), so there is nothing of it left to keep — and kept, it
+    /// held the call's one seat, every later REFER on the call was answered
+    /// 491 for a transfer nobody was running, and taking or refusing this one
+    /// now would answer a transaction that no longer exists.
+    pub(crate) fn forget_unanswered_refer(&mut self, transaction: TransactionId<NonInviteServer>) {
+        for held in self.calls.values_mut() {
+            if held
+                .referred
+                .is_some_and(|referred| referred.transaction == Some(transaction))
+            {
+                held.referred = None;
+                held.asked_to_refer = None;
+            }
         }
     }
 

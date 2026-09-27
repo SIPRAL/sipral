@@ -467,6 +467,12 @@ pub(crate) struct Answering {
     /// body of any other type is refused 415 or ignored before a change is
     /// handed over.
     pub(crate) offer: SessionDescription,
+    /// The reliable provisional response the request acknowledges, when it
+    /// is a PRACK (RFC 3262 §5). Its 2xx carries only the answer, and it
+    /// lets go of whatever that response was holding back; a refusal
+    /// leaves the response unacknowledged, for the PRACK the far end sends
+    /// again without the offer.
+    pub(crate) prack: Option<ProvisionalResponseId>,
 }
 
 /// What `current_contact` (`crate::calls`) needs to answer for a call besides

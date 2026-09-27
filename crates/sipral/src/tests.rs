@@ -9225,7 +9225,7 @@ t=0 0\r\nm=audio 40002 {proto} 0\r\na=rtpmap:0 PCMU/8000\r\n{crypto}a={direction
             );
             pair.callee
                 .agent
-                .accept_reoffer(remote, Some(described(6, "recvonly").as_bytes()), pair.now)
+                .accept_reoffer(remote, described(6, "recvonly").as_bytes(), pair.now)
                 .expect("the application answers it");
             pair.settle();
             assert!(!refused(&pair));

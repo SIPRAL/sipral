@@ -136,6 +136,14 @@ public final class SipralStack: @unchecked Sendable {
     /// default, when every one is refused 403: a peer that can make a phone
     /// dial is a toll-fraud vector, so each one is the application's
     /// decision.
+    ///
+    /// `registrarKeepalive` keeps the registrar's flow open behind a NAT:
+    /// every account `stunServer` showed to be behind one sends its
+    /// registrar a double CRLF every `registrarKeepaliveMs` (zero for 25
+    /// seconds, 1 000 to 120 000), so that a NAT filtering by address and
+    /// port still lets the registrar's INVITE in minutes after the REGISTER.
+    /// On by default; `false` turns it off, and an interval with it off is
+    /// refused. Nothing is sent while the stack is suspended.
     public init(
         bindHost: String = "127.0.0.1",
         bindPort: UInt16 = 0,
@@ -148,7 +156,9 @@ public final class SipralStack: @unchecked Sendable {
         stunServer: String? = nil,
         turn: TurnServer? = nil,
         g729AnnexB: Bool? = nil,
-        referrals: Bool? = nil
+        referrals: Bool? = nil,
+        registrarKeepalive: Bool? = nil,
+        registrarKeepaliveMs: UInt64 = 0
     ) throws {
         let socket = try UDPSocket(host: bindHost, port: bindPort)
         self.socket = socket
@@ -192,6 +202,8 @@ public final class SipralStack: @unchecked Sendable {
                     config.ice = ice?.rawValue ?? 0
                     config.g729_annex_b = SipralStack.toggle(g729AnnexB)
                     config.referrals = SipralStack.toggle(referrals)
+                    config.registrar_keepalive = SipralStack.toggle(registrarKeepalive)
+                    config.registrar_keepalive_ms = registrarKeepaliveMs
                     if let stunPointer = parts[3].pointer {
                         config.nat = SipralNat.stun.rawValue
                         config.stun_server = stunPointer

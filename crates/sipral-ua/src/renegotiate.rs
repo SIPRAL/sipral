@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use sipral_core::endpoint::{Event, OutgoingInDialogRequest, OutgoingResponse};
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode};
 use sipral_core::sdp::{self, SessionDescription};
-use sipral_core::transaction::{AnyTransactionId, DialogId};
+use sipral_core::transaction::{AnyTransactionId, DialogId, ProvisionalResponseId};
 
 use crate::agent::UserAgent;
 use crate::call::{Answering, Author, CallHandle, CallState, Direction, Offer};
@@ -110,7 +110,7 @@ const BACKOFF_STEP: u64 = 10;
 const RETRY_AFTER_CEILING: u32 = 11;
 /// §14.2 and RFC 3311 §5.2 both say a 488 "SHOULD include a Warning header
 /// field". 399 is §20.43's miscellaneous code, which is what this is.
-const WHY_488: &[u8] = b"399 sipral \"the session description could not be read\"";
+pub(crate) const WHY_488: &[u8] = b"399 sipral \"the session description could not be read\"";
 
 // -- what the application asks for -------------------------------------------
 
@@ -251,8 +251,18 @@ impl UserAgent {
 
     /// Answer a [`UaEvent::Reoffer`] the far end sent.
     ///
-    /// `sdp` is the answer to the offer it carried, and is left out only for a
-    /// request that carried none.
+    /// `sdp` is the answer to the offer it carried, and it is not optional:
+    /// every [`UaEvent::Reoffer`] carries an offer — a re-INVITE that came
+    /// without one is answered with this end's own offer before anything is
+    /// handed over (RFC 3261 §14.1), and an UPDATE without one only
+    /// refreshes the target — and RFC 3264 §5 has an offer answered, so a
+    /// 2xx with no body is not an answer this layer can be asked to send.
+    ///
+    /// For an offer that arrived in a PRACK (RFC 3262 §5: "If the UAS
+    /// receives a PRACK with an offer, it MUST place the answer in the 2xx
+    /// to the PRACK") the 2xx is the PRACK's and carries only the answer,
+    /// and a 2xx to the INVITE that was waiting for the provisional response
+    /// to be acknowledged goes as soon as it has.
     ///
     /// Two things the answer gets from this layer rather than from whoever
     /// wrote it. A hold this end asked for is kept: a stream the answer has
@@ -271,39 +281,35 @@ impl UserAgent {
     pub fn accept_reoffer(
         &mut self,
         call: CallHandle,
-        sdp: Option<&[u8]>,
+        sdp: &[u8],
         now: Instant,
     ) -> Result<(), UaError> {
-        let mut written = match sdp {
-            Some(bytes) => {
-                Some(sdp::parse_with_limits(bytes, self.sdp_limits).map_err(UaError::Sdp)?)
-            }
-            None => None,
-        };
+        let mut written = sdp::parse_with_limits(sdp, self.sdp_limits).map_err(UaError::Sdp)?;
         let (answering, rewritten) = {
             let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
             let state = held.state;
             let answering = held.answering.take().ok_or(UaError::WrongState(state))?;
-            let rewritten = written
-                .as_mut()
-                .is_some_and(|answer| held.session.keep_hold(answer));
+            let rewritten = held.session.keep_hold(&mut written);
             (answering, rewritten)
         };
-        let contact = self.current_contact(call, now);
-        let mut response = OutgoingResponse::new(StatusCode::OK)
-            .contact(&contact)
-            .header(HeaderName::Allow, ALLOW);
-        if let Some(value) = self.timer_echo(call) {
-            response = response.header(HeaderName::SessionExpires, &value);
+        let body = if rewritten {
+            written.to_bytes()
+        } else {
+            sdp.to_vec()
+        };
+        let mut response = OutgoingResponse::new(StatusCode::OK).header(HeaderName::Allow, ALLOW);
+        // a PRACK is no target refresh and no session refresh — RFC 3262 §6,
+        // Table 1, marks `Contact` "-" in its 2xx, and RFC 4028 §1 refreshes
+        // "through re-INVITEs or UPDATEs" only — so its 2xx carries the
+        // answer alone
+        if answering.prack.is_none() {
+            let contact = self.current_contact(call, now);
+            response = response.contact(&contact);
+            if let Some(value) = self.timer_echo(call) {
+                response = response.header(HeaderName::SessionExpires, &value);
+            }
         }
-        if let (Some(bytes), Some(answer)) = (sdp, written.as_ref()) {
-            let body = if rewritten {
-                answer.to_bytes()
-            } else {
-                bytes.to_vec()
-            };
-            response = response.body(b"application/sdp", Arc::from(body));
-        }
+        let response = response.body(b"application/sdp", Arc::from(body));
         if let Err(error) = self.answer_with(call, answering.transaction, &response, now) {
             // the far end's change is over here even so — the transaction it
             // named is gone — and a hold waiting behind it goes now rather
@@ -314,12 +320,13 @@ impl UserAgent {
         }
         if let Some(held) = self.calls.get_mut(&call) {
             held.session.set_remote(answering.offer);
-            if let Some(answer) = written {
-                held.session.set_local(answer);
-            }
+            held.session.set_local(written);
             held.overtake();
         }
         self.report_session(call);
+        if answering.prack.is_some() {
+            self.acknowledged(call, now);
+        }
         self.drain(now);
         Ok(())
     }
@@ -344,7 +351,17 @@ impl UserAgent {
         if status == StatusCode::NOT_ACCEPTABLE_HERE {
             response = response.header(HeaderName::Warning, WHY_488);
         }
-        if let Err(error) = self.answer_with(call, answering.transaction, &response, now) {
+        let sent = match (answering.prack, answering.transaction) {
+            // a PRACK refused acknowledged nothing: the response it named
+            // goes back on the list, for the PRACK the far end sends again
+            // without the offer (RFC 3262 §3, RFC 3261 §8.1.3.5)
+            (Some(provisional), AnyTransactionId::NonInviteServer(transaction)) => self
+                .endpoint
+                .refuse_prack(transaction, provisional, &response, now)
+                .map_err(UaError::Respond),
+            _ => self.answer_with(call, answering.transaction, &response, now),
+        };
+        if let Err(error) = sent {
             // as in accept_reoffer
             self.send_waiting_holds(now);
             return Err(error);
@@ -660,7 +677,7 @@ impl UserAgent {
 
     /// A refusal that says when to come back, with the interval drawn rather
     /// than fixed so that two peers do not repeat the collision.
-    fn too_soon(&mut self, status: StatusCode) -> OutgoingResponse {
+    pub(crate) fn too_soon(&mut self, status: StatusCode) -> OutgoingResponse {
         let seconds = (spread(&self.endpoint.token()) % RETRY_AFTER_CEILING).to_string();
         OutgoingResponse::new(status).header(HeaderName::RetryAfter, seconds.as_bytes())
     }
@@ -675,7 +692,7 @@ impl UserAgent {
         }
     }
 
-    fn report_session(&mut self, call: CallHandle) {
+    pub(crate) fn report_session(&mut self, call: CallHandle) {
         let Some(current) = self.calls.get(&call) else {
             return;
         };
@@ -1148,7 +1165,7 @@ impl UserAgent {
             }
             Arriving::Offer(offer) => {
                 if !self.take_offer(call, transaction, &offer, now) {
-                    self.hand_over(call, transaction, *offer, request);
+                    self.hand_over(call, transaction, *offer, None, request);
                 }
             }
         }
@@ -1258,15 +1275,20 @@ impl UserAgent {
     }
 
     /// Hand a change to the application, keeping the transaction open for it.
-    fn hand_over(
+    pub(crate) fn hand_over(
         &mut self,
         call: CallHandle,
         transaction: AnyTransactionId,
         offer: SessionDescription,
+        prack: Option<ProvisionalResponseId>,
         request: &OwnedMessage,
     ) {
         if let Some(held) = self.calls.get_mut(&call) {
-            held.answering = Some(Answering { transaction, offer });
+            held.answering = Some(Answering {
+                transaction,
+                offer,
+                prack,
+            });
         }
         self.events.push_back(UaEvent::Reoffer {
             call,
@@ -1322,7 +1344,12 @@ fn arriving(request: &RawMessage<'_>, limits: sdp::Limits) -> Arriving {
             }),
         // a body of any other type got past `body_refusal` only because its
         // sender marked it optional (RFC 3261 §20.11), and §8.2.3 refuses
-        // only the bodies that are not: one that is, this agent ignores
+        // only the bodies that are not: one that is, this agent ignores.
+        // Ignored, not handed to the application: RFC 3204 §6, which
+        // defines the parameter §20.11 points to, has "the UAS MUST ignore
+        // the message body" when it is `optional`, so the request is the one
+        // it would be without it — a re-INVITE asking for an offer, an
+        // UPDATE refreshing the target — and is answered as that
         _ => Arriving::Nothing,
     }
 }

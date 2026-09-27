@@ -17,6 +17,12 @@
 //! It is answered here rather than handed to the application because there is
 //! no decision in it. The application cannot know the answer better than the
 //! stack does, and one that forgot to reply would look like this one did.
+//!
+//! Inside a dialog too, and with the same answer: "An OPTIONS request
+//! received within a dialog generates a 200 (OK) response that is identical
+//! to one constructed outside a dialog and does not have any impact on the
+//! dialog" (§11.2). A peer that checks a call is still there sends one, and
+//! an OPTIONS left unanswered there is one §12.2.1.2 has it end the call over.
 
 use std::time::Instant;
 
@@ -35,10 +41,15 @@ impl UserAgent {
     /// `None` when this was an OPTIONS and has been answered; the event back
     /// when it was anything else.
     pub(crate) fn on_options_event(&mut self, event: Event, now: Instant) -> Option<Event> {
-        let Event::IncomingOutOfDialog {
+        let (Event::IncomingOutOfDialog {
             transaction,
             ref request,
-        } = event
+        }
+        | Event::IncomingInDialog {
+            transaction,
+            ref request,
+            ..
+        }) = event
         else {
             return Some(event);
         };

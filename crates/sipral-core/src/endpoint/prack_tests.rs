@@ -464,6 +464,150 @@ Content-Length: 0\r\n\
     );
 }
 
+/// A PRACK for the 180 `respond_reliable` just sent, with the branch and the
+/// `CSeq` given, and what the endpoint reported it as.
+fn prack_for(
+    endpoint: &mut Endpoint,
+    ringing: &[u8],
+    branch: &str,
+    cseq: u32,
+    now: Instant,
+) -> Option<(
+    TransactionId<crate::transaction::NonInviteServer>,
+    ProvisionalResponseId,
+)> {
+    let rseq = String::from_utf8_lossy(&header(ringing, HeaderName::RSeq)).into_owned();
+    let tag = String::from_utf8_lossy(&header(ringing, HeaderName::To))
+        .rsplit(";tag=")
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    let prack = format!(
+        "PRACK sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch={branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: Bob <sip:bob@example.com>;tag=bobtag\r\n\
+To: Alice <sip:alice@192.0.2.1>;tag={tag}\r\n\
+Call-ID: incoming-1\r\n\
+CSeq: {cseq} PRACK\r\n\
+RAck: {rseq} 1 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n"
+    );
+    deliver(endpoint, prack.as_bytes(), now);
+    events(endpoint).into_iter().find_map(|event| match event {
+        Event::IncomingPrack {
+            transaction,
+            provisional,
+            ..
+        } => Some((transaction, provisional)),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_refused_prack_acknowledges_nothing_and_its_retry_is_matched() {
+    // §3 answers a matching PRACK 2xx only once §8.2 of RFC 3261 has let it
+    // through; a PRACK refused there (a 420 here) acknowledged nothing, the
+    // far end retries it with the same RAck (§8.1.3.5), and that retry has
+    // to be matched rather than answered 481, which ends the dialog
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let transaction = incoming_call(&mut endpoint, t0);
+    endpoint
+        .respond_reliable(transaction, &OutgoingResponse::new(StatusCode::RINGING), t0)
+        .expect("180 goes reliably");
+    let ringing = sent(&mut endpoint);
+
+    let (first, provisional) =
+        prack_for(&mut endpoint, &ringing, "z9hG4bKrefused", 2, t0).expect("the PRACK");
+    let refusal =
+        OutgoingResponse::new(StatusCode::BAD_EXTENSION).header(HeaderName::Unsupported, b"foo");
+    endpoint
+        .refuse_prack(first, provisional, &refusal, t0)
+        .expect("the 420 goes");
+    assert!(sent(&mut endpoint).starts_with(b"SIP/2.0 420 "));
+    // still unacknowledged: a second reliable response waits for it, and it
+    // is retransmitted again
+    assert_eq!(
+        endpoint.respond_reliable(
+            transaction,
+            &OutgoingResponse::new(StatusCode::SESSION_PROGRESS),
+            t0
+        ),
+        Err(RespondError::StillUnacknowledged)
+    );
+    let due = endpoint.poll_timeout().expect("a retransmission");
+    assert!(due < t0 + 64 * T1, "{:?}", due - t0);
+    endpoint.handle_timeout(due);
+    assert_eq!(sent(&mut endpoint), ringing, "the 180 again");
+
+    let (retry, matched) = prack_for(&mut endpoint, &ringing, "z9hG4bKretried", 3, due)
+        .expect("the retry is matched, not answered 481");
+    assert_eq!(matched.rseq(), provisional.rseq());
+    endpoint
+        .refuse_prack(retry, matched, &OutgoingResponse::new(StatusCode::OK), due)
+        .expect("the 200 goes");
+    assert!(sent(&mut endpoint).starts_with(b"SIP/2.0 200 "));
+    // a 2xx through the same door acknowledges it for good
+    assert!(
+        endpoint
+            .respond_reliable(
+                transaction,
+                &OutgoingResponse::new(StatusCode::SESSION_PROGRESS),
+                due
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_refused_prack_after_the_final_response_is_not_retransmitted_again() {
+    // §3: after a final response the provisional "SHOULD NOT" be
+    // retransmitted, and taking its acknowledgement back does not change that
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let transaction = incoming_call(&mut endpoint, t0);
+    endpoint
+        .respond_reliable(transaction, &OutgoingResponse::new(StatusCode::RINGING), t0)
+        .expect("180 goes reliably");
+    let ringing = sent(&mut endpoint);
+    endpoint
+        .respond_invite(
+            transaction,
+            &OutgoingResponse::new(StatusCode::BUSY_HERE),
+            t0,
+        )
+        .expect("486 goes");
+    transmits(&mut endpoint);
+
+    let (prack, provisional) =
+        prack_for(&mut endpoint, &ringing, "z9hG4bKlate", 2, t0).expect("the PRACK");
+    endpoint
+        .refuse_prack(
+            prack,
+            provisional,
+            &OutgoingResponse::new(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            t0,
+        )
+        .expect("the 415 goes");
+    transmits(&mut endpoint);
+    for _ in 0..8 {
+        let Some(due) = endpoint.poll_timeout() else {
+            break;
+        };
+        endpoint.handle_timeout(due);
+        assert!(
+            transmits(&mut endpoint)
+                .iter()
+                .all(|transmit| with(&transmit.payload, |m| {
+                    m.status().map(StatusCode::get) != Some(180)
+                })),
+            "the provisional was retransmitted after the final response"
+        );
+    }
+}
+
 #[test]
 fn a_prack_that_matches_nothing_is_answered_481() {
     // §3: "the UAS MUST respond to the PRACK with a 481 response"

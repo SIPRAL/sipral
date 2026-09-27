@@ -61,6 +61,10 @@ pub mod dtmf;
 mod error;
 mod event;
 mod headers;
+/// Keeping a registration reachable through a NAT over UDP: what is sent to
+/// the registrar, when and how often, grouped under its own path for the
+/// bounds a binding checks its own setting against.
+pub mod keepalive;
 mod lifecycle;
 mod message;
 mod mwi;

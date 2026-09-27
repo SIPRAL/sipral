@@ -327,7 +327,10 @@ pub enum Event {
     ///
     /// Retransmissions of that response have already stopped. §3 makes
     /// answering it 2xx a MUST, and the answer is the caller's because a PRACK
-    /// may carry an offer that the 2xx has to answer.
+    /// may carry an offer that the 2xx has to answer. One the caller refuses
+    /// under RFC 3261 §8.2 — a 420, a 415, a 488 to its offer — goes through
+    /// [`super::Endpoint::refuse_prack`], which puts the response back on the
+    /// list of unacknowledged ones for the retry to find.
     IncomingPrack {
         /// The transaction to answer on.
         transaction: TransactionId<NonInviteServer>,

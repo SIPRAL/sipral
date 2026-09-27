@@ -12,9 +12,11 @@
 //! that is told 200 believes it was understood.
 //!
 //! The method question is asked twice. REGISTER is refused before anything
-//! else reads the request; any other method outside a dialog is refused only
-//! after every handler that claims one has passed it over, because only then
-//! is it known that nothing here implements it.
+//! else reads the request; any other method is refused only after every
+//! handler that claims one has passed it over, because only then is it known
+//! that nothing here implements it — outside a dialog, and inside one, where
+//! RFC 5057 §5.3 says which usage the request belongs to and so which
+//! refusal it gets.
 //!
 //! One question more comes from the other direction. An INVITE whose
 //! `Accept` rules out `application/sdp` asks for an answer this agent cannot
@@ -80,6 +82,24 @@ const ACCEPT_ENCODING_FIELD: HeaderName<'static> = HeaderName::Extension("Accept
 /// §20.11, which the core's list of header names does not carry either.
 const CONTENT_DISPOSITION_FIELD: HeaderName<'static> = HeaderName::Extension("Content-Disposition");
 
+/// RFC 6086 §11.6: "469 Bad Info Package".
+const BAD_INFO_PACKAGE: StatusCode = match StatusCode::new(469) {
+    Ok(code) => code,
+    Err(_) => StatusCode::SERVER_ERROR,
+};
+
+/// RFC 6086 §7.2, the field an INFO names its Info Package in.
+const INFO_PACKAGE_FIELD: HeaderName<'static> = HeaderName::Extension("Info-Package");
+
+/// RFC 6086 §7.3, the field a 469 lists the packages it would take in —
+/// empty here, since this agent takes none: `Recv-Info = "Recv-Info" HCOLON
+/// [info-package-list]`.
+const RECV_INFO_FIELD: HeaderName<'static> = HeaderName::Extension("Recv-Info");
+
+/// The bodies this agent reads in an INFO, which is what a 415 to one lists
+/// in `Accept` (§8.2.3): the two DTMF forms of [`crate::dtmf`].
+const INFO_ACCEPT: &[u8] = b"application/dtmf-relay, application/dtmf";
+
 impl UserAgent {
     /// §8.2.1 and §8.2.2.1, before anything else acts on a request that
     /// opens nothing yet: an initial INVITE, or a request outside a dialog.
@@ -125,18 +145,114 @@ impl UserAgent {
     /// Run last, after every handler that claims a method outside a dialog
     /// (OPTIONS, NOTIFY, MESSAGE) has had its turn, so nothing a handler
     /// takes is ever refused here. See [`unclaimed_refusal`] for the status.
+    ///
+    /// Inside a dialog it is the same question with one fact more — whether
+    /// the dialog is a call's — and the same reason to answer it here: a
+    /// request nobody answers is retransmitted until the far end's own
+    /// timer gives up, and RFC 3261 §12.2.1.2 has a UAC whose request inside
+    /// a dialog timed out "terminate the dialog", which is the call hung up
+    /// over a SUBSCRIBE it sent in passing. See [`in_dialog_answer`] for the
+    /// status. The one exception is an INFO in a call that the application
+    /// said it answers itself ([`UserAgent::hand_over_info`]).
     pub(crate) fn on_unclaimed_request(&mut self, event: Event, now: Instant) -> Option<Event> {
-        let Event::IncomingOutOfDialog {
-            transaction,
-            ref request,
-        } = event
-        else {
-            return Some(event);
-        };
-        let refusal = unclaimed_refusal(&request.as_raw());
-        self.endpoint.respond(transaction, &refusal, now).ok();
-        None
+        match event {
+            Event::IncomingOutOfDialog {
+                transaction,
+                ref request,
+            } => {
+                let refusal = unclaimed_refusal(&request.as_raw());
+                self.endpoint.respond(transaction, &refusal, now).ok();
+                None
+            }
+            Event::IncomingInDialog {
+                transaction,
+                dialog,
+                ref request,
+            } => {
+                let raw = request.as_raw();
+                let in_call = self.by_dialog.contains_key(&dialog);
+                if in_call && self.info_handed_over && raw.method() == Some(Method::Info) {
+                    return Some(event);
+                }
+                let answer = in_dialog_answer(&raw, in_call);
+                self.endpoint.respond(transaction, &answer, now).ok();
+                None
+            }
+            // a re-INVITE in a dialog that holds no call: RFC 5057 §5.3 puts
+            // an INVITE in the dialog's invite usage, and there is none here
+            // — a subscription's dialog, or a call that has just gone. 481
+            // says the usage does not exist and destroys nothing else (§5.1,
+            // note 8)
+            Event::IncomingReinvite { transaction, .. } => {
+                let gone = OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST);
+                self.endpoint.respond_invite(transaction, &gone, now).ok();
+                None
+            }
+            // a PRACK the endpoint matched to a reliable provisional response
+            // of a call this layer no longer holds — one a CANCEL ended while
+            // the response was still unacknowledged. RFC 3262 §3: "If the
+            // PRACK does match an unacknowledged reliable provisional
+            // response, it MUST be responded to with a 2xx response"
+            Event::IncomingPrack { transaction, .. } => {
+                let taken = OutgoingResponse::new(StatusCode::OK).header(HeaderName::Allow, ALLOW);
+                self.endpoint.respond(transaction, &taken, now).ok();
+                None
+            }
+            _ => Some(event),
+        }
     }
+}
+
+/// What a request inside a dialog that nothing here claimed is answered
+/// with, by the usage RFC 5057 §5.3 matches it to.
+///
+/// - **An INFO in a call** is legacy INFO usage (RFC 6086 §3) of a kind
+///   this agent does not read — anything but `application/dtmf-relay` and
+///   `application/dtmf`, which [`crate::dtmf`] claims first — and is
+///   answered by RFC 6086 §4.2.2: **469** with an empty `Recv-Info` when it
+///   names an `Info-Package`, since this agent indicated willingness to
+///   receive none; **415** with an `Accept` naming the two DTMF types for a
+///   body it cannot read that its sender did not mark optional (RFC 3261
+///   §8.2.3); and **200** for one with no body, or an optional one: "if the
+///   INFO request is syntactically correct and well structured, the UA MUST
+///   send a 200 (OK) response". Refusing those would answer the INFO some
+///   equipment sends as a keepalive with an error.
+/// - **481** for the other methods of an invite usage (UPDATE, PRACK, INFO,
+///   BYE) in a dialog that holds no call: the usage they belong to does not
+///   exist, and RFC 5057 §5.1 has a 481 destroy that usage and nothing more.
+/// - **403** for a REFER, as outside a dialog: a new usage refused on
+///   policy, which RFC 5057 §5.1 counts against the transaction alone.
+/// - **501** for a method this agent does not recognise (RFC 3261 §21.5.2),
+///   which RFC 5057 §5.3 expects of a server and which affects the
+///   transaction only.
+/// - **405** with [`ALLOW`] for any other method it recognises and does
+///   not take here: a SUBSCRIBE (other than the `refer` package, which
+///   [`crate::transfer`] claims), a PUBLISH, a REGISTER. RFC 5057 §5.1, note
+///   3: for a request "not integral to the usage ... only the transaction
+///   will be affected".
+fn in_dialog_answer(request: &RawMessage<'_>, in_call: bool) -> OutgoingResponse {
+    match request.method() {
+        Some(Method::Info) if in_call => legacy_info_answer(request),
+        Some(Method::Refer) => OutgoingResponse::new(FORBIDDEN),
+        Some(Method::Bye | Method::Update | Method::Info | Method::Prack) => {
+            OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST)
+        }
+        Some(Method::Extension(_)) | None => OutgoingResponse::new(NOT_IMPLEMENTED),
+        Some(_) => OutgoingResponse::new(METHOD_NOT_ALLOWED).header(HeaderName::Allow, ALLOW),
+    }
+}
+
+/// RFC 6086 §4.2.2 for an INFO in a call that is not one of this agent's
+/// DTMF forms. See [`in_dialog_answer`].
+fn legacy_info_answer(request: &RawMessage<'_>) -> OutgoingResponse {
+    if request.header(INFO_PACKAGE_FIELD).is_some() {
+        return OutgoingResponse::new(BAD_INFO_PACKAGE).header(RECV_INFO_FIELD, b"");
+    }
+    if !request.body().is_empty() && !optional_body(request) {
+        return OutgoingResponse::new(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+            .header(HeaderName::Accept, INFO_ACCEPT);
+    }
+    OutgoingResponse::new(StatusCode::OK)
 }
 
 /// What a request outside a dialog that nothing here claimed is answered

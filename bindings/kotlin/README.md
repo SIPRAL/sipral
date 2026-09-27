@@ -192,6 +192,14 @@ with `IdiomaticCheck.kt`, proves each on the wire against a STUN and TURN
 server inside the check, and carries a call between two clients that require
 ICE and one between a lite client and a full one.
 
+Behind a NAT, every account `stunServer` showed to be behind one keeps its
+registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
+seconds, so that a NAT filtering by address and port keeps letting the
+registrar's INVITE in long after the REGISTER (`docs/06-nat.md`).
+`registrarKeepalive = false` turns it off and `registrarKeepaliveMs` sets the
+interval, 1 000 to 120 000; nothing goes while the stack is suspended.
+`NatCheck.kt` proves both on the wire.
+
 ### A REFER from outside any call
 
 `SipralClient.open(referrals = true)` hands a REFER that names no dialog —

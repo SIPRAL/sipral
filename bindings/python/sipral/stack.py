@@ -86,6 +86,8 @@ class Stack:
         turn_password: str | None = None,
         g729_annex_b: bool | None = None,
         referrals: bool | None = None,
+        registrar_keepalive: bool | None = None,
+        registrar_keepalive_ms: int = 0,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
 
@@ -102,6 +104,15 @@ class Stack:
         or refuse with :meth:`reject_referral`. Off by default, when every
         one is refused 403: a peer that can make a phone dial is a
         toll-fraud vector, so each one is the application's decision.
+
+        ``registrar_keepalive`` keeps the registrar's flow open behind a
+        NAT: every account ``stun_server`` showed to be behind one sends its
+        registrar a double CRLF every ``registrar_keepalive_ms`` (``0`` for
+        25 seconds, 1 000 to 120 000), so that a NAT filtering by address
+        and port still lets the registrar's INVITE in minutes after the
+        REGISTER. On by default; ``False`` turns it off, and an interval
+        with it off is refused. Nothing is sent while the stack is
+        suspended.
 
         ``nat=Nat.STUN`` needs ``stun_server`` as ``host:port``;
         ``turn_server`` rides on it and needs ``turn_username`` and
@@ -210,6 +221,8 @@ class Stack:
             config.turn_password = turn_password_buf
             config.turn_password_len = len(turn_password.encode("utf-8"))
         config.referrals = _toggle(referrals)
+        config.registrar_keepalive = _toggle(registrar_keepalive)
+        config.registrar_keepalive_ms = registrar_keepalive_ms
 
         out_stack = ffi.new("sipral_handle_t *")
         check(lib.sipral_stack_create(config, out_stack), "sipral_stack_create")

@@ -2941,10 +2941,14 @@ public enum Sipral {
     /// Accept a change the far end offered, reported as
     /// `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
     ///
-    /// `sdp` is the answer to the offer it carried, and is left out only for a
-    /// request that carried none. A re-INVITE nobody answers is retransmitted
-    /// and then ends the call, so this or sipral_call_reject_session has
-    /// to follow that event.
+    /// `sdp` is the answer to the offer it carried, and is required: every
+    /// such event carries an offer, and RFC 3264 §5 has an offer answered,
+    /// so a null or empty `sdp` is `SIPRAL_STATUS_INVALID_ARGUMENT` and the
+    /// request is still waiting for this or its refusal. A re-INVITE nobody
+    /// answers is retransmitted and then ends the call, so this or
+    /// sipral_call_reject_session has to follow that event. An offer that
+    /// arrived in a PRACK (RFC 3262 §5) is answered the same way, in the
+    /// PRACK's 2xx.
     ///
     /// Only for a call the application describes. One this stack describes
     /// answers its own re-offers, from the same codec order, before the poll

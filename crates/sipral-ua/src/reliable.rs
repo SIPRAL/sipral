@@ -30,13 +30,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sipral_core::endpoint::{Event, OutgoingResponse};
-use sipral_core::msg::{HeaderName, RawMessage, StatusCode};
-use sipral_core::transaction::{DialogId, InviteServer, ProvisionalResponseId, TransactionId};
+use sipral_core::msg::{HeaderName, OwnedMessage, RawMessage, StatusCode};
+use sipral_core::sdp::SessionDescription;
+use sipral_core::transaction::{
+    AnyTransactionId, DialogId, InviteServer, NonInviteServer, ProvisionalResponseId, TransactionId,
+};
 
 use crate::account::Account;
 use crate::agent::UserAgent;
 use crate::call::CallHandle;
-use crate::renegotiate::ALLOW;
+use crate::renegotiate::{ALLOW, WHY_488};
 
 /// Everything this agent will always answer `Require` for.
 ///
@@ -157,6 +160,23 @@ impl UserAgent {
     }
 
     /// `None` when the event was not about a reliable provisional.
+    ///
+    /// RFC 3262 §3 has the PRACK processed "according to the procedures of
+    /// Sections 8.2 and 12.2.2 of RFC 3261" before it counts as the
+    /// acknowledgement, so whatever §8.2 refuses — its `Require` (asked
+    /// earlier, in [`UserAgent::on_require_event`]), its body here — goes
+    /// through [`sipral_core::endpoint::Endpoint::refuse_prack`]: the
+    /// response stays unacknowledged, a 2xx §5 is holding back behind it
+    /// stays held, and the PRACK the far end sends again without what was
+    /// refused (§8.1.3.5) is the one that lets it go.
+    ///
+    /// A session description in a PRACK is one of two things (§5). When the
+    /// provisional response carried this end's offer — the INVITE came
+    /// without one — it is the answer, and it is taken. Otherwise it is a
+    /// new offer, and it is answered the way a re-offer is
+    /// (`answer_prack_offer`): here when it changes nothing
+    /// this layer would have to ask about, by the application through
+    /// [`UaEvent::Reoffer`](crate::UaEvent::Reoffer) when it does.
     pub(crate) fn on_reliable_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         let Event::IncomingPrack {
             transaction,
@@ -170,66 +190,159 @@ impl UserAgent {
             return Some(event);
         };
         let request = request.clone();
-
-        // §5: "If the UAS receives a PRACK with an offer, it MUST place the
-        // answer in the 2xx to the PRACK." An offer this layer can answer —
-        // the same hold or resume `is_same_media` takes anywhere else — gets
-        // its answer in the 2xx below.
-        //
-        // One that it cannot is a gap, and a named one. The 2xx still has to
-        // go (§3: a PRACK "MUST be responded to with a 2xx response"), it goes
-        // without a body, and nothing is adopted: `answer_for` returns before
-        // it touches `set_remote`, so a PRACK carrying a downgrade leaves the
-        // call on the secure description it already had. That is the safe half
-        // and it is not an accident. The unsafe half is that the application
-        // is never told an offer arrived and was dropped, and there is no
-        // event shaped to tell it — the 2xx has already gone, so there is no
-        // transaction left for an application to answer into. Saying so is
-        // what this comment is for, and it is the one thing this path owes
-        // that it does not yet pay.
-        //
-        // Before any of that, RFC 3261 §8.2.3, which a UAS asks of every
-        // request ahead of what its method would have it do: a body that is
-        // not a session description, and that its sender did not mark
-        // optional, is refused 415 rather than answered as though it were an
-        // offer. The PRACK has still done what §3 has one do — the endpoint
-        // matched it to the provisional and stopped retransmitting that — so
-        // what the provisional held back is let go below all the same.
         let raw = request.as_raw();
-        let response = if let Some(refusal) = crate::admission::body_refusal(&raw) {
-            refusal
-        } else {
-            // only a session description is an offer; a body of another type
-            // that got this far was marked optional, and is ignored
-            let offered = !raw.body().is_empty()
-                && raw
-                    .content_type()
-                    .is_ok_and(|kind| kind.is("application", "sdp"));
-            let answer = if offered {
-                self.answer_for(call, raw.body())
-            } else {
-                None
-            };
-            // §3: "it MUST be responded to with a 2xx response"
-            let mut response =
-                OutgoingResponse::new(StatusCode::OK).header(HeaderName::Allow, ALLOW);
-            if let Some(ref answer) = answer {
-                response = response.body(b"application/sdp", Arc::clone(answer));
+        // RFC 3261 §8.2.3: a body that is not a session description, and that
+        // its sender did not mark optional, is refused 415 rather than read
+        if let Some(refusal) = crate::admission::body_refusal(&raw) {
+            self.endpoint
+                .refuse_prack(transaction, provisional, &refusal, now)
+                .ok();
+            return None;
+        }
+        // only a session description is an offer or an answer; a body of
+        // another type that got this far was marked optional, and is ignored
+        // — §3 has "any other type of body" treated "in the same way that
+        // body in an ACK would be treated", which is not at all
+        let described = !raw.body().is_empty()
+            && raw
+                .content_type()
+                .is_ok_and(|kind| kind.is("application", "sdp"));
+        if !described {
+            self.confirm_prack(call, transaction, None, now);
+            return None;
+        }
+        let parsed = sipral_core::sdp::parse_with_limits(raw.body(), self.sdp_limits);
+        let answers_ours = self
+            .calls
+            .get(&call)
+            .is_some_and(|held| held.session.has_local() && !held.session.has_remote());
+        match parsed {
+            // bytes that say they are a session description and are not one:
+            // neither an offer that can be answered nor an answer that can be
+            // taken (RFC 3261 §14.2's 488, which RFC 3262 §5 applies here)
+            Err(_) => {
+                let refusal = OutgoingResponse::new(StatusCode::NOT_ACCEPTABLE_HERE)
+                    .header(HeaderName::Warning, WHY_488);
+                self.endpoint
+                    .refuse_prack(transaction, provisional, &refusal, now)
+                    .ok();
             }
-            response
-        };
-        self.endpoint.respond(transaction, &response, now).ok();
+            // §5: "If the UAC receives a reliable provisional response with an
+            // offer ... it MUST generate an answer in the PRACK"
+            Ok(answer) if answers_ours => {
+                if let Some(held) = self.calls.get_mut(&call) {
+                    held.session.set_remote(answer);
+                }
+                self.report_session(call);
+                self.confirm_prack(call, transaction, None, now);
+            }
+            Ok(offer) => {
+                self.answer_prack_offer(call, transaction, provisional, offer, &request, now);
+            }
+        }
+        None
+    }
 
+    /// A PRACK that carried an offer (RFC 3262 §5: "If the UAS receives a
+    /// PRACK with an offer, it MUST place the answer in the 2xx to the
+    /// PRACK"), asked what a re-offer is asked.
+    ///
+    /// One that crosses an offer of this end's own is told to wait with a
+    /// 491, and one that arrives while an earlier offer of the far end's is
+    /// still with the application with a 500 saying when to come back (RFC
+    /// 3311 §5.2, which names the PRACK among the requests an offer may
+    /// arrive in). An offer that keeps the streams, the formats and the
+    /// keying is answered here, in the PRACK's 2xx. Anything else — a codec
+    /// change, a stream added, a secured stream — needs what the application
+    /// holds, so it is handed over as
+    /// [`UaEvent::Reoffer`](crate::UaEvent::Reoffer) with the PRACK held open
+    /// for it: [`UserAgent::accept_reoffer`] puts the answer in the PRACK's
+    /// 2xx, and [`UserAgent::reject_reoffer`] refuses the PRACK and leaves
+    /// the provisional response unacknowledged.
+    fn answer_prack_offer(
+        &mut self,
+        call: CallHandle,
+        transaction: TransactionId<NonInviteServer>,
+        provisional: ProvisionalResponseId,
+        offer: SessionDescription,
+        request: &OwnedMessage,
+        now: Instant,
+    ) {
+        let (crossing, pending) = self.calls.get(&call).map_or((false, false), |held| {
+            let crossing = held.session.answer_owed
+                || held
+                    .offering
+                    .as_ref()
+                    .is_some_and(|offer| offer.transaction.is_some());
+            (crossing, held.answering.is_some())
+        });
+        if crossing || pending {
+            let refusal = if crossing {
+                OutgoingResponse::new(StatusCode::REQUEST_PENDING)
+            } else {
+                self.too_soon(StatusCode::SERVER_ERROR)
+            };
+            self.endpoint
+                .refuse_prack(transaction, provisional, &refusal, now)
+                .ok();
+            return;
+        }
+        let answer = self.calls.get_mut(&call).and_then(|held| {
+            if !held.session.is_same_media(&offer) {
+                return None;
+            }
+            let wanted = held.session.hold.local;
+            held.session.answer(&offer, wanted)
+        });
+        let Some(answer) = answer else {
+            self.hand_over(
+                call,
+                AnyTransactionId::NonInviteServer(transaction),
+                offer,
+                Some(provisional),
+                request,
+            );
+            return;
+        };
+        let body: Arc<[u8]> = Arc::from(answer.to_bytes());
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.session.set_remote(offer);
+            held.session.set_local(answer);
+            held.overtake();
+        }
+        self.report_session(call);
+        self.confirm_prack(call, transaction, Some(body), now);
+    }
+
+    /// Answer a PRACK 2xx (§3: "it MUST be responded to with a 2xx
+    /// response"), with the answer to its offer when it carried one, and let
+    /// go of what the provisional response it acknowledged was holding back.
+    fn confirm_prack(
+        &mut self,
+        call: CallHandle,
+        transaction: TransactionId<NonInviteServer>,
+        answer: Option<Arc<[u8]>>,
+        now: Instant,
+    ) {
+        let mut response = OutgoingResponse::new(StatusCode::OK).header(HeaderName::Allow, ALLOW);
+        if let Some(answer) = answer {
+            response = response.body(b"application/sdp", answer);
+        }
+        self.endpoint.respond(transaction, &response, now).ok();
+        self.acknowledged(call, now);
+    }
+
+    /// The reliable provisional response this call was waiting on has been
+    /// acknowledged: §5 held the 2xx to the INVITE until now, and it can go.
+    pub(crate) fn acknowledged(&mut self, call: CallHandle, now: Instant) {
         let waiting = self
             .calls
             .get_mut(&call)
             .and_then(|held| held.unacknowledged.take());
-        // §5 held the 2xx to the INVITE; it can go now
         if let Some(sdp) = waiting.and_then(|waiting| waiting.held) {
             let sdp = (!sdp.is_empty()).then_some(sdp);
             self.answer(call, sdp, now).ok();
         }
-        None
     }
 
     /// The call a reliable provisional belongs to.
@@ -242,21 +355,6 @@ impl UserAgent {
                     .is_some_and(|waiting| waiting.provisional == provisional)
             })
             .map(|(handle, _)| *handle)
-    }
-
-    /// The answer to an offer that arrived in a PRACK, when this layer can
-    /// write one at all.
-    fn answer_for(&mut self, call: CallHandle, body: &[u8]) -> Option<Arc<[u8]>> {
-        let offer = sipral_core::sdp::parse_with_limits(body, self.sdp_limits).ok()?;
-        let held = self.calls.get_mut(&call)?;
-        if !held.session.is_same_media(&offer) {
-            return None;
-        }
-        let wanted = held.session.hold.local;
-        let answer = held.session.answer(&offer, wanted)?;
-        held.session.set_remote(offer);
-        held.session.set_local(answer.clone());
-        Some(Arc::from(answer.to_bytes()))
     }
 
     /// §8.2.2.3: a `Require` this agent cannot honour is a 420, and the
@@ -274,7 +372,10 @@ impl UserAgent {
     ///
     /// This runs before the handlers that would act on the request, for the
     /// same reason the screening hook runs before the call layer: by the time
-    /// a session change has been applied, refusing it is a second change.
+    /// a session change has been applied, refusing it is a second change. A
+    /// PRACK is among them: refused here, it has acknowledged nothing, so the
+    /// provisional response it names is put back and a 2xx held behind it
+    /// waits for the PRACK that comes again without the extension.
     ///
     /// `Require: gruu` is the one token whose answer depends on who the
     /// request is for: honoured for an account that has asked its own
@@ -304,6 +405,17 @@ impl UserAgent {
                 let gruu = self.account_wants_gruu(&request.as_raw(), None);
                 unsupported(&request.as_raw(), gruu)
             }
+            // a PRACK is a request inside the dialog like any other (RFC 3262
+            // §3: "the UAS core processes it according to the procedures of
+            // Sections 8.2 and 12.2.2 of RFC 3261"), and §8.2.2.3 is one of them
+            Event::IncomingPrack {
+                ref request,
+                provisional,
+                ..
+            } => {
+                let gruu = self.account_wants_gruu(&request.as_raw(), Some(provisional.dialog()));
+                unsupported(&request.as_raw(), gruu)
+            }
             _ => return Some(event),
         };
         if missing.is_empty() {
@@ -320,6 +432,18 @@ impl UserAgent {
             Event::IncomingInDialog { transaction, .. }
             | Event::IncomingOutOfDialog { transaction, .. } => {
                 self.endpoint.respond(transaction, &refusal, now).ok();
+            }
+            // refused before it acknowledged anything: the provisional it
+            // names stays unacknowledged, and a 2xx held behind it stays held
+            // until the PRACK the far end sends again without the extension
+            Event::IncomingPrack {
+                transaction,
+                provisional,
+                ..
+            } => {
+                self.endpoint
+                    .refuse_prack(transaction, provisional, &refusal, now)
+                    .ok();
             }
             _ => return Some(event),
         }

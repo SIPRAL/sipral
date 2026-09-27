@@ -2439,13 +2439,16 @@ fn unregistering_removes_this_binding_and_not_everybody_elses() {
 
 #[test]
 fn a_request_this_layer_has_no_policy_for_is_passed_through_whole() {
-    // a PUBLISH inside a call (RFC 3903): nothing here has an opinion about
-    // it, so it reaches the application as the core wrote it rather than
-    // being dropped. INFO used to be this test's example, and then MESSAGE;
-    // 8.3.11 gave the first a policy of its own and 8.6.5 gave the second
-    // one, so neither proves the point this test exists for any longer
+    // an INFO in a call that is not DTMF, handed over because the
+    // application said it answers those itself: it reaches the application
+    // as the core wrote it rather than being dropped. INFO used to be this
+    // test's example unconditionally, and then MESSAGE, then PUBLISH; 8.3.11
+    // and 8.6.5 gave the first two a policy of their own, and 8.7.4 has
+    // every in-dialog request nothing claims answered here, so only what
+    // the application asked for still proves the point
     let t0 = Instant::now();
     let mut agent = agent(t0);
+    agent.hand_over_info(true);
     agent.add_account(account());
     deliver(&mut agent, &incoming_invite("in1", Some(OFFER)), t0);
     transmits(&mut agent);
@@ -2463,11 +2466,22 @@ fn a_request_this_layer_has_no_policy_for_is_passed_through_whole() {
     deliver(&mut agent, &in_dialog(&ok, "ACK", "in1ack", 1), t0);
     events(&mut agent);
 
-    deliver(&mut agent, &in_dialog(&ok, "PUBLISH", "in1pub", 2), t0);
+    let info = carrying(
+        &in_dialog(&ok, "INFO", "in1info", 2),
+        "application/media_control+xml",
+        "",
+        "<media_control/>",
+    );
+    deliver(&mut agent, &info, t0);
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "the application answers it"
+    );
     assert!(
         events(&mut agent).iter().any(|event| matches!(
-            *event,
-            UaEvent::Unclaimed(sipral_core::endpoint::Event::IncomingInDialog { .. })
+            event,
+            UaEvent::Unclaimed(sipral_core::endpoint::Event::IncomingInDialog { request, .. })
+                if request.as_raw().body() == b"<media_control/>"
         )),
         "nothing is dropped on the way through"
     );
@@ -4838,7 +4852,7 @@ fn an_answer_written_for_a_call_held_here_keeps_it_held() {
     let listening: &[u8] = b"v=0\r\no=- 1 4 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
 t=0 0\r\nm=audio 8000 RTP/AVP 8\r\na=sendrecv\r\n";
     agent
-        .accept_reoffer(call, Some(listening), t0)
+        .accept_reoffer(call, listening, t0)
         .expect("the 200 goes");
     let answer = body_of(&sent(&mut agent));
     assert!(answer.contains("a=sendonly\r\n"), "{answer}");
@@ -4863,9 +4877,7 @@ fn an_answer_with_nothing_held_goes_out_byte_for_byte() {
     // written oddly on purpose: a layer that re-wrote it would tidy it
     let odd: &[u8] = b"v=0\r\no=- 1 2 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
 t=0 0\r\na=sendrecv\r\nm=audio 8000 RTP/AVP 8\r\n";
-    agent
-        .accept_reoffer(call, Some(odd), t0)
-        .expect("the 200 goes");
+    agent.accept_reoffer(call, odd, t0).expect("the 200 goes");
     assert_eq!(body_of(&sent(&mut agent)).as_bytes(), odd);
 }
 
@@ -4884,7 +4896,7 @@ fn an_answer_that_cannot_be_read_leaves_the_offer_waiting_to_be_answered() {
     events(&mut agent);
 
     assert!(matches!(
-        agent.accept_reoffer(call, Some(b"not a description"), t0),
+        agent.accept_reoffer(call, b"not a description", t0),
         Err(UaError::Sdp(_))
     ));
     agent
@@ -4925,7 +4937,7 @@ fn a_refresh_the_application_answers_still_says_what_the_session_timer_is() {
     events(&mut agent);
 
     agent
-        .accept_reoffer(call, Some(ANSWER), t0 + Duration::from_secs(300))
+        .accept_reoffer(call, ANSWER, t0 + Duration::from_secs(300))
         .expect("the 200 goes");
     let answer = sent(&mut agent);
     assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
@@ -5115,7 +5127,7 @@ fn an_offer_that_changes_the_codecs_is_the_applications() {
     );
 
     agent
-        .accept_reoffer(call, Some(ANSWER), t0)
+        .accept_reoffer(call, ANSWER, t0)
         .expect("the 200 goes");
     let answer = sent(&mut agent);
     assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
@@ -5145,7 +5157,7 @@ fn an_accepted_reoffers_answer_past_the_configured_sdp_bound_is_refused() {
     let two_streams: &[u8] = b"v=0\r\no=- 2 2 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
 t=0 0\r\nm=audio 9000 RTP/AVP 0\r\nm=video 9002 RTP/AVP 31\r\n";
     let err = agent
-        .accept_reoffer(call, Some(two_streams), t0)
+        .accept_reoffer(call, two_streams, t0)
         .expect_err("a second stream is past the configured bound");
     assert_eq!(
         err,
@@ -5567,7 +5579,7 @@ fn a_hold_asked_for_while_the_far_ends_offer_waits_on_the_application_goes_after
     assert!(transmits(&mut agent).is_empty());
 
     agent
-        .accept_reoffer(call, Some(THEIR_PCMA), t0)
+        .accept_reoffer(call, THEIR_PCMA, t0)
         .expect("answered");
     let written = transmits(&mut agent);
     assert!(
@@ -6032,7 +6044,7 @@ fn a_retry_due_while_the_far_ends_offer_waits_on_the_application_waits_too() {
     );
 
     agent
-        .accept_reoffer(call, Some(OUR_PCMA_ANSWER), t0 + wait)
+        .accept_reoffer(call, OUR_PCMA_ANSWER, t0 + wait)
         .expect("answered");
     transmits(&mut agent);
     let later = t0 + wait + Duration::from_secs(5);
@@ -7259,12 +7271,13 @@ fn carrying(request: &[u8], content_type: &str, extra: &str, body: &str) -> Vec<
 const ISUP: &str = "\u{1}\u{2}\u{3}";
 
 #[test]
-fn a_prack_with_a_body_this_agent_cannot_read_is_refused_415_and_still_acknowledges() {
+fn a_prack_with_a_body_this_agent_cannot_read_is_refused_415_and_acknowledges_nothing() {
     // RFC 3261 §8.2.3 comes before anything a request's method asks for, a
     // PRACK's 2xx included: a body that is not a session description is
-    // refused with an Accept that says what is read. The PRACK has matched
-    // its provisional all the same (RFC 3262 §3), so the 2xx held behind that
-    // provisional goes
+    // refused with an Accept that says what is read. RFC 3262 §3 counts a
+    // PRACK as the acknowledgement only once §8.2 has let it through, so the
+    // provisional stays unacknowledged and the 2xx held behind it stays held
+    // until the PRACK the far end sends again with a body it can read
     let t0 = Instant::now();
     let mut agent = agent(t0);
     agent.add_account(account());
@@ -7298,11 +7311,329 @@ fn a_prack_with_a_body_this_agent_cannot_read_is_refused_415_and_still_acknowled
     );
     assert_eq!(header(refusal, HeaderName::Accept), b"application/sdp");
     assert!(
+        !written
+            .iter()
+            .any(|bytes| header(bytes, HeaderName::CSeq) == b"1 INVITE"),
+        "the 2xx the provisional held went for a PRACK that acknowledged nothing"
+    );
+
+    // the far end sends it again with nothing in it, and that one lets the
+    // 2xx go
+    let again = plus(
+        &in_dialog(&progress, "PRACK", "rel415again", 3),
+        &format!("RAck: {rseq} 1 INVITE\r\n"),
+    );
+    deliver(&mut agent, &again, t0);
+    let written = transmits(&mut agent);
+    assert!(
+        written
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 200 OK\r\n")
+                && header(bytes, HeaderName::CSeq) == b"3 PRACK"),
+        "the PRACK sent again is matched and answered"
+    );
+    assert!(
         written
             .iter()
             .any(|bytes| bytes.starts_with(b"SIP/2.0 200 OK\r\n")
                 && header(bytes, HeaderName::CSeq) == b"1 INVITE"),
         "the 2xx the provisional held goes"
+    );
+}
+
+/// A call rung with early media on a 183 sent reliably and answered at once,
+/// so that its 2xx is held behind the 183 (RFC 3262 §5): the call, the 183,
+/// and the `RAck` a PRACK for it carries.
+fn early_media_held(
+    agent: &mut UserAgent,
+    branch: &str,
+    now: Instant,
+) -> (CallHandle, Vec<u8>, String) {
+    let call = call_arriving(agent, &incoming_100rel(branch, true), now);
+    agent
+        .ring(call, Some(Arc::from(ANSWER)), now)
+        .expect("183 with early media");
+    let progress = sent(agent);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), now)
+        .expect("the answer is taken");
+    assert!(transmits(agent).is_empty(), "the 200 is held");
+    let rseq = String::from_utf8_lossy(&header(&progress, HeaderName::RSeq)).into_owned();
+    (call, progress, format!("RAck: {rseq} 1 INVITE\r\n"))
+}
+
+/// Whether the 2xx to the INVITE is among what was written.
+fn invite_answered(written: &[Vec<u8>]) -> bool {
+    written.iter().any(|bytes| {
+        bytes.starts_with(b"SIP/2.0 200 OK\r\n") && header(bytes, HeaderName::CSeq) == b"1 INVITE"
+    })
+}
+
+/// The answer to the PRACK with `CSeq` `cseq`, among what was written.
+fn prack_answer(written: &[Vec<u8>], cseq: u32) -> Vec<u8> {
+    let wanted = format!("{cseq} PRACK");
+    written
+        .iter()
+        .find(|bytes| header(bytes, HeaderName::CSeq) == wanted.as_bytes())
+        .cloned()
+        .expect("the PRACK is answered")
+}
+
+#[test]
+fn a_prack_that_requires_an_extension_is_refused_420_and_acknowledges_nothing() {
+    // RFC 3261 §8.2.2.3 asks every request its Require, and RFC 3262 §3 has
+    // a PRACK processed "according to the procedures of Sections 8.2 and
+    // 12.2.2 of RFC 3261": a PRACK demanding an extension this agent lacks
+    // is a 420 naming it, and one refused so has acknowledged nothing — the
+    // 2xx held behind the 183 waits for the PRACK sent again without it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (_call, progress, rack) = early_media_held(&mut agent, "rel420", t0);
+
+    let prack = plus(
+        &in_dialog(&progress, "PRACK", "rel420prack", 2),
+        &format!("{rack}Require: foo\r\n"),
+    );
+    deliver(&mut agent, &prack, t0);
+    let written = transmits(&mut agent);
+    let refusal = prack_answer(&written, 2);
+    assert!(
+        refusal.starts_with(b"SIP/2.0 420 "),
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
+    assert_eq!(header(&refusal, HeaderName::Unsupported), b"foo");
+    assert!(
+        !invite_answered(&written),
+        "the held 2xx went for a refused PRACK"
+    );
+
+    // without the extension, the same RAck is matched and lets the 2xx go
+    deliver(
+        &mut agent,
+        &plus(&in_dialog(&progress, "PRACK", "rel420again", 3), &rack),
+        t0,
+    );
+    let written = transmits(&mut agent);
+    assert!(prack_answer(&written, 3).starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert!(
+        invite_answered(&written),
+        "the 2xx the provisional held goes"
+    );
+}
+
+/// An offer from the far end over what [`OFFER`] described, with its `o=`
+/// version moved on and `extra` after its one stream.
+fn their_new_offer(format: &str, extra: &str) -> Vec<u8> {
+    format!(
+        "v=0\r\no=- 1 2 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/AVP {format}\r\n{extra}"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn an_offer_in_a_prack_that_only_holds_the_call_is_answered_in_its_2xx() {
+    // RFC 3262 §5: "If the UAS receives a PRACK with an offer, it MUST place
+    // the answer in the 2xx to the PRACK", and a hold asks nothing this
+    // layer has to hand up
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (call, progress, rack) = early_media_held(&mut agent, "relhold", t0);
+    events(&mut agent);
+
+    let offer = their_new_offer("0", "a=sendonly\r\n");
+    let prack = carrying(
+        &in_dialog(&progress, "PRACK", "relholdprack", 2),
+        "application/sdp",
+        &rack,
+        std::str::from_utf8(&offer).expect("text"),
+    );
+    deliver(&mut agent, &prack, t0);
+    let written = transmits(&mut agent);
+    let answer = prack_answer(&written, 2);
+    assert!(
+        answer.starts_with(b"SIP/2.0 200 OK\r\n"),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    let body = body_of(&answer);
+    assert!(body.contains("a=recvonly\r\n"), "{body}");
+    assert!(
+        invite_answered(&written),
+        "the 2xx the provisional held goes"
+    );
+    assert_eq!(agent.hold_state(call).map(|hold| hold.remote), Some(true));
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::SessionChanged { call: changed, .. } if *changed == call)),
+        "the application is told what the session is now"
+    );
+}
+
+#[test]
+fn an_offer_in_a_prack_this_layer_cannot_answer_is_the_applications_and_its_answer_goes_in_the_2xx()
+{
+    // an offer on another codec needs what only the application holds: it is
+    // handed up the way a re-offer is, the PRACK held open for it, and the
+    // answer goes in the PRACK's 2xx — never a 2xx with no body and the
+    // offer dropped. The 2xx held behind the 183 goes once the PRACK is
+    // answered, not before
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (call, progress, rack) = early_media_held(&mut agent, "relcodec", t0);
+    events(&mut agent);
+
+    let offer = their_new_offer("8", "");
+    let prack = carrying(
+        &in_dialog(&progress, "PRACK", "relcodecprack", 2),
+        "application/sdp",
+        &rack,
+        std::str::from_utf8(&offer).expect("text"),
+    );
+    deliver(&mut agent, &prack, t0);
+    let written = transmits(&mut agent);
+    assert!(
+        written
+            .iter()
+            .all(|bytes| header(bytes, HeaderName::CSeq) != b"2 PRACK"),
+        "the PRACK was answered before anyone had an answer to its offer"
+    );
+    assert!(!invite_answered(&written));
+    assert!(
+        events(&mut agent).iter().any(|event| matches!(
+            event,
+            UaEvent::Reoffer { call: offered, request }
+                if *offered == call && request.as_raw().method() == Some(Method::Prack)
+        )),
+        "the offer reaches the application"
+    );
+
+    let ours = b"v=0\r\no=- 2 3 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 8\r\n";
+    agent
+        .accept_reoffer(call, ours, t0)
+        .expect("the answer goes");
+    let written = transmits(&mut agent);
+    let answer = prack_answer(&written, 2);
+    assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert_eq!(body_of(&answer).as_bytes(), ours);
+    assert!(
+        header(&answer, HeaderName::Contact).is_empty(),
+        "RFC 3262 §6 leaves Contact out of a PRACK's 2xx"
+    );
+    assert!(
+        invite_answered(&written),
+        "the 2xx the provisional held goes"
+    );
+}
+
+#[test]
+fn an_offer_in_a_prack_the_application_refuses_leaves_the_provisional_unacknowledged() {
+    // refused, the PRACK acknowledged nothing (RFC 3262 §3 counts only one
+    // §8.2 and the method let through): the 2xx stays held behind the 183,
+    // and the PRACK the far end sends again without the offer lets it go
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (call, progress, rack) = early_media_held(&mut agent, "relrefuse", t0);
+    let offer = their_new_offer("8", "");
+    let prack = carrying(
+        &in_dialog(&progress, "PRACK", "relrefuseprack", 2),
+        "application/sdp",
+        &rack,
+        std::str::from_utf8(&offer).expect("text"),
+    );
+    deliver(&mut agent, &prack, t0);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent
+        .reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, t0)
+        .expect("the refusal goes");
+    let written = transmits(&mut agent);
+    assert!(prack_answer(&written, 2).starts_with(b"SIP/2.0 488 "));
+    assert!(
+        !invite_answered(&written),
+        "the held 2xx went for a refused PRACK"
+    );
+
+    deliver(
+        &mut agent,
+        &plus(&in_dialog(&progress, "PRACK", "relrefuseagain", 3), &rack),
+        t0,
+    );
+    let written = transmits(&mut agent);
+    assert!(prack_answer(&written, 3).starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert!(invite_answered(&written));
+}
+
+#[test]
+fn a_session_description_in_a_prack_that_cannot_be_read_is_refused_488() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (_call, progress, rack) = early_media_held(&mut agent, "relgarbled", t0);
+    let prack = carrying(
+        &in_dialog(&progress, "PRACK", "relgarbledprack", 2),
+        "application/sdp",
+        &rack,
+        "not a description",
+    );
+    deliver(&mut agent, &prack, t0);
+    let written = transmits(&mut agent);
+    let refusal = prack_answer(&written, 2);
+    assert!(
+        refusal.starts_with(b"SIP/2.0 488 "),
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
+    assert!(!header(&refusal, HeaderName::Warning).is_empty());
+    assert!(!invite_answered(&written));
+}
+
+#[test]
+fn the_answer_in_a_prack_to_an_offer_in_a_reliable_183_is_taken() {
+    // RFC 3262 §5: an INVITE with no offer, a reliable 183 carrying this
+    // end's, and the answer in the PRACK. Read as a new offer, it was
+    // compared with a session that had no far end yet and dropped
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(
+        &mut agent,
+        &plus(&incoming_invite("reloffered", None), "Require: 100rel\r\n"),
+        t0,
+    );
+    agent
+        .ring(call, Some(Arc::from(ANSWER)), t0)
+        .expect("183 with this end's offer");
+    let progress = sent(&mut agent);
+    let rseq = String::from_utf8_lossy(&header(&progress, HeaderName::RSeq)).into_owned();
+    events(&mut agent);
+
+    let prack = carrying(
+        &in_dialog(&progress, "PRACK", "relofferedprack", 2),
+        "application/sdp",
+        &format!("RAck: {rseq} 1 INVITE\r\n"),
+        std::str::from_utf8(OFFER).expect("text"),
+    );
+    deliver(&mut agent, &prack, t0);
+    let answer = prack_answer(&transmits(&mut agent), 2);
+    assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert!(body_of(&answer).is_empty(), "an answer is not answered");
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            UaEvent::SessionChanged { call: changed, remote: Some(remote), .. }
+                if *changed == call && remote.as_ref() == OFFER
+        )),
+        "{seen:?}"
     );
 }
 
@@ -8802,6 +9133,82 @@ fn a_refer_can_be_refused() {
         .reject_transfer(call, refused, t0)
         .expect("the refusal goes");
     assert!(sent(&mut agent).starts_with(b"SIP/2.0 603 "));
+}
+
+#[test]
+fn a_refer_nobody_answered_in_time_leaves_the_call_able_to_be_asked_again() {
+    // RFC 3515 §2.4.2 has the answer go "before the REFER transaction
+    // expires". Left alone, the endpoint answers it 408 at 64·T1 and the
+    // transaction ends; the call used to keep it as a transfer still being
+    // decided, and every REFER after it on the call was answered 491
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("reflapse", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "reflapseack", 1), t0);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "reflapse1", 2),
+            "Refer-To: <sip:carol@example.com>\r\n",
+        ),
+        t0,
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::TransferRequested { .. }))
+    );
+    // nobody answers it: the endpoint's 408, and then the transaction's end
+    let mut now = t0;
+    let mut timed_out = false;
+    while let Some(due) = agent.poll_timeout() {
+        if due > t0 + Duration::from_secs(120) {
+            break;
+        }
+        now = due;
+        agent.handle_timeout(now);
+        timed_out |= transmits(&mut agent)
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 408 "));
+    }
+    assert!(timed_out, "the endpoint answered the REFER nobody took");
+    events(&mut agent);
+    assert!(
+        matches!(
+            agent.accept_transfer(call, None, OutgoingExtras::default(), now),
+            Err(UaError::WrongState(_))
+        ),
+        "a transaction that no longer exists cannot be answered"
+    );
+
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "reflapse2", 3),
+            "Refer-To: <sip:dave@example.com>\r\n",
+        ),
+        now,
+    );
+    assert!(
+        transmits(&mut agent)
+            .iter()
+            .all(|bytes| !bytes.starts_with(b"SIP/2.0 491 ")),
+        "the next REFER was refused for a transfer nobody was running"
+    );
+    assert!(
+        events(&mut agent).iter().any(|event| matches!(
+            event,
+            UaEvent::TransferRequested { target, .. } if target.as_bytes() == b"sip:dave@example.com"
+        )),
+        "the next REFER is the application's to take"
+    );
 }
 
 #[test]
@@ -13499,16 +13906,15 @@ fn a_received_duration_of_zero_is_reported_as_zero_not_the_default() {
     );
 }
 
-/// 8.3.11-bis(a): 8.3.11 made every INFO in a call's dialog this stack's own,
-/// so one carrying a body it does not read — RFC 5168's media control here —
-/// stopped reaching the application and was answered 415 instead. Only
-/// `application/dtmf-relay` and `application/dtmf` are this stack's; every
-/// other body is left for the application, unanswered, the way it reached it
-/// before 8.3.11 existed.
+/// 8.3.11-bis(a): only `application/dtmf-relay` and `application/dtmf` are
+/// read as a digit. Every other INFO reaches the application unanswered —
+/// but only once it has said it answers them itself: see the next test for
+/// what happens when it has not.
 #[test]
-fn a_content_type_neither_form_uses_reaches_the_application_unanswered() {
+fn a_content_type_neither_form_uses_reaches_an_application_that_asked_unanswered() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
+    agent.hand_over_info(true);
     let id = agent.add_account(account());
     let (_call, ack) = call_up(&mut agent, id, t0);
 
@@ -13534,6 +13940,174 @@ fn a_content_type_neither_form_uses_reaches_the_application_unanswered() {
         seen.iter()
             .all(|event| !matches!(event, UaEvent::DtmfReceived { .. })),
         "nothing is reported for a body this stack never read"
+    );
+}
+
+/// An INFO this agent does not read as a digit is answered by RFC 6086
+/// §4.2.2 rather than left for an application with no way to answer it: a
+/// peer whose INFO is never answered retransmits it for thirty-two seconds
+/// and then, by RFC 3261 §12.2.1.2, ends the call.
+#[test]
+fn an_info_that_is_not_dtmf_is_answered_by_the_info_framework() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_call, ack) = call_up(&mut agent, id, t0);
+
+    // legacy usage with a body this agent cannot read: 415, and the Accept
+    // names the two forms it does
+    deliver(
+        &mut agent,
+        &incoming_info(
+            &ack,
+            "mediactl",
+            51,
+            Some("application/media_control+xml"),
+            b"<media_control/>",
+        ),
+        t0,
+    );
+    let answer = last(&mut agent);
+    assert!(
+        answer.starts_with(b"SIP/2.0 415 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert_eq!(
+        header(&answer, HeaderName::Accept),
+        b"application/dtmf-relay, application/dtmf"
+    );
+
+    // no body at all, which some equipment sends to see the call is there:
+    // "the UA MUST send a 200 (OK) response"
+    deliver(&mut agent, &incoming_info(&ack, "bare", 52, None, b""), t0);
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 200 "));
+
+    // an Info Package this agent never said it would take: 469, with the
+    // (empty) list of the ones it would
+    let packaged = plus(
+        &incoming_info(&ack, "package", 53, Some("application/foo"), b"x"),
+        "Info-Package: foo\r\n",
+    );
+    deliver(&mut agent, &packaged, t0);
+    let answer = last(&mut agent);
+    assert!(
+        answer.starts_with(b"SIP/2.0 469 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(
+        String::from_utf8_lossy(&answer).contains("\r\nRecv-Info: \r\n"),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(event, UaEvent::Unclaimed(_))),
+        "nothing answered here is also handed on"
+    );
+}
+
+#[test]
+fn a_request_inside_a_call_that_nothing_here_takes_is_answered_rather_than_left() {
+    // RFC 5057 §5.3 matches each to a usage, and §5.1 says which answer
+    // costs no more than the transaction: 405 with Allow for what this agent
+    // recognises and does not take, 501 for what it does not recognise
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_call, ack) = call_up(&mut agent, id, t0);
+
+    for (method, cseq, status) in [
+        ("SUBSCRIBE", 60, "405"),
+        ("PUBLISH", 61, "405"),
+        ("FROBNICATE", 62, "501"),
+    ] {
+        let request = plus(
+            &reversed(&ack, method, &format!("unclaimed{cseq}"), cseq, None),
+            "Event: presence\r\n",
+        );
+        deliver(&mut agent, &request, t0);
+        let answer = last(&mut agent);
+        assert!(
+            answer.starts_with(format!("SIP/2.0 {status} ").as_bytes()),
+            "{method}: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        if status == "405" {
+            assert!(
+                String::from_utf8_lossy(&header(&answer, HeaderName::Allow)).contains("INVITE"),
+                "{method}"
+            );
+        }
+    }
+    // and an OPTIONS inside the call is answered as one outside it is (§11.2)
+    deliver(
+        &mut agent,
+        &reversed(&ack, "OPTIONS", "inside", 63, None),
+        t0,
+    );
+    let answer = last(&mut agent);
+    assert!(answer.starts_with(b"SIP/2.0 200 "));
+    assert!(!header(&answer, HeaderName::Allow).is_empty());
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(event, UaEvent::Unclaimed(_))),
+        "nothing answered here is also handed on"
+    );
+}
+
+#[test]
+fn an_invite_usage_request_in_a_subscriptions_dialog_is_481() {
+    // RFC 5057 §5.3: "A dialog can have at most one invite usage, so any
+    // INVITE, UPDATE, PRACK, ACK, CANCEL, BYE, or INFO requests belong to
+    // it", and a subscription's dialog has none: 481 ends that usage, which
+    // does not exist, and nothing else (§5.1)
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_handle, subscribe) = subscribed(&mut agent, id, t0);
+    let from = format!("{};tag=notifier", text(&subscribe, HeaderName::To));
+    let to = text(&subscribe, HeaderName::From);
+    let call_id = text(&subscribe, HeaderName::CallId);
+
+    for (method, cseq, status) in [
+        ("UPDATE", 70, "481"),
+        ("INFO", 71, "481"),
+        ("REFER", 72, "403"),
+    ] {
+        deliver(
+            &mut agent,
+            &peer_request(
+                &from,
+                &to,
+                &call_id,
+                method,
+                &format!("sub{cseq}"),
+                cseq,
+                None,
+            ),
+            t0,
+        );
+        let answer = last(&mut agent);
+        assert!(
+            answer.starts_with(format!("SIP/2.0 {status} ").as_bytes()),
+            "{method}: {}",
+            String::from_utf8_lossy(&answer)
+        );
+    }
+    deliver(
+        &mut agent,
+        &peer_request(&from, &to, &call_id, "INVITE", "subinvite", 73, Some(OFFER)),
+        t0,
+    );
+    assert!(
+        transmits(&mut agent)
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 481 ")),
+        "a re-INVITE in a dialog with no call is answered too"
     );
 }
 
@@ -14146,14 +14720,15 @@ fn an_oversized_relay_body_is_400_even_when_it_names_a_digit() {
 }
 
 /// 8.3.11-bis(a): an INFO with no `Content-Type` names no body this stack
-/// reads either, so it is not this stack's to answer at all — RFC 6086
-/// §4.2.2's 200 for one that is "syntactically correct and well structured"
-/// is the application's to give if it chooses to, not this layer's to give
-/// on its behalf.
+/// reads either, so an application that said it answers the INFOs this
+/// stack does not read gets it unanswered, and gives RFC 6086 §4.2.2's 200
+/// itself. Without that, this layer gives it
+/// (`an_info_that_is_not_dtmf_is_answered_by_the_info_framework`).
 #[test]
-fn an_info_with_no_body_at_all_reaches_the_application_unanswered() {
+fn an_info_with_no_body_at_all_reaches_an_application_that_asked_unanswered() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
+    agent.hand_over_info(true);
     let id = agent.add_account(account());
     let (_call, ack) = call_up(&mut agent, id, t0);
 

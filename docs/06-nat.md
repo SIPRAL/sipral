@@ -16,8 +16,11 @@ Most of the NAT problem in SIP telephony is solved before ICE is reached:
    port, learn the peer's real address from the first valid packet.
 3. **Keepalive** frequent enough to hold the binding: a double-CRLF every 25 s
    on a stream transport (`EndpointConfig::keepalive_interval`); on UDP, the
-   STUN Binding refresh when STUN is on, otherwise only the registration's own
-   refreshes; and RTP itself once media flows.
+   STUN Binding refresh when STUN is on, and — for an account STUN showed to be
+   behind a NAT — a double-CRLF datagram to its registrar every 20 to 25 s, so
+   that a NAT filtering by address and port still lets the registrar's INVITE
+   in (*Refresh*, below); otherwise only the registration's own refreshes; and
+   RTP itself once media flows.
 4. **STUN** where the local address must be known before media starts.
 5. **TURN** as the relay of last resort.
 
@@ -77,7 +80,7 @@ chosen for it rather than for the general case.
 | Mechanism | Default | On the wire if turned on |
 |---|---|---|
 | ICE, in any role | **off** | **143 bytes** for the ICE attributes with one candidate (ice-lite, credentials, options and the candidate line), and one candidate line more per extra candidate, plus a round of checks before the first audio packet |
-| STUN | off | one 28-byte Binding request per socket (the header and FINGERPRINT), again every 25 s on the signalling socket; nothing on a request |
+| STUN | off | one 28-byte Binding request per socket (the header and FINGERPRINT), again every 25 s on the signalling socket; nothing on a request; and, for an account the answer shows behind a NAT, 4 bytes to its registrar every 20 to 25 s (the registrar keep-alive, on with STUN unless `registrar_keepalive` turns it off) |
 | TURN | off | a 4-byte channel header per media packet on a relayed pair, 36 bytes of Send indication until the channel is bound; one more candidate line; an Allocate (two round trips) before the offer |
 
 The 143 is measured, not estimated, and pinned by
@@ -235,17 +238,32 @@ The decisions, and why each one is what it is:
   exchange addressed to the edge proxy, and this one is addressed to the STUN
   server, which keeps the mapping open for a NAT whose mapping is
   endpoint-independent (RFC 4787 REQ-1). It does not open a NAT's filter
-  towards the registrar; the registration's own refreshes do that. Behind a
-  NAT that filters by address and port, a call reaches the phone only while
-  that filter is open, and only from the address and port the phone's
-  REGISTER went to: on the Android emulator behind its own NAT and a VPN's
-  (`docs/15-mobile.md`), Asterisk's INVITE rang the phone two and a half
-  minutes after the REGISTER and was dropped five and a half minutes after
-  it, and it was dropped whenever Asterisk sent it from a port other than the
-  one the phone had registered to, which a registrar behind a port
-  translation of its own does unless the translation is one to one. A phone
-  that has to be reachable while idle registers more often than its NAT
-  forgets, or is woken by a push (RFC 8599) and registers then. A media
+  towards the registrar. Behind a NAT that filters by address and port
+  (RFC 4787 §5), a call reaches the phone only while that filter is open,
+  and only from the address and port the phone's REGISTER went to: on the
+  Android emulator behind its own NAT and a VPN's (`docs/15-mobile.md`),
+  Asterisk's INVITE rang the phone two and a half minutes after the REGISTER
+  and was dropped five and a half minutes after it, and it was dropped
+  whenever Asterisk sent it from a port other than the one the phone had
+  registered to, which a registrar behind a port translation of its own does
+  unless the translation is one to one. So every account whose `Contact` an
+  answer moved onto an address that is not the socket's own — the one fact
+  that says it is behind a NAT — sends its registrar a double CRLF, alone in
+  a datagram, every 20 to 25 seconds while it holds a binding or is getting
+  one (`sipral_ua::keepalive`, `UserAgent::keep_registrar_flows_alive`,
+  `sipral_stack_config_t::registrar_keepalive` and `registrar_keepalive_ms`,
+  from one to 120 seconds). RFC 5626 §3.5 names a STUN request for a UDP
+  flow's keep-alive, so that the pong also says whether the mapping moved;
+  Asterisk answers no STUN on its SIP port and no registrar pongs a CRLF on
+  UDP, so a STUN request there buys nothing a CRLF does not, and the mapping
+  moving is caught by the refresh above, which the STUN server does answer.
+  The registrar drops the datagram (RFC 3261 §7.5), and the NAT has seen the
+  phone send to the registrar's address and port, which is all its filter
+  asks. Nothing is sent while the stack is suspended: a phone that sleeps is
+  woken by a push (RFC 8599) and registers then. `scripts/lab.sh nat-idle`
+  is the proof: a call placed 330 seconds after the REGISTER, behind the
+  lab's filtering NAT, rings with the keep-alive on and is dropped at the NAT
+  with it off. A media
   socket is asked on the same schedule while it waits for its call — an
   application that maps the next call's socket when the last call ends may
   place that call many minutes later, and nothing else crosses the binding in

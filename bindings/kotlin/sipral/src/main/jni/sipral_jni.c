@@ -870,7 +870,7 @@ Java_org_sipral_SipralNative_sipral_1capabilities(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlong configRegistrarKeepalive, jlong configRegistrarKeepaliveMs, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -931,6 +931,8 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     config_value.turn_password = (const char *)configTurnPassword_data;
     config_value.turn_password_len = (size_t)configTurnPassword_size;
     config_value.referrals = (uint32_t)configReferrals;
+    config_value.registrar_keepalive = (uint32_t)configRegistrarKeepalive;
+    config_value.registrar_keepalive_ms = (uint64_t)configRegistrarKeepaliveMs;
     sipral_handle_t stack_value = 0;
     sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
     if (configBindAddress) {
@@ -977,7 +979,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
     settings_value.size = sizeof settings_value;
     sipral_status_t status = sipral_stack_settings((sipral_handle_t)stack, &settings_value);
     {
-        jlong slots[14];
+        jlong slots[15];
         slots[0] = (jlong)settings_value.size;
         slots[1] = (jlong)settings_value.transport;
         slots[2] = (jlong)settings_value.retransmits;
@@ -992,7 +994,8 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
         slots[11] = (jlong)settings_value.media_stall_ms;
         slots[12] = (jlong)settings_value.g729_annex_b;
         slots[13] = (jlong)settings_value.referrals;
-        (*env)->SetLongArrayRegion(env, settings, 0, 14, slots);
+        slots[14] = (jlong)settings_value.registrar_keepalive_ms;
+        (*env)->SetLongArrayRegion(env, settings, 0, 15, slots);
     }
     return (jint)status;
 }

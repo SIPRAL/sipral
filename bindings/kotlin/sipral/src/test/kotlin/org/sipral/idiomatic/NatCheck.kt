@@ -560,11 +560,55 @@ private suspend fun iceCallSaysWhichPathsItTriedAndRestarts(host: String): Strin
     }
 }
 
+/** An account the STUN answer showed behind a NAT keeps its registrar's
+ * flow open: a double CRLF, alone in a datagram, reaches the registrar every
+ * `registrarKeepaliveMs`, and none does with the keep-alive off
+ * (`docs/06-nat.md`, "Refresh"). */
+private fun registrarFlowIsKeptOpenBehindTheNat(host: String): String {
+    for (keepalive in listOf(true, false)) {
+        FakeStunServer(host).use { stun ->
+            DatagramSocket(0, InetAddress.getByName(host)).use { registrar ->
+                val registrarAddress = formatAddress(host, registrar.localPort)
+                SipralClient.open(
+                    bindHost = host,
+                    stunServer = stun.address,
+                    registrarKeepalive = keepalive,
+                    registrarKeepaliveMs = if (keepalive) 1_000 else 0,
+                ).use { client ->
+                    val seen = recordEvents(client, 15_000)
+                    val account = client.addAccount(
+                        aor = "sip:alice@example.invalid",
+                        registrarAddress = registrarAddress,
+                        registrar = "sip:example.invalid",
+                    )
+                    stun.open = true
+                    val deadline = System.currentTimeMillis() + 10_000
+                    while (seen.toList().none { natOf(it)?.signalling == 1L } &&
+                        System.currentTimeMillis() < deadline
+                    ) {
+                        Thread.sleep(20)
+                    }
+                    assertTrue(seen.toList().any { natOf(it)?.signalling == 1L }, "the STUN server's answer never became an event")
+                    account.register()
+                    val ping = read(registrar, "\r\n\r\n", withinMs = if (keepalive) 5_000 else 3_000)
+                    if (keepalive) {
+                        assertEquals("\r\n\r\n", ping, "no keep-alive reached the registrar")
+                    } else {
+                        assertEquals(null, ping, "a keep-alive went out with it turned off")
+                    }
+                }
+            }
+        }
+    }
+    return "an account behind the NAT kept its registrar's flow open, and did not with it off"
+}
+
 /** Everything above, for IdiomaticCheck.kt's main. */
 internal suspend fun natChecks(): String {
     val host = hostAddress() ?: error("no interface but loopback: ICE has no host candidate to check with")
     return listOf(
         stunMappingReachesContactAndSdp(host),
+        registrarFlowIsKeptOpenBehindTheNat(host),
         turnRelayIsAllocatedAndOffered(host),
         iceBehindStunCarriesAudio(host),
         iceCallSaysWhichPathsItTriedAndRestarts(host),

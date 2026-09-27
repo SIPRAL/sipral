@@ -2439,9 +2439,19 @@ data class SipralStackSettings(
      * unmoved.
      */
     val referrals: Long,
+    /**
+     * How often an account behind a NAT sends to its registrar, in
+     * milliseconds, with the default filled in. Zero when
+     * `registrar_keepalive` was turned off, which is the one case where
+     * there is no figure to give.
+     *
+     * Appended at the tail (task 8.7.4); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val registrarKeepaliveMs: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 14
+        const val SLOTS: Int = 15
 
         fun of(slots: LongArray): SipralStackSettings = SipralStackSettings(
             slots[0],
@@ -2458,6 +2468,7 @@ data class SipralStackSettings(
             slots[11],
             slots[12],
             slots[13],
+            slots[14],
         )
     }
 }
@@ -3389,6 +3400,36 @@ class SipralStackConfig(
      * unmoved.
      */
     val referrals: Long = 0,
+    /**
+     * Whether an account behind a NAT keeps its registrar's UDP flow
+     * open, as a `SipralToggle`. **On by default.** An account is
+     * behind a NAT when `SIPRAL_NAT_STUN`'s answer about the signalling
+     * socket named an address that is not the socket's own; each such
+     * account on a UDP transport then sends a double CRLF, alone in a
+     * datagram, to its registrar every `registrar_keepalive_ms`, while
+     * its registration holds a binding or is getting one. A NAT that
+     * filters by address and port (RFC 4787 §5) lets the registrar's
+     * INVITE in only while it remembers this end sending to it, and the
+     * STUN refresh goes to the STUN server; without this, a call that
+     * arrives minutes after the REGISTER is dropped at the NAT.
+     * Registrars ignore the datagram (RFC 3261 §7.5). Nothing is sent
+     * while the stack is suspended (`sipral_stack_suspending`), for a
+     * stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
+     * own address. `sipral_ua`'s `keepalive` module has the reasons.
+     *
+     * Appended at the tail (task 8.7.4), with the one below; the pinned
+     * `MIN_SIZE` is unmoved.
+     */
+    val registrarKeepalive: Long = 0,
+    /**
+     * How often, in milliseconds, or zero for twenty-five seconds (RFC
+     * 5626 §4.4.2's interval for UDP). Each interval is drawn between
+     * 80% and 100% of it. From 1 000 to 120 000 — past two minutes a
+     * NAT that keeps to RFC 4787 REQ-5 may already have let the flow go
+     * — and anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`, as is a
+     * figure with `registrar_keepalive` off, a value nothing would read.
+     */
+    val registrarKeepaliveMs: Long = 0,
 )
 
 /**
@@ -5272,7 +5313,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -5773,7 +5814,7 @@ object Sipral {
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
         }
@@ -6741,10 +6782,14 @@ object Sipral {
      * Accept a change the far end offered, reported as
      * `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
      *
-     * `sdp` is the answer to the offer it carried, and is left out only for a
-     * request that carried none. A re-INVITE nobody answers is retransmitted
-     * and then ends the call, so this or sipral_call_reject_session has
-     * to follow that event.
+     * `sdp` is the answer to the offer it carried, and is required: every
+     * such event carries an offer, and RFC 3264 §5 has an offer answered,
+     * so a null or empty `sdp` is `SIPRAL_STATUS_INVALID_ARGUMENT` and the
+     * request is still waiting for this or its refusal. A re-INVITE nobody
+     * answers is retransmitted and then ends the call, so this or
+     * sipral_call_reject_session has to follow that event. An offer that
+     * arrived in a PRACK (RFC 3262 §5) is answered the same way, in the
+     * PRACK's 2xx.
      *
      * Only for a call the application describes. One this stack describes
      * answers its own re-offers, from the same codec order, before the poll

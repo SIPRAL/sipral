@@ -6,7 +6,8 @@
 //!
 //! The bookkeeping is in `reliable`; what is here is the four moments it is
 //! touched. A response goes out and starts a doubling timer. A PRACK arrives
-//! and stops one, or matches nothing and earns a 481. A response arrives and
+//! and stops one — until the layer above refuses it, which starts it again —
+//! or matches nothing and earns a 481. A response arrives and
 //! is either the next in its series or is dropped without a word. And 64·T1
 //! passes with nothing acknowledged, at which point §3 gives up on the call
 //! rather than on the response: "the UAS SHOULD reject the original request
@@ -125,6 +126,8 @@ impl Endpoint {
                 attempt: 0,
                 give_up_at: now + self.config.timers.sixty_four_t1(),
                 timer: None,
+                acknowledged: false,
+                quiet: false,
             }),
         });
         self.arm_reliable(raw, now);
@@ -167,6 +170,62 @@ impl Endpoint {
         // because a retransmission is discarded before it reaches the caller
         self.reliable.forget(raw);
         Ok(id)
+    }
+}
+
+// -- refusing a PRACK ---------------------------------------------------------
+
+impl Endpoint {
+    /// Answer a PRACK with a refusal, and put the provisional response it
+    /// named back on the list of unacknowledged ones.
+    ///
+    /// RFC 3262 §3 has a matching PRACK answered 2xx and the response it
+    /// names taken off that list, but only once "the UAS core processes it
+    /// according to the procedures of Sections 8.2 and 12.2.2 of RFC 3261",
+    /// and §8.2 can end a request before its method is acted on: a
+    /// `Require` this end cannot honour is a 420 (§8.2.2.3), a body it
+    /// cannot read a 415 (§8.2.3), an offer it will not take a 488 (RFC 3261
+    /// §14.2, which RFC 3262 §5 applies to an offer in a PRACK). Such a
+    /// PRACK has acknowledged nothing, and the far end retries it without
+    /// what was refused (§8.1.3.5) — with the same `RAck`, which a response
+    /// already forgotten would answer 481, and §12.2.1.2 has a 481 end the
+    /// dialog. So the response goes back on the list, its retransmissions
+    /// start again unless the INVITE already has its final response (§3's
+    /// "SHOULD NOT continue to retransmit"), and 64·T1 after it was first
+    /// sent still refuses the INVITE with a 5xx if nothing acknowledges it.
+    ///
+    /// A 2xx through here is an ordinary answer and puts nothing back.
+    ///
+    /// # Errors
+    /// As [`Self::respond`]; nothing is put back when the answer could not go.
+    pub fn refuse_prack(
+        &mut self,
+        transaction: TransactionId<NonInviteServer>,
+        provisional: ProvisionalResponseId,
+        response: &OutgoingResponse,
+        now: Instant,
+    ) -> Result<(), RespondError> {
+        self.respond(transaction, response, now)?;
+        if response.status.is_success() {
+            return Ok(());
+        }
+        let raw = provisional.raw;
+        let Some(sent) = self
+            .reliable
+            .get_mut(raw)
+            .and_then(|reliable| reliable.sent.as_mut())
+        else {
+            return Ok(());
+        };
+        if !sent.acknowledged {
+            return Ok(());
+        }
+        sent.acknowledged = false;
+        let quiet = sent.quiet;
+        if !quiet {
+            self.arm_reliable(raw, now);
+        }
+        Ok(())
     }
 }
 
@@ -260,8 +319,10 @@ impl Endpoint {
 
         // "It SHOULD cease retransmissions of the reliable provisional
         // response, and MUST remove it from the list of unacknowledged
-        // provisional responses."
-        let rseq = self.stop_reliable(raw).unwrap_or_default();
+        // provisional responses." Marked rather than forgotten: the layer
+        // above still asks §8.2's questions of this PRACK, and one it refuses
+        // puts the response back ([`Self::refuse_prack`])
+        let rseq = self.acknowledge_reliable(raw).unwrap_or_default();
         self.push(Event::IncomingPrack {
             transaction,
             provisional: ProvisionalResponseId::new(dialog, rseq, raw),
@@ -330,6 +391,21 @@ impl Endpoint {
     }
 
     /// Stop retransmitting one, and forget it. Returns its `RSeq`.
+    /// Stop retransmitting one a PRACK matched, and take it off the list
+    /// of unacknowledged responses without forgetting it.
+    fn acknowledge_reliable(&mut self, raw: Raw) -> Option<u32> {
+        let reliable = self.reliable.get_mut(raw)?;
+        let rseq = reliable.rseq;
+        let handle = reliable.sent.as_mut().and_then(|sent| {
+            sent.acknowledged = true;
+            sent.timer.take()
+        });
+        if let Some(handle) = handle {
+            self.deadlines.cancel(handle);
+        }
+        Some(rseq)
+    }
+
     pub(super) fn stop_reliable(&mut self, raw: Raw) -> Option<u32> {
         let reliable = self.reliable.forget(raw)?;
         if let Some(handle) = reliable.sent.and_then(|sent| sent.timer) {
@@ -349,7 +425,10 @@ impl Endpoint {
                 .reliable
                 .get_mut(raw)
                 .and_then(|reliable| reliable.sent.as_mut())
-                .and_then(|sent| sent.timer.take());
+                .and_then(|sent| {
+                    sent.quiet = true;
+                    sent.timer.take()
+                });
             if let Some(handle) = handle {
                 self.deadlines.cancel(handle);
             }

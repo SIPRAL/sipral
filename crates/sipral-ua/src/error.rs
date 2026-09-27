@@ -75,6 +75,11 @@ pub enum UaError {
     /// dialog, and MUST NOT do so unless the route set for that dialog uses
     /// a congestion-controlled transport at every hop."
     MessagePending,
+    /// A registrar keep-alive interval outside what
+    /// [`UserAgent::keep_registrar_flows_alive`](crate::UserAgent::keep_registrar_flows_alive)
+    /// takes: under a second, or over the two minutes RFC 4787 REQ-5 has a
+    /// NAT keep a UDP flow for.
+    InvalidKeepalive(core::time::Duration),
 }
 
 impl fmt::Display for UaError {
@@ -103,6 +108,11 @@ impl fmt::Display for UaError {
             ),
             Self::MessagePending => f.write_str(
                 "an out-of-dialog MESSAGE to this target is already waiting for its final answer",
+            ),
+            Self::InvalidKeepalive(interval) => write!(
+                f,
+                "a registrar keep-alive every {} ms is outside 1 000 to 120 000 ms",
+                interval.as_millis()
             ),
         }
     }

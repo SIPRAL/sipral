@@ -133,6 +133,14 @@ class SipralClient private constructor(
          * [acceptReferral] or refuse with [rejectReferral]. Off by default,
          * when every one is refused 403: a peer that can make a phone dial
          * is a toll-fraud vector, so each one is the application's decision.
+         *
+         * [registrarKeepalive] keeps the registrar's flow open behind a
+         * NAT: every account [stunServer] showed to be behind one sends its
+         * registrar a double CRLF every [registrarKeepaliveMs] (`0` for 25
+         * seconds, 1 000 to 120 000), so that a NAT filtering by address and
+         * port still lets the registrar's INVITE in minutes after the
+         * REGISTER. On by default; false turns it off, and an interval with
+         * it off is refused. Nothing is sent while the stack is suspended.
          */
         fun open(
             bindHost: String = "127.0.0.1",
@@ -144,13 +152,18 @@ class SipralClient private constructor(
             turn: SipralTurnServer? = null,
             g729AnnexB: Boolean? = null,
             referrals: Boolean? = null,
+            registrarKeepalive: Boolean? = null,
+            registrarKeepaliveMs: Long = 0,
         ): SipralClient {
             val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost))
             socket.soTimeout = 20
             val bindAddress = formatAddress(socket.localAddress.hostAddress, socket.localPort)
             val client = SipralClient(socket, bindAddress, stunServer, turn?.address)
             try {
-                client.start(userAgent, codecs, ice, turn, g729AnnexB, referrals)
+                client.start(
+                    userAgent, codecs, ice, turn, g729AnnexB, referrals,
+                    registrarKeepalive, registrarKeepaliveMs,
+                )
             } catch (refused: Exception) {
                 socket.close()
                 throw refused
@@ -172,6 +185,8 @@ class SipralClient private constructor(
         turn: SipralTurnServer?,
         g729AnnexB: Boolean?,
         referrals: Boolean?,
+        registrarKeepalive: Boolean?,
+        registrarKeepaliveMs: Long,
     ) {
         val random = SecureRandom()
         val entropy = ByteArray(32).also { random.nextBytes(it) }
@@ -193,6 +208,8 @@ class SipralClient private constructor(
             turnUsername = turn?.username,
             turnPassword = turn?.password,
             referrals = toggle(referrals),
+            registrarKeepalive = toggle(registrarKeepalive),
+            registrarKeepaliveMs = registrarKeepaliveMs,
         )
         handle = Sipral.stackCreate(config)
         thread = Thread(::run, "sipral-client-$bindAddress").apply {

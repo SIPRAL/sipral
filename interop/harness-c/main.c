@@ -717,6 +717,13 @@ static int listening;
 static uint32_t ice_for_this_flow;
 static uint32_t referrals_for_this_flow;
 
+/* Whether SIPRAL_REGISTRAR_KEEPALIVE says `off`. */
+static int keepalive_off(void)
+{
+    const char *said = getenv("SIPRAL_REGISTRAR_KEEPALIVE");
+    return said != NULL && strcmp(said, "off") == 0;
+}
+
 static void wrong(const char *what, sipral_status_t status)
 {
     if (trouble[0] == '\0') {
@@ -1441,6 +1448,10 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     config.media_clock_unix_seconds = (uint64_t)time(NULL);
     config.ice = ice_for_this_flow;
     config.referrals = referrals_for_this_flow;
+    /* the registrar keep-alive behind a NAT is the stack's default; the lab's
+     * `nat-idle` step turns it off once, with SIPRAL_REGISTRAR_KEEPALIVE=off,
+     * to show the call it exists for is lost without it */
+    config.registrar_keepalive = keepalive_off() ? SIPRAL_TOGGLE_OFF : 0u;
     if (stun_for_this_flow != NULL) {
         config.nat = SIPRAL_NAT_STUN;
         config.stun_server = stun_for_this_flow;
@@ -2481,7 +2492,8 @@ static void contact_of(const char *message, char *out, size_t room)
 /* How long a call from Asterisk is waited for once this end says it is ready,
  * and how long the call is then given to end: scripts/lab.sh's `nat` step
  * places it within a few seconds, and interop/asterisk's extension 9010
- * echoes for eight seconds before it hangs up. */
+ * echoes for eight seconds before it hangs up. Its `nat-idle` step places it
+ * minutes later, and says how long to wait with SIPRAL_CALLED_PATIENCE_MS. */
 #define CALLED_PATIENCE_MS 30000u
 #define CALLED_ENDS_MS 20000u
 
@@ -2514,6 +2526,9 @@ static int flow_nat_incoming(struct endpoint *end)
     char contact[192];
     const char *user_at;
     const char *user_end;
+    const char *patience = getenv("SIPRAL_CALLED_PATIENCE_MS");
+    unsigned called_patience = patience != NULL ? (unsigned)strtoul(patience, NULL, 10)
+                                                : CALLED_PATIENCE_MS;
     int stray = 0;
     sipral_status_t status;
 
@@ -2546,10 +2561,11 @@ static int flow_nat_incoming(struct endpoint *end)
         wrong_text("the account's address of record names no user");
         return -1;
     }
+    printf("  nat   registrar keep-alive %s\n", keepalive_off() ? "off" : "on (the default)");
     printf("  nat   waiting for a call to sip:%.*s@%s\n", (int)(user_end - user_at - 1),
            user_at + 1, end->seen.sip_public);
     (void)fflush(stdout);
-    if (!wait_until(end, called, CALLED_PATIENCE_MS)) {
+    if (!wait_until(end, called, called_patience)) {
         wrong_text("nobody called");
         return -1;
     }

@@ -2765,6 +2765,36 @@ struct sipral_stack_config {
      * unmoved.
      */
     uint32_t referrals;
+    /**
+     * Whether an account behind a NAT keeps its registrar's UDP flow
+     * open, as a `SipralToggle`. **On by default.** An account is
+     * behind a NAT when `SIPRAL_NAT_STUN`'s answer about the signalling
+     * socket named an address that is not the socket's own; each such
+     * account on a UDP transport then sends a double CRLF, alone in a
+     * datagram, to its registrar every `registrar_keepalive_ms`, while
+     * its registration holds a binding or is getting one. A NAT that
+     * filters by address and port (RFC 4787 §5) lets the registrar's
+     * INVITE in only while it remembers this end sending to it, and the
+     * STUN refresh goes to the STUN server; without this, a call that
+     * arrives minutes after the REGISTER is dropped at the NAT.
+     * Registrars ignore the datagram (RFC 3261 §7.5). Nothing is sent
+     * while the stack is suspended (`sipral_stack_suspending`), for a
+     * stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
+     * own address. `sipral_ua`'s `keepalive` module has the reasons.
+     *
+     * Appended at the tail (task 8.7.4), with the one below; the pinned
+     * `MIN_SIZE` is unmoved.
+     */
+    uint32_t registrar_keepalive;
+    /**
+     * How often, in milliseconds, or zero for twenty-five seconds (RFC
+     * 5626 §4.4.2's interval for UDP). Each interval is drawn between
+     * 80% and 100% of it. From 1 000 to 120 000 — past two minutes a
+     * NAT that keeps to RFC 4787 REQ-5 may already have let the flow go
+     * — and anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`, as is a
+     * figure with `registrar_keepalive` off, a value nothing would read.
+     */
+    uint64_t registrar_keepalive_ms;
 };
 
 /**
@@ -2895,6 +2925,16 @@ struct sipral_stack_settings {
      * unmoved.
      */
     uint32_t referrals;
+    /**
+     * How often an account behind a NAT sends to its registrar, in
+     * milliseconds, with the default filled in. Zero when
+     * `registrar_keepalive` was turned off, which is the one case where
+     * there is no figure to give.
+     *
+     * Appended at the tail (task 8.7.4); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    uint64_t registrar_keepalive_ms;
 };
 
 /**
@@ -5845,10 +5885,14 @@ sipral_status_t sipral_call_leave(sipral_handle_t stack, sipral_handle_t call);
  * Accept a change the far end offered, reported as
  * `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
  *
- * `sdp` is the answer to the offer it carried, and is left out only for a
- * request that carried none. A re-INVITE nobody answers is retransmitted
- * and then ends the call, so this or sipral_call_reject_session has
- * to follow that event.
+ * `sdp` is the answer to the offer it carried, and is required: every
+ * such event carries an offer, and RFC 3264 §5 has an offer answered,
+ * so a null or empty `sdp` is `SIPRAL_STATUS_INVALID_ARGUMENT` and the
+ * request is still waiting for this or its refusal. A re-INVITE nobody
+ * answers is retransmitted and then ends the call, so this or
+ * sipral_call_reject_session has to follow that event. An offer that
+ * arrived in a PRACK (RFC 3262 §5) is answered the same way, in the
+ * PRACK's 2xx.
  *
  * Only for a call the application describes. One this stack describes
  * answers its own re-offers, from the same codec order, before the poll

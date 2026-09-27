@@ -1455,8 +1455,8 @@ mod tests {
     use crate::event::{SipralEvent, SipralEventKind};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
     use crate::media::SIPRAL_ADDRESS_BYTES;
-    use crate::stack::SipralStackConfig;
     use crate::stack::tests::{BIND, Observed, config, create, poll, record};
+    use crate::stack::{SipralStackConfig, sipral_stack_destroy};
     use crate::status::SipralStatus;
     use crate::transport::{
         SIPRAL_MESSAGE_BYTES, SIPRAL_TRANSPORT_MAIN, SipralTransmit, sipral_stack_poll_transmit,
@@ -1802,6 +1802,127 @@ mod tests {
             header(&register.0, "Contact").as_deref(),
             Some("<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.10:5060>;expires=0")
         );
+    }
+
+    /// A stack configured with `configure`, an account registered on it and
+    /// moved onto [`SIP_PUBLIC`] by the STUN answer, its REGISTER there
+    /// granted: what the registrar keep-alive tests start from. Answers the
+    /// stack and the registrar's address.
+    fn behind_the_nat(
+        observed: &mut Observed,
+        configure: impl FnOnce(&mut SipralStackConfig),
+    ) -> (SipralHandle, String) {
+        let _ = mapped();
+        let mut settings = asking(observed);
+        configure(&mut settings);
+        let (status, stack) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        assert_eq!(
+            unsafe { sipral_account_register(stack, account, 10) },
+            SipralStatus::Ok
+        );
+        let out = signalling_out(stack);
+        assert_eq!(
+            from_server(stack, &answer(&out[0].0, SIP_PUBLIC), 20),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 20);
+        let (register, registrar) = signalling_out(stack)
+            .into_iter()
+            .rev()
+            .find(|(message, _)| message.starts_with(b"REGISTER "))
+            .expect("the REGISTER naming the public address");
+        let mut granted = b"SIP/2.0 200 OK\r\n".to_vec();
+        for name in ["Via", "From", "To", "Call-ID", "CSeq"] {
+            let value = header(&register, name).expect("a field to copy");
+            granted.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
+        granted.extend_from_slice(
+            b"Contact: <sip:alice@203.0.113.7:41000>\r\nExpires: 3600\r\nContent-Length: 0\r\n\r\n",
+        );
+        let status = unsafe {
+            sipral_stack_receive_datagram(
+                stack,
+                SIPRAL_TRANSPORT_MAIN,
+                granted.as_ptr(),
+                granted.len(),
+                registrar.as_ptr().cast::<c_char>(),
+                registrar.len(),
+                ptr::null(),
+                0,
+                30,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = poll(stack, 30);
+        let _ = signalling_out(stack);
+        (stack, registrar)
+    }
+
+    /// How many keep-alives went to `registrar` between `from_ms` and
+    /// `until_ms`, polling once a second as an application that sleeps until
+    /// the stack's next deadline would, at worst, more often.
+    fn keepalives_to(stack: SipralHandle, registrar: &str, from_ms: u64, until_ms: u64) -> usize {
+        let mut count = 0;
+        let mut now = from_ms;
+        while now <= until_ms {
+            let _ = poll(stack, now);
+            count += signalling_out(stack)
+                .iter()
+                .filter(|(message, destination)| {
+                    message.as_slice() == b"\r\n\r\n" && destination == registrar
+                })
+                .count();
+            now += 1_000;
+        }
+        count
+    }
+
+    /// The lab's failure: behind an address-and-port-filtering NAT, a call
+    /// 330 s after the REGISTER never arrived, because nothing but the STUN
+    /// refresh left the socket in between and it went to the STUN server.
+    /// Behind a NAT the stack now keeps the registrar's own flow open, by
+    /// default, every 20 to 25 seconds.
+    #[test]
+    fn an_account_behind_the_nat_keeps_its_registrars_flow_open() {
+        let mut observed = Observed::default();
+        let (stack, registrar) = behind_the_nat(&mut observed, |_| {});
+        let sent = keepalives_to(stack, &registrar, 1_000, 330_000);
+        assert!((13..=17).contains(&sent), "{sent} keep-alives in 330 s");
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn the_registrar_keepalive_follows_its_setting_and_stops_while_suspended() {
+        let mut observed = Observed::default();
+        let (stack, registrar) = behind_the_nat(&mut observed, |settings| {
+            settings.registrar_keepalive_ms = 10_000;
+        });
+        let sent = keepalives_to(stack, &registrar, 1_000, 101_000);
+        assert!((10..=12).contains(&sent), "{sent} keep-alives in 100 s");
+
+        // a phone going to sleep is woken by a push, not by a process that
+        // is not running
+        let mut report = crate::lifecycle::SipralSuspending {
+            size: size_of::<crate::lifecycle::SipralSuspending>(),
+            unverified: 0,
+            subscriptions: 0,
+            calls: 0,
+        };
+        assert_eq!(
+            unsafe { crate::lifecycle::sipral_stack_suspending(stack, 102_000, &raw mut report) },
+            SipralStatus::Ok
+        );
+        assert_eq!(keepalives_to(stack, &registrar, 103_000, 300_000), 0);
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let (stack, registrar) = behind_the_nat(&mut observed, |settings| {
+            settings.registrar_keepalive = crate::media::SipralToggle::Off as u32;
+        });
+        assert_eq!(keepalives_to(stack, &registrar, 1_000, 120_000), 0);
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
     }
 
     #[test]

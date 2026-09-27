@@ -486,6 +486,32 @@ record! {
         /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
         /// unmoved.
         pub referrals: u32,
+        /// Whether an account behind a NAT keeps its registrar's UDP flow
+        /// open, as a `SipralToggle`. **On by default.** An account is
+        /// behind a NAT when `SIPRAL_NAT_STUN`'s answer about the signalling
+        /// socket named an address that is not the socket's own; each such
+        /// account on a UDP transport then sends a double CRLF, alone in a
+        /// datagram, to its registrar every `registrar_keepalive_ms`, while
+        /// its registration holds a binding or is getting one. A NAT that
+        /// filters by address and port (RFC 4787 §5) lets the registrar's
+        /// INVITE in only while it remembers this end sending to it, and the
+        /// STUN refresh goes to the STUN server; without this, a call that
+        /// arrives minutes after the REGISTER is dropped at the NAT.
+        /// Registrars ignore the datagram (RFC 3261 §7.5). Nothing is sent
+        /// while the stack is suspended (`sipral_stack_suspending`), for a
+        /// stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
+        /// own address. `sipral_ua`'s `keepalive` module has the reasons.
+        ///
+        /// Appended at the tail (task 8.7.4), with the one below; the pinned
+        /// `MIN_SIZE` is unmoved.
+        pub registrar_keepalive: u32,
+        /// How often, in milliseconds, or zero for twenty-five seconds (RFC
+        /// 5626 §4.4.2's interval for UDP). Each interval is drawn between
+        /// 80% and 100% of it. From 1 000 to 120 000 — past two minutes a
+        /// NAT that keeps to RFC 4787 REQ-5 may already have let the flow go
+        /// — and anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`, as is a
+        /// figure with `registrar_keepalive` off, a value nothing would read.
+        pub registrar_keepalive_ms: u64,
     }
 }
 
@@ -603,6 +629,14 @@ record! {
         /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
         /// unmoved.
         pub referrals: u32,
+        /// How often an account behind a NAT sends to its registrar, in
+        /// milliseconds, with the default filled in. Zero when
+        /// `registrar_keepalive` was turned off, which is the one case where
+        /// there is no figure to give.
+        ///
+        /// Appended at the tail (task 8.7.4); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub registrar_keepalive_ms: u64,
     }
 }
 
@@ -1171,6 +1205,44 @@ fn timers_for(
     Ok(timers)
 }
 
+/// What the user agent is told of the configuration's policies: whether it
+/// takes a REFER from outside any dialog, and how often an account behind a
+/// NAT sends to its registrar, or that it never does.
+fn agent_policy(
+    agent: &mut UserAgent,
+    config: &SipralStackConfig,
+    now: Instant,
+) -> Result<(), Fail> {
+    agent.allow_referrals(toggled(config.referrals, "referrals", false)?);
+    agent
+        .keep_registrar_flows_alive(registrar_keepalive(config)?, now)
+        .map_err(|error| {
+            fail(
+                SipralStatus::InvalidArgument,
+                format!("registrar_keepalive_ms: {error}"),
+            )
+        })
+}
+
+/// How often an account behind a NAT sends to its registrar, or `None` for
+/// never. Shaped like the stall watchdog below: a figure given with the
+/// keep-alive switched off is one nothing reads, and is said to be so.
+fn registrar_keepalive(config: &SipralStackConfig) -> Result<Option<Duration>, Fail> {
+    let keeping = toggled(config.registrar_keepalive, "registrar_keepalive", true)?;
+    match (keeping, config.registrar_keepalive_ms) {
+        (false, 0) => Ok(None),
+        (false, millis) => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "registrar_keepalive_ms is {millis} and registrar_keepalive is off, so the \
+                 interval it sets is one nothing reads"
+            ),
+        )),
+        (true, 0) => Ok(Some(sipral_ua::keepalive::DEFAULT_KEEPALIVE)),
+        (true, millis) => Ok(Some(Duration::from_millis(millis))),
+    }
+}
+
 /// How this stack's media behaves, or which of its settings it was given
 /// nothing to do with.
 ///
@@ -1300,7 +1372,7 @@ pub(crate) unsafe fn create_on(
     let engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
     let mut agent = UserAgent::new(endpoint, seed)
         .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))?;
-    agent.allow_referrals(toggled(config.referrals, "referrals", false)?);
+    agent_policy(&mut agent, &config, origin)?;
     // the socket is the caller's; what the stack is told is the address
     // the far end will answer to, which is what goes in every Via
     let bound = agent.receive(
@@ -1459,6 +1531,7 @@ entry! {
                 media_stall_ms: state.media.stall_after.map_or(0, millis),
                 g729_annex_b: toggle_of(catalog.g729_annex_b()),
                 referrals: toggle_of(state.agent.allows_referrals()),
+                registrar_keepalive_ms: state.agent.registrar_keepalive().map_or(0, millis),
             })
         })?;
         unsafe { write_versioned(out_settings, settings) }?;
@@ -2258,6 +2331,8 @@ pub(crate) mod tests {
             turn_password: ptr::null(),
             turn_password_len: 0,
             referrals: 0,
+            registrar_keepalive: 0,
+            registrar_keepalive_ms: 0,
         }
     }
 
@@ -2418,6 +2493,7 @@ pub(crate) mod tests {
             media_stall_ms: u64::MAX,
             g729_annex_b: u32::MAX,
             referrals: u32::MAX,
+            registrar_keepalive_ms: u64::MAX,
         }
     }
 
@@ -2463,6 +2539,51 @@ pub(crate) mod tests {
         let mut wrong = config(record, &mut observed);
         wrong.referrals = 3;
         assert_eq!(create(&wrong).0, SipralStatus::InvalidArgument);
+    }
+
+    /// The registrar keep-alive is on at twenty-five seconds unless told
+    /// otherwise, an interval of the caller's own is taken and read back, off
+    /// reads back as zero, and a figure out of range or given with it off is
+    /// refused.
+    #[test]
+    fn the_registrar_keepalive_is_on_by_default_and_reads_back_as_it_came_to() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        assert_eq!(read_settings(handle).registrar_keepalive_ms, 25_000);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let mut every = config(record, &mut observed);
+        every.registrar_keepalive_ms = 15_000;
+        let (status, handle) = create(&every);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(read_settings(handle).registrar_keepalive_ms, 15_000);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let mut off = config(record, &mut observed);
+        off.registrar_keepalive = SipralToggle::Off as u32;
+        let (status, handle) = create(&off);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(read_settings(handle).registrar_keepalive_ms, 0);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        for (toggle, millis) in [
+            (SipralToggle::Off as u32, 25_000),
+            (0, 999),
+            (0, 120_001),
+            (3, 0),
+        ] {
+            let mut observed = Observed::default();
+            let mut wrong = config(record, &mut observed);
+            wrong.registrar_keepalive = toggle;
+            wrong.registrar_keepalive_ms = millis;
+            assert_eq!(
+                create(&wrong).0,
+                SipralStatus::InvalidArgument,
+                "{toggle} {millis}"
+            );
+        }
     }
 
     #[test]

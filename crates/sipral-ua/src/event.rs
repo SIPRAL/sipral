@@ -360,7 +360,9 @@ pub enum UaEvent {
     /// [`UserAgent::accept_transfer`](crate::UserAgent::accept_transfer),
     /// which answers 202 and places the call, or refuse it with
     /// [`UserAgent::reject_transfer`](crate::UserAgent::reject_transfer). A
-    /// REFER nobody answers is retransmitted until it gives up.
+    /// REFER nobody answers is retransmitted until it gives up; 64·T1 after
+    /// it arrived the stack answers it 408 itself, and the call takes the
+    /// next REFER it is sent as though this one had never come.
     TransferRequested {
         /// The call it arrived in.
         call: CallHandle,
@@ -671,9 +673,16 @@ pub enum UaEvent {
     ///
     /// Nothing the endpoint says is dropped on the way through, and nothing
     /// that passes here has been interpreted. The one exception is a request
-    /// outside a dialog that no handler here claims: RFC 3261 §8.2.1 leaves
-    /// no choice in how it is answered — 405 with `Allow`, 501, or 481 when
-    /// it names a dialog this agent does not have — so it is answered here
-    /// and never arrives as `Event::IncomingOutOfDialog` (`docs/04-ua.md`).
+    /// that no handler here claims, which leaves no choice in how it is
+    /// answered and would otherwise go unanswered until the far end's timer
+    /// gives up: outside a dialog RFC 3261 §8.2.1 has it 405 with `Allow`,
+    /// 501, or 481 when it names a dialog this agent does not have, and
+    /// inside one the usage RFC 5057 §5.3 matches it to decides between the
+    /// same statuses, with RFC 6086 §4.2.2's answer for an INFO. So it is
+    /// answered here and never arrives as `Event::IncomingOutOfDialog` or
+    /// `Event::IncomingInDialog` — except an INFO in a call that is not
+    /// DTMF, once
+    /// [`UserAgent::hand_over_info`](crate::UserAgent::hand_over_info) has
+    /// asked for those (`docs/04-ua.md`).
     Unclaimed(Event),
 }

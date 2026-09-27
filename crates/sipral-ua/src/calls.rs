@@ -2235,6 +2235,13 @@ impl UserAgent {
         if failed.is_some() {
             self.release_refer(transaction, false);
         }
+        // a REFER the far end sent that nobody took or refused: the endpoint
+        // answered it 408 when 64·T1 ran out, and the seat it held has to go
+        // back here, since this arm is where its end is reported and
+        // `transfer` never sees it
+        if let AnyTransactionId::NonInviteServer(server) = transaction {
+            self.forget_unanswered_refer(server);
+        }
         let call = self.by_request.remove(&transaction).map(|(call, _)| call);
         self.account_of.remove(&transaction);
         match (call, failed) {

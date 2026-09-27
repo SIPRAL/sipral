@@ -343,6 +343,39 @@ final class NatTests: XCTestCase {
         XCTAssertTrue(invite.contains("a=rtcp-mux"), "one mapping describes one port, so the offer asks for rtcp-mux")
     }
 
+    /// An account the STUN answer showed behind a NAT keeps its registrar's
+    /// flow open: a double CRLF, alone in a datagram, reaches the registrar
+    /// within the interval asked for, and none does with the keep-alive off.
+    func testAnAccountBehindTheNatKeepsItsRegistrarsFlowOpen() async throws {
+        for keepalive in [true, false] {
+            let stun = try FakeStunServer()
+            defer { stun.stop() }
+            let registrar = try UDPSocket(host: "127.0.0.1", port: 0)
+            defer { registrar.close() }
+            let alice = try SipralStack(
+                stunServer: stun.address,
+                registrarKeepalive: keepalive,
+                registrarKeepaliveMs: keepalive ? 1_000 : 0
+            )
+            defer { alice.close() }
+            let events = alice.events()
+            let account = try alice.addAccount(
+                aor: "sip:alice@sipral.invalid", registrarAddress: registrar.localAddress,
+                registrar: "sip:sipral.invalid"
+            )
+            stun.open = true
+            let learned = await first(events) { $0.natData?.signalling == true }
+            XCTAssertNotNil(learned, "the STUN server's answer never became an event")
+            try account.register()
+            let ping = read(registrar, startingWith: "\r\n\r\n", within: keepalive ? 5 : 3)
+            if keepalive {
+                XCTAssertEqual(ping, "\r\n\r\n", "no keep-alive reached the registrar")
+            } else {
+                XCTAssertNil(ping, "a keep-alive went out with it turned off")
+            }
+        }
+    }
+
     func testTurnRelayIsAllocatedWithTheCredentialAndOffered() async throws {
         #if !canImport(CryptoKit)
         throw XCTSkip("the fake TURN server signs its answers with CryptoKit")

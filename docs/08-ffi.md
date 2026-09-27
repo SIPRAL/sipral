@@ -566,6 +566,24 @@ already holding a binding have registered it by the time the event arrives. An
 application that registers only after that event registers the public
 `Contact` the first time, which is what the lab's own flow does.
 
+**The registrar's flow is kept open too, with nothing asked of the
+application.** Every account whose `Contact` an answer moved onto an address
+that is not the socket's own is behind a NAT, and on a UDP transport it sends
+its registrar a double CRLF, alone in a datagram, every 20 to 25 seconds while
+it holds a binding or is getting one. It leaves through
+`sipral_stack_poll_transmit` like everything else on that transport, addressed
+to the registrar; the registrar drops it, and a NAT that filters by address
+and port has seen this end send to the registrar, which is what keeps the
+INVITE's way in open (`docs/06-nat.md`). **`registrar_keepalive` and
+`registrar_keepalive_ms` on `sipral_stack_config_t`** (appended at the tail in
+0.28; `MIN_SIZE` unmoved) are a `sipral_toggle_t`, on by default, and the
+interval in milliseconds, zero for 25 000, from 1 000 to 120 000; anything
+else, or an interval with the toggle off, is
+`SIPRAL_STATUS_INVALID_ARGUMENT`. `sipral_stack_settings_t::registrar_keepalive_ms`
+reads back the interval in force, zero when off. Nothing goes while the stack
+is suspended: `sipral_stack_suspending` stops it, and the REGISTER after
+`sipral_stack_resumed` starts it again.
+
 A **media socket** is named before its call, because it is the application's
 and exists before the call does: `sipral_stack_nat_map(stack, local, len,
 now_ms)`, then send what `sipral_stack_poll_stun` hands out — a

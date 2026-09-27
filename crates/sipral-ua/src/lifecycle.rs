@@ -554,8 +554,10 @@ impl UserAgent {
         });
         // the clock is taken and not read, and that is the whole shape of this
         // call: nothing here is scheduled against a time, because nothing will
-        // be running to reach it
-        let _ = now;
+        // be running to reach it — a registrar's keep-alive included, which a
+        // suspended phone leaves to push (RFC 8599) rather than to a process
+        // that is not running
+        self.settle_keepalives(now);
         report
     }
 
@@ -712,6 +714,16 @@ impl UserAgent {
         }
         moved.sort_unstable_by_key(|(id, ..)| *id);
         let count = moved.len();
+        // the one fact that says these accounts are behind a NAT: the address
+        // the far end sees them at is not the one the socket is bound to, and
+        // their registrar's flow is then one to keep open (`crate::keepalive`)
+        let behind = self
+            .endpoint
+            .bound_transport(transport)
+            .is_some_and(|(_, local)| local != to);
+        for (id, ..) in &moved {
+            self.note_nat(*id, behind);
+        }
         for (id, old, new) in moved {
             let Some(reg) = self.registrations.get_mut(&id) else {
                 continue;
@@ -792,6 +804,10 @@ impl UserAgent {
             due: None,
             told: false,
         };
+        // a registrar's keep-alive follows the state: none while there is no
+        // interface or the recovery gave up, and once a wake has proved a
+        // binding again, the drain that proved it starts it
+        self.settle_keepalives(now);
         if self.life.ladder.is_empty() {
             // A ladder with no rungs is the decision that nothing needs doing.
             // Saying so is worth an event only when the state moved: an event
@@ -2134,6 +2150,175 @@ mod tests {
             "<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.1>;expires=0, \
              <sip:alice@203.0.113.7:52000>;expires=0"
         );
+    }
+
+    // -- keeping the registrar's flow open behind a NAT -----------------------
+
+    /// What the registrar was sent that is a keep-alive: a double CRLF alone
+    /// in a datagram, to its own address over the account's transport.
+    fn pings(agent: &mut UserAgent) -> usize {
+        let mut count = 0;
+        while let Some(transmit) = agent.poll_transmit() {
+            if &*transmit.payload == b"\r\n\r\n" {
+                assert_eq!(transmit.destination, registrar());
+                assert_eq!(transmit.transport, UDP);
+                assert_eq!(transmit.protocol, TransportProtocol::Udp);
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// One account registered, then moved by a STUN answer onto `public`
+    /// and registered again there, everything drained.
+    fn readdressed_to(public: SocketAddr, now: Instant) -> (UserAgent, AccountId) {
+        let (mut agent, id) = registered(now);
+        agent.readdress(UDP, local(), public, now);
+        let mut out = transmits(&mut agent);
+        if let Some(request) = out.pop().filter(|bytes| bytes.starts_with(b"REGISTER ")) {
+            deliver(&mut agent, &granted(&request, 3_600), now);
+        }
+        let _ = events(&mut agent);
+        (agent, id)
+    }
+
+    /// Run every deadline up to `until`, and count the pings on the way.
+    fn run_until(agent: &mut UserAgent, from: Instant, until: Instant) -> usize {
+        let mut count = pings(agent);
+        let mut now = from;
+        while let Some(due) = agent.poll_timeout() {
+            if due > until {
+                break;
+            }
+            now = due.max(now);
+            agent.handle_timeout(now);
+            count += pings(agent);
+            let _ = events(agent);
+        }
+        count
+    }
+
+    #[test]
+    fn an_account_stun_showed_behind_a_nat_keeps_its_registrars_flow_open() {
+        // the lab's failure: a call 330 s after the REGISTER was dropped by
+        // an address-and-port-dependent filter (RFC 4787 §5), because the
+        // only thing sent in between went to the STUN server. Something has
+        // to go to the registrar itself, and by default every 20 to 25 s
+        let t0 = Instant::now();
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
+        let (mut agent, id) = readdressed_to(public, t0);
+        assert!(agent.keeping_registrar_flow_alive(id));
+        let first = agent
+            .keepalive_deadline()
+            .expect("a keep-alive is scheduled");
+        assert!(
+            first >= t0 + Duration::from_secs(20) && first <= t0 + Duration::from_secs(25),
+            "{:?}",
+            first - t0
+        );
+        // 330 s: at least thirteen of them, none further apart than 25 s
+        let sent = run_until(&mut agent, t0, t0 + Duration::from_secs(330));
+        assert!((13..=17).contains(&sent), "{sent} keep-alives in 330 s");
+    }
+
+    #[test]
+    fn an_account_stun_found_on_its_own_address_sends_no_keep_alive() {
+        // no NAT between the socket and the world: nothing to keep open
+        let t0 = Instant::now();
+        let (mut agent, id) = readdressed_to(local(), t0);
+        assert!(!agent.keeping_registrar_flow_alive(id));
+        assert_eq!(run_until(&mut agent, t0, t0 + Duration::from_secs(300)), 0);
+    }
+
+    #[test]
+    fn the_keep_alive_interval_is_the_applications_and_can_be_turned_off() {
+        let t0 = Instant::now();
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
+        let (mut agent, id) = readdressed_to(public, t0);
+        assert_eq!(agent.registrar_keepalive(), Some(Duration::from_secs(25)));
+
+        agent
+            .keep_registrar_flows_alive(Some(Duration::from_secs(10)), t0)
+            .expect("ten seconds");
+        let first = agent
+            .keepalive_deadline()
+            .expect("drawn again from the new one");
+        assert!(first <= t0 + Duration::from_secs(10), "{:?}", first - t0);
+        // every 8 to 10 s
+        let sent = run_until(&mut agent, t0, t0 + Duration::from_secs(100));
+        assert!((10..=12).contains(&sent), "{sent} keep-alives in 100 s");
+
+        for refused in [
+            Duration::ZERO,
+            Duration::from_millis(999),
+            Duration::from_secs(121),
+        ] {
+            assert_eq!(
+                agent.keep_registrar_flows_alive(Some(refused), t0),
+                Err(UaError::InvalidKeepalive(refused))
+            );
+        }
+        assert_eq!(agent.registrar_keepalive(), Some(Duration::from_secs(10)));
+
+        agent
+            .keep_registrar_flows_alive(None, t0)
+            .expect("off is always taken");
+        assert!(!agent.keeping_registrar_flow_alive(id));
+        let later = t0 + Duration::from_secs(100);
+        assert_eq!(
+            run_until(&mut agent, later, later + Duration::from_secs(300)),
+            0
+        );
+    }
+
+    #[test]
+    fn a_suspended_stack_keeps_nothing_open_and_a_proved_binding_starts_it_again() {
+        // a phone asleep is woken by a push (RFC 8599), not by a process
+        // that is not running; once the wake registers again, the flow is
+        // kept open again
+        let t0 = Instant::now();
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
+        let (mut agent, id) = readdressed_to(public, t0);
+        agent.suspending(t0);
+        assert!(!agent.keeping_registrar_flow_alive(id));
+        assert_eq!(
+            agent.keepalive_deadline(),
+            None,
+            "nothing scheduled while suspended"
+        );
+        assert_eq!(run_until(&mut agent, t0, t0 + Duration::from_secs(300)), 0);
+
+        let woke = t0 + HOUR;
+        agent.resumed(woke);
+        let out = transmits(&mut agent);
+        let request = out
+            .into_iter()
+            .rev()
+            .find(|bytes| bytes.starts_with(b"REGISTER "))
+            .expect("the wake registers again");
+        assert!(
+            agent.keeping_registrar_flow_alive(id),
+            "the flow the binding is being proved on is kept open again"
+        );
+        deliver(&mut agent, &granted(&request, 3_600), woke);
+        let _ = events(&mut agent);
+        assert!(agent.keeping_registrar_flow_alive(id));
+        assert!(run_until(&mut agent, woke, woke + Duration::from_secs(60)) >= 2);
+    }
+
+    #[test]
+    fn a_binding_given_up_or_an_account_removed_is_no_longer_kept_open() {
+        let t0 = Instant::now();
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
+        let (mut agent, id) = readdressed_to(public, t0);
+        agent.unregister(id, t0).expect("the de-registration goes");
+        let _ = transmits(&mut agent);
+        assert!(!agent.keeping_registrar_flow_alive(id));
+
+        let (mut agent, id) = readdressed_to(public, t0);
+        agent.remove_account(id);
+        assert!(!agent.keeping_registrar_flow_alive(id));
+        assert_eq!(run_until(&mut agent, t0, t0 + Duration::from_secs(120)), 0);
     }
 
     #[test]

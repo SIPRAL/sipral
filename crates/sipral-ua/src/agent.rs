@@ -159,6 +159,12 @@ pub struct UserAgent {
     /// The REFERs outside any dialog this agent holds, and whether it takes
     /// any ([`crate::referral`]).
     pub(crate) referrals: Referrals,
+    /// Whether an INFO in a call that is not DTMF reaches the application
+    /// unanswered ([`UserAgent::hand_over_info`]) rather than being answered
+    /// here.
+    pub(crate) info_handed_over: bool,
+    /// The registrar flows kept open through a NAT ([`crate::keepalive`]).
+    pub(crate) keepalives: crate::keepalive::Keepalives,
     /// 64·T1, read off the configuration once. RFC 6665 §4.1.2.4's Timer N is
     /// the only deadline this layer takes from the transaction timings, and
     /// the endpoint does not hand its configuration back out.
@@ -270,6 +276,8 @@ impl UserAgent {
             events: VecDeque::new(),
             guard: Guard::default(),
             referrals: Referrals::default(),
+            info_handed_over: false,
+            keepalives: crate::keepalive::Keepalives::default(),
             timer_n,
             sdp_limits,
             life: Machine::default(),
@@ -321,6 +329,7 @@ impl UserAgent {
         self.fire_subscription_timers(now);
         self.fire_lifecycle_timers(now);
         self.fire_announce_timers(now);
+        self.fire_keepalives(now);
         self.drain(now);
     }
 
@@ -391,9 +400,14 @@ impl UserAgent {
     }
 
     /// Bytes to put on a transport. Drain to empty.
+    ///
+    /// What the endpoint wrote, and then the keep-alives this layer sends to
+    /// a registrar behind a NAT ([`crate::keepalive`]).
     #[must_use]
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
-        self.endpoint.poll_transmit()
+        self.endpoint
+            .poll_transmit()
+            .or_else(|| self.poll_keepalive())
     }
 
     /// Something the application has to know. Drain to empty.
@@ -413,6 +427,7 @@ impl UserAgent {
             .chain(self.subscription_deadline())
             .chain(self.lifecycle_deadline())
             .chain(self.announce_deadline())
+            .chain(self.keepalive_deadline())
             .min();
         match (self.endpoint.poll_timeout(), mine) {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -423,9 +438,11 @@ impl UserAgent {
     /// The endpoint underneath, for what this layer has no policy for yet.
     ///
     /// What this layer has no policy for arrives as [`UaEvent::Unclaimed`] and
-    /// is answered through here — a request inside a dialog, since one
-    /// outside any that nothing here claims is answered by this layer
-    /// (§8.2.1). Registration, calls, transfers and
+    /// is answered through here — an INFO in a call that is not DTMF, and
+    /// only once [`UserAgent::hand_over_info`] asked for it, since every
+    /// other request nothing here claims, inside a dialog or outside one, is
+    /// answered by this layer (§8.2.1, RFC 5057 §5.3). Registration, calls,
+    /// transfers and
     /// subscriptions are not among them: a REGISTER or a SUBSCRIBE sent from
     /// here would be one this layer does not know it owns, and would neither
     /// be refreshed nor retried.
@@ -491,6 +508,7 @@ impl UserAgent {
         self.accounts.remove(&account);
         self.registrations.remove(&account);
         self.owners.retain(|_, owner| *owner != account);
+        self.forget_keepalive(account);
     }
 
     /// What was configured, read back.
@@ -796,6 +814,8 @@ impl UserAgent {
         // last, so that every change this round finished — answered, refused,
         // or given up on after a challenge — has let go of its call first
         self.send_waiting_holds(now);
+        // and after every registration this round won or lost
+        self.settle_keepalives(now);
     }
 
     /// `None` when this layer claimed the event; the event back when nothing

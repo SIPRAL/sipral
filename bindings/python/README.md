@@ -110,6 +110,14 @@ centre answering a WebRTC gateway. `g729_annex_b=False` on the stack turns off
 G.729's Annex B silence compression (`annexb=no`) if that codec runs at
 all.
 
+Behind a NAT, every account `stun_server` showed to be behind one keeps its
+registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
+seconds, so that a NAT filtering by address and port keeps letting the
+registrar's INVITE in long after the REGISTER (`docs/06-nat.md`).
+`registrar_keepalive=False` turns it off and `registrar_keepalive_ms` sets
+the interval, 1 000 to 120 000; nothing goes while the stack is suspended.
+`tests/test_nat.py` proves both on the wire.
+
 ## A REFER from outside any call
 
 `Stack(referrals=True)` hands a REFER that names no dialog — click-to-dial

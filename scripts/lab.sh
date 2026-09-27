@@ -19,6 +19,12 @@
 #   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
 #   scripts/lab.sh nat          only the calls from and to behind a NAT, with
 #                               STUN against coturn, through the C ABI
+#   scripts/lab.sh nat-idle     only the call placed 330 seconds after the
+#                               REGISTER, behind the NAT, with the registrar
+#                               keep-alive on (part of a run that names
+#                               nothing) and then off, which the NAT's filter
+#                               has to drop for the lab to prove anything --
+#                               about twelve minutes
 #   scripts/lab.sh referral     only a REFER from outside any call, sent at a
 #                               stack driven through the C ABI: refused while
 #                               it does not take them, taken when it does,
@@ -1238,6 +1244,83 @@ nat_called_flow() {
     docker rm -f "$NAT_CALLED_NAME" >/dev/null 2>&1
     nat_down
     [ "$status" = 0 ]
+}
+
+# The same called flow, with the call placed 330 seconds after the REGISTER
+# rather than at once: long past the NAT's UDP timeout (interop/nat is Linux
+# masquerading, whose conntrack forgets a UDP flow minutes after its last
+# packet, and which lets in only what matches a flow it remembers -- address
+# and port dependent filtering, RFC 4787 §5, like most NATs). The STUN refresh every 25 s goes to coturn and says nothing for
+# the flow to Asterisk; only the stack's own registrar keep-alive, a double
+# CRLF to Asterisk every 20 to 25 s, keeps the INVITE's way in open.
+#
+# `$1` is `on` or `off`: off sets SIPRAL_REGISTRAR_KEEPALIVE=off in the
+# harness, and then the call must NOT arrive -- that run is the proof the NAT
+# in front of it forgets, without which the `on` run proves nothing. The
+# harness waits for the call for 420 s, the originate goes at 330 s, and the
+# step returns 0 when the outcome is the one `$1` expects.
+NAT_IDLE_NAME=sipral-lab-nat-idle
+NAT_IDLE_WAIT=330
+nat_idle_called_flow() {
+    local keepalive="$1" beside uri status tries=0 waited
+    local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    nat_up || return 1
+    printf '  behind %s, STUN at %s:3478, Asterisk at %s, keep-alive %s\n' \
+        "$NAT_GATEWAY" "$NAT_STUN" "$NAT_ASTERISK" "$keepalive"
+    docker rm -f "$NAT_IDLE_NAME" >/dev/null 2>&1
+    docker run -d --name "$NAT_IDLE_NAME" --network "${project}_inside" \
+        --cap-add NET_ADMIN \
+        --add-host "asterisk:$NAT_ASTERISK" \
+        -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=natin \
+        -e SIPRAL_CALLED_PATIENCE_MS=420000 \
+        -e "SIPRAL_REGISTRAR_KEEPALIVE=$keepalive" \
+        -e "SIPRAL_STUN_SERVER=$NAT_STUN:3478" \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        sipral-lab-nat sh -c "
+            ip route replace default via $NAT_GATEWAY || exit 1
+            exec /harness-c asterisk 5060 9000" >/dev/null \
+        || { printf '  could not start the harness\n'; nat_down; return 1; }
+    uri=""
+    until [ -n "$uri" ]; do
+        uri=$(docker logs "$NAT_IDLE_NAME" 2>&1 \
+            | sed -n 's/^  nat   waiting for a call to \(sip:[^ ]*\)$/\1/p' | head -1)
+        [ -n "$uri" ] && break
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$NAT_IDLE_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 45 ]; then
+            printf '  the harness never said it was waiting for the call\n'
+            docker logs "$NAT_IDLE_NAME" 2>&1
+            docker rm -f "$NAT_IDLE_NAME" >/dev/null 2>&1
+            nat_down
+            return 1
+        fi
+        sleep 1
+    done
+    printf '  registered; calling %s in %s s\n' "$uri" "$NAT_IDLE_WAIT"
+    waited=0
+    while [ "$waited" -lt "$NAT_IDLE_WAIT" ]; do
+        if [ "$(docker inspect -f '{{.State.Running}}' "$NAT_IDLE_NAME" 2>/dev/null)" != true ]; then
+            printf '  the harness stopped while it waited\n'
+            break
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/labuser/$uri extension 9010@lab" ) >/dev/null 2>&1
+    status=$(timeout 150 docker wait "$NAT_IDLE_NAME" 2>/dev/null || echo 1)
+    docker logs "$NAT_IDLE_NAME" 2>&1
+    docker rm -f "$NAT_IDLE_NAME" >/dev/null 2>&1
+    nat_down
+    if [ "$keepalive" = off ]; then
+        [ "$status" != 0 ]
+    else
+        [ "$status" = 0 ]
+    fi
 }
 
 # 8.5.5's ICE-lite steps: the headless application answering as an ICE-lite
@@ -2531,6 +2614,28 @@ if [ "$WANT" = all ] || [ "$WANT" = nat ]; then
         fail "behind a NAT: there is no C harness to run it with"
     else
         printf '  note  no C harness, so the flow behind a NAT is skipped with the other C flows\n'
+    fi
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = nat-idle ]; then
+    step "called ${NAT_IDLE_WAIT} s after registering, behind a filtering NAT, keep-alive on, in C"
+    if [ -n "$HARNESS_C" ]; then
+        nat_idle_called_flow on \
+            && pass "called ${NAT_IDLE_WAIT} s after the REGISTER: the registrar keep-alive held the NAT's filter open" \
+            || fail "called ${NAT_IDLE_WAIT} s after registering behind a NAT"
+        # the control, only when asked for by name: six more minutes, to show
+        # the NAT does forget -- a lab whose NAT never did would pass the step
+        # above with the keep-alive doing nothing
+        if [ "$WANT" = nat-idle ]; then
+            step "the same with the keep-alive off: the NAT has to drop the call"
+            nat_idle_called_flow off \
+                && pass "with no keep-alive the NAT's filter dropped the call, so the step above proves the keep-alive" \
+                || fail "the call got through with no keep-alive: this NAT proves nothing about one"
+        fi
+    elif [ "$WANT" = nat-idle ]; then
+        fail "called behind a NAT after an idle: there is no C harness to run it with"
+    else
+        printf '  note  no C harness, so the idle call behind a NAT is skipped with the other C flows\n'
     fi
 fi
 

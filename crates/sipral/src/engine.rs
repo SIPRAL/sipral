@@ -3016,7 +3016,7 @@ impl MediaEngine {
                 #[cfg(feature = "dtls")]
                 let named = self.named(dtls.is_some());
                 let bytes = answer.to_bytes();
-                if agent.accept_reoffer(call, Some(&bytes), now).is_ok()
+                if agent.accept_reoffer(call, &bytes, now).is_ok()
                     && let Some(managed) = self.calls.get_mut(&call)
                 {
                     managed.version = version;

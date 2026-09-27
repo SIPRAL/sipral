@@ -370,6 +370,57 @@ public sealed class NatTests
         Assert.Equal("203.0.113.7:40000", evt.Nat.Mapped);
     }
 
+    /// <summary>An account the STUN answer showed behind a NAT keeps its
+    /// registrar's flow open: a double CRLF, alone in a datagram, reaches
+    /// the registrar every <c>registrarKeepaliveMs</c>, and none does with
+    /// the keep-alive off (`docs/06-nat.md`, "Refresh").</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AnAccountBehindTheNatKeepsItsRegistrarsFlowOpen(bool keepalive)
+    {
+        using var server = new FakeStunServer("203.0.113.7", 40000);
+        using var registrar = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        registrar.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        registrar.ReceiveTimeout = 100;
+        using var alice = new SipralStack(
+            nat: SipralNat.Stun,
+            stunServer: server.Address,
+            registrarKeepalive: keepalive,
+            registrarKeepaliveMs: keepalive ? 1000ul : 0ul);
+
+        await FirstMatchingAsync(alice.Events, e => e.Kind == SipralEventKind.NatMapping, Timeout);
+        var registrarAddress = $"127.0.0.1:{((IPEndPoint)registrar.LocalEndPoint!).Port}";
+        var account = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress, registrar: "sip:sipral.invalid");
+        account.Register();
+
+        var pings = 0;
+        var buffer = new byte[2048];
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(4);
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                var read = registrar.Receive(buffer);
+                if (read == 4 && Encoding.ASCII.GetString(buffer, 0, read) == "\r\n\r\n")
+                {
+                    pings++;
+                }
+            }
+            catch (SocketException)
+            {
+            }
+        }
+        if (keepalive)
+        {
+            Assert.True(pings >= 2, $"{pings} keep-alives reached the registrar in four seconds");
+        }
+        else
+        {
+            Assert.Equal(0, pings);
+        }
+    }
+
     [Fact]
     public async Task CallOffersTheMappedMediaAddress()
     {
