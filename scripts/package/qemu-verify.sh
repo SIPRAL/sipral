@@ -167,7 +167,18 @@ if [ -n "$WHEEL" ]; then
     mkdir -p "$OUT/wheel"
     cp "$WHEEL" "$OUT/wheel/"
     EXTRA_MOUNTS=(-v "$OUT/wheel:/wheels:ro" -v "$DEPS:/deps:ro")
-    PY=/rootfs/opt/_internal/cpython-3.12.14/bin/python3.12
+    # The exact patch version under manylinux_2_28_aarch64's own
+    # /opt/_internal moves as that image (pulled as :latest, no pin) is
+    # rebuilt upstream, so this globs for whichever cpython-3.12.x is
+    # there rather than hardcoding one -- a rootfs with none, or more than
+    # one, fails here with a clear reason rather than qemu's own "No such
+    # file or directory" three steps later.
+    cpython_dir=$(find "$ROOTFS/opt/_internal" -maxdepth 1 -type d -name 'cpython-3.12.*' 2>/dev/null | sort | tail -1)
+    if [ -z "$cpython_dir" ] || [ ! -x "$cpython_dir/bin/python3.12" ]; then
+        fail "no cpython-3.12.x/bin/python3.12 under $ROOTFS/opt/_internal (manylinux_2_28_aarch64's own layout changed?)"
+        printf '\nqemu-verify.sh: failed\n'; exit 1
+    fi
+    PY="/rootfs/${cpython_dir#"$ROOTFS"/}/bin/python3.12"
     wheel_name=$(basename "$WHEEL")
     if out=$(QEMU_RUN "qemu-aarch64 -L /rootfs $PY -m pip install --quiet --no-index --find-links /wheels --find-links /deps --target=/tmp/inst /wheels/$wheel_name && qemu-aarch64 -L /rootfs -E PYTHONPATH=/tmp/inst $PY -c \"import sipral; print(sipral.__name__)\"" 2>&1); then
         pass "installed into a clean target dir and imported: $(printf '%s' "$out" | tail -1)"
