@@ -354,7 +354,8 @@ refreshed before they lapse, and a Binding indication towards the server every
 Tr so that the NAT binding under all of it survives. It is given back — a
 Refresh with a lifetime of zero (RFC 8656 §8) — three seconds after ICE
 concludes on a pair that does not use it (RFC 8445 §8.3.1), when the call
-ends, and at once when the call cannot use it: a peer that answered without
+ends — unless another branch of a forked call can use it, below — and at once
+when the call cannot use it: a peer that answered without
 ICE, a catalogue that offers none, the lite role. A relay left to lapse holds a
 port and the account's quota on the server for up to ten minutes, and a user
 whose quota is a handful of allocations cannot place the next call until then.
@@ -410,20 +411,37 @@ need none.
 A forked INVITE sent one offer, with one relayed candidate in it, to every
 branch, and one allocation stands behind that candidate: the server relays for
 the one client that holds it, so only one branch's agent can answer the checks
-it draws. The agent waits with the branch the call was placed on, and moves to
-the first other branch that is answered and kept while that first branch has no
-session yet: two phones ringing, and the second picked up — which
-`ForkPolicy::KeepFirst` keeps, since it answered first. The user agent reports
-the branch kept before it ends the one the call was placed on with `ForkLost`,
-so the relay has moved before that ending could give it back, and a branch that
-answers after one was kept is hung up without ever becoming a call, so it never
-takes the relay either. A branch whose session opens while another already runs
-the relay — both answered under `ForkPolicy::KeepAll`, or early media on the
-first before the second answers — runs an agent rebuilt from the description,
-without the relay, and its checks towards the relayed candidate go unanswered;
-ICE finds the paths that need none. The offer cannot say otherwise: it left
-once, before anybody knew the INVITE would fork, and it was true for the branch
-that holds the relay.
+it draws. Nor can a second one stand beside it for another branch: the server
+knows an allocation by the addresses it runs between, and "If the client
+wishes to allocate a second relayed transport address, it must create a second
+allocation using a different 5-tuple" (RFC 8656 §3.2) — while the offer named
+one socket for every branch. The agent waits with the branch the call was
+placed on, and moves to the first other branch that is answered and kept while
+that first branch has no session yet: two phones ringing, and the second picked
+up — which `ForkPolicy::KeepFirst` keeps, since it answered first. The user
+agent reports the branch kept before it ends the one the call was placed on
+with `ForkLost`, so the relay has moved before that ending could give it back,
+and a branch that answers after one was kept is hung up without ever becoming a
+call, so it never takes the relay either. A branch whose session opens while
+another already runs the relay — both answered under `ForkPolicy::KeepAll`, or
+early media on the first before the second answers — runs an agent rebuilt
+from the description, without the relay, and its checks towards the relayed
+candidate go unanswered for as long as the other one holds it; ICE finds the
+paths that need none.
+
+The relay is the fork's rather than the branch's, so the branch that holds it
+does not give it back to the server while another branch can use it. When it
+ends — the one that played early media losing to the one that answered, one
+leg of `KeepAll` hanging up, or the answered leg ending while another still
+rings — the relay goes to the branch whose agent holds none and has found no
+path of its own: that agent is rebuilt around it, with the same credentials
+and candidates the offer named, and told its peer's description again, so it
+asks the server for that peer's permissions and checks every pair again, the
+relayed ones included. What it had under way without the relay goes with the
+agent it replaces. Failing such a branch, one still ringing keeps it waiting
+for its session, refreshed as the branch the call was placed on kept it. Only
+when no branch is left that can use it does it go back with a Refresh of
+lifetime zero. A branch that has already found a path keeps the agent it has.
 
 Not done yet: TURN over TCP or TLS to the server, for the network that lets
 nothing out but 443. The client has the framing; the agent's datagram model

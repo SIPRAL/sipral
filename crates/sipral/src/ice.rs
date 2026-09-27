@@ -395,25 +395,11 @@ impl LocalIce {
         let credentials = draw_credentials(keys)?;
         let tiebreaker = u64::from_be_bytes(keys.block()[..8].try_into().unwrap_or([0; 8]));
         let role = Role::initial_full(we_are_offerer, false);
-        let (mut agent, stream) = new_agent(&credentials, role, tiebreaker, address, public, now)?;
-        let Some((server, client)) = relay.take().map(crate::relay::Relay::into_parts) else {
+        let (agent, stream) = new_agent(&credentials, role, tiebreaker, address, public, now)?;
+        let Some(ice) = with_relay(agent, stream, address, relay, keys, now)? else {
             return Ok(None);
         };
-        agent
-            .add_relayed(stream, ComponentId::RTP, address, server, client, now)
-            .map_err(MediaError::Ice)?;
-        let candidates = agent.local_candidates(stream);
-        let mut ice = Ice {
-            local: address,
-            out: Vec::new(),
-            probe: Vec::new(),
-            running: Running::Full(Box::new(Full {
-                agent,
-                stream,
-                keys: KeySource::new(keys.block()),
-            })),
-        };
-        ice.top_up();
+        let candidates = ice.gathered().unwrap_or_default();
         Ok(Some((
             Self {
                 credentials,
@@ -425,6 +411,39 @@ impl LocalIce {
             },
             ice,
         )))
+    }
+
+    /// The agent a call runs when it inherits the relay another branch of
+    /// the same fork held: [`LocalIce::agent`], with the allocation in
+    /// `relay` added back as the relayed candidate.
+    ///
+    /// Every branch of a fork was offered the one description, so the agent
+    /// comes out holding what that description named: the host and
+    /// server-reflexive candidates gathered in the same order, and the
+    /// relayed one on the same allocation, at the same address. `relay` is
+    /// taken out of its slot only once the agent it goes into has been
+    /// gathered, so a refusal of `address` leaves it there, for the caller to
+    /// give back; `None` when the slot was empty.
+    ///
+    /// # Errors
+    ///
+    /// As [`LocalIce::draw_relayed`].
+    pub(crate) fn relayed_agent(
+        &self,
+        address: SocketAddr,
+        relay: &mut Option<crate::relay::Relay>,
+        keys: &mut KeySource,
+        now: Instant,
+    ) -> Result<Option<Ice>, MediaError> {
+        let (agent, stream) = new_agent(
+            &self.credentials,
+            self.role,
+            self.tiebreaker,
+            address,
+            self.public,
+            now,
+        )?;
+        with_relay(agent, stream, address, relay, keys, now)
     }
 
     /// The same call's ICE after an ICE restart (RFC 8445 §9), whichever end
@@ -653,6 +672,38 @@ fn new_agent(
             .map_err(MediaError::Ice)?;
     }
     Ok((agent, stream))
+}
+
+/// A gathered agent with the allocation in `relay` taken into it as its
+/// relayed candidate, running on transaction ids drawn from `keys`; `None`
+/// when the slot was empty.
+#[cfg(feature = "ice")]
+fn with_relay(
+    mut agent: IceAgent,
+    stream: StreamId,
+    address: SocketAddr,
+    relay: &mut Option<crate::relay::Relay>,
+    keys: &mut KeySource,
+    now: Instant,
+) -> Result<Option<Ice>, MediaError> {
+    let Some((server, client)) = relay.take().map(crate::relay::Relay::into_parts) else {
+        return Ok(None);
+    };
+    agent
+        .add_relayed(stream, ComponentId::RTP, address, server, client, now)
+        .map_err(MediaError::Ice)?;
+    let mut ice = Ice {
+        local: address,
+        out: Vec::new(),
+        probe: Vec::new(),
+        running: Running::Full(Box::new(Full {
+            agent,
+            stream,
+            keys: KeySource::new(keys.block()),
+        })),
+    };
+    ice.top_up();
+    Ok(Some(ice))
 }
 
 /// The running agent, on the media session that owns the socket.
@@ -1092,6 +1143,29 @@ impl Ice {
         match &self.running {
             Running::Full(full) => Some(full.agent.local_candidates(full.stream)),
             Running::Lite(_) => None,
+        }
+    }
+
+    /// Whether this agent would be better off with a relay than without:
+    /// a full agent that holds none and has not found a path of its own.
+    ///
+    /// Asked of the other branches of a fork when the branch that held the
+    /// relay the offer named ends, since that relay is the one candidate of
+    /// the offer this agent could not answer for. One that has selected a
+    /// pair needs nothing, and a lite end holds no relay.
+    pub(crate) fn wants_relay(&self) -> bool {
+        match &self.running {
+            Running::Full(full) => {
+                full.agent
+                    .selected_pair(full.stream, ComponentId::RTP)
+                    .is_none()
+                    && !full
+                        .agent
+                        .local_candidates(full.stream)
+                        .iter()
+                        .any(|candidate| candidate.kind == CandidateType::Relay)
+            }
+            Running::Lite(_) => false,
         }
     }
 

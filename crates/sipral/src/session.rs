@@ -1858,6 +1858,35 @@ impl MediaSession {
         followed
     }
 
+    /// Whether this session's agent would take a relay another branch of its
+    /// fork gave up. See [`crate::ice::Ice::wants_relay`].
+    #[cfg(feature = "ice")]
+    pub(crate) fn wants_relay(&self) -> bool {
+        self.ice.as_ref().is_some_and(crate::ice::Ice::wants_relay)
+    }
+
+    /// Run `ice` from here on in place of the agent this session had: the
+    /// same credentials and candidates, with the relay another branch of the
+    /// fork held added back. What the agent it replaces had under way —
+    /// checks without a relay, on a session no pair has been found for —
+    /// goes with it; the new one checks every pair again.
+    #[cfg(feature = "ice")]
+    pub(crate) fn inherit_ice(&mut self, ice: crate::ice::Ice, now: Instant) {
+        self.ice = Some(ice);
+        self.drain_ice(now);
+    }
+
+    /// The relays this session's agent holds, whole and live on their
+    /// servers, for a call that has ended and whose fork has another branch
+    /// to hand them to; the agent goes with them.
+    #[cfg(feature = "ice")]
+    pub(crate) fn take_relays(&mut self) -> Vec<crate::relay::Relay> {
+        self.ice
+            .take()
+            .map(crate::ice::Ice::into_relays)
+            .unwrap_or_default()
+    }
+
     /// The candidates this session's full agent still holds, for a restart
     /// to write. See [`crate::ice::Ice::gathered`].
     #[cfg(feature = "ice")]

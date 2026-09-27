@@ -6014,6 +6014,20 @@ fn sent_to_the_server(stack: &mut Stack, now: Instant) -> Vec<CallHandle> {
         .collect()
 }
 
+/// What left for the TURN server from the caller's sessions over the next
+/// two seconds — checks from the relayed candidate, and permissions and
+/// their retransmissions — with the clock moved as a driver moves it.
+#[cfg(feature = "ice")]
+fn sent_to_the_server_over(pair: &mut Pair) -> Vec<CallHandle> {
+    let mut sent = Vec::new();
+    for _ in 0..100 {
+        pair.advance();
+        pair.caller.engine.handle_timeout(pair.now);
+        sent.extend(sent_to_the_server(&mut pair.caller, pair.now));
+    }
+    sent
+}
+
 #[cfg(feature = "ice")]
 #[test]
 fn a_forked_branch_answered_and_kept_takes_the_relay_its_offer_named() {
@@ -6047,7 +6061,104 @@ fn a_forked_branch_answered_and_kept_takes_the_relay_its_offer_named() {
     );
     assert!(!sent.contains(&call), "{sent:?}");
 
-    // and it gives it back when it ends, the first branch having none
+    // when it ends, the first branch still ringing inherits it rather than
+    // the server: under KeepAll it may yet answer, and its session will
+    // open on the relay the offer named
+    pair.caller
+        .agent
+        .hangup(sibling, pair.now)
+        .expect("the BYE");
+    pair.caller.drain(pair.now, false);
+    assert!(
+        relays_given_back(&mut pair.caller).is_empty(),
+        "the relay went back while a branch that can use it still rings"
+    );
+    // it waits with the first branch, keeping the NAT binding towards the
+    // server open while that phone rings on
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    let start = pair.now;
+    let mut kept_alive = Vec::new();
+    while pair.now < start + Duration::from_secs(20) {
+        pair.advance();
+        pair.caller.engine.handle_timeout(pair.now);
+        while let Some((holder, datagram)) = pair.caller.engine.poll_waiting_transmit() {
+            if datagram.destination == server {
+                kept_alive.push(holder);
+            }
+        }
+    }
+    assert!(
+        kept_alive.contains(&call),
+        "the ringing branch does not hold the relay: {kept_alive:?}"
+    );
+}
+
+/// A 2xx rewritten as the 183 the same phone would have sent before it: the
+/// same dialog and the same description, as early media.
+#[cfg(feature = "ice")]
+fn as_early_media(response: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8(response.to_vec()).expect("text");
+    text.replacen("SIP/2.0 200 OK", "SIP/2.0 183 Session Progress", 1)
+        .into_bytes()
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn the_branch_kept_after_early_media_on_another_inherits_the_relay_it_held() {
+    use crate::relay::tests::SERVER;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let (call, answered) = rung_with_a_relay(&mut pair, crate::ForkPolicy::KeepFirst);
+    // the first phone plays early media, and its session runs on the relay
+    pair.caller
+        .deliver(&as_early_media(&answered), callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    assert!(pair.caller.engine.session(call).is_some(), "early media");
+    assert!(
+        sent_to_the_server(&mut pair.caller, pair.now).contains(&call),
+        "the early session has no relay"
+    );
+
+    // a second phone answers: kept, and the first ends with ForkLost
+    pair.caller
+        .deliver(&from_another_branch(&answered), callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    let sibling = pair
+        .caller
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::CallForked { sibling, .. }) => Some(*sibling),
+            _ => None,
+        })
+        .expect("the 2xx came from a second dialog");
+    assert!(
+        pair.caller.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::CallEnded {
+                call: ended,
+                reason: crate::CallEndReason::ForkLost,
+                ..
+            }) if *ended == call
+        )),
+        "the first branch was not let go"
+    );
+    assert!(pair.caller.engine.session(sibling).is_some(), "media");
+    assert!(
+        relays_given_back(&mut pair.caller).is_empty(),
+        "the relay went back with the branch that lost"
+    );
+    // the kept branch's agent holds it now: what it checks and asks for on
+    // the relay goes to the TURN server
+    let sent = sent_to_the_server_over(&mut pair);
+    assert!(
+        sent.contains(&sibling),
+        "the branch kept has no relay: {sent:?}"
+    );
+
     pair.caller
         .agent
         .hangup(sibling, pair.now)
@@ -6055,12 +6166,62 @@ fn a_forked_branch_answered_and_kept_takes_the_relay_its_offer_named() {
     pair.caller.drain(pair.now, false);
     let server: SocketAddr = SERVER.parse().expect("an address");
     assert_eq!(relays_given_back(&mut pair.caller), vec![(sibling, server)]);
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn when_the_branch_holding_the_relay_ends_the_other_answered_one_takes_it() {
+    use crate::relay::tests::SERVER;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let (call, answered) = rung_with_a_relay(&mut pair, crate::ForkPolicy::KeepAll);
+    // both phones answer, and both are kept: one allocation, one socket, so
+    // the first one's agent holds the relay and the second runs without
+    pair.caller.deliver(&answered, callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    pair.caller
+        .deliver(&from_another_branch(&answered), callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    let sibling = pair
+        .caller
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::CallForked { sibling, .. }) => Some(*sibling),
+            _ => None,
+        })
+        .expect("the 2xx came from a second dialog");
+    assert!(pair.caller.engine.session(call).is_some(), "media");
+    assert!(pair.caller.engine.session(sibling).is_some(), "media");
+    let sent = sent_to_the_server(&mut pair.caller, pair.now);
+    assert!(sent.contains(&call), "{sent:?}");
+    assert!(!sent.contains(&sibling), "{sent:?}");
+
+    // the first leg hangs up: the second, which found no path of its own,
+    // takes the relay over instead of the server getting it back
+    pair.caller.agent.hangup(call, pair.now).expect("the BYE");
+    pair.caller.drain(pair.now, false);
+    assert!(
+        relays_given_back(&mut pair.caller).is_empty(),
+        "the relay went back while the other leg could use it"
+    );
+    let sent = sent_to_the_server_over(&mut pair);
+    assert!(
+        sent.contains(&sibling),
+        "the leg left has no relay: {sent:?}"
+    );
+    assert!(pair.caller.engine.session(sibling).is_some(), "media");
+
     pair.caller
         .agent
-        .hangup(call, pair.now)
-        .expect("the CANCEL");
+        .hangup(sibling, pair.now)
+        .expect("the BYE");
     pair.caller.drain(pair.now, false);
-    assert!(relays_given_back(&mut pair.caller).is_empty());
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    assert_eq!(relays_given_back(&mut pair.caller), vec![(sibling, server)]);
 }
 
 #[cfg(feature = "ice")]

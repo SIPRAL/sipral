@@ -772,6 +772,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   answered — and would have taken an UPDATE's offer the ACK's answer then
   landed on. The offer in a 2xx now counts as outstanding until its ACK,
   as RFC 3311 §5.2 has it.
+- **A forked call's relay goes to the branch that is left, not back to the
+  server.** A forked INVITE's one offer named one relayed candidate, and
+  one allocation stands behind it: a second from the same socket to the
+  same server is refused by the server (RFC 8656 §3.2), so only one
+  branch's agent can hold it at a time. The branch kept after early media
+  on another, or the second leg of `ForkPolicy::KeepAll`, ran without it,
+  and when the branch that held it ended the relay was deleted, leaving a
+  call that only a relay could carry with no path at all. Now, when that
+  branch ends, a branch whose agent holds no relay and has found no path
+  gets an agent rebuilt around it, which checks every pair again, relayed
+  ones included; failing that, a branch still ringing keeps it waiting for
+  its session. Only when no branch can use it does it go back with a
+  Refresh of lifetime zero.
 - **A relay handed to the answer of a call already rung with media comes
   back whole.** `MediaEngine::answer_with` on a call `ring_with` described
   reads no relay, since the 200 OK carries the 183's description, and it

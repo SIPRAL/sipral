@@ -321,7 +321,9 @@ impl CallMedia {
     /// binds the channel the media needs, keeps the allocation and the NAT
     /// binding under it alive, and gives it back to the server (a Refresh
     /// with a lifetime of zero, RFC 8656 §8) when the call ends, ICE settles
-    /// on another pair, or the peer turns out to do no ICE at all. What that
+    /// on another pair, or the peer turns out to do no ICE at all — though a
+    /// forked call's branch that ends hands it to another branch of the fork
+    /// that can use it instead. What that
     /// sends comes out of [`MediaEngine::poll_transmit`] while the call is
     /// being set up and [`MediaEngine::poll_farewell`] once it is over, for
     /// the socket the relay was allocated from.
@@ -953,15 +955,152 @@ impl MediaEngine {
     #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
     const fn hand_back(&mut self, _handed: Handed) {}
 
-    /// Give back the relay a call's waiting agent holds, among the call's
-    /// farewells: for a call that ended before its session opened, and for
-    /// one whose peer turned out to do no ICE.
+    /// The relay a call's waiting agent holds, for a call that ended before
+    /// its session opened: to `heir`, another branch of its fork that wants
+    /// it ([`MediaEngine::heir`]), or back to its server among the call's
+    /// farewells.
     #[cfg(feature = "ice")]
-    fn let_go(&mut self, call: CallHandle, now: Instant) {
-        if let Some(mut ice) = self.gathered.remove(&call) {
-            for (destination, payload) in ice.release(now) {
-                self.farewells.push_back((call, destination, payload));
+    fn let_go(&mut self, call: CallHandle, heir: Option<CallHandle>, now: Instant) {
+        let Some(mut ice) = self.gathered.remove(&call) else {
+            return;
+        };
+        match heir {
+            Some(heir) => self.bequeath(call, heir, ice.into_relays(), now),
+            None => {
+                for (destination, payload) in ice.release(now) {
+                    self.farewells.push_back((call, destination, payload));
+                }
             }
+        }
+    }
+
+    /// The branch of `call`'s fork that is to have the relay `call` holds
+    /// when `call` ends, if one wants it.
+    ///
+    /// One offer went to every branch, with one relayed candidate in it, and
+    /// one allocation stands behind it — one per socket and server, since the
+    /// server knows an allocation by the addresses it runs between: "If the
+    /// client wishes to allocate a second relayed transport address, it must
+    /// create a second allocation using a different 5-tuple" (RFC 8656
+    /// §3.2), and the offer named the one socket. So while two
+    /// branches run at once only one of them holds it
+    /// ([`MediaEngine::claim_relay`]), and when that one ends, the relay is
+    /// worth more to a branch still going than to the server: a branch whose
+    /// session runs a full agent that holds no relay and has found no path —
+    /// the one kept after early media on the one that ends, or the other
+    /// leg of [`ForkPolicy::KeepAll`] — and failing that, a branch still
+    /// ringing, whose session will open with it.
+    ///
+    /// [`ForkPolicy::KeepAll`]: sipral_ua::ForkPolicy::KeepAll
+    #[cfg(feature = "ice")]
+    fn heir(&self, call: CallHandle) -> Option<CallHandle> {
+        let root = self.branches.get(&call).copied().or_else(|| {
+            self.branches
+                .values()
+                .any(|root| *root == call)
+                .then_some(call)
+        })?;
+        let family: Vec<CallHandle> = std::iter::once(root)
+            .chain(
+                self.branches
+                    .iter()
+                    .filter(|(_, first)| **first == root)
+                    .map(|(branch, _)| *branch),
+            )
+            .filter(|branch| *branch != call)
+            .filter(|branch| {
+                self.calls.get(branch).is_some_and(|managed| {
+                    managed.address.is_some()
+                        && managed.ice.as_ref().is_some_and(|ice| !ice.is_lite())
+                })
+            })
+            .collect();
+        let running = family.iter().copied().find(|branch| {
+            self.sessions
+                .get(branch)
+                .is_some_and(|held| share::lock(held).session.wants_relay())
+        });
+        running.or_else(|| {
+            family.iter().copied().find(|branch| {
+                !self.sessions.contains_key(branch) && !self.gathered.contains_key(branch)
+            })
+        })
+    }
+
+    /// Hand the relays `call` held to `heir`, another branch of its fork: an
+    /// agent rebuilt around the one the offer named, in place of the one
+    /// `heir`'s session runs, or waiting for its session to open. What
+    /// cannot be handed over goes back to its server among `call`'s
+    /// farewells, from the same socket.
+    ///
+    /// The rebuilt agent is `heir`'s own — the fork's credentials, the
+    /// candidates its offer named — and is told what `heir`'s peer described
+    /// before it runs, so it installs that peer's permissions on the relay
+    /// and checks every pair again, the relayed ones included.
+    #[cfg(feature = "ice")]
+    fn bequeath(
+        &mut self,
+        call: CallHandle,
+        heir: CallHandle,
+        relays: Vec<crate::Relay>,
+        now: Instant,
+    ) {
+        let mut relays = relays.into_iter();
+        let mut relay = relays.next();
+        // the fork's offer named one relay; an agent holding another had it
+        // from nowhere this engine put it, and it goes back
+        for extra in relays {
+            self.relay_farewell(call, extra, now);
+        }
+        let taken = self.calls.get(&heir).and_then(|managed| {
+            let local = managed.ice.clone()?;
+            let address = managed.address?;
+            let peer = managed.remote.as_ref().and_then(|remote| {
+                remote
+                    .media
+                    .iter()
+                    .find(|stream| !stream.is_rejected())
+                    .and_then(|stream| sipral_nat::ice::parse_remote(remote, stream))
+            });
+            Some((local, address, peer))
+        });
+        let Some((local, address, peer)) = taken else {
+            if let Some(relay) = relay {
+                self.relay_farewell(call, relay, now);
+            }
+            return;
+        };
+        let built = if relay.as_ref().is_some_and(|held| held.local() == address) {
+            local.relayed_agent(address, &mut relay, &mut self.keys, now)
+        } else {
+            Ok(None)
+        };
+        if let Ok(Some(mut ice)) = built {
+            match self.sessions.get(&heir).map(Arc::clone) {
+                Some(held) => match peer.map(|peer| ice.set_remote(&peer, now)) {
+                    Some(Ok(())) => share::lock(&held).session.inherit_ice(ice, now),
+                    _ => {
+                        for (destination, payload) in ice.release(now) {
+                            self.farewells.push_back((call, destination, payload));
+                        }
+                    }
+                },
+                None => {
+                    self.gathered.insert(heir, ice);
+                }
+            }
+        }
+        if let Some(relay) = relay {
+            self.relay_farewell(call, relay, now);
+        }
+    }
+
+    /// Give a relay back to its server among `call`'s farewells.
+    #[cfg(feature = "ice")]
+    fn relay_farewell(&mut self, call: CallHandle, relay: crate::Relay, now: Instant) {
+        let server = relay.server();
+        for payload in relay.release(now) {
+            self.farewells.push_back((call, server, payload));
         }
     }
 
@@ -2188,8 +2327,8 @@ impl MediaEngine {
     /// A call given a relay ([`CallMedia::relay`]) gives it back here too:
     /// the Refresh with a lifetime of zero that deletes the allocation (RFC
     /// 8656 §8), addressed to the TURN server, when the call ends — whether
-    /// or not its session ever opened — or as soon as the call is known not
-    /// to use it.
+    /// or not its session ever opened, and unless another branch of its fork
+    /// takes the relay over — or as soon as the call is known not to use it.
     #[must_use]
     pub fn poll_farewell(&mut self) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
         self.farewells.pop_front()
@@ -2610,7 +2749,8 @@ impl MediaEngine {
     /// agent reports that branch up before it ends the one the call was
     /// placed on, so the relay has moved by the time that ending would give
     /// it back. A branch that answers after another was kept never becomes a
-    /// call.
+    /// call. One whose session already runs on the relay keeps it until it
+    /// ends, and [`MediaEngine::heir`] names who has it then.
     ///
     /// [`ForkPolicy::KeepFirst`]: sipral_ua::ForkPolicy::KeepFirst
     #[cfg(feature = "ice")]
@@ -2887,9 +3027,12 @@ impl MediaEngine {
         // a call that ends before its session opened — cancelled while it
         // rang, refused, never answered — still holds the relay it was
         // described with, and the server would hold it for minutes more
+        // — to another branch of its fork that can use it, when there is one
+        #[cfg(feature = "ice")]
+        let heir = self.heir(call);
         #[cfg(feature = "ice")]
         {
-            self.let_go(call, now);
+            self.let_go(call, heir, now);
             self.branches.remove(&call);
         }
         let Some(held) = self.sessions.remove(&call) else {
@@ -2931,12 +3074,18 @@ impl MediaEngine {
             }
         }
         // and last, because the goodbyes above may have left through it: the
-        // relay goes back to its server (RFC 8656 §8), rather than holding a
-        // port and the account's quota there until its lifetime runs out
+        // relay goes to another branch of the fork that can use it, or back
+        // to its server (RFC 8656 §8), rather than holding a port and the
+        // account's quota there until its lifetime runs out
         #[cfg(feature = "ice")]
-        for (destination, payload) in session.release_relays(now) {
-            self.farewells.push_back((call, destination, payload));
-        }
+        let bequest = if heir.is_some() {
+            session.take_relays()
+        } else {
+            for (destination, payload) in session.release_relays(now) {
+                self.farewells.push_back((call, destination, payload));
+            }
+            Vec::new()
+        };
         // Best effort, and never fatal: a call that has already ended is
         // not going to un-end because a collector could not be reached.
         // `Ok(false)` is `send_quality_report`'s own silent no-op for an
@@ -2956,6 +3105,11 @@ impl MediaEngine {
         }
         self.events
             .push_back((call, MediaEvent::Ended(session.statistics(now))));
+        drop(slot);
+        #[cfg(feature = "ice")]
+        if let Some(heir) = heir {
+            self.bequeath(call, heir, bequest, now);
+        }
     }
 }
 
