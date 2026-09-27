@@ -9497,3 +9497,43 @@ fn an_answer_from_behind_the_nat_and_its_answer_to_a_later_offer_name_the_public
     assert!(answered.contains("c=IN IP4 203.0.113.9\r\n"), "{answered}");
     assert!(answered.contains("m=audio 41010 "), "{answered}");
 }
+
+/// The signalling side of the same story: an account whose `Contact` has
+/// already moved to the address a STUN answer gave (`UserAgent::readdress`,
+/// what a mapping learned before the call arrived writes) is called, and the
+/// 2xx it answers with has to carry that address too, not the one the socket
+/// is bound to underneath it — the far end's ACK, and everything else built
+/// from this dialog's `Contact`, goes exactly where this header says.
+#[test]
+fn a_call_answered_after_the_account_moved_behind_a_nat_writes_the_public_contact() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let incoming = pair.ring();
+    let public: SocketAddr = "203.0.113.9:41010".parse().expect("an address");
+    assert_eq!(
+        pair.callee.agent.readdress(UDP, callee_sip(), public, pair.now),
+        1,
+        "the account moves before the call is answered"
+    );
+    pair.callee
+        .engine
+        .answer(&mut pair.callee.agent, incoming, callee_media(), pair.now)
+        .expect("the answer goes");
+    let response = pair
+        .callee
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"SIP/2.0 200"))
+        .expect("the 200 OK went out");
+    let mut scratch = ParseScratch::new();
+    let message = sipral_core::msg::parse(&response, &mut scratch, ParseMode::Lenient)
+        .expect("a well-formed response");
+    let contact = message
+        .header(sipral_core::msg::HeaderName::Contact)
+        .map(|value| String::from_utf8_lossy(value).into_owned())
+        .expect("a Contact on the 2xx");
+    assert!(
+        contact.contains("203.0.113.9:41010"),
+        "the 200 OK's Contact still names the address behind the NAT: {contact}"
+    );
+}
