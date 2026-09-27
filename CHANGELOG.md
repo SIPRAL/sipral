@@ -124,6 +124,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   call 330 s after the REGISTER behind the lab's NAT, with the keep-alive on
   and then off. `Endpoint::bound_transport` says what a bound transport
   speaks and where it is bound.
+- **A CycloneDX SBOM beside every packaged artefact.** `scripts/package/
+  {wheels,nuget,aar,xcframework}.sh` each now write a `.cdx.json` next to
+  the wheel, `.nupkg`, `.aar` or `.xcframework` they build, listing
+  `sipral-ffi`'s own normal dependency graph at the features and target
+  that artefact was actually built with — name, version, SPDX licence
+  expression and a purl per crate — plus libopus itself as its own
+  component, with its own version, in a `--with-opus` build: the C library
+  `opusic-sys` vendors rather than declares as a dependency of its own.
+  The packaged file's SHA-256 goes on the document's own component, when
+  one exists to hash (a `--dry-run` `xcframework.sh` builds no zip, so
+  that SBOM carries no hash of one). New: `tools/sbom-gen`.
 - **ICE restarts in the full role, from either end.** A peer's re-offer
   that changes both `ice-ufrag` and `ice-pwd` is answered with new
   credentials of this end's own (RFC 8839 §4.4.2.1) instead of the ones the

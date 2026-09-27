@@ -262,6 +262,30 @@ else
     fail "no $PACKAGE_ID.<version>.nupkg landed in $OUT"
 fi
 
+# The SBOM sits beside the .nupkg, from sipral-ffi's own dependency graph at
+# the features this pack was staged with, across every RID a .nupkg carries
+# in one file (docs/10-roadmap.md). --notices only for the variant whose
+# feature list is THIRD-PARTY-LICENSES.txt's own (no flags at all, opus
+# included).
+if [ -n "$NUPKG" ]; then
+    step "SBOM"
+    NUPKG_VERSION=$(basename "$NUPKG" .nupkg)
+    NUPKG_VERSION="${NUPKG_VERSION#"$PACKAGE_ID".}"
+    SBOM="$NUPKG.cdx.json"
+    # Expanded as ${NOTICES_ARGS[@]+...}: bash 3.2 under `set -u` calls an
+    # empty array's [@] an unbound variable.
+    NOTICES_ARGS=()
+    [ "$WITH_OPUS" -eq 1 ] && NOTICES_ARGS=(--notices "$ROOT/THIRD-PARTY-LICENSES.txt")
+    if sbom_out=$(cargo run --quiet -p sipral-sbom-gen -- \
+        --crate sipral-ffi --features "$FFI_FEATURES" --target all \
+        --artifact-name "$PACKAGE_ID" --artifact-version "$NUPKG_VERSION" \
+        --artifact "$NUPKG" --out "$SBOM" ${NOTICES_ARGS[@]+"${NOTICES_ARGS[@]}"} 2>&1); then
+        pass "$(basename "$SBOM")"
+    else
+        fail "sbom-gen:"; printf '%s\n' "$sbom_out" | sed 's/^/        /'
+    fi
+fi
+
 if [ "$PUBLISH" -eq 1 ]; then
     step "publish"
     printf '  not run: nothing ships to NuGet before the ABI freezes (docs/08-ffi.md).\n'

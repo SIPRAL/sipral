@@ -1593,6 +1593,17 @@ fi
 pkg_run "wheels.sh --dry-run" \
     scripts/package/wheels.sh --out "$PKG_WORK/wheels" --dry-run
 
+# The --with-opus variant, once, is where the SBOM each packaging script now
+# writes beside its artefact (docs/10-roadmap.md) is checked for real: that
+# variant's own sbom-gen invocation carries --notices THIRD-PARTY-LICENSES.txt,
+# so a wheels.sh that runs to completion here already proves the SBOM's
+# crates.io components are exactly what that file lists -- wheels.sh chosen
+# because it is the cheapest of the four to build twice. The other three
+# scripts' own --notices wiring is the same shape (each script's own SBOM
+# step, above) and is not re-proven artefact by artefact.
+pkg_run "wheels.sh --dry-run --with-opus" \
+    scripts/package/wheels.sh --out "$PKG_WORK/wheels-opus" --dry-run --with-opus
+
 pkg_run "nuget.sh collect (osx-arm64, osx-x64)" \
     scripts/package/nuget.sh collect --out "$PKG_WORK/nuget-natives" --rid osx-arm64 --rid osx-x64
 pkg_run "nuget.sh pack --dry-run" \

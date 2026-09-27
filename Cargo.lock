@@ -989,6 +989,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipral-sbom-gen"
+version = "0.0.1"
+
+[[package]]
 name = "sipral-ua"
 version = "0.0.1"
 dependencies = [

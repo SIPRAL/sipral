@@ -381,6 +381,14 @@ property through before it reaches C.
   one place the default would put libopus into a product quietly
   (`05-media.md`). *Built* locally by `scripts/package/*.sh`; publishing is
   left to a person;
+- a CycloneDX SBOM beside every one of those artefacts, from `sipral-ffi`'s
+  own dependency graph at the features and target that artefact was actually
+  built with, plus libopus itself as its own component in a `--with-opus`
+  one — the C library `opusic-sys` vendors rather than declares, read the
+  same way `sipral-license-gen --aec` already reads a vendored library's own
+  licence file. *Built*: `tools/sbom-gen`, called from each packaging
+  script; `scripts/check.sh` checks the `--with-opus` SBOM's crates.io
+  components against `THIRD-PARTY-LICENSES.txt` exactly;
 - `sipral-io-pipewire` for Linux desktops over `libpipewire` (MIT; ALSA and
   PulseAudio client libraries are LGPL and stay out), on a `sipral-io-common`
   crate holding what the two device crates currently duplicate. *Built*:

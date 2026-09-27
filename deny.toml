@@ -90,6 +90,11 @@ allow = ["AGPL-3.0-only"]
 name = "sipral-license-gen"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]
+# the fourth tool under tools/: it writes the CycloneDX SBOM beside each
+# packaged artefact, out of the same dependency graph, and is never shipped
+name = "sipral-sbom-gen"
+allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
 # crates/sipral-aec-webrtc, outside the workspace and checked with its own
 # `cargo deny`, not the one this file otherwise gates -- kept here anyway so
 # the same allow-list covers webrtc-audio-processing's BSD-3-Clause too,

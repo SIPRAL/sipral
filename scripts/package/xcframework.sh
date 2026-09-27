@@ -305,6 +305,7 @@ else
     tail -20 "$STAGE/dump-package.log" | sed 's/^/        /'
 fi
 
+ZIP=""
 if [ "$DRY_RUN" -eq 0 ]; then
     step "zip and checksum, for a remote binaryTarget"
     ZIP="$OUT/CSipral$VARIANT_SUFFIX.xcframework.zip"
@@ -321,6 +322,26 @@ if [ "$DRY_RUN" -eq 0 ]; then
             tail -10 "$STAGE/checksum.log" | sed 's/^/        /'
         fi
     fi
+fi
+
+# The SBOM sits beside the .xcframework, from sipral-ffi's own dependency
+# graph across every Apple platform this one artefact carries
+# (docs/10-roadmap.md). Hashed against the zip a host would actually
+# publish when there is one; --dry-run builds no zip (above), so the SBOM
+# there carries no hash rather than one of something that is not the
+# artefact. --notices only for the variant whose feature list is
+# THIRD-PARTY-LICENSES.txt's own (no flags at all, opus included).
+step "SBOM"
+XCF_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -1)
+SBOM_ARGS=(--crate sipral-ffi --features "$FFI_FEATURES" --target all \
+    --artifact-name "CSipral$VARIANT_SUFFIX" --artifact-version "$XCF_VERSION" \
+    --out "$XCFRAMEWORK.cdx.json")
+[ -f "$ZIP" ] && SBOM_ARGS+=(--artifact "$ZIP")
+[ "$WITH_OPUS" -eq 1 ] && SBOM_ARGS+=(--notices "$ROOT/THIRD-PARTY-LICENSES.txt")
+if sbom_out=$(cargo run --quiet -p sipral-sbom-gen -- "${SBOM_ARGS[@]}" 2>&1); then
+    pass "$(basename "$XCFRAMEWORK.cdx.json")"
+else
+    fail "sbom-gen:"; printf '%s\n' "$sbom_out" | sed 's/^/        /'
 fi
 
 if [ "$PUBLISH" -eq 1 ]; then

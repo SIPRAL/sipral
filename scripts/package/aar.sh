@@ -342,6 +342,24 @@ if [ -f "$AAR" ]; then
     done
 fi
 
+# The SBOM sits beside sipral(.opus).aar, from sipral-ffi's own dependency
+# graph across every ABI this one archive carries (docs/10-roadmap.md).
+# --notices only for the variant whose feature list is
+# THIRD-PARTY-LICENSES.txt's own (no flags at all, opus included).
+if [ -f "$AAR" ]; then
+    step "SBOM"
+    AAR_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -1)
+    SBOM_ARGS=(--crate sipral-ffi --features "$FFI_FEATURES" --target all \
+        --artifact-name "sipral$VARIANT_SUFFIX" --artifact-version "$AAR_VERSION" \
+        --artifact "$AAR" --out "$AAR.cdx.json")
+    [ "$WITH_OPUS" -eq 1 ] && SBOM_ARGS+=(--notices "$ROOT/THIRD-PARTY-LICENSES.txt")
+    if sbom_out=$(cargo run --quiet -p sipral-sbom-gen -- "${SBOM_ARGS[@]}" 2>&1); then
+        pass "$(basename "$AAR").cdx.json"
+    else
+        fail "sbom-gen:"; printf '%s\n' "$sbom_out" | sed 's/^/        /'
+    fi
+fi
+
 if [ "$PUBLISH" -eq 1 ]; then
     step "publish"
     printf '  not run: nothing ships to Maven before the ABI freezes (docs/08-ffi.md).\n'

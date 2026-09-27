@@ -228,15 +228,15 @@ fi
 # still `sipral`, imported the same way.
 DIST_INFO=$(dirname "$WHEEL_METADATA")
 DIST_NAME="sipral"
+DIST_VERSION=$(basename "$DIST_INFO" .dist-info)
+DIST_VERSION="${DIST_VERSION#sipral-}"
 if [ "$WITH_OPUS" -eq 1 ]; then
     DIST_NAME="sipral-opus"
-    dist_version=$(basename "$DIST_INFO" .dist-info)
-    dist_version="${dist_version#sipral-}"
     if grep -q '^Name: sipral$' "$DIST_INFO/METADATA" \
         && sed 's/^Name: sipral$/Name: sipral-opus/' "$DIST_INFO/METADATA" >"$DIST_INFO/METADATA.new" \
         && mv "$DIST_INFO/METADATA.new" "$DIST_INFO/METADATA" \
-        && mv "$DIST_INFO" "$DISTDIR/sipral_opus-$dist_version.dist-info"; then
-        pass "renamed sipral-opus $dist_version, for the variant that carries libopus"
+        && mv "$DIST_INFO" "$DISTDIR/sipral_opus-$DIST_VERSION.dist-info"; then
+        pass "renamed sipral-opus $DIST_VERSION, for the variant that carries libopus"
     else
         fail "could not rename $(basename "$DIST_INFO") to the sipral-opus distribution"
     fi
@@ -296,6 +296,30 @@ print(next((l[6:] for l in z.read(m[0]).decode().splitlines() if l.startswith("N
 else
     fail "no tagged wheel in $OUT"
 fi
+
+# The SBOM sits beside the wheel it describes, from sipral-ffi's own
+# dependency graph at the features and single target this wheel was actually
+# built with (docs/10-roadmap.md). --notices only for the variant whose feature
+# list is THIRD-PARTY-LICENSES.txt's own (no flags at all, opus included):
+# that is the one file this tool's crate list can be checked against exactly.
+if [ -n "$FINAL" ]; then
+    step "SBOM"
+    SBOM="$FINAL.cdx.json"
+    # Expanded as ${NOTICES_ARGS[@]+...}: bash 3.2 under `set -u` calls an
+    # empty array's [@] an unbound variable (android.sh's own comment on
+    # VARIANT_ARGS says the same).
+    NOTICES_ARGS=()
+    [ "$WITH_OPUS" -eq 1 ] && NOTICES_ARGS=(--notices "$ROOT/THIRD-PARTY-LICENSES.txt")
+    if sbom_out=$(cargo run --quiet -p sipral-sbom-gen -- \
+        --crate sipral-ffi --features "$FFI_FEATURES" --target "$RUST_TRIPLE" \
+        --artifact-name "$DIST_NAME" --artifact-version "$DIST_VERSION" \
+        --artifact "$FINAL" --out "$SBOM" ${NOTICES_ARGS[@]+"${NOTICES_ARGS[@]}"} 2>&1); then
+        pass "$(basename "$SBOM")"
+    else
+        fail "sbom-gen:"; printf '%s\n' "$sbom_out" | sed 's/^/        /'
+    fi
+fi
+[ "$FAIL" -ne 0 ] && { printf '\nwheels.sh: failed\n'; exit 1; }
 
 if [ "$DRY_RUN" -eq 0 ] && [ -n "$FINAL" ]; then
     step "importing it for real"
