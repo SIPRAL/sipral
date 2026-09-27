@@ -360,7 +360,23 @@ fn a_default_that_changes_is_reported_and_nothing_else_passes_for_one() {
         .default_device(Direction::Input)
         .expect("the session names a default source");
 
+    // Which of the two cables a fresh session names its default sink is not
+    // this test's to assume: on PipeWire's own dummy driver, that is a fact
+    // of the session manager's own startup timing, and it lands on the ear
+    // as often as on the mouth. Left to chance, `configure` below is then a
+    // coin flip between an actual move (the ear was not already the
+    // default, and moving to it is noted) and a no-op (it already was, so
+    // `set_default` never runs and nothing is ever noted) -- the failure
+    // this test used to see roughly one run in two or three, on an empty
+    // `heard` rather than on a wrong one. So the starting default is pinned
+    // to a known value, distinct from every value configured after it,
+    // before anything below relies on a transition happening at all.
+    configure(Direction::Output, MOUTH);
+    until("the default sink starting from a known place", || {
+        monitor.default_device(Direction::Output) == Some(DeviceId::new(MOUTH))
+    });
     while monitor.poll().is_some() {}
+
     configure(Direction::Output, EAR);
     until("the default sink moving to the ear", || {
         monitor.default_device(Direction::Output) == Some(DeviceId::new(EAR))
