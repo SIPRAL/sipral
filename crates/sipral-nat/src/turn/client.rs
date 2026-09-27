@@ -1169,7 +1169,7 @@ impl TurnClient {
         let stale = message
             .error_code()
             .is_some_and(|error| error.code() == error_code::STALE_NONCE);
-        if let Some(verdict) = self.answerable(index, nonce, stale) {
+        if let Some(verdict) = self.answerable(index, nonce, stale, realm) {
             self.expire(index, verdict, now);
             return;
         }
@@ -1209,11 +1209,29 @@ impl TurnClient {
     /// not.
     ///
     /// A 438 is answered once per nonce: a second one naming a nonce we have
-    /// already used is a server that will never be satisfied. A second 401 in
-    /// the same exchange is the server saying the password is wrong, since
-    /// §9.2.5 forbids retrying without changing the username, realm or
-    /// password, and none of those changed.
-    fn answerable(&self, index: usize, nonce: &[u8], stale: bool) -> Option<TurnError> {
+    /// already used is a server that will never be satisfied.
+    ///
+    /// A 401 is different: "the client MUST NOT perform this retry if it is
+    /// not changing the USERNAME, USERHASH, REALM, or its associated
+    /// password from the previous attempt" (RFC 8489 §9.2.5). A request
+    /// that already carried MESSAGE-INTEGRITY — a Refresh or any other
+    /// request sent once an allocation is established — was already
+    /// answering for the realm named in `self.auth`; a 401 naming that same
+    /// realm again is the server saying those credentials are no longer
+    /// good (expired ephemeral credentials are the common production
+    /// cause), not an invitation to resend them unchanged, so it ends the
+    /// transaction at once. A 401 naming a *different* realm is a change of
+    /// realm and, with it, of the derived password, so it still gets its
+    /// one retry. An unauthenticated request's first challenge is
+    /// unaffected either way, since there was no previous attempt to have
+    /// left unchanged.
+    fn answerable(
+        &self,
+        index: usize,
+        nonce: &[u8],
+        stale: bool,
+        realm: &[u8],
+    ) -> Option<TurnError> {
         let entry = self.transactions.get(index)?;
         if stale {
             if entry.stale.iter().any(|seen| seen == nonce) || entry.stale.len() >= MAX_STALE_NONCES
@@ -1221,6 +1239,9 @@ impl TurnClient {
                 return Some(TurnError::StaleNonceLoop);
             }
             return None;
+        }
+        if entry.authenticated && realm == self.auth.realm.as_slice() {
+            return Some(TurnError::Unauthenticated);
         }
         (entry.challenges > 0).then_some(TurnError::Unauthenticated)
     }
@@ -1760,10 +1781,14 @@ mod tests {
     }
 
     fn challenge(request: &Message<'_>, code: u16, nonce: &[u8]) -> Vec<u8> {
+        challenge_in_realm(request, code, REALM, nonce)
+    }
+
+    fn challenge_in_realm(request: &Message<'_>, code: u16, realm: &[u8], nonce: &[u8]) -> Vec<u8> {
         let mut builder =
             MessageBuilder::new(Class::Error, request.method(), request.transaction_id());
         builder.add_error_code(code, b"try again").unwrap();
-        builder.add(AttributeType::REALM, REALM).unwrap();
+        builder.add(AttributeType::REALM, realm).unwrap();
         builder.add(AttributeType::NONCE, nonce).unwrap();
         builder.finish()
     }
@@ -2126,46 +2151,82 @@ mod tests {
     }
 
     #[test]
-    fn a_nonce_rotated_without_stale_on_every_refresh_costs_one_retry_and_never_loops() {
-        // the registrar once retried a nonce that changed on every 401 for
-        // ever; here a server that answers each refresh with a fresh nonce
-        // and no 438 gets one retry per refresh, and one that refuses the
-        // retry as well ends the allocation rather than being asked again
+    fn a_401_to_an_already_authenticated_refresh_in_the_same_realm_ends_it_at_once() {
+        // RFC 8489 SS9.2.5: "The client MUST NOT perform this retry if it is
+        // not changing the USERNAME, USERHASH, REALM, or its associated
+        // password from the previous attempt." A Refresh is sent already
+        // carrying MESSAGE-INTEGRITY for the realm the allocation was made
+        // in, so a 401 naming that same realm again is not an invitation to
+        // resend the same credentials — it is the server saying they no
+        // longer work (expired ephemeral credentials being the usual
+        // production cause), and the application needs to hear that now
+        // rather than after a pointless retry.
         let (mut client, mut ids) = ready(Instant::now());
-        for round in 0..5_u8 {
-            ids.feed(&mut client);
-            let now = client.deadline().expect("a refresh is due");
-            client.handle_timeout(now);
-            let refresh = sent(&mut client);
-            let refresh = Message::parse(&refresh).unwrap();
-            assert_eq!(refresh.method(), method::REFRESH);
-            let nonce = [b'n', round];
-            client.handle_input(&challenge(&refresh, 401, &nonce), now);
-            ids.feed(&mut client);
-            let retry = sent(&mut client);
-            let retry = Message::parse(&retry).unwrap();
-            assert_eq!(retry.nonce(), Some(&nonce[..]));
-            assert!(client.poll_transmit().is_none(), "more than one retry");
-            client.handle_input(&success(&retry, |_| {}), now);
-            assert!(client.is_allocated());
-        }
-
         ids.feed(&mut client);
         let now = client.deadline().expect("a refresh is due");
         client.handle_timeout(now);
         let refresh = sent(&mut client);
         let refresh = Message::parse(&refresh).unwrap();
-        client.handle_input(&challenge(&refresh, 401, b"fresh-one"), now);
-        ids.feed(&mut client);
-        let retry = sent(&mut client);
-        let retry = Message::parse(&retry).unwrap();
-        let _refreshed = events(&mut client);
-        client.handle_input(&challenge(&retry, 401, b"fresh-two"), now);
-        assert!(client.poll_transmit().is_none(), "a third request went out");
+        assert_eq!(refresh.method(), method::REFRESH);
+        assert!(refresh.has_integrity(), "already authenticated");
+
+        client.handle_input(&challenge(&refresh, 401, b"fresh-nonce"), now);
+        assert!(
+            client.poll_transmit().is_none(),
+            "no retry for the same realm"
+        );
         assert_eq!(
             events(&mut client),
             vec![Event::Closed(TurnError::Unauthenticated)]
         );
+    }
+
+    #[test]
+    fn a_401_naming_a_different_realm_still_gets_its_one_retry() {
+        // the exception in SS9.2.5: naming a different realm changes what
+        // the credentials derive to, so it is still a change worth retrying
+        // once — unlike the same-realm case above.
+        let (mut client, mut ids) = ready(Instant::now());
+        ids.feed(&mut client);
+        let now = client.deadline().expect("a refresh is due");
+        client.handle_timeout(now);
+        let refresh = sent(&mut client);
+        let refresh = Message::parse(&refresh).unwrap();
+
+        let other_realm = b"other.example.com";
+        client.handle_input(
+            &challenge_in_realm(&refresh, 401, other_realm, b"fresh-nonce"),
+            now,
+        );
+        ids.feed(&mut client);
+        let retry = sent(&mut client);
+        let retry = Message::parse(&retry).unwrap();
+        assert_ne!(retry.transaction_id(), refresh.transaction_id());
+        assert_eq!(retry.realm(), Some(&other_realm[..]));
+        assert!(retry.has_integrity());
+        assert!(events(&mut client).is_empty(), "not closed after one retry");
+    }
+
+    #[test]
+    fn the_unauthenticated_first_request_still_gets_its_usual_challenge() {
+        // unaffected by the rule above: there was no previous attempt to
+        // leave unchanged, so the ordinary challenge/response handshake for
+        // a brand-new allocation is untouched.
+        let now = Instant::now();
+        let mut client = TurnClient::new(config());
+        let mut ids = Ids::new();
+        ids.feed(&mut client);
+        client.allocate(now).unwrap();
+        let first = sent(&mut client);
+        let first = Message::parse(&first).unwrap();
+        assert!(!first.has_integrity());
+
+        client.handle_input(&challenge(&first, 401, NONCE), now);
+        ids.feed(&mut client);
+        let retry = sent(&mut client);
+        let retry = Message::parse(&retry).unwrap();
+        assert!(retry.has_integrity());
+        assert!(events(&mut client).is_empty());
     }
 
     #[test]

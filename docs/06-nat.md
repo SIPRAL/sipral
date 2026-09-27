@@ -311,10 +311,20 @@ framing, but no call can use it yet (see "Not done yet" below).
 `TurnClient` is not told the server's address, so whoever holds it hands in
 only what came from there: ChannelData and Data indications carry no proof of
 who wrote them beyond the relay's 5-tuple. The full ICE agent does. Long-term
-credentials follow RFC 8489 §9.2: the first request goes out bare, a 401 is
-answered once per transaction, a 438 once per new nonce and at most three
-times, and a server that rotates its nonce without saying stale costs one
-retry per request rather than a loop. The derived key is overwritten as it is
+credentials follow RFC 8489 §9.2: the first request goes out bare, and its
+401 is answered once, echoing the realm and nonce back with
+MESSAGE-INTEGRITY; a 438 is answered once per new nonce and at most three
+times. A 401 to a request that already carried MESSAGE-INTEGRITY — a Refresh,
+or anything sent once the allocation is authenticated — is not answered the
+same way: §9.2.5 says "the client MUST NOT perform this retry if it is not
+changing the USERNAME, USERHASH, REALM, or its associated password from the
+previous attempt," and resending the same credentials to the same realm again
+would do exactly that, so the transaction ends with
+`TurnError::Unauthenticated` at once instead of retrying — the common cause
+in production is ephemeral credentials that have expired, and the
+application needs to hear that now, not after a pointless round trip. A 401
+naming a *different* realm still changes what the derived password is, so it
+still gets its one retry. The derived key is overwritten as it is
 dropped, with the password's own best effort — no volatile write without
 `unsafe`, and a move leaves the bytes it moved from — and neither it nor the
 password reaches a `Debug`.

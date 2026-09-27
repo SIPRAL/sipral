@@ -970,6 +970,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   else — sat there unread until the flow's own patience ran out. Both
   roles' `turn` reads the socket now, the same way `main`'s own `drive`
   does.
+- **A TURN 401 to an already-authenticated request no longer gets a
+  pointless retry.** `TurnClient::answerable` answered a 401 once per
+  transaction regardless of whether the request already carried
+  MESSAGE-INTEGRITY, so a Refresh — or anything else sent once the
+  allocation was authenticated — whose credentials the server rejected,
+  most commonly because ephemeral credentials had expired, sent one more
+  copy of the same USERNAME/REALM/password before giving up, which RFC
+  8489 §9.2.5 forbids ("the client MUST NOT perform this retry if it is
+  not changing the USERNAME, USERHASH, REALM, or its associated password
+  from the previous attempt"). A 401 naming the realm already in use now
+  ends the transaction with `TurnError::Unauthenticated` at once; one
+  naming a different realm, a genuine change, still gets its one retry.
 - **An incoming call the caller gave up on before it was taken no longer
   leaves a call that can never end.** `SipralStack.takeIncomingCall` (and
   `answerCall`, which calls it) minted and registered a `Call` for a
