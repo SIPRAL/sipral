@@ -435,7 +435,7 @@ branch: the server knows an allocation by the addresses it runs between, and
 create a second allocation using a different 5-tuple" (RFC 8656 §3.2) — while
 the offer named one socket for every branch. It does not have to be: "Since
 SIP supports forking, TURN supports multiple peers per relayed transport
-address" (RFC 8656 §2), and RFC 8839 §7 runs each answer as "an independent
+address" (RFC 8656 §1), and RFC 8839 §7 runs each answer as "an independent
 offer/answer exchange, with its own set of local candidates, pairs,
 checklists, states". So every branch runs an ICE agent of its own — the one
 offer's credentials and candidates, and a checklist formed from its own
@@ -475,7 +475,7 @@ that phone a pair works whose triggered check nobody sends.
 
 A branch that ends, or whose agent concludes on a pair that does not use the
 relay, lets go of it: the permissions only its own phone needed are no longer
-renewed (RFC 8656 §2.3 has no way to take one back, so they lapse at the
+renewed (RFC 8656 §3.3/§3.5 has no way to take one back, so they lapse at the
 server in five minutes, a channel in ten), and the allocation stays with the
 branches still holding it. The last to let go gives it back with a Refresh of
 lifetime zero — "Once all ICE sessions have ceased using a given local

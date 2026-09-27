@@ -10,7 +10,7 @@
 //! transport address, it must create a second allocation using a different
 //! 5-tuple" (RFC 8656 §3.2), while the offer named one socket. It does not
 //! need to be either: "Since SIP supports forking, TURN supports multiple
-//! peers per relayed transport address" (RFC 8656 §2), and RFC 8839 §7 runs
+//! peers per relayed transport address" (RFC 8656 §1), and RFC 8839 §7 runs
 //! each answer as "an independent offer/answer exchange, with its own set of
 //! local candidates, pairs, checklists, states". So every branch's agent
 //! holds the one allocation as a relayed candidate of its own, asks it for

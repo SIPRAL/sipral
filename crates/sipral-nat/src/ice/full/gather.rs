@@ -375,7 +375,7 @@ impl IceAgent {
 
     /// A relayed candidate on an allocation other ICE sessions hold too: the
     /// agents of the other branches of a forked call, which were all offered
-    /// the one relayed candidate (RFC 8839 §7, RFC 8656 §2).
+    /// the one relayed candidate (RFC 8839 §7, RFC 8656 §1).
     ///
     /// The candidate is the one [`IceAgent::add_relayed`] makes of the same
     /// allocation, with the same priority and foundation, so an agent built

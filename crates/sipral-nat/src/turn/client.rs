@@ -638,11 +638,11 @@ impl TurnClient {
     ///
     /// For an allocation that outlives the reason a peer was let in — one
     /// shared by the branches of a forked call, of which one has ended. RFC
-    /// 8656 §2.3 gives no way to take either back ("there is no way to
-    /// explicitly delete a permission", "no way to explicitly delete a
-    /// channel binding; the client must simply wait for it to time out"), so
-    /// both are left to lapse at the server, five and ten minutes on. A
-    /// channel keeps its number out of use until five minutes after it
+    /// 8656 gives no way to take either back ("there is no way to
+    /// explicitly delete a permission", §3.3; "no way to explicitly delete a
+    /// channel binding; the client must simply wait for it to time out",
+    /// §3.5), so both are left to lapse at the server, five and ten minutes
+    /// on. A channel keeps its number out of use until five minutes after it
     /// lapses, as §12 asks of one that expires, and an answer to a
     /// CreatePermission already on its way installs nothing. A later
     /// [`TurnClient::permit`] or [`TurnClient::bind_channel`] asks again.

@@ -576,7 +576,7 @@ impl LocalIce {
     /// candidates gathered in the same order, and the relayed one on the same
     /// allocation, at the same address. RFC 8839 §7 runs each answer as "an
     /// independent offer/answer exchange, with its own set of local
-    /// candidates, pairs, checklists, states", and RFC 8656 §2 lets one
+    /// candidates, pairs, checklists, states", and RFC 8656 §1 lets one
     /// relayed address serve "multiple peers" for exactly this: the agent
     /// asks the relay to let its own branch's peer through, checks its own
     /// pairs, and lets go of the allocation — which goes back to the server

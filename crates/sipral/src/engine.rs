@@ -1011,7 +1011,7 @@ impl MediaEngine {
     /// a second relayed transport address, it must create a second
     /// allocation using a different 5-tuple" (RFC 8656 §3.2), while the
     /// offer named the one socket. It serves them all the same — "TURN
-    /// supports multiple peers per relayed transport address" (RFC 8656 §2)
+    /// supports multiple peers per relayed transport address" (RFC 8656 §1)
     /// — and each branch runs its own ICE session over it (RFC 8839 §7).
     #[cfg(feature = "ice")]
     fn branch_agent(
