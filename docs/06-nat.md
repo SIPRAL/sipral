@@ -235,7 +235,17 @@ The decisions, and why each one is what it is:
   exchange addressed to the edge proxy, and this one is addressed to the STUN
   server, which keeps the mapping open for a NAT whose mapping is
   endpoint-independent (RFC 4787 REQ-1). It does not open a NAT's filter
-  towards the registrar; the registration's own refreshes do that. A media
+  towards the registrar; the registration's own refreshes do that. Behind a
+  NAT that filters by address and port, a call reaches the phone only while
+  that filter is open, and only from the address and port the phone's
+  REGISTER went to: on the Android emulator behind its own NAT and a VPN's
+  (`docs/15-mobile.md`), Asterisk's INVITE rang the phone two and a half
+  minutes after the REGISTER and was dropped five and a half minutes after
+  it, and it was dropped whenever Asterisk sent it from a port other than the
+  one the phone had registered to, which a registrar behind a port
+  translation of its own does unless the translation is one to one. A phone
+  that has to be reachable while idle registers more often than its NAT
+  forgets, or is woken by a push (RFC 8599) and registers then. A media
   socket is asked on the same schedule while it waits for its call — an
   application that maps the next call's socket when the last call ends may
   place that call many minutes later, and nothing else crosses the binding in

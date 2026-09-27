@@ -836,6 +836,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   to 340 ms held in hand; a buffer that runs dry mid-spurt now starts
   again at once rather than waiting out a pause's frames in hand
   (`docs/19-numbers.md`, `docs/05-media.md`).
+- **The lab's Asterisk calls a phone behind a NAT from the port the phone
+  registered to.** `scripts/lab.sh wasapi up` published Asterisk's internal
+  5060 as 5062, so an INVITE Asterisk started itself left the lab machine
+  from 5062 only while the machine's connection tracking still held the
+  phone's REGISTER, and from 5060 after that; a NAT that filters by address
+  and port dropped it, and the phone never rang. Asterisk's own socket is
+  now moved to 5062 and published one to one, and `wasapi up` fails unless
+  Asterisk reports it there. On the Android emulator with STUN and the plain
+  `labuser` account, an incoming call now rings and carries audio both ways
+  (`docs/15-mobile.md`); the earlier report of that call answered with a
+  private `Contact` did not reproduce, on the emulator or in the lab.
 - **Apple artefacts are built for the releases they claim.** The macOS
   wheel was tagged with the building Mac's own version (`macosx_26_0`), so
   pip refused it on every older macOS the library runs on; and in every

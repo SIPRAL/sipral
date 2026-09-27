@@ -19,11 +19,19 @@
 # pjsip_local.conf here is `scripts/lab.sh wasapi up`'s own, generated fresh
 # each time it runs (gitignored: see this directory's own comment in
 # .gitignore) with the address this machine is reachable at on the LAN,
-# which nothing checked into the repository can know in advance.
+# which nothing checked into the repository can know in advance. It also
+# moves Asterisk's own SIP socket to 5062, so that the port is published one
+# to one. Published as 5062 onto the 5060 inside, the answers to what a
+# client sent still left from 5062, since the NAT that forwarded the request
+# rewrites its replies, but a request Asterisk starts itself -- the INVITE of
+# a call to a registered phone -- left the host from 5060. A phone behind a
+# NAT that filters by address and port has opened a way in only for the
+# address and port it sent its REGISTER to, and dropped that INVITE: the
+# phone never rang.
 services:
   asterisk:
     ports:
-      - "5062:5060/udp"
+      - "5062:5062/udp"
       - "10000-10020:10000-10020/udp"
     volumes:
       - ./wasapi/rtp.conf:/etc/asterisk/rtp.conf:ro

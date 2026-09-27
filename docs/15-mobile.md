@@ -469,40 +469,56 @@ nothing while Asterisk hears the phone. `rewrite_contact` and
 phones behind NATs is configured with (`docs/06-nat.md`, "The order that
 matters"); STUN (`SIPRAL_NAT_STUN`) is the answer for one that is not. The
 sample's account screen takes a STUN server (and a TURN server, with ICE
-offered when one is given), passed to `SipralClient.open`. On a later run the
-emulator asked a STUN server on the lab machine, through its own NAT and the
-VPN's, and was answered: the lab machine saw the Binding request and every
-REGISTER after it come from one public address and port, the one the answer
-names, so a `Contact` written from the answer is the address the registrar
-can reach. That run went further on a later attempt, this time with
-Asterisk's own registrar port reachable one-to-one rather than remapped —
-the lab's own `wasapi` override otherwise publishes a different host port
-onto Asterisk's internal 5060, which a request Asterisk itself originates
-(an incoming INVITE, unlike a REGISTER's reply) leaves the host under its
-container-internal port instead of the published one, so a phone's
-port-restricted NAT, whose only open pinhole is toward the published port,
-never lets it in: `pjsip show contacts` on `labuser` reads
-`labuser/sip:labuser@<VPN concentrator's public address>:<port>`, never
-`10.0.2.x`. `channel originate` to that contact then reaches the phone:
-`SET_RINGING` in the sample's own event log and in the telecom framework,
-and the dialog completes at the SIP layer — INVITE, 100 Trying, the
-sample's 200 OK, Asterisk's ACK, the channel `Up`. No audio crossed either
-way on that call, though: the 200 OK's own SDP already names the mapped
-public address for `c=`/`m=`, but its `Contact` header still names the
-private one, so the ACK Asterisk sends goes to an address nothing reads —
-this is `sipral-ua`'s answer path, not the sample or the Kotlin layer
-(which only relay what it emits), and is flagged here rather than fixed.
-Placing a call the other way, from that same registered `labuser` account
-back through the same STUN mapping, shows what the incoming one could not:
-audio both ways, Asterisk's own counters climbing throughout (408 packets
-each way 9 seconds in, 1,497 at 32 seconds, none lost either direction),
-ended by the sample's own hangup — BYE, 200 OK, no channel left.
+offered when one is given), passed to `SipralClient.open`.
+
+With a STUN server the same account works both ways, which a run on 27
+September 2026 showed on an `android-36` arm64 AVD started without
+`-no-audio`: `labuser`, the lab machine's own address as registrar
+(`192.0.2.30:5062`), and as STUN server a coturn answering Binding requests
+only, on the lab machine's own network at port 3479. The Binding request and
+every REGISTER after it reached the lab machine from one public address and
+port, the VPN concentrator's, and `pjsip show contacts` read
+`labuser/sip:labuser@<concentrator>:<port>`. `channel originate` to
+`PJSIP/labuser` into 9008 rang the sample; answered, the 200 OK Asterisk
+received named that address in its `Contact` as well as in `c=`, the ACK
+went there, and Asterisk counted 2,555 packets each way 69 seconds in, none
+lost, until the sample's own BYE. The call the other way, to 9008, counted
+1,694 each way at 36 seconds, none lost. The same incoming call with the
+emulator started with `-no-audio` counted 883 each way at 23 seconds: the
+microphone reads silence then, and silence is sent like any other frame.
+
+An earlier attempt had reported that call answered with the private address
+in the 200 OK's `Contact` and no audio either way. That did not happen
+again: not in any of the four incoming calls answered in this run, each
+200 OK read at Asterisk, and not in the lab, where the C harness and, in a
+run of its own, the Kotlin example agent, each behind `interop/nat` with a
+STUN server, answered calls from Asterisk with the public `Contact`, were
+acknowledged and heard the echo (`scripts/lab.sh nat` now runs the C half
+of that on every run). What the attempts had in common was the lab itself:
+`scripts/lab.sh wasapi up` published Asterisk's internal 5060 as 5062. A
+request Asterisk starts itself leaves the lab machine from 5062 only while
+the machine's own connection tracking still holds the flow the phone's
+REGISTER opened, two minutes after its last packet; after that the INVITE
+left from 5060, and the concentrator, which lets in only what comes from the
+address and port the phone sent to, dropped it. Captured on the lab machine
+with the old override: the INVITE from `192.0.2.30:5060`, retransmitted and
+never answered, and the phone never rang. The override now moves Asterisk's
+own socket to 5062 and publishes it one to one, and the same call rings
+whenever it is placed.
+
+Whenever, within limits: nothing but the phone's own traffic keeps the
+concentrator's way in open. A call two and a half minutes after the REGISTER
+rang and carried 794 packets each way; one five and a half minutes after it
+left the lab machine from 5062, to the right address, and nothing answered.
+The STUN refresh every 25 seconds keeps the mapping, but it goes to the STUN
+server, and a NAT that filters by address and port opens nothing towards the
+registrar for it (`docs/06-nat.md`, "Refresh"); the registration refreshes
+once an hour. A phone that has to be reachable while idle is woken by a push
+(`SipralPush`, RFC 8599), which makes it register again, or registers more
+often than its NAT forgets.
 `NatTests.swift` and `NatCheck.kt` show the `Contact` and `c=` on the wire
 under a controlled test; this is the same address, written the same way,
-under a live registrar. The NAT's mapping is not kept open by anything but
-the phone's own traffic, since UDP has no keepalive here and the
-registration refreshes once an hour: a call to a phone left idle longer
-than its NAT keeps a mapping is not something this run tested.
+under a live registrar.
 
 ## The Swift package on iOS
 
@@ -594,7 +610,9 @@ which moved the dialog off the path its INVITE took. The ACK had already
 gone the right way, the BYE went to 5060, and nothing answered there. The
 package now leaves the event unanswered (`DialogFlowTests` is the case, with
 a server whose `Contact` names a second socket), and so do the Python and
-.NET packages, which did the same. On the account with Asterisk's defaults,
+.NET packages, which did the same. The lab no longer names the port inside
+its container either: `wasapi up` binds Asterisk to 5062 and publishes it
+one to one, for the reason the Android section above gives. On the account with Asterisk's defaults,
 `labuser`, the simulator's call works as well: the Mac's VPN address is
 routable from the lab, so the `c=` Asterisk sends to reaches it, where the
 emulator's does not.
