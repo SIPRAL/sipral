@@ -1614,6 +1614,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   route changes with it; `SipralConnection.routes`, `route` and
   `requestRoute` take the same type under its new name. The Android
   sample's own `AudioPump` is gone, replaced by `SipralCallAudio`.
+- **What a pause keeps in hand for the earpiece's pace is bounded at
+  100 ms.** Every clock a device runs at needs a frame or two: measured, a
+  laptop's loudspeaker ran 3 ppm off its machine's crystal, and the widest
+  a device may run and meet its bus's specification is USB full speed's
+  2500 ppm (USB 2.0 §7.1.11). The budget carries 2500 ppm through a
+  twenty-second spurt, and no frame runs dry up to ±10 000 ppm in the
+  crate's simulations of `scripts/lab.sh drift`, either callback length.
+  Past that the skew is a stream played at the wrong rate, and the buffer
+  no longer chases it with delay — 340 ms at 500 000 ppm, past what ITU-T
+  G.114 finds acceptable for conversation — but keeps the budget, runs dry
+  for the rest and counts every frame (`Quality::underruns`,
+  `frames_underrun`), so the loss rate, `is_suffering` and the score say
+  so. At 500 000 ppm in the lab the fast earpiece now holds 80 ms at most and
+  is scored 0 and suffering at every report (`docs/05-media.md`,
+  `docs/19-numbers.md`).
 - **The `sipral` crate's own description of its bindings names all four.**
   `crates/sipral/README.md`, its `Cargo.toml` description and
   `bindings/dotnet/Sipral/README.md` said "Swift, .NET and Kotlin bindings,"

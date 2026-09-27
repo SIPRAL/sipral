@@ -9807,3 +9807,173 @@ fn a_call_answered_after_the_account_moved_behind_a_nat_writes_the_public_contac
         "the 200 OK's Contact still names the address behind the NAT: {contact}"
     );
 }
+
+// -- an earpiece on a clock of its own ----------------------------------------
+
+/// What an earpiece heard of the lab's cadenced tone through the facade, as
+/// `interop/harness` counts it.
+#[derive(Debug, Default)]
+struct Earpiece {
+    /// Frames taken.
+    played: u32,
+    /// Frames played as silence because the buffer had nothing, once
+    /// playout had begun.
+    dry: u32,
+    /// Of those, the frames of runs that neither began straight after the
+    /// tone nor ended straight into it: silence heard in the far end's
+    /// own pause.
+    dry_in_pauses: u32,
+    /// Runs of that silence that cut the tone off.
+    cuts: u32,
+    /// The deepest the buffer was after any frame.
+    deepest: Duration,
+}
+
+/// Sixty frames of the lab's tone and thirty of silence, over and over,
+/// captured by the caller on the network's clock and played by the callee
+/// on an earpiece `skew_ppm` fast (or slow), `per_callback` frames at a
+/// time, each callback up to three milliseconds either side of its tick —
+/// `sipral-rtp`'s own simulation of `scripts/lab.sh drift`, carried through
+/// the codec, the concealment and the facade's own detector of speech,
+/// whose verdicts are the ones the buffer is actually given.
+fn earpiece_against(skew_ppm: i64, pulls: u32, per_callback: u32) -> (crate::Quality, Earpiece) {
+    const FRAME_US: i64 = 20_000;
+    let mut pair = Pair::new(CodecCatalog::with_order(&["PCMU"]).expect("an order"));
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let start = pair.now;
+    let at = |us: i64| start + Duration::from_micros(u64::try_from(us).unwrap_or(0));
+
+    let pull_every = FRAME_US * 1_000_000 / (1_000_000 + skew_ppm);
+    let mut next_capture = 0_i64;
+    let mut tick = pull_every * i64::from(per_callback);
+    let (mut sent, mut pulled) = (0_u32, 0_u32);
+    let mut phase = 0_u32;
+    let mut samples = vec![0_i16; 160];
+    let mut heard = Earpiece::default();
+    // whether playout has begun, whether the frame before the dry run going
+    // on now was the tone, and how long that run is
+    let (mut started, mut before_was_tone, mut run) = (false, false, 0_u32);
+    while pulled < pulls {
+        let wobble = (i64::from(pulled) * 7_919 % 7 - 3) * 1_000;
+        if next_capture + FRAME_US / 2 < tick + wobble {
+            if sent % 90 < 60 {
+                tone(&mut samples, 8_000, &mut phase);
+            } else {
+                samples.fill(0);
+            }
+            let datagram = pair
+                .caller
+                .engine
+                .session(call)
+                .expect("media")
+                .capture(&samples, at(next_capture))
+                .expect("it encodes")
+                .map(|out| out.payload.to_vec());
+            if let Some(mut datagram) = datagram {
+                pair.callee.engine.session(remote).expect("media").receive(
+                    &mut datagram,
+                    caller_media(),
+                    at(next_capture + FRAME_US / 2),
+                );
+            }
+            sent += 1;
+            next_capture += FRAME_US;
+            continue;
+        }
+        let mut session = pair.callee.engine.session(remote).expect("media");
+        for _ in 0..per_callback {
+            let mut played = vec![0_i16; session.frame_samples()];
+            let outcome = session.playback(&mut played);
+            let tone_heard = outcome == Playback::Packet && loudness(&played) >= 500;
+            heard.played += 1;
+            if outcome == Playback::Silence && started {
+                heard.dry += 1;
+                run += 1;
+            } else {
+                if run > 0 {
+                    if before_was_tone || tone_heard {
+                        heard.cuts += 1;
+                    } else {
+                        heard.dry_in_pauses += run;
+                    }
+                    run = 0;
+                }
+                started |= outcome == Playback::Packet;
+                before_was_tone = tone_heard;
+            }
+            heard.deepest = heard
+                .deepest
+                .max(session.statistics(at(next_capture)).quality.delay);
+            pulled += 1;
+        }
+        drop(session);
+        tick += pull_every * i64::from(per_callback);
+    }
+    let quality = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("media")
+        .statistics(at(next_capture))
+        .quality;
+    (quality, heard)
+}
+
+/// Every clock a real device runs on, and twice the widest any may run at
+/// and meet its bus's specification (USB 2.0 §7.1.11, ±0.25 %), and twice
+/// that again: an earpiece fast or slow by any of them, taking one frame a
+/// callback or two, never plays a frame of silence where the far end was
+/// sending, in the tone or in its pauses, once the facade's own detector
+/// is the one telling the buffer which is which.
+#[test]
+fn an_earpiece_on_any_clock_a_device_runs_never_runs_dry() {
+    for per_callback in [1, 2] {
+        for skew in [-10_000, -5_000, 500, 2_500, 5_000, 10_000] {
+            let (quality, heard) = earpiece_against(skew, 6_000, per_callback);
+            assert_eq!(
+                (heard.dry, heard.cuts),
+                (0, 0),
+                "{skew} ppm, {per_callback} a callback: {heard:?}"
+            );
+            assert_eq!(
+                quality.underruns, 0,
+                "{skew} ppm, {per_callback} a callback"
+            );
+            assert!(
+                heard.deepest <= Duration::from_millis(100),
+                "{skew} ppm, {per_callback} a callback: {:?} held",
+                heard.deepest
+            );
+        }
+    }
+}
+
+/// An earpiece half as fast again as the far end is no device's clock but
+/// a stream opened at the wrong rate. Through the facade it plays what it
+/// can with no more than a tenth of a second in hand, and every frame it
+/// played as nothing is counted, frame for frame, as an under-run the
+/// call's loss rate takes in: the call says it is in trouble, where it
+/// used to hold a third of a second of delay and say nothing.
+#[test]
+fn an_earpiece_past_any_real_clock_is_held_to_its_budget_and_says_so() {
+    for per_callback in [1, 2] {
+        let (quality, heard) = earpiece_against(500_000, 6_000, per_callback);
+        assert!(
+            heard.deepest <= Duration::from_millis(100),
+            "{per_callback} a callback: {:?} held",
+            heard.deepest
+        );
+        assert!(heard.dry > 1_000, "{per_callback} a callback: {heard:?}");
+        assert_eq!(
+            quality.underruns,
+            u64::from(heard.dry),
+            "{per_callback} a callback"
+        );
+        assert!(
+            quality.loss_rate >= 0.05,
+            "{per_callback} a callback: a loss rate of {}",
+            quality.loss_rate
+        );
+    }
+}

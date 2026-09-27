@@ -119,8 +119,38 @@ const BASE_WINDOW: u32 = 512;
 /// pause leaves this many queued or, once the earpiece's pace has been
 /// measured ([`Pace::in_hand`]), the one about to be played and what it is
 /// expected to slip over a spurt as long as the recent ones ([`Spurts`]),
-/// whichever is more.
+/// whichever is more, and never more than [`DRIFT_BUDGET_MS`] of them.
 const IN_HAND: u16 = 2;
+
+/// The most delay a pause may keep in hand for the earpiece's pace, in
+/// milliseconds, the one about to be played included: a hundred, which is
+/// five frames of twenty milliseconds.
+///
+/// It covers every clock a real device runs on, with room over. Measured,
+/// a laptop's own loudspeaker ran 3 ppm off the machine's crystal and that
+/// crystal 9 ppm off true time (`docs/19-numbers.md`), and the widest a
+/// device's clock may be off by and still meet its bus's specification is
+/// 2500 ppm, a USB full-speed one's (USB 2.0 §7.1.11, ±0.25 %; ±500 ppm at
+/// high speed). What a pause keeps in hand is what the pace slips over one
+/// talk spurt, with the frame about to be played, half a frame for where
+/// the pulls land, and a frame more for an earpiece that takes two at a
+/// time; what is left of the budget carries 2500 ppm through a spurt of
+/// twenty seconds and 5000 ppm through one of ten, longer than anyone talks
+/// without a pause the buffer can stretch.
+///
+/// A skew past that is no pair of clocks but something broken — a device
+/// run at a rate other than the one the stream was opened at — and chasing
+/// it with delay would hide it behind a call nobody can talk over: at
+/// 500 000 ppm the frames in hand for the lab's second-long spurts came to
+/// 340 ms (`docs/19-numbers.md`), past the 150 ms of one-way delay ITU-T
+/// G.114 finds acceptable for most conversations. So the buffer keeps no
+/// more than this for the pace, runs dry for the rest, and counts every
+/// frame it played as nothing ([`Quality::underruns`]), which
+/// [`Quality::loss_rate`] takes in: the call says it is suffering rather
+/// than quietly growing half a second of delay. The delay a path's jitter
+/// calls for is another matter, and is bounded by [`BufferConfig::max_delay`]
+/// alone.
+const DRIFT_BUDGET_MS: u32 = 100;
 
 /// Frames of the far end's clock the earpiece's pace is measured over before
 /// the older half of the measure is forgotten: a minute at twenty
@@ -1418,8 +1448,8 @@ impl JitterBuffer {
     /// The fewest packets a pause leaves queued: the target, or the frames
     /// in hand ([`IN_HAND`]) an earpiece at the pace measured needs to
     /// carry it through a spurt as long as the recent ones without running
-    /// dry, whichever is more — and never more in hand than the longest
-    /// delay this buffer may choose.
+    /// dry, whichever is more — and never more in hand than
+    /// [`JitterBuffer::drift_ceiling`].
     fn floor(&self) -> u16 {
         let slip = self.pace.in_hand(self.spurts.length);
         // a spurt that spends what is in hand ends with next to nothing
@@ -1429,8 +1459,20 @@ impl JitterBuffer {
         let in_hand = slip
             .saturating_add(burst)
             .saturating_add(1)
-            .min(self.max_delay.max(IN_HAND));
+            .min(self.drift_ceiling());
         self.target.max(in_hand)
+    }
+
+    /// The most packets a pause keeps in hand for the earpiece's pace:
+    /// [`DRIFT_BUDGET_MS`] of them, never fewer than [`IN_HAND`] and never
+    /// more than the buffer's longest delay.
+    fn drift_ceiling(&self) -> u16 {
+        let budget = u64::from(self.clock_rate) * u64::from(DRIFT_BUDGET_MS) / 1_000;
+        let packets = budget / u64::from(self.timing.span.max(1));
+        u16::try_from(packets)
+            .unwrap_or(u16::MAX)
+            .min(self.max_delay)
+            .max(IN_HAND)
     }
 
     /// A pull with nothing to play. Once something has been played it is
@@ -1631,7 +1673,7 @@ impl JitterBuffer {
 mod tests {
     use std::time::Duration;
 
-    use super::{Activity, BufferConfig, Insert, JitterBuffer, MAX_DEPTH, Pull};
+    use super::{Activity, BufferConfig, DRIFT_BUDGET_MS, Insert, JitterBuffer, MAX_DEPTH, Pull};
     use crate::wire::{PacketBuilder, RtpHeader, RtpPacket};
 
     const RATE: u32 = 8000;
@@ -2536,6 +2578,8 @@ mod tests {
     struct Heard {
         dry: u32,
         cuts: u32,
+        /// The deepest the buffer was after any pull.
+        deepest: Duration,
     }
 
     /// An earpiece whose clock is `skew_ppm` off the far end's, taking
@@ -2548,6 +2592,20 @@ mod tests {
     /// because the buffer had nothing, and whatever it was for a frame the
     /// buffer asked to have invented, which is built from the one before.
     fn heard_against(skew_ppm: i64, pulls: u32, per_callback: u32) -> (JitterBuffer, Heard) {
+        heard_through(skew_ppm, pulls, per_callback, 0)
+    }
+
+    /// As [`heard_against`], with verdicts that hold speech for `hangover`
+    /// frames after the last frame of the tone, as the facade's detector
+    /// does for two hundred milliseconds (`sipral_media::vad`'s
+    /// `DEFAULT_HANGOVER_MS`, ten frames): every frame played meanwhile,
+    /// quiet packet, silence or stretch, is still called speech.
+    fn heard_through(
+        skew_ppm: i64,
+        pulls: u32,
+        per_callback: u32,
+        hangover: u32,
+    ) -> (JitterBuffer, Heard) {
         const FRAME_US: i64 = 20_000;
         let mut buffer = JitterBuffer::new(RATE, &BufferConfig::new(SPAN));
         let pull_every = FRAME_US * 1_000_000 / (1_000_000 + skew_ppm);
@@ -2556,6 +2614,16 @@ mod tests {
         let mut sent = 0_u32;
         let mut pulled = 0_u32;
         let mut activity = Activity::Silence;
+        // frames of speech the detector still owes after the last tone
+        let mut held = 0_u32;
+        let quieted = |held: &mut u32| {
+            if *held > 0 {
+                *held -= 1;
+                Activity::Speech
+            } else {
+                Activity::Silence
+            }
+        };
         let mut heard = Heard::default();
         let (mut started, mut was_tone, mut was_dry, mut counted) = (false, false, false, false);
         while pulled < pulls {
@@ -2576,22 +2644,28 @@ mod tests {
                         started = true;
                         let tone = u32::from(frame.sequence) % 90 < 60;
                         activity = if tone {
+                            held = hangover;
                             Activity::Speech
                         } else {
-                            Activity::Silence
+                            quieted(&mut held)
                         };
                         (tone, false)
                     }
                     Pull::Empty if started => {
                         heard.dry += 1;
-                        activity = Activity::Silence;
+                        activity = quieted(&mut held);
                         (false, true)
                     }
                     Pull::Empty => {
-                        activity = Activity::Silence;
+                        activity = quieted(&mut held);
                         (false, false)
                     }
-                    Pull::Conceal | Pull::Stretch => (false, false),
+                    Pull::Conceal | Pull::Stretch => {
+                        if activity == Activity::Silence || held < hangover {
+                            activity = quieted(&mut held);
+                        }
+                        (false, false)
+                    }
                 };
                 if dry {
                     if was_tone {
@@ -2606,6 +2680,7 @@ mod tests {
                 }
                 was_tone = tone;
                 was_dry = dry;
+                heard.deepest = heard.deepest.max(buffer.quality().delay);
                 pulled += 1;
             }
             tick += pull_every * i64::from(per_callback);
@@ -2764,13 +2839,13 @@ mod tests {
 
     #[test]
     fn an_earpiece_that_slips_frames_by_the_handful_in_a_spurt_has_them_in_hand() {
-        // 50 000 ppm slips three frames in a second of tone and 500 000 ppm
-        // twenty: a frame in hand is gone before the spurt is. Once the pace
-        // and the length of a spurt have been measured, each pause is
-        // stretched by what the next spurt will slip, and the buffer runs dry
-        // only in the seconds it takes to measure them
+        // 20 000 ppm slips a frame in a second of tone and 50 000 ppm three:
+        // a frame in hand is gone before the spurt is. Once the pace and the
+        // length of a spurt have been measured, each pause is stretched by
+        // what the next spurt will slip, and the buffer runs dry only in the
+        // seconds it takes to measure them
         for per_callback in [1, 2] {
-            for skew in [50_000, 500_000] {
+            for skew in [20_000, 50_000] {
                 let (_, measuring) = heard_against(skew, 3_000, per_callback);
                 let (buffer, heard) = heard_against(skew, 24_000, per_callback);
                 assert_eq!(
@@ -2779,7 +2854,7 @@ mod tests {
                     "{skew} ppm, {per_callback} a callback: dry and cut after the first minute"
                 );
                 assert!(
-                    heard.dry < 50,
+                    heard.dry < 10,
                     "{skew} ppm, {per_callback} a callback: dry {} while measuring",
                     heard.dry
                 );
@@ -2789,16 +2864,75 @@ mod tests {
         // and the same from a far end that sends nothing in its pauses, whose
         // spurts start from an empty buffer: they wait for what is to be in
         // hand, as a pause
-        for skew in [50_000, 500_000] {
+        for skew in [20_000, 50_000] {
             let (_, _, measuring) = played_against(skew, 3_000, true);
             let (buffer, _, dry) = played_against(skew, 24_000, true);
             assert_eq!(dry, measuring, "{skew} ppm, silent pauses");
             assert!(
-                dry < 60,
+                dry < 10,
                 "{skew} ppm, silent pauses: dry {dry} while measuring"
             );
             assert_eq!(buffer.quality().stretched, 0, "{skew} ppm");
         }
+    }
+
+    #[test]
+    fn a_skew_past_the_drift_budget_runs_dry_rather_than_growing_the_delay() {
+        // 500 000 ppm plays three frames for every two sent, and the lab's
+        // second-long spurts would need a third of a second in hand to carry
+        // it: no device runs so, and a call carrying that much delay is one
+        // nobody can talk over. The buffer holds its frames in hand to the
+        // budget, runs dry for the rest, and counts each frame it played as
+        // nothing, so the call's loss rate says it is in trouble
+        let budget = Duration::from_millis(u64::from(DRIFT_BUDGET_MS));
+        for per_callback in [1, 2] {
+            let (buffer, heard) = heard_against(500_000, 6_000, per_callback);
+            let quality = buffer.quality();
+            assert!(
+                heard.deepest <= budget,
+                "{per_callback} a callback: {:?} held",
+                heard.deepest
+            );
+            assert!(
+                heard.dry > 1_000,
+                "{per_callback} a callback: dry {}",
+                heard.dry
+            );
+            assert_eq!(quality.underruns, u64::from(heard.dry));
+            assert!(
+                quality.loss_rate >= 0.05,
+                "{per_callback} a callback: a loss rate of {}",
+                quality.loss_rate
+            );
+        }
+    }
+
+    #[test]
+    fn the_detectors_hangover_leaves_a_pause_fewer_frames_to_stretch() {
+        // the facade's detector calls the first two hundred milliseconds
+        // after the tone speech still, and the buffer stretches only what is
+        // called a pause. At any skew a device runs at, the rest of the pause
+        // is ample; at one that needs every pull of a pause stretched, the
+        // start of each pause runs dry instead — frames nobody hears cut, in
+        // the far end's own quiet, and what `scripts/lab.sh drift` measured
+        // where this simulation, with exact verdicts, measured none
+        for skew in [2_000, 5_000, 50_000] {
+            let (_, exact) = heard_against(skew, 6_000, 1);
+            let (_, held) = heard_through(skew, 6_000, 1, 10);
+            assert!(
+                held.dry <= exact.dry + 2,
+                "{skew} ppm: {held:?} against {exact:?}"
+            );
+        }
+        let (_, exact) = heard_against(500_000, 6_000, 1);
+        let (_, held) = heard_through(500_000, 6_000, 1, 10);
+        assert_eq!(held.cuts, exact.cuts, "no more of the tone is cut");
+        assert!(
+            held.dry > exact.dry + 100,
+            "the hangover ran dry {} times to exact verdicts' {}",
+            held.dry,
+            exact.dry
+        );
     }
 
     #[test]

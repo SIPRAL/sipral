@@ -479,12 +479,50 @@ someone configured once. Design targets:
   speech and one of silence. A pause then keeps in hand the frames that
   pace slips over a spurt that long, and half a frame over, rounded up;
   one, as before, until the measure is long enough to say more than the
-  pull either side of each run can put into it; never more than the
-  buffer's longest delay. An earpiece that takes two frames at once keeps
-  the second of them in hand as well once it keeps more than one, since a
-  spurt that has spent what was in hand ends with next to nothing queued.
-  A far end that sends nothing in its pauses gets the same frames in hand
-  by the wait its next spurt starts with.
+  pull either side of each run can put into it. An earpiece that takes two
+  frames at once keeps the second of them in hand as well once it keeps
+  more than one, since a spurt that has spent what was in hand ends with
+  next to nothing queued. A far end that sends nothing in its pauses gets
+  the same frames in hand by the wait its next spurt starts with.
+- **What is kept in hand for the pace is bounded, at 100 ms.** Every clock
+  a device runs at needs a frame or two: measured, a laptop's loudspeaker
+  ran 3 ppm off its own machine's crystal and that crystal 9 ppm off true
+  time, and the widest a device may be off and meet its bus's
+  specification is 2500 ppm, USB full speed's ±0.25 % (USB 2.0 §7.1.11;
+  `docs/19-numbers.md`). The budget (`playout::DRIFT_BUDGET_MS`, five
+  frames of 20 ms) carries 2500 ppm through a spurt of twenty seconds and
+  5000 ppm through one of ten, with the frame about to be played, half a
+  frame for where the pulls land and the second frame of a two-frame
+  earpiece on top; in the crate's own simulations of `scripts/lab.sh
+  drift`, carried through the facade's codec and detector, no frame runs
+  dry anywhere up to ±10 000 ppm, either callback length. A skew past
+  that is no pair of clocks but a stream played at the wrong rate — a
+  device run at a rate other than the one the stream was opened at — and
+  the buffer does not chase it with delay: at 500 000 ppm the lab's
+  second-long spurts called for 340 ms in hand, past the 150 ms of one-way
+  delay ITU-T G.114 finds acceptable for most conversations, which would
+  have hidden a broken device behind a call nobody can talk over. It keeps
+  the budget, runs dry for the rest, and counts every frame it played as
+  nothing, so the call's loss rate, `StreamStatistics::is_suffering` and
+  the C ABI's `frames_underrun` say what is wrong. A slow earpiece past any
+  real clock piles packets up faster than its pauses can give them back,
+  and its buffer fills to its ring, two seconds, and throws the oldest out
+  for overflow, which RFC 3611's discard rate, the ratings and the score
+  all see. The delay a path's jitter calls for is another matter, bounded
+  by the buffer's longest delay alone.
+- **The detector's hangover is a pause the buffer cannot stretch.** The
+  verdict the buffer moves on comes from the facade's detector of speech
+  on decoded audio (`sipral_media::vad`), which holds speech for 200 ms
+  after the last frame that scored as speech, so a word's closures are not
+  called pauses. The first ten frames of every pause are called speech,
+  and the buffer stretches only the rest. At any skew a device runs at
+  that is ample. At 500 000 ppm, which needs every pull of a pause
+  stretched, the start of each pause ran dry instead: the lab counted 122
+  frames run dry in two minutes, all in the far end's pauses, where the
+  crate's simulation with exact verdicts counted 31; the same simulation
+  through the facade's own detector counted 123, and with verdicts that
+  hold speech ten frames past the tone, 133. Those frames are in the far
+  end's own quiet, are heard by nobody, and are counted.
 - **A buffer that runs dry in a spurt starts again at once.** The caller's
   verdict after a frame the buffer had nothing for is on that frame of
   silence, not on the far end. While the first packet held carries on from
