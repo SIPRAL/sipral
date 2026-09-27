@@ -1588,6 +1588,15 @@ enum flow {
      * baresip -- see runs_against() below. */
     FLOW_PEER_SRTP,
     FLOW_PEER_DTLS,
+    /* interop/harness/src/main.rs's own Flow::PeerHangup: a call to the
+     * peer's dedicated `baresip-hangup` account, ended by the far end on its
+     * own rather than by this end -- scripts/lab.sh's own
+     * `flows_baresip_hangup`, which triggers it through a `ctrl_tcp` command
+     * `baresip_ctrl_hangup` sends. Gated on SIPRAL_PEER naming that account,
+     * never "baresip" -- see runs_against() below -- so a run of the three
+     * ordinary phone-to-phone flows never shares the account this one's
+     * hangup command is aimed at. */
+    FLOW_PEER_HANGUP,
     /* 8.5.5: registered and calling from behind a NAT, with the stack asking
      * a STUN server where its two sockets appear from. Run only when
      * SIPRAL_STUN_SERVER names one -- scripts/lab.sh's own `nat` step, which
@@ -1642,6 +1651,8 @@ static const char *flow_name(enum flow which)
         return "SRTP, phone to phone";
     case FLOW_PEER_DTLS:
         return "DTLS-SRTP, phone to phone";
+    case FLOW_PEER_HANGUP:
+        return "call, ended by the far end";
     case FLOW_NAT:
         return "behind a NAT, through STUN";
     case FLOW_NAT_INCOMING:
@@ -1689,6 +1700,8 @@ static const char *flow_key(enum flow which)
         return "peersrtp";
     case FLOW_PEER_DTLS:
         return "peerdtls";
+    case FLOW_PEER_HANGUP:
+        return "peerhangup";
     case FLOW_NAT:
         return "nat";
     case FLOW_NAT_INCOMING:
@@ -1918,6 +1931,14 @@ static int runs_against(enum flow which, const char *server, int for_baresip)
     case FLOW_PEER_SRTP:
     case FLOW_PEER_DTLS:
         return for_baresip;
+    case FLOW_PEER_HANGUP: {
+        /* its own gate, never `for_baresip`: scripts/lab.sh's own
+         * `flows_baresip_hangup` names this peer to keep its own hangup
+         * command from ever landing on a call the ordinary three
+         * phone-to-phone flows placed */
+        const char *hangup_peer = getenv("SIPRAL_PEER");
+        return hangup_peer != NULL && strcmp(hangup_peer, "baresip-hangup") == 0;
+    }
     case FLOW_ICE_NAT: {
         /* only when named, and with a STUN server to ask: the far end is a
          * second stack behind a second NAT, which only scripts/lab.sh's own
@@ -1993,6 +2014,8 @@ static const char *extension_for(enum flow which, const char *named)
         return "baresip-srtp";
     case FLOW_PEER_DTLS:
         return "baresip-dtls";
+    case FLOW_PEER_HANGUP:
+        return "baresip-hangup";
     case FLOW_REGISTER:
     case FLOW_CALL:
     case FLOW_HOLD:
@@ -2059,6 +2082,7 @@ static uint32_t srtp_for(enum flow which)
     case FLOW_MESSAGE:
     case FLOW_MWI:
     case FLOW_G729:
+    case FLOW_PEER_HANGUP:
     case FLOW_NAT:
     case FLOW_ICE_NAT:
     case FLOW_COUNT:
@@ -2823,6 +2847,22 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
         dwell(end, DWELL_MS);
         break;
 
+    case FLOW_PEER_HANGUP:
+        /* nothing here schedules a hangup of its own -- unlike every other
+         * flow in this switch, which either ends the call itself below or
+         * leaves it to `finish()` once this function returns. The far end
+         * (baresip-hangup, driven by scripts/lab.sh's own
+         * `baresip_ctrl_hangup`, backgrounded two seconds into
+         * FLOW_PATIENCE_MS) has to be what ends this one, and `end_reason`
+         * is checked, not only `hung_up`, so a call this end gave up on for
+         * some other reason is not read as the far end's own BYE. */
+        if (!wait_until(end, hung_up, FLOW_PATIENCE_MS)
+            || end->seen.end_reason != SIPRAL_CALL_END_REASON_REMOTE_HANGUP) {
+            wrong_text("the far end's BYE never arrived");
+            return -1;
+        }
+        break;
+
     case FLOW_SRTP:
     case FLOW_PEER_SRTP:
         /* the same tone as the plain call, and judged the same way: a stream
@@ -3150,7 +3190,7 @@ static int audio_holds(const struct endpoint *end, enum flow which)
 {
     const char *required = getenv("SIPRAL_REQUIRE_AUDIO");
     if (which != FLOW_CALL && which != FLOW_SRTP && which != FLOW_NAT
-        && which != FLOW_NAT_INCOMING && which != FLOW_G729) {
+        && which != FLOW_NAT_INCOMING && which != FLOW_G729 && which != FLOW_PEER_HANGUP) {
         return 1;
     }
     if (end->sent == 0) {

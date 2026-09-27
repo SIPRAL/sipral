@@ -68,18 +68,32 @@
 #                               Linux container -- only what the Windows
 #                               machine needs to reach in
 #   scripts/lab.sh wasapi down  tear that down again
-#                               Both take /var/lock/sipral-lab.lock (or
-#                               ./.sipral-lab.lock where that path does not
-#                               exist) themselves, so plain use never races
-#                               another run. A caller that already holds that
-#                               lock itself -- to keep the stack in one state
-#                               across several steps, `wasapi up` then some
-#                               calls then `wasapi down` -- sets
-#                               SIPRAL_LAB_LOCK_HELD=1 first; these two then
-#                               skip their own flock instead of deadlocking
-#                               against it (flock is not re-entrant). Do not
-#                               wrap these two in an outer flock without also
-#                               setting that: they would just deadlock.
+#                               Every word above takes /var/lock/sipral-lab.lock
+#                               (or ./.sipral-lab.lock where that path does not
+#                               exist) itself, for its whole run, so two runs
+#                               against the same Docker Compose project never
+#                               race each other -- five agents at once tore
+#                               down each other's containers on 27 Sept. An
+#                               outer `flock` wrapped around this script is not
+#                               needed any more for any word, including
+#                               `wasapi up|down`, and should not be used: the
+#                               lock is not re-entrant, so a caller already
+#                               holding it (an outer flock, or a lab.sh call
+#                               nested inside another one) would deadlock
+#                               against its own hold. A run that already holds
+#                               it -- this script re-invoking itself, or a
+#                               caller that wants several words to share one
+#                               lab state, `wasapi up` then some calls then
+#                               `wasapi down` -- sets SIPRAL_LAB_LOCK_HELD=1
+#                               first, and every invocation started with that
+#                               already set skips taking the lock again instead
+#                               of deadlocking. A run that finds the lock held
+#                               prints a message and then waits for it.
+#                               COMPOSE_PROJECT_NAME (default sipral-interop)
+#                               names the Compose project and the lab's own
+#                               Docker network throughout, so a run under a
+#                               project name of its own is fully isolated from
+#                               any other run sharing the same lock file.
 #   scripts/lab.sh --matrix     the above, then regenerate docs/11-testing.md's
 #                               own generated section from this run
 #                               (scripts/interop-matrix.py); any of the words
@@ -96,6 +110,36 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+
+# This script's own re-entrant lock, held for the whole run, every word
+# (including `wasapi up|down` and `--matrix`, which just re-invokes this
+# script under the flag stripped). /var/lock does not exist on every machine
+# that runs this (macOS has none), so this falls back to a lock file inside
+# the checkout when the system one is not there. Held on fd 9 for the life of
+# this process, so every function and subshell below inherits it; a nested
+# invocation of this same script (a caller stacking several words on one lab
+# state, or this block re-execing itself) is a new process with a new fd, so
+# it would just block on the same file forever -- that is what
+# SIPRAL_LAB_LOCK_HELD=1 is for: set once the lock is taken, inherited by any
+# child this process starts, and checked here so a nested run skips locking
+# instead of deadlocking against its own parent.
+if [ -z "${SIPRAL_LAB_LOCK_HELD:-}" ]; then
+    LOCK="/var/lock/sipral-lab.lock"
+    [ -e "$LOCK" ] || LOCK="$ROOT/.sipral-lab.lock"
+    exec 9>"$LOCK" || { printf 'could not open %s for locking\n' "$LOCK"; exit 2; }
+    if ! flock -n 9; then
+        printf 'waiting for the lab lock (%s) -- another run holds it...\n' "$LOCK"
+        flock 9 || { printf 'could not take the lab lock at %s\n' "$LOCK"; exit 2; }
+    fi
+    export SIPRAL_LAB_LOCK_HELD=1
+fi
+
+# The Compose project name, and the lab's own Docker network that follows it
+# everywhere a flow reaches into the lab from outside Compose (docker run
+# --network, docker inspect on a container Compose did not start). A run
+# under a COMPOSE_PROJECT_NAME of its own is then fully isolated on the
+# network too, not only under the lock.
+LAB_NETWORK="${COMPOSE_PROJECT_NAME:-sipral-interop}_lab"
 
 # Regenerates docs/11-testing.md's own generated section from this run's
 # output, once the run is over -- not interleaved with it, so the generator
@@ -147,21 +191,9 @@ command -v docker >/dev/null 2>&1 || {
 # never races another run doing the same on the same host.
 if [ "$WANT" = wasapi ]; then
     SUB="${2:-}"
-    LOCK="/var/lock/sipral-lab.lock"
-    [ -e "$LOCK" ] || LOCK="$ROOT/.sipral-lab.lock"
-    # flock is not re-entrant: a caller that already holds $LOCK itself, to
-    # keep the stack in one state across several of these calls (the
-    # documented way to do that), would deadlock against its own hold if
-    # this wrapped every compose call in another flock on the same file. A
-    # caller doing that sets SIPRAL_LAB_LOCK_HELD=1 to say so; plain use
-    # (nothing set) is unchanged.
-    with_lock() {
-        if [ -n "${SIPRAL_LAB_LOCK_HELD:-}" ]; then
-            sh -c "$1"
-        else
-            flock "$LOCK" sh -c "$1"
-        fi
-    }
+    # The lock block above already holds the lock for this whole run, so the
+    # compose calls below run under it directly, no per-call flock of their
+    # own needed.
     case "$SUB" in
     up)
         LAN_ADDR="${SIPRAL_LAN_ADDR:-}"
@@ -190,20 +222,18 @@ if [ "$WANT" = wasapi ]; then
         # Asterisk starts itself has to leave from the port a phone sent to
         printf '; generated by scripts/lab.sh wasapi up -- not committed, see .gitignore\n[transport-udp](+)\nbind=0.0.0.0:5062\nexternal_media_address=%s\nexternal_signaling_address=%s\n' \
             "$LAN_ADDR" "$LAN_ADDR" >interop/wasapi/pjsip_local.generated.conf
-        with_lock \
-            'cd interop && docker compose -f compose.yaml -f wasapi/compose.override.yaml up -d' \
+        ( cd interop && docker compose -f compose.yaml -f wasapi/compose.override.yaml up -d ) \
             >/dev/null 2>&1 \
             || { fail "docker compose up (wasapi override)"; exit 1; }
         # named from the Compose project, as the `nat` step's networks are,
         # so that a copy of the lab under a COMPOSE_PROJECT_NAME of its own
         # reads its own bridge
-        BRIDGE="${COMPOSE_PROJECT_NAME:-sipral-interop}_lab"
+        BRIDGE="$LAB_NETWORK"
         BRIDGE_SUBNET="$(docker network inspect "$BRIDGE" \
             --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null)"
         [ -n "$BRIDGE_SUBNET" ] || { fail "could not read $BRIDGE's own subnet"; exit 1; }
         printf 'local_net=%s\n' "$BRIDGE_SUBNET" >>interop/wasapi/pjsip_local.generated.conf
-        with_lock \
-            'cd interop && docker compose -f compose.yaml -f wasapi/compose.override.yaml restart asterisk' \
+        ( cd interop && docker compose -f compose.yaml -f wasapi/compose.override.yaml restart asterisk ) \
             >/dev/null 2>&1 \
             || { fail "docker compose restart asterisk (wasapi override)"; exit 1; }
         # the socket itself, asked rather than assumed from the file: the
@@ -220,8 +250,7 @@ if [ "$WANT" = wasapi ]; then
         printf '  note  point interop/wasapi/run.ps1 (or SIPRAL_SERVER_HOST) at %s:5062\n' "$LAN_ADDR"
         ;;
     down)
-        with_lock \
-            'cd interop && docker compose -f compose.yaml -f wasapi/compose.override.yaml down' \
+        ( cd interop && docker compose -f compose.yaml -f wasapi/compose.override.yaml down ) \
             && pass "the lab, down" \
             || fail "docker compose down (wasapi override)"
         rm -f interop/wasapi/pjsip_local.generated.conf
@@ -454,7 +483,7 @@ wait_for asterisk "Asterisk Ready" || exit 1
 # are swapped is "no such file or directory" for a file that is plainly there.
 flows() {
     local server="$1" capture="$2"
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
@@ -486,7 +515,7 @@ flows_c() {
     # be the machine that built either, and on the one of ours that cannot
     # build them the two live under /opt rather than here
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 \
         -e LD_LIBRARY_PATH=/lib-sipral \
@@ -523,7 +552,7 @@ python_agent() {
     [ -n "$HARNESS_C" ] || return 0
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
     docker rm -f "$AGENT_NAME" >/dev/null 2>&1
-    docker run -d --name "$AGENT_NAME" --network sipral-interop_lab \
+    docker run -d --name "$AGENT_NAME" --network "$LAB_NETWORK" \
         -e SIPRAL_LIBRARY=/lib-sipral \
         -e PYTHONPATH=/python \
         -e SIPRAL_AOR=sip:labuser-agent@asterisk \
@@ -602,7 +631,7 @@ kotlin_agent() {
     docker build -q -t sipral-lab-kotlin interop/kotlin >/dev/null 2>&1 \
         || { printf '  could not build interop/kotlin\n'; return 1; }
     docker rm -f "$KOTLIN_AGENT_NAME" >/dev/null 2>&1
-    docker run -d --name "$KOTLIN_AGENT_NAME" --network sipral-interop_lab \
+    docker run -d --name "$KOTLIN_AGENT_NAME" --network "$LAB_NETWORK" \
         -e SIPRAL_AOR=sip:labuser-agent-kotlin@asterisk \
         -e SIPRAL_REGISTRAR=sip:asterisk \
         -e SIPRAL_AUTH_USER=labuser-agent-kotlin -e SIPRAL_AUTH_PASSWORD=labpass \
@@ -684,7 +713,7 @@ swift_agent() {
     local log tries
     [ -n "$SWIFT_AGENT" ] || return 0
     docker rm -f "$SWIFT_AGENT_NAME" >/dev/null 2>&1
-    docker run -d --name "$SWIFT_AGENT_NAME" --network sipral-interop_lab \
+    docker run -d --name "$SWIFT_AGENT_NAME" --network "$LAB_NETWORK" \
         -v "$ROOT":/work:ro -v "${SWIFT_LIB_DIR:-$ROOT/target/release}":/work/target/release:ro \
         -e SIPRAL_AOR=sip:labuser-agent-swift@asterisk \
         -e SIPRAL_REGISTRAR=sip:asterisk \
@@ -749,7 +778,7 @@ csharp_agent() {
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
     [ -s "$beside/libsipral_ffi.so" ] || { printf '  no libsipral_ffi.so beside the C harness\n'; return 1; }
     docker rm -f "$CSHARP_AGENT_NAME" >/dev/null 2>&1
-    docker run -d --name "$CSHARP_AGENT_NAME" --network sipral-interop_lab \
+    docker run -d --name "$CSHARP_AGENT_NAME" --network "$LAB_NETWORK" \
         -e SIPRAL_LIBRARY=/lib-sipral/libsipral_ffi.so \
         -e SIPRAL_AOR=sip:labuser-agent-csharp@asterisk \
         -e SIPRAL_REGISTRAR=sip:asterisk \
@@ -828,7 +857,7 @@ headless_socket_agent() {
 
     # Mounted beside the image's own directories, never over /bin: on Debian
     # 13 /bin is /usr/bin, and covering it takes the container's shell away.
-    docker run -d --name "$HEADLESS_APP_NAME" --network sipral-interop_lab \
+    docker run -d --name "$HEADLESS_APP_NAME" --network "$LAB_NETWORK" \
         -v "$app_beside:/sipral:ro" \
         debian:trixie-slim sh -c '
             own=$(hostname -i)
@@ -852,7 +881,7 @@ headless_socket_agent() {
         sleep 1
     done
 
-    docker run -d --name "$HEADLESS_CLIENT_NAME" --network sipral-interop_lab \
+    docker run -d --name "$HEADLESS_CLIENT_NAME" --network "$LAB_NETWORK" \
         -v "$client_beside:/sipral:ro" \
         debian:trixie-slim /sipral/agent --addr "$HEADLESS_APP_NAME:7001" >/dev/null \
         || {
@@ -910,7 +939,7 @@ headless_socket_agent() {
 # dialling baresip's accounts from scripts/lab.sh kamailio or asterisk.
 flows_baresip() {
     local capture="$1"
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip \
         -e SIPRAL_FLOWS=call,hold,peersrtp,peerdtls \
@@ -936,7 +965,7 @@ flows_baresip_c() {
     local capture="$1" beside
     [ -n "$HARNESS_C" ] || return 0
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip \
         -e SIPRAL_FLOWS=call,hold,peersrtp,peerdtls \
@@ -971,7 +1000,7 @@ flows_baresip_c() {
 baresip_ctrl_hangup() {
     local json='{"command":"hangup","params":"","token":"lab"}'
     local len=${#json}
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         debian:trixie-slim sh -c "
             export DEBIAN_FRONTEND=noninteractive
             apt-get -qq update >/dev/null 2>&1
@@ -989,18 +1018,39 @@ baresip_ctrl_hangup() {
 # the whole call; its own status is waited on after so a slow image pull or
 # `apt-get install` inside it can never outlive this function's caller.
 #
-# The C harness has no flow of its own here yet (`not_done` names why); this
-# one runs the Rust harness only.
+# flows_baresip_hangup_c() below is the same flow through the C ABI.
 flows_baresip_hangup() {
     local status trigger_pid
     ( sleep 2; baresip_ctrl_hangup ) &
     trigger_pid=$!
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip-hangup \
         -e SIPRAL_FLOWS=peerhangup \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
         debian:trixie-slim sh -c "/harness kamailio 5060 baresip-hangup"
+    status=$?
+    wait "$trigger_pid" 2>/dev/null
+    return "$status"
+}
+
+# The same, through the C ABI. See flows_c() above for why this is a function
+# of its own rather than an argument to flows_baresip_hangup(); see
+# interop/harness-c/main.c's own FLOW_PEER_HANGUP for the flow itself.
+flows_baresip_hangup_c() {
+    local status trigger_pid beside
+    [ -n "$HARNESS_C" ] || return 0
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    ( sleep 2; baresip_ctrl_hangup ) &
+    trigger_pid=$!
+    docker run --rm --network "$LAB_NETWORK" \
+        -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip-hangup \
+        -e SIPRAL_FLOWS=peerhangup \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        debian:trixie-slim sh -c "/harness-c kamailio 5060 baresip-hangup"
     status=$?
     wait "$trigger_pid" 2>/dev/null
     return "$status"
@@ -1166,7 +1216,7 @@ start_lite_agent() {
     app_beside=$(cd "$(dirname "$HEADLESS_APP")" && pwd)
     client_beside=$(cd "$(dirname "$HEADLESS_CLIENT")" && pwd)
     docker rm -f "$ICE_APP_NAME" "$ICE_CLIENT_NAME" >/dev/null 2>&1
-    docker run -d --name "$ICE_APP_NAME" --network sipral-interop_lab \
+    docker run -d --name "$ICE_APP_NAME" --network "$LAB_NETWORK" \
         -e "SIPRAL_LITE_REGISTER=$account" \
         -v "$app_beside:/sipral:ro" \
         debian:trixie-slim sh -c '
@@ -1193,7 +1243,7 @@ start_lite_agent() {
         fi
         sleep 1
     done
-    docker run -d --name "$ICE_CLIENT_NAME" --network sipral-interop_lab \
+    docker run -d --name "$ICE_CLIENT_NAME" --network "$LAB_NETWORK" \
         -v "$client_beside:/sipral:ro" \
         debian:trixie-slim /sipral/agent --addr "$ICE_APP_NAME:7001" >/dev/null \
         || { printf '  could not start the agent container\n'; stop_lite_agent; return 1; }
@@ -1238,9 +1288,9 @@ ice_lite_flow() {
     local address status app_log
     start_lite_agent "" || return 1
     address=$(docker inspect -f \
-        '{{with index .NetworkSettings.Networks "sipral-interop_lab"}}{{.IPAddress}}{{end}}' \
+        "{{with index .NetworkSettings.Networks \"$LAB_NETWORK\"}}{{.IPAddress}}{{end}}" \
         "$ICE_APP_NAME")
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=icelite \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
@@ -1331,7 +1381,7 @@ start_c_listener() {
     local referrals="$1" ice="$2" beside tries
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
     docker rm -f "$C_LISTENER_NAME" >/dev/null 2>&1
-    docker run -d --name "$C_LISTENER_NAME" --network sipral-interop_lab \
+    docker run -d --name "$C_LISTENER_NAME" --network "$LAB_NETWORK" \
         -e LD_LIBRARY_PATH=/lib-sipral \
         -e "SIPRAL_REFERRALS=$referrals" -e "SIPRAL_ICE=$ice" \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
@@ -1356,7 +1406,7 @@ start_c_listener() {
 # Where the listener is on the lab network, for the harness to reach.
 c_listener_address() {
     docker inspect -f \
-        '{{with index .NetworkSettings.Networks "sipral-interop_lab"}}{{.IPAddress}}{{end}}' \
+        "{{with index .NetworkSettings.Networks \"$LAB_NETWORK\"}}{{.IPAddress}}{{end}}" \
         "$C_LISTENER_NAME"
 }
 
@@ -1385,7 +1435,7 @@ stop_c_listener() {
 refer_the_listener() {
     local flow="$1" address
     address=$(c_listener_address)
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         -e "SIPRAL_FLOWS=$flow" \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
@@ -1437,7 +1487,7 @@ ice_lite_c_flow() {
     local address status log
     start_c_listener off lite || return 1
     address=$(c_listener_address)
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=icelite \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
@@ -1840,7 +1890,7 @@ bad_network() {
     WHY=""; NETEM=""; REQUIRE=""; DWELL_MS=""; DURING=""
     . "$ROOT/interop/impairment/$profile.sh"
     printf '  %-10s %s\n' "$profile" "$WHY"
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=register,call \
         -e SIPRAL_AUDIO_GATE=1 \
@@ -1896,7 +1946,7 @@ bad_network() {
 # capture: three calls for an hour are over a million packets, and what this
 # step proves is in the report lines, not on the wire.
 drift_flow() {
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=drift \
         -e SIPRAL_DRIFT_MS="${SIPRAL_DRIFT_MS:-3600000}" \
         -e SIPRAL_DRIFT_REPORT_MS="${SIPRAL_DRIFT_REPORT_MS:-300000}" \
@@ -2050,6 +2100,10 @@ if [ "$WANT" = all ] || [ "$WANT" = baresip ]; then
                 required baresip; then
             flows_baresip_hangup && pass "baresip hangs the call up on its own" \
                 || fail "baresip hangs the call up on its own"
+            if [ -n "$HARNESS_C" ]; then
+                flows_baresip_hangup_c && pass "baresip hangs the call up on its own, in C" \
+                    || fail "baresip hangs the call up on its own, in C"
+            fi
         fi
     else
         fail "docker compose up baresip baresip-hangup"
@@ -2149,7 +2203,7 @@ if [ "$WANT" = pipewire ]; then
     step "a call on a Linux desktop's devices -- PipeWire, straight at Asterisk"
     docker build -q -t sipral-pipewire interop/pipewire >/dev/null 2>&1 \
         && pass "the PipeWire image" || { fail "docker build interop/pipewire"; exit 1; }
-    docker run --rm --network sipral-interop_lab \
+    docker run --rm --network "$LAB_NETWORK" \
         -v "$ROOT:/src:ro" -v sipral-pipewire-target:/target \
         -e CARGO_TARGET_DIR=/target -w /src \
         sipral-pipewire bash interop/pipewire/run.sh call \

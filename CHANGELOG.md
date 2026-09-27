@@ -53,6 +53,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the unit, and answers `StreamEvent::DeviceLost`; `Stream::recover` builds
   a new unit, the only thing that works after a reset. It used to answer
   `None` on iOS whatever had happened.
+- **The far end hanging up on its own is proven through the C ABI too.**
+  `FLOW_PEER_HANGUP` (key `peerhangup`) is `interop/harness-c`'s own half of
+  `Flow::PeerHangup`: it places the call at baresip's dedicated
+  `baresip-hangup` account and only waits, never scheduling its own hangup,
+  and passes on `end_reason == SIPRAL_CALL_END_REASON_REMOTE_HANGUP` alone —
+  the same claim the Rust harness already proved, now proved from both
+  drivers on every run of `scripts/lab.sh baresip`.
 - **ICE restarts in the full role, from either end.** A peer's re-offer
   that changes both `ice-ufrag` and `ice-pwd` is answered with new
   credentials of this end's own (RFC 8839 §4.4.2.1) instead of the ones the
