@@ -6320,6 +6320,221 @@ fn a_hold_does_not_withdraw_ice_from_a_call_that_had_it() {
     }
 }
 
+/// The USERNAME of every connectivity check one end has queued for the
+/// other, drained.
+#[cfg(feature = "ice")]
+fn checks_sent(stack: &mut Stack, now: Instant) -> Vec<(Vec<u8>, String)> {
+    use sipral_nat::stun::{Class, Message, Method};
+
+    std::iter::from_fn(|| stack.engine.poll_transmit(now))
+        .filter_map(|(_, _, datagram)| {
+            let message = Message::parse(&datagram).ok()?;
+            let username = (message.class() == Class::Request
+                && message.method() == Method::BINDING)
+                .then(|| message.username())
+                .flatten()?;
+            Some((
+                datagram.clone(),
+                String::from_utf8_lossy(username).into_owned(),
+            ))
+        })
+        .collect()
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn an_ice_restart_between_two_full_agents_checks_again_on_new_credentials_and_keeps_the_audio()
+{
+    let (mut pair, call, remote) = ice_call();
+    pair.check_paths(call, remote);
+    let first = pair.callee.offer_received().expect("the first offer");
+    let answer = pair.caller.answer_received().expect("the first answer");
+    let (offered_before, answered_before) = (
+        ice_value(&first, "ice-ufrag").expect("a fragment"),
+        ice_value(&answer, "ice-ufrag").expect("a fragment"),
+    );
+    let old_pwd = ice_value(&answer, "ice-pwd").expect("a password");
+
+    // RFC 8445 §9, from this end: the caller offers the call again with new
+    // credentials, and nothing else of the description moves
+    pair.caller
+        .engine
+        .restart_ice(&mut pair.caller.agent, call, pair.now)
+        .expect("a call running ICE restarts");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+
+    let (restart_answer, restart_offer) =
+        last_described(&pair.callee).expect("the callee answered the restart");
+    let offering = ice_value(&restart_offer, "ice-ufrag").expect("a fragment");
+    let answering = ice_value(&restart_answer, "ice-ufrag").expect("a fragment");
+    let new_pwd = ice_value(&restart_answer, "ice-pwd").expect("a password");
+    assert_ne!(offering, offered_before, "RFC 8839 §4.4.1.1.1: the offer changes both");
+    assert_ne!(
+        ice_value(&restart_offer, "ice-pwd"),
+        ice_value(&first, "ice-pwd"),
+        "RFC 8839 §4.4.1.1.1: the offer changes both"
+    );
+    assert_ne!(answering, answered_before, "RFC 8839 §4.4.2.1: the answer changes both");
+    assert_ne!(new_pwd, old_pwd, "RFC 8839 §4.4.2.1: the answer changes both");
+    for (what, description, before) in [
+        ("offer", &restart_offer, &first),
+        ("answer", &restart_answer, &answer),
+    ] {
+        assert_eq!(
+            attribute_values(&one_stream(description), "candidate"),
+            attribute_values(&one_stream(before), "candidate"),
+            "the restart's {what} named candidates its agent does not hold"
+        );
+    }
+    assert!(failures(&pair).is_empty(), "{:?}", failures(&pair));
+
+    // both agents flushed and check again, under the new credentials: the
+    // caller's USERNAME is the callee's new fragment and then its own
+    // (RFC 8445 §7.2.2)
+    pair.advance();
+    pair.caller.engine.handle_timeout(pair.now);
+    pair.callee.engine.handle_timeout(pair.now);
+    let checked_by_alice = checks_sent(&mut pair.caller, pair.now);
+    let checked_by_bob = checks_sent(&mut pair.callee, pair.now);
+    assert!(
+        checked_by_alice
+            .iter()
+            .any(|(_, username)| *username == format!("{answering}:{offering}")),
+        "the caller does not check under the new credentials: {checked_by_alice:?}"
+    );
+    assert!(
+        checked_by_bob
+            .iter()
+            .any(|(_, username)| *username == format!("{offering}:{answering}")),
+        "the callee does not check under the new credentials: {checked_by_bob:?}"
+    );
+    for (datagram, _) in checked_by_alice {
+        let mut datagram = datagram;
+        let _ = pair.callee.engine.session(remote).expect("media").receive(
+            &mut datagram,
+            caller_media(),
+            pair.now,
+        );
+    }
+    for (datagram, _) in checked_by_bob {
+        let mut datagram = datagram;
+        let _ = pair.caller.engine.session(call).expect("media").receive(
+            &mut datagram,
+            callee_media(),
+            pair.now,
+        );
+    }
+
+    // RFC 8839 §4.4.3.1.1: the audio stays on the pair selected before,
+    // while the new session has selected nothing
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").ice_path(),
+        None,
+        "the restart did not reach the caller's agent"
+    );
+    let heard = tone_after(&mut pair, call, remote);
+    assert!(heard > 4_000, "the tone came back at {heard} during the restart");
+
+    // and the checks run to a new selection on both ends
+    pair.check_paths(call, remote);
+    assert_eq!(
+        paths_chosen(&pair.caller),
+        vec![(caller_media(), callee_media()); 2],
+        "the caller's new session selected nothing"
+    );
+    assert_eq!(
+        paths_chosen(&pair.callee),
+        vec![(callee_media(), caller_media()); 2],
+        "the callee's new session selected nothing"
+    );
+    let heard = tone_after(&mut pair, call, remote);
+    assert!(heard > 4_000, "the tone came back at {heard} after the restart");
+    assert!(failures(&pair).is_empty(), "{:?}", failures(&pair));
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_restart_the_far_end_refuses_leaves_ice_as_it_was() {
+    let ice = |order: &[&str]| {
+        CodecCatalog::with_order(order)
+            .expect("an order")
+            .with_ice(crate::IcePolicy::Offered)
+    };
+    let mut pair = Pair::asymmetric(ice(&["PCMU", "PCMA"]), ice(&["PCMU"]));
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    pair.check_paths(call, remote);
+    let first = pair.callee.offer_received().expect("the first offer");
+    let old_ufrag = ice_value(&first, "ice-ufrag").expect("a fragment");
+
+    pair.caller
+        .engine
+        .restart_ice(&mut pair.caller.agent, call, pair.now)
+        .expect("a call running ICE restarts");
+    pair.caller.drain(pair.now, false);
+    // the far end is offered a codec it does not have, and refuses the
+    // whole offer with a 488 (RFC 3261 §14.2)
+    for datagram in pair.caller.outbound() {
+        let body = wire_message_body(&datagram);
+        let datagram = if body.starts_with(b"v=0") {
+            let mut offer = parse(&body).expect("the restart offer");
+            let stream = offer
+                .media
+                .iter_mut()
+                .find(|stream| !stream.is_rejected())
+                .expect("a stream");
+            stream.formats = vec!["8".to_owned()];
+            stream.attributes.retain(|attribute| {
+                attribute.name != "rtpmap" && attribute.name != "fmtp"
+            });
+            with_body(&datagram, "application/sdp", &offer.to_string())
+        } else {
+            datagram
+        };
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.settle();
+    assert!(
+        pair.caller.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::SessionChangeFailed { call: failed, .. }) if *failed == call
+        )),
+        "the far end accepted the restart"
+    );
+
+    // RFC 8839 §4.4: "as if the subsequent offer had never been made" — the
+    // agent kept its pair and its credentials, and a later offer names them
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").ice_path(),
+        Some((caller_media(), callee_media())),
+        "a refused restart reached the running agent"
+    );
+    assert_eq!(paths_chosen(&pair.caller).len(), 1);
+    pair.caller
+        .agent
+        .hold(call, pair.now)
+        .expect("a confirmed call can be held");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    let (_, held) = last_described(&pair.callee).expect("the callee saw the hold");
+    assert_eq!(ice_value(&held, "ice-ufrag"), Some(old_ufrag));
+    assert!(failures(&pair).is_empty(), "{:?}", failures(&pair));
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_restart_asked_of_a_call_without_ice_is_refused_and_sends_nothing() {
+    let (mut pair, call, _) = one_sided_ice_call(crate::IcePolicy::Offered);
+    let refused = pair
+        .caller
+        .engine
+        .restart_ice(&mut pair.caller.agent, call, pair.now);
+    assert_eq!(refused, Err(MediaError::NoIce));
+    assert!(pair.caller.outbound().is_empty(), "an offer went out");
+}
+
 /// A caller that will carry no audio on a path ICE did not check, and a
 /// headless agent answering it as a lite endpoint.
 #[cfg(all(feature = "ice", feature = "headless"))]
@@ -6337,7 +6552,7 @@ fn lite_call() -> (Pair, CallHandle, CallHandle) {
 }
 
 /// Every `PathChosen` a stack has reported.
-#[cfg(all(feature = "ice", feature = "headless"))]
+#[cfg(feature = "ice")]
 fn paths_chosen(stack: &Stack) -> Vec<(SocketAddr, SocketAddr)> {
     stack
         .media_events()
@@ -6403,7 +6618,7 @@ fn ask_lite(pair: &mut Pair, remote: CallHandle, from: SocketAddr, check: &[u8])
 }
 
 /// An ICE attribute's value on a description's one stream.
-#[cfg(all(feature = "ice", feature = "headless"))]
+#[cfg(feature = "ice")]
 fn ice_value(description: &SessionDescription, name: &str) -> Option<String> {
     one_stream(description)
         .attribute(name)

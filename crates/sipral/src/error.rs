@@ -206,10 +206,21 @@ pub enum MediaError {
     /// response for thirty seconds, or a 403 revoking it (RFC 7675 §5).
     ///
     /// Nothing more may be sent on that pair and the same credentials may not
-    /// be used on it again. This stack has no re-offer of its own yet, so the
-    /// only remedy available to an application is to end the call.
+    /// be used on it again. The remedy is an ICE restart, which draws new
+    /// ones and checks every pair again
+    /// ([`MediaEngine::restart_ice`](crate::MediaEngine::restart_ice)), or
+    /// ending the call.
     #[cfg(feature = "ice")]
     IcePathLost,
+    /// [`MediaEngine::restart_ice`](crate::MediaEngine::restart_ice) was
+    /// asked of a call that runs no ICE agent: its catalogue offers no ICE,
+    /// its peer answered without any, or its session has not opened yet.
+    ///
+    /// Nothing is sent. A restart is a new ICE session on a running one (RFC
+    /// 8445 §9), and a call with none has nothing for new credentials to
+    /// replace.
+    #[cfg(feature = "ice")]
+    NoIce,
     /// The call asked for SRTP and would have carried audio without it: a
     /// plain offer arriving at a call set to [`SrtpPolicy::Required`], or a
     /// plain re-offer inside one.
@@ -448,6 +459,8 @@ impl MediaError {
             }
             #[cfg(feature = "ice")]
             Self::IcePathLost => "consent to send on the path ICE selected has been withdrawn",
+            #[cfg(feature = "ice")]
+            Self::NoIce => "this call runs no ICE agent to restart",
             Self::SrtpRequired => "this call requires SRTP and the far end described none",
             Self::UnusableKeying => "the crypto line asks for terms this build will not be held to",
             _ => return None,
@@ -616,6 +629,8 @@ mod tests {
             MediaError::IceNeedsRtcpMux,
             #[cfg(feature = "ice")]
             MediaError::IcePathLost,
+            #[cfg(feature = "ice")]
+            MediaError::NoIce,
         ];
         let mut said: Vec<String> = Vec::new();
         for refusal in refusals {

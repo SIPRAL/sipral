@@ -431,10 +431,11 @@ after it. What is left is platform work, and platform work needs the platform.
   `IcePolicy`; the lab proves two stacks behind two NATs finding each other on
   STUN's reflexive candidates and, with the path between them blocked,
   through a relay on a TURN server, with the start-up cost of both measured
-  (`docs/06-nat.md`), and Asterisk's own ICE against the lite role. What is
-  left is TURN over TCP and TLS, for the network that lets nothing out but
-  443, and an ICE restart in the full role, which the facade still answers
-  with the credentials the running agent holds. Off by default for a desktop
+  (`docs/06-nat.md`), and Asterisk's own ICE against the lite role; an ICE
+  restart from either end, in either role, keeps the audio on the old pair
+  until the new one is chosen. What is left is TURN over TCP and TLS, for
+  the network that lets nothing out but 443, and a C ABI entry point for a
+  restart this end starts, which only the Rust API has. Off by default for a desktop
   softphone, where it only adds setup time; on for a phone on a carrier-grade
   NAT, and lite on a public server.
 

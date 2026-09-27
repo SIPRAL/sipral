@@ -12,6 +12,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **ICE restarts in the full role, from either end.** A peer's re-offer
+  that changes both `ice-ufrag` and `ice-pwd` is answered with new
+  credentials of this end's own (RFC 8839 §4.4.2.1) instead of the ones the
+  running agent held, and `MediaEngine::restart_ice` offers one from this
+  end: the call's last description with the ICE lines written as for a
+  first offer, the candidates the agent still holds and the role it had.
+  Once the exchange is complete the agent restarts (RFC 8445 §9) and checks
+  again under both ends' new credentials, while the pair it had selected
+  carries the audio until the new session selects one, reported as another
+  `MediaEvent::PathChosen`; a restart the far end refuses leaves ICE as it
+  was. It is the remedy for `MediaError::IcePathLost`. A call running no
+  ICE agent is refused with the new `MediaError::NoIce`. Over the C ABI a
+  peer's restart is followed the same way; a restart this end starts has
+  no entry point there yet.
 - **The .NET binding can get a call past a NAT.** `SipralStack`'s
   constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
   `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP

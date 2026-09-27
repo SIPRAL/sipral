@@ -871,11 +871,11 @@ impl MediaSession {
             match news {
                 PathNews::Selected(pair) => selected = Some(pair),
                 // RFC 7675 §5: nothing more may be sent on that pair, and the
-                // same credentials may not be used on it again. This stack
-                // has no re-offer of its own yet, so the only remedy an
-                // application has is to end the call — which is what the
-                // event's own documentation says, rather than leaving it to
-                // be worked out from the silence
+                // same credentials may not be used on it again. What the
+                // application can do about it is restart ICE, which draws new
+                // ones (`MediaEngine::restart_ice`), or end the call — which
+                // is what the event's own documentation says, rather than
+                // leaving it to be worked out from the silence
                 PathNews::Lost => lost = true,
             }
         }
@@ -1837,12 +1837,32 @@ impl MediaSession {
     }
 
     /// Carry what the call's descriptions now say about ICE onto the running
-    /// agent: the credentials a restart gave it. See [`crate::ice::Ice::follow`].
+    /// agent: the credentials a restart gave it, and the peer's side of the
+    /// same exchange. See [`crate::ice::Ice::follow`].
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::ice::Ice::follow`].
     #[cfg(feature = "ice")]
-    pub(crate) fn follow_ice(&mut self, local: Option<&crate::ice::LocalIce>) {
-        if let (Some(ice), Some(local)) = (self.ice.as_mut(), local) {
-            ice.follow(local);
-        }
+    pub(crate) fn follow_ice(
+        &mut self,
+        local: Option<&crate::ice::LocalIce>,
+        remote: Option<&sipral_nat::ice::RemoteIce>,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let (Some(ice), Some(local)) = (self.ice.as_mut(), local) else {
+            return Ok(());
+        };
+        let followed = ice.follow(local, remote, now);
+        self.drain_ice(now);
+        followed
+    }
+
+    /// The candidates this session's full agent still holds, for a restart
+    /// to write. See [`crate::ice::Ice::gathered`].
+    #[cfg(feature = "ice")]
+    pub(crate) fn ice_candidates(&self) -> Option<Vec<sipral_nat::ice::Candidate>> {
+        self.ice.as_ref().and_then(crate::ice::Ice::gathered)
     }
 
     /// Whether inbound audio is currently considered stopped.

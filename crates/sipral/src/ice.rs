@@ -89,7 +89,21 @@
 //! goes on answering checks under the old ones, until the peer nominates
 //! under the new.
 //!
+//! # Restarts
+//!
+//! Either end may restart ICE on a call (RFC 8445 §9) by offering new
+//! credentials: the peer with a re-offer, this end with
+//! [`MediaEngine::restart_ice`]. Both roles answer one with new credentials
+//! of their own (RFC 8839 §4.4.2.1), and both follow it only once the
+//! exchange is complete, since a re-offer that fails leaves ICE "as if the
+//! subsequent offer had never been made" (§4.4). The full agent then flushes
+//! its checklist, forms it again from the peer's new description and checks
+//! again, on the candidates it still holds, while the pair it had selected
+//! goes on carrying the audio until the new session selects one
+//! (§4.4.3.1.1).
+//!
 //! [`MediaEvent::PathChosen`]: crate::MediaEvent::PathChosen
+//! [`MediaEngine::restart_ice`]: crate::MediaEngine::restart_ice
 
 #[cfg(feature = "ice")]
 use std::collections::VecDeque;
@@ -102,6 +116,8 @@ use std::time::Instant;
 
 #[cfg(feature = "ice")]
 use sipral_core::auth::KeySource;
+#[cfg(feature = "ice")]
+use sipral_core::sdp::SessionDescription;
 #[cfg(feature = "ice")]
 use sipral_nat::ice::{
     Candidate, CandidateType, CheckAnswer, ComponentId, Credentials, IceAgent, IceConfig, IceEvent,
@@ -411,18 +427,33 @@ impl LocalIce {
         )))
     }
 
-    /// The same call's ICE after an ICE restart the peer asked for: new
-    /// credentials of this end's own, which RFC 8839 §4.4.2.1 requires of an
-    /// answerer that accepts one, and everything else as it was — a lite end
-    /// "MUST NOT add additional host candidates in a subsequent offer"
-    /// (§4.4.1.3), and has no other kind to add.
+    /// The same call's ICE after an ICE restart (RFC 8445 §9), whichever end
+    /// asked for it: new credentials of this end's own — RFC 8839 §4.4.1.1.1
+    /// has an offerer that restarts "change both the "ice-pwd" and the
+    /// "ice-ufrag"", and §4.4.2.1 asks the same of an answerer that accepts
+    /// one — and the role and tiebreaker as they were, since §9 flushes
+    /// everything "excluding the roles of the agents".
+    ///
+    /// The candidates are `running`'s when the call runs a full agent: the
+    /// ones it still holds, which is what §4.4.1.1.1's "some, none, or all
+    /// of the previous candidates" comes to for an agent that asks no server
+    /// itself — the host and server-reflexive candidates it gathered, and the
+    /// relayed one unless ICE gave the allocation back when it concluded on
+    /// another pair. `None` keeps the ones written before, which is all a
+    /// lite end has: it "MUST NOT add additional host candidates in a
+    /// subsequent offer" (§4.4.1.3), and has no other kind to add.
     ///
     /// # Errors
     ///
     /// As [`LocalIce::draw`].
-    pub(crate) fn restarted(&self, keys: &mut KeySource) -> Result<Self, MediaError> {
+    pub(crate) fn restarted(
+        &self,
+        keys: &mut KeySource,
+        running: Option<Vec<Candidate>>,
+    ) -> Result<Self, MediaError> {
         Ok(Self {
             credentials: draw_credentials(keys)?,
+            candidates: running.unwrap_or_else(|| self.candidates.clone()),
             ..self.clone()
         })
     }
@@ -430,6 +461,20 @@ impl LocalIce {
     /// Whether this end is the lite implementation.
     pub(crate) const fn is_lite(&self) -> bool {
         self.lite
+    }
+
+    /// Whether `description` names these credentials on its stream: the one
+    /// this end wrote with them, as a session change hands it back once the
+    /// far end has accepted it.
+    pub(crate) fn written_in(&self, description: &SessionDescription) -> bool {
+        description
+            .media
+            .iter()
+            .find(|stream| !stream.is_rejected())
+            .and_then(|stream| sipral_nat::ice::parse_remote(description, stream))
+            .is_some_and(|written| {
+                written.ufrag == self.credentials.ufrag() && written.pwd == self.credentials.pwd()
+            })
     }
 }
 
@@ -720,19 +765,61 @@ impl Ice {
     }
 
     /// Take up the credentials a restart gave this call, when they are not
-    /// the ones the running agent holds.
+    /// the ones the running agent holds, and the peer's side of the same
+    /// exchange, `remote`.
     ///
-    /// Only the lite role restarts here, and only because the peer did: the
-    /// answer that accepted the restart already carried `local`'s new
-    /// credentials, and the peer's checks from now on are signed with them.
-    pub(crate) fn follow(&mut self, local: &LocalIce) {
-        if let Running::Lite(lite) = &mut self.running
-            && lite.agent.local_ufrag() != local.credentials().ufrag()
-        {
-            lite.agent.restart(
-                local.credentials().ufrag().to_owned(),
-                local.credentials().pwd().to_owned(),
-            );
+    /// Reached once the exchange that restarted is complete, whichever end
+    /// offered it: the answer this end sent accepting the peer's restart, or
+    /// the peer's answer to one this end offered. Not before — "Should a
+    /// subsequent offer fail, ICE processing continues as if the subsequent
+    /// offer had never been made" (RFC 8839 §4.4) — and from here on the
+    /// peer's checks are signed with `local`'s new password.
+    ///
+    /// The full agent restarts (RFC 8445 §9): its checklist and valid list
+    /// are flushed and formed again from `remote`'s candidates, the checks
+    /// run again, and the pair it had selected goes on carrying the audio,
+    /// and on answering and sending consent checks under the old
+    /// credentials, until the new session selects one (RFC 8839
+    /// §4.4.3.1.1, RFC 7675 §5.1). The role stays what it was. A lite end
+    /// takes the new credentials and keeps its pair until the peer nominates
+    /// under them.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::Ice`] for peer credentials outside RFC 8839 §5.4's
+    /// shape. The previous pair still carries the audio then, for as long as
+    /// its consent lasts.
+    pub(crate) fn follow(
+        &mut self,
+        local: &LocalIce,
+        remote: Option<&RemoteIce>,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        match &mut self.running {
+            Running::Lite(lite) => {
+                if lite.agent.local_ufrag() != local.credentials().ufrag() {
+                    lite.agent.restart(
+                        local.credentials().ufrag().to_owned(),
+                        local.credentials().pwd().to_owned(),
+                    );
+                }
+                Ok(())
+            }
+            Running::Full(full) => {
+                if full.agent.local_credentials() == local.credentials() {
+                    return Ok(());
+                }
+                full.agent
+                    .restart(local.credentials().clone())
+                    .map_err(MediaError::Ice)?;
+                self.top_up();
+                let (Running::Full(full), Some(remote)) = (&mut self.running, remote) else {
+                    return Ok(());
+                };
+                let set = full.agent.set_remote(full.stream, remote, now);
+                self.top_up();
+                set.map_err(MediaError::Ice)
+            }
         }
     }
 
@@ -991,19 +1078,28 @@ impl Ice {
         }
     }
 
-    /// The candidates this agent will advertise for its stream.
+    /// The candidates this agent still holds for its stream: what it
+    /// gathered, less a relay ICE gave back when it concluded on another
+    /// pair (RFC 8445 §8.3.1). `None` for a lite end, which gathered nothing
+    /// of its own.
     ///
-    /// Only a test asks: what goes into a description comes from
-    /// [`LocalIce::candidates`], which is what makes the second and every
-    /// later description of a call say what the first one did. This is how
-    /// that equality is checked. A lite end has no agent that gathered
-    /// anything, so there is nothing of it to compare.
+    /// What goes into a description comes from [`LocalIce::candidates`],
+    /// which is what makes the second and every later description of a call
+    /// say what the first one did. This is asked only when a restart writes
+    /// a new set ([`LocalIce::restarted`]), since a candidate the agent no
+    /// longer holds is one the peer's checks would go to for nothing.
+    pub(crate) fn gathered(&self) -> Option<Vec<Candidate>> {
+        match &self.running {
+            Running::Full(full) => Some(full.agent.local_candidates(full.stream)),
+            Running::Lite(_) => None,
+        }
+    }
+
+    /// [`Ice::gathered`], empty for a lite end, for the tests that compare it
+    /// with what was offered.
     #[cfg(test)]
     pub(crate) fn local_candidates(&self) -> Vec<Candidate> {
-        match &self.running {
-            Running::Full(full) => full.agent.local_candidates(full.stream),
-            Running::Lite(_) => Vec::new(),
-        }
+        self.gathered().unwrap_or_default()
     }
 }
 
@@ -1167,7 +1263,7 @@ mod tests {
         assert_eq!(forwarded.candidates()[0].related, None);
         // and a restart changes the credentials and nothing else
         let restarted = forwarded
-            .restarted(&mut KeySource::new([8; 32]))
+            .restarted(&mut KeySource::new([8; 32]), None)
             .expect("a restart draws");
         assert_ne!(
             restarted.credentials().ufrag(),

@@ -1113,7 +1113,8 @@ and candidates, multiplexing. A key drawn afresh would be a re-key nobody
 asked for, in the middle of a change about something else; a fingerprint
 written afresh is what RFC 8842 §3.1 reads as asking for a new DTLS
 association, which this stack does not start; new ICE credentials are a
-restart. A hold carries all of them unchanged for the same reasons, and the
+restart, which `MediaEngine::restart_ice` offers on purpose, carrying all the
+rest the same way (`docs/06-nat.md`). A hold carries all of them unchanged for the same reasons, and the
 codec change is the second re-offer this end writes, so it behaves the same —
 down to the one line both rewrite, `a=setup`, which the next paragraph is
 about. Which way the call flows is the user agent's to write
@@ -1122,7 +1123,7 @@ about. Which way the call flows is the user agent's to write
 
 **The DTLS roles.** RFC 8842 §5.5 asks every subsequent offer for
 `a=setup:actpass`, and every re-offer this stack writes carries it — the hold,
-the resume and the codec change alike — including one made from a
+the resume, the codec change and the ICE restart alike — including one made from a
 description that was last an answer and so said `active` or `passive`.
 `actpass` hands the far end the choice again, and §5.3 has an answerer that
 keeps the association answer with "an attribute value that does not change

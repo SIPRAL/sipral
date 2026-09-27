@@ -703,11 +703,27 @@ What it does, in the order a session meets it:
   packets before and 1 after, the one the stream's probation takes; the Rust
   caller in the same step got 197 of the callee's 198 back.
 
+- **Restarts, from either end.** A peer's re-offer whose `ice-ufrag` and
+  `ice-pwd` both changed is an ICE restart (RFC 8839 §4.4.1.1.1), and
+  `MediaEngine::restart_ice` sends one from this end: the description this
+  end last wrote, with the ICE lines written as for a first offer. Whichever
+  end offered it, this end's half carries new credentials of its own
+  (§4.4.1.1.1, §4.4.2.1), the role and tiebreaker it had, and the candidates
+  its agent still holds — a relay ICE gave back when it concluded on another
+  pair is not offered again. Nothing reaches the running agent until the
+  exchange is complete: "Should a subsequent offer fail, ICE processing
+  continues as if the subsequent offer had never been made" (§4.4). Then it
+  restarts (RFC 8445 §9): checklist and valid list flushed, formed again from
+  the peer's new description, checked again, while the pair it had selected
+  goes on carrying the audio, and answering and sending consent checks under
+  the old credentials, until the new session selects a pair, reported as a
+  second `PathChosen` (§4.4.3.1.1, RFC 7675 §5.1). That is the remedy for
+  `IcePathLost`, which forbids the old credentials on the pair, and for a
+  network change the application sees first. The C ABI has no entry point
+  for it yet: a restart from this end is the Rust API's.
+
 Not done yet: TURN over TCP or TLS (the TURN client has the framing; the
-agent's datagram model does not carry it), a restart from the facade in the
-full role — a peer's restart offer reaches the engine, and its answer keeps
-the credentials the running agent holds, since answering with new ones the
-agent does not would stop the checks it depends on — and
+agent's datagram model does not carry it), and
 `a=remote-candidates` (RFC 8839 §4.4.1.2.2). The last is not written because
 nothing yet writes an offer it would go in: it belongs in the updated offer a controlling agent sends after
 nomination, when the selected pair differs from the default candidate pair.
@@ -727,7 +743,12 @@ of its packets. `fuzz/fuzz_targets/ice.rs` drives the same agent from the other
 side — arbitrary datagrams from arbitrary sources on the media port, which is
 what this port is open to before any key exists — seeded with checks signed the
 way the agent will check them, because an unsigned datagram dies in the
-authenticator and reaches none of the state machine.
+authenticator and reaches none of the state machine. The facade's restart is
+proven between two stacks in process (`crates/sipral/src/tests.rs`): one
+restarts, both halves of the exchange carry new credentials and the same
+candidates, both agents check again under them while the tone goes on
+crossing the old pair, and both select again; a restart the far end refuses
+leaves the pair and the credentials as they were.
 
 And it is proven in the lab (`scripts/lab.sh ice`), between two stacks each
 behind a NAT of its own: the interop harness as caller behind `interop/nat`'s

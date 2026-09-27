@@ -212,6 +212,17 @@ struct Managed {
     /// [`IcePolicy`]: crate::IcePolicy
     #[cfg(feature = "ice")]
     ice: Option<crate::ice::LocalIce>,
+    /// The ICE an ICE restart this end offered ([`MediaEngine::restart_ice`])
+    /// runs on once the far end accepts it: new credentials, and the
+    /// candidates the agent still held when it was written.
+    ///
+    /// It becomes [`Managed::ice`] with the session change that carries its
+    /// credentials, and a refusal drops it: "Should a subsequent offer fail,
+    /// ICE processing continues as if the subsequent offer had never been
+    /// made" (RFC 8839 §4.4), so nothing of it reaches the running agent
+    /// before the answer does.
+    #[cfg(feature = "ice")]
+    restarting: Option<crate::ice::LocalIce>,
     /// Whether [`MediaEngine::ring_with`] has already described and opened
     /// this call's session, before it was answered.
     ///
@@ -955,17 +966,17 @@ impl MediaEngine {
     }
 
     /// What this call says about ICE in its answer to a re-offer: what
-    /// [`MediaEngine::ice_lines`] says, unless the offer is an ICE restart
-    /// and this end is lite.
+    /// [`MediaEngine::ice_lines`] says, unless the offer is an ICE restart.
     ///
     /// RFC 8839 §4.4.1.1.1 signals a restart by a change of both `ice-ufrag`
     /// and `ice-pwd`, and §4.4.2.1 has an answerer that accepts one "change
-    /// the SDP "ice-pwd" and "ice-ufrag" attribute values". A lite end
-    /// follows it, keeping the pair it has until the peer nominates under the
-    /// new ones ([`sipral_nat::ice::LiteAgent::restart`]). The full role does
-    /// not restart from here yet: answering it with new credentials the
-    /// running agent does not hold would stop the checks it depends on, so
-    /// its answer keeps the ones it has.
+    /// the SDP "ice-pwd" and "ice-ufrag" attribute values". The answer
+    /// carries new credentials of this end's own, and candidates the running
+    /// agent still holds ([`crate::ice::LocalIce::restarted`]); the agent
+    /// takes both up once the answer has gone
+    /// ([`crate::ice::Ice::follow`]), a full one flushing its checklist and
+    /// checking again, a lite one keeping its pair until the peer nominates
+    /// under the new ones ([`sipral_nat::ice::LiteAgent::restart`]).
     ///
     /// # Errors
     ///
@@ -982,9 +993,6 @@ impl MediaEngine {
         let Some(held) = self.ice_lines(Some(call), catalog, address, public, false, now)? else {
             return Ok(None);
         };
-        if !held.is_lite() {
-            return Ok(Some(held));
-        }
         let credentials = |description: &SessionDescription| {
             description
                 .media
@@ -1000,7 +1008,11 @@ impl MediaEngine {
             .and_then(credentials);
         match (before, credentials(offer)) {
             (Some(before), Some(offered)) if before.0 != offered.0 && before.1 != offered.1 => {
-                held.restarted(&mut self.keys).map(Some)
+                let running = self
+                    .sessions
+                    .get(&call)
+                    .and_then(|held| share::lock(held).session.ice_candidates());
+                held.restarted(&mut self.keys, running).map(Some)
             }
             _ => Ok(Some(held)),
         }
@@ -1430,6 +1442,8 @@ impl MediaEngine {
                 dtls,
                 #[cfg(feature = "ice")]
                 ice,
+                #[cfg(feature = "ice")]
+                restarting: None,
                 // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
                 payloads: Payloads::default(),
@@ -1547,6 +1561,8 @@ impl MediaEngine {
                 dtls,
                 #[cfg(feature = "ice")]
                 ice,
+                #[cfg(feature = "ice")]
+                restarting: None,
                 // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
                 payloads: Payloads::default(),
@@ -2009,6 +2025,77 @@ impl MediaEngine {
         }
         Ok(())
     }
+
+    /// Restart ICE on a call (RFC 8445 §9): offer it again with new ICE
+    /// credentials, so that both ends flush their checklists and check every
+    /// pair again.
+    ///
+    /// What a call whose path has gone needs: consent lost or revoked
+    /// ([`MediaError::IcePathLost`]), since RFC 7675 §5.1 forbids the same
+    /// credentials on that pair again, or a network change the application
+    /// saw before the agent did, since only a restart may "change the
+    /// destinations of data streams" (§9).
+    ///
+    /// Everything but ICE is the description this end last wrote, carried
+    /// across the way [`MediaEngine::change_codecs`] carries it: the codecs,
+    /// the key or the fingerprint, multiplexing, and which way the call
+    /// flows, with `a=setup` offered again as `actpass`. The ICE lines are
+    /// written as for a first offer (RFC 8839 §4.4.1.1.1): new credentials,
+    /// the role and tiebreaker the call has, and the candidates its agent
+    /// still holds — a relay ICE gave back when it concluded on another pair
+    /// is not offered again.
+    ///
+    /// The running agent is not touched until the far end answers. The pair
+    /// it selected carries the audio meanwhile, and from the answer on as
+    /// well, until the restarted agents have checked their way to a new one
+    /// (RFC 8839 §4.4.3.1.1), reported as another [`MediaEvent::PathChosen`].
+    /// A refusal leaves ICE exactly as it was: "Should a subsequent offer
+    /// fail, ICE processing continues as if the subsequent offer had never
+    /// been made" (§4.4).
+    ///
+    /// # Errors
+    /// [`MediaError::NoSuchCall`] for a call this engine does not manage;
+    /// [`MediaError::NoIce`] for one that runs no ICE agent;
+    /// [`MediaError::NoDescription`] before this end has described it;
+    /// [`MediaError::Ice`] should new credentials fail to draw; and
+    /// [`MediaError::Signalling`] when the user agent will not send it —
+    /// [`UaError::ChangeInProgress`] while another change is on its way,
+    /// chiefly.
+    #[cfg(feature = "ice")]
+    pub fn restart_ice(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
+        let (Some(ice), Some(held)) = (managed.ice.clone(), self.sessions.get(&call)) else {
+            return Err(MediaError::NoIce);
+        };
+        let running = {
+            let slot = share::lock(held);
+            if !slot.session.runs_ice() {
+                return Err(MediaError::NoIce);
+            }
+            slot.session.ice_candidates()
+        };
+        let mut offer = managed.local.clone().ok_or(MediaError::NoDescription)?;
+        let version = managed.version.saturating_add(1);
+        let restarted = ice.restarted(&mut self.keys, running)?;
+
+        withdraw_ice(&mut offer);
+        describe_ice(&mut offer, Some(&restarted), None);
+        for stream in &mut offer.media {
+            stream.offer_roles_again();
+        }
+        offer.origin.version = version;
+
+        agent.change_formats(call, &offer.to_bytes(), now)?;
+        if let Some(managed) = self.calls.get_mut(&call) {
+            managed.restarting = Some(restarted);
+        }
+        Ok(())
+    }
 }
 
 // -- draining ----------------------------------------------------------------
@@ -2402,6 +2489,12 @@ impl MediaEngine {
             } => {
                 if let Some(managed) = self.calls.get_mut(call) {
                     managed.pending = None;
+                    // and an ICE restart refused is one that never happened
+                    // (RFC 8839 §4.4): the agent goes on as it was
+                    #[cfg(feature = "ice")]
+                    {
+                        managed.restarting = None;
+                    }
                 }
             }
             UaEvent::CallEnded { call, .. } => self.release(*call, agent, now),
@@ -2468,6 +2561,8 @@ impl MediaEngine {
                 dtls_identity: None,
                 #[cfg(feature = "ice")]
                 ice: None,
+                #[cfg(feature = "ice")]
+                restarting: None,
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
@@ -2587,6 +2682,17 @@ impl MediaEngine {
                 && let Some(pending) = managed.pending.take()
             {
                 managed.catalog = pending.catalog;
+            }
+            // the ICE restart this end offered, accepted: the credentials it
+            // named are this call's from here on, and `settle` below hands
+            // them to the running agent with the peer's new ones
+            #[cfg(feature = "ice")]
+            if managed
+                .restarting
+                .as_ref()
+                .is_some_and(|restarting| restarting.written_in(&described))
+            {
+                managed.ice = managed.restarting.take();
             }
             managed.local = Some(described);
         }
@@ -2903,14 +3009,26 @@ impl MediaEngine {
         let ours = setup_in(local);
         #[cfg(feature = "ice")]
         let settled_ice = managed.ice.clone();
+        #[cfg(feature = "ice")]
+        let peer_ice = remote
+            .media
+            .iter()
+            .find(|stream| !stream.is_rejected())
+            .and_then(|stream| sipral_nat::ice::parse_remote(remote, stream));
         let running = self.sessions.get(&call).map(Arc::clone);
         if let Some(held) = running {
             let mut slot = share::lock(&held);
-            // a restart this end's answer accepted: the running agent takes
-            // up the credentials that answer carried, before anything the
-            // peer signs with them arrives
+            // a restart either end offered, now answered: the running agent
+            // takes up the credentials this end's half carried and the
+            // peer's new ones, and checks again, while the pair it had goes
+            // on carrying the audio
             #[cfg(feature = "ice")]
-            slot.session.follow_ice(settled_ice.as_ref());
+            if let Err(error) = slot
+                .session
+                .follow_ice(settled_ice.as_ref(), peer_ice.as_ref(), now)
+            {
+                self.fail(call, error);
+            }
             // an answer that took the other role asks for a new association
             // this end does not start, the way a moved certificate does, and
             // is refused the same way: by name, before anything is adopted,
@@ -3347,6 +3465,32 @@ fn describe_ice(
         // the Ta this agent proposes, which `IceConfig::default` is built with
         // and `crate::ice` does not move
         sipral_nat::ice::write_pacing(description, sipral_nat::ice::DEFAULT_TA);
+    }
+}
+
+/// Take every ICE line out of a description this end wrote, for
+/// [`describe_ice`] to write a restart's in their place: the stream's
+/// credentials, options and candidates, and the session's pacing and
+/// `a=ice-lite` (RFC 8839 §5).
+#[cfg(feature = "ice")]
+fn withdraw_ice(description: &mut SessionDescription) {
+    const STREAM: [&str; 7] = [
+        "ice-ufrag",
+        "ice-pwd",
+        "ice-options",
+        "candidate",
+        "remote-candidates",
+        "end-of-candidates",
+        "ice-mismatch",
+    ];
+    const SESSION: [&str; 5] = ["ice-ufrag", "ice-pwd", "ice-options", "ice-pacing", "ice-lite"];
+    description
+        .attributes
+        .retain(|attribute| !SESSION.contains(&attribute.name.as_str()));
+    for stream in &mut description.media {
+        stream
+            .attributes
+            .retain(|attribute| !STREAM.contains(&attribute.name.as_str()));
     }
 }
 
