@@ -282,10 +282,15 @@ private fun stunMappingReachesContactAndSdp(host: String): String {
                 assertEquals(1L, sip.accounts)
 
                 client.placeCall(account, target = "sip:bob@$peerAddress", mediaHost = host).use {
+                    // placeCall returns once the poll thread has seen the
+                    // media socket's mapping, which is before that event
+                    // reaches `events` and the thread collecting it here
+                    val mediaDeadline = System.currentTimeMillis() + 5_000
+                    while (mappingFor(false) == null && System.currentTimeMillis() < mediaDeadline) Thread.sleep(20)
                     val media = assertNotNull(mappingFor(false), "the media socket was never mapped")
                     assertEquals(FakeStunServer.mapped(media.local!!), media.mapped)
                     val invite = assertNotNull(read(peer, "INVITE "), "no INVITE reached the far end")
-                    val publicMedia = parseHostPort(FakeStunServer.mapped(media.local!!))
+                    val publicMedia = parseHostPort(FakeStunServer.mapped(media.local))
                     assertTrue(
                         invite.contains("@${FakeStunServer.mapped(client.bindAddress)}"),
                         "the INVITE's Contact does not name the public address:\n$invite",
