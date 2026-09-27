@@ -190,6 +190,33 @@ func runCall(_ call: Call, _ streams: CallStreams) async {
     print("ended \(String(call.handle, radix: 16)): packets_sent=\(counts.sent) packets_received=\(counts.received)")
 }
 
+/// Whether `call` has ended within `milliseconds`, read off `events`, a
+/// stream of the call's own that finishes when the call ends. Both of the
+/// group's children give up when the group cancels them, so it returns as
+/// soon as either does. A child that awaited an unstructured task's `value`
+/// would not: cancelling the child does not cancel that task, and a group
+/// waits for every child before it returns -- which left the lab agent,
+/// once it had dwelt, waiting for a far end that never hangs up before it
+/// would hang up itself.
+func endedWithin(_ call: Call, _ events: AsyncStream<SipralEvent>, milliseconds: UInt64) async -> Bool {
+    if call.ended { return true }
+    return await withTaskGroup(of: Bool.self) { group -> Bool in
+        group.addTask {
+            for await _ in events where call.ended {
+                return true
+            }
+            return call.ended
+        }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: milliseconds * 1_000_000)
+            return call.ended
+        }
+        let first = await group.next() ?? false
+        group.cancelAll()
+        return first || call.ended
+    }
+}
+
 /// Talk for the life of one call this end placed against a peer with
 /// nothing of its own that would ever hang up first (the lab's own
 /// two-NAT pair, `scripts/lab.sh`'s `ice_turn_flow`, where the far end is
@@ -248,21 +275,9 @@ func runCallDirect(_ call: Call, patienceMs: UInt64, dwellMs: UInt64) async -> B
             call.media?.sendAudio(respond(frame))
         }
     }
-    let endTask = Task {
-        for await _ in forEnd {
-            if call.ended { return }
-        }
-    }
-    let dwellTask = Task {
-        try? await Task.sleep(nanoseconds: dwellMs * 1_000_000)
-    }
-    _ = await withTaskGroup(of: Void.self) { group -> Void in
-        group.addTask { await endTask.value }
-        group.addTask { await dwellTask.value }
-        await group.next()
-        group.cancelAll()
-    }
-    if !call.ended {
+    // the dwell, cut short by the far end hanging up first; then this end's
+    // own hangup, which waits on nothing the far end has to do
+    if !(await endedWithin(call, forEnd, milliseconds: dwellMs)) {
         // one last read while the call is still certainly up, for the
         // freshest number this path can give
         last.read(call.media)
@@ -270,17 +285,13 @@ func runCallDirect(_ call: Call, patienceMs: UInt64, dwellMs: UInt64) async -> B
         // the relayed call's farewell -- the TURN Refresh that gives its
         // allocation back, not only the RTCP BYE -- is queued once the far
         // end's 200 to this end's own BYE is read, so this waits for
-        // `call.ended` rather than closing right behind hangup()
-        _ = await withTaskGroup(of: Void.self) { group -> Void in
-            group.addTask { await endTask.value }
-            group.addTask { try? await Task.sleep(nanoseconds: 5_000_000_000) }
-            await group.next()
-            group.cancelAll()
-        }
+        // `call.ended` rather than closing right behind hangup(); on a
+        // stream of its own, since the one above finished when its reader
+        // was cancelled
+        _ = await endedWithin(call, call.events(), milliseconds: 5_000)
     }
     talkTask.cancel()
     statisticsTask.cancel()
-    endTask.cancel()
     // the same short wait bindings/python/examples/agent.py's own
     // hang_up_after_dwell gives, so a relayed call's farewell has had its
     // own turn before the stack tears the socket down
