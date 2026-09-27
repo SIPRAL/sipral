@@ -37,6 +37,8 @@ __all__ = [
     "PathKind",
     "PathOutcome",
     "CandidateKind",
+    "Transport",
+    "TurnStream",
 ]
 
 
@@ -133,3 +135,16 @@ PathOutcome = _enum("PathOutcome", "SIPRAL_PATH_OUTCOME_")
 #: A `sipral_candidate_kind_t`: the kind of an ICE candidate (RFC 8445
 #: Section 5.1.1), a path's `local_kind` and `remote_kind`.
 CandidateKind = _enum("CandidateKind", "SIPRAL_CANDIDATE_KIND_")
+#: A `SipralTransport`: what a transport speaks, and what
+#: `sipral_stack_config_t::turn_transport` reaches the TURN server over.
+#: Excludes the capability bits, the error codes and `SIPRAL_TRANSPORT_MAIN`,
+#: which share the same start and are not protocols.
+Transport = _enum(
+    "Transport",
+    "SIPRAL_TRANSPORT_",
+    exclude=("SIPRAL_TRANSPORT_BIT_", "SIPRAL_TRANSPORT_ERROR_", "SIPRAL_TRANSPORT_MAIN"),
+)
+
+#: A `sipral_turn_stream_t`, carried on `SIPRAL_EVENT_KIND_TURN_STREAM`:
+#: open the media socket's connection to the TURN server, or close it.
+TurnStream = _enum("TurnStream", "SIPRAL_TURN_STREAM_")

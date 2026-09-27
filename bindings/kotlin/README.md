@@ -200,6 +200,18 @@ registrar's INVITE in long after the REGISTER (`docs/06-nat.md`).
 interval, 1 000 to 120 000; nothing goes while the stack is suspended.
 `NatCheck.kt` proves both on the wire.
 
+`SipralTurnServer(..., transport = SipralTransport.TCP)` reaches the TURN
+server over TCP, for the network that lets no UDP out, and `TLS` over TLS
+(RFC 8656 §3.1), 5349 being the port for it: the client opens a `Socket` per
+media socket when `SIPRAL_EVENT_KIND_TURN_STREAM` asks (`turnStreamOf`), an
+`SSLSocket` over it for TLS, carries everything for the relay on it and
+closes it when told. The certificate is checked against `serverName` — the
+host part of `address` when null — with HTTPS endpoint identification, by
+`sslSocketFactory` or the platform's default; a factory over a
+`TrustManagerFactory` of the application's own is how a private CA or a
+self-signed server is trusted. `NatCheck.kt` proves it against a TURN server
+on a TCP port inside the check, over TLS with a certificate trusted and not.
+
 ### A REFER from outside any call
 
 `SipralClient.open(referrals = true)` hands a REFER that names no dialog —

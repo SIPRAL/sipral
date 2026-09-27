@@ -41,7 +41,7 @@ use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
 use crate::names::Names;
-use crate::nat::{SipralNatEvent, SipralNatRelayEvent};
+use crate::nat::{SipralNatEvent, SipralNatRelayEvent, SipralTurnStreamEvent};
 use crate::subscription::{SipralSubscriptionState, named_end, named_state};
 
 /// Declare the event number space, once.
@@ -504,6 +504,25 @@ event_kinds! {
         /// REFER's transaction ran out: the stack answered it with that status
         /// and the handle is stale from here on.
         41 = Referral, c"referral";
+        /// A media socket's connection to a TURN server reached over TCP or
+        /// TLS (`turn_transport`, RFC 8656 §3.1) is to be opened, or closed.
+        /// Only on a stack created with one.
+        ///
+        /// `payload.turn_stream` says which socket, which server, over what,
+        /// and which of the two. `SIPRAL_TURN_STREAM_OPEN` follows
+        /// `sipral_stack_nat_map`: open the connection from the socket to the
+        /// server — TLS with the platform's own stack, the certificate
+        /// checked against the server's name — and say so with
+        /// `sipral_stack_turn_connected`, then hand everything it carries to
+        /// `sipral_stack_turn_receive` for as long as it is open, and its
+        /// closing to `sipral_stack_turn_closed`. What is written on it comes
+        /// out of `sipral_stack_poll_stun`, `sipral_media_poll_transmit`,
+        /// `sipral_media_capture`, `sipral_media_poll_rtcp` and
+        /// `sipral_stack_poll_farewell`, each marked with its `protocol`.
+        /// `SIPRAL_TURN_STREAM_CLOSE` says nothing more will be: write what
+        /// is still queued for it, and close it. `account` and `call` are
+        /// `SIPRAL_HANDLE_NONE`: a socket is neither.
+        42 = TurnStream, c"turn stream";
     }
 }
 
@@ -567,6 +586,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::NatMapping, "nat"),
     (SipralEventKind::NatRelay, "relay"),
     (SipralEventKind::Referral, "referral"),
+    (SipralEventKind::TurnStream, "turn_stream"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1187,6 +1207,8 @@ record! {
         pub relay: SipralNatRelayEvent,
         /// For [`SipralEventKind::Referral`].
         pub referral: SipralReferralEvent,
+        /// For [`SipralEventKind::TurnStream`].
+        pub turn_stream: SipralTurnStreamEvent,
     }
 }
 
@@ -1355,6 +1377,18 @@ pub(crate) fn nat_mapping(stack: SipralHandle, payload: SipralNatEvent) -> Sipra
 #[cfg(all(feature = "stun", feature = "ice"))]
 pub(crate) fn nat_relay(stack: SipralHandle, payload: SipralNatRelayEvent) -> SipralEvent {
     SipralEvent::of(stack, SipralEventKind::NatRelay, payload!(relay: payload))
+}
+
+/// What a media socket's connection to its TURN server is to do, as C
+/// reads it. The pointers in `payload` point into text the caller keeps
+/// beside the event.
+#[cfg(all(feature = "stun", feature = "ice"))]
+pub(crate) fn turn_stream(stack: SipralHandle, payload: SipralTurnStreamEvent) -> SipralEvent {
+    SipralEvent::of(
+        stack,
+        SipralEventKind::TurnStream,
+        payload!(turn_stream: payload),
+    )
 }
 
 /// Everything one translation needs to reach.
@@ -2719,7 +2753,8 @@ mod tests {
         assert_eq!(SipralEventKind::NatMapping as u32, 39);
         assert_eq!(SipralEventKind::NatRelay as u32, 40);
         assert_eq!(SipralEventKind::Referral as u32, 41);
-        assert_eq!(SipralEventKind::ALL.len(), 40, "and there are no others");
+        assert_eq!(SipralEventKind::TurnStream as u32, 42);
+        assert_eq!(SipralEventKind::ALL.len(), 41, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2790,7 +2825,8 @@ mod tests {
         assert_eq!(name(39).as_deref(), Some("nat mapping"), "39 is live");
         assert_eq!(name(40).as_deref(), Some("nat relay"), "40 is live");
         assert_eq!(name(41).as_deref(), Some("referral"), "41 is live");
-        assert_eq!(name(42), None, "past the last kind");
+        assert_eq!(name(42).as_deref(), Some("turn stream"), "42 is live");
+        assert_eq!(name(43), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

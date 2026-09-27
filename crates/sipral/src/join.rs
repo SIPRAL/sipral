@@ -86,6 +86,14 @@ pub struct MixOutcome {
     pub to_a: Option<(SocketAddr, Vec<u8>)>,
     /// The same, for the far end of the session passed second.
     pub to_b: Option<(SocketAddr, Vec<u8>)>,
+    /// How `to_a` leaves, as [`Datagram::transport`](crate::Datagram::transport)
+    /// says: a datagram, or bytes for the relay's connection to its TURN
+    /// server.
+    #[cfg(feature = "ice")]
+    pub via_a: crate::TurnTransport,
+    /// The same, for `to_b`.
+    #[cfg(feature = "ice")]
+    pub via_b: crate::TurnTransport,
 }
 
 /// One frame of a local conference of two calls and this end.
@@ -129,18 +137,34 @@ pub fn mix_two(
 
     let mut to_a = vec![0_i16; a.frame_samples()];
     sum_scaled_into(&mut to_a, &[mic, &from_b], &[half, half]);
-    let sent_a = a
-        .capture(&to_a, now)?
-        .map(|datagram| (datagram.destination, datagram.payload.to_vec()));
+    #[cfg(feature = "ice")]
+    let mut via_a = crate::TurnTransport::Udp;
+    let sent_a = a.capture(&to_a, now)?.map(|datagram| {
+        #[cfg(feature = "ice")]
+        {
+            via_a = datagram.transport;
+        }
+        (datagram.destination, datagram.payload.to_vec())
+    });
 
     let mut to_b = vec![0_i16; b.frame_samples()];
     sum_scaled_into(&mut to_b, &[mic, &from_a], &[half, half]);
-    let sent_b = b
-        .capture(&to_b, now)?
-        .map(|datagram| (datagram.destination, datagram.payload.to_vec()));
+    #[cfg(feature = "ice")]
+    let mut via_b = crate::TurnTransport::Udp;
+    let sent_b = b.capture(&to_b, now)?.map(|datagram| {
+        #[cfg(feature = "ice")]
+        {
+            via_b = datagram.transport;
+        }
+        (datagram.destination, datagram.payload.to_vec())
+    });
 
     Ok(MixOutcome {
         to_a: sent_a,
         to_b: sent_b,
+        #[cfg(feature = "ice")]
+        via_a,
+        #[cfg(feature = "ice")]
+        via_b,
     })
 }

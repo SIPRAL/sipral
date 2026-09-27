@@ -23,9 +23,10 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import ssl
 
 from sipral import Call, Stack
-from sipral.enums import EventKind, Ice, Nat
+from sipral.enums import EventKind, Ice, Nat, Transport
 from sipral.errors import SipralError
 
 
@@ -152,20 +153,12 @@ async def run_call(
         except SipralError:
             pass
         call.hangup()
-        # Waited out here, not left to the caller's own `finally`: a
-        # relayed call's farewell -- the TURN Refresh that gives its
-        # allocation back, not only the RTCP BYE -- is queued once the
-        # far end's 200 to this end's own BYE is read
-        # (`Stack._drain_farewells`, on the poll thread), and `call.close`
-        # right behind `call.hangup` would tear the socket down before
-        # that thread's next turn ever ran. `Stack.close`'s own docstring
-        # gives the same reasoning for the same sleep. Polled rather than
-        # read off `call.events`: `wait_for_remote_hangup` reads that same
-        # queue concurrently, and the one `CALL_ENDED` on it is only ever
-        # delivered to whichever of the two calls `get()` first.
+        # Polled rather than read off `call.events`:
+        # `wait_for_remote_hangup` reads that same queue concurrently, and
+        # the one `CALL_ENDED` on it is only ever delivered to whichever
+        # of the two calls `get()` first.
         while not call.ended:
             await asyncio.sleep(0.05)
-        await asyncio.sleep(0.2)
 
     talking = asyncio.create_task(talk())
     polling = asyncio.create_task(poll_statistics())
@@ -184,6 +177,17 @@ async def run_call(
         ending.cancel()
         if dwelling is not None:
             dwelling.cancel()
+        if call.ended:
+            # A relayed call's farewell -- the TURN Refresh that gives its
+            # allocation back, not only the RTCP BYE -- can be queued a
+            # poll after `CALL_ENDED` (`Stack._drain_farewells`, on the poll
+            # thread), and one that finds the call already closed is
+            # dropped. Waited out here, where every way the call ends
+            # passes: `wait_for_remote_hangup` sees the end of a call this
+            # end hung up as soon as the dwell does, and wins as often.
+            # `Stack.close`'s own docstring gives the same reasoning for
+            # the same sleep.
+            await asyncio.sleep(0.2)
         call.close()
         print(f"ended {call.handle:x}: {stats}")
     return True
@@ -212,7 +216,12 @@ async def run_direct_call() -> bool:
     ``SIPRAL_STUN_SERVER`` turns on `Nat.STUN` the same way
     :class:`sipral.stack.Stack` already offers any application;
     ``SIPRAL_TURN_SERVER``/``SIPRAL_TURN_USER``/``SIPRAL_TURN_PASSWORD``
-    ride on it, and ``SIPRAL_ICE=required`` asks `Ice.REQUIRED` of every
+    ride on it. ``SIPRAL_TURN_TRANSPORT`` is ``udp``, ``tcp`` or ``tls``
+    (RFC 8656 Section 3.1); over TLS the server's certificate is checked
+    against ``SIPRAL_TURN_NAME`` and trusted if it chains to the PEM file
+    ``SIPRAL_TURN_CA`` names, the platform's roots otherwise -- the lab's
+    own coturn presents a certificate made for the run, and this is how the
+    run tells the agent to trust it. ``SIPRAL_ICE=required`` asks `Ice.REQUIRED` of every
     call this account places, which is what makes a call that cannot
     find a path fail outright rather than fall back to the address this
     end bound to -- the one thing that would let a run through a blocked
@@ -227,6 +236,9 @@ async def run_direct_call() -> bool:
 
     stun_server = os.environ.get("SIPRAL_STUN_SERVER")
     turn_server = os.environ.get("SIPRAL_TURN_SERVER")
+    over = os.environ.get("SIPRAL_TURN_TRANSPORT", "udp")
+    turn_transport = {"udp": 0, "tcp": Transport.TCP, "tls": Transport.TLS}[over]
+    trusted = os.environ.get("SIPRAL_TURN_CA")
     stack = Stack(
         bind_host=host,
         loop=loop,
@@ -235,6 +247,9 @@ async def run_direct_call() -> bool:
         turn_server=turn_server,
         turn_username=os.environ.get("SIPRAL_TURN_USER"),
         turn_password=os.environ.get("SIPRAL_TURN_PASSWORD"),
+        turn_transport=turn_transport,
+        turn_server_name=os.environ.get("SIPRAL_TURN_NAME"),
+        turn_tls_context=ssl.create_default_context(cafile=trusted) if trusted else None,
         ice=Ice.REQUIRED if os.environ.get("SIPRAL_ICE") == "required" else 0,
     )
     account = stack.add_account(
@@ -258,6 +273,10 @@ async def run_direct_call() -> bool:
         dwell=int(os.environ.get("SIPRAL_DWELL_MS", "2000")) / 1000,
     )
     stack.close()
+    if ok and turn_server and turn_transport:
+        # the relay was made and given back on its connection, as the
+        # server's own log shows; this is what the agent itself saw
+        print(f"relay over {over.upper()} to {turn_server}: the call ran through it")
     return ok
 
 

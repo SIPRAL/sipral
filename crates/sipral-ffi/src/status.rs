@@ -70,6 +70,12 @@ codes! {
         /// instead ships a control that does nothing and finds out from a
         /// customer.
         NotSupported = 11,
+        /// A byte stream carried something no message this library reads
+        /// starts with. Nothing in a stream marks where the next message
+        /// begins, so nothing arriving on it later can be read either: close
+        /// the connection. What rode on it is lost with it, and the call that
+        /// said so says what that was.
+        StreamBroken = 12,
     }
 }
 
@@ -97,6 +103,7 @@ entry! {
             9 => c"wrong state".as_ptr(),
             10 => c"not sent".as_ptr(),
             11 => c"not supported in this build".as_ptr(),
+            12 => c"stream broken".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -134,6 +141,7 @@ mod tests {
             SipralStatus::WrongState,
             SipralStatus::NotSent,
             SipralStatus::NotSupported,
+            SipralStatus::StreamBroken,
         ];
         for status in all {
             let code = status as i32;
@@ -144,7 +152,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in 0..=11 {
+        for code in 0..=12 {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -155,7 +163,7 @@ mod tests {
 
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
-        assert!(name(12).is_none());
+        assert!(name(13).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -179,5 +187,6 @@ mod tests {
         assert_eq!(SipralStatus::WrongState as i32, 9);
         assert_eq!(SipralStatus::NotSent as i32, 10);
         assert_eq!(SipralStatus::NotSupported as i32, 11);
+        assert_eq!(SipralStatus::StreamBroken as i32, 12);
     }
 }

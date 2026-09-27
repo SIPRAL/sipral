@@ -181,6 +181,17 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "reason": _text(relay.reason, relay.reason_len),
         }
 
+    # A media socket's connection to a TURN server reached over TCP or TLS:
+    # open it, or close it (`Stack` does both itself).
+    if kind == lib.SIPRAL_EVENT_KIND_TURN_STREAM:
+        stream = payload.turn_stream
+        return {
+            "state": int(stream.state),
+            "protocol": int(stream.protocol),
+            "local": _text(stream.local, stream.local_len),
+            "server": _text(stream.server, stream.server_len),
+        }
+
     # A REFER outside any dialog (`Stack.accept_referral`), or -- with
     # `status_code` set and nothing else -- the word that one lapsed.
     if kind == lib.SIPRAL_EVENT_KIND_REFERRAL:

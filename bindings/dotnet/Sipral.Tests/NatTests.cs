@@ -42,7 +42,7 @@ public sealed class NatTests
     /// same way every request is, signed or not, answered or not
     /// (<c>bindings/swift/Tests/SipralTests/NatTests.swift</c>'s own
     /// <c>FakeStunServer</c> and <c>bindings/kotlin/.../NatCheck.kt</c>'s).</summary>
-    private sealed class FakeStunServer : IDisposable
+    internal sealed class FakeStunServer : IDisposable
     {
         private const ushort BindingRequest = 0x0001;
         private const ushort BindingSuccess = 0x0101;
@@ -149,7 +149,7 @@ public sealed class NatTests
             }
         }
 
-        private static Dictionary<ushort, byte[]> ParseAttributes(byte[] data)
+        internal static Dictionary<ushort, byte[]> ParseAttributes(byte[] data)
         {
             var attributes = new Dictionary<ushort, byte[]>();
             var offset = 20;
@@ -204,7 +204,7 @@ public sealed class NatTests
 
         private static ushort Moved(ushort port, int distance) => (ushort)(port > 40000 ? port - distance : port + distance);
 
-        private static byte[] XorAddress(string host, ushort port)
+        internal static byte[] XorAddress(string host, ushort port)
         {
             var cookie = CookieBytes();
             var ipBytes = IPAddress.Parse(host).GetAddressBytes();
@@ -233,7 +233,7 @@ public sealed class NatTests
             return cookie;
         }
 
-        private static byte[] BuildMessage(ushort type, byte[] transactionId, (ushort attribute, byte[] value)[] attributes)
+        internal static byte[] BuildMessage(ushort type, byte[] transactionId, (ushort attribute, byte[] value)[] attributes)
         {
             var body = new List<byte>();
             foreach (var (attribute, value) in attributes)
@@ -260,7 +260,7 @@ public sealed class NatTests
         }
 
         /// <summary>RFC 8489 Section 9.2.2: MD5 of <c>username:realm:password</c>.</summary>
-        private static byte[] LongTermKey(string username, string realm, string password) =>
+        internal static byte[] LongTermKey(string username, string realm, string password) =>
             MD5.HashData(Encoding.UTF8.GetBytes($"{username}:{realm}:{password}"));
 
         private static byte[] Hmac(byte[] data, byte[] key)
@@ -272,7 +272,7 @@ public sealed class NatTests
         /// <summary>RFC 8489 Section 14.5: the HMAC covers the message up to
         /// the attribute, with the header's length counting up to the
         /// attribute's end.</summary>
-        private static bool IntegrityHolds(byte[] message, byte[] key)
+        internal static bool IntegrityHolds(byte[] message, byte[] key)
         {
             var offset = 20;
             while (offset + 4 <= message.Length)
@@ -295,7 +295,7 @@ public sealed class NatTests
             return false;
         }
 
-        private static byte[] Signed(ushort type, byte[] transactionId, (ushort attribute, byte[] value)[] attributes, byte[] key)
+        internal static byte[] Signed(ushort type, byte[] transactionId, (ushort attribute, byte[] value)[] attributes, byte[] key)
         {
             var unsigned = BuildMessage(type, transactionId, attributes);
             var counted = unsigned.Length - 20 + 24;

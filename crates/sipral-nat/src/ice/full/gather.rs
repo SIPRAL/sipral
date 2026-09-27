@@ -27,7 +27,7 @@ use crate::stun::{
     BindingClient, BindingConfig, Class, MessageBuilder, Method, Progress as BindingProgress,
     TransactionId,
 };
-use crate::turn::{Event, StartError, TurnClient, TurnConfig, TurnError};
+use crate::turn::{Event, StartError, Transport, TurnClient, TurnConfig, TurnError};
 
 /// "Once a checklist has reached the Completed state, the agent SHOULD wait an
 /// additional three seconds" before letting go of candidates it did not
@@ -78,7 +78,8 @@ impl IceAgent {
             };
             let (stream, component, address, top) =
                 (base.stream, base.component, base.address, base.top);
-            let foundation = self.foundation(CandidateType::Host, address.ip(), None);
+            let foundation =
+                self.foundation(CandidateType::Host, address.ip(), None, Transport::Udp);
             self.locals.push(LocalCandidate {
                 stream,
                 candidate: Candidate {
@@ -123,6 +124,7 @@ impl IceAgent {
                     client: SharedRelay::new(
                         server.address,
                         TurnClient::new(TurnConfig {
+                            transport: server.transport,
                             credentials: server.credentials.clone(),
                             rto,
                             ..TurnConfig::default()
@@ -231,6 +233,7 @@ impl IceAgent {
                         source,
                         destination: server,
                         data,
+                        transport: Transport::Udp,
                     });
                 }
             }
@@ -526,7 +529,7 @@ impl IceAgent {
         let (stream, component, address) = (entry.stream, entry.component, entry.address);
         let kind = CandidateType::ServerReflexive;
         let priority = candidate_priority(kind, local_preference, component);
-        let foundation = self.foundation(kind, address.ip(), server);
+        let foundation = self.foundation(kind, address.ip(), server, Transport::Udp);
         if let Some(existing) = self.locals.iter_mut().find(|local| {
             local.stream == stream
                 && local.candidate.component == component
@@ -574,10 +577,12 @@ impl IceAgent {
                 return;
             };
             if let Some(data) = entry.client.poll_transmit() {
+                let transport = entry.client.transport();
                 self.queue(Transmit {
                     source,
                     destination: server,
                     data,
+                    transport,
                 });
                 continue;
             }
@@ -647,7 +652,7 @@ impl IceAgent {
         let Some(entry) = self.relays.get(relay) else {
             return;
         };
-        let (base, server) = (entry.base, entry.server);
+        let (base, server, transport) = (entry.base, entry.server, entry.client.transport());
         let (relay_preference, reflexive_preference) =
             (entry.relay_preference, entry.reflexive_preference);
         let Some(host) = self.bases.get(base) else {
@@ -663,7 +668,10 @@ impl IceAgent {
         });
         if !duplicate {
             let kind = CandidateType::Relay;
-            let foundation = self.foundation(kind, relayed.ip(), Some(server.ip()));
+            // "they were obtained using the same transport protocol" is the
+            // last of §5.1.1.3's conditions, so a relay reached over TCP
+            // does not share a foundation with one reached over UDP
+            let foundation = self.foundation(kind, relayed.ip(), Some(server.ip()), transport);
             self.locals.push(LocalCandidate {
                 stream,
                 candidate: Candidate {
@@ -687,7 +695,11 @@ impl IceAgent {
                 entry.candidate = Some(index);
             }
         }
-        if let Some(mapped) = mapped {
+        // over TCP or TLS the address the server saw is where the
+        // connection's segments come from, a mapping the NAT made for that
+        // connection alone: nothing sent to it reaches the host socket's
+        // datagrams, so it is no server-reflexive candidate of the socket's
+        if let Some(mapped) = mapped.filter(|_| !transport.is_stream()) {
             self.add_reflexive(base, mapped, Some(server.ip()), reflexive_preference);
         }
     }
@@ -905,7 +917,7 @@ impl IceAgent {
         if !due {
             return;
         }
-        let (base, server) = (entry.base, entry.server);
+        let (base, server, transport) = (entry.base, entry.server, entry.client.transport());
         let Some(id) = self.ids.pop_front() else {
             return;
         };
@@ -919,6 +931,7 @@ impl IceAgent {
             source,
             destination: server,
             data,
+            transport,
         });
         if let Some(entry) = self.relays.get_mut(index) {
             entry.refresh_at = now.checked_add(keepalive);
@@ -1006,8 +1019,9 @@ impl IceAgent {
         kind: CandidateType,
         base: IpAddr,
         server: Option<IpAddr>,
+        transport: Transport,
     ) -> Foundation {
-        let key = (kind, base, server);
+        let key = (kind, base, server, transport);
         let position = if let Some(known) = self.foundations.iter().position(|entry| *entry == key)
         {
             known
@@ -1036,7 +1050,12 @@ impl IceAgent {
             from.relay,
             from.local_preference,
         );
-        let foundation = self.foundation(CandidateType::PeerReflexive, base.ip(), None);
+        let foundation = self.foundation(
+            CandidateType::PeerReflexive,
+            base.ip(),
+            None,
+            Transport::Udp,
+        );
         self.locals.push(LocalCandidate {
             stream,
             candidate: Candidate {

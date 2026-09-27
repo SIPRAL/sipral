@@ -89,6 +89,21 @@ public final class SipralStack: @unchecked Sendable {
     /// `host:port`, or `nil` for a stack that asks nobody.
     public let stunServer: String?
     private let turnServer: String?
+    private let turn: TurnServer?
+
+    /// Every media socket's open connection to a TURN server reached over
+    /// TCP or TLS, by the socket's `host:port`. Guarded by `natQueue`.
+    private var turnConnections: [String: TurnConnection] = [:]
+    /// Every call's media socket, by the call, for as long as the socket's
+    /// connection to the TURN server stands: a call's last farewell -- the
+    /// Refresh that gives its relay back -- can come after the `Call` itself
+    /// was closed and forgotten, and still goes on that connection. Guarded
+    /// by `natQueue`, and let go with the connection.
+    private var turnSockets: [SipralHandle: String] = [:]
+    /// What `SipralEventKind.turnStream` asked for during the poll that
+    /// raised it -- nothing may call back into the stack from inside its own
+    /// callback -- acted on right after that poll, on the poll thread.
+    private var turnAsked: [TurnStreamEventData] = []
 
     /// Media sockets `sipral_stack_nat_map` named whose call has no media
     /// handle yet, by `host:port`: the poll thread reads them and hands what
@@ -125,7 +140,9 @@ public final class SipralStack: @unchecked Sendable {
     /// the address it can actually send to. `turn` adds a relay on a TURN
     /// server for each of those media sockets, offered as the call's relayed
     /// ICE candidate; it needs `stunServer` too, and a call only uses the
-    /// relay under ICE. `g729AnnexB` allows G.729's silence compression
+    /// relay under ICE. `TurnServer.transport` reaches it over TCP or TLS
+    /// instead of UDP, the stack opening each connection itself.
+    /// `g729AnnexB` allows G.729's silence compression
     /// (on by default). `SipralIce.lite` is for a server reachable at the
     /// address it advertises, answering full ICE peers, and nothing else
     /// (`docs/06-nat.md`, "ICE-lite").
@@ -165,6 +182,7 @@ public final class SipralStack: @unchecked Sendable {
         self.bindAddress = socket.localAddress
         self.stunServer = stunServer
         self.turnServer = turn?.address
+        self.turn = turn
         self.origin = .now()
         self.box = StackBox()
         self.transmitData = .allocate(capacity: 65536)
@@ -216,6 +234,7 @@ public final class SipralStack: @unchecked Sendable {
                         config.turn_username_len = parts[5].count
                         config.turn_password = parts[6].pointer
                         config.turn_password_len = parts[6].count
+                        config.turn_transport = turn?.transport.rawValue ?? 0
                     }
                     return try Sipral.stackCreate(config: config)
                 }
@@ -459,6 +478,9 @@ public final class SipralStack: @unchecked Sendable {
 
     func registerCall(_ call: Call) {
         callsQueue.sync { calls[call.handle] = call }
+        if let transport = turn?.transport, Self.overStream(transport.rawValue) {
+            natQueue.sync { turnSockets[call.handle] = call.mediaAddress }
+        }
     }
 
     func forgetCall(_ handle: SipralHandle) {
@@ -547,7 +569,8 @@ public final class SipralStack: @unchecked Sendable {
         var destination = [UInt8](repeating: 0, count: 128)
         var source = [UInt8](repeating: 0, count: 128)
         while true {
-            let taken: (payload: [UInt8], destination: String, source: String)? = data.withUnsafeMutableBufferPointer { dataBuf in
+            let taken: (payload: [UInt8], destination: String, source: String, protocolRaw: UInt32)? =
+                data.withUnsafeMutableBufferPointer { dataBuf in
                 destination.withUnsafeMutableBufferPointer { destinationBuf in
                     source.withUnsafeMutableBufferPointer { sourceBuf in
                         var transmit = sipral_transmit_t.sized()
@@ -564,13 +587,112 @@ public final class SipralStack: @unchecked Sendable {
                         return (
                             Array(dataBuf.prefix(transmit.len)),
                             String(decoding: destinationBuf.prefix(transmit.destination_len), as: UTF8.self),
-                            String(decoding: sourceBuf.prefix(transmit.source_len), as: UTF8.self)
+                            String(decoding: sourceBuf.prefix(transmit.source_len), as: UTF8.self),
+                            transmit.protocol
                         )
                     }
                 }
             }
             guard let taken else { return }
+            if Self.overStream(taken.protocolRaw) {
+                // for the TURN server, on the socket's connection to it:
+                // never a datagram, which a network that blocks UDP drops
+                writeTurn(taken.source, taken.payload)
+                continue
+            }
             natQueue.sync { _ = stunSockets[taken.source]?.send(taken.payload, to: taken.destination) }
+        }
+    }
+
+    // MARK: - a TURN server reached over TCP or TLS
+
+    private static func overStream(_ protocolRaw: UInt32) -> Bool {
+        protocolRaw == SipralTransport.tcp.rawValue || protocolRaw == SipralTransport.tls.rawValue
+    }
+
+    /// Write `payload` on media socket `local`'s connection to the TURN
+    /// server, whole: what `sipral_stack_poll_stun`,
+    /// `sipral_stack_poll_farewell` and a call's media hand out marked TCP
+    /// or TLS. Thread-safe.
+    func writeTurn(_ local: String, _ payload: [UInt8]) {
+        let connection = natQueue.sync { turnConnections[local] }
+        connection?.send(payload)
+    }
+
+    /// Open or close what `SipralEventKind.turnStream` asked for in the poll
+    /// that just ran, after this round's queues were written.
+    private func actOnTurnStreams() {
+        let asked = natQueue.sync { () -> [TurnStreamEventData] in
+            defer { turnAsked = [] }
+            return turnAsked
+        }
+        for said in asked {
+            switch said.state {
+            case .open:
+                openTurn(said)
+            case .close:
+                let connection = natQueue.sync { () -> TurnConnection? in
+                    turnSockets = turnSockets.filter { $0.value != said.local }
+                    return turnConnections.removeValue(forKey: said.local)
+                }
+                connection?.close()
+            case nil:
+                break
+            }
+        }
+    }
+
+    /// Connect media socket `said.local` to the TURN server, and tell the
+    /// stack how that went and everything the connection carries.
+    private func openTurn(_ said: TurnStreamEventData) {
+        guard let turn else { return }
+        let local = said.local
+        let connection = TurnConnection(
+            local: local, server: said.server, turn: turn,
+            ready: { [weak self] opened in
+                guard let self else { return }
+                if opened {
+                    try? retryingBusy {
+                        try Sipral.stackTurnConnected(stack: self.handle, local: local, nowMs: self.nowMs())
+                    }
+                } else {
+                    self.natQueue.sync { _ = self.turnConnections.removeValue(forKey: local) }
+                    try? retryingBusy {
+                        try Sipral.stackTurnClosed(stack: self.handle, local: local, nowMs: self.nowMs())
+                    }
+                }
+            },
+            bytes: { [weak self] bytes in self?.turnReceived(local, bytes) },
+            closed: { [weak self] in
+                guard let self else { return }
+                let held = self.natQueue.sync { self.turnConnections.removeValue(forKey: local) }
+                guard held != nil else { return }
+                try? retryingBusy {
+                    try Sipral.stackTurnClosed(stack: self.handle, local: local, nowMs: self.nowMs())
+                }
+            }
+        )
+        natQueue.sync { turnConnections[local] = connection }
+    }
+
+    /// What a connection carried, to `sipral_stack_turn_receive`: every
+    /// byte, in order, since a stream that loses one never finds its place
+    /// again, so a busy stack is waited for rather than skipped. A
+    /// connection the stack found broken is closed and needs no word.
+    private func turnReceived(_ local: String, _ bytes: [UInt8]) {
+        while !isClosed {
+            do {
+                try Sipral.stackTurnReceive(stack: handle, local: local, data: bytes, nowMs: nowMs())
+                return
+            } catch let error as SipralError where error.status == .busy {
+                usleep(1_000)
+            } catch let error as SipralError where error.status == .streamBroken {
+                let connection = natQueue.sync { turnConnections.removeValue(forKey: local) }
+                connection?.close()
+                return
+            } catch {
+                return
+            }
         }
     }
 
@@ -618,6 +740,9 @@ public final class SipralStack: @unchecked Sendable {
     /// `Sipral.stackResolved`.
     fileprivate func handleEvent(_ raw: sipral_event_t) {
         let event = SipralEventDecoder.decode(raw)
+        if let stream = event.turnStreamData {
+            natQueue.sync { turnAsked.append(stream) }
+        }
         noteNat(event)
         if let call = callFor(event.call) {
             call.deliver(event)
@@ -653,7 +778,7 @@ public final class SipralStack: @unchecked Sendable {
     private func drainFarewells() {
         var destination = [UInt8](repeating: 0, count: 128)
         while true {
-            let taken: (call: SipralHandle, payload: [UInt8], destination: String)? =
+            let taken: (call: SipralHandle, payload: [UInt8], destination: String, protocolRaw: UInt32)? =
                 destination.withUnsafeMutableBufferPointer { destinationBuf in
                     var packet = sipral_media_packet_t.sized()
                     packet.data = farewellData
@@ -666,10 +791,19 @@ public final class SipralStack: @unchecked Sendable {
                     return (
                         call,
                         Array(UnsafeBufferPointer(start: farewellData, count: packet.len)),
-                        String(decoding: destinationBuf.prefix(packet.destination_len), as: UTF8.self)
+                        String(decoding: destinationBuf.prefix(packet.destination_len), as: UTF8.self),
+                        packet.protocol
                     )
                 }
             guard let taken else { return }
+            if Self.overStream(taken.protocolRaw) {
+                // given back on the relay's connection, which is the
+                // stack's and not the call's, and outlives it
+                if let local = natQueue.sync(execute: { turnSockets[taken.call] }) {
+                    writeTurn(local, taken.payload)
+                }
+                continue
+            }
             guard let target = callFor(taken.call) else { continue }
             let address = taken.destination.isEmpty ? target.media?.remoteAddress : taken.destination
             guard let address else { continue }
@@ -714,6 +848,7 @@ public final class SipralStack: @unchecked Sendable {
             drainTransmit()
             drainStun()
             drainFarewells()
+            actOnTurnStreams()
         }
         closedSemaphore.signal()
     }
@@ -755,6 +890,15 @@ public final class SipralStack: @unchecked Sendable {
         }
 
         _ = closedSemaphore.wait(timeout: .now() + 5)
+        // and every connection to the TURN server still open: what it
+        // carried was given back through it above, or lapses with it
+        let connections = natQueue.sync { () -> [TurnConnection] in
+            defer { turnConnections = [:] }
+            return Array(turnConnections.values)
+        }
+        for connection in connections {
+            connection.close()
+        }
         try? Sipral.stackDestroy(stack: handle)
         eventBroadcast.finish()
         socket.close()

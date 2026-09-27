@@ -41,6 +41,9 @@ public sealed class CallMedia : IDisposable
 
     private readonly SipralStack _stack;
     private readonly Socket _socket;
+    /// <summary>This call's media socket, as <c>host:port</c>: the name of its
+    /// connection to a TURN server reached over TCP or TLS.</summary>
+    private readonly string _localAddress;
     private readonly MediaSafeHandle _handle = new();
     private readonly Thread _thread;
     private readonly ManualResetEventSlim _closed = new(initialState: false);
@@ -88,6 +91,7 @@ public sealed class CallMedia : IDisposable
         _stack = stack;
         _socket = socket;
         _socket.Blocking = false;
+        _localAddress = SipralStack.FormatAddress((IPEndPoint)socket.LocalEndPoint!);
 
         ulong media = 0;
         SipralErrors.Call(() => NativeMethods.sipral_call_media(stack.Handle, callHandle, out media), "sipral_call_media");
@@ -338,15 +342,23 @@ public sealed class CallMedia : IDisposable
         }
     }
 
+    /// <summary>One packet out where it says: a datagram from this call's
+    /// socket, or — marked TCP or TLS — bytes on the socket's connection to
+    /// the TURN server, which the stack holds.</summary>
     private void SendPacket(SipralMediaPacket packet)
     {
+        var payload = new byte[(int)packet.Len];
+        Marshal.Copy(_packetData, payload, 0, payload.Length);
+        if (SipralStack.OverStream(packet.Protocol))
+        {
+            _stack.WriteTurn(_localAddress, payload);
+            return;
+        }
         var text = Marshal.PtrToStringUTF8(_packetDestination, (int)packet.DestinationLen);
         if (text is null)
         {
             return;
         }
-        var payload = new byte[(int)packet.Len];
-        Marshal.Copy(_packetData, payload, 0, payload.Length);
         SendTo(payload, text);
     }
 

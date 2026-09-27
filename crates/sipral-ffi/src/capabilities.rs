@@ -116,6 +116,17 @@ constants! {
     /// does not already bring. `SIPRAL_NAT_STUN` keeps its number in a build
     /// without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
     pub const SIPRAL_FEATURE_STUN: u32 = 1 << 9;
+    /// See [`SIPRAL_FEATURE_DTMF`]. A TURN server reached over TCP or TLS
+    /// (RFC 8656 §3.1): `sipral_stack_config_t::turn_transport`, and the
+    /// connection the application opens for each media socket when
+    /// `SIPRAL_EVENT_KIND_TURN_STREAM` asks — for the network that lets no
+    /// UDP out.
+    ///
+    /// It comes with `SIPRAL_FEATURE_ICE`, since a relay is only ever a
+    /// call's relayed ICE candidate, and without it `turn_transport` other
+    /// than UDP answers `SIPRAL_STATUS_NOT_SUPPORTED` as a `turn_server`
+    /// does.
+    pub const SIPRAL_FEATURE_TURN_STREAM: u32 = 1 << 10;
 }
 
 record! {
@@ -222,6 +233,9 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.stun {
         features |= SIPRAL_FEATURE_STUN;
     }
+    if capabilities.turn_streams {
+        features |= SIPRAL_FEATURE_TURN_STREAM;
+    }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -254,11 +268,11 @@ entry! {
 #[cfg(test)]
 mod tests {
     use super::{
-        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS,
-        SIPRAL_FEATURE_RECORDING, SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP,
-        SIPRAL_FEATURE_SUBSCRIPTIONS, SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS,
-        SIPRAL_TRANSPORT_BIT_UDP, SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS,
-        SipralCapabilities, sipral_capabilities,
+        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG,
+        SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING, SIPRAL_FEATURE_RTCP_MUX,
+        SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS, SIPRAL_FEATURE_TURN_STREAM,
+        SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS, SIPRAL_TRANSPORT_BIT_UDP,
+        SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS, SipralCapabilities, sipral_capabilities,
     };
     use crate::error::last_error_text;
     use crate::status::SipralStatus;
@@ -356,6 +370,24 @@ mod tests {
             "the bit is the facade's answer and not a second opinion"
         );
         assert!(read().features & SIPRAL_FEATURE_SUBSCRIPTIONS != 0);
+    }
+
+    /// A relay over TCP or TLS is the facade's answer too, and comes with
+    /// ICE: a build that has no agent to hand a relay to has no connection to
+    /// carry one on.
+    #[test]
+    fn turn_over_a_stream_reads_present_exactly_when_the_facade_says() {
+        let features = read().features;
+        assert_eq!(
+            features & SIPRAL_FEATURE_TURN_STREAM != 0,
+            Capabilities::of_this_build().turn_streams,
+            "the bit is the facade's answer and not a second opinion"
+        );
+        assert_eq!(
+            features & SIPRAL_FEATURE_TURN_STREAM != 0,
+            features & SIPRAL_FEATURE_ICE != 0
+        );
+        assert_eq!(SIPRAL_FEATURE_TURN_STREAM, 1024);
     }
 
     #[test]

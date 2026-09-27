@@ -84,7 +84,7 @@ fn talk(net: &mut Network, from: usize, payload: &[u8]) -> Result<(), SendError>
     let route = peer
         .agent
         .send(stream, ComponentId::RTP, payload, &mut out, now)?;
-    net.send_from(from, route.source, route.destination, out);
+    net.send_route(from, route, out);
     Ok(())
 }
 
@@ -410,6 +410,214 @@ fn an_agent_that_never_runs_hands_its_relay_back_whole() {
     // one given back already is not handed out a second time
     taker.release_relays(now);
     assert!(taker.into_relays().is_empty());
+}
+
+/// Two agents behind symmetric NATs on a network that drops every datagram
+/// to or from the TURN server, each handed a relay allocated over a TCP
+/// connection of its own: the only path there is.
+fn behind_a_udp_firewall(seed: u64) -> (Network, usize, usize) {
+    let mut net = Network::new(seed);
+    net.udp_to_turn_blocked = true;
+    let (nat_a, nat_b) = nat_pair(
+        &mut net,
+        Mapping::AddressAndPortDependent,
+        Filtering::AddressAndPortDependent,
+    );
+    let (a_agent, a_stream) = agent(
+        config(false, false),
+        "A",
+        Role::Controlling,
+        10,
+        address(A_HOST),
+    );
+    let (b_agent, b_stream) = agent(
+        config(false, false),
+        "B",
+        Role::Controlled,
+        20,
+        address(B_HOST),
+    );
+    let a = net.add_full(a_agent, a_stream, &[address(A_HOST)], Some(nat_a));
+    let b = net.add_full(b_agent, b_stream, &[address(B_HOST)], Some(nat_b));
+    for (index, host) in [(a, A_HOST), (b, B_HOST)] {
+        let now = net.now;
+        net.peer_mut(index)
+            .agent
+            .gather(now)
+            .expect("gathering starts");
+        let client = net.allocate_outside_stream(index, address(host));
+        let peer = net.peer_mut(index);
+        let stream = peer.stream;
+        peer.agent
+            .add_relayed(
+                stream,
+                ComponentId::RTP,
+                address(host),
+                net_turn(),
+                client,
+                now,
+            )
+            .expect("an allocated client is taken over");
+    }
+    (net, a, b)
+}
+
+#[test]
+fn a_relay_over_tcp_carries_the_call_through_a_firewall_that_drops_udp() {
+    let (mut net, a, b) = behind_a_udp_firewall(33);
+    for index in [a, b] {
+        let stream = net.peer(index).stream;
+        let candidates = net.peer(index).agent.local_candidates(stream);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == CandidateType::Relay)
+        );
+        // the address the server saw is the connection's, and nothing sent
+        // there reaches the socket's datagrams
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.kind == CandidateType::ServerReflexive),
+            "{candidates:?}"
+        );
+    }
+    exchange(&mut net, a, b);
+    assert!(net.run_until(Duration::from_secs(60), |n| completed(n, a)
+        && completed(n, b)));
+    for index in [a, b] {
+        let pair = selected(&net, index);
+        assert_eq!(pair.local_kind, CandidateType::Relay, "{pair:?}");
+        let stream = net.peer(index).stream;
+        let route = net
+            .peer(index)
+            .agent
+            .route(stream, ComponentId::RTP)
+            .expect("a route");
+        assert_eq!(route.transport, crate::turn::Transport::Tcp);
+        assert_eq!(route.destination, net_turn());
+    }
+    assert_media_flows(&mut net, a, b);
+    assert!(
+        net.turn
+            .allocations
+            .iter()
+            .any(|allocation| !allocation.channels.is_empty()),
+        "a channel bound over a connection"
+    );
+
+    // and both allocations go back over the connections they were made on
+    for index in [a, b] {
+        let now = net.now;
+        net.peer_mut(index).agent.release_relays(now);
+    }
+    net.run_for(Duration::from_millis(200));
+    assert!(net.turn.allocations.is_empty());
+}
+
+#[test]
+fn a_datagram_from_the_servers_address_is_not_a_relay_over_tcp() {
+    let (mut net, a, b) = behind_a_udp_firewall(34);
+    exchange(&mut net, a, b);
+    assert!(net.run_until(Duration::from_secs(60), |n| completed(n, a)
+        && completed(n, b)));
+    let now = net.now;
+    // every channel either end bound, sent as a datagram from the server's
+    // address to both hosts: over UDP the relay would unwrap it and hand the
+    // peer's audio up, and over a connection it is a stranger's datagram
+    let bound: Vec<_> = net
+        .turn
+        .allocations
+        .iter()
+        .flat_map(|allocation| allocation.channels.iter().map(|(number, _)| *number))
+        .collect();
+    assert!(!bound.is_empty());
+    for number in bound {
+        let mut forged = Vec::new();
+        crate::turn::ChannelData::encode(
+            number,
+            b"\x80\x00forged",
+            crate::turn::Transport::Udp,
+            &mut forged,
+        )
+        .expect("fits");
+        for (index, host) in [(a, A_HOST), (b, B_HOST)] {
+            net.peer_mut(index).feed();
+            let taken =
+                net.peer_mut(index)
+                    .agent
+                    .handle_datagram(address(host), net_turn(), &forged, now);
+            let unwrapped = match &taken {
+                crate::ice::Received::Data { range, .. } => forged.get(range.clone()),
+                _ => None,
+            };
+            assert_ne!(unwrapped, Some(&b"\x80\x00forged"[..]), "{taken:?}");
+        }
+    }
+}
+
+#[test]
+fn a_closed_connection_loses_the_relay_and_the_path_on_it() {
+    let (mut net, a, b) = behind_a_udp_firewall(35);
+    exchange(&mut net, a, b);
+    assert!(net.run_until(Duration::from_secs(60), |n| completed(n, a)
+        && completed(n, b)));
+    net.close_stream(a, address(A_HOST));
+    assert!(
+        net.turn.allocations.len() == 1,
+        "the server dropped the allocation made on the connection"
+    );
+    assert!(
+        !net.peer_mut(a)
+            .agent
+            .push_stream(address(A_HOST), net_turn(), &[0x40, 0, 0, 0]),
+        "no relay runs over a connection that closed"
+    );
+    assert!(
+        net.run_until(Duration::from_secs(40), |n| n
+            .peer(a)
+            .saw(|event| matches!(event, IceEvent::ConsentLost { .. }))),
+        "the pair on the lost relay stops carrying the call"
+    );
+}
+
+#[test]
+fn an_agent_gathers_its_own_relay_over_tcp_when_the_server_says_so() {
+    let mut net = Network::new(36);
+    net.udp_to_turn_blocked = true;
+    let (nat_a, nat_b) = nat_pair(
+        &mut net,
+        Mapping::AddressAndPortDependent,
+        Filtering::AddressAndPortDependent,
+    );
+    let over_tcp = || IceConfig {
+        turn_servers: vec![crate::ice::TurnServer {
+            address: net_turn(),
+            credentials: None,
+            transport: crate::turn::Transport::Tcp,
+        }],
+        ..IceConfig::default()
+    };
+    let (a_agent, a_stream) = agent(over_tcp(), "A", Role::Controlling, 10, address(A_HOST));
+    let (b_agent, b_stream) = agent(over_tcp(), "B", Role::Controlled, 20, address(B_HOST));
+    let a = net.add_full(a_agent, a_stream, &[address(A_HOST)], Some(nat_a));
+    let b = net.add_full(b_agent, b_stream, &[address(B_HOST)], Some(nat_b));
+    net.open_stream(a, address(A_HOST));
+    net.open_stream(b, address(B_HOST));
+
+    assert!(connect(&mut net, a, b, Duration::from_secs(60)));
+    for index in [a, b] {
+        let stream = net.peer(index).stream;
+        let candidates = net.peer(index).agent.local_candidates(stream);
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.kind == CandidateType::ServerReflexive),
+            "{candidates:?}"
+        );
+        assert_eq!(selected(&net, index).local_kind, CandidateType::Relay);
+    }
+    assert_media_flows(&mut net, a, b);
 }
 
 fn net_turn() -> std::net::SocketAddr {

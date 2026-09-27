@@ -113,6 +113,14 @@ pub struct Datagram<'a> {
     pub destination: SocketAddr,
     /// The octets.
     pub payload: &'a [u8],
+    /// How it leaves. [`TurnTransport::Udp`](crate::TurnTransport::Udp) is
+    /// a datagram from the media socket, which is everything unless the call
+    /// was given a relay over TCP or TLS ([`crate::Relays::over`]): then
+    /// what goes through the relay is bytes to write, as they are and in
+    /// order, on the media socket's connection to the TURN server, which is
+    /// `destination`.
+    #[cfg(feature = "ice")]
+    pub transport: crate::TurnTransport,
 }
 
 /// What a datagram turned out to be.
@@ -359,6 +367,11 @@ pub struct MediaSession {
     /// which is the whole of the fallback RFC 8445 §2.6 asks for.
     #[cfg(feature = "ice")]
     ice: Option<crate::ice::Ice>,
+    /// The last whole message the relay's connection to its TURN server
+    /// carried, held here so that one read does not allocate for every
+    /// frame in it ([`MediaSession::receive_stream`]).
+    #[cfg(feature = "ice")]
+    stream_in: Vec<u8>,
 }
 
 /// Which of this session's own buffers a datagram was built in.
@@ -555,6 +568,8 @@ impl MediaSession {
             dtls_out: Vec::new(),
             #[cfg(feature = "ice")]
             ice,
+            #[cfg(feature = "ice")]
+            stream_in: Vec::new(),
         })
     }
 
@@ -804,6 +819,89 @@ impl MediaSession {
             Ok(payload) => payload,
             Err(arrival) => return arrival,
         };
+        self.receive_payload(datagram, from, now)
+    }
+
+    /// Take bytes read off the TCP or TLS connection this call's relay runs
+    /// over to its TURN server ([`crate::Relays::over`]), in whatever pieces
+    /// the connection delivered them.
+    ///
+    /// The messages in them are put back together (RFC 8656 §12.5), and each
+    /// is taken as [`MediaSession::receive`] takes a datagram from the
+    /// server: the relay's own traffic by the agent, and a peer's audio,
+    /// reports and handshake records, unwrapped, by the rest of the session.
+    /// Drain [`MediaSession::poll_transmit`] after it, as after a
+    /// [`Arrival::Check`].
+    ///
+    /// `Ok(false)` for a session whose relay runs over no connection, or has
+    /// none, and the bytes are not this call's.
+    ///
+    /// # Errors
+    ///
+    /// The connection carried something that is neither STUN nor a channel
+    /// message, or a STUN length that is not whole words: nothing in a
+    /// stream marks where a message starts, so it cannot find its place
+    /// again. The relay is lost with it — as if the connection had closed —
+    /// and the application closes the connection.
+    #[cfg(feature = "ice")]
+    pub fn receive_stream(
+        &mut self,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Result<bool, crate::TurnStreamError> {
+        let Some(ice) = self.ice.as_mut() else {
+            return Ok(false);
+        };
+        let Some(server) = ice.stream_server() else {
+            return Ok(false);
+        };
+        if !ice.push_stream(bytes) {
+            return Ok(false);
+        }
+        let mut frame = core::mem::take(&mut self.stream_in);
+        let result = loop {
+            let Some(ice) = self.ice.as_mut() else {
+                break Ok(true);
+            };
+            ice.top_up();
+            let taken = ice.poll_stream(&mut frame, now);
+            self.drain_ice(now);
+            match taken {
+                Ok(Some(Taken::Data(range))) => {
+                    // the server is where a relayed datagram comes from, on
+                    // a connection as on UDP, and it is what the rest of the
+                    // path has always been handed for one
+                    if let Some(payload) = frame.get_mut(range) {
+                        let _ = self.receive_payload(payload, server, now);
+                    }
+                }
+                Ok(Some(Taken::Consumed | Taken::Foreign)) => {}
+                Ok(None) => break Ok(true),
+                Err(error) => break Err(error),
+            }
+        };
+        self.stream_in = frame;
+        result
+    }
+
+    /// The connection this call's relay ran over to its TURN server closed,
+    /// and the relay went with it: the server knew the allocation by that
+    /// connection (RFC 8656 §3.2). A pair through it stops carrying the call
+    /// when its consent runs out (RFC 7675 §5.1) — reported as
+    /// [`MediaError::IcePathLost`] — and whatever pair ICE found without it
+    /// goes on. Nothing for a session whose relay runs over no connection.
+    #[cfg(feature = "ice")]
+    pub fn stream_closed(&mut self, now: Instant) {
+        if let Some(ice) = self.ice.as_mut() {
+            ice.stream_closed(now);
+        }
+        self.drain_ice(now);
+    }
+
+    /// Everything [`MediaSession::receive`] does with a datagram once the
+    /// agent has taken off any relay wrapping and passed on what is not its
+    /// own.
+    fn receive_payload(&mut self, datagram: &mut [u8], from: SocketAddr, now: Instant) -> Arrival {
         #[cfg(feature = "dtls")]
         if sipral_nat::classify(datagram) == sipral_nat::Demux::Dtls {
             return self.receive_handshake(datagram, from, now);
@@ -969,6 +1067,7 @@ impl MediaSession {
             return Some(Datagram {
                 destination: signalled,
                 payload: data,
+                transport: crate::TurnTransport::Udp,
             });
         };
         // N9's third place. `send` spends no id while the pair is direct, and
@@ -976,10 +1075,11 @@ impl MediaSession {
         // here costs one subtraction on a full pool and means the rule does
         // not have to be remembered again then
         ice.top_up();
-        let (destination, payload) = ice.send(data, now).ok()?;
+        let (destination, transport, payload) = ice.send(data, now).ok()?;
         Some(Datagram {
             destination,
             payload,
+            transport,
         })
     }
 
@@ -1180,10 +1280,11 @@ impl MediaSession {
             // second borrow: a borrow of the bytes taken here would be held
             // open by the datagram this returns, and the handshake below
             // needs `self` mutably
-            if let Some(destination) = ready {
+            if let Some((destination, transport)) = ready {
                 return Some(Datagram {
                     destination,
                     payload: self.ice.as_ref().map_or(&[][..], crate::ice::Ice::probe),
+                    transport,
                 });
             }
         }
@@ -1854,7 +1955,10 @@ impl MediaSession {
     /// Give back the relays this call's agent holds, for a call that has
     /// ended: what to send, and where. See [`crate::ice::Ice::release`].
     #[cfg(feature = "ice")]
-    pub(crate) fn release_relays(&mut self, now: Instant) -> Vec<(SocketAddr, Vec<u8>)> {
+    pub(crate) fn release_relays(
+        &mut self,
+        now: Instant,
+    ) -> Vec<(SocketAddr, crate::TurnTransport, Vec<u8>)> {
         self.ice
             .as_mut()
             .map(|ice| ice.release(now))

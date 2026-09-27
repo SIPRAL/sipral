@@ -719,6 +719,64 @@ sent nothing that named the relay, and leaves it on its socket for the next
 call there. A relay nobody takes is given back when the socket is spent by a
 call that did not take it.
 
+**`turn_transport`** (appended after `registrar_keepalive_ms`, ABI 0.29;
+`MIN_SIZE` unmoved) is how every media socket reaches `turn_server` (RFC 8656
+§3.1): zero or
+`SIPRAL_TRANSPORT_UDP` as above, `SIPRAL_TRANSPORT_TCP` for the network that
+lets no UDP out, `SIPRAL_TRANSPORT_TLS` for the one that lets one port out —
+5349, TURN's own — or for the application that wants the server checked. The
+relay speaks UDP to the peer whichever it is, and a call uses it exactly as
+over UDP; only the carriage changes, the way SIP's does over a stream. The
+application owns the connection, one per media socket since the server knows
+an allocation by the 5-tuple it was made on:
+
+- `sipral_stack_nat_map` raises `SIPRAL_EVENT_KIND_TURN_STREAM` (42) with
+  `payload.turn_stream.state` `SIPRAL_TURN_STREAM_OPEN`, the socket as
+  `local`, the server and the `protocol`. The application opens the
+  connection — for TLS with the platform's own stack, checking the server's
+  certificate against the name it configured, as it does for SIP over TLS —
+  and says so with **`sipral_stack_turn_connected(stack, local, len,
+  now_ms)`**; the Allocate is in `sipral_stack_poll_stun` when that returns.
+  A connection that cannot be opened is `sipral_stack_turn_closed`, and the
+  socket's `SIPRAL_EVENT_KIND_NAT_RELAY` is then `SIPRAL_NAT_RELAY_FAILED`. A
+  call on the socket before either is `SIPRAL_STATUS_WRONG_STATE`, as before
+  the relay's event over UDP.
+- What goes on the connection comes out of the queues a datagram for the
+  server would: `sipral_stack_poll_stun`, `sipral_media_poll_transmit`,
+  `sipral_media_capture`, `sipral_media_poll_rtcp` and
+  `sipral_stack_poll_farewell`, with `protocol` — `sipral_transmit_t`'s, and
+  `sipral_media_packet_t`'s own, appended — `SIPRAL_TRANSPORT_TCP` or `_TLS`
+  rather than `_UDP`, `destination` the server, and the socket the one the
+  record names or the call's own. Written as they are and in order: they
+  are whole messages already framed, a ChannelData message padded as RFC 8656
+  §12.5 asks on a stream. A binding that sends every packet as a datagram
+  sends these as datagrams too, to a server that is not listening for them,
+  which is why the member is read before the address.
+- Everything the connection delivers goes to **`sipral_stack_turn_receive(stack,
+  local, len, data, len, now_ms)`**, in whatever pieces it arrived in, for as
+  long as it is open: before the call, while the call waits for its session,
+  and once its media handle exists alike — the stack puts the messages back
+  together and hands each to wherever the socket's relay is, a call's audio
+  included, so the media loop reads the socket and nothing more. It is one
+  stream: a byte skipped is a stream that never finds its place again, so
+  `SIPRAL_STATUS_BUSY` is waited out rather than dropped, and
+  **`SIPRAL_STATUS_STREAM_BROKEN`** (12) says the connection carried
+  something no TURN message starts with — close it; its relay is lost with
+  it, and no close event follows.
+- **`sipral_stack_turn_closed(stack, local, len, now_ms)`** says the
+  connection went: the relay goes with it (§3.2) — `SIPRAL_NAT_RELAY_FAILED`
+  for one still waiting for its call, and for a call that had it, the pair
+  through it losing consent while the pairs that need no relay go on.
+- `SIPRAL_TURN_STREAM_CLOSE` says nothing more will be written for the
+  connection: the relay went back or was lost before a call took it, the
+  socket was unmapped, or no call is described on the socket any more — every
+  branch of a fork counted, since a branch left may inherit the relay. Write
+  what the queues still hold for it, the Refresh that gives the relay back
+  among them, and close it.
+
+`SIPRAL_FEATURE_TURN_STREAM` (1024) is set where `SIPRAL_FEATURE_ICE` is; a
+build without it answers the three calls `SIPRAL_STATUS_NOT_SUPPORTED`.
+
 **`sipral_stack_nat_unmap(stack, local, len, now_ms)`** is how a
 socket named with `sipral_stack_nat_map` that will carry no call after all
 says so: it is no longer asked about every twenty-five seconds, a request for
@@ -754,7 +812,13 @@ socket still named when a call ends before its media or the stack closes.
 `NatTests.swift`, `NatCheck.kt` and `scripts/lab.sh`'s own `ice_turn_flow`
 (driving each binding's idiomatic layer directly, through
 `NAT_PAIR_CALLER=python`, `=kotlin`, `=dotnet` or `=swift`) hold them to it
-on the wire.
+on the wire. All four also open the TURN connection themselves when the
+server is reached over TCP or TLS — Swift with Network.framework's
+`NWConnection`, Kotlin with an `SSLSocket`, Python with `ssl`, .NET with an
+`SslStream` — read it into `sipral_stack_turn_receive`, write on it whatever
+is marked for it, and close it when told; `TurnStreamTests.swift`,
+`NatCheck.kt`, `test_turn_stream.py` and `TurnStreamTests.cs` prove each
+against a TURN server on TCP and on TLS, trusted and not.
 
 ## Media across the boundary
 

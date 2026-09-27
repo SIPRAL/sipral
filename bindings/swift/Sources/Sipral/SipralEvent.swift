@@ -35,6 +35,22 @@ public struct SipralEvent: Sendable {
     public let relayData: RelayEventData?
     /// `payload.referral`, for `SipralEventKind.referral` only.
     public let referralData: ReferralEventData?
+    /// `payload.turn_stream`, for `SipralEventKind.turnStream` only.
+    public let turnStreamData: TurnStreamEventData?
+}
+
+/// A media socket's connection to a TURN server reached over TCP or TLS
+/// (`sipral_turn_stream_event_t`): open it, or close it. `SipralStack` does
+/// both itself; this is what it was told.
+public struct TurnStreamEventData: Sendable {
+    public let stateRaw: UInt32
+    public let state: SipralTurnStream?
+    /// What to open: `SipralTransport.tcp` or `.tls`, as a raw value.
+    public let protocolRaw: UInt32
+    /// The media socket, as `sipral_stack_nat_map` named it.
+    public let local: String
+    /// The TURN server, `host:port`.
+    public let server: String
 }
 
 /// A REFER outside any dialog (`sipral_referral_event_t`): take it with
@@ -265,6 +281,16 @@ enum SipralEventDecoder {
         )
     }
 
+    private static func turnStreamData(_ stream: sipral_turn_stream_event_t) -> TurnStreamEventData {
+        TurnStreamEventData(
+            stateRaw: stream.state,
+            state: SipralTurnStream(rawValue: stream.state),
+            protocolRaw: stream.protocol,
+            local: textC(stream.local, stream.local_len) ?? "",
+            server: textC(stream.server, stream.server_len) ?? ""
+        )
+    }
+
     private static func referralData(_ referral: sipral_referral_event_t) -> ReferralEventData {
         ReferralEventData(
             statusCode: referral.status_code,
@@ -289,8 +315,11 @@ enum SipralEventDecoder {
         var natData: NatEventData?
         var relayData: RelayEventData?
         var referralData: ReferralEventData?
+        var turnStreamData: TurnStreamEventData?
 
-        if kindRaw == SipralEventKind.natMapping.rawValue {
+        if kindRaw == SipralEventKind.turnStream.rawValue {
+            turnStreamData = self.turnStreamData(raw.payload.turn_stream)
+        } else if kindRaw == SipralEventKind.natMapping.rawValue {
             natData = self.natData(raw.payload.nat)
         } else if kindRaw == SipralEventKind.natRelay.rawValue {
             relayData = self.relayData(raw.payload.relay)
@@ -321,7 +350,8 @@ enum SipralEventDecoder {
             announceData: announceData,
             natData: natData,
             relayData: relayData,
-            referralData: referralData
+            referralData: referralData,
+            turnStreamData: turnStreamData
         )
     }
 }

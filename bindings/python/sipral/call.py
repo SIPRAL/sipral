@@ -204,6 +204,13 @@ class Call:
             self._media_socket.close()
         self.stack.forget_call(self.handle)
 
+    @property
+    def media_address(self) -> str:
+        """This call's media socket, as ``host:port``: the name
+        `sipral_stack_nat_map` gave it, and so of its connection to a TURN
+        server reached over TCP or TLS."""
+        return self._media_address
+
     def __enter__(self) -> "Call":
         return self
 

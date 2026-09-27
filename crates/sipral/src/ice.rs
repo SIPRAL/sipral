@@ -131,6 +131,8 @@ use sipral_nat::ice::{
 };
 #[cfg(feature = "ice")]
 use sipral_nat::stun::{Class, Integrity, Message, Method, TransactionId};
+#[cfg(feature = "ice")]
+use sipral_nat::turn::{FrameError, Transport};
 
 #[cfg(feature = "ice")]
 use crate::error::MediaError;
@@ -615,6 +617,7 @@ impl LocalIce {
         }
         let mut ice = Ice {
             local: address,
+            stream: relay.transport().is_stream().then(|| relay.server()),
             out: Vec::new(),
             probe: Vec::new(),
             running: Running::Full(Box::new(Full {
@@ -761,6 +764,7 @@ impl LocalIce {
             let advertised = self.public.unwrap_or(address);
             return Ok(Ice {
                 local: address,
+                stream: None,
                 out: Vec::new(),
                 probe: Vec::new(),
                 running: Running::Lite(Box::new(Lite {
@@ -790,6 +794,7 @@ impl LocalIce {
         )?;
         let mut ice = Ice {
             local: address,
+            stream: None,
             out: Vec::new(),
             probe: Vec::new(),
             running: Running::Full(Box::new(Full {
@@ -851,11 +856,13 @@ fn with_relay(
     let Some((server, client)) = relay.take().map(crate::relay::Relay::into_parts) else {
         return Ok(None);
     };
+    let over = client.transport().is_stream().then_some(server);
     agent
         .add_relayed(stream, ComponentId::RTP, address, server, client, now)
         .map_err(MediaError::Ice)?;
     let mut ice = Ice {
         local: address,
+        stream: over,
         out: Vec::new(),
         probe: Vec::new(),
         running: Running::Full(Box::new(Full {
@@ -877,6 +884,10 @@ pub(crate) struct Ice {
     /// The socket the application bound for this call, which is what every
     /// datagram handed to the agent arrived on.
     local: SocketAddr,
+    /// The TURN server the call's relay reaches over a TCP or TLS connection
+    /// from `local`, when it was allocated over one: what that connection
+    /// delivers is the relay's, and goes nowhere else.
+    stream: Option<SocketAddr>,
     /// Where application data goes once it is ready for the pair, held rather
     /// than allocated per frame. With a relayed pair it is the frame with the
     /// channel header in front of it; without one it is the frame.
@@ -1204,6 +1215,57 @@ fn signed_for(data: &[u8], credentials: &Credentials) -> bool {
 
 #[cfg(feature = "ice")]
 impl Ice {
+    /// The TURN server this call's relay reaches over a TCP or TLS
+    /// connection, when it does.
+    pub(crate) const fn stream_server(&self) -> Option<SocketAddr> {
+        self.stream
+    }
+
+    /// Hand the relay bytes read off its connection to the TURN server, and
+    /// say whether this agent has one that runs over a connection at all.
+    /// Whole messages come out of [`Ice::poll_stream`].
+    pub(crate) fn push_stream(&mut self, bytes: &[u8]) -> bool {
+        let (Some(server), Running::Full(full)) = (self.stream, &mut self.running) else {
+            return false;
+        };
+        full.agent.push_stream(self.local, server, bytes)
+    }
+
+    /// The next whole message the relay's connection carried, copied into
+    /// `frame`: a peer's data as [`Taken::Data`] at its position there, and
+    /// the relay's own traffic as [`Taken::Consumed`]. `Ok(None)` once no
+    /// whole one is waiting.
+    ///
+    /// # Errors
+    ///
+    /// The connection stopped making sense, and the relay is lost with it
+    /// ([`IceAgent::poll_stream`]).
+    pub(crate) fn poll_stream(
+        &mut self,
+        frame: &mut Vec<u8>,
+        now: Instant,
+    ) -> Result<Option<Taken>, FrameError> {
+        let (Some(server), Running::Full(full)) = (self.stream, &mut self.running) else {
+            return Ok(None);
+        };
+        Ok(full
+            .agent
+            .poll_stream(self.local, server, frame, now)?
+            .map(|received| match received {
+                Received::Data { range, .. } => Taken::Data(range),
+                Received::Consumed => Taken::Consumed,
+                Received::Foreign => Taken::Foreign,
+            }))
+    }
+
+    /// The relay's connection to the TURN server closed, and the relay went
+    /// with it ([`IceAgent::stream_closed`]).
+    pub(crate) fn stream_closed(&mut self, now: Instant) {
+        if let (Some(server), Running::Full(full)) = (self.stream, &mut self.running) {
+            full.agent.stream_closed(self.local, server, now);
+        }
+    }
+
     /// Take the passing of time. A lite end has no timer.
     pub(crate) fn handle_timeout(&mut self, now: Instant) {
         if let Running::Full(full) = &mut self.running {
@@ -1220,25 +1282,32 @@ impl Ice {
         }
     }
 
-    /// Take the agent's own next datagram, and say where it goes.
+    /// Take the agent's own next datagram, and say where it goes and how:
+    /// from the socket, or on the relay's connection to its TURN server.
     ///
     /// The bytes stay here, in [`Ice::probe`], and are read back with
     /// [`Ice::probe`]. Two calls rather than one because the caller is a
     /// method that hands out a borrow of the session: an address is `Copy`
     /// and ends the mutable borrow, where a borrow of the bytes would hold it
     /// open for as long as the datagram lives.
-    pub(crate) fn take_probe(&mut self) -> Option<SocketAddr> {
-        let (destination, data) = match &mut self.running {
+    pub(crate) fn take_probe(&mut self) -> Option<(SocketAddr, Transport)> {
+        let (destination, data, transport) = match &mut self.running {
             Running::Full(full) => {
                 let Transmit {
-                    destination, data, ..
+                    destination,
+                    data,
+                    transport,
+                    ..
                 } = full.agent.poll_transmit()?;
-                (destination, data)
+                (destination, data, transport)
             }
-            Running::Lite(lite) => lite.outbox.pop_front()?,
+            Running::Lite(lite) => {
+                let (destination, data) = lite.outbox.pop_front()?;
+                (destination, data, Transport::Udp)
+            }
         };
         self.probe = data;
-        Some(destination)
+        Some((destination, transport))
     }
 
     /// The bytes [`Ice::take_probe`] last took.
@@ -1288,11 +1357,14 @@ impl Ice {
             Running::Lite(lite) => lite.selected.map(|pair| Route {
                 source: self.local,
                 destination: pair.remote,
+                transport: Transport::Udp,
             }),
         }
     }
 
-    /// Wrap a datagram for the pair the agent picked and say where it goes.
+    /// Wrap a datagram for the pair the agent picked and say where it goes
+    /// and how: from the socket, or on the relay's connection to its TURN
+    /// server.
     ///
     /// # Errors
     ///
@@ -1304,32 +1376,33 @@ impl Ice {
         &mut self,
         data: &[u8],
         now: Instant,
-    ) -> Result<(SocketAddr, &[u8]), SendError> {
+    ) -> Result<(SocketAddr, Transport, &[u8]), SendError> {
         self.out.clear();
-        let destination = match &mut self.running {
+        let (destination, transport) = match &mut self.running {
             Running::Full(full) => {
-                full.agent
-                    .send(full.stream, ComponentId::RTP, data, &mut self.out, now)?
-                    .destination
+                let route =
+                    full.agent
+                        .send(full.stream, ComponentId::RTP, data, &mut self.out, now)?;
+                (route.destination, route.transport)
             }
             Running::Lite(lite) => {
                 let pair = lite.selected.ok_or(SendError::NoRoute)?;
                 self.out.extend_from_slice(data);
-                pair.remote
+                (pair.remote, Transport::Udp)
             }
         };
-        Ok((destination, &self.out))
+        Ok((destination, transport, &self.out))
     }
 
     /// Give every relay this call holds back to its server, and hand over
     /// what that takes to send: the Refresh with a lifetime of zero RFC 8656
-    /// §8 deletes an allocation with, each with where it goes.
+    /// §8 deletes an allocation with, each with where it goes and how.
     ///
     /// For the end of a call, and for a call that turned out not to use ICE
     /// at all. Anything else the agent still had queued goes with them — it
     /// was going to the same places from the same socket — and nothing waits
     /// for an answer. A lite end holds no relay and has nothing to give back.
-    pub(crate) fn release(&mut self, now: Instant) -> Vec<(SocketAddr, Vec<u8>)> {
+    pub(crate) fn release(&mut self, now: Instant) -> Vec<(SocketAddr, Transport, Vec<u8>)> {
         self.top_up();
         let Running::Full(full) = &mut self.running else {
             return Vec::new();
@@ -1337,10 +1410,13 @@ impl Ice {
         full.agent.release_relays(now);
         let mut out = Vec::new();
         while let Some(Transmit {
-            destination, data, ..
+            destination,
+            data,
+            transport,
+            ..
         }) = full.agent.poll_transmit()
         {
-            out.push((destination, data));
+            out.push((destination, transport, data));
         }
         out
     }

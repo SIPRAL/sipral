@@ -42,8 +42,11 @@
 #                               same two with the path between them blocked,
 #                               through a relay on coturn as a TURN server
 #   scripts/lab.sh turn         only that last, relayed, step, the call placed
-#                               from the Rust harness and then through the
-#                               C ABI
+#                               from the Rust harness, through the C ABI and
+#                               through the Python bindings; then again from
+#                               behind a NAT that drops every datagram to
+#                               coturn, the relay reached over TCP from the
+#                               C ABI and over TLS from the Python bindings
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -1715,10 +1718,18 @@ nat_pair_call() {
     local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
     local callee callee_status status=0 tries=0 beside
     local -a caller_only=()
+    local turn_port=3478
+    # TURN over TLS is 5349, the port the "turns" scheme implies (RFC 8656
+    # §4.1); TCP shares 3478 with UDP
+    [ "${NAT_PAIR_TURN_TRANSPORT:-udp}" = tls ] && turn_port=5349
     if [ -n "${NAT_PAIR_CALLER_TURN:-}" ]; then
-        caller_only=(-e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478"
+        caller_only=(-e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:$turn_port"
             -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER"
-            -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD")
+            -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD"
+            -e "SIPRAL_TURN_TRANSPORT=${NAT_PAIR_TURN_TRANSPORT:-udp}"
+            -e "SIPRAL_TURN_NAME=$TURN_TLS_NAME"
+            -e SIPRAL_TURN_CA=/turn-certs/turn.pem
+            -v "$SIPRAL_TURN_CERTS:/turn-certs:ro")
     fi
     docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
     docker run -d --name "$ICE_CALLEE_NAME" --network "${project}_inside2" \
@@ -1975,7 +1986,10 @@ nat_pair_call() {
 # the word. Without TURN that call has to find no path too, and coturn's log
 # has to count its two allocations as given back on top of the first two.
 # Last, the C caller alone is given TURN: the only path left runs through its
-# own relay, and its one allocation has to be given back as well.
+# own relay, and its one allocation has to be given back as well. Then again
+# with the caller's NAT dropping every datagram to or from coturn, the relay
+# reached over TCP through the C ABI and, after the Python bindings' own
+# pair of calls, over TLS through them.
 #
 # Then the same two calls again from each idiomatic binding in turn --
 # Python, Kotlin, .NET, Swift -- each placing the call itself through its
@@ -1989,7 +2003,8 @@ ice_turn_flow() {
     SIPRAL_TURN_USER=sipral-lab
     SIPRAL_TURN_PASSWORD=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     export SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD
-    nat_pair_up -f compose.yaml -f turn/compose.override.yaml || return 1
+    turn_certificate || return 1
+    nat_pair_up -f compose.yaml -f turn/compose.override.yaml || { rm -rf "$SIPRAL_TURN_CERTS"; return 1; }
     printf '  caller behind %s (%s outside), callee behind %s (%s outside), TURN at %s:3478\n' \
         "$NAT_PAIR_GATEWAY" "$NAT_PAIR_OUTSIDE" "$NAT_PAIR_GATEWAY2" "$NAT_PAIR_OUTSIDE2" \
         "$NAT_PAIR_COTURN"
@@ -2055,6 +2070,23 @@ ice_turn_flow() {
         if [ "$status" -eq 0 ]; then
             turn_given_back 5 || status=1
         fi
+        # and from behind a NAT that also drops every datagram to or from
+        # coturn: the mapping asked over UDP goes unanswered, which the
+        # harness requires as the proof that the block holds, and the only
+        # relay there can be is one reached over TCP -- the connection the
+        # library asks for, carrying the Allocate, the permission, the
+        # channel, the tone both ways and the Refresh that gives it back
+        if [ "$status" -eq 0 ]; then
+            printf '  with TURN over TCP at the C caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over the connection\n'
+            turn_udp_dropped -I || status=1
+            [ "$status" -ne 0 ] \
+                || NAT_PAIR_CALLER=c NAT_PAIR_CALLER_TURN=1 NAT_PAIR_TURN_TRANSPORT=tcp nat_pair_call \
+                || status=1
+            turn_udp_dropped -D
+        fi
+        if [ "$status" -eq 0 ]; then
+            turn_given_back 6 || status=1
+        fi
     fi
     if [ "$status" -eq 0 ] && [ -z "$HARNESS_C" ]; then
         if [ "$WANT" = turn ]; then
@@ -2081,7 +2113,22 @@ ice_turn_flow() {
                 || status=1
         fi
         if [ "$status" -eq 0 ]; then
-            turn_given_back 7 || status=1
+            turn_given_back 8 || status=1
+        fi
+        # the same network again, the relay reached over TLS on 5349 with
+        # the certificate made for this run: the Python bindings open the
+        # connection with the platform's ssl, told to trust that certificate
+        # and to check it against the name it was made for
+        if [ "$status" -eq 0 ]; then
+            printf '  with TURN over TLS at the Python caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over TLS\n'
+            turn_udp_dropped -I || status=1
+            [ "$status" -ne 0 ] \
+                || NAT_PAIR_CALLER=python NAT_PAIR_CALLER_TURN=1 NAT_PAIR_TURN_TRANSPORT=tls nat_pair_call \
+                || status=1
+            turn_udp_dropped -D
+        fi
+        if [ "$status" -eq 0 ]; then
+            turn_given_back 9 || status=1
         fi
     fi
     if [ "$status" -eq 0 ] \
@@ -2108,7 +2155,7 @@ ice_turn_flow() {
                 || status=1
         fi
         if [ "$status" -eq 0 ]; then
-            turn_given_back 9 || status=1
+            turn_given_back 11 || status=1
         fi
     fi
     if [ "$status" -eq 0 ] && [ -z "$HARNESS_C" ]; then
@@ -2136,7 +2183,7 @@ ice_turn_flow() {
                 || status=1
         fi
         if [ "$status" -eq 0 ]; then
-            turn_given_back 11 || status=1
+            turn_given_back 13 || status=1
         fi
     fi
     if [ "$status" -eq 0 ] && [ -z "$SWIFT_AGENT" ]; then
@@ -2161,12 +2208,49 @@ ice_turn_flow() {
                 || status=1
         fi
         if [ "$status" -eq 0 ]; then
-            turn_given_back 13 || status=1
+            turn_given_back 15 || status=1
         fi
     fi
     nat_pair_down -f compose.yaml -f turn/compose.override.yaml
-    unset SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD
+    rm -rf "$SIPRAL_TURN_CERTS"
+    unset SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD SIPRAL_TURN_CERTS
     return "$status"
+}
+
+# The name the relay step's TLS certificate is made for, and the one the
+# clients check it against: coturn is reached by address, and a certificate
+# for an address the lab hands out afresh on every run is one nobody could
+# have checked beforehand.
+TURN_TLS_NAME=turn.lab.sipral.test
+
+# A key and a self-signed certificate for coturn's TLS listener, made for
+# this run alone and thrown away after it, in the directory SIPRAL_TURN_CERTS
+# names (interop/turn/compose.override.yaml mounts it). serverAuth is in it
+# because Apple's TLS refuses a server certificate without it. Readable by
+# coturn's own unprivileged user: the key protects a lab that lasts minutes.
+turn_certificate() {
+    SIPRAL_TURN_CERTS=$(mktemp -d)
+    export SIPRAL_TURN_CERTS
+    if ! openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+        -subj "/CN=$TURN_TLS_NAME" -addext "subjectAltName=DNS:$TURN_TLS_NAME" \
+        -addext extendedKeyUsage=serverAuth \
+        -keyout "$SIPRAL_TURN_CERTS/turn.key" -out "$SIPRAL_TURN_CERTS/turn.pem" >/dev/null 2>&1; then
+        printf '  could not make the certificate for coturn'"'"'s TLS listener (openssl)\n'
+        rm -rf "$SIPRAL_TURN_CERTS"
+        return 1
+    fi
+    chmod 755 "$SIPRAL_TURN_CERTS"
+    chmod 644 "$SIPRAL_TURN_CERTS/turn.key" "$SIPRAL_TURN_CERTS/turn.pem"
+}
+
+# At the caller's NAT, every datagram to or from coturn dropped (-I) or let
+# through again (-D): the network TURN over TCP and TLS exists for (RFC 8656
+# §3.1), for as long as the step through it runs.
+turn_udp_dropped() {
+    docker exec "$NAT_PAIR_BOX" sh -c "
+        iptables $1 FORWARD -d $NAT_PAIR_COTURN -p udp -j DROP &&
+        iptables $1 FORWARD -s $NAT_PAIR_COTURN -p udp -j DROP" \
+        || { printf '  could not change what the NAT drops to and from coturn\n'; return 1; }
 }
 
 # What coturn --verbose has written so far for an allocation made
@@ -2175,14 +2259,16 @@ ice_turn_flow() {
 # many of the latter, every relay given back rather than lapsing. The
 # permissions and the channel ("lifetime updated") are printed beside them,
 # which is where the relayed path shows. The log is the container's whole
-# life, so a second call's count includes the first's.
+# life, so a second call's count includes the first's. Over TLS coturn
+# writes the cipher right after the lifetime ("lifetime=0, cipher=..."), so
+# the zero ends at a space or a comma.
 turn_given_back() {
     local wanted="$1" allocations deleted said
     said=$( (cd interop && docker compose --profile nat logs --no-color coturn) 2>/dev/null )
     printf '%s\n' "$said" | grep 'allocation new,\|allocation refreshed,\|lifetime updated' \
         | tail -40 | sed 's/^/    coturn  /'
     allocations=$(printf '%s\n' "$said" | grep -c 'allocation new,')
-    deleted=$(printf '%s\n' "$said" | grep -c 'allocation refreshed,.*lifetime=0 ')
+    deleted=$(printf '%s\n' "$said" | grep -c 'allocation refreshed,.*lifetime=0[ ,]')
     printf '  coturn: %s allocation(s), %s given back\n' "$allocations" "$deleted"
     [ "$allocations" -ge "$wanted" ] && [ "$deleted" -ge "$allocations" ]
 }

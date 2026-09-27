@@ -3,10 +3,13 @@
 
 package org.sipral.idiomatic
 
+import javax.net.ssl.SSLSocketFactory
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralNatEvent
 import org.sipral.SipralNatRelayEvent
+import org.sipral.SipralTransport
+import org.sipral.SipralTurnStreamEvent
 
 /**
  * A TURN server (RFC 8656) and the long-term credential it knows this end
@@ -18,13 +21,28 @@ import org.sipral.SipralNatRelayEvent
  * a log is a relay somebody else can use, and a generated `toString`,
  * `equals` or `component3` would hand it to whatever prints or destructures
  * one.
+ *
+ * [transport] is how every media socket reaches it (RFC 8656 §3.1):
+ * `SipralTransport.UDP` by default, `TCP` for a network that lets no UDP
+ * out, `TLS` for one that lets one port out -- 5349 is TURN's -- or for an
+ * application that wants the server checked. Over either the client opens
+ * a connection per media socket itself and carries everything for the
+ * relay on it; over TLS that is an `SSLSocket` from [sslSocketFactory] --
+ * the platform default when null, one built over a `TrustManagerFactory`
+ * of the application's own for a private CA or a self-signed server --
+ * with the server's name, [serverName] or the host part of [address],
+ * checked against its certificate. Nothing here turns checking off.
  */
 class SipralTurnServer(
     val address: String,
     val username: String,
     internal val password: String,
+    val transport: SipralTransport = SipralTransport.UDP,
+    val serverName: String? = null,
+    val sslSocketFactory: SSLSocketFactory? = null,
 ) {
-    override fun toString(): String = "SipralTurnServer(address=$address, username=$username, password=<redacted>)"
+    override fun toString(): String =
+        "SipralTurnServer(address=$address, username=$username, password=<redacted>, transport=$transport)"
 }
 
 /**
@@ -43,3 +61,11 @@ fun natOf(event: SipralEvent): SipralNatEvent? =
  */
 fun relayOf(event: SipralEvent): SipralNatRelayEvent? =
     if (event.kind == SipralEventKind.NAT_RELAY.value.toLong()) event.payload.relay else null
+
+/**
+ * The `SIPRAL_EVENT_KIND_TURN_STREAM` payload -- open a media socket's
+ * connection to a TURN server reached over TCP or TLS, or close it, which
+ * [SipralClient] does itself -- or null for an event of any other kind.
+ */
+fun turnStreamOf(event: SipralEvent): SipralTurnStreamEvent? =
+    if (event.kind == SipralEventKind.TURN_STREAM.value.toLong()) event.payload.turnStream else null

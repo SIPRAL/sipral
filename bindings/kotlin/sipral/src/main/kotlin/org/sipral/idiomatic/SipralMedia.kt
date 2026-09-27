@@ -230,17 +230,32 @@ class SipralMedia internal constructor(
     private fun drainQueued(poll: (ByteArray, ByteArray, LongArray) -> Int) {
         val data = ByteArray(PACKET_BYTES)
         val destination = ByteArray(ADDRESS_BYTES)
-        val lens = LongArray(2)
+        val lens = LongArray(3)
         while (true) {
             val status = poll(data, destination, lens)
             val len = lens[0].toInt()
             if (status != 0 || len == 0) {
                 return
             }
-            val destinationLen = lens[1].toInt()
-            val destinationText = String(destination, 0, destinationLen, Charsets.UTF_8)
-            sendTo(data.copyOfRange(0, len), parseAddress(destinationText))
+            send(data.copyOfRange(0, len), destination, lens)
         }
+    }
+
+    /** This call's media socket, as `host:port`: the name of its connection
+     * to a TURN server reached over TCP or TLS. */
+    private val localAddress = formatAddress(socket.localAddress.hostAddress, socket.localPort)
+
+    /** One packet out where it says: a datagram from this call's socket,
+     * or -- marked TCP or TLS -- bytes on the socket's connection to the TURN
+     * server, which the client holds. `lens` is [len, destination_len,
+     * protocol]. */
+    private fun send(payload: ByteArray, destination: ByteArray, lens: LongArray) {
+        if (overStream(lens[2])) {
+            client.writeTurn(localAddress, payload)
+            return
+        }
+        val destinationText = String(destination, 0, lens[1].toInt(), Charsets.UTF_8)
+        sendTo(payload, parseAddress(destinationText))
     }
 
     private fun drainRtcp() = drainQueued { data, destination, lens ->
@@ -304,14 +319,12 @@ class SipralMedia internal constructor(
     private fun captureOnce(samples: ShortArray) {
         val data = ByteArray(PACKET_BYTES)
         val destination = ByteArray(ADDRESS_BYTES)
-        val lens = LongArray(2)
+        val lens = LongArray(3)
         val status = SipralMediaNative.mediaCapture(handle, client.nowMs(), samples, data, destination, lens)
         val len = lens[0].toInt()
         if (status != 0 || len == 0) {
             return
         }
-        val destinationLen = lens[1].toInt()
-        val destinationText = String(destination, 0, destinationLen, Charsets.UTF_8)
-        sendTo(data.copyOfRange(0, len), parseAddress(destinationText))
+        send(data.copyOfRange(0, len), destination, lens)
     }
 }

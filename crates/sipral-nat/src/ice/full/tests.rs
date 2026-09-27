@@ -36,6 +36,7 @@ fn config(stun: bool, turn: bool) -> IceConfig {
             vec![TurnServer {
                 address: address(TURN_SERVER),
                 credentials: None,
+                transport: crate::turn::Transport::Udp,
             }]
         } else {
             Vec::new()

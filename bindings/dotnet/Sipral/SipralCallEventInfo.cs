@@ -109,6 +109,15 @@ public sealed record SipralPath(
     ulong Priority,
     string Local,
     string Remote);
+/// <summary>What a <see cref="SipralEventKind.TurnStream"/> event carries —
+/// the fields of <c>sipral_turn_stream_event_t</c>: open a media socket's
+/// connection to a TURN server reached over TCP or TLS, or close it, which
+/// <see cref="SipralStack"/> does itself.</summary>
+public sealed record SipralTurnStreamEventInfo(
+    SipralTurnStream State,
+    SipralTransport Protocol,
+    string? Local,
+    string? Server);
 
 /// <summary>A snapshot of <c>sipral_stream_stats_t</c>, copied field by
 /// field — never the library's own pointer, which is valid only for the

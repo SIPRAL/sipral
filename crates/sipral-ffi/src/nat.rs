@@ -32,7 +32,18 @@
 //! says what each socket learned, and when a signalling socket's mapping
 //! moved. `docs/06-nat.md` has the reasons for each of these choices, and
 //! `docs/08-ffi.md` the order an application calls them in.
+//!
+//! A TURN server reached over TCP or TLS (`turn_transport`) is reached over
+//! a connection the application opens, one per media socket, the way it
+//! opens a SIP stream: [`SipralEventKind::TurnStream`](crate::event::SipralEventKind::TurnStream)
+//! asks for it, [`sipral_stack_turn_connected`] says it is open,
+//! [`sipral_stack_turn_receive`] hands in what it carried and
+//! [`sipral_stack_turn_closed`] says it has gone. What is written on it comes
+//! out of the queues a datagram for the server would, marked with the
+//! protocol to write it on.
 
+#[cfg(all(feature = "stun", feature = "ice"))]
+use std::collections::HashSet;
 #[cfg(feature = "stun")]
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_char;
@@ -41,6 +52,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(feature = "ice")]
+use sipral::TurnTransport;
 use sipral_core::endpoint::{Transmit, TransportId, TransportProtocol};
 
 use crate::abi::{codes, record};
@@ -193,6 +206,53 @@ record! {
     }
 }
 
+codes! {
+    /// What a media socket's connection to the TURN server is to do. Names
+    /// for `sipral_turn_stream_event_t::state`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralTurnStream: u32 {
+        /// Open a connection from the media socket `local` to the TURN
+        /// server at `server`, over `protocol` — TCP, or TLS with the
+        /// server's certificate checked by the platform's own stack — and
+        /// say so with `sipral_stack_turn_connected` once it is open, or
+        /// `sipral_stack_turn_closed` if it cannot be. The socket's relay is
+        /// allocated over it; a call on the socket before that answers
+        /// `SIPRAL_STATUS_WRONG_STATE`.
+        Open = 1,
+        /// Nothing more will be written for the connection from `local`:
+        /// its relay was given back or lost, or the call it carried has
+        /// ended. Write what the queues still hold for it —
+        /// `sipral_stack_poll_farewell` and `sipral_stack_poll_stun` — and
+        /// close it.
+        Close = 2,
+    }
+}
+
+record! {
+    /// What a [`SipralEventKind::TurnStream`](crate::event::SipralEventKind::TurnStream)
+    /// carries.
+    ///
+    /// The addresses are text, not NUL-terminated, and the library's: valid
+    /// for as long as the callback runs.
+    #[derive(Clone, Copy)]
+    pub struct SipralTurnStreamEvent {
+        /// A [`SipralTurnStream`].
+        pub state: u32,
+        /// What to open, as a `SipralTransport`: `SIPRAL_TRANSPORT_TCP` or
+        /// `SIPRAL_TRANSPORT_TLS`, what `turn_transport` named.
+        pub protocol: u32,
+        /// The media socket, as `sipral_stack_nat_map` named it: the
+        /// connection's own name in the three calls that take one.
+        pub local: *const c_char,
+        /// How many bytes of it.
+        pub local_len: usize,
+        /// The TURN server, `host:port`, as `turn_server` named it.
+        pub server: *const c_char,
+        /// How many bytes of it.
+        pub server_len: usize,
+    }
+}
+
 /// The server a stack's configuration asks, or `None` for one that asks
 /// nobody.
 ///
@@ -264,12 +324,27 @@ pub(crate) unsafe fn turn_configured<'a>(
             "turn_password",
         )
     }?;
+    let transport = match config.turn_transport {
+        0 | 1 => TurnTransport::Udp,
+        2 => TurnTransport::Tcp,
+        3 => TurnTransport::Tls,
+        other => {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!(
+                    "turn_transport is {other}, and a TURN server is reached over \
+                     SIPRAL_TRANSPORT_UDP, SIPRAL_TRANSPORT_TCP or SIPRAL_TRANSPORT_TLS \
+                     (RFC 8656 §3.1), or zero for UDP"
+                ),
+            ));
+        }
+    };
     let Some(server) = server else {
-        return if username.is_some() || password.is_some() {
+        return if username.is_some() || password.is_some() || config.turn_transport != 0 {
             Err(fail(
                 SipralStatus::InvalidArgument,
-                "turn_username or turn_password is set and turn_server names no server to use \
-                 them with",
+                "turn_username, turn_password or turn_transport is set and turn_server names no \
+                 server to use them with",
             ))
         } else {
             Ok(None)
@@ -301,9 +376,20 @@ pub(crate) unsafe fn turn_configured<'a>(
     };
     relaying(Turn {
         server: address,
+        transport,
         username,
         password,
     })
+}
+
+/// How a relay reaches its TURN server, for a build with no ICE to relay for:
+/// the configuration naming one is refused before this is read.
+#[cfg(not(feature = "ice"))]
+#[derive(Clone, Copy)]
+pub(crate) enum TurnTransport {
+    Udp,
+    Tcp,
+    Tls,
 }
 
 /// The relay a call described on a media socket takes: a
@@ -325,6 +411,7 @@ pub(crate) type HeldRelay = Option<core::convert::Infallible>;
 #[cfg_attr(not(all(feature = "stun", feature = "ice")), allow(dead_code))]
 pub(crate) struct Turn<'a> {
     server: SocketAddr,
+    transport: TurnTransport,
     username: &'a str,
     password: &'a str,
 }
@@ -393,7 +480,31 @@ struct Active {
     /// way a Binding request is: an Allocate after its 401 is a different
     /// request, not a newer copy of the first.
     #[cfg(feature = "ice")]
-    relay_out: VecDeque<sipral::StunDatagram>,
+    relay_out: VecDeque<sipral::RelayDatagram>,
+    /// Over TCP or TLS, where each media socket's connection to the TURN
+    /// server stands.
+    #[cfg(feature = "ice")]
+    streams: Streams,
+}
+
+/// The connections a stack whose TURN server is reached over TCP or TLS has
+/// asked the application for, one per media socket.
+#[cfg(all(feature = "stun", feature = "ice"))]
+#[derive(Default)]
+struct Streams {
+    /// Asked for, and not open yet: no Allocate has gone.
+    connecting: HashSet<SocketAddr>,
+    /// Open, and carrying a relay being made or kept for the socket, or the
+    /// relay of a call described there.
+    open: HashSet<SocketAddr>,
+    /// Open, and the relay on it taken by the call described on the socket:
+    /// closed when no call is described there any more.
+    carried: HashSet<SocketAddr>,
+    /// What to tell the application, in order.
+    said: VecDeque<(SipralTurnStream, SocketAddr)>,
+    /// Sockets whose connection closed before it opened: their relay is
+    /// `SIPRAL_NAT_RELAY_FAILED` without the server ever having been asked.
+    lost: VecDeque<SocketAddr>,
 }
 
 /// The text one event's three addresses are read from, and the event.
@@ -423,6 +534,7 @@ impl Nat {
             state
                 .engine
                 .relays(turn.server, turn.username, turn.password)
+                .over(turn.transport)
         });
         #[cfg(not(feature = "ice"))]
         let _ = turn;
@@ -435,6 +547,8 @@ impl Nat {
             relays,
             #[cfg(feature = "ice")]
             relay_out: VecDeque::new(),
+            #[cfg(feature = "ice")]
+            streams: Streams::default(),
         });
         Self::bound(state, transport, protocol, local, now);
     }
@@ -627,17 +741,58 @@ impl Nat {
             ));
         }
         #[cfg(feature = "ice")]
-        if let Some(relays) = state
-            .nat
-            .active
-            .as_mut()
-            .and_then(|active| active.relays.as_mut())
-        {
-            while let Some(said) = relays.poll_event() {
-                raised.push(relay_event(stack, said));
+        Self::drain_relays(state, stack, &mut raised);
+        raised
+    }
+
+    /// What the relays and their connections came to since the last poll.
+    #[cfg(feature = "ice")]
+    fn drain_relays(state: &mut StackState, stack: SipralHandle, raised: &mut Vec<Raised>) {
+        let engine = &state.engine;
+        let Some(active) = state.nat.active.as_mut() else {
+            return;
+        };
+        let Some(relays) = active.relays.as_mut() else {
+            return;
+        };
+        let server = relays.server();
+        let protocol = protocol_of(relays.transport());
+        let streams = &mut active.streams;
+        while let Some(local) = streams.lost.pop_front() {
+            raised.push(relay_event(
+                stack,
+                sipral::RelayEvent::Failed {
+                    local,
+                    failure: sipral::TurnFailure::ConnectionLost,
+                },
+            ));
+        }
+        while let Some(said) = relays.poll_event() {
+            // a relay lost or refused leaves its connection nothing to carry
+            if let sipral::RelayEvent::Failed { local, .. } = said
+                && streams.open.remove(&local)
+            {
+                streams.said.push_back((SipralTurnStream::Close, local));
+            }
+            raised.push(relay_event(stack, said));
+        }
+        // and a call's: once no call is described on the socket, its
+        // farewells are queued and nothing more will be written there
+        let done: Vec<SocketAddr> = streams
+            .carried
+            .iter()
+            .filter(|local| !engine.describes(**local))
+            .copied()
+            .collect();
+        for local in done {
+            streams.carried.remove(&local);
+            if streams.open.remove(&local) {
+                streams.said.push_back((SipralTurnStream::Close, local));
             }
         }
-        raised
+        while let Some((said, local)) = streams.said.pop_front() {
+            raised.push(stream_event(stack, said, protocol, local, server));
+        }
     }
 
     /// An account was added, or given a new `Contact`: when the signalling
@@ -700,12 +855,20 @@ impl Nat {
     /// for its mapping.
     #[cfg(feature = "ice")]
     pub(crate) fn relay_for(state: &mut StackState, local: SocketAddr) -> Result<HeldRelay, Fail> {
-        let Some(relays) = state
-            .nat
-            .active
-            .as_mut()
-            .and_then(|active| active.relays.as_mut())
-        else {
+        let Some(active) = state.nat.active.as_mut() else {
+            return Ok(None);
+        };
+        if active.streams.connecting.contains(&local) {
+            return Err(fail(
+                SipralStatus::WrongState,
+                format!(
+                    "the connection to the TURN server for {local} is not open yet: open the one \
+                     SIPRAL_EVENT_KIND_TURN_STREAM asked for and say so with \
+                     sipral_stack_turn_connected, or sipral_stack_turn_closed if it cannot be"
+                ),
+            ));
+        }
+        let Some(relays) = active.relays.as_mut() else {
             return Ok(None);
         };
         if relays.pending(local) {
@@ -742,7 +905,22 @@ impl Nat {
             active.media_out.retain(|request| request.local != local);
             #[cfg(feature = "ice")]
             if let Some(relays) = active.relays.as_mut() {
+                let kept = relays.holds(local);
                 relays.release(local, now);
+                // the connection goes on for the relay a call took from it,
+                // and has nothing left to carry once the one nobody took has
+                // gone back
+                let streams = &mut active.streams;
+                if streams.connecting.remove(&local) {
+                    streams.said.push_back((SipralTurnStream::Close, local));
+                } else if streams.open.contains(&local) {
+                    if kept {
+                        streams.open.remove(&local);
+                        streams.said.push_back((SipralTurnStream::Close, local));
+                    } else {
+                        streams.carried.insert(local);
+                    }
+                }
             }
             active.sort();
         }
@@ -816,16 +994,120 @@ impl Nat {
         active.mappings.map(local, sipral::Keep::Once, now);
         #[cfg(feature = "ice")]
         if let Some(relays) = active.relays.as_mut() {
+            let streams = &mut active.streams;
+            if !relays.transport().is_stream() || streams.open.contains(&local) {
+                relays.allocate(local, now);
+            } else if streams.connecting.insert(local) {
+                // the Allocate waits for the connection it is made on
+                streams.said.push_back((SipralTurnStream::Open, local));
+            }
+        }
+        active.sort();
+        Ok(())
+    }
+
+    /// The connection a socket's relay is made over is open: its Allocate
+    /// goes.
+    #[cfg(feature = "ice")]
+    fn connected(state: &mut StackState, local: SocketAddr, now: Instant) -> Result<(), Fail> {
+        let Some(active) = state.nat.active.as_mut() else {
+            return Err(not_asking());
+        };
+        if !active.streams.connecting.remove(&local) {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!(
+                    "no connection to the TURN server was asked for {local}: \
+                     SIPRAL_EVENT_KIND_TURN_STREAM says which, and only on a stack whose \
+                     turn_transport is TCP or TLS"
+                ),
+            ));
+        }
+        active.streams.open.insert(local);
+        if let Some(relays) = active.relays.as_mut() {
             relays.allocate(local, now);
         }
         active.sort();
         Ok(())
     }
 
-    fn take_media(
+    /// What a socket's connection to the TURN server carried: for the relay
+    /// being made or kept for it, or for the call that took the relay.
+    #[cfg(feature = "ice")]
+    fn stream_received(
         state: &mut StackState,
-        room: usize,
-    ) -> Result<Option<sipral::StunDatagram>, usize> {
+        local: SocketAddr,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Result<(), Fail> {
+        let Some(active) = state.nat.active.as_mut() else {
+            return Err(not_asking());
+        };
+        if !active.streams.open.contains(&local) {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!(
+                    "{local} has no open connection to the TURN server: none was asked for, it \
+                     was never said to be connected, or it has closed"
+                ),
+            ));
+        }
+        let taken = match active.relays.as_mut() {
+            Some(relays) => relays.receive_stream(local, bytes, now),
+            None => Ok(false),
+        };
+        active.sort();
+        let taken = match taken {
+            Ok(true) => Ok(true),
+            Ok(false) => state.engine.receive_stream(local, bytes, now),
+            Err(error) => Err(error),
+        };
+        match taken {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // lost with its relay: the relay's failure is raised as
+                // usual, and no SIPRAL_TURN_STREAM_CLOSE, since this answer
+                // already says to close it
+                if let Some(active) = state.nat.active.as_mut() {
+                    active.streams.open.remove(&local);
+                    active.streams.carried.remove(&local);
+                }
+                state.engine.stream_closed(local, now);
+                Err(fail(
+                    SipralStatus::StreamBroken,
+                    format!(
+                        "the connection from {local} to the TURN server carried {error}, and no \
+                         TURN message starts that way: close it; its relay is lost"
+                    ),
+                ))
+            }
+        }
+    }
+
+    /// A socket's connection to the TURN server closed, or could not be
+    /// opened.
+    #[cfg(feature = "ice")]
+    fn stream_gone(state: &mut StackState, local: SocketAddr, now: Instant) -> Result<(), Fail> {
+        let Some(active) = state.nat.active.as_mut() else {
+            return Err(not_asking());
+        };
+        let streams = &mut active.streams;
+        if streams.connecting.remove(&local) {
+            streams.lost.push_back(local);
+            return Ok(());
+        }
+        streams.carried.remove(&local);
+        if streams.open.remove(&local) {
+            if let Some(relays) = active.relays.as_mut() {
+                relays.stream_closed(local, now);
+            }
+            active.relay_out.retain(|queued| queued.local != local);
+            state.engine.stream_closed(local, now);
+        }
+        Ok(())
+    }
+
+    fn take_media(state: &mut StackState, room: usize) -> Result<Option<Outgoing>, usize> {
         let Some(active) = state.nat.active.as_mut() else {
             return Ok(None);
         };
@@ -836,25 +1118,32 @@ impl Nat {
         // relay used before the call, from the same socket, to the same server
         #[cfg(feature = "ice")]
         while let Some((_, datagram)) = state.engine.poll_waiting_transmit() {
-            active.relay_out.push_back(sipral::StunDatagram {
-                local: datagram.local,
-                destination: datagram.destination,
-                payload: datagram.payload,
-            });
+            active.relay_out.push_back(datagram);
+        }
+        if let Some(front) = active.media_out.front() {
+            if front.payload.len() > room {
+                return Err(front.payload.len());
+            }
+            return Ok(active.media_out.pop_front().map(|request| Outgoing {
+                local: request.local,
+                destination: request.destination,
+                payload: request.payload,
+                protocol: crate::stack::SipralTransport::Udp as u32,
+            }));
         }
         #[cfg(feature = "ice")]
-        let queue = if active.media_out.is_empty() {
-            &mut active.relay_out
-        } else {
-            &mut active.media_out
-        };
-        #[cfg(not(feature = "ice"))]
-        let queue = &mut active.media_out;
-        match queue.front() {
-            Some(front) if front.payload.len() > room => Err(front.payload.len()),
-            Some(_) => Ok(queue.pop_front()),
-            None => Ok(None),
+        if let Some(front) = active.relay_out.front() {
+            if front.payload.len() > room {
+                return Err(front.payload.len());
+            }
+            return Ok(active.relay_out.pop_front().map(|request| Outgoing {
+                local: request.local,
+                destination: request.destination,
+                payload: request.payload,
+                protocol: protocol_of(request.transport),
+            }));
         }
+        Ok(None)
     }
 
     fn receive_media(
@@ -923,14 +1212,31 @@ impl Active {
         #[cfg(feature = "ice")]
         if let Some(relays) = self.relays.as_mut() {
             while let Some(request) = relays.poll_transmit() {
-                self.relay_out.push_back(sipral::StunDatagram {
-                    local: request.local,
-                    destination: request.destination,
-                    payload: request.payload,
-                });
+                self.relay_out.push_back(request);
             }
         }
     }
+}
+
+/// One request for a media socket to send, and what to send it over.
+#[cfg(feature = "stun")]
+struct Outgoing {
+    local: SocketAddr,
+    destination: SocketAddr,
+    payload: Vec<u8>,
+    /// A `SipralTransport`: UDP for a datagram from `local`, TCP or TLS for
+    /// `local`'s connection to the TURN server.
+    protocol: u32,
+}
+
+/// The `SipralTransport` bytes for a TURN server go out over.
+#[cfg(feature = "ice")]
+pub(crate) const fn protocol_of(transport: TurnTransport) -> u32 {
+    crate::stack::SipralTransport::named(match transport {
+        TurnTransport::Tcp => TransportProtocol::Tcp,
+        TurnTransport::Tls => TransportProtocol::Tls,
+        TurnTransport::Udp => TransportProtocol::Udp,
+    })
 }
 
 /// Without the feature a stack never asks, since `nat` naming STUN is refused
@@ -1153,6 +1459,30 @@ fn relay_event(stack: SipralHandle, said: sipral::RelayEvent) -> Raised {
     (crate::event::nat_relay(stack, payload), text)
 }
 
+/// One connection event, and the text its two addresses point into.
+#[cfg(all(feature = "stun", feature = "ice"))]
+fn stream_event(
+    stack: SipralHandle,
+    said: SipralTurnStream,
+    protocol: u32,
+    local: SocketAddr,
+    server: SocketAddr,
+) -> Raised {
+    let local = local.to_string();
+    let server = server.to_string();
+    let text = format!("{local}{server}");
+    let base = text.as_ptr().cast::<c_char>();
+    let payload = SipralTurnStreamEvent {
+        state: said as u32,
+        protocol,
+        local: base,
+        local_len: local.len(),
+        server: base.wrapping_add(local.len()),
+        server_len: server.len(),
+    };
+    (crate::event::turn_stream(stack, payload), text)
+}
+
 /// The STUN error code a relay failure stands for, or zero for a failure no
 /// server answered with (RFC 8656 §19, RFC 8489 §14.8): what a relay event
 /// carries, and what a path a relay refused or lost does.
@@ -1180,7 +1510,8 @@ pub(crate) fn refusal_code(failure: sipral::TurnFailure) -> u32 {
         | TurnFailure::Malformed
         | TurnFailure::FamilyMismatch
         | TurnFailure::ChannelOutOfSync
-        | TurnFailure::Oversized => 0,
+        | TurnFailure::Oversized
+        | TurnFailure::ConnectionLost => 0,
     }
 }
 
@@ -1275,6 +1606,139 @@ entry! {
 }
 
 entry! {
+    /// Say that the TCP or TLS connection a
+    /// `SIPRAL_EVENT_KIND_TURN_STREAM` of state `SIPRAL_TURN_STREAM_OPEN`
+    /// asked for is open — for TLS, that the handshake has finished and the
+    /// server's certificate was checked against the name the application
+    /// configured, by the platform's own TLS stack, as for SIP over TLS.
+    ///
+    /// The socket's Allocate is waiting in [`sipral_stack_poll_stun`] when
+    /// this returns, marked with the connection's `protocol`, to be written
+    /// on it; the answer comes back through [`sipral_stack_turn_receive`],
+    /// and `SIPRAL_EVENT_KIND_NAT_RELAY` says what the server gave, exactly
+    /// as over UDP.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket no connection was asked
+    /// for, and `SIPRAL_STATUS_WRONG_STATE` on a stack created without
+    /// `SIPRAL_NAT_STUN`.
+    ///
+    /// # Safety
+    ///
+    /// `local` must be readable for `local_len` bytes.
+    fn sipral_stack_turn_connected(
+        stack: SipralHandle,
+        local: *const c_char,
+        local_len: usize,
+        now_ms: u64,
+    ) {
+        let local = unsafe { crate::media::address(local, local_len, "local") }?;
+        #[cfg(all(feature = "stun", feature = "ice"))]
+        {
+            with_stack_at(stack, now_ms, |state, now| Nat::connected(state, local, now))
+        }
+        #[cfg(not(all(feature = "stun", feature = "ice")))]
+        {
+            let _ = (stack, local, now_ms);
+            Err(no_turn_streams())
+        }
+    }
+}
+
+entry! {
+    /// Hand over bytes read off a media socket's TCP or TLS connection to
+    /// the TURN server, in whatever pieces the connection delivered them.
+    ///
+    /// The messages in them are put back together here (RFC 8656 §12.5)
+    /// and each goes where a datagram from the server would: to the relay
+    /// being made or kept for the socket, or, once a call has taken it, to
+    /// that call — its agent while it waits for its session, and then its
+    /// media, as through `sipral_media_receive`, audio included. So the
+    /// connection is read here for as long as it is open, media handle or
+    /// not, and what the call owes the far end in reply comes out of
+    /// `sipral_media_poll_transmit` as it always does.
+    ///
+    /// `SIPRAL_STATUS_STREAM_BROKEN` when the connection carried something
+    /// no TURN message starts with, which nothing in a stream can recover
+    /// from: close it. The socket's relay is lost with it —
+    /// `SIPRAL_NAT_RELAY_FAILED` for one still waiting for its call — and no
+    /// `SIPRAL_TURN_STREAM_CLOSE` follows. `SIPRAL_STATUS_INVALID_ARGUMENT`
+    /// for a socket with no open connection.
+    ///
+    /// # Safety
+    ///
+    /// `local` must be readable for `local_len` bytes, and `data` for `len`.
+    fn sipral_stack_turn_receive(
+        stack: SipralHandle,
+        local: *const c_char,
+        local_len: usize,
+        data: *const u8,
+        len: usize,
+        now_ms: u64,
+    ) {
+        let bytes = unsafe { arrived(data, len, "the bytes") }?;
+        let local = unsafe { crate::media::address(local, local_len, "local") }?;
+        #[cfg(all(feature = "stun", feature = "ice"))]
+        {
+            with_stack_at(stack, now_ms, |state, now| {
+                Nat::stream_received(state, local, bytes, now)
+            })
+        }
+        #[cfg(not(all(feature = "stun", feature = "ice")))]
+        {
+            let _ = (stack, local, bytes, now_ms);
+            Err(no_turn_streams())
+        }
+    }
+}
+
+entry! {
+    /// Say that a media socket's connection to the TURN server closed, or
+    /// could not be opened at all.
+    ///
+    /// The server knew the socket's allocation by that connection (RFC 8656
+    /// §3.2), so the relay went with it: one still being made is
+    /// `SIPRAL_NAT_RELAY_FAILED` at the next poll, and a call on the socket
+    /// goes without it; a call that had taken it keeps the paths ICE found
+    /// that need none, and loses the one through it when its consent runs
+    /// out (RFC 7675). Naming the socket again with `sipral_stack_nat_map`
+    /// asks for a new connection. `SIPRAL_STATUS_OK` for a connection the
+    /// stack had already let go.
+    ///
+    /// # Safety
+    ///
+    /// `local` must be readable for `local_len` bytes.
+    fn sipral_stack_turn_closed(
+        stack: SipralHandle,
+        local: *const c_char,
+        local_len: usize,
+        now_ms: u64,
+    ) {
+        let local = unsafe { crate::media::address(local, local_len, "local") }?;
+        #[cfg(all(feature = "stun", feature = "ice"))]
+        {
+            with_stack_at(stack, now_ms, |state, now| Nat::stream_gone(state, local, now))
+        }
+        #[cfg(not(all(feature = "stun", feature = "ice")))]
+        {
+            let _ = (stack, local, now_ms);
+            Err(no_turn_streams())
+        }
+    }
+}
+
+/// What the three connection calls answer in a build that has no relay to
+/// carry over one.
+#[cfg(not(all(feature = "stun", feature = "ice")))]
+fn no_turn_streams() -> Fail {
+    fail(
+        SipralStatus::NotSupported,
+        "this build has no ICE, so no relay to reach over a connection: \
+         SIPRAL_FEATURE_TURN_STREAM is clear in sipral_capabilities",
+    )
+}
+
+entry! {
+    /// Take the next STUN request a media socket has to send.entry! {
     /// Take the next STUN request a media socket has to send.
     ///
     /// The same record and the same rules as `sipral_stack_poll_transmit`,
@@ -1284,7 +1748,11 @@ entry! {
     /// nobody answered. `source` is always written, and it is the socket to
     /// send from — the whole point is the address the server sees it come
     /// from, so sending it from any other socket learns the wrong one.
-    /// `transport` is zero and names nothing here, and `protocol` is UDP.
+    /// `transport` is zero and names nothing here. `protocol` is UDP for a
+    /// datagram; on a stack whose `turn_transport` is TCP or TLS, what is for
+    /// the TURN server says that instead, and is written, as it is, on the
+    /// connection from `source` that `SIPRAL_EVENT_KIND_TURN_STREAM` asked
+    /// for — never sent as a datagram.
     ///
     /// A call placed, rung or answered on a socket with its relay sends
     /// through here too, for as long as it has no media handle: the Binding
@@ -1337,7 +1805,7 @@ entry! {
 /// The buffers in `transmit` must be writable for the capacities beside them,
 /// which `prepare` has already been asked about, and the payload must fit.
 #[cfg(feature = "stun")]
-unsafe fn put(transmit: &mut SipralTransmit, request: &sipral::StunDatagram) -> Result<(), Fail> {
+unsafe fn put(transmit: &mut SipralTransmit, request: &Outgoing) -> Result<(), Fail> {
     if !request.payload.is_empty() {
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -1349,7 +1817,7 @@ unsafe fn put(transmit: &mut SipralTransmit, request: &sipral::StunDatagram) -> 
     }
     transmit.len = request.payload.len();
     transmit.transport = 0;
-    transmit.protocol = crate::stack::SipralTransport::Udp as u32;
+    transmit.protocol = request.protocol;
     transmit.destination_len = unsafe {
         write_address(
             transmit.destination,
@@ -1442,11 +1910,14 @@ mod tests {
     use std::net::{IpAddr, SocketAddr};
     use std::ptr;
 
-    #[cfg(feature = "ice")]
-    use super::SipralNatRelay;
     use super::{
         SipralNat, SipralNatMapping, sipral_stack_nat_map, sipral_stack_poll_stun,
         sipral_stack_receive_stun,
+    };
+    #[cfg(feature = "ice")]
+    use super::{
+        SipralNatRelay, SipralTurnStream, sipral_stack_turn_closed, sipral_stack_turn_connected,
+        sipral_stack_turn_receive,
     };
     use crate::account::sipral_account_register;
     use crate::account::tests::account_config;
@@ -1523,7 +1994,39 @@ mod tests {
             };
             RELAYED.with(|all| all.borrow_mut().push(relayed));
         }
+        #[cfg(feature = "ice")]
+        if seen.kind == SipralEventKind::TurnStream {
+            let payload = unsafe { seen.payload.turn_stream };
+            let said = StreamSaid {
+                state: payload.state,
+                protocol: payload.protocol,
+                local: piece(payload.local, payload.local_len),
+                server: piece(payload.server, payload.server_len),
+            };
+            STREAMS.with(|all| all.borrow_mut().push(said));
+        }
         unsafe { record(event, user_data) };
+    }
+
+    /// What one `SIPRAL_EVENT_KIND_TURN_STREAM` said, copied out inside the
+    /// callback.
+    #[cfg(feature = "ice")]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct StreamSaid {
+        state: u32,
+        protocol: u32,
+        local: String,
+        server: String,
+    }
+
+    #[cfg(feature = "ice")]
+    thread_local! {
+        static STREAMS: RefCell<Vec<StreamSaid>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(feature = "ice")]
+    fn streams() -> Vec<StreamSaid> {
+        STREAMS.with(|all| std::mem::take(&mut *all.borrow_mut()))
     }
 
     /// What one `SIPRAL_EVENT_KIND_NAT_RELAY` said, copied out inside the
@@ -2368,6 +2871,24 @@ mod tests {
         assert_eq!(status, SipralStatus::InvalidArgument);
     }
 
+    /// Everything `sipral_stack_poll_stun` hands out, each with the protocol
+    /// it is marked to go over.
+    #[cfg(feature = "ice")]
+    fn stun_out_marked(stack: SipralHandle) -> Vec<(Vec<u8>, String, String, u32)> {
+        let mut buffers = Buffers::new();
+        let mut all = Vec::new();
+        loop {
+            let mut transmit = buffers.transmit();
+            let status = unsafe { sipral_stack_poll_stun(stack, &raw mut transmit) };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if transmit.len == 0 {
+                return all;
+            }
+            let (message, destination, source) = buffers.taken(&transmit);
+            all.push((message, destination, source, transmit.protocol));
+        }
+    }
+
     /// Where the TURN server relays the media socket from, in these tests.
     #[cfg(feature = "ice")]
     const RELAYED_AT: &str = "198.51.100.1:50000";
@@ -2573,6 +3094,395 @@ mod tests {
             at += 4 + len.div_ceil(4) * 4;
         }
         None
+    }
+
+    #[cfg(feature = "ice")]
+    const UDP: u32 = crate::stack::SipralTransport::Udp as u32;
+    #[cfg(feature = "ice")]
+    const TCP: u32 = crate::stack::SipralTransport::Tcp as u32;
+    #[cfg(feature = "ice")]
+    const TLS: u32 = crate::stack::SipralTransport::Tls as u32;
+
+    /// A stack whose TURN server is reached over `protocol`.
+    #[cfg(feature = "ice")]
+    fn relaying_over(observed: &mut Observed, protocol: u32) -> SipralStackConfig {
+        let mut settings = relaying(observed);
+        settings.turn_transport = protocol;
+        settings
+    }
+
+    #[cfg(feature = "ice")]
+    fn turn_connected(stack: SipralHandle, now_ms: u64) -> SipralStatus {
+        unsafe {
+            sipral_stack_turn_connected(stack, MEDIA.as_ptr().cast::<c_char>(), MEDIA.len(), now_ms)
+        }
+    }
+
+    #[cfg(feature = "ice")]
+    fn turn_receive(stack: SipralHandle, bytes: &[u8], now_ms: u64) -> SipralStatus {
+        unsafe {
+            sipral_stack_turn_receive(
+                stack,
+                MEDIA.as_ptr().cast::<c_char>(),
+                MEDIA.len(),
+                bytes.as_ptr(),
+                bytes.len(),
+                now_ms,
+            )
+        }
+    }
+
+    #[cfg(feature = "ice")]
+    fn turn_closed(stack: SipralHandle, now_ms: u64) -> SipralStatus {
+        unsafe {
+            sipral_stack_turn_closed(stack, MEDIA.as_ptr().cast::<c_char>(), MEDIA.len(), now_ms)
+        }
+    }
+
+    /// A stack over `protocol`, its media socket named and mapped, and the
+    /// connection it asked for said to be open: the stack and the account,
+    /// with the Allocate that went on the connection.
+    #[cfg(feature = "ice")]
+    fn connected_stack(
+        observed: &mut Observed,
+        protocol: u32,
+    ) -> (SipralHandle, SipralHandle, Vec<u8>) {
+        let _ = mapped();
+        let _ = relayed();
+        let _ = streams();
+        let (status, stack) = create(&relaying_over(observed, protocol));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        let _ = poll(stack, 5);
+        let _ = mapped();
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let out = stun_out_marked(stack);
+        assert_eq!(
+            out.len(),
+            1,
+            "the Binding request, and no Allocate before the connection"
+        );
+        assert!(!is_allocate(&out[0].0));
+        assert_eq!(
+            out[0].3, UDP,
+            "the mapping is the socket's own, asked over UDP"
+        );
+        assert_eq!(
+            on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 12),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 12);
+        assert_eq!(
+            streams(),
+            vec![StreamSaid {
+                state: SipralTurnStream::Open as u32,
+                protocol,
+                local: MEDIA.to_owned(),
+                server: SERVER.to_owned(),
+            }]
+        );
+        assert_eq!(
+            turn_connected(stack, 15),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let out = stun_out_marked(stack);
+        assert_eq!(out.len(), 1, "{out:?}");
+        let (allocate, destination, source, marked) = out.into_iter().next().expect("one");
+        assert!(is_allocate(&allocate));
+        assert_eq!(
+            (destination.as_str(), source.as_str(), marked),
+            (SERVER, MEDIA, protocol)
+        );
+        (stack, account, allocate)
+    }
+
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_turn_transport_needs_a_turn_server_and_is_one_of_three() {
+        let mut observed = Observed::default();
+        let mut no_server = asking(&mut observed);
+        no_server.turn_transport = TCP;
+        assert_eq!(create(&no_server).0, SipralStatus::InvalidArgument);
+        assert!(last_error_text().contains("turn_transport"));
+        let mut websocket = relaying(&mut observed);
+        websocket.turn_transport = crate::stack::SipralTransport::Ws as u32;
+        assert_eq!(create(&websocket).0, SipralStatus::InvalidArgument);
+        assert!(last_error_text().contains("turn_transport"));
+        for fine in [0, UDP, TCP, TLS] {
+            assert_eq!(
+                create(&relaying_over(&mut observed, fine)).0,
+                SipralStatus::Ok,
+                "{fine}: {}",
+                last_error_text()
+            );
+        }
+    }
+
+    /// Over TCP nothing about the relay is a datagram: the Allocate waits for
+    /// the connection, goes on it, is answered on it in whatever pieces, and
+    /// the call that takes the relay writes its permission and its checks
+    /// through it, and gives it back on it when it ends — after which the
+    /// connection has nothing left to carry, and the application is told to
+    /// close it.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_relay_over_tcp_is_made_on_its_connection_and_the_call_carries_it_there() {
+        let mut observed = Observed::default();
+        let (stack, account, allocate) = connected_stack(&mut observed, TCP);
+        let reply = turn_answer(&allocate, RELAYED_AT, "203.0.113.7:52000");
+        // the server answers on the connection, and the same answer in a
+        // datagram from its address allocates nothing
+        let _ = on_media_socket(stack, &reply, SERVER, 20);
+        let _ = poll(stack, 20);
+        assert!(relayed().is_empty(), "a datagram was believed");
+        for piece in reply.chunks(7) {
+            assert_eq!(
+                turn_receive(stack, piece, 20),
+                SipralStatus::Ok,
+                "{}",
+                last_error_text()
+            );
+        }
+        let _ = poll(stack, 20);
+        assert_eq!(
+            relayed(),
+            vec![RelaySaid {
+                outcome: SipralNatRelay::Allocated as u32,
+                code: 0,
+                local: MEDIA.to_owned(),
+                relayed: RELAYED_AT.to_owned(),
+                // the connection's own mapping says nothing about the socket
+                mapped: String::new(),
+                reason: String::new(),
+            }]
+        );
+
+        let (call, invite, _, _) = place_ice(stack, account, 30);
+        let text = String::from_utf8_lossy(&invite).into_owned();
+        assert!(text.contains("198.51.100.1 50000 typ relay"), "{text}");
+        // the connection's own mapping is no candidate of the socket's
+        assert!(!text.contains("52000 typ srflx"), "{text}");
+        assert!(text.contains("c=IN IP4 203.0.113.7\r\n"), "{text}");
+        crate::call::tests::deliver(
+            stack,
+            &crate::call::tests::accepted(&invite, &ice_answer(), true),
+            50,
+        );
+        let _ = poll(stack, 50);
+        let media = media_of(stack, call);
+        let mut sent = Vec::new();
+        for at in (50..400).step_by(20) {
+            let _ = poll(stack, at);
+            sent.extend(media_out_marked(media, at));
+        }
+        assert!(
+            sent.iter().any(|(message, to, marked)| {
+                *marked == TCP && to == SERVER && message.get(..2) == Some(&[0x00, 0x08][..])
+            }),
+            "the permission for the far end went on the connection: {sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|(_, to, marked)| to == SERVER && *marked != TCP),
+            "a datagram to a server reached over TCP: {sent:?}"
+        );
+        assert!(
+            sent.iter()
+                .any(|(_, to, marked)| *marked == UDP && to == PEER_CHECKS_FROM),
+            "and the host pair is checked from the socket as ever: {sent:?}"
+        );
+
+        assert_eq!(
+            unsafe { crate::call::sipral_call_hangup(stack, call, 500) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = streams();
+        let _ = poll(stack, 500);
+        let given_back: Vec<(Vec<u8>, String, u32)> = farewells_marked(stack)
+            .into_iter()
+            .filter(|(message, ..)| refresh_lifetime(message) == Some(0))
+            .collect();
+        assert_eq!(given_back.len(), 1, "{given_back:?}");
+        assert_eq!((given_back[0].1.as_str(), given_back[0].2), (SERVER, TCP));
+        assert_eq!(
+            streams(),
+            vec![StreamSaid {
+                state: SipralTurnStream::Close as u32,
+                protocol: TCP,
+                local: MEDIA.to_owned(),
+                server: SERVER.to_owned(),
+            }],
+            "nothing more for the connection once the call is gone"
+        );
+    }
+
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_connection_that_never_opens_leaves_the_socket_without_a_relay() {
+        let mut observed = Observed::default();
+        let _ = relayed();
+        let _ = streams();
+        let (status, stack) = create(&relaying_over(&mut observed, TLS));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let out = stun_out_marked(stack);
+        let _ = on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 12);
+        let _ = poll(stack, 12);
+        assert_eq!(streams().len(), 1);
+        let mut offering = managed_config();
+        offering.ice = crate::media::SipralIce::Offered as u32;
+        assert_eq!(
+            place(stack, account, &offering, 13).0,
+            SipralStatus::WrongState
+        );
+        assert!(last_error_text().contains("sipral_stack_turn_connected"));
+
+        assert_eq!(turn_closed(stack, 14), SipralStatus::Ok);
+        let _ = poll(stack, 14);
+        let said = relayed();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].outcome, SipralNatRelay::Failed as u32);
+        assert_eq!(said[0].code, 0);
+        assert!(said[0].reason.contains("connection"), "{}", said[0].reason);
+        assert!(streams().is_empty(), "the application closed it already");
+        assert!(stun_out_marked(stack).is_empty(), "no Allocate goes");
+        assert_eq!(turn_connected(stack, 15), SipralStatus::InvalidArgument);
+        let (status, _) = place(stack, account, &offering, 16);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    }
+
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_connection_that_stops_making_sense_is_broken_and_its_relay_lost() {
+        let mut observed = Observed::default();
+        let (stack, _, _) = connected_stack(&mut observed, TCP);
+        assert_eq!(
+            turn_receive(stack, &[22, 0xfe, 0xfd, 0, 0, 0, 0, 0], 20),
+            SipralStatus::StreamBroken
+        );
+        assert!(last_error_text().contains("close it"));
+        let _ = poll(stack, 20);
+        let said = relayed();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].outcome, SipralNatRelay::Failed as u32);
+        assert!(streams().is_empty(), "the answer already said to close it");
+        assert_eq!(
+            turn_receive(stack, &[0x40, 0, 0, 0], 21),
+            SipralStatus::InvalidArgument,
+            "nothing is open there any more"
+        );
+    }
+
+    #[cfg(feature = "ice")]
+    #[test]
+    fn unmapping_gives_the_relay_back_on_its_connection_and_closes_it() {
+        let mut observed = Observed::default();
+        let (stack, _, allocate) = connected_stack(&mut observed, TLS);
+        let reply = turn_answer(&allocate, RELAYED_AT, MEDIA_PUBLIC);
+        assert_eq!(turn_receive(stack, &reply, 20), SipralStatus::Ok);
+        let _ = poll(stack, 20);
+        assert_eq!(relayed().len(), 1);
+        assert_eq!(unmap(stack, MEDIA, 30), SipralStatus::Ok);
+        let out = stun_out_marked(stack);
+        assert!(
+            out.iter().any(|(request, destination, source, marked)| {
+                refresh_lifetime(request) == Some(0)
+                    && destination == SERVER
+                    && source == MEDIA
+                    && *marked == TLS
+            }),
+            "{out:?}"
+        );
+        let _ = poll(stack, 30);
+        assert_eq!(
+            streams(),
+            vec![StreamSaid {
+                state: SipralTurnStream::Close as u32,
+                protocol: TLS,
+                local: MEDIA.to_owned(),
+                server: SERVER.to_owned(),
+            }]
+        );
+    }
+
+    /// Everything a call's media handle hands out, with where it goes and
+    /// what over.
+    #[cfg(feature = "ice")]
+    fn media_out_marked(media: SipralHandle, now_ms: u64) -> Vec<(Vec<u8>, String, u32)> {
+        let mut data = vec![0_u8; crate::media::SIPRAL_MEDIA_PACKET_BYTES];
+        let mut destination: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
+        let mut all = Vec::new();
+        loop {
+            let mut packet = crate::media::SipralMediaPacket {
+                size: size_of::<crate::media::SipralMediaPacket>(),
+                data: data.as_mut_ptr(),
+                capacity: data.len(),
+                len: 0,
+                destination: destination.as_mut_ptr(),
+                destination_capacity: destination.len(),
+                destination_len: 0,
+                protocol: u32::MAX,
+            };
+            let status =
+                unsafe { crate::media::sipral_media_poll_transmit(media, now_ms, &raw mut packet) };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if packet.len == 0 {
+                return all;
+            }
+            let to = unsafe { CStr::from_ptr(destination.as_ptr()) }
+                .to_string_lossy()
+                .into_owned();
+            all.push((
+                data.get(..packet.len).unwrap_or_default().to_vec(),
+                to,
+                packet.protocol,
+            ));
+        }
+    }
+
+    /// Everything `sipral_stack_poll_farewell` hands out, with where it goes
+    /// and what over.
+    #[cfg(feature = "ice")]
+    fn farewells_marked(stack: SipralHandle) -> Vec<(Vec<u8>, String, u32)> {
+        let mut data = vec![0_u8; crate::media::SIPRAL_MEDIA_PACKET_BYTES];
+        let mut destination: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
+        let mut all = Vec::new();
+        loop {
+            let mut packet = crate::media::SipralMediaPacket {
+                size: size_of::<crate::media::SipralMediaPacket>(),
+                data: data.as_mut_ptr(),
+                capacity: data.len(),
+                len: 0,
+                destination: destination.as_mut_ptr(),
+                destination_capacity: destination.len(),
+                destination_len: 0,
+                protocol: u32::MAX,
+            };
+            let mut call = SIPRAL_HANDLE_NONE;
+            let status = unsafe {
+                crate::media::sipral_stack_poll_farewell(stack, &raw mut call, &raw mut packet)
+            };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if packet.len == 0 {
+                return all;
+            }
+            let to = unsafe { CStr::from_ptr(destination.as_ptr()) }
+                .to_string_lossy()
+                .into_owned();
+            all.push((
+                data.get(..packet.len).unwrap_or_default().to_vec(),
+                to,
+                packet.protocol,
+            ));
+        }
     }
 
     /// A relay allocated for a socket whose call was described when it rang
@@ -3319,6 +4229,7 @@ mod tests {
                 destination: destination.as_mut_ptr(),
                 destination_capacity: destination.len(),
                 destination_len: 0,
+                protocol: u32::MAX,
             };
             let status =
                 unsafe { crate::media::sipral_media_poll_transmit(media, now_ms, &raw mut packet) };

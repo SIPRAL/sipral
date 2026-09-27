@@ -118,6 +118,16 @@ out of every log, event and exception this package raises.
 same as `nat`, which `docs/06-nat.md` explains. `SipralIce.Lite` is the
 server's value, never the phone's: an ICE-lite endpoint (RFC 8445 §2.5) for
 a host reachable at the address it advertises, answering full ICE peers.
+`turnTransport: SipralTransport.Tcp` reaches the TURN server over TCP, for
+the network that lets no UDP out, and `SipralTransport.Tls` over TLS (RFC 8656
+§3.1), 5349 being the port for it: the stack opens a `TcpClient` per media
+socket when `SipralEventKind.TurnStream` asks, an `SslStream` over it for
+TLS, carries everything for the relay on it and closes it when told. The
+certificate is checked against `turnServerName` — the host part of
+`turnServer` when `null` — with the platform's trust, or, when
+`turnTrustedCertificates` holds any, with those roots and nothing else.
+`Sipral.Tests/TurnStreamTests.cs` proves it against a TURN server on a TCP
+port, over TLS with a certificate trusted and not.
 `g729AnnexB: false` on the stack turns off G.729's Annex B silence
 compression (`annexb=no`) if that codec runs at all.
 

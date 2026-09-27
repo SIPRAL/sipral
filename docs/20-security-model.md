@@ -433,7 +433,9 @@ this end directly rather than through the line's own proxy.
   planned, because a stack that picked one would impose it on every embedder
   (`docs/01-architecture.md`, `docs/03-core-signalling.md`). Whatever
   protection SDES's key exchange needs from the signalling transport (above)
-  is therefore entirely the application's to provide.
+  is therefore entirely the application's to provide. The same holds for a
+  TURN server reached over TLS (below): the stack frames what crosses the
+  connection and never sees the handshake.
 - **It is not a proxy, a registrar or a B2BUA.** It never rewrites a message
   on someone else's behalf and never terminates one signalling leg to
   originate another, so the class of attack that targets those roles has
@@ -628,8 +630,36 @@ The TURN client (`crates/sipral-nat/src/turn/client.rs`, about 3,000 lines) is
 reachable now, on a stack given a `turn_server` (C ABI) or a `sipral::Relays`
 (Rust). It talks to a configured server under a long-term credential, and the
 ICE agent uses the allocation as the call's relayed candidate. The `turn` and
-`turn_client` fuzz targets cover its framing and state machine. A person's
-adversarial reading of it is still owed.
+`turn_client` fuzz targets cover its framing and state machine, the stream
+reassembly over TCP included. A person's adversarial reading of it is still
+owed.
+
+**A TURN server reached over TLS is checked by the application's TLS, and by
+nothing here.** RFC 8656 §3.1 gives TLS to the client that wants "to
+ascertain that it is talking to the correct server"; the connection is the
+application's, and so is that check (`docs/06-nat.md`, *Over TCP or TLS*).
+The four bindings check the server's certificate against a configured name —
+the server's own name, not the address the ABI is given, since the address is
+all `turn_server` takes — with the platform's trust store by default, or with
+roots the application hands over for a private CA or a self-signed lab
+server, trusted then instead of the store and not beside it. None of them has
+a way to turn the check off, and one whose certificate fails it gives no
+relay at all: the socket's `SIPRAL_EVENT_KIND_NAT_RELAY` says failed and the
+call goes on without one, on whatever path ICE finds. What TLS buys is the
+server's identity and the privacy of the TURN control messages; the long-term
+credential crosses it signed rather than in clear either way (RFC 8489 §9.2),
+so TLS protects the credential from an offline guess at the password, not
+from disclosure. The media inside is still SRTP's to protect — RFC 8656 §3.1
+calls TLS here "doubly encrypted" for that reason — and a server that relays
+is a server that sees who talks to whom and when, over TLS or not. Apple's
+TLS asks a server certificate to name `serverAuth` among its extended key
+usages; a certificate made for such a server without it is refused by the
+Swift binding before anything else is. Bytes that arrive on the connection
+reach the stack only after the TLS layer below has authenticated them, so
+the reassembly (`TurnClient::push_stream`) reads only what the server wrote —
+and a stream that stops being TURN is closed rather than resynchronised,
+since a guess at where the next message starts is a guess an attacker who
+could write one byte would win.
 
 **Everything upstream of this layer is the application's.** No identity
 verification beyond source address and dialog matching exists anywhere in

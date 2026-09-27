@@ -18,6 +18,7 @@ import asyncio
 import os
 import selectors
 import socket
+import ssl
 import threading
 import time
 
@@ -36,6 +37,9 @@ __all__ = ["Stack"]
 #: multiple of it rather than that same bound.
 _TRANSMIT_BYTES = 1 << 16
 _ADDRESS_BYTES = 128
+#: How long a write on a connection to the TURN server may wait for room
+#: before the connection is given up as dead, which loses the relay on it.
+_TURN_WRITE_PATIENCE = 5.0
 
 
 def _toggle(value: bool | None) -> int:
@@ -54,6 +58,21 @@ def parse_address(text: str) -> tuple[str, int]:
     """The inverse of :func:`format_address`."""
     host, _, port = text.rpartition(":")
     return host, int(port)
+
+
+class _TurnStream:
+    """One media socket's TCP or TLS connection to the TURN server.
+
+    Read by the poll thread alone, and written by it and by the call's
+    :class:`sipral.media.Media` thread: every operation on the socket holds
+    :attr:`lock`, since one TLS session read and written from two threads
+    at once is a session whose records interleave.
+    """
+
+    def __init__(self, local: str, sock: socket.socket) -> None:
+        self.local = local
+        self.sock = sock
+        self.lock = threading.Lock()
 
 
 class Stack:
@@ -84,6 +103,9 @@ class Stack:
         turn_server: str | None = None,
         turn_username: str | None = None,
         turn_password: str | None = None,
+        turn_transport: int = 0,
+        turn_server_name: str | None = None,
+        turn_tls_context: ssl.SSLContext | None = None,
         g729_annex_b: bool | None = None,
         referrals: bool | None = None,
         registrar_keepalive: bool | None = None,
@@ -121,6 +143,19 @@ class Stack:
         and kept out of every log, event and error this package raises --
         neither is in `repr(stack)` (there is none) or anywhere else this
         module writes text.
+
+        ``turn_transport`` is a :class:`sipral.enums.Transport` --
+        ``Transport.TCP`` for a network that lets no UDP out,
+        ``Transport.TLS`` for one that lets one port out (5349 is TURN's) --
+        or ``0`` for UDP (RFC 8656 Section 3.1). Over either this stack opens
+        one connection per media socket, when
+        `SIPRAL_EVENT_KIND_TURN_STREAM` asks, and carries everything for the
+        relay on it. Over TLS the server's certificate is checked against
+        ``turn_server_name`` -- the host part of ``turn_server`` when left
+        out, which for an address is an IP-address certificate -- with
+        ``turn_tls_context``, or with the platform's default trust when none
+        is given: a context built with ``cafile=`` trusts a private CA or a
+        self-signed certificate, and nothing here ever turns checking off.
         """
         self._loop = loop
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
@@ -128,6 +163,24 @@ class Stack:
         self._lock = threading.Lock()
         self._nat = nat
         self._turn = turn_server is not None
+        self._turn_server_name = turn_server_name or (
+            parse_address(turn_server)[0] if turn_server else None
+        )
+        self._turn_tls_context = turn_tls_context
+        #: Every media socket's open connection to the TURN server, by the
+        #: socket's `host:port`, under :attr:`_nat_lock`.
+        self._turn_streams: dict[str, _TurnStream] = {}
+        #: What `SIPRAL_EVENT_KIND_TURN_STREAM` asked for during the poll
+        #: that raised it -- nothing may call back into the stack from
+        #: inside its own callback -- acted on right after that poll.
+        self._turn_asked: list[tuple[int, str, str, int]] = []
+        #: Every call's media socket, by the call's handle, for as long as
+        #: the socket's connection to the TURN server stands: a call's last
+        #: farewell -- the Refresh that gives its relay back -- can come
+        #: after the :class:`Call` was closed and forgotten, and still goes
+        #: on that connection. Under :attr:`_nat_lock`.
+        self._turn_sockets: dict[int, str] = {}
+        self._turn_streamed = turn_transport in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS)
 
         #: Media sockets currently named with `sipral_stack_nat_map`, keyed
         #: by their own `host:port` text -- from that call until either
@@ -223,6 +276,7 @@ class Stack:
         config.referrals = _toggle(referrals)
         config.registrar_keepalive = _toggle(registrar_keepalive)
         config.registrar_keepalive_ms = registrar_keepalive_ms
+        config.turn_transport = turn_transport
 
         out_stack = ffi.new("sipral_handle_t *")
         check(lib.sipral_stack_create(config, out_stack), "sipral_stack_create")
@@ -372,8 +426,7 @@ class Stack:
             media_socket.close()
             raise
         call = Call(self, int(out_call[0]), media_socket, media_address)
-        with self._lock:
-            self._calls[call.handle] = call
+        self.register_call(call)
         return call
 
     def answer_call(
@@ -471,8 +524,7 @@ class Stack:
             media_socket.close()
             raise
         call = Call(self, int(out_placed[0]), media_socket, media_address)
-        with self._lock:
-            self._calls[call.handle] = call
+        self.register_call(call)
         return call
 
     def reject_referral(self, event: _events.Event, code: int = 603) -> None:
@@ -500,6 +552,9 @@ class Stack:
         """
         with self._lock:
             self._calls[call.handle] = call
+        if self._turn_streamed:
+            with self._nat_lock:
+                self._turn_sockets[call.handle] = call.media_address
 
     def forget_call(self, handle: int) -> None:
         with self._lock:
@@ -530,6 +585,11 @@ class Stack:
         # reason `Call.deliver` orders its own steps that way: a consumer
         # of `self.events` may look up `self.call_for(event.call)` and
         # read its state, and that state has to already be current.
+        if event.kind == lib.SIPRAL_EVENT_KIND_TURN_STREAM:
+            fields = event.fields
+            self._turn_asked.append(
+                (fields["state"], fields["local"], fields["server"], fields["protocol"])
+            )
         if event.kind in (lib.SIPRAL_EVENT_KIND_NAT_MAPPING, lib.SIPRAL_EVENT_KIND_NAT_RELAY):
             local = event.fields.get("local")
             if local:
@@ -615,6 +675,14 @@ class Stack:
                 return
             if packet.len == 0:
                 return
+            if packet.protocol in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
+                # given back on the relay's connection, which is the
+                # stack's and not the call's, and outlives it
+                with self._nat_lock:
+                    local = self._turn_sockets.get(int(out_call[0]))
+                if local is not None:
+                    self.write_turn(local, bytes(ffi.buffer(packet.data, packet.len)))
+                continue
             call = self.call_for(int(out_call[0]))
             if call is None:
                 continue
@@ -750,6 +818,11 @@ class Stack:
             payload = bytes(ffi.buffer(transmit.data, transmit.len))
             destination = ffi.string(transmit.destination, transmit.destination_len).decode("utf-8")
             source_text = ffi.string(transmit.source, transmit.source_len).decode("utf-8")
+            if transmit.protocol in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
+                # for the TURN server, on the socket's connection to it:
+                # never a datagram, which a network that blocks UDP drops
+                self.write_turn(source_text, payload)
+                continue
             with self._nat_lock:
                 sock = self._stun_sockets.get(source_text)
             if sock is None:
@@ -760,13 +833,165 @@ class Stack:
             except OSError:
                 pass
 
+    # -- the TURN server over TCP or TLS -----------------------------------
+
+    def write_turn(self, local: str, payload: bytes) -> None:
+        """Write ``payload`` on media socket ``local``'s connection to the
+        TURN server, whole: what `sipral_stack_poll_stun`,
+        `sipral_stack_poll_farewell` and a call's media hand out marked TCP
+        or TLS. Thread-safe; a connection that fails here is closed and the
+        stack is told, which loses the relay on it."""
+        with self._nat_lock:
+            stream = self._turn_streams.get(local)
+        if stream is None:
+            return
+        try:
+            with stream.lock:
+                stream.sock.sendall(payload)
+        except (OSError, ssl.SSLError):
+            self._lose_turn_stream(local, tell=True)
+
+    def _act_on_turn_streams(self) -> None:
+        """Open or close what `SIPRAL_EVENT_KIND_TURN_STREAM` asked for in
+        the poll that just ran. A connection is opened on a thread of its
+        own -- a TLS handshake is round trips the poll thread does not wait
+        out -- and closed here, after this round's queues were written."""
+        asked, self._turn_asked = self._turn_asked, []
+        for state, local, server, protocol in asked:
+            if state == lib.SIPRAL_TURN_STREAM_OPEN:
+                threading.Thread(
+                    target=self._open_turn_stream,
+                    args=(local, server, protocol),
+                    name="sipral-turn",
+                    daemon=True,
+                ).start()
+            elif state == lib.SIPRAL_TURN_STREAM_CLOSE:
+                with self._nat_lock:
+                    self._turn_sockets = {
+                        handle: named for handle, named in self._turn_sockets.items() if named != local
+                    }
+                self._lose_turn_stream(local, tell=False)
+
+    def _open_turn_stream(self, local: str, server: str, protocol: int) -> None:
+        """Connect to the TURN server for media socket ``local``, over TLS
+        when ``protocol`` says so with the certificate checked against
+        :attr:`_turn_server_name`, and say how that went:
+        `sipral_stack_turn_connected`, or `sipral_stack_turn_closed` for a
+        connection that could not be made -- a refused port, a handshake
+        that failed, a certificate nobody vouches for."""
+        local_bytes = local.encode("utf-8")
+        host, port = parse_address(server)
+        try:
+            raw = socket.create_connection((host, port), timeout=5.0)
+        except OSError:
+            self._say_turn(lib.sipral_stack_turn_closed, local_bytes)
+            return
+        try:
+            if protocol == lib.SIPRAL_TRANSPORT_TLS:
+                context = self._turn_tls_context or ssl.create_default_context()
+                sock: socket.socket = context.wrap_socket(raw, server_hostname=self._turn_server_name)
+            else:
+                sock = raw
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.settimeout(_TURN_WRITE_PATIENCE)
+        except (OSError, ssl.SSLError, ValueError):
+            raw.close()
+            self._say_turn(lib.sipral_stack_turn_closed, local_bytes)
+            return
+        if self._closed.is_set():
+            sock.close()
+            return
+        with self._nat_lock:
+            self._turn_streams[local] = _TurnStream(local, sock)
+        self._selector.register(sock, selectors.EVENT_READ, data=("turn", local))
+        self._say_turn(lib.sipral_stack_turn_connected, local_bytes)
+
+    def _say_turn(self, entry_point, local_bytes: bytes) -> None:
+        """`sipral_stack_turn_connected` or `sipral_stack_turn_closed`,
+        from whichever thread knows; never raising on the way out."""
+        local_buf = ffi.new("char[]", local_bytes)
+        try:
+            _retry(
+                lambda: entry_point(self.handle, local_buf, len(local_bytes), self.now_ms()),
+                "a TURN connection",
+            )
+        except Exception:  # noqa: BLE001 -- the stack is going away
+            pass
+
+    def _read_turn_stream(self, local: str) -> None:
+        """What media socket ``local``'s connection to the TURN server
+        carried, to `sipral_stack_turn_receive` -- every byte, in order,
+        since a stream that loses one never finds its place again: a busy
+        stack is waited for rather than skipped. The connection closing is
+        `sipral_stack_turn_closed`; one the stack found broken
+        (`SIPRAL_STATUS_STREAM_BROKEN`) is closed and needs no word."""
+        with self._nat_lock:
+            stream = self._turn_streams.get(local)
+        if stream is None:
+            return
+        try:
+            with stream.lock:
+                # read without waiting: the selector said bytes arrived, not
+                # that they make application data -- TLS 1.3's session
+                # tickets come after the handshake and hold none, and a
+                # read waiting on the rest would hold this, the poll
+                # thread, for the socket's whole timeout
+                stream.sock.settimeout(0.0)
+                try:
+                    data = stream.sock.recv(_TRANSMIT_BYTES)
+                    pending = getattr(stream.sock, "pending", None)
+                    while pending is not None and pending() > 0:
+                        data += stream.sock.recv(pending())
+                finally:
+                    stream.sock.settimeout(_TURN_WRITE_PATIENCE)
+        except (ssl.SSLWantReadError, BlockingIOError, socket.timeout):
+            return
+        except (OSError, ssl.SSLError):
+            data = b""
+        if not data:
+            self._lose_turn_stream(local, tell=True)
+            return
+        local_bytes = local.encode("utf-8")
+        local_buf = ffi.new("char[]", local_bytes)
+        while True:
+            status = lib.sipral_stack_turn_receive(
+                self.handle, local_buf, len(local_bytes), data, len(data), self.now_ms()
+            )
+            if status != lib.SIPRAL_STATUS_BUSY or self._closed.is_set():
+                break
+            time.sleep(0.001)
+        if status == lib.SIPRAL_STATUS_STREAM_BROKEN:
+            self._lose_turn_stream(local, tell=False)
+
+    def _lose_turn_stream(self, local: str, *, tell: bool) -> None:
+        """Close media socket ``local``'s connection, and when ``tell``, say
+        so with `sipral_stack_turn_closed` -- not for one the stack itself
+        asked to close or found broken."""
+        with self._nat_lock:
+            stream = self._turn_streams.pop(local, None)
+        if stream is None:
+            return
+        try:
+            self._selector.unregister(stream.sock)
+        except (KeyError, ValueError, OSError):
+            pass
+        with stream.lock:
+            try:
+                stream.sock.close()
+            except OSError:
+                pass
+        if tell:
+            self._say_turn(lib.sipral_stack_turn_closed, local.encode("utf-8"))
+
     def _run(self) -> None:
         result = ffi.new("sipral_poll_result_t *")
         while not self._closed.is_set():
             timeout = 0.05
             events = self._selector.select(timeout)
             for key, _mask in events:
-                if key.data == "main":
+                if isinstance(key.data, tuple) and key.data[0] == "turn":
+                    self._read_turn_stream(key.data[1])
+                elif key.data == "main":
                     try:
                         data, from_address = self._socket.recvfrom(_TRANSMIT_BYTES)
                     except (BlockingIOError, OSError):
@@ -817,6 +1042,7 @@ class Stack:
             self._drain_transmit()
             self._drain_stun()
             self._drain_farewells()
+            self._act_on_turn_streams()
 
     def close(self) -> None:
         """`sipral_stack_destroy`, and everything this wrapper opened.
@@ -873,6 +1099,12 @@ class Stack:
         self._closed.set()
         if threading.current_thread() is not self._thread:
             self._thread.join(timeout=5.0)
+        # and every connection to the TURN server still open: what it
+        # carried was given back through it above, or lapses with it
+        with self._nat_lock:
+            streams = list(self._turn_streams)
+        for local in streams:
+            self._lose_turn_stream(local, tell=False)
         lib.sipral_stack_destroy(self.handle)
         self._selector.close()
         self._socket.close()

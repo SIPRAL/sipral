@@ -492,6 +492,13 @@ pub struct MediaEngine {
     /// branch holds beside the others ([`crate::ice::LocalIce::shared_agent`]).
     #[cfg(feature = "ice")]
     fork_relays: BTreeMap<CallHandle, sipral_nat::ice::SharedRelay>,
+    /// What calls wrote for a relay's TCP or TLS connection to its TURN
+    /// server, out of what [`MediaEngine::poll_transmit`],
+    /// [`MediaEngine::poll_rtcp`] and the farewells would otherwise have
+    /// handed out as datagrams, waiting for
+    /// [`MediaEngine::poll_turn_stream`].
+    #[cfg(feature = "ice")]
+    streamed: VecDeque<(CallHandle, crate::RelayDatagram)>,
 }
 
 /// The relay a description was handed, for as long as the description can
@@ -600,6 +607,8 @@ impl MediaEngine {
             branches: BTreeMap::new(),
             #[cfg(feature = "ice")]
             fork_relays: BTreeMap::new(),
+            #[cfg(feature = "ice")]
+            streamed: VecDeque::new(),
         }
     }
 
@@ -937,18 +946,11 @@ impl MediaEngine {
                 // drawn no candidates yet, so none is waiting here; were one
                 // ever replaced, its allocation goes back rather than being
                 // dropped with nothing sent
-                if let Some(mut before) = self.gathered.insert(call, ice) {
-                    for (destination, payload) in before.release(now) {
-                        self.farewells.push_back((call, destination, payload));
-                    }
+                if let Some(before) = self.gathered.insert(call, ice) {
+                    self.release_ice(call, before, now);
                 }
             }
-            Some(Kept::Unused(relay)) => {
-                let server = relay.server();
-                for payload in relay.release(now) {
-                    self.farewells.push_back((call, server, payload));
-                }
-            }
+            Some(Kept::Unused(relay)) => self.relay_farewell(call, *relay, now),
             None => {}
         }
     }
@@ -986,12 +988,10 @@ impl MediaEngine {
     /// branch of its fork still holds it (RFC 8445 §8.3.1).
     #[cfg(feature = "ice")]
     fn let_go(&mut self, call: CallHandle, now: Instant) {
-        let Some(mut ice) = self.gathered.remove(&call) else {
+        let Some(ice) = self.gathered.remove(&call) else {
             return;
         };
-        for (destination, payload) in ice.release(now) {
-            self.farewells.push_back((call, destination, payload));
-        }
+        self.release_ice(call, ice, now);
     }
 
     /// The fork `call` is a branch of: the call its first description was
@@ -1044,6 +1044,80 @@ impl MediaEngine {
             self.calls.contains_key(&root) || self.branches.values().any(|first| *first == root);
         if !left {
             self.fork_relays.remove(&root);
+        }
+    }
+
+    /// One of `call`'s own datagrams as a farewell, `local` being the socket
+    /// the call was described on: among the rest, or with
+    /// [`MediaEngine::poll_turn_stream`]'s when it goes through a relay's
+    /// connection to its TURN server.
+    fn say_farewell(
+        &mut self,
+        call: CallHandle,
+        local: Option<SocketAddr>,
+        datagram: crate::session::Datagram<'_>,
+    ) {
+        #[cfg(feature = "ice")]
+        if let Some(local) = local.filter(|_| datagram.transport.is_stream()) {
+            let said = vec![(
+                datagram.destination,
+                datagram.transport,
+                datagram.payload.to_vec(),
+            )];
+            self.farewells_of(call, local, said);
+            return;
+        }
+        #[cfg(not(feature = "ice"))]
+        let _ = local;
+        self.farewells
+            .push_back((call, datagram.destination, datagram.payload.to_vec()));
+    }
+
+    /// Give a relay back to its server among `call`'s farewells.
+    #[cfg(feature = "ice")]
+    fn relay_farewell(&mut self, call: CallHandle, relay: crate::Relay, now: Instant) {
+        let (local, server, transport) = (relay.local(), relay.server(), relay.transport());
+        let released = relay
+            .release(now)
+            .into_iter()
+            .map(|payload| (server, transport, payload))
+            .collect();
+        self.farewells_of(call, local, released);
+    }
+
+    /// Give back every relay `ice` holds among `call`'s farewells, from the
+    /// socket it runs on.
+    #[cfg(feature = "ice")]
+    fn release_ice(&mut self, call: CallHandle, mut ice: crate::ice::Ice, now: Instant) {
+        let local = ice.local();
+        let said = ice.release(now);
+        self.farewells_of(call, local, said);
+    }
+
+    /// `call`'s farewells from the socket `local`, each where it goes and
+    /// how: a datagram among the rest, and what is for a relay's connection
+    /// to its TURN server with [`MediaEngine::poll_turn_stream`]'s.
+    #[cfg(feature = "ice")]
+    fn farewells_of(
+        &mut self,
+        call: CallHandle,
+        local: SocketAddr,
+        said: Vec<(SocketAddr, crate::TurnTransport, Vec<u8>)>,
+    ) {
+        for (destination, transport, payload) in said {
+            if transport.is_stream() {
+                self.streamed.push_back((
+                    call,
+                    crate::RelayDatagram {
+                        local,
+                        destination,
+                        payload,
+                        transport,
+                    },
+                ));
+            } else {
+                self.farewells.push_back((call, destination, payload));
+            }
         }
     }
 
@@ -1190,10 +1264,8 @@ impl MediaEngine {
         // stream on `c=`/`m=` and symmetric RTP has no use for one
         let mut held = self.gathered.remove(&call);
         let built = self.build_ice(call, plan, &mut held, now);
-        if let Some(mut unused) = held {
-            for (destination, payload) in unused.release(now) {
-                self.farewells.push_back((call, destination, payload));
-            }
+        if let Some(unused) = held {
+            self.release_ice(call, unused, now);
         }
         built
     }
@@ -1326,11 +1398,28 @@ impl MediaEngine {
     /// The octets are copied out rather than lent, for the reason
     /// [`MediaEngine::poll_rtcp`] gives: a handshake is a few datagrams once
     /// per call.
+    ///
+    /// What goes through a relay's TCP or TLS connection to its TURN server
+    /// is not handed out here but set aside for
+    /// [`MediaEngine::poll_turn_stream`], so drain that after this.
     #[cfg(any(feature = "dtls", feature = "ice"))]
     #[must_use]
     pub fn poll_transmit(&mut self, now: Instant) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
+        #[cfg(feature = "ice")]
+        let (calls, streamed) = (&self.calls, &mut self.streamed);
         for (call, held) in &self.sessions {
             let mut slot = share::lock(held);
+            #[cfg(feature = "ice")]
+            while let Some(datagram) = slot.session.poll_transmit(now) {
+                if datagram.transport.is_stream() {
+                    set_aside(streamed, calls, *call, &datagram);
+                    continue;
+                }
+                return Some((*call, datagram.destination, datagram.payload.to_vec()));
+            }
+            // without a relay there is no connection to set anything aside
+            // for, and the first datagram is the one handed out
+            #[cfg(not(feature = "ice"))]
             if let Some(datagram) = slot.session.poll_transmit(now) {
                 return Some((*call, datagram.destination, datagram.payload.to_vec()));
             }
@@ -1339,11 +1428,127 @@ impl MediaEngine {
         // the keepalives that hold the NAT binding towards the TURN server
         #[cfg(feature = "ice")]
         for (call, ice) in &mut self.gathered {
-            if let Some(destination) = ice.take_probe() {
+            while let Some((destination, transport)) = ice.take_probe() {
+                if transport.is_stream() {
+                    self.streamed.push_back((
+                        *call,
+                        crate::RelayDatagram {
+                            local: ice.local(),
+                            destination,
+                            payload: ice.probe().to_vec(),
+                            transport,
+                        },
+                    ));
+                    continue;
+                }
                 return Some((*call, destination, ice.probe().to_vec()));
             }
         }
         None
+    }
+
+    /// Whether a call is described on the media socket `local`: placed, rung
+    /// or answered there, and not ended.
+    ///
+    /// What an application that opened a TCP or TLS connection to a TURN
+    /// server for the socket ([`crate::Relays::over`]) asks after a call on
+    /// it ends: while one is still described there — another branch of a
+    /// forked call, which may inherit the relay — the connection has a relay
+    /// to carry, and once none is, and the farewells are sent, it has
+    /// nothing left.
+    #[must_use]
+    pub fn describes(&self, local: SocketAddr) -> bool {
+        self.calls
+            .values()
+            .any(|managed| managed.address == Some(local))
+    }
+
+    /// What a call wrote for its relay's TCP or TLS connection to the TURN
+    /// server ([`crate::Relays::over`]), set aside by
+    /// [`MediaEngine::poll_transmit`], [`MediaEngine::poll_rtcp`] and a
+    /// call's ending rather than handed out as datagrams: the connection is
+    /// the one from [`crate::RelayDatagram::local`], and the bytes are
+    /// written on it as they are, in the order they come out here. One at a
+    /// time; loop until `None` after each of those.
+    #[cfg(feature = "ice")]
+    #[must_use]
+    pub fn poll_turn_stream(&mut self) -> Option<(CallHandle, crate::RelayDatagram)> {
+        self.streamed.pop_front()
+    }
+
+    /// Hand in bytes read off the TCP or TLS connection from the media
+    /// socket `local` to the TURN server a call's relay runs over, in
+    /// whatever pieces it delivered them, and say whether a call's relay
+    /// runs over it.
+    ///
+    /// The call whose relay it is takes them: the session, as
+    /// [`MediaSession::receive_stream`](crate::MediaSession::receive_stream),
+    /// or the agent of a call described there and waiting for its session —
+    /// the refresh's answer above all, as [`MediaEngine::receive_waiting`]
+    /// takes it off a datagram. Drain [`MediaEngine::poll_transmit`] and
+    /// [`MediaEngine::poll_turn_stream`] after it. `Ok(false)` leaves the
+    /// bytes to [`crate::Relays::receive_stream`], for a socket no call has
+    /// taken the relay of yet.
+    ///
+    /// # Errors
+    ///
+    /// The connection carried something that is not a TURN message, and the
+    /// relay is lost with it; the application closes the connection.
+    #[cfg(feature = "ice")]
+    pub fn receive_stream(
+        &mut self,
+        local: SocketAddr,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Result<bool, crate::TurnStreamError> {
+        for ice in self.gathered.values_mut() {
+            if ice.local() != local || ice.stream_server().is_none() {
+                continue;
+            }
+            ice.top_up();
+            if !ice.push_stream(bytes) {
+                continue;
+            }
+            // before its session a call has nowhere to play what a peer sent
+            // through the relay, and the peer sends it again once the answer
+            // lands; the agent's own answers are what matter here
+            let mut frame = Vec::new();
+            loop {
+                ice.top_up();
+                if ice.poll_stream(&mut frame, now)?.is_none() {
+                    return Ok(true);
+                }
+            }
+        }
+        let open = self.calls.iter().find_map(|(call, managed)| {
+            (managed.address == Some(local))
+                .then(|| self.sessions.get(call))
+                .flatten()
+        });
+        match open {
+            Some(held) => share::lock(held).session.receive_stream(bytes, now),
+            None => Ok(false),
+        }
+    }
+
+    /// The TCP or TLS connection from the media socket `local` to the TURN
+    /// server a call's relay ran over closed, and the relay is gone with it
+    /// ([`MediaSession::stream_closed`](crate::MediaSession::stream_closed)).
+    /// A call still waiting for its session opens it without the relay.
+    #[cfg(feature = "ice")]
+    pub fn stream_closed(&mut self, local: SocketAddr, now: Instant) {
+        for ice in self.gathered.values_mut() {
+            if ice.local() == local {
+                ice.stream_closed(now);
+            }
+        }
+        for (call, managed) in &self.calls {
+            if managed.address == Some(local)
+                && let Some(held) = self.sessions.get(call)
+            {
+                share::lock(held).session.stream_closed(now);
+            }
+        }
     }
 
     /// What this engine offers by default, in the order it offers it — A4's
@@ -2357,13 +2562,14 @@ impl MediaEngine {
     #[must_use]
     pub fn poll_waiting_transmit(&mut self) -> Option<(CallHandle, crate::RelayDatagram)> {
         for (call, ice) in &mut self.gathered {
-            if let Some(destination) = ice.take_probe() {
+            if let Some((destination, transport)) = ice.take_probe() {
                 return Some((
                     *call,
                     crate::RelayDatagram {
                         local: ice.local(),
                         destination,
                         payload: ice.probe().to_vec(),
+                        transport,
                     },
                 ));
             }
@@ -2639,17 +2845,27 @@ impl MediaEngine {
     /// the copy costs nothing the audio path would notice; a thread that
     /// carries one call's audio can ask that call alone with
     /// [`MediaSession::poll_rtcp`] through a [`SessionShare`] instead.
+    ///
+    /// A report that goes through a relay's TCP or TLS connection is set
+    /// aside for [`MediaEngine::poll_turn_stream`] instead.
     #[must_use]
     pub fn poll_rtcp(&mut self, now: Instant) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
+        #[cfg(feature = "ice")]
+        let (calls, streamed) = (&self.calls, &mut self.streamed);
         for (call, held) in &self.sessions {
             let mut slot = share::lock(held);
             if !slot.session.rtcp_deadline_passed(now) {
                 continue;
             }
-            return slot
-                .session
-                .poll_rtcp(now)
-                .map(|datagram| (*call, datagram.destination, datagram.payload.to_vec()));
+            let Some(datagram) = slot.session.poll_rtcp(now) else {
+                continue;
+            };
+            #[cfg(feature = "ice")]
+            if datagram.transport.is_stream() {
+                set_aside(streamed, calls, *call, &datagram);
+                continue;
+            }
+            return Some((*call, datagram.destination, datagram.payload.to_vec()));
         }
         None
     }
@@ -3124,8 +3340,7 @@ impl MediaEngine {
         // can reach it. It is freed when the last reference to it goes, which
         // is at the end of this function unless a share is mid-frame on it.
         if let Some(datagram) = session.goodbye(now) {
-            self.farewells
-                .push_back((call, datagram.destination, datagram.payload.to_vec()));
+            self.say_farewell(call, address, datagram);
         }
         // and the same courtesy to the far end's DTLS stack. It comes after
         // the BYE because a stream that never keyed has no BYE to send —
@@ -3135,8 +3350,7 @@ impl MediaEngine {
         {
             session.close_handshake();
             while let Some(datagram) = session.poll_transmit(now) {
-                self.farewells
-                    .push_back((call, datagram.destination, datagram.payload.to_vec()));
+                self.say_farewell(call, address, datagram);
             }
         }
         // and last, because the goodbyes above may have left through it: the
@@ -3145,8 +3359,18 @@ impl MediaEngine {
         // or, while another branch of the fork still holds it, stays theirs,
         // and stops letting this branch's peer through
         #[cfg(feature = "ice")]
-        for (destination, payload) in session.release_relays(now) {
-            self.farewells.push_back((call, destination, payload));
+        {
+            let said = session.release_relays(now);
+            match address {
+                Some(local) => self.farewells_of(call, local, said),
+                // with no socket to name, what is for a relay's connection
+                // has no connection to go on, and the datagrams still leave
+                None => self.farewells.extend(
+                    said.into_iter()
+                        .filter(|(_, transport, _)| !transport.is_stream())
+                        .map(|(destination, _, payload)| (call, destination, payload)),
+                ),
+            }
         }
         // Best effort, and never fatal: a call that has already ended is
         // not going to un-end because a collector could not be reached.
@@ -3168,6 +3392,30 @@ impl MediaEngine {
         self.events
             .push_back((call, MediaEvent::Ended(session.statistics(now))));
     }
+}
+
+/// Set aside a datagram `call`'s session wrote for its relay's connection to
+/// the TURN server, from the socket the call was described on, for
+/// [`MediaEngine::poll_turn_stream`].
+#[cfg(feature = "ice")]
+fn set_aside(
+    streamed: &mut VecDeque<(CallHandle, crate::RelayDatagram)>,
+    calls: &BTreeMap<CallHandle, Managed>,
+    call: CallHandle,
+    datagram: &crate::session::Datagram<'_>,
+) {
+    let Some(local) = calls.get(&call).and_then(|managed| managed.address) else {
+        return;
+    };
+    streamed.push_back((
+        call,
+        crate::RelayDatagram {
+            local,
+            destination: datagram.destination,
+            payload: datagram.payload.to_vec(),
+            transport: datagram.transport,
+        },
+    ));
 }
 
 // -- the plan ----------------------------------------------------------------

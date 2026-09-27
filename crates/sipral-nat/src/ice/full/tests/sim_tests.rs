@@ -4,19 +4,22 @@
 //! An in-memory network for driving agents against each other.
 //!
 //! NATs with the mapping and filtering behaviours RFC 4787 names, a STUN
-//! server, a TURN server that relays by indication or by channel, a fixed
-//! delay on every hop, loss drawn from a seeded generator, and a clock that
-//! jumps straight to the next thing that is due. Nothing here is clever; it is
-//! small enough to read, and thirty simulated seconds of consent checks cost a
-//! few milliseconds.
+//! server, a TURN server that relays by indication or by channel and takes
+//! its clients over UDP or over a TCP connection, a firewall that can drop
+//! every datagram to or from that server, a fixed delay on every hop, loss
+//! drawn from a seeded generator, and a clock that jumps straight to the next
+//! thing that is due. Nothing here is clever; it is small enough to read, and
+//! thirty simulated seconds of consent checks cost a few milliseconds.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use crate::ice::{Claim, ComponentId, IceAgent, IceEvent, LiteAgent, Received, StreamId};
+use crate::ice::{Claim, ComponentId, IceAgent, IceEvent, LiteAgent, Received, Route, StreamId};
 use crate::stun::address::decode_xor;
 use crate::stun::{AttributeType, Class, Message, MessageBuilder, Method, TransactionId};
-use crate::turn::{ChannelData, ChannelNumber, Transport, TurnClient, TurnConfig, method};
+use crate::turn::{
+    ChannelData, ChannelNumber, StreamFraming, Transport, TurnClient, TurnConfig, method,
+};
 
 pub(super) const STUN_SERVER: &str = "203.0.113.200:3478";
 pub(super) const TURN_SERVER: &str = "203.0.113.201:3478";
@@ -173,6 +176,9 @@ pub(super) struct TurnRelay {
     next_port: u16,
     next_id: u32,
     pub(super) allocations: Vec<RelayAllocation>,
+    /// Where the server sees each connection from, for the clients that
+    /// reach it over TCP: what it writes to them is framed for a stream.
+    stream_clients: Vec<SocketAddr>,
 }
 
 impl TurnRelay {
@@ -325,8 +331,14 @@ impl TurnRelay {
         }
         let client = entry.client;
         if let Some((number, _)) = entry.channels.iter().find(|(_, peer)| *peer == from) {
+            // §12.5: padded to a multiple of four over a stream
+            let transport = if self.stream_clients.contains(&client) {
+                Transport::Tcp
+            } else {
+                Transport::Udp
+            };
             let mut frame = Vec::new();
-            ChannelData::encode(*number, data, Transport::Udp, &mut frame).unwrap();
+            ChannelData::encode(*number, data, transport, &mut frame).unwrap();
             return vec![Packet {
                 source: self.address,
                 destination: client,
@@ -367,12 +379,37 @@ fn success(
     }]
 }
 
+/// A TCP connection from a node's host socket to the TURN server.
+struct StreamLink {
+    node: usize,
+    local: SocketAddr,
+    /// Where the server sees the connection from.
+    seen: SocketAddr,
+    /// What the server has read off it that is not a whole message yet.
+    at_server: StreamFraming,
+    open: bool,
+}
+
+/// Bytes on their way along a [`StreamLink`], one way or the other.
+struct Segment {
+    link: usize,
+    to_server: bool,
+    data: Vec<u8>,
+}
+
 pub(super) struct Network {
     pub(super) now: Instant,
     pub(super) nodes: Vec<Node>,
     nats: Vec<Nat>,
     pub(super) turn: TurnRelay,
     in_flight: Vec<(Instant, u64, Packet)>,
+    links: Vec<StreamLink>,
+    segments: Vec<(Instant, u64, Segment)>,
+    /// Drop every datagram to or from the TURN server: the firewall TURN
+    /// over TCP exists for (RFC 8656 §3.1).
+    pub(super) udp_to_turn_blocked: bool,
+    /// How many datagrams that firewall has dropped.
+    pub(super) blocked: usize,
     sequence: u64,
     latency: Duration,
     loss_percent: u64,
@@ -398,8 +435,13 @@ impl Network {
                 next_port: 50_000,
                 next_id: 0,
                 allocations: Vec::new(),
+                stream_clients: Vec::new(),
             },
             in_flight: Vec::new(),
+            links: Vec::new(),
+            segments: Vec::new(),
+            udp_to_turn_blocked: false,
+            blocked: 0,
             sequence: 0,
             latency: Duration::from_millis(10),
             loss_percent: 0,
@@ -525,6 +567,124 @@ impl Network {
         );
     }
 
+    /// Put application data an agent routed where the route says: a
+    /// datagram through the node's NAT, or bytes on its connection to the
+    /// TURN server.
+    pub(super) fn send_route(&mut self, index: usize, route: Route, data: Vec<u8>) {
+        if route.transport.is_stream() {
+            self.write_stream(index, route.source, data);
+        } else {
+            self.send_from(index, route.source, route.destination, data);
+        }
+    }
+
+    /// Open a TCP connection from `socket` of the node at `index` to the
+    /// TURN server, and say where the server sees it from.
+    pub(super) fn open_stream(&mut self, index: usize, socket: SocketAddr) -> SocketAddr {
+        let public = match self.peer(index).nat {
+            Some(nat) => self.nats[nat].public,
+            None => socket.ip(),
+        };
+        let seen = SocketAddr::new(
+            public,
+            61_000 + u16::try_from(self.links.len()).expect("a handful of links"),
+        );
+        self.links.push(StreamLink {
+            node: index,
+            local: socket,
+            seen,
+            at_server: StreamFraming::new(),
+            open: true,
+        });
+        self.turn.stream_clients.push(seen);
+        seen
+    }
+
+    /// Close the connection from `socket` of the node at `index`: the server
+    /// drops the allocation made on it, and the agent is told.
+    pub(super) fn close_stream(&mut self, index: usize, socket: SocketAddr) {
+        let server = self.turn.address;
+        let now = self.now;
+        let Some(link) = self
+            .links
+            .iter_mut()
+            .find(|link| link.node == index && link.local == socket && link.open)
+        else {
+            return;
+        };
+        link.open = false;
+        let seen = link.seen;
+        self.turn.allocations.retain(|entry| entry.client != seen);
+        let peer = self.peer_mut(index);
+        peer.feed();
+        peer.agent.stream_closed(socket, server, now);
+        self.settle();
+    }
+
+    /// The same as [`Network::allocate_outside`], over a TCP connection this
+    /// opens from `socket`: every answer is handed to the client a few octets
+    /// at a time, as a stream delivers it.
+    pub(super) fn allocate_outside_stream(
+        &mut self,
+        index: usize,
+        socket: SocketAddr,
+    ) -> TurnClient {
+        let seen = self.open_stream(index, socket);
+        let now = self.now;
+        let mut client = TurnClient::new(TurnConfig {
+            transport: Transport::Tcp,
+            ..TurnConfig::default()
+        });
+        let mut next = 0_u32;
+        let mut supply = |client: &mut TurnClient| {
+            while client.transaction_ids_wanted() > 0 {
+                next += 1;
+                let mut bytes = [0xb3_u8; 12];
+                bytes[..4].copy_from_slice(&u32::try_from(index).unwrap().to_be_bytes());
+                bytes[8..].copy_from_slice(&next.to_be_bytes());
+                client.supply_transaction_id(TransactionId::new(bytes));
+            }
+        };
+        supply(&mut client);
+        client.allocate(now).expect("an allocation starts");
+        let mut frame = Vec::new();
+        while let Some(request) = client.poll_transmit() {
+            for reply in self.turn.on_client(seen, &request) {
+                for piece in reply.data.chunks(7) {
+                    client.push_stream(piece);
+                    while client
+                        .poll_stream(&mut frame, now)
+                        .expect("a well-formed stream")
+                        .is_some()
+                    {}
+                }
+            }
+            supply(&mut client);
+        }
+        assert!(client.is_allocated(), "the relay allocated");
+        client
+    }
+
+    fn write_stream(&mut self, index: usize, socket: SocketAddr, data: Vec<u8>) {
+        let Some(link) = self
+            .links
+            .iter()
+            .position(|link| link.node == index && link.local == socket && link.open)
+        else {
+            return;
+        };
+        self.sequence += 1;
+        self.segments.push((
+            self.now + self.latency,
+            self.sequence,
+            Segment {
+                link,
+                to_server: true,
+                data,
+            },
+        ));
+    }
+
     /// An allocation made on the TURN server from `socket`, through the NAT
     /// of the node at `index`, by a client of the application's own rather
     /// than by the node's agent — what `IceAgent::add_relayed` takes over.
@@ -594,11 +754,16 @@ impl Network {
     fn pump(&mut self) -> bool {
         let now = self.now;
         let mut outgoing = Vec::new();
-        for node in &mut self.nodes {
+        let mut streamed = Vec::new();
+        for (index, node) in self.nodes.iter_mut().enumerate() {
             match node {
                 Node::Full(peer) => {
                     peer.feed();
                     while let Some(transmit) = peer.agent.poll_transmit() {
+                        if transmit.transport.is_stream() {
+                            streamed.push((index, transmit.source, transmit.data));
+                            continue;
+                        }
                         outgoing.push((
                             peer.nat,
                             Packet {
@@ -617,12 +782,15 @@ impl Network {
                 }
             }
         }
-        let busy = !outgoing.is_empty();
+        let busy = !outgoing.is_empty() || !streamed.is_empty();
         for (nat, packet) in outgoing {
             if self.capture {
                 self.captured.push(packet.clone());
             }
             self.emit(nat, packet);
+        }
+        for (index, socket, data) in streamed {
+            self.write_stream(index, socket, data);
         }
         busy
     }
@@ -630,6 +798,17 @@ impl Network {
     fn emit(&mut self, nat: Option<usize>, mut packet: Packet) {
         if let Some(nat) = nat {
             packet.source = self.nats[nat].outbound(packet.source, packet.destination);
+        }
+        let to_a_connection = self
+            .links
+            .iter()
+            .any(|link| link.open && link.seen == packet.destination);
+        if self.udp_to_turn_blocked
+            && !to_a_connection
+            && (packet.destination == self.turn.address || packet.source == self.turn.address)
+        {
+            self.blocked += 1;
+            return;
         }
         if self.cut || self.lose() {
             return;
@@ -659,11 +838,72 @@ impl Network {
             self.in_flight.drain(..).partition(|(at, _, _)| *at <= now);
         self.in_flight = kept;
         due.sort_by_key(|(at, sequence, _)| (*at, *sequence));
-        let busy = !due.is_empty();
+        let (mut segments, kept): (Vec<_>, Vec<_>) =
+            self.segments.drain(..).partition(|(at, _, _)| *at <= now);
+        self.segments = kept;
+        segments.sort_by_key(|(at, sequence, _)| (*at, *sequence));
+        let busy = !due.is_empty() || !segments.is_empty();
         for (_, _, packet) in due {
             self.route(packet);
         }
+        for (_, _, segment) in segments {
+            self.carry(segment);
+        }
         busy
+    }
+
+    /// Bytes arriving at one end of a connection: whole messages at the
+    /// server, and at the node the agent's own reassembly, fed in two
+    /// pieces cut in the middle so that no read lines up with a message.
+    fn carry(&mut self, segment: Segment) {
+        let Segment {
+            link,
+            to_server,
+            data,
+        } = segment;
+        let Some(held) = self.links.get_mut(link) else {
+            return;
+        };
+        if !held.open {
+            return;
+        }
+        let (node, local, seen) = (held.node, held.local, held.seen);
+        if to_server {
+            held.at_server.push(&data);
+            let mut frames = Vec::new();
+            while let Some(frame) = held.at_server.next_frame().expect("a well-formed stream") {
+                frames.push(frame.to_vec());
+            }
+            for frame in frames {
+                for reply in self.turn.on_client(seen, &frame) {
+                    self.emit(None, reply);
+                }
+            }
+            return;
+        }
+        let server = self.turn.address;
+        let now = self.now;
+        let Node::Full(peer) = &mut self.nodes[node] else {
+            return;
+        };
+        let (first, second) = data.split_at(data.len() / 2);
+        let mut frame = Vec::new();
+        for piece in [first, second] {
+            peer.feed();
+            assert!(
+                peer.agent.push_stream(local, server, piece),
+                "a connection the agent's relay runs over"
+            );
+            while let Some(received) = peer
+                .agent
+                .poll_stream(local, server, &mut frame, now)
+                .expect("a well-formed stream")
+            {
+                if let Received::Data { range, .. } = received {
+                    peer.received.push(frame[range].to_vec());
+                }
+            }
+        }
     }
 
     fn route(&mut self, packet: Packet) {
@@ -672,6 +912,18 @@ impl Network {
             destination,
             data,
         } = packet;
+        if let Some(link) = self
+            .links
+            .iter()
+            .position(|link| link.open && link.seen == destination)
+        {
+            self.carry(Segment {
+                link,
+                to_server: false,
+                data,
+            });
+            return;
+        }
         if destination == address(STUN_SERVER) {
             if let Ok(message) = Message::parse(&data)
                 && message.class() == Class::Request
@@ -799,7 +1051,12 @@ impl Network {
     }
 
     fn next_time(&self) -> Option<Instant> {
-        let packets = self.in_flight.iter().map(|(at, _, _)| *at).min();
+        let packets = self
+            .in_flight
+            .iter()
+            .map(|(at, _, _)| *at)
+            .chain(self.segments.iter().map(|(at, _, _)| *at))
+            .min();
         let deadlines = self
             .nodes
             .iter()

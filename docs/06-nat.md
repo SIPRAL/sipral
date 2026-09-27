@@ -26,8 +26,9 @@ Most of the NAT problem in SIP telephony is solved before ICE is reached:
 
 Steps 1 to 3 are in phase 1. Steps 4 and 5 are in the facade and the C ABI, off
 unless asked for: see *STUN, from a softphone behind a NAT* and *TURN* below.
-A relay is used only as a call's relayed ICE candidate, and TURN over TCP or
-TLS is not done yet.
+A relay is used only as a call's relayed ICE candidate, and it reaches its
+server over UDP, TCP or TLS — the last two for the network that lets no UDP
+out (*Over TCP or TLS*, below).
 
 That is a deliberate ordering, not a refusal. Full ICE — gathering, checks,
 nomination, role conflicts, restarts, consent — is written on top of the pieces
@@ -323,8 +324,8 @@ because the 4-byte channel header beats the 36-byte Send indication on every
 packet.
 
 TCP and TLS to the TURN server, for a corporate network that lets nothing out
-but 443, is what this component is ultimately for. `TurnClient` has the
-framing, but no call can use it yet (see "Not done yet" below).
+but 443, is what this component is ultimately for, and a call uses them the
+way it uses UDP: see *Over TCP or TLS* below.
 
 `TurnClient` is not told the server's address, so whoever holds it hands in
 only what came from there: ChannelData and Data indications carry no proof of
@@ -500,9 +501,79 @@ lifetime zero — "Once all ICE sessions have ceased using a given local
 candidate (a candidate may be used by multiple ICE sessions, e.g., in forking
 scenarios), the agent can free that candidate" (RFC 8445 §8.3.1).
 
-Not done yet: TURN over TCP or TLS to the server, for the network that lets
-nothing out but 443. The client has the framing; the agent's datagram model
-does not carry a stream.
+### Over TCP or TLS
+
+RFC 8656 §3.1: "TURN supports TCP transport between the client and the server
+because some firewalls are configured to block UDP entirely", and TLS over
+TCP for the client "to ascertain that it is talking to the correct server".
+The relay speaks UDP to the peer whichever it is; only the hop from this end
+to the server changes. So nothing about the call does either: the relay is
+allocated before it, offered as its relayed candidate, carries its checks and
+its audio when ICE picks it, is refreshed, and is given back, exactly as over
+UDP. What changes is the carriage, at three places.
+
+**The connection is the application's.** Sans-I/O as SIP over TCP and TLS
+already is: the stack names the connection it wants and the application opens
+it — for TLS with the platform's own stack, which checks the server's
+certificate against the name the application configured, as it does for a
+SIP server. One per media socket, since the server knows an allocation by the
+5-tuple it was made on (§3.2) and one socket's relay is one allocation.
+`sipral::Relays::over(TurnTransport::Tcp)` or `Tls` says which, and
+`Relays::allocate` is then called once the socket's connection is open. The C
+ABI asks for it: `turn_transport` on `sipral_stack_config_t`, and
+`SIPRAL_EVENT_KIND_TURN_STREAM` when `sipral_stack_nat_map` names a socket;
+`sipral_stack_turn_connected` says it is open, and the Allocate goes then
+(`docs/08-ffi.md`). A call on a socket whose connection is not open yet is
+refused, as one whose STUN answer is not in yet is.
+
+**What is written for the server is marked, not diverted.** Every datagram
+this stack hands out already names the socket it leaves from and where it
+goes; one for a relay over a connection names the server and is marked as
+bytes for that connection — `RelayDatagram::transport`, `Datagram::transport`,
+`ice::Transmit::transport` and `Route::transport` in Rust, `protocol` on
+`sipral_transmit_t` and `sipral_media_packet_t` over the C ABI — whole
+messages already framed, a ChannelData message padded to a multiple of four
+octets as §12.5 requires on a stream, written as they are and in order. The
+STUN mapping of the same socket still goes over UDP: it is the socket's own,
+and the connection's would describe another binding. The address the
+Allocate response names beside the relay is the connection's mapping for the
+same reason, so it is neither a server-reflexive candidate of the socket nor
+an address for `c=`; `Relay::mapped` and the relay event leave it out.
+`MediaEngine::poll_turn_stream` is where an application driving the engine
+itself finds what its calls wrote for a connection, set aside from the
+datagrams `poll_transmit`, `poll_rtcp` and the farewells hand out.
+
+**What the connection carries goes in as it arrives.** A read may end halfway
+through a message or hold several; the TURN client keeps what is not a whole
+message yet (`TurnClient::push_stream`, `poll_stream`) — a STUN message is
+twenty octets and its length, a ChannelData message four and its length
+rounded up to whole words — and wherever the relay is at that moment takes
+each one: `Relays::receive_stream` before the call,
+`MediaEngine::receive_stream` after, which reaches a call's agent still
+waiting for its session or the session itself, whose audio is unwrapped and
+played as a relayed datagram's is. Over the C ABI all of it is one entry
+point, `sipral_stack_turn_receive`, whatever the socket's call is doing. A
+datagram from the server's address is not the relay's over a connection, and
+is taken as any other stranger's would be. A stream that carries something no
+TURN message starts with cannot find its place again — nothing in it marks
+where a message begins — so the relay is lost and the connection is to be
+closed (`SIPRAL_STATUS_STREAM_BROKEN`). A connection that closes takes the
+allocation with it: before the call the socket's relay has failed, and a call
+that had it keeps whatever pair ICE found without it, the one through it
+losing consent in thirty seconds as any silent pair does (RFC 7675 §5.1).
+Nothing is sent after the Refresh of lifetime zero that gives the relay back;
+the C ABI says `SIPRAL_TURN_STREAM_CLOSE` once no call is described on the
+socket any more, a fork's other branches included, and the application
+closes the connection after writing what is still queued for it.
+
+The four bindings open the connection themselves: Swift with
+Network.framework's `NWConnection`, Kotlin with a `Socket` and an
+`SSLSocket` over it, Python with `socket` and `ssl`, .NET with a `TcpClient`
+and an `SslStream`. Each checks the server's certificate against the
+configured name with the platform's trust by default, or with roots the
+application hands it for a private CA or a self-signed server, and none can be
+told to stop checking. `docs/20-security-model.md` has what the TLS is and is
+not trusted for.
 
 ### Proven in the lab
 
@@ -537,6 +608,22 @@ same claim the same way: `bindings/kotlin/examples/Agent.kt`'s
 idiomatic layer's `Client`/`SipralStack` constructor and `placeCall`, and
 `nat_pair_call` drives each with `NAT_PAIR_CALLER=kotlin`, `=dotnet` or
 `=swift`.
+
+The same pair proves the relay over a connection. `interop/turn`'s coturn
+listens on TCP beside UDP on 3478 and on TLS on 5349, with a certificate
+`scripts/lab.sh` makes for the run (`turn_certificate`) for a name, and the
+caller's NAT is told to drop every datagram to or from coturn as well. The
+C harness then places the call with a relay over TCP (`SIPRAL_TURN_TRANSPORT
+=tcp`): it requires the media socket's STUN mapping to go unanswered — the
+proof the block holds — the relay allocated over the connection, the tone
+heard back through it, its own audio marked for the connection, and the
+Refresh that gives the relay back written on it. The Python agent places the
+same call over TLS (`SIPRAL_TURN_TRANSPORT=tls`), told to trust the run's
+certificate and to check it against its name (`SIPRAL_TURN_CA`,
+`SIPRAL_TURN_NAME`), with the platform's own `ssl`. coturn's log has to count
+both allocations given back, beside the UDP ones. The C harness carries no
+TLS of its own; TLS is the Python agent's to prove, the platform's stack
+being exactly what an application brings.
 
 ## ICE-lite
 
@@ -853,10 +940,8 @@ What it does, in the order a session meets it:
   moment the restart is taken up; a restart refused drops what was kept, and
   so does waiting longer than the far end's transaction, 39.5 seconds.
 
-Not done yet: TURN over TCP or TLS (the TURN client has the framing; the
-agent's datagram model does not carry it), and
-`a=remote-candidates` (RFC 8839 §4.4.1.2.2). The last is not written because
-nothing yet writes an offer it would go in: it belongs in the updated offer a controlling agent sends after
+Not done yet: `a=remote-candidates` (RFC 8839 §4.4.1.2.2). It is not
+written because nothing yet writes an offer it would go in: it belongs in the updated offer a controlling agent sends after
 nomination, when the selected pair differs from the default candidate pair.
 With a reflexive candidate that can now happen in address — `c=` names the
 reflexive address and the selected pair's local candidate is its base, the

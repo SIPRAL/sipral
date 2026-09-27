@@ -11,16 +11,26 @@
 
 package org.sipral.idiomatic
 
+import java.io.File
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
+import java.net.ServerSocket
+import java.net.Socket
 import java.net.SocketTimeoutException
+import java.nio.file.Files
+import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.cert.CertificateFactory
 import java.util.Collections
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManagerFactory
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onSubscription
@@ -39,6 +49,8 @@ import org.sipral.SipralPathKind
 import org.sipral.SipralPathOutcome
 import org.sipral.SipralNatMapping
 import org.sipral.SipralNatRelay
+import org.sipral.SipralNatRelayEvent
+import org.sipral.SipralTransport
 
 /**
  * A STUN and TURN server on `host` that tells every socket it appears at
@@ -608,6 +620,275 @@ private fun registrarFlowIsKeptOpenBehindTheNat(host: String): String {
     return "an account behind the NAT kept its registrar's flow open, and did not with it off"
 }
 
+/**
+ * A TURN server on a TCP port of this machine's loopback -- over TLS when it
+ * is given a server socket that speaks it -- and on nothing else: no
+ * datagram reaches it. What arrives is framed as RFC 8656 §12.5 and RFC 8489
+ * §6.2.2 say, and every request is recorded with the connection it came on,
+ * counting from one; an unauthenticated Allocate gets the 401, a signed one
+ * a relay, and every other signed request its success.
+ */
+private class FakeTurnOverStream(
+    private val credential: Pair<String, String>,
+    private val listener: ServerSocket = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")),
+) : AutoCloseable {
+    class Request(val connection: Int, val method: Int, val attributes: Map<Int, ByteArray>)
+
+    val address = "127.0.0.1:${listener.localPort}"
+    val requests: MutableList<Request> = Collections.synchronizedList(ArrayList())
+    val closed: MutableList<Int> = Collections.synchronizedList(ArrayList())
+    @Volatile private var connections = 0
+    private val accepting = Thread(::accept, "fake-turn-stream").apply {
+        isDaemon = true
+        start()
+    }
+
+    val allocations: List<Int>
+        get() = requests.toList().filter { it.method == 0x0003 && it.attributes.containsKey(0x0006) }.map { it.connection }
+
+    val refreshes: List<Pair<Int, ByteArray?>>
+        get() = requests.toList().filter { it.method == 0x0004 && it.attributes.containsKey(0x0006) }
+            .map { it.connection to it.attributes[0x000D] }
+
+    override fun close() {
+        listener.close()
+        accepting.join(2000)
+    }
+
+    private fun accept() {
+        while (!listener.isClosed) {
+            val connection = try {
+                listener.accept()
+            } catch (_: Exception) {
+                return
+            }
+            connections += 1
+            val number = connections
+            Thread({ serve(connection, number) }, "fake-turn-connection").apply {
+                isDaemon = true
+                start()
+            }
+        }
+    }
+
+    private fun serve(connection: Socket, number: Int) {
+        val input = connection.getInputStream()
+        val output = connection.getOutputStream()
+        var held = ByteArray(0)
+        val buffer = ByteArray(4096)
+        while (true) {
+            val read = try {
+                input.read(buffer)
+            } catch (_: Exception) {
+                -1
+            }
+            if (read < 0) {
+                closed += number
+                connection.close()
+                return
+            }
+            held += buffer.copyOfRange(0, read)
+            while (true) {
+                val (frame, rest) = frame(held) ?: break
+                held = rest
+                answer(frame, number)?.let {
+                    output.write(it)
+                    output.flush()
+                }
+            }
+        }
+    }
+
+    private fun frame(held: ByteArray): Pair<ByteArray, ByteArray>? {
+        if (held.size < 4) return null
+        val length = (held[2].toInt() and 0xff shl 8) or (held[3].toInt() and 0xff)
+        if ((held[0].toInt() and 0xff) < 4) {
+            if (held.size < 20 + length) return null
+            return held.copyOfRange(0, 20 + length) to held.copyOfRange(20 + length, held.size)
+        }
+        val padded = (4 + length + 3) / 4 * 4
+        if (held.size < padded) return null
+        return held.copyOfRange(0, 4 + length) to held.copyOfRange(padded, held.size)
+    }
+
+    private fun answer(frame: ByteArray, number: Int): ByteArray? {
+        if ((frame[0].toInt() and 0xff) >= 4) return null
+        val request = FakeStunServer.parse(frame, "") ?: return null
+        requests += Request(number, request.method, request.attributes)
+        val transaction = frame.copyOfRange(8, 20)
+        val type = (frame[0].toInt() and 0xff shl 8) or (frame[1].toInt() and 0xff)
+        if (!request.attributes.containsKey(0x0006)) {
+            return FakeStunServer.message(
+                type or 0x0110,
+                transaction,
+                listOf(
+                    0x0009 to (byteArrayOf(0, 0, 4, 1) + "Unauthorized".toByteArray()),
+                    0x0014 to FakeStunServer.REALM.toByteArray(),
+                    0x0015 to FakeStunServer.NONCE.toByteArray(),
+                ),
+            )
+        }
+        val key = MessageDigest.getInstance("MD5")
+            .digest("${credential.first}:${FakeStunServer.REALM}:${credential.second}".toByteArray())
+        if (!FakeStunServer.integrityHolds(frame, key)) return null
+        return when (request.method) {
+            0x0003 -> FakeStunServer.signed(
+                0x0103,
+                transaction,
+                listOf(
+                    0x0016 to FakeStunServer.xorAddress("198.51.100.39:${50000 + number}"),
+                    0x0020 to FakeStunServer.xorAddress("203.0.113.39:${41000 + number}"),
+                    0x000D to byteArrayOf(0, 0, 0x02, 0x58),
+                ),
+                key,
+            )
+            0x0004 -> FakeStunServer.signed(
+                type or 0x0100,
+                transaction,
+                listOf(0x000D to (request.attributes[0x000D] ?: byteArrayOf(0, 0, 0x02, 0x58))),
+                key,
+            )
+            else -> FakeStunServer.signed(type or 0x0100, transaction, emptyList(), key)
+        }
+    }
+}
+
+private const val TURN_SERVER_NAME = "turn.sipral.test"
+
+/** A key and a certificate for [TURN_SERVER_NAME], made with the `openssl`
+ * command: the server's side as a key manager's, and the client's as a
+ * socket factory that trusts that certificate and nothing else. */
+private fun selfSigned(): Pair<SSLContext, SSLSocketFactory> {
+    val openssl = listOf("/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", "/usr/bin/openssl")
+        .firstOrNull { File(it).canExecute() } ?: error("no openssl command to make the server's certificate with")
+    val directory = Files.createTempDirectory("sipral-turn").toFile()
+    try {
+        val key = File(directory, "turn.key").path
+        val pem = File(directory, "turn.pem").path
+        val p12 = File(directory, "turn.p12").path
+        fun run(vararg arguments: String) {
+            val process = ProcessBuilder(listOf(openssl) + arguments).redirectErrorStream(true).start()
+            process.inputStream.readAllBytes()
+            check(process.waitFor() == 0) { "openssl ${arguments.first()} failed" }
+        }
+        run(
+            "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1",
+            "-subj", "/CN=$TURN_SERVER_NAME", "-addext", "subjectAltName=DNS:$TURN_SERVER_NAME",
+            "-addext", "extendedKeyUsage=serverAuth", "-keyout", key, "-out", pem,
+        )
+        run("pkcs12", "-export", "-inkey", key, "-in", pem, "-passout", "pass:sipral", "-out", p12)
+        val identity = KeyStore.getInstance("PKCS12").apply { File(p12).inputStream().use { load(it, "sipral".toCharArray()) } }
+        val keys = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
+            init(identity, "sipral".toCharArray())
+        }
+        val server = SSLContext.getInstance("TLS").apply { init(keys.keyManagers, null, null) }
+        val certificate = File(pem).inputStream().use { CertificateFactory.getInstance("X.509").generateCertificate(it) }
+        val anchors = KeyStore.getInstance("PKCS12").apply {
+            load(null, null)
+            setCertificateEntry("turn", certificate)
+        }
+        val trust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(anchors) }
+        val client = SSLContext.getInstance("TLS").apply { init(null, trust.trustManagers, null) }
+        return server to client.socketFactory
+    } finally {
+        directory.deleteRecursively()
+    }
+}
+
+/**
+ * Alice behind `server`, reached as `turn` says, calling Bob, who answers:
+ * what her relay event said. The call is closed and forgotten with the
+ * clients still running, so its farewell goes out after it is gone.
+ */
+private suspend fun callThrough(
+    host: String,
+    stun: FakeStunServer,
+    turn: SipralTurnServer,
+    afterRelay: suspend (SipralNatRelayEvent) -> Unit,
+) {
+    SipralClient.open(bindHost = host, ice = SipralIce.OFFERED, codecs = "PCMU", stunServer = stun.address, turn = turn)
+        .use { alice ->
+            SipralClient.open(bindHost = host, codecs = "PCMU").use { bob ->
+                val seen = recordEvents(alice, 30_000)
+                val aliceAccount = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
+                bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)
+                val (aliceCall, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+                    alice.placeCall(aliceAccount, target = "sip:bob@${bob.bindAddress}", mediaHost = host)
+                }
+                val relay = assertNotNull(seen.toList().mapNotNull { relayOf(it) }.firstOrNull(), "no relay event")
+                val bobCall = bob.answerCall(incoming, mediaHost = host)
+                val mediaDeadline = System.currentTimeMillis() + 8_000
+                while (aliceCall.media == null && System.currentTimeMillis() < mediaDeadline) delay(20)
+                assertNotNull(aliceCall.media, "alice's media never started, relay or not")
+                aliceCall.close()
+                bobCall.close()
+                afterRelay(relay)
+            }
+        }
+}
+
+private fun until(withinMs: Long = 5_000, done: () -> Boolean) {
+    val deadline = System.currentTimeMillis() + withinMs
+    while (!done() && System.currentTimeMillis() < deadline) Thread.sleep(20)
+}
+
+private suspend fun turnOverTcpIsMadeAndGivenBackOnItsConnection(host: String): String {
+    val password = "turn-secret-${System.nanoTime() % 1_000_000}"
+    FakeStunServer(host).use { stun ->
+        stun.open = true
+        FakeTurnOverStream("alice-turn" to password).use { server ->
+            val turn = SipralTurnServer(server.address, "alice-turn", password, transport = SipralTransport.TCP)
+            callThrough(host, stun, turn) { relay ->
+                assertEquals(SipralNatRelay.ALLOCATED.value.toLong(), relay.outcome, "relay failed: ${relay.code} ${relay.reason}")
+                assertTrue(relay.mapped.isNullOrEmpty(), "the connection's own mapping says nothing about the socket")
+                assertEquals(listOf(1), server.allocations, "one Allocate, on the one connection")
+                assertTrue(stun.requests.toList().none { it.method == 0x0003 }, "an Allocate went as a datagram")
+                until { server.refreshes.any { it.second?.contentEquals(byteArrayOf(0, 0, 0, 0)) == true } }
+                assertEquals(
+                    listOf(1),
+                    server.refreshes.filter { it.second?.contentEquals(byteArrayOf(0, 0, 0, 0)) == true }.map { it.first },
+                    "given back on the connection it was made on, after the call was gone",
+                )
+                until { 1 in server.closed }
+                assertTrue(1 in server.closed, "the connection was closed once nothing was left for it")
+            }
+        }
+    }
+    return "a relay over TCP was made and given back on its connection"
+}
+
+private suspend fun turnOverTlsTrustsWhatItIsTold(host: String): String {
+    val password = "turn-secret-${System.nanoTime() % 1_000_000}"
+    val (serverContext, trusting) = selfSigned()
+    for (trusted in listOf(true, false)) {
+        FakeStunServer(host).use { stun ->
+            stun.open = true
+            val listener = serverContext.serverSocketFactory.createServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+            FakeTurnOverStream("alice-turn" to password, listener).use { server ->
+                val turn = SipralTurnServer(
+                    server.address,
+                    "alice-turn",
+                    password,
+                    transport = SipralTransport.TLS,
+                    serverName = TURN_SERVER_NAME,
+                    sslSocketFactory = if (trusted) trusting else null,
+                )
+                callThrough(host, stun, turn) { relay ->
+                    if (trusted) {
+                        assertEquals(SipralNatRelay.ALLOCATED.value.toLong(), relay.outcome, "relay failed: ${relay.code} ${relay.reason}")
+                        assertEquals(listOf(1), server.allocations)
+                    } else {
+                        assertEquals(SipralNatRelay.FAILED.value.toLong(), relay.outcome, "a certificate nobody vouches for")
+                        assertTrue(relay.reason?.contains("connection") == true, "${relay.reason}")
+                        assertTrue(server.allocations.isEmpty(), "nothing reached the server past the handshake")
+                    }
+                }
+            }
+        }
+    }
+    return "a relay over TLS was made with the roots it was told to trust, and refused without them"
+}
+
 /** Everything above, for IdiomaticCheck.kt's main. */
 internal suspend fun natChecks(): String {
     val host = hostAddress() ?: error("no interface but loopback: ICE has no host candidate to check with")
@@ -619,5 +900,7 @@ internal suspend fun natChecks(): String {
         iceCallSaysWhichPathsItTriedAndRestarts(host),
         liteAnsweringAFullAgentCarriesAudio(host),
         turnAllocationIsGivenBackWhenTheCallEnds(host),
+        turnOverTcpIsMadeAndGivenBackOnItsConnection(host),
+        turnOverTlsTrustsWhatItIsTold(host),
     ).joinToString(", ")
 }

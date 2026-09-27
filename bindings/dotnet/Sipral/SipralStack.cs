@@ -5,10 +5,13 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Channels;
@@ -62,6 +65,39 @@ public sealed class SipralStack : IDisposable
     private readonly SipralNat _nat;
     private readonly bool _turn;
     private readonly object _natLock = new();
+
+    /// <summary>How the TURN server is reached, the name its certificate is
+    /// checked against over TLS, and the roots that check trusts.</summary>
+    private readonly SipralTransport _turnTransport;
+    private readonly string? _turnServerName;
+    private readonly X509Certificate2Collection? _turnTrustedCertificates;
+
+    /// <summary>Every media socket's open connection to the TURN server,
+    /// by the socket's <c>host:port</c>.</summary>
+    private readonly ConcurrentDictionary<string, TurnStream> _turnStreams = new();
+
+    /// <summary>What <see cref="SipralEventKind.TurnStream"/> asked for
+    /// during the poll that raised it — nothing may call back into the
+    /// stack from its own callback — acted on right after that poll.</summary>
+    private readonly ConcurrentQueue<SipralTurnStreamEventInfo> _turnAsked = new();
+
+    /// <summary>Every call's media socket, by the call, for as long as the
+    /// socket's connection to the TURN server stands: a call's last farewell
+    /// — the Refresh that gives its relay back — can come after the
+    /// <see cref="Call"/> itself was closed and forgotten, and still goes on
+    /// that connection.</summary>
+    private readonly ConcurrentDictionary<ulong, string> _turnSockets = new();
+
+    /// <summary>One media socket's TCP or TLS connection to the TURN server:
+    /// written by the poll thread and by the call's media thread, each write
+    /// whole under <see cref="WriteLock"/>, and read by a thread of its
+    /// own.</summary>
+    private sealed class TurnStream
+    {
+        public required TcpClient Client { get; init; }
+        public required Stream Stream { get; init; }
+        public object WriteLock { get; } = new();
+    }
 
     /// <summary>Media sockets currently named with <c>sipral_stack_nat_map</c>,
     /// keyed by their own <c>host:port</c> text — from
@@ -139,7 +175,22 @@ public sealed class SipralStack : IDisposable
     /// 1 000 to 120 000), so that a NAT filtering by address and port still
     /// lets the registrar's INVITE in minutes after the REGISTER. On by
     /// default; <see langword="false"/> turns it off, and an interval with
-    /// it off is refused. Nothing is sent while the stack is suspended.</summary>
+    /// it off is refused. Nothing is sent while the stack is suspended.
+    ///
+    /// <paramref name="turnTransport"/> is how every media socket reaches
+    /// <paramref name="turnServer"/> (RFC 8656 §3.1): <c>0</c> or
+    /// <see cref="SipralTransport.Udp"/>, <see cref="SipralTransport.Tcp"/>
+    /// for a network that lets no UDP out, <see cref="SipralTransport.Tls"/>
+    /// for one that lets one port out — 5349 is TURN's — or for an
+    /// application that wants the server checked. Over either the stack
+    /// opens a connection per media socket itself and carries everything
+    /// for the relay on it; over TLS that is an <see cref="SslStream"/>
+    /// whose certificate is checked against <paramref name="turnServerName"/>
+    /// — the host part of <paramref name="turnServer"/> when <c>null</c> —
+    /// with the platform's trust, or, when
+    /// <paramref name="turnTrustedCertificates"/> holds any, with those roots
+    /// and nothing else: how a private CA or a self-signed server is
+    /// trusted. Nothing here turns checking off.</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -157,10 +208,16 @@ public sealed class SipralStack : IDisposable
         bool? g729AnnexB = null,
         bool? referrals = null,
         bool? registrarKeepalive = null,
-        ulong registrarKeepaliveMs = 0)
+        ulong registrarKeepaliveMs = 0,
+        SipralTransport turnTransport = 0,
+        string? turnServerName = null,
+        X509Certificate2Collection? turnTrustedCertificates = null)
     {
         _nat = nat;
         _turn = turnServer is not null;
+        _turnTransport = turnTransport;
+        _turnServerName = turnServerName ?? (turnServer is null ? null : ParseAddress(turnServer).Host);
+        _turnTrustedCertificates = turnTrustedCertificates;
         NativeLibraryLoader.EnsureRegistered();
 
         _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -239,6 +296,7 @@ public sealed class SipralStack : IDisposable
             config.Referrals = ToggleOf(referrals);
             config.RegistrarKeepalive = ToggleOf(registrarKeepalive);
             config.RegistrarKeepaliveMs = registrarKeepaliveMs;
+            config.TurnTransport = (uint)turnTransport;
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }
@@ -338,7 +396,7 @@ public sealed class SipralStack : IDisposable
         }
 
         var call = new Call(this, callHandle, mediaSocket, mediaAddress);
-        _calls[call.Handle] = call;
+        Track(call, mediaAddress);
         return call;
     }
 
@@ -357,7 +415,7 @@ public sealed class SipralStack : IDisposable
         MapMediaSocket(mediaSocket, mediaAddress);
 
         var call = new Call(this, args.Call, mediaSocket, mediaAddress);
-        RegisterCall(call);
+        Track(call, mediaAddress);
         try
         {
             call.Answer();
@@ -423,7 +481,7 @@ public sealed class SipralStack : IDisposable
         }
 
         var call = new Call(this, placed, mediaSocket, mediaAddress);
-        _calls[call.Handle] = call;
+        Track(call, mediaAddress);
         return call;
     }
 
@@ -438,6 +496,19 @@ public sealed class SipralStack : IDisposable
     internal Call? CallFor(ulong handle) => _calls.TryGetValue(handle, out var call) ? call : null;
 
     internal void RegisterCall(Call call) => _calls[call.Handle] = call;
+
+    /// <summary>A call this stack runs the media of, and — with a TURN server
+    /// reached over TCP or TLS — the socket whose connection its last
+    /// farewell goes on, kept past the call itself until that connection
+    /// closes.</summary>
+    private void Track(Call call, string mediaAddress)
+    {
+        RegisterCall(call);
+        if (OverStream((uint)_turnTransport))
+        {
+            _turnSockets[call.Handle] = mediaAddress;
+        }
+    }
 
     internal void ForgetCall(ulong handle) => _calls.TryRemove(handle, out _);
 
@@ -469,6 +540,10 @@ public sealed class SipralStack : IDisposable
         // keeps and for the same reason: a consumer of `Events` may look
         // up `CallFor(args.Call)` the moment it wakes and read state that
         // must already be current.
+        if (args.TurnStream is { } asked)
+        {
+            _turnAsked.Enqueue(asked);
+        }
         if (args.Kind is SipralEventKind.NatMapping or SipralEventKind.NatRelay)
         {
             var local = args.Nat?.Local ?? args.Relay?.Local;
@@ -566,6 +641,18 @@ public sealed class SipralStack : IDisposable
             if (status != SipralStatus.Ok || packet.Len == 0)
             {
                 return;
+            }
+            if (OverStream(packet.Protocol))
+            {
+                // given back on the relay's connection, which is the
+                // stack's and not the call's, and outlives it
+                if (_turnSockets.TryGetValue(endedCall, out var local))
+                {
+                    var bytes = new byte[(int)packet.Len];
+                    Marshal.Copy(_farewellData, bytes, 0, bytes.Length);
+                    WriteTurn(local, bytes);
+                }
+                continue;
             }
             var media = CallFor(endedCall)?.Media;
             if (media is null)
@@ -730,6 +817,13 @@ public sealed class SipralStack : IDisposable
             Marshal.Copy(_stunData, payload, 0, payload.Length);
             var destination = Marshal.PtrToStringUTF8(_stunDestination, (int)transmit.DestinationLen) ?? string.Empty;
             var sourceText = Marshal.PtrToStringUTF8(_stunSource, (int)transmit.SourceLen) ?? string.Empty;
+            if (OverStream(transmit.Protocol))
+            {
+                // for the TURN server, on the socket's connection to it:
+                // never a datagram, which a network that blocks UDP drops
+                WriteTurn(sourceText, payload);
+                continue;
+            }
             Socket? sock;
             lock (_natLock)
             {
@@ -875,6 +969,210 @@ public sealed class SipralStack : IDisposable
             DrainTransmit();
             DrainStun();
             DrainFarewells();
+            ActOnTurnStreams();
+        }
+    }
+
+    // -- a TURN server reached over TCP or TLS ------------------------------
+
+    /// <summary>Whether a <c>SipralTransport</c> number marks bytes for a
+    /// TURN server's connection rather than a datagram.</summary>
+    internal static bool OverStream(uint protocol) =>
+        protocol == (uint)SipralTransport.Tcp || protocol == (uint)SipralTransport.Tls;
+
+    /// <summary>Writes <paramref name="payload"/> on media socket
+    /// <paramref name="local"/>'s connection to the TURN server, whole: what
+    /// <c>sipral_stack_poll_stun</c>, <c>sipral_stack_poll_farewell</c> and
+    /// a call's media hand out marked TCP or TLS. Thread-safe; a connection
+    /// that fails here is closed and the stack told, which loses the relay
+    /// on it.</summary>
+    internal void WriteTurn(string local, byte[] payload)
+    {
+        if (!_turnStreams.TryGetValue(local, out var stream))
+        {
+            return;
+        }
+        try
+        {
+            lock (stream.WriteLock)
+            {
+                stream.Stream.Write(payload, 0, payload.Length);
+                stream.Stream.Flush();
+            }
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
+        {
+            LoseTurnStream(local, tell: true);
+        }
+    }
+
+    /// <summary>Opens or closes what <see cref="SipralEventKind.TurnStream"/>
+    /// asked for in the poll that just ran, after this round's queues were
+    /// written.</summary>
+    private void ActOnTurnStreams()
+    {
+        while (_turnAsked.TryDequeue(out var asked))
+        {
+            if (asked.Local is not { } local)
+            {
+                continue;
+            }
+            if (asked.State == SipralTurnStream.Open && asked.Server is { } server)
+            {
+                var thread = new Thread(() => OpenTurnStream(local, server, asked.Protocol))
+                {
+                    IsBackground = true,
+                    Name = "sipral-turn",
+                };
+                thread.Start();
+            }
+            else if (asked.State == SipralTurnStream.Close)
+            {
+                foreach (var entry in _turnSockets)
+                {
+                    if (entry.Value == local)
+                    {
+                        _turnSockets.TryRemove(entry.Key, out _);
+                    }
+                }
+                LoseTurnStream(local, tell: false);
+            }
+        }
+    }
+
+    /// <summary>Connects to the TURN server for media socket
+    /// <paramref name="local"/> — over TLS, the certificate checked against
+    /// the configured name, when <paramref name="protocol"/> says so — says
+    /// how that went, and reads the connection until it closes.</summary>
+    private void OpenTurnStream(string local, string server, SipralTransport protocol)
+    {
+        TurnStream stream;
+        try
+        {
+            var (host, port) = ParseAddress(server);
+            var client = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
+            if (!client.ConnectAsync(IPAddress.Parse(host), port).Wait(TimeSpan.FromSeconds(5)))
+            {
+                client.Dispose();
+                throw new IOException($"no connection to {server} in five seconds");
+            }
+            Stream carried = client.GetStream();
+            if (protocol == SipralTransport.Tls)
+            {
+                var tls = new SslStream(carried, leaveInnerStreamOpen: false);
+                var options = new SslClientAuthenticationOptions { TargetHost = _turnServerName };
+                if (_turnTrustedCertificates is { Count: > 0 } roots)
+                {
+                    var policy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust };
+                    policy.CustomTrustStore.AddRange(roots);
+                    options.CertificateChainPolicy = policy;
+                }
+                tls.AuthenticateAsClient(options);
+                carried = tls;
+            }
+            stream = new TurnStream { Client = client, Stream = carried };
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or AggregateException
+                                       or System.Security.Authentication.AuthenticationException
+                                       or FormatException)
+        {
+            SayTurn(local, closed: true);
+            return;
+        }
+        if (_closed.IsSet)
+        {
+            stream.Stream.Dispose();
+            stream.Client.Dispose();
+            return;
+        }
+        _turnStreams[local] = stream;
+        SayTurn(local, closed: false);
+        var buffer = new byte[TransmitBytes];
+        while (true)
+        {
+            int read;
+            try
+            {
+                read = stream.Stream.Read(buffer, 0, buffer.Length);
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
+            {
+                read = 0;
+            }
+            if (read == 0)
+            {
+                LoseTurnStream(local, tell: true);
+                return;
+            }
+            if (!TurnReceived(local, buffer, read))
+            {
+                LoseTurnStream(local, tell: false);
+                return;
+            }
+        }
+    }
+
+    /// <summary><c>sipral_stack_turn_connected</c> or
+    /// <c>sipral_stack_turn_closed</c>, from whichever thread knows; never
+    /// throwing on the way out.</summary>
+    private void SayTurn(string local, bool closed)
+    {
+        var localBytes = ToSBytes(local);
+        try
+        {
+            SipralErrors.Call(
+                () => closed
+                    ? NativeMethods.sipral_stack_turn_closed(Handle, localBytes, (nuint)localBytes.Length, NowMs)
+                    : NativeMethods.sipral_stack_turn_connected(Handle, localBytes, (nuint)localBytes.Length, NowMs),
+                closed ? "sipral_stack_turn_closed" : "sipral_stack_turn_connected");
+        }
+        catch (Exception ex) when (ex is SipralException or ObjectDisposedException)
+        {
+            // the stack is going away, and with it everything on `local`
+        }
+    }
+
+    /// <summary>What a connection carried, to
+    /// <c>sipral_stack_turn_receive</c>: every byte, in order, since a stream
+    /// that loses one never finds its place again, so a busy stack is waited
+    /// for rather than skipped. False for a connection the stack found
+    /// broken.</summary>
+    private bool TurnReceived(string local, byte[] buffer, int count)
+    {
+        var localBytes = ToSBytes(local);
+        var bytes = buffer.AsSpan(0, count).ToArray();
+        while (!_closed.IsSet)
+        {
+            var status = NativeMethods.sipral_stack_turn_receive(
+                Handle, localBytes, (nuint)localBytes.Length, bytes, (nuint)bytes.Length, NowMs);
+            if (status == SipralStatus.Busy)
+            {
+                Thread.Sleep(1);
+                continue;
+            }
+            return status != SipralStatus.StreamBroken;
+        }
+        return true;
+    }
+
+    /// <summary>Closes media socket <paramref name="local"/>'s connection,
+    /// and when <paramref name="tell"/>, says so with
+    /// <c>sipral_stack_turn_closed</c> — not for one the stack itself asked
+    /// to close or found broken.</summary>
+    private void LoseTurnStream(string local, bool tell)
+    {
+        if (!_turnStreams.TryRemove(local, out var stream))
+        {
+            return;
+        }
+        lock (stream.WriteLock)
+        {
+            stream.Stream.Dispose();
+            stream.Client.Dispose();
+        }
+        if (tell)
+        {
+            SayTurn(local, closed: true);
         }
     }
 
@@ -938,6 +1236,12 @@ public sealed class SipralStack : IDisposable
         if (Thread.CurrentThread != _pollThread)
         {
             _pollThread.Join(TimeSpan.FromSeconds(5));
+        }
+        // and every connection to the TURN server still open: what it
+        // carried was given back through it above, or lapses with it
+        foreach (var local in _turnStreams.Keys.ToList())
+        {
+            LoseTurnStream(local, tell: false);
         }
         _events.Writer.TryComplete();
 

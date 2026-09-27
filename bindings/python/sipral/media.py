@@ -58,6 +58,9 @@ class Media:
         self.call_handle = call_handle
         self._socket = sock
         self._socket.setblocking(False)
+        #: The socket's own `host:port`, which names its connection to a
+        #: TURN server reached over TCP or TLS (:meth:`Stack.write_turn`).
+        self.local_address = _format_address(*sock.getsockname())
 
         out_media = ffi.new("sipral_handle_t *")
         _call(
@@ -267,12 +270,22 @@ class Media:
             status = poll(packet)
             if status != lib.SIPRAL_STATUS_OK or packet.len == 0:
                 return
-            text = ffi.string(packet.destination, packet.destination_len).decode("utf-8")
-            host, port = _parse_address(text)
-            try:
-                self._socket.sendto(bytes(ffi.buffer(packet.data, packet.len)), (host, port))
-            except OSError:
-                pass
+            self._send(packet)
+
+    def _send(self, packet) -> None:
+        """One packet out where it says: a datagram from this call's
+        socket, or -- marked TCP or TLS -- bytes on the socket's connection
+        to the TURN server, which the stack holds."""
+        payload = bytes(ffi.buffer(packet.data, packet.len))
+        if packet.protocol in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
+            self.stack.write_turn(self.local_address, payload)
+            return
+        text = ffi.string(packet.destination, packet.destination_len).decode("utf-8")
+        host, port = _parse_address(text)
+        try:
+            self._socket.sendto(payload, (host, port))
+        except OSError:
+            pass
 
     def _capture_once(self, samples) -> None:
         """One `sipral_media_capture` call, not a drain: it consumes one
@@ -291,12 +304,7 @@ class Media:
         )
         if status != lib.SIPRAL_STATUS_OK or packet.len == 0:
             return
-        text = ffi.string(packet.destination, packet.destination_len).decode("utf-8")
-        host, port = _parse_address(text)
-        try:
-            self._socket.sendto(bytes(ffi.buffer(packet.data, packet.len)), (host, port))
-        except OSError:
-            pass
+        self._send(packet)
 
     def _next_chunk(self) -> bytes:
         needed = self.frame_samples * 2

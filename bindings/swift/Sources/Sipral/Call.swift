@@ -86,7 +86,10 @@ public final class Call: @unchecked Sendable {
     }
 
     private let mediaSocket: UDPSocket
-    private let mediaAddress: String
+    /// The call's media socket, as `host:port`: the name
+    /// `sipral_stack_nat_map` gave it, and so of its connection to a TURN
+    /// server reached over TCP or TLS.
+    let mediaAddress: String
 
     /// The raw descriptor `close()` releases on the no-media path -- `internal`
     /// rather than `private` only so `SipralTests` can watch it directly, the

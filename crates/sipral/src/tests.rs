@@ -5667,13 +5667,53 @@ fn relay_for_the_caller(pair: &mut Pair) -> crate::Relay {
     relays.take(caller_media()).expect("the relay")
 }
 
+/// A relay allocated for the caller's media socket over a TCP connection to
+/// the same server, every answer handed in three octets at a time, as a
+/// stream may deliver it.
+#[cfg(feature = "ice")]
+fn relay_over_tcp_for_the_caller(pair: &mut Pair) -> crate::Relay {
+    use crate::relay::tests::{SERVER, answer};
+
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    let mut relays = pair
+        .caller
+        .engine
+        .relays(server, "alice", "correct horse")
+        .over(crate::TurnTransport::Tcp);
+    relays.allocate(caller_media(), pair.now);
+    while let Some(request) = relays.poll_transmit() {
+        assert_eq!(request.transport, crate::TurnTransport::Tcp);
+        let reply = answer(&request.payload).expect("an answer");
+        for piece in reply.chunks(3) {
+            assert_eq!(
+                relays.receive_stream(request.local, piece, pair.now),
+                Ok(true)
+            );
+        }
+    }
+    let relay = relays.take(caller_media()).expect("the relay");
+    assert_eq!(relay.transport(), crate::TurnTransport::Tcp);
+    relay
+}
+
 /// Place the caller's call with a relay for its media socket, and take it all
 /// the way to confirmed.
 #[cfg(feature = "ice")]
 fn place_with_a_relay(pair: &mut Pair, catalog: CodecCatalog) -> CallHandle {
+    let relay = relay_for_the_caller(pair);
+    place_with_this_relay(pair, catalog, relay)
+}
+
+/// Place the caller's call with `relay` for its media socket, and take it all
+/// the way to confirmed.
+#[cfg(feature = "ice")]
+fn place_with_this_relay(
+    pair: &mut Pair,
+    catalog: CodecCatalog,
+    relay: crate::Relay,
+) -> CallHandle {
     let account = pair.caller.account("alice", callee_sip());
     let _ = pair.callee.account("bob", caller_sip());
-    let relay = relay_for_the_caller(pair);
     let media = CallMedia::new(catalog, MediaConfig::default()).relay(relay);
     let placed = pair
         .caller
@@ -5758,6 +5798,401 @@ fn a_relay_is_offered_beside_the_host_candidate_and_given_back_when_the_call_end
         vec![(call, server)],
         "the allocation goes back with the call rather than lapsing"
     );
+}
+
+/// Everything the caller wrote for its relay's TCP connection, from the
+/// socket it was allocated on to the server it was allocated on.
+#[cfg(feature = "ice")]
+fn written_on_the_connection(stack: &mut Stack) -> Vec<(CallHandle, Vec<u8>)> {
+    let server: SocketAddr = crate::relay::tests::SERVER.parse().expect("an address");
+    std::iter::from_fn(|| stack.engine.poll_turn_stream())
+        .map(|(call, bytes)| {
+            assert_eq!(bytes.transport, crate::TurnTransport::Tcp);
+            assert_eq!(bytes.local, caller_media());
+            assert_eq!(bytes.destination, server);
+            (call, bytes.payload)
+        })
+        .collect()
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_relay_over_tcp_offers_no_mapping_of_the_connection_and_goes_back_on_it() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let relay = relay_over_tcp_for_the_caller(&mut pair);
+    // what the server saw is where the connection comes from, not the socket
+    assert_eq!(relay.mapped(), None);
+    let call = place_with_this_relay(&mut pair, catalog, relay);
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    let offer = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw an offer")
+        .to_string();
+    assert!(offer.contains("198.51.100.9 50000 typ relay"), "{offer}");
+    assert!(!offer.contains("typ srflx"), "{offer}");
+    assert!(offer.contains("c=IN IP4 192.0.2.1\r\n"), "{offer}");
+    assert!(offer.contains("m=audio 40000 "), "{offer}");
+
+    pair.check_paths(call, remote);
+    // the permissions and the channel went on the connection, not as
+    // datagrams to the server
+    assert!(!written_on_the_connection(&mut pair.caller).is_empty());
+
+    pair.caller
+        .agent
+        .hangup(call, pair.now)
+        .expect("the hangup");
+    pair.settle();
+    pair.caller.drain(pair.now, false);
+    assert_eq!(
+        relays_given_back(&mut pair.caller),
+        vec![],
+        "no datagram gives back an allocation made on a connection"
+    );
+    let given_back: Vec<_> = written_on_the_connection(&mut pair.caller)
+        .into_iter()
+        .filter(|(_, bytes)| crate::relay::tests::refresh_lifetime(bytes) == Some(0))
+        .map(|(handle, _)| handle)
+        .collect();
+    assert_eq!(given_back, vec![call]);
+}
+
+/// A TURN server the caller reaches over TCP and nothing else, in front of a
+/// network that carries no datagram between the two ends: what the caller's
+/// connection carries is framed here, the callee is reached from the relayed
+/// address, and what the callee sends there goes back on the connection.
+#[cfg(feature = "ice")]
+#[derive(Default)]
+struct TcpTurn {
+    from_caller: sipral_nat::turn::StreamFraming,
+    channels: Vec<(sipral_nat::turn::ChannelNumber, SocketAddr)>,
+    to_caller: Vec<u8>,
+    to_callee: Vec<Vec<u8>>,
+}
+
+#[cfg(feature = "ice")]
+impl TcpTurn {
+    fn caller_wrote(&mut self, bytes: &[u8]) {
+        self.from_caller.push(bytes);
+        let mut frames = Vec::new();
+        while let Some(frame) = self.from_caller.next_frame().expect("a well-formed stream") {
+            frames.push(frame.to_vec());
+        }
+        for frame in frames {
+            self.frame(&frame);
+        }
+    }
+
+    fn frame(&mut self, frame: &[u8]) {
+        use sipral_nat::stun::{AttributeType, Class, Message};
+        use sipral_nat::turn::{ChannelData, ChannelNumber, method};
+
+        if let Ok(channel) = ChannelData::parse_frame(frame) {
+            if self
+                .channels
+                .iter()
+                .any(|(number, _)| *number == channel.channel())
+            {
+                self.to_callee.push(channel.data().to_vec());
+            }
+            return;
+        }
+        let message = Message::parse(frame).expect("STUN");
+        match (message.class(), message.method()) {
+            (Class::Indication, method::SEND) => {
+                if let Some(data) = message.find(AttributeType::DATA) {
+                    self.to_callee.push(data.to_vec());
+                }
+            }
+            (Class::Request, method::CHANNEL_BIND) => {
+                let number = message
+                    .find(AttributeType::CHANNEL_NUMBER)
+                    .and_then(|value| value.get(..2))
+                    .and_then(|bytes| ChannelNumber::new(u16::from_be_bytes([bytes[0], bytes[1]])))
+                    .expect("a channel number");
+                let peer = message
+                    .find(AttributeType::XOR_PEER_ADDRESS)
+                    .map(xor_v4)
+                    .expect("a peer");
+                self.channels.push((number, peer));
+                self.answer(frame);
+            }
+            (Class::Request, _) => self.answer(frame),
+            _ => {}
+        }
+    }
+
+    fn answer(&mut self, request: &[u8]) {
+        let reply = crate::relay::tests::answer(request).expect("an answer");
+        self.to_caller.extend_from_slice(&reply);
+    }
+
+    /// A datagram the callee sent to the relayed address: a channel message
+    /// once one is bound to the callee, padded for the stream (RFC 8656
+    /// §12.5), and a Data indication before.
+    fn callee_sent(&mut self, datagram: &[u8]) {
+        use sipral_nat::stun::{AttributeType, Class, MessageBuilder, TransactionId};
+        use sipral_nat::turn::{ChannelData, Transport, method};
+
+        if let Some((number, _)) = self
+            .channels
+            .iter()
+            .find(|(_, peer)| *peer == callee_media())
+        {
+            ChannelData::encode(*number, datagram, Transport::Tcp, &mut self.to_caller)
+                .expect("fits");
+            return;
+        }
+        let mut builder =
+            MessageBuilder::new(Class::Indication, method::DATA, TransactionId::new([7; 12]));
+        builder
+            .add_xor_address(AttributeType::XOR_PEER_ADDRESS, callee_media())
+            .expect("fits");
+        builder.add(AttributeType::DATA, datagram).expect("fits");
+        self.to_caller.extend_from_slice(&builder.finish());
+    }
+}
+
+/// An IPv4 XOR-PEER-ADDRESS (RFC 8489 §14.2).
+#[cfg(feature = "ice")]
+fn xor_v4(value: &[u8]) -> SocketAddr {
+    let cookie = sipral_nat::stun::MAGIC_COOKIE.to_be_bytes();
+    let port = u16::from_be_bytes([value[2] ^ cookie[0], value[3] ^ cookie[1]]);
+    let ip = std::net::Ipv4Addr::new(
+        value[4] ^ cookie[0],
+        value[5] ^ cookie[1],
+        value[6] ^ cookie[2],
+        value[7] ^ cookie[3],
+    );
+    SocketAddr::from((ip, port))
+}
+
+#[cfg(feature = "ice")]
+impl Pair {
+    /// Run the connectivity checks with no datagram crossing between the
+    /// two ends, the caller's relay over TCP the only path: the caller's
+    /// connection carried to `turn` and back, and what the callee sends to
+    /// the relayed address carried there.
+    fn check_paths_through(&mut self, turn: &mut TcpTurn, call: CallHandle, remote: CallHandle) {
+        let relayed: SocketAddr = crate::relay::tests::RELAYED.parse().expect("an address");
+        for _ in 0..400 {
+            let mut moved = false;
+            let server: SocketAddr = crate::relay::tests::SERVER.parse().expect("an address");
+            while let Some((_, destination, _)) = self.caller.engine.poll_transmit(self.now) {
+                assert_ne!(
+                    destination, server,
+                    "a datagram to a server reached over TCP"
+                );
+                moved = true;
+            }
+            for (_, bytes) in written_on_the_connection(&mut self.caller) {
+                turn.caller_wrote(&bytes);
+                moved = true;
+            }
+            while let Some((_, destination, datagram)) = self.callee.engine.poll_transmit(self.now)
+            {
+                if destination == relayed {
+                    turn.callee_sent(&datagram);
+                }
+                moved = true;
+            }
+            for mut datagram in std::mem::take(&mut turn.to_callee) {
+                let mut session = self.callee.engine.session(remote).expect("media");
+                session.receive(&mut datagram, relayed, self.now);
+                moved = true;
+            }
+            let bytes = std::mem::take(&mut turn.to_caller);
+            if !bytes.is_empty() {
+                // cut where no message ends, as a read off a socket may be
+                let (first, second) = bytes.split_at(bytes.len() / 2 + 1);
+                for piece in [first, second] {
+                    assert_eq!(
+                        self.caller
+                            .engine
+                            .receive_stream(caller_media(), piece, self.now),
+                        Ok(true)
+                    );
+                }
+                moved = true;
+            }
+            let chosen = self
+                .caller
+                .engine
+                .session(call)
+                .is_some_and(|session| session.ice_path().is_some())
+                && self
+                    .callee
+                    .engine
+                    .session(remote)
+                    .is_some_and(|session| session.ice_path().is_some());
+            if chosen && !moved {
+                return;
+            }
+            self.advance();
+            self.caller.engine.handle_timeout(self.now);
+            self.callee.engine.handle_timeout(self.now);
+            self.caller.drain(self.now, false);
+            self.callee.drain(self.now, true);
+        }
+        panic!("no path through the relay");
+    }
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_call_whose_only_path_is_a_relay_over_tcp_carries_audio_both_ways() {
+    use crate::relay::tests::{RELAYED, SERVER};
+
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    let relayed: SocketAddr = RELAYED.parse().expect("an address");
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let relay = relay_over_tcp_for_the_caller(&mut pair);
+    let call = place_with_this_relay(&mut pair, catalog, relay);
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    let mut turn = TcpTurn::default();
+    pair.check_paths_through(&mut turn, call, remote);
+    let path = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .ice_path()
+        .expect("a path");
+    assert_eq!(path, (relayed, callee_media()));
+
+    // the caller's audio leaves on the connection, and the callee hears it
+    // from the relayed address: three frames, since a new source is on
+    // probation for its first (RFC 3550 §6.2.1)
+    let silence = [0_i16; 160];
+    let mut arrivals = Vec::new();
+    for _ in 0..3 {
+        pair.advance();
+        let sent = {
+            let mut session = pair.caller.engine.session(call).expect("media");
+            let datagram = session
+                .capture(&silence, pair.now)
+                .expect("a frame")
+                .expect("a route");
+            assert_eq!(datagram.transport, crate::TurnTransport::Tcp);
+            assert_eq!(datagram.destination, server);
+            datagram.payload.to_vec()
+        };
+        turn.caller_wrote(&sent);
+        let mut heard = turn.to_callee.pop().expect("relayed to the callee");
+        arrivals.push(
+            pair.callee
+                .engine
+                .session(remote)
+                .expect("media")
+                .receive(&mut heard, relayed, pair.now),
+        );
+    }
+    assert_eq!(
+        arrivals.last(),
+        Some(&crate::Arrival::Queued),
+        "{arrivals:?}"
+    );
+
+    // and the callee's comes back on it, padded, every read cut short of a
+    // whole message
+    let before = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .statistics(pair.now)
+        .quality
+        .received;
+    for _ in 0..3 {
+        pair.advance();
+        let answered = {
+            let mut session = pair.callee.engine.session(remote).expect("media");
+            let datagram = session
+                .capture(&silence, pair.now)
+                .expect("a frame")
+                .expect("a route");
+            assert_eq!(datagram.destination, relayed);
+            datagram.payload.to_vec()
+        };
+        turn.callee_sent(&answered);
+    }
+    let bytes = std::mem::take(&mut turn.to_caller);
+    assert_eq!(bytes.len() % 4, 0, "padded to whole words");
+    for piece in bytes.chunks(5) {
+        assert_eq!(
+            pair.caller
+                .engine
+                .receive_stream(caller_media(), piece, pair.now),
+            Ok(true)
+        );
+    }
+    let after = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .statistics(pair.now)
+        .quality
+        .received;
+    assert!(
+        after > before,
+        "the caller heard the callee: {before} then {after}"
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_closed_connection_takes_the_relay_and_the_path_through_it() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let relay = relay_over_tcp_for_the_caller(&mut pair);
+    let call = place_with_this_relay(&mut pair, catalog, relay);
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    let mut turn = TcpTurn::default();
+    pair.check_paths_through(&mut turn, call, remote);
+
+    pair.caller.engine.stream_closed(caller_media(), pair.now);
+    assert_eq!(
+        pair.caller
+            .engine
+            .receive_stream(caller_media(), &[0x40, 0, 0, 0], pair.now),
+        Ok(false),
+        "nothing runs over a connection that closed"
+    );
+    // consent on the pair through it runs out, and the call hears so
+    let mut lost = false;
+    for _ in 0..(40_000 / TICK.as_millis()) {
+        pair.advance();
+        pair.caller.engine.handle_timeout(pair.now);
+        pair.caller.drain(pair.now, false);
+        while pair.caller.engine.poll_transmit(pair.now).is_some() {}
+        assert!(
+            written_on_the_connection(&mut pair.caller).is_empty(),
+            "written on a connection that closed"
+        );
+        lost = pair.caller.heard.iter().any(|event| {
+            matches!(
+                event,
+                Event::Media {
+                    event: MediaEvent::Failed(MediaError::IcePathLost),
+                    ..
+                }
+            )
+        });
+        if lost {
+            break;
+        }
+    }
+    assert!(lost, "the path through the lost relay was reported gone");
 }
 
 #[cfg(feature = "ice")]

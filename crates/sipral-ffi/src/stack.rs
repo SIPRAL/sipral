@@ -512,6 +512,21 @@ record! {
         /// — and anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`, as is a
         /// figure with `registrar_keepalive` off, a value nothing would read.
         pub registrar_keepalive_ms: u64,
+        /// How every media socket reaches `turn_server`, as a
+        /// `SipralTransport`: `SIPRAL_TRANSPORT_UDP`, or zero for it;
+        /// `SIPRAL_TRANSPORT_TCP` for the network that blocks UDP outright;
+        /// `SIPRAL_TRANSPORT_TLS` for the one that lets one port out — 5349
+        /// is TURN's (RFC 8656 §4.1) — or for an application that wants the
+        /// server's certificate checked. The relay speaks UDP to the peer
+        /// whichever it is (§3.1). Over TCP or TLS the application opens a
+        /// connection per media socket when `SIPRAL_EVENT_KIND_TURN_STREAM`
+        /// asks, with the platform's own TLS as it does for SIP. Anything
+        /// else, or a value other than zero with no `turn_server`, is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        ///
+        /// Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub turn_transport: u32,
     }
 }
 
@@ -899,7 +914,7 @@ pub(crate) struct StackState {
     /// one the call it belonged to may already be forgotten there. Drained by
     /// [`crate::media::sipral_stack_poll_farewell`], and held to at most
     /// [`FAREWELL_CEILING`].
-    pub(crate) farewells: VecDeque<(SipralHandle, SocketAddr, Vec<u8>)>,
+    pub(crate) farewells: VecDeque<(SipralHandle, SocketAddr, Vec<u8>, u32)>,
     /// How many events a poll raised and then had nowhere to queue, because
     /// [`OUTBOX_CEILING`] was already reached. Reported at the tail of
     /// `sipral_counters_t`.
@@ -1781,14 +1796,15 @@ fn drain(
     // to see is already here, still naming a call `calls` has not forgotten
     // yet
     while let Some((call, destination, payload)) = state.engine.poll_farewell() {
-        let handle = state.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
-        if state.farewells.len() >= FAREWELL_CEILING {
-            // the oldest goodbye is worth less than the one that just
-            // arrived — see FAREWELL_CEILING
-            state.farewells.pop_front();
-            state.farewells_dropped = state.farewells_dropped.saturating_add(1);
-        }
-        state.farewells.push_back((handle, destination, payload));
+        let protocol = SipralTransport::Udp as u32;
+        farewell(state, call, destination, payload, protocol);
+    }
+    // what a call gives back on its relay's connection to the TURN server:
+    // the same queue, marked with what to write it on
+    #[cfg(feature = "ice")]
+    while let Some((call, bytes)) = state.engine.poll_turn_stream() {
+        let protocol = crate::nat::protocol_of(bytes.transport);
+        farewell(state, call, bytes.destination, bytes.payload, protocol);
     }
     for call in ended {
         if let Some(dialog) = state.agent.call_dialog(call) {
@@ -1811,6 +1827,26 @@ fn drain(
     for referral in lapsed {
         state.calls.forget(referral);
     }
+}
+
+/// Queue one of `call`'s farewells for `sipral_stack_poll_farewell`.
+fn farewell(
+    state: &mut StackState,
+    call: CallHandle,
+    destination: SocketAddr,
+    payload: Vec<u8>,
+    protocol: u32,
+) {
+    let handle = state.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
+    if state.farewells.len() >= FAREWELL_CEILING {
+        // the oldest goodbye is worth less than the one that just
+        // arrived — see FAREWELL_CEILING
+        state.farewells.pop_front();
+        state.farewells_dropped = state.farewells_dropped.saturating_add(1);
+    }
+    state
+        .farewells
+        .push_back((handle, destination, payload, protocol));
 }
 
 fn signalling(
@@ -2333,6 +2369,7 @@ pub(crate) mod tests {
             referrals: 0,
             registrar_keepalive: 0,
             registrar_keepalive_ms: 0,
+            turn_transport: 0,
         }
     }
 

@@ -92,6 +92,14 @@ public enum SipralStatus : int
     /// customer.
     /// </summary>
     NotSupported = 11,
+    /// <summary>
+    /// A byte stream carried something no message this library reads
+    /// starts with. Nothing in a stream marks where the next message
+    /// begins, so nothing arriving on it later can be read either: close
+    /// the connection. What rode on it is lost with it, and the call that
+    /// said so says what that was.
+    /// </summary>
+    StreamBroken = 12,
 }
 
 /// <summary>
@@ -1190,6 +1198,27 @@ public enum SipralEventKind : uint
     /// and the handle is stale from here on.
     /// </summary>
     Referral = 41,
+    /// <summary>
+    /// A media socket's connection to a TURN server reached over TCP or
+    /// TLS (`turn_transport`, RFC 8656 §3.1) is to be opened, or closed.
+    /// Only on a stack created with one.
+    ///
+    /// `payload.turn_stream` says which socket, which server, over what,
+    /// and which of the two. `SIPRAL_TURN_STREAM_OPEN` follows
+    /// `sipral_stack_nat_map`: open the connection from the socket to the
+    /// server — TLS with the platform's own stack, the certificate
+    /// checked against the server's name — and say so with
+    /// `sipral_stack_turn_connected`, then hand everything it carries to
+    /// `sipral_stack_turn_receive` for as long as it is open, and its
+    /// closing to `sipral_stack_turn_closed`. What is written on it comes
+    /// out of `sipral_stack_poll_stun`, `sipral_media_poll_transmit`,
+    /// `sipral_media_capture`, `sipral_media_poll_rtcp` and
+    /// `sipral_stack_poll_farewell`, each marked with its `protocol`.
+    /// `SIPRAL_TURN_STREAM_CLOSE` says nothing more will be: write what
+    /// is still queued for it, and close it. `account` and `call` are
+    /// `SIPRAL_HANDLE_NONE`: a socket is neither.
+    /// </summary>
+    TurnStream = 42,
 }
 
 /// <summary>
@@ -1622,6 +1651,32 @@ public enum SipralNatRelay : uint
     /// without one, and ICE finds what path it can on the rest.
     /// </summary>
     Failed = 2,
+}
+
+/// <summary>
+/// What a media socket's connection to the TURN server is to do. Names
+/// for `sipral_turn_stream_event_t::state`.
+/// </summary>
+public enum SipralTurnStream : uint
+{
+    /// <summary>
+    /// Open a connection from the media socket `local` to the TURN
+    /// server at `server`, over `protocol` — TCP, or TLS with the
+    /// server's certificate checked by the platform's own stack — and
+    /// say so with `sipral_stack_turn_connected` once it is open, or
+    /// `sipral_stack_turn_closed` if it cannot be. The socket's relay is
+    /// allocated over it; a call on the socket before that answers
+    /// `SIPRAL_STATUS_WRONG_STATE`.
+    /// </summary>
+    Open = 1,
+    /// <summary>
+    /// Nothing more will be written for the connection from `local`:
+    /// its relay was given back or lost, or the call it carried has
+    /// ended. Write what the queues still hold for it —
+    /// `sipral_stack_poll_farewell` and `sipral_stack_poll_stun` — and
+    /// close it.
+    /// </summary>
+    Close = 2,
 }
 
 /// <summary>
@@ -2552,6 +2607,23 @@ public struct SipralStackConfig
     /// figure with `registrar_keepalive` off, a value nothing would read.
     /// </summary>
     public ulong RegistrarKeepaliveMs;
+    /// <summary>
+    /// How every media socket reaches `turn_server`, as a
+    /// `SipralTransport`: `SIPRAL_TRANSPORT_UDP`, or zero for it;
+    /// `SIPRAL_TRANSPORT_TCP` for the network that blocks UDP outright;
+    /// `SIPRAL_TRANSPORT_TLS` for the one that lets one port out — 5349
+    /// is TURN's (RFC 8656 §4.1) — or for an application that wants the
+    /// server's certificate checked. The relay speaks UDP to the peer
+    /// whichever it is (§3.1). Over TCP or TLS the application opens a
+    /// connection per media socket when `SIPRAL_EVENT_KIND_TURN_STREAM`
+    /// asks, with the platform's own TLS as it does for SIP. Anything
+    /// else, or a value other than zero with no `turn_server`, is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    ///
+    /// Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public uint TurnTransport;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -3674,6 +3746,19 @@ public struct SipralMediaPacket
     /// How many bytes of it were written, the NUL not counted.
     /// </summary>
     public nuint DestinationLen;
+    /// <summary>
+    /// What to send it over, as a `SipralTransport`.
+    /// `SIPRAL_TRANSPORT_UDP` is a datagram from the call's media socket,
+    /// which is everything unless the stack reaches its TURN server over
+    /// TCP or TLS (`turn_transport`); then what goes through the relay
+    /// says that instead, `destination` is the server, and the bytes are
+    /// written, as they are and in order, on the media socket's
+    /// connection to it — never sent as a datagram.
+    ///
+    /// Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public uint Protocol;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -4533,6 +4618,44 @@ public struct SipralReferralEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.TurnStream
+/// carries.
+///
+/// The addresses are text, not NUL-terminated, and the library's: valid
+/// for as long as the callback runs.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralTurnStreamEvent
+{
+    /// <summary>
+    /// A SipralTurnStream.
+    /// </summary>
+    public uint State;
+    /// <summary>
+    /// What to open, as a `SipralTransport`: `SIPRAL_TRANSPORT_TCP` or
+    /// `SIPRAL_TRANSPORT_TLS`, what `turn_transport` named.
+    /// </summary>
+    public uint Protocol;
+    /// <summary>
+    /// The media socket, as `sipral_stack_nat_map` named it: the
+    /// connection's own name in the three calls that take one.
+    /// </summary>
+    public IntPtr Local;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint LocalLen;
+    /// <summary>
+    /// The TURN server, `host:port`, as `turn_server` named it.
+    /// </summary>
+    public IntPtr Server;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ServerLen;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -4612,6 +4735,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralReferralEvent Referral;
+    /// <summary>
+    /// For SipralEventKind.TurnStream.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralTurnStreamEvent TurnStream;
 }
 
 /// <summary>
@@ -5345,6 +5473,15 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_stack_receive_stun(ulong stack, byte[] data, nuint len, sbyte[] from, nuint fromLen, sbyte[] to, nuint toLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_turn_connected(ulong stack, sbyte[] local, nuint localLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_turn_receive(ulong stack, sbyte[] local, nuint localLen, byte[] data, nuint len, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_turn_closed(ulong stack, sbyte[] local, nuint localLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern IntPtr sipral_event_kind_name(uint kind);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -5452,7 +5589,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 28;
+    public const uint AbiVersionMinor = 29;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -5581,6 +5718,20 @@ public static class Sipral
     /// without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
     /// </summary>
     public const uint FeatureStun = 512;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. A TURN server reached over TCP or TLS
+    /// (RFC 8656 §3.1): `sipral_stack_config_t::turn_transport`, and the
+    /// connection the application opens for each media socket when
+    /// `SIPRAL_EVENT_KIND_TURN_STREAM` asks — for the network that lets no
+    /// UDP out.
+    ///
+    /// It comes with `SIPRAL_FEATURE_ICE`, since a relay is only ever a
+    /// call's relayed ICE candidate, and without it `turn_transport` other
+    /// than UDP answers `SIPRAL_STATUS_NOT_SUPPORTED` as a `turn_server`
+    /// does.
+    /// </summary>
+    public const uint FeatureTurnStream = 1024;
 
     /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
@@ -7972,6 +8123,7 @@ public static class Sipral
     }
 
     /// <summary>
+    /// Take the next STUN request a media socket has to send.entry! {
     /// Take the next STUN request a media socket has to send.
     ///
     /// The same record and the same rules as `sipral_stack_poll_transmit`,
@@ -7981,7 +8133,11 @@ public static class Sipral
     /// nobody answered. `source` is always written, and it is the socket to
     /// send from — the whole point is the address the server sees it come
     /// from, so sending it from any other socket learns the wrong one.
-    /// `transport` is zero and names nothing here, and `protocol` is UDP.
+    /// `transport` is zero and names nothing here. `protocol` is UDP for a
+    /// datagram; on a stack whose `turn_transport` is TCP or TLS, what is for
+    /// the TURN server says that instead, and is written, as it is, on the
+    /// connection from `source` that `SIPRAL_EVENT_KIND_TURN_STREAM` asked
+    /// for — never sent as a datagram.
     ///
     /// A call placed, rung or answered on a socket with its relay sends
     /// through here too, for as long as it has no media handle: the Binding
@@ -8056,6 +8212,92 @@ public static class Sipral
         var toSigned = new sbyte[toBytes.Length];
         Buffer.BlockCopy(toBytes, 0, toSigned, 0, toBytes.Length);
         Check(NativeMethods.sipral_stack_receive_stun(stack, data, (nuint)data.Length, fromSigned, (nuint)fromSigned.Length, toSigned, (nuint)toSigned.Length, nowMs));
+    }
+
+    /// <summary>
+    /// Say that the TCP or TLS connection a
+    /// `SIPRAL_EVENT_KIND_TURN_STREAM` of state `SIPRAL_TURN_STREAM_OPEN`
+    /// asked for is open — for TLS, that the handshake has finished and the
+    /// server's certificate was checked against the name the application
+    /// configured, by the platform's own TLS stack, as for SIP over TLS.
+    ///
+    /// The socket's Allocate is waiting in sipral_stack_poll_stun when
+    /// this returns, marked with the connection's `protocol`, to be written
+    /// on it; the answer comes back through sipral_stack_turn_receive,
+    /// and `SIPRAL_EVENT_KIND_NAT_RELAY` says what the server gave, exactly
+    /// as over UDP.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket no connection was asked
+    /// for, and `SIPRAL_STATUS_WRONG_STATE` on a stack created without
+    /// `SIPRAL_NAT_STUN`.
+    ///
+    /// Safety
+    ///
+    /// `local` must be readable for `local_len` bytes.
+    /// </summary>
+    public static void StackTurnConnected(ulong stack, string local, ulong nowMs)
+    {
+        var localBytes = Encoding.UTF8.GetBytes(local);
+        var localSigned = new sbyte[localBytes.Length];
+        Buffer.BlockCopy(localBytes, 0, localSigned, 0, localBytes.Length);
+        Check(NativeMethods.sipral_stack_turn_connected(stack, localSigned, (nuint)localSigned.Length, nowMs));
+    }
+
+    /// <summary>
+    /// Hand over bytes read off a media socket's TCP or TLS connection to
+    /// the TURN server, in whatever pieces the connection delivered them.
+    ///
+    /// The messages in them are put back together here (RFC 8656 §12.5)
+    /// and each goes where a datagram from the server would: to the relay
+    /// being made or kept for the socket, or, once a call has taken it, to
+    /// that call — its agent while it waits for its session, and then its
+    /// media, as through `sipral_media_receive`, audio included. So the
+    /// connection is read here for as long as it is open, media handle or
+    /// not, and what the call owes the far end in reply comes out of
+    /// `sipral_media_poll_transmit` as it always does.
+    ///
+    /// `SIPRAL_STATUS_STREAM_BROKEN` when the connection carried something
+    /// no TURN message starts with, which nothing in a stream can recover
+    /// from: close it. The socket's relay is lost with it —
+    /// `SIPRAL_NAT_RELAY_FAILED` for one still waiting for its call — and no
+    /// `SIPRAL_TURN_STREAM_CLOSE` follows. `SIPRAL_STATUS_INVALID_ARGUMENT`
+    /// for a socket with no open connection.
+    ///
+    /// Safety
+    ///
+    /// `local` must be readable for `local_len` bytes, and `data` for `len`.
+    /// </summary>
+    public static void StackTurnReceive(ulong stack, string local, byte[] data, ulong nowMs)
+    {
+        var localBytes = Encoding.UTF8.GetBytes(local);
+        var localSigned = new sbyte[localBytes.Length];
+        Buffer.BlockCopy(localBytes, 0, localSigned, 0, localBytes.Length);
+        Check(NativeMethods.sipral_stack_turn_receive(stack, localSigned, (nuint)localSigned.Length, data, (nuint)data.Length, nowMs));
+    }
+
+    /// <summary>
+    /// Say that a media socket's connection to the TURN server closed, or
+    /// could not be opened at all.
+    ///
+    /// The server knew the socket's allocation by that connection (RFC 8656
+    /// §3.2), so the relay went with it: one still being made is
+    /// `SIPRAL_NAT_RELAY_FAILED` at the next poll, and a call on the socket
+    /// goes without it; a call that had taken it keeps the paths ICE found
+    /// that need none, and loses the one through it when its consent runs
+    /// out (RFC 7675). Naming the socket again with `sipral_stack_nat_map`
+    /// asks for a new connection. `SIPRAL_STATUS_OK` for a connection the
+    /// stack had already let go.
+    ///
+    /// Safety
+    ///
+    /// `local` must be readable for `local_len` bytes.
+    /// </summary>
+    public static void StackTurnClosed(ulong stack, string local, ulong nowMs)
+    {
+        var localBytes = Encoding.UTF8.GetBytes(local);
+        var localSigned = new sbyte[localBytes.Length];
+        Buffer.BlockCopy(localBytes, 0, localSigned, 0, localBytes.Length);
+        Check(NativeMethods.sipral_stack_turn_closed(stack, localSigned, (nuint)localSigned.Length, nowMs));
     }
 
     /// <summary>

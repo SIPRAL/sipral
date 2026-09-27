@@ -43,9 +43,10 @@ pub const MAX_FRAME: usize = STUN_HEADER_LEN + (u16::MAX as usize & !3);
 ///
 /// It is not what the relay speaks to the peer; that is always UDP in this
 /// version of the protocol (§3.1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Transport {
     /// What a client picks unless it has a reason not to.
+    #[default]
     Udp,
     /// For the firewall that blocks UDP outright.
     Tcp,

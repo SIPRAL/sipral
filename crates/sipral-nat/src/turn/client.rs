@@ -33,7 +33,7 @@ use super::attribute::{
     PROTOCOL_UDP, ReservationToken, method,
 };
 use super::channel::{ChannelData, ChannelNumber, FIRST_CHANNEL, LAST_CHANNEL};
-use super::framing::Transport;
+use super::framing::{FrameError, StreamFraming, Transport};
 
 /// "Ti SHOULD be configurable and SHOULD have a default of 39.5 s"
 /// (RFC 8489 §6.2.2). It is the whole life of a transaction on a stream, where
@@ -259,6 +259,11 @@ pub enum TurnError {
         /// The code the server sent.
         code: u16,
     },
+    /// The TCP or TLS connection to the server closed, or stopped making
+    /// sense. The allocation went with it: the server knows one by the
+    /// 5-tuple it was made on (RFC 8656 §3.2), and a new connection is a new
+    /// 5-tuple.
+    ConnectionLost,
 }
 
 impl TurnError {
@@ -310,6 +315,7 @@ impl fmt::Display for TurnError {
             Self::ChannelOutOfSync => f.write_str("the channel bindings disagree with the server"),
             Self::Oversized => f.write_str("the request does not fit a message"),
             Self::Rejected { code } => write!(f, "error response {code}"),
+            Self::ConnectionLost => f.write_str("the connection to the server closed"),
         }
     }
 }
@@ -526,6 +532,9 @@ pub struct TurnClient {
     /// Whether the server took DONT-FRAGMENT, which is the only way to know
     /// that a Send indication may carry it (§7.1).
     dont_fragment: bool,
+    /// What a TCP or TLS connection has carried that is not a whole message
+    /// yet. Empty for ever over UDP.
+    framing: StreamFraming,
 }
 
 impl TurnClient {
@@ -551,6 +560,7 @@ impl TurnClient {
             drop_reservation: false,
             drop_dont_fragment: false,
             dont_fragment: false,
+            framing: StreamFraming::new(),
         }
     }
 
@@ -765,6 +775,84 @@ impl TurnClient {
             Some(0..=3) => self.on_stun(bytes, now),
             Some(64..=79) => self.on_channel_data(bytes),
             _ => Input::Foreign,
+        }
+    }
+
+    /// How this client reaches its server.
+    #[must_use]
+    pub const fn transport(&self) -> Transport {
+        self.config.transport
+    }
+
+    /// Take bytes read off the TCP or TLS connection to the server (RFC 8656
+    /// §3.1).
+    ///
+    /// A stream has no message boundaries: one read may end halfway through
+    /// a message or hold several, so what arrives is kept here until
+    /// [`TurnClient::poll_stream`] finds a whole one — a STUN message is
+    /// twenty octets and its length, a ChannelData message four and its
+    /// length padded to a multiple of four (§12.5). Nothing for a client
+    /// over UDP, whose datagrams are whole and go to
+    /// [`TurnClient::handle_input`], nor once the client is closed: what
+    /// arrives after that belongs to no allocation.
+    ///
+    /// Only what was read from the connection this client's allocation was
+    /// made on, for the reason [`TurnClient::handle_input`] gives about the
+    /// server's address.
+    pub fn push_stream(&mut self, bytes: &[u8]) {
+        if self.config.transport.is_stream() && self.state != State::Closed {
+            self.framing.push(bytes);
+        }
+    }
+
+    /// The next whole message [`TurnClient::push_stream`] has been given,
+    /// copied into `frame` and taken exactly as [`TurnClient::handle_input`]
+    /// takes a datagram: application data comes back as a position in
+    /// `frame`, without the padding the stream carried it with.
+    ///
+    /// `Ok(None)` when no whole message has arrived yet. Loop until it says
+    /// so after every push, draining the transmits and events in between as
+    /// after a datagram.
+    ///
+    /// # Errors
+    ///
+    /// A frame that is neither STUN nor ChannelData, or a STUN length that
+    /// is not whole words: the stream is no longer where it thinks it is and
+    /// cannot find its place again, since nothing in it marks where a message
+    /// starts. The allocation is lost with it — the client closes with
+    /// [`TurnError::ConnectionLost`] — and the caller closes the connection.
+    pub fn poll_stream(
+        &mut self,
+        frame: &mut Vec<u8>,
+        now: Instant,
+    ) -> Result<Option<Input>, FrameError> {
+        frame.clear();
+        match self.framing.next_frame() {
+            Ok(Some(message)) => frame.extend_from_slice(message),
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.lose_stream();
+                return Err(error);
+            }
+        }
+        Ok(Some(self.handle_input(frame, now)))
+    }
+
+    /// The TCP or TLS connection to the server closed. The allocation is
+    /// gone with it (§3.2), so the client closes with
+    /// [`TurnError::ConnectionLost`], and whatever it had not handed out yet
+    /// has nowhere to go. Nothing for a client over UDP, which has no
+    /// connection to lose.
+    pub fn stream_closed(&mut self) {
+        if self.config.transport.is_stream() {
+            self.lose_stream();
+        }
+    }
+
+    fn lose_stream(&mut self) {
+        self.outbox.clear();
+        if self.state != State::Closed {
+            self.close(Event::Closed(TurnError::ConnectionLost));
         }
     }
 
@@ -3245,6 +3333,150 @@ mod tests {
         let mut out = Vec::new();
         client.send_to(peer(), b"abcde", &mut out).unwrap();
         assert_eq!(out.len(), 12);
+    }
+
+    /// The Allocate exchange of [`allocate`], carried over a stream: every
+    /// answer written to the wire as the server would write it and handed in
+    /// `chunk` octets at a time, so that no read lines up with a message.
+    fn allocate_over_a_stream(client: &mut TurnClient, ids: &mut Ids, now: Instant, chunk: usize) {
+        ids.feed(client);
+        client.allocate(now).unwrap();
+        let first = sent(client);
+        let refusal = challenge(&Message::parse(&first).unwrap(), 401, NONCE);
+        let mut frame = Vec::new();
+        for piece in refusal.chunks(chunk) {
+            client.push_stream(piece);
+            while let Some(input) = client.poll_stream(&mut frame, now).unwrap() {
+                assert_eq!(input, Input::Consumed);
+                ids.feed(client);
+            }
+        }
+        let second = sent(client);
+        let response = success(
+            &Message::parse(&second).unwrap(),
+            allocated_body(&[relay()], 600),
+        );
+        for piece in response.chunks(chunk) {
+            client.push_stream(piece);
+            while client.poll_stream(&mut frame, now).unwrap().is_some() {}
+        }
+    }
+
+    #[test]
+    fn an_allocation_over_a_stream_arrives_whatever_the_reads_cut_it_into() {
+        let now = Instant::now();
+        for chunk in [1, 3, 7, 20, 64, 4096] {
+            let mut client = TurnClient::new(TurnConfig {
+                transport: Transport::Tcp,
+                ..config()
+            });
+            let mut ids = Ids::new();
+            allocate_over_a_stream(&mut client, &mut ids, now, chunk);
+            assert!(client.is_allocated(), "{chunk}");
+            assert_eq!(client.relayed_addresses(), &[relay()], "{chunk}");
+        }
+    }
+
+    #[test]
+    fn channel_data_back_to_back_on_a_stream_comes_out_one_message_each() {
+        let now = Instant::now();
+        let mut client = TurnClient::new(TurnConfig {
+            transport: Transport::Tls,
+            ti: Duration::from_secs(3600),
+            ..config()
+        });
+        let mut ids = Ids::new();
+        allocate_over_a_stream(&mut client, &mut ids, now, 5);
+        let _seen = events(&mut client);
+        ids.feed(&mut client);
+        let number = client.bind_channel(peer(), now).unwrap();
+        let raw = sent(&mut client);
+        let permission = Message::parse(&raw).unwrap();
+        let raw = sent(&mut client);
+        let bind = Message::parse(&raw).unwrap();
+
+        // the two answers and three voice frames of odd lengths in one read,
+        // each frame padded as §12.5 requires on a stream
+        let mut wire = success(&permission, |_| {});
+        wire.extend_from_slice(&success(&bind, |_| {}));
+        for payload in [&b"a"[..], b"bcdef", b"ghijklmn"] {
+            ChannelData::encode(number, payload, Transport::Tls, &mut wire).unwrap();
+        }
+        client.push_stream(&wire);
+        let mut frame = Vec::new();
+        let mut delivered = Vec::new();
+        while let Some(input) = client.poll_stream(&mut frame, now).unwrap() {
+            if let Input::Data { peer: from, range } = input {
+                assert_eq!(from, peer());
+                delivered.push(frame[range].to_vec());
+            }
+        }
+        assert_eq!(
+            delivered,
+            vec![b"a".to_vec(), b"bcdef".to_vec(), b"ghijklmn".to_vec()]
+        );
+        assert_eq!(client.channel(peer()), Some(number));
+    }
+
+    #[test]
+    fn a_stream_that_stops_making_sense_loses_the_allocation() {
+        let now = Instant::now();
+        let mut client = TurnClient::new(TurnConfig {
+            transport: Transport::Tcp,
+            ..config()
+        });
+        let mut ids = Ids::new();
+        allocate_over_a_stream(&mut client, &mut ids, now, 64);
+        let _seen = events(&mut client);
+        client.push_stream(&[22, 0xfe, 0xfd, 0]);
+        let mut frame = Vec::new();
+        assert_eq!(
+            client.poll_stream(&mut frame, now),
+            Err(crate::turn::framing::FrameError::NotTurn(22))
+        );
+        assert_eq!(
+            events(&mut client),
+            vec![Event::Closed(TurnError::ConnectionLost)]
+        );
+        assert!(!client.is_allocated());
+        assert_eq!(client.deadline(), None);
+    }
+
+    #[test]
+    fn a_closed_connection_takes_the_allocation_and_what_was_waiting_with_it() {
+        let now = Instant::now();
+        let mut client = TurnClient::new(TurnConfig {
+            transport: Transport::Tcp,
+            ..config()
+        });
+        let mut ids = Ids::new();
+        allocate_over_a_stream(&mut client, &mut ids, now, 64);
+        let _seen = events(&mut client);
+        ids.feed(&mut client);
+        client.permit(peer().ip(), now);
+        client.stream_closed();
+        assert_eq!(client.poll_transmit(), None, "nowhere left to send it");
+        assert_eq!(
+            events(&mut client),
+            vec![Event::Closed(TurnError::ConnectionLost)]
+        );
+        assert!(!client.is_allocated());
+        // and what the socket goes on delivering is nobody's
+        client.push_stream(&[0x40, 0, 0, 0]);
+        let mut frame = Vec::new();
+        assert_eq!(client.poll_stream(&mut frame, now), Ok(None));
+    }
+
+    #[test]
+    fn a_client_over_udp_has_no_stream_to_read_or_lose() {
+        let now = Instant::now();
+        let (mut client, _ids) = ready(now);
+        client.push_stream(&[0x40, 0, 0, 0]);
+        let mut frame = Vec::new();
+        assert_eq!(client.poll_stream(&mut frame, now), Ok(None));
+        client.stream_closed();
+        assert!(client.is_allocated());
+        assert!(events(&mut client).is_empty());
     }
 
     #[test]

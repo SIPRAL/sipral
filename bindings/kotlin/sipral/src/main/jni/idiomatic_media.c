@@ -31,8 +31,10 @@
 #include "sipral.h"
 
 /* Fill one sipral_media_packet_t pointed at data/destination buffers the
- * caller pinned, run `fetch`, and copy `len`/`destination_len` back into
- * `outLen` (two longs: len, destination_len). Returns the status. */
+ * caller pinned, run `fetch`, and copy `len`, `destination_len` and
+ * `protocol` back into `outLen` -- as many of the three as it has room for,
+ * so a caller that brings two longs still gets the first two. Returns the
+ * status. */
 static jint
 run_packet_call(JNIEnv *env, jbyteArray outData, jbyteArray outDestination, jlongArray outLen,
     sipral_status_t (*fetch)(sipral_media_packet_t *, void *), void *arg)
@@ -43,7 +45,8 @@ run_packet_call(JNIEnv *env, jbyteArray outData, jbyteArray outDestination, jlon
     jbyte *dest_buf = NULL;
     jsize dest_cap = 0;
     sipral_status_t status;
-    jlong lens[2];
+    jlong lens[3];
+    jsize room;
 
     memset(&packet, 0, sizeof packet);
     packet.size = sizeof packet;
@@ -76,7 +79,9 @@ run_packet_call(JNIEnv *env, jbyteArray outData, jbyteArray outDestination, jlon
 
     lens[0] = (jlong)packet.len;
     lens[1] = (jlong)packet.destination_len;
-    (*env)->SetLongArrayRegion(env, outLen, 0, 2, lens);
+    lens[2] = (jlong)packet.protocol;
+    room = (*env)->GetArrayLength(env, outLen);
+    (*env)->SetLongArrayRegion(env, outLen, 0, room < 3 ? room : 3, lens);
     return (jint)status;
 }
 
@@ -297,7 +302,9 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollTransmit(JNIEnv *env, jcla
  * source is the point: it names the media socket the request has to leave
  * from, since the address the server sees it come from is the answer. So all
  * three buffers are the caller's, and `outLen` comes back as
- * [len, destination_len, source_len]. */
+ * [len, destination_len, source_len, protocol] -- as many as it has room
+ * for -- the last saying whether it is a datagram or bytes for the socket's
+ * connection to a TURN server reached over TCP or TLS. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralSignalNative_stackPollStun(JNIEnv *env, jclass cls,
     jlong stack, jbyteArray outData, jbyteArray outDestination, jbyteArray outSource,
@@ -308,7 +315,8 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollStun(JNIEnv *env, jclass c
     jbyte *dest_buf;
     jbyte *source_buf;
     sipral_status_t status;
-    jlong lens[3];
+    jlong lens[4];
+    jsize room;
 
     (void)cls;
     memset(&transmit, 0, sizeof transmit);
@@ -345,6 +353,8 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollStun(JNIEnv *env, jclass c
     lens[0] = (jlong)transmit.len;
     lens[1] = (jlong)transmit.destination_len;
     lens[2] = (jlong)transmit.source_len;
-    (*env)->SetLongArrayRegion(env, outLen, 0, 3, lens);
+    lens[3] = (jlong)transmit.protocol;
+    room = (*env)->GetArrayLength(env, outLen);
+    (*env)->SetLongArrayRegion(env, outLen, 0, room < 4 ? room : 4, lens);
     return (jint)status;
 }

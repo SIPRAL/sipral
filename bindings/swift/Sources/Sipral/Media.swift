@@ -192,7 +192,7 @@ public final class Media: @unchecked Sendable {
                     let destinationText = destBuf.withMemoryRebound(to: UInt8.self) {
                         String(decoding: UnsafeBufferPointer(start: $0.baseAddress, count: packet.destination_len), as: UTF8.self)
                     }
-                    socket.send(payload, to: destinationText)
+                    send(payload, to: destinationText, over: packet.protocol)
                     return true
                 }
             }
@@ -216,8 +216,19 @@ public final class Media: @unchecked Sendable {
                 let destinationText = destBuf.withMemoryRebound(to: UInt8.self) {
                     String(decoding: UnsafeBufferPointer(start: $0.baseAddress, count: packet.destination_len), as: UTF8.self)
                 }
-                socket.send(payload, to: destinationText)
+                send(payload, to: destinationText, over: packet.protocol)
             }
+        }
+    }
+
+    /// One packet out where it says: a datagram from this call's socket, or
+    /// -- marked TCP or TLS -- bytes on the socket's connection to the TURN
+    /// server, which the stack holds.
+    private func send(_ payload: [UInt8], to destination: String, over protocolRaw: UInt32) {
+        if protocolRaw == SipralTransport.tcp.rawValue || protocolRaw == SipralTransport.tls.rawValue {
+            stack.writeTurn(socket.localAddress, payload)
+        } else {
+            socket.send(payload, to: destination)
         }
     }
 

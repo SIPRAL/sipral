@@ -13,11 +13,17 @@
 
 package org.sipral.idiomatic
 
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.SocketTimeoutException
+import javax.net.ssl.SNIHostName
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -49,6 +55,19 @@ internal fun parseHostPort(text: String): InetSocketAddress {
     return InetSocketAddress(text.substring(0, at), text.substring(at + 1).toInt())
 }
 
+/** Whether a `SipralTransport` number marks bytes for a TURN server's
+ * connection rather than a datagram. */
+internal fun overStream(protocol: Long): Boolean =
+    protocol == SipralTransport.TCP.value.toLong() || protocol == SipralTransport.TLS.value.toLong()
+
+/** One media socket's TCP or TLS connection to the TURN server: written by
+ * the poll thread and by the call's media thread, each write whole under
+ * the stream's own lock; read by a thread of its own. */
+private class TurnStream(val socket: Socket) {
+    val input: InputStream = socket.getInputStream()
+    val output: OutputStream = socket.getOutputStream()
+}
+
 /**
  * One `sipral_stack_create` handle, its signalling socket and its poll
  * thread: the class an application reaches for first.
@@ -66,6 +85,7 @@ class SipralClient private constructor(
      * `host:port`, or null for a client that asks nobody. */
     val stunServer: String?,
     private val turnServer: String?,
+    private val turn: SipralTurnServer?,
 ) : AutoCloseable {
     internal var handle: Long = 0L
         private set
@@ -122,7 +142,9 @@ class SipralClient private constructor(
          * address it can actually send to. [turn] adds a relay on a TURN
          * server for each of those media sockets, offered as the call's
          * relayed ICE candidate ([relayOf]); it needs [stunServer] too, and
-         * a call only uses the relay under ICE. [g729AnnexB] allows G.729's
+         * a call only uses the relay under ICE. [SipralTurnServer.transport]
+         * reaches it over TCP or TLS instead of UDP, the client opening each
+         * connection itself. [g729AnnexB] allows G.729's
          * silence compression, on by default. `SipralIce.LITE` is for a
          * server reachable at the address it advertises, answering full ICE
          * peers, and nothing else (`docs/06-nat.md`, "ICE-lite").
@@ -158,7 +180,7 @@ class SipralClient private constructor(
             val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost))
             socket.soTimeout = 20
             val bindAddress = formatAddress(socket.localAddress.hostAddress, socket.localPort)
-            val client = SipralClient(socket, bindAddress, stunServer, turn?.address)
+            val client = SipralClient(socket, bindAddress, stunServer, turn?.address, turn)
             try {
                 client.start(
                     userAgent, codecs, ice, turn, g729AnnexB, referrals,
@@ -210,6 +232,7 @@ class SipralClient private constructor(
             referrals = toggle(referrals),
             registrarKeepalive = toggle(registrarKeepalive),
             registrarKeepaliveMs = registrarKeepaliveMs,
+            turnTransport = if (turn != null) turn.transport.value.toLong() else 0,
         )
         handle = Sipral.stackCreate(config)
         thread = Thread(::run, "sipral-client-$bindAddress").apply {
@@ -292,7 +315,7 @@ class SipralClient private constructor(
             throw refused
         }
         val call = SipralCall(this, callHandle, mediaSocket, mediaAddress)
-        calls[callHandle] = call
+        track(call, callHandle, mediaAddress)
         return call
     }
 
@@ -313,7 +336,7 @@ class SipralClient private constructor(
         val mediaSocket = DatagramSocket(mediaPort, InetAddress.getByName(mediaHost))
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
         val call = SipralCall(this, callHandle, mediaSocket, mediaAddress)
-        calls[callHandle] = call
+        track(call, callHandle, mediaAddress)
         try {
             mapMediaSocket(mediaSocket, mediaAddress)
             call.answer(mediaAddress)
@@ -373,7 +396,7 @@ class SipralClient private constructor(
             throw refused
         }
         val call = SipralCall(this, placed, mediaSocket, mediaAddress)
-        calls[placed] = call
+        track(call, placed, mediaAddress)
         return call
     }
 
@@ -392,6 +415,17 @@ class SipralClient private constructor(
     }
 
     internal fun callFor(callHandle: Long): SipralCall? = calls[callHandle]
+
+    /** A call this client runs the media of, and -- with a TURN server
+     * reached over TCP or TLS -- the socket whose connection its last
+     * farewell goes on, kept past the call itself until that connection
+     * closes. */
+    private fun track(call: SipralCall, callHandle: Long, mediaAddress: String) {
+        calls[callHandle] = call
+        if (turn != null && overStream(turn.transport.value.toLong())) {
+            turnSockets[callHandle] = mediaAddress
+        }
+    }
 
     internal fun forgetCall(callHandle: Long) {
         calls.remove(callHandle)
@@ -506,7 +540,7 @@ class SipralClient private constructor(
         val data = ByteArray(PACKET_BYTES)
         val destination = ByteArray(ADDRESS_BYTES)
         val source = ByteArray(ADDRESS_BYTES)
-        val lens = LongArray(3)
+        val lens = LongArray(4)
         var busyFor = 0
         while (true) {
             val status = SipralSignalNative.stackPollStun(handle, data, destination, source, lens)
@@ -519,8 +553,14 @@ class SipralClient private constructor(
             if (status != SipralStatus.OK.value || len == 0) {
                 return
             }
-            val to = parseHostPort(String(destination, 0, lens[1].toInt(), Charsets.UTF_8))
             val from = String(source, 0, lens[2].toInt(), Charsets.UTF_8)
+            if (overStream(lens[3])) {
+                // for the TURN server, on the socket's connection to it:
+                // never a datagram, which a network that blocks UDP drops
+                writeTurn(from, data.copyOfRange(0, len))
+                continue
+            }
+            val to = parseHostPort(String(destination, 0, lens[1].toInt(), Charsets.UTF_8))
             synchronized(natLock) {
                 try {
                     stunSockets[from]?.send(DatagramPacket(data.copyOfRange(0, len), len, to))
@@ -561,6 +601,148 @@ class SipralClient private constructor(
         }
     }
 
+    // -- a TURN server reached over TCP or TLS --------------------------------
+
+    // Every media socket's open connection to the TURN server, by the
+    // socket's `host:port`; what `SIPRAL_EVENT_KIND_TURN_STREAM` asked for
+    // during the poll that raised it -- nothing may call back into the stack
+    // from its own callback -- acted on right after that poll; and every
+    // call's socket, by the call, for its last farewell.
+    private val turnStreams = ConcurrentHashMap<String, TurnStream>()
+    private val turnAsked = java.util.concurrent.ConcurrentLinkedQueue<org.sipral.SipralTurnStreamEvent>()
+    private val turnSockets = ConcurrentHashMap<Long, String>()
+
+    /** Write [payload] on media socket [local]'s connection to the TURN
+     * server, whole: what `sipral_stack_poll_stun`,
+     * `sipral_stack_poll_farewell` and a call's media hand out marked TCP or
+     * TLS. Thread-safe; a connection that fails here is closed and the stack
+     * told, which loses the relay on it. */
+    internal fun writeTurn(local: String, payload: ByteArray) {
+        val stream = turnStreams[local] ?: return
+        try {
+            synchronized(stream) {
+                stream.output.write(payload)
+                stream.output.flush()
+            }
+        } catch (_: Exception) {
+            loseTurnStream(local, tell = true)
+        }
+    }
+
+    /** Open or close what `SIPRAL_EVENT_KIND_TURN_STREAM` asked for in the
+     * poll that just ran, after this round's queues were written. */
+    private fun actOnTurnStreams() {
+        while (true) {
+            val said = turnAsked.poll() ?: return
+            val local = said.local ?: continue
+            when (said.state) {
+                org.sipral.SipralTurnStream.OPEN.value.toLong() ->
+                    Thread({ openTurnStream(local, said.server ?: return@Thread, said.protocol) }, "sipral-turn").apply {
+                        isDaemon = true
+                        start()
+                    }
+                org.sipral.SipralTurnStream.CLOSE.value.toLong() -> {
+                    turnSockets.entries.removeIf { it.value == local }
+                    loseTurnStream(local, tell = false)
+                }
+            }
+        }
+    }
+
+    /** Connect to the TURN server for media socket [local] -- over TLS, with
+     * the certificate checked against [SipralTurnServer.serverName], when
+     * [protocol] says so -- say how that went, and read it until it closes. */
+    private fun openTurnStream(local: String, server: String, protocol: Long) {
+        val turn = turn ?: return
+        val stream = try {
+            val raw = Socket()
+            raw.connect(parseHostPort(server), 5_000)
+            raw.tcpNoDelay = true
+            val socket = if (protocol == SipralTransport.TLS.value.toLong()) {
+                val name = turn.serverName ?: server.substring(0, server.lastIndexOf(':'))
+                val factory = turn.sslSocketFactory ?: SSLSocketFactory.getDefault() as SSLSocketFactory
+                (factory.createSocket(raw, name, raw.port, true) as SSLSocket).apply {
+                    sslParameters = sslParameters.apply {
+                        endpointIdentificationAlgorithm = "HTTPS"
+                        serverNames = listOf(SNIHostName(name))
+                    }
+                    startHandshake()
+                }
+            } else {
+                raw
+            }
+            TurnStream(socket)
+        } catch (_: Exception) {
+            sayTurn(local) { Sipral.stackTurnClosed(handle, local, nowMs()) }
+            return
+        }
+        if (closed.get()) {
+            stream.socket.close()
+            return
+        }
+        turnStreams[local] = stream
+        sayTurn(local) { Sipral.stackTurnConnected(handle, local, nowMs()) }
+        val buffer = ByteArray(TRANSMIT_BYTES)
+        while (true) {
+            val read = try {
+                stream.input.read(buffer)
+            } catch (_: Exception) {
+                -1
+            }
+            if (read < 0) {
+                loseTurnStream(local, tell = true)
+                return
+            }
+            if (read > 0 && !turnReceived(local, buffer.copyOfRange(0, read))) {
+                loseTurnStream(local, tell = false)
+                return
+            }
+        }
+    }
+
+    private fun sayTurn(local: String, entry: () -> Unit) {
+        try {
+            retryBusy(action = entry)
+        } catch (_: Exception) {
+            // the stack is going away, and with it everything on [local]
+        }
+    }
+
+    /** What a connection carried, to `sipral_stack_turn_receive`: every
+     * byte, in order, since a stream that loses one never finds its place
+     * again, so a busy stack is waited for rather than skipped. False for a
+     * connection the stack found broken. */
+    private fun turnReceived(local: String, bytes: ByteArray): Boolean {
+        while (!closed.get()) {
+            try {
+                Sipral.stackTurnReceive(handle, local, bytes, nowMs())
+                return true
+            } catch (refused: SipralException) {
+                when (refused.status) {
+                    SipralStatus.BUSY -> Thread.sleep(1)
+                    SipralStatus.STREAM_BROKEN -> return false
+                    else -> return true
+                }
+            }
+        }
+        return true
+    }
+
+    /** Close media socket [local]'s connection, and when [tell], say so with
+     * `sipral_stack_turn_closed` -- not for one the stack itself asked to
+     * close or found broken. */
+    private fun loseTurnStream(local: String, tell: Boolean) {
+        val stream = turnStreams.remove(local) ?: return
+        try {
+            synchronized(stream) { stream.socket.close() }
+        } catch (_: Exception) {
+            // closed either way
+        }
+        if (tell) {
+            sayTurn(local) { Sipral.stackTurnClosed(handle, local, nowMs()) }
+        }
+    }
+
     // -- the poll thread -----------------------------------------------------
 
     private fun onEvent(event: SipralEvent) {
@@ -568,6 +750,7 @@ class SipralClient private constructor(
         // `events` reading `callFor(event.call)`'s own state must find it
         // already current, the same ordering `sipral.call.Call.deliver`
         // (the Python binding) keeps for the same reason.
+        turnStreamOf(event)?.let { turnAsked.add(it) }
         noteNat(event)
         calls[event.call]?.deliver(event)
         eventsFlow.tryEmit(event)
@@ -604,13 +787,19 @@ class SipralClient private constructor(
     private fun drainFarewells() {
         val data = ByteArray(PACKET_BYTES)
         val destination = ByteArray(ADDRESS_BYTES)
-        val lens = LongArray(2)
+        val lens = LongArray(3)
         val outCall = LongArray(1)
         while (true) {
             val status = SipralMediaNative.stackPollFarewell(handle, data, destination, lens, outCall)
             val len = lens[0].toInt()
             if (status != SipralStatus.OK.value || len == 0) {
                 return
+            }
+            if (overStream(lens[2])) {
+                // given back on the relay's connection, which is the
+                // client's and not the call's, and outlives it
+                turnSockets[outCall[0]]?.let { writeTurn(it, data.copyOfRange(0, len)) }
+                continue
             }
             val call = calls[outCall[0]] ?: continue
             val named = lens[1].toInt()
@@ -660,6 +849,7 @@ class SipralClient private constructor(
             drainTransmit()
             drainStun()
             drainFarewells()
+            actOnTurnStreams()
         }
     }
 
@@ -703,6 +893,11 @@ class SipralClient private constructor(
         }
         if (Thread.currentThread() !== thread) {
             thread.join(5000)
+        }
+        // and every connection to the TURN server still open: what it
+        // carried was given back through it above, or lapses with it
+        for (local in turnStreams.keys.toList()) {
+            loseTurnStream(local, tell = false)
         }
         Sipral.stackDestroy(handle)
         socket.close()

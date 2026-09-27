@@ -87,6 +87,14 @@ enum class SipralStatus(val value: Int) {
      * customer.
      */
     NOT_SUPPORTED(11),
+    /**
+     * A byte stream carried something no message this library reads
+     * starts with. Nothing in a stream marks where the next message
+     * begins, so nothing arriving on it later can be read either: close
+     * the connection. What rode on it is lost with it, and the call that
+     * said so says what that was.
+     */
+    STREAM_BROKEN(12),
     ;
 
     companion object {
@@ -1258,6 +1266,27 @@ enum class SipralEventKind(val value: Int) {
      * and the handle is stale from here on.
      */
     REFERRAL(41),
+    /**
+     * A media socket's connection to a TURN server reached over TCP or
+     * TLS (`turn_transport`, RFC 8656 §3.1) is to be opened, or closed.
+     * Only on a stack created with one.
+     *
+     * `payload.turn_stream` says which socket, which server, over what,
+     * and which of the two. `SIPRAL_TURN_STREAM_OPEN` follows
+     * `sipral_stack_nat_map`: open the connection from the socket to the
+     * server — TLS with the platform's own stack, the certificate
+     * checked against the server's name — and say so with
+     * `sipral_stack_turn_connected`, then hand everything it carries to
+     * `sipral_stack_turn_receive` for as long as it is open, and its
+     * closing to `sipral_stack_turn_closed`. What is written on it comes
+     * out of `sipral_stack_poll_stun`, `sipral_media_poll_transmit`,
+     * `sipral_media_capture`, `sipral_media_poll_rtcp` and
+     * `sipral_stack_poll_farewell`, each marked with its `protocol`.
+     * `SIPRAL_TURN_STREAM_CLOSE` says nothing more will be: write what
+     * is still queued for it, and close it. `account` and `call` are
+     * `SIPRAL_HANDLE_NONE`: a socket is neither.
+     */
+    TURN_STREAM(42),
     ;
 
     companion object {
@@ -1746,6 +1775,36 @@ enum class SipralNatRelay(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralNatRelay? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a media socket's connection to the TURN server is to do. Names
+ * for `sipral_turn_stream_event_t::state`.
+ */
+enum class SipralTurnStream(val value: Int) {
+    /**
+     * Open a connection from the media socket `local` to the TURN
+     * server at `server`, over `protocol` — TCP, or TLS with the
+     * server's certificate checked by the platform's own stack — and
+     * say so with `sipral_stack_turn_connected` once it is open, or
+     * `sipral_stack_turn_closed` if it cannot be. The socket's relay is
+     * allocated over it; a call on the socket before that answers
+     * `SIPRAL_STATUS_WRONG_STATE`.
+     */
+    OPEN(1),
+    /**
+     * Nothing more will be written for the connection from `local`:
+     * its relay was given back or lost, or the call it carried has
+     * ended. Write what the queues still hold for it —
+     * `sipral_stack_poll_farewell` and `sipral_stack_poll_stun` — and
+     * close it.
+     */
+    CLOSE(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralTurnStream? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -3430,6 +3489,23 @@ class SipralStackConfig(
      * figure with `registrar_keepalive` off, a value nothing would read.
      */
     val registrarKeepaliveMs: Long = 0,
+    /**
+     * How every media socket reaches `turn_server`, as a
+     * `SipralTransport`: `SIPRAL_TRANSPORT_UDP`, or zero for it;
+     * `SIPRAL_TRANSPORT_TCP` for the network that blocks UDP outright;
+     * `SIPRAL_TRANSPORT_TLS` for the one that lets one port out — 5349
+     * is TURN's (RFC 8656 §4.1) — or for an application that wants the
+     * server's certificate checked. The relay speaks UDP to the peer
+     * whichever it is (§3.1). Over TCP or TLS the application opens a
+     * connection per media socket when `SIPRAL_EVENT_KIND_TURN_STREAM`
+     * asks, with the platform's own TLS as it does for SIP. Anything
+     * else, or a value other than zero with no `turn_server`, is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     *
+     * Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val turnTransport: Long = 0,
 )
 
 /**
@@ -4346,6 +4422,34 @@ data class SipralReferralEvent(
 )
 
 /**
+ * What a SipralEventKind.TURN_STREAM
+ * carries.
+ *
+ * The addresses are text, not NUL-terminated, and the library's: valid
+ * for as long as the callback runs.
+ */
+data class SipralTurnStreamEvent(
+    /**
+     * A SipralTurnStream.
+     */
+    val state: Long,
+    /**
+     * What to open, as a `SipralTransport`: `SIPRAL_TRANSPORT_TCP` or
+     * `SIPRAL_TRANSPORT_TLS`, what `turn_transport` named.
+     */
+    val protocol: Long,
+    /**
+     * The media socket, as `sipral_stack_nat_map` named it: the
+     * connection's own name in the three calls that take one.
+     */
+    val local: String?,
+    /**
+     * The TURN server, `host:port`, as `turn_server` named it.
+     */
+    val server: String?,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -4410,6 +4514,10 @@ class SipralEventPayload(
      * For SipralEventKind.REFERRAL.
      */
     val referral: SipralReferralEvent,
+    /**
+     * For SipralEventKind.TURN_STREAM.
+     */
+    val turnStream: SipralTurnStreamEvent,
 )
 
 class SipralEvent(
@@ -4895,6 +5003,24 @@ class SipralEvent(
      * §2.1 allows. Not NUL-terminated.
      */
     private val payloadReferralReferredBy: String? = null,
+    /**
+     * A SipralTurnStream.
+     */
+    private val payloadTurnStreamState: Long = 0,
+    /**
+     * What to open, as a `SipralTransport`: `SIPRAL_TRANSPORT_TCP` or
+     * `SIPRAL_TRANSPORT_TLS`, what `turn_transport` named.
+     */
+    private val payloadTurnStreamProtocol: Long = 0,
+    /**
+     * The media socket, as `sipral_stack_nat_map` named it: the
+     * connection's own name in the three calls that take one.
+     */
+    private val payloadTurnStreamLocal: String? = null,
+    /**
+     * The TURN server, `host:port`, as `turn_server` named it.
+     */
+    private val payloadTurnStreamServer: String? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -4912,6 +5038,7 @@ class SipralEvent(
             SipralNatEvent(payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal, payloadNatMapped, payloadNatPrevious),
             SipralNatRelayEvent(payloadRelayOutcome, payloadRelayCode, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason),
             SipralReferralEvent(payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget, payloadReferralReferredBy),
+            SipralTurnStreamEvent(payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal, payloadTurnStreamServer),
         )
 }
 
@@ -4983,10 +5110,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -5289,7 +5416,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 28)
+        agree(0, 29)
     }
 
     /**
@@ -5313,7 +5440,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -5398,6 +5525,9 @@ internal object SipralNative {
     external fun sipral_stack_nat_unmap(stack: Long, local: ByteArray, nowMs: Long): Int
     external fun sipral_stack_poll_stun(stack: Long, transmit: Long): Int
     external fun sipral_stack_receive_stun(stack: Long, data: ByteArray, from: ByteArray, to: ByteArray, nowMs: Long): Int
+    external fun sipral_stack_turn_connected(stack: Long, local: ByteArray, nowMs: Long): Int
+    external fun sipral_stack_turn_receive(stack: Long, local: ByteArray, data: ByteArray, nowMs: Long): Int
+    external fun sipral_stack_turn_closed(stack: Long, local: ByteArray, nowMs: Long): Int
     external fun sipral_event_kind_name(kind: Long): String?
     external fun sipral_message_header_count(message: ByteArray, name: ByteArray, count: LongArray): Int
     external fun sipral_message_header(message: ByteArray, name: ByteArray, index: Long, offset: LongArray, len: LongArray): Int
@@ -5442,7 +5572,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 28
+    const val ABI_VERSION_MINOR: Long = 29
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -5571,6 +5701,20 @@ object Sipral {
      * without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
      */
     const val FEATURE_STUN: Long = 512
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. A TURN server reached over TCP or TLS
+     * (RFC 8656 §3.1): `sipral_stack_config_t::turn_transport`, and the
+     * connection the application opens for each media socket when
+     * `SIPRAL_EVENT_KIND_TURN_STREAM` asks — for the network that lets no
+     * UDP out.
+     *
+     * It comes with `SIPRAL_FEATURE_ICE`, since a relay is only ever a
+     * call's relayed ICE candidate, and without it `turn_transport` other
+     * than UDP answers `SIPRAL_STATUS_NOT_SUPPORTED` as a `turn_server`
+     * does.
+     */
+    const val FEATURE_TURN_STREAM: Long = 1024
 
     /**
      * The buffer a caller has to bring for one outgoing packet.
@@ -5814,7 +5958,7 @@ object Sipral {
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
         }
@@ -7927,6 +8071,7 @@ object Sipral {
     }
 
     /**
+     * Take the next STUN request a media socket has to send.entry! {
      * Take the next STUN request a media socket has to send.
      *
      * The same record and the same rules as `sipral_stack_poll_transmit`,
@@ -7936,7 +8081,11 @@ object Sipral {
      * nobody answered. `source` is always written, and it is the socket to
      * send from — the whole point is the address the server sees it come
      * from, so sending it from any other socket learns the wrong one.
-     * `transport` is zero and names nothing here, and `protocol` is UDP.
+     * `transport` is zero and names nothing here. `protocol` is UDP for a
+     * datagram; on a stack whose `turn_transport` is TCP or TLS, what is for
+     * the TURN server says that instead, and is written, as it is, on the
+     * connection from `source` that `SIPRAL_EVENT_KIND_TURN_STREAM` asked
+     * for — never sent as a datagram.
      *
      * A call placed, rung or answered on a socket with its relay sends
      * through here too, for as long as it has no media handle: the Binding
@@ -8005,6 +8154,83 @@ object Sipral {
         val fromBytes = from.toByteArray(Charsets.UTF_8)
         val toBytes = to.toByteArray(Charsets.UTF_8)
         check(SipralNative.sipral_stack_receive_stun(stack, data, fromBytes, toBytes, nowMs))
+    }
+
+    /**
+     * Say that the TCP or TLS connection a
+     * `SIPRAL_EVENT_KIND_TURN_STREAM` of state `SIPRAL_TURN_STREAM_OPEN`
+     * asked for is open — for TLS, that the handshake has finished and the
+     * server's certificate was checked against the name the application
+     * configured, by the platform's own TLS stack, as for SIP over TLS.
+     *
+     * The socket's Allocate is waiting in sipral_stack_poll_stun when
+     * this returns, marked with the connection's `protocol`, to be written
+     * on it; the answer comes back through sipral_stack_turn_receive,
+     * and `SIPRAL_EVENT_KIND_NAT_RELAY` says what the server gave, exactly
+     * as over UDP.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket no connection was asked
+     * for, and `SIPRAL_STATUS_WRONG_STATE` on a stack created without
+     * `SIPRAL_NAT_STUN`.
+     *
+     * Safety
+     *
+     * `local` must be readable for `local_len` bytes.
+     */
+    fun stackTurnConnected(stack: Long, local: String, nowMs: Long) {
+        val localBytes = local.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_stack_turn_connected(stack, localBytes, nowMs))
+    }
+
+    /**
+     * Hand over bytes read off a media socket's TCP or TLS connection to
+     * the TURN server, in whatever pieces the connection delivered them.
+     *
+     * The messages in them are put back together here (RFC 8656 §12.5)
+     * and each goes where a datagram from the server would: to the relay
+     * being made or kept for the socket, or, once a call has taken it, to
+     * that call — its agent while it waits for its session, and then its
+     * media, as through `sipral_media_receive`, audio included. So the
+     * connection is read here for as long as it is open, media handle or
+     * not, and what the call owes the far end in reply comes out of
+     * `sipral_media_poll_transmit` as it always does.
+     *
+     * `SIPRAL_STATUS_STREAM_BROKEN` when the connection carried something
+     * no TURN message starts with, which nothing in a stream can recover
+     * from: close it. The socket's relay is lost with it —
+     * `SIPRAL_NAT_RELAY_FAILED` for one still waiting for its call — and no
+     * `SIPRAL_TURN_STREAM_CLOSE` follows. `SIPRAL_STATUS_INVALID_ARGUMENT`
+     * for a socket with no open connection.
+     *
+     * Safety
+     *
+     * `local` must be readable for `local_len` bytes, and `data` for `len`.
+     */
+    fun stackTurnReceive(stack: Long, local: String, data: ByteArray, nowMs: Long) {
+        val localBytes = local.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_stack_turn_receive(stack, localBytes, data, nowMs))
+    }
+
+    /**
+     * Say that a media socket's connection to the TURN server closed, or
+     * could not be opened at all.
+     *
+     * The server knew the socket's allocation by that connection (RFC 8656
+     * §3.2), so the relay went with it: one still being made is
+     * `SIPRAL_NAT_RELAY_FAILED` at the next poll, and a call on the socket
+     * goes without it; a call that had taken it keeps the paths ICE found
+     * that need none, and loses the one through it when its consent runs
+     * out (RFC 7675). Naming the socket again with `sipral_stack_nat_map`
+     * asks for a new connection. `SIPRAL_STATUS_OK` for a connection the
+     * stack had already let go.
+     *
+     * Safety
+     *
+     * `local` must be readable for `local_len` bytes.
+     */
+    fun stackTurnClosed(stack: Long, local: String, nowMs: Long) {
+        val localBytes = local.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_stack_turn_closed(stack, localBytes, nowMs))
     }
 
     /**

@@ -242,6 +242,21 @@ registrar's INVITE in long after the REGISTER (`docs/06-nat.md`).
 interval, 1 000 to 120 000; nothing goes while the stack is suspended.
 `NatTests.swift` proves both on the wire.
 
+`TurnServer(..., transport: .tcp)` reaches the TURN server over TCP, for the
+network that lets no UDP out, and `.tls` over TLS (RFC 8656 §3.1) — 5349 is
+the port for it. The stack opens a Network.framework `NWConnection` per media
+socket when `sipral_stack_nat_map` asks for one, carries everything for the
+relay on it and closes it when told; the relay is then used exactly as over
+UDP. Over TLS the server's certificate is checked against `serverName` — the
+host part of `address` when it is `nil` — with the system's trust, or, when
+`trustedCertificates` holds any DER certificates, with those roots and
+nothing else, which is how a private CA or a self-signed server is trusted.
+Apple's TLS refuses a server certificate without `serverAuth` among its
+extended key usages. Linux has no Network.framework: there the lab agent's
+build reaches a TURN server over TCP with a plain socket, and refuses TLS.
+`Tests/SipralTests/TurnStreamTests.swift` proves both against a TURN server
+on a TCP port inside the test, over TLS with a certificate trusted and not.
+
 ### A REFER from outside any call
 
 `SipralStack(referrals: true)` hands a REFER that names no dialog —

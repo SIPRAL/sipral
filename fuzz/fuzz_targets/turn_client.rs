@@ -19,6 +19,12 @@
 //! random bits and everything on what a response can say; it can sign the
 //! answer with the key the configured credential derives, under either
 //! algorithm, which is what reaches the paths behind the integrity check.
+//!
+//! A client over TCP takes all of it as a stream (RFC 8656 §12.5): every
+//! answer and every unasked message is pushed in two reads cut where the
+//! input says, so the reassembly is what decides where one message ends, and
+//! a stream that stops making sense has to lose the allocation rather than
+//! go on reading.
 
 #![no_main]
 
@@ -157,14 +163,44 @@ fn feed(client: &mut TurnClient, ids: &mut u32) {
     }
 }
 
-/// Hand the client a datagram, and hold whatever it hands back to the one
-/// promise it makes about it.
+/// Hand the client a datagram -- or, over TCP, the same bytes as a stream in
+/// two reads cut where the first byte says -- and hold whatever it hands
+/// back to the one promise it makes about it.
 fn input(client: &mut TurnClient, bytes: &[u8], now: Instant) {
-    if let Input::Data { range, .. } = client.handle_input(bytes, now) {
-        assert!(
-            range.start <= range.end && range.end <= bytes.len(),
-            "a range that does not index what was passed in"
-        );
+    if !client.transport().is_stream() {
+        if let Input::Data { range, .. } = client.handle_input(bytes, now) {
+            assert!(
+                range.start <= range.end && range.end <= bytes.len(),
+                "a range that does not index what was passed in"
+            );
+        }
+        return;
+    }
+    let cut = usize::from(bytes.first().copied().unwrap_or(0)).min(bytes.len());
+    let (first, second) = bytes.split_at(cut);
+    let mut frame = Vec::new();
+    for piece in [first, second] {
+        client.push_stream(piece);
+        let mut frames = 0_usize;
+        loop {
+            match client.poll_stream(&mut frame, now) {
+                Ok(Some(Input::Data { range, .. })) => assert!(
+                    range.start <= range.end && range.end <= frame.len(),
+                    "a range that does not index the frame it came in"
+                ),
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    assert!(
+                        !client.is_allocated(),
+                        "a broken stream kept its allocation"
+                    );
+                    break;
+                }
+            }
+            frames += 1;
+            assert!(frames <= bytes.len(), "more frames than bytes");
+        }
     }
 }
 

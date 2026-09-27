@@ -147,6 +147,36 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   The packaged file's SHA-256 goes on the document's own component, when
   one exists to hash (a `--dry-run` `xcframework.sh` builds no zip, so
   that SBOM carries no hash of one). New: `tools/sbom-gen`.
+- **A relay over TCP or TLS, for the network that lets no UDP out.** A call
+  can now reach its TURN server over TCP, or over TLS on 5349 (RFC 8656
+  §3.1), and use the relay exactly as over UDP: allocated before the call,
+  offered as its relayed ICE candidate, carrying its checks and its audio,
+  refreshed, and given back. The connection is the application's, as a SIP
+  stream is: `sipral::Relays::over` names the transport, what is written for
+  the server is marked for the connection (`RelayDatagram::transport`,
+  `Datagram::transport`, `MediaEngine::poll_turn_stream`), and what the
+  connection carries goes back in whatever pieces it arrived in
+  (`Relays::receive_stream`, `MediaEngine::receive_stream`,
+  `MediaSession::receive_stream`), put back together by
+  `TurnClient::push_stream`/`poll_stream` with ChannelData padded to whole
+  words on the stream (§12.5). A connection that closes, or stops carrying
+  TURN, takes the relay with it (`TurnError::ConnectionLost`). The
+  connection's own mapping is never offered as a server-reflexive candidate
+  or written in `c=`. The full ICE agent can gather over one too
+  (`TurnServer::transport`), and a datagram from the server's address is not
+  a relay's over a connection. Over the C ABI: `turn_transport` on
+  `sipral_stack_config_t`, `SIPRAL_EVENT_KIND_TURN_STREAM` (42) asking the
+  application to open the connection and saying when to close it,
+  `sipral_stack_turn_connected`, `sipral_stack_turn_receive` and
+  `sipral_stack_turn_closed`, `protocol` on `sipral_media_packet_t`,
+  `SIPRAL_STATUS_STREAM_BROKEN` (12) and `SIPRAL_FEATURE_TURN_STREAM`
+  (1024). All four bindings open the connection themselves — Swift with
+  Network.framework, Kotlin with `SSLSocket`, Python with `ssl`, .NET with
+  `SslStream` — checking the server's certificate against a configured name,
+  with the platform's trust or with roots the application hands over, so a
+  relay over TLS is one option on the stack. The lab proves it from behind a
+  NAT that drops every datagram to coturn: over TCP through the C ABI, over
+  TLS through the Python bindings.
 - **ICE restarts in the full role, from either end.** A peer's re-offer
   that changes both `ice-ufrag` and `ice-pwd` is answered with new
   credentials of this end's own (RFC 8839 §4.4.2.1) instead of the ones the
@@ -1070,6 +1100,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   endpoint but kept as a transfer still being decided, so every later REFER
   on the call got 491; the end of its transaction now lets it go, and
   `accept_transfer` or `reject_transfer` on it is `UaError::WrongState`.
+- **The Python example agent gives back a relay it hung up on.**
+  `bindings/python/examples/agent.py` closed a call the moment it saw it
+  end, when the same end had hung up after its dwell, so the TURN Refresh
+  queued a poll later found the call gone and was dropped: the relay lapsed
+  at coturn instead, and the lab's count of allocations given back came up
+  one short. The short wait for that farewell now runs on every way a call
+  ends.
 - **A body the agent cannot read is refused 415 on every request that
   carries an offer, not only on the INVITE that opens a call.** A
   re-INVITE, UPDATE or PRACK whose body is not `application/sdp`, or is
@@ -1843,6 +1880,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   as the one it would be without it: a re-INVITE with this end's own offer
   (§14.1), an UPDATE as a target refresh. A body without that marking is
   refused 415, as above.
+- **ABI 0.29.** `sipral_stack_config_t` grew `turn_transport` and
+  `sipral_media_packet_t` grew `protocol`, both at the tail with `MIN_SIZE`
+  unmoved, after `registrar_keepalive_ms`; event kind 42, status 12 and
+  feature bit 1024 are spent, and a binding built against 0.28 is refused
+  (the Kotlin agent's jar is rebuilt). In Rust, `sipral_nat::ice::Transmit`,
+  `Route` and `TurnServer`, `sipral::Datagram`, `RelayDatagram` and
+  `MixOutcome` each grew a field saying what a message goes over, and
+  `TurnError` a variant; a caller that builds one by its fields names the
+  new one.
 - **The `sipral` crate's own description of its bindings names all four.**
   `crates/sipral/README.md`, its `Cargo.toml` description and
   `bindings/dotnet/Sipral/README.md` said "Swift, .NET and Kotlin bindings,"

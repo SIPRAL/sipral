@@ -910,6 +910,17 @@ record! {
         pub destination_capacity: usize,
         /// How many bytes of it were written, the NUL not counted.
         pub destination_len: usize,
+        /// What to send it over, as a `SipralTransport`.
+        /// `SIPRAL_TRANSPORT_UDP` is a datagram from the call's media socket,
+        /// which is everything unless the stack reaches its TURN server over
+        /// TCP or TLS (`turn_transport`); then what goes through the relay
+        /// says that instead, `destination` is the server, and the bytes are
+        /// written, as they are and in order, on the media socket's
+        /// connection to it — never sent as a datagram.
+        ///
+        /// Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub protocol: u32,
     }
 }
 
@@ -2162,7 +2173,7 @@ entry! {
                 .capture(taken, now)
                 .map_err(|error| media_failed(&error))?;
             match sent {
-                Some(datagram) => unsafe { put(&mut out, datagram.destination, datagram.payload) },
+                Some(datagram) => unsafe { put_datagram(&mut out, &datagram) },
                 None => Ok(()),
             }
         })?;
@@ -2485,10 +2496,18 @@ entry! {
             mix_two(session_a, session_b, taken, room, now).map_err(|error| media_failed(&error))
         })?;
         if let Some((destination, payload)) = outcome.to_a {
-            unsafe { put(&mut out_a, destination, &payload) }?;
+            #[cfg(feature = "ice")]
+            let protocol = crate::nat::protocol_of(outcome.via_a);
+            #[cfg(not(feature = "ice"))]
+            let protocol = crate::stack::SipralTransport::Udp as u32;
+            unsafe { put(&mut out_a, destination, &payload, protocol) }?;
         }
         if let Some((destination, payload)) = outcome.to_b {
-            unsafe { put(&mut out_b, destination, &payload) }?;
+            #[cfg(feature = "ice")]
+            let protocol = crate::nat::protocol_of(outcome.via_b);
+            #[cfg(not(feature = "ice"))]
+            let protocol = crate::stack::SipralTransport::Udp as u32;
+            unsafe { put(&mut out_b, destination, &payload, protocol) }?;
         }
         unsafe { write_versioned(packet_a, out_a) }?;
         unsafe { write_versioned(packet_b, out_b) }
@@ -2521,7 +2540,7 @@ entry! {
         with_media(media, |session, entry| {
             let now = entry.instant(now_ms)?;
             match session.poll_rtcp(now) {
-                Some(datagram) => unsafe { put(&mut out, datagram.destination, datagram.payload) },
+                Some(datagram) => unsafe { put_datagram(&mut out, &datagram) },
                 None => Ok(()),
             }
         })?;
@@ -2567,7 +2586,7 @@ entry! {
             let now = entry.instant(now_ms)?;
             #[cfg(any(feature = "dtls", feature = "ice"))]
             match session.poll_transmit(now) {
-                Some(datagram) => unsafe { put(&mut out, datagram.destination, datagram.payload) },
+                Some(datagram) => unsafe { put_datagram(&mut out, &datagram) },
                 None => Ok(()),
             }
             #[cfg(not(any(feature = "dtls", feature = "ice")))]
@@ -2629,10 +2648,10 @@ entry! {
         let mut out = unsafe { read_versioned(out_packet) }?;
         prepare(&mut out)?;
         let call = with_stack(stack, |state| {
-            let Some((call, destination, payload)) = state.farewells.pop_front() else {
+            let Some((call, destination, payload, protocol)) = state.farewells.pop_front() else {
                 return Ok(crate::handle::SIPRAL_HANDLE_NONE);
             };
-            unsafe { put(&mut out, destination, &payload) }?;
+            unsafe { put(&mut out, destination, &payload, protocol) }?;
             Ok(call)
         })?;
         unsafe { out_call.write(call) };
@@ -2651,6 +2670,7 @@ entry! {
 fn prepare(packet: &mut SipralMediaPacket) -> Result<(), Fail> {
     packet.len = 0;
     packet.destination_len = 0;
+    packet.protocol = crate::stack::SipralTransport::Udp as u32;
     if packet.data.is_null() || packet.capacity < SIPRAL_MEDIA_PACKET_BYTES {
         return Err(fail(
             SipralStatus::BufferTooSmall,
@@ -2674,6 +2694,23 @@ fn prepare(packet: &mut SipralMediaPacket) -> Result<(), Fail> {
     Ok(())
 }
 
+/// Put one datagram a session produced in the caller's buffers, with what
+/// to send it over.
+///
+/// # Safety
+///
+/// As [`put`].
+unsafe fn put_datagram(
+    packet: &mut SipralMediaPacket,
+    datagram: &sipral::Datagram<'_>,
+) -> Result<(), Fail> {
+    #[cfg(feature = "ice")]
+    let protocol = crate::nat::protocol_of(datagram.transport);
+    #[cfg(not(feature = "ice"))]
+    let protocol = crate::stack::SipralTransport::Udp as u32;
+    unsafe { put(packet, datagram.destination, datagram.payload, protocol) }
+}
+
 /// Put one datagram in the caller's buffers.
 ///
 /// # Safety
@@ -2684,9 +2721,11 @@ unsafe fn put(
     packet: &mut SipralMediaPacket,
     destination: SocketAddr,
     payload: &[u8],
+    protocol: u32,
 ) -> Result<(), Fail> {
     unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), packet.data, payload.len()) };
     packet.len = payload.len();
+    packet.protocol = protocol;
     if packet.destination.is_null() {
         return Ok(());
     }
@@ -2928,6 +2967,7 @@ a=sendrecv\r\n";
                 destination: self.address.as_mut_ptr(),
                 destination_capacity: self.address.len(),
                 destination_len: usize::MAX,
+                protocol: u32::MAX,
             }
         }
 
@@ -4359,6 +4399,7 @@ a=sendrecv\r\n";
             destination: ptr::null_mut(),
             destination_capacity: 0,
             destination_len: 0,
+            protocol: u32::MAX,
         };
         let samples = [1_000_i16; FRAME];
         let status = unsafe {

@@ -316,7 +316,7 @@ final class PushKitBridgeTests: XCTestCase {
                 fromUri: "sip:alice@sipral.invalid", fromDisplay: nil, toUri: nil, callId: nil, digit: 0
             ),
             mediaData: nil, registrationData: nil, announceData: nil, natData: nil, relayData: nil,
-            referralData: nil
+            referralData: nil, turnStreamData: nil
         )
 
         pushKit.matchIncomingCall(event, on: stack)

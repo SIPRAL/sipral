@@ -170,7 +170,9 @@ and each is cheaper before the ABI carries it than after:
   `harness-c listen`. TURN is wired too: `sipral::Relays`
   and `turn_server` allocate a relay for a media socket before its call, and
   the full agent carries it as the relayed candidate, proven in the lab
-  between two NATs that let nothing else through (`docs/06-nat.md#turn`);
+  between two NATs that let nothing else through (`docs/06-nat.md#turn`),
+  over UDP and — for the network that lets no UDP out — over TCP and TLS,
+  the connection opened by the application and by every binding;
 - **early media on the answering side**, so a stack that answers can speak
   before 200 OK through its own engine rather than through a second one.
   *Built*: `MediaEngine::ring`/`ring_with`, and
@@ -463,9 +465,10 @@ after it. What is left is platform work, and platform work needs the platform.
   through a relay on a TURN server, with the start-up cost of both measured
   (`docs/06-nat.md`), and Asterisk's own ICE against the lite role; an ICE
   restart from either end, in either role, keeps the audio on the old pair
-  until the new one is chosen. What is left is TURN over TCP and TLS, for
-  the network that lets nothing out but 443, and a C ABI entry point for a
-  restart this end starts, which only the Rust API has. Off by default for a desktop
+  until the new one is chosen; the relay reaches its server over UDP, TCP or
+  TLS, the last two proven from behind a NAT that drops every datagram to the
+  server. What is left is a C ABI entry point for a restart this end starts,
+  which only the Rust API has. Off by default for a desktop
   softphone, where it only adds setup time; on for a phone on a carrier-grade
   NAT, and lite on a public server.
 

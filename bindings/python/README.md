@@ -103,7 +103,15 @@ same socket, and the same two calls then wait out its
 event and error this package raises. `ice=Ice.OFFERED`/`Ice.REQUIRED`
 (`sipral.enums.Ice`), per stack or per `place_call`, is what actually puts
 a relay to use — off by default, the same as `nat`, which
-`docs/06-nat.md` explains. `Ice.LITE` is the server's value, never the
+`docs/06-nat.md` explains. `turn_transport=Transport.TCP` reaches the TURN
+server over TCP, for the network that lets no UDP out, and `Transport.TLS`
+over TLS (RFC 8656 Section 3.1), 5349 being the port for it: the stack opens
+the connection per media socket when `SIPRAL_EVENT_KIND_TURN_STREAM` asks,
+carries everything for the relay on it and closes it when told. Over TLS
+the certificate is checked against `turn_server_name` — the host part of
+`turn_server` when left out — with `turn_tls_context`, or with the
+platform's default trust when none is given; `ssl.create_default_context(
+cafile=...)` is how a private CA or a self-signed server is trusted. `Ice.LITE` is the server's value, never the
 phone's: an ICE-lite endpoint (RFC 8445 §2.5) for a host reachable at the
 address it advertises, answering full ICE peers — a voice agent in a data
 centre answering a WebRTC gateway. `g729_annex_b=False` on the stack turns off
@@ -150,7 +158,11 @@ with `nat=Nat.STUN` learns and advertises the mapping, records what a
 two stacks with `ice=Ice.REQUIRED` against each other on this host's own
 routable address (never `127.0.0.1` — RFC 8445 Section 5.1.1.1 rules a
 loopback address out as a host candidate) to prove media starts, both
-ways, through a full ICE checklist and nomination. `tests/test_referral.py`
+ways, through a full ICE checklist and nomination. `tests/test_turn_stream.py`
+runs a TURN server of its own on a TCP port, over TLS with a certificate made
+for the run by the `openssl` command, and proves the relay made and given
+back on its connection, and refused over TLS to a certificate nobody vouches
+for. `tests/test_referral.py`
 sends a REFER from outside any call by hand, from a plain socket, and proves
 the 403 without `referrals=True` and, with it, the 202, the NOTIFYs from
 `100 Trying` to the placed call's `200 OK` and the call itself; and puts an

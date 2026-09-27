@@ -51,8 +51,10 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +64,15 @@
 #include <unistd.h>
 
 #include "sipral.h"
+
+/* A write to a connection the far end has closed is an error to read, not a
+ * signal that ends the process: MSG_NOSIGNAL where the system has it, and
+ * SO_NOSIGPIPE on the socket where it has that instead. */
+#ifdef MSG_NOSIGNAL
+#define NO_SIGNAL MSG_NOSIGNAL
+#else
+#define NO_SIGNAL 0
+#endif
 
 /* How long a flow may take before it is a failure. Generous, because a
  * registrar that challenges, a proxy that forks and a media server that takes
@@ -375,6 +386,11 @@ struct seen {
     uint64_t relay_at_ms;
     char relayed[SIPRAL_ADDRESS_BYTES];
     char relay_reason[128];
+    /* `FLOW_ICE_NAT` over a TURN server reached by TCP: what the last
+     * `SIPRAL_EVENT_KIND_TURN_STREAM` asked for, not yet acted on, and the
+     * server it named */
+    uint32_t turn_asked;
+    char turn_server[SIPRAL_ADDRESS_BYTES];
     /* `FLOW_ICE_NAT`: when the call was answered, and when ICE chose the
      * path its media takes -- the event carries no addresses, so which path
      * it was is read off the packets the library addresses afterwards */
@@ -464,6 +480,11 @@ static void on_event(const sipral_event_t *event, void *user_data)
              event->payload.relay.relayed_len);
         keep(seen->relay_reason, sizeof seen->relay_reason, event->payload.relay.reason,
              event->payload.relay.reason_len);
+        break;
+    case SIPRAL_EVENT_KIND_TURN_STREAM:
+        seen->turn_asked = event->payload.turn_stream.state;
+        keep(seen->turn_server, sizeof seen->turn_server, event->payload.turn_stream.server,
+             event->payload.turn_stream.server_len);
         break;
     case SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN:
         /* the first nomination is the one timed; a later one of higher
@@ -614,6 +635,10 @@ struct endpoint {
 
     int sip_fd;
     int rtp_fd;
+    /* `FLOW_ICE_NAT` over TCP: the RTP socket's connection to the TURN
+     * server, opened when the stack asks and read on every turn of the loop
+     * from then on, media handle or not */
+    int turn_fd;
     char sip_address[SIPRAL_ADDRESS_BYTES];
     char rtp_address[SIPRAL_ADDRESS_BYTES];
     /* this account's own AOR, as `open_endpoint` built it to add the
@@ -652,10 +677,18 @@ struct endpoint {
      * has chosen, the one statement of which path it chose that reaches an
      * application, since every packet names its own destination */
     char media_to[SIPRAL_ADDRESS_BYTES];
+    /* and what it was sent over: a datagram, or the connection to the TURN
+     * server (`sipral_media_packet_t::protocol`) */
+    uint32_t media_over;
     /* `FLOW_ICE_NAT`: the Refreshes with a lifetime of zero this end sent,
-     * whichever queue handed them out, and where the last went */
+     * whichever queue handed them out, where the last went, and over what */
     unsigned relays_given_back;
     char given_back_to[SIPRAL_ADDRESS_BYTES];
+    uint32_t given_back_over;
+    /* `FLOW_ICE_NAT` over TCP: the bytes the connection to the TURN server
+     * carried each way */
+    size_t turn_bytes_out;
+    size_t turn_bytes_in;
     /* the last 2xx to an INVITE this end sent, as it left the signalling
      * socket: `FLOW_NAT_INCOMING` reads its `Contact`, which is where the far
      * end's ACK and every request it sends in the dialog go */
@@ -697,6 +730,13 @@ static const char *stun_for_this_flow;
 static const char *turn_for_this_flow;
 static const char *turn_user_for_this_flow;
 static const char *turn_password_for_this_flow;
+
+/* How the flow being opened reaches its TURN server: zero for UDP, or
+ * SIPRAL_TRANSPORT_TCP when SIPRAL_TURN_TRANSPORT says `tcp` -- the relay
+ * step's network that drops every datagram to or from coturn. TLS is not
+ * this harness's: it carries no TLS stack of its own, and the relay over TLS
+ * is proved through the Python agent, which brings the platform's. */
+static uint32_t turn_transport_for_this_flow;
 
 /* The codec order the call a flow places is offered with, as
  * `sipral_call_config_t::codecs` takes it, or NULL for the stack's own --
@@ -821,6 +861,119 @@ static void send_media(struct endpoint *end, const uint8_t *data, size_t len,
     (void)sendto(end->rtp_fd, data, len, 0, (const struct sockaddr *)&to, sizeof to);
 }
 
+/* Bytes for the RTP socket's connection to the TURN server, written whole
+ * and in order: what the library marked TCP. Anything that cannot be
+ * written is a connection lost, said so, and closed. */
+static void send_on_turn(struct endpoint *end, const uint8_t *data, size_t len, uint64_t now)
+{
+    size_t done = 0;
+    if (end->turn_fd < 0) {
+        return;
+    }
+    while (done < len) {
+        ssize_t wrote = send(end->turn_fd, data + done, len - done, NO_SIGNAL);
+        if (wrote < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            continue;
+        }
+        if (wrote <= 0) {
+            (void)close(end->turn_fd);
+            end->turn_fd = -1;
+            (void)sipral_stack_turn_closed(end->stack, end->rtp_address, strlen(end->rtp_address),
+                                           now);
+            return;
+        }
+        done += (size_t)wrote;
+    }
+    end->turn_bytes_out += len;
+}
+
+/* One packet the library handed back, sent the way it is marked: a datagram
+ * from the RTP socket, or bytes on that socket's connection to the TURN
+ * server. */
+static void send_marked(struct endpoint *end, const uint8_t *data, size_t len,
+                        const char *destination, uint32_t protocol, uint64_t now)
+{
+    if (protocol == SIPRAL_TRANSPORT_TCP) {
+        send_on_turn(end, data, len, now);
+    } else {
+        send_media(end, data, len, destination);
+    }
+}
+
+/* The RTP socket's connection to the TURN server, as the stack asks for it
+ * (`SIPRAL_EVENT_KIND_TURN_STREAM`): opened and said to be, and read on
+ * every turn from then on, everything it carried handed in; its closing, by
+ * either side, said or done. */
+static void run_turn(struct endpoint *end, uint64_t now)
+{
+    static uint8_t in[DATAGRAM];
+    if (end->seen.turn_asked == SIPRAL_TURN_STREAM_OPEN && end->turn_fd < 0) {
+        struct sockaddr_in to;
+        int on = 1;
+        int fd = -1;
+        end->seen.turn_asked = 0;
+        if (address_of(end->seen.turn_server, &to) == 0) {
+            fd = socket(AF_INET, SOCK_STREAM, 0);
+        }
+        if (fd >= 0 && connect(fd, (const struct sockaddr *)&to, sizeof to) != 0) {
+            (void)close(fd);
+            fd = -1;
+        }
+        if (fd < 0) {
+            (void)sipral_stack_turn_closed(end->stack, end->rtp_address, strlen(end->rtp_address),
+                                           now);
+            return;
+        }
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+#ifdef SO_NOSIGPIPE
+        (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+#endif
+        (void)fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+        end->turn_fd = fd;
+        if (sipral_stack_turn_connected(end->stack, end->rtp_address, strlen(end->rtp_address),
+                                        now)
+            != SIPRAL_STATUS_OK) {
+            wrong_text("the stack refused the connection it asked for");
+        }
+    }
+    while (end->turn_fd >= 0) {
+        ssize_t got = recv(end->turn_fd, in, sizeof in, 0);
+        sipral_status_t taken;
+        if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            break;
+        }
+        if (got <= 0) {
+            (void)close(end->turn_fd);
+            end->turn_fd = -1;
+            (void)sipral_stack_turn_closed(end->stack, end->rtp_address, strlen(end->rtp_address),
+                                           now);
+            break;
+        }
+        end->turn_bytes_in += (size_t)got;
+        taken = sipral_stack_turn_receive(end->stack, end->rtp_address, strlen(end->rtp_address),
+                                          in, (size_t)got, now);
+        if (taken == SIPRAL_STATUS_STREAM_BROKEN) {
+            wrong_text("the connection to the TURN server stopped carrying TURN messages");
+            (void)close(end->turn_fd);
+            end->turn_fd = -1;
+        }
+    }
+}
+
+/* The connection closed when the stack says nothing more will be written
+ * on it: after this turn's queues, the Refresh that gives the relay back
+ * among them, went out. */
+static void close_turn_when_done(struct endpoint *end)
+{
+    if (end->seen.turn_asked == SIPRAL_TURN_STREAM_CLOSE) {
+        end->seen.turn_asked = 0;
+        if (end->turn_fd >= 0) {
+            (void)close(end->turn_fd);
+            end->turn_fd = -1;
+        }
+    }
+}
+
 /* Whether `data` is a TURN Refresh request (RFC 8656 §7.2) whose LIFETIME is
  * zero: the one that deletes an allocation. Read off the wire format itself --
  * a 20-byte header with the magic cookie, then type-length-value attributes
@@ -859,10 +1012,11 @@ static int releases_a_relay(const uint8_t *data, size_t len)
  * leaves through `sipral_media_poll_transmit`, and when the call ends through
  * `sipral_stack_poll_farewell`, so both are watched. */
 static void note_given_back(struct endpoint *end, const uint8_t *data, size_t len,
-                            const char *destination)
+                            const char *destination, uint32_t protocol)
 {
     if (releases_a_relay(data, len)) {
         end->relays_given_back++;
+        end->given_back_over = protocol;
         keep(end->given_back_to, sizeof end->given_back_to, destination, strlen(destination));
     }
 }
@@ -927,8 +1081,8 @@ static void run_media(struct endpoint *end, uint64_t now)
             || packet.len == 0) {
             break;
         }
-        send_media(end, out, packet.len, destination);
-        note_given_back(end, out, packet.len, destination);
+        send_marked(end, out, packet.len, destination, packet.protocol, now);
+        note_given_back(end, out, packet.len, destination, packet.protocol);
     }
 
     if (now < end->next_frame_ms) {
@@ -978,8 +1132,9 @@ static void run_media(struct endpoint *end, uint64_t now)
         if (sipral_media_capture(end->media, now, samples, room, &packet)
                 == SIPRAL_STATUS_OK
             && packet.len > 0) {
-            send_media(end, out, packet.len, destination);
+            send_marked(end, out, packet.len, destination, packet.protocol, now);
             end->sent++;
+            end->media_over = packet.protocol;
             keep(end->media_to, sizeof end->media_to, destination, strlen(destination));
         }
     }
@@ -993,7 +1148,7 @@ static void run_media(struct endpoint *end, uint64_t now)
     packet.destination = destination;
     packet.destination_capacity = sizeof destination;
     if (sipral_media_poll_rtcp(end->media, now, &packet) == SIPRAL_STATUS_OK) {
-        send_media(end, out, packet.len, destination);
+        send_marked(end, out, packet.len, destination, packet.protocol, now);
     }
 }
 
@@ -1036,7 +1191,7 @@ static void run_stun(struct endpoint *end, uint64_t now)
             wrong_text("a STUN request named a socket this end never asked about");
             continue;
         }
-        send_media(end, out, request.len, destination);
+        send_marked(end, out, request.len, destination, request.protocol, now);
     }
     for (;;) {
         struct sockaddr_in from;
@@ -1070,7 +1225,7 @@ static void run_stun(struct endpoint *end, uint64_t now)
  * asks, since a call that turns out not to use its relay queues the Refresh
  * earlier -- then, while its media runs, through `sipral_media_poll_transmit`
  * instead, which `run_media` counts the same way. */
-static void run_farewells(struct endpoint *end)
+static void run_farewells(struct endpoint *end, uint64_t now)
 {
     static uint8_t out[DATAGRAM];
     static char destination[SIPRAL_ADDRESS_BYTES];
@@ -1087,8 +1242,8 @@ static void run_farewells(struct endpoint *end)
             || packet.len == 0) {
             return;
         }
-        send_media(end, out, packet.len, destination);
-        note_given_back(end, out, packet.len, destination);
+        send_marked(end, out, packet.len, destination, packet.protocol, now);
+        note_given_back(end, out, packet.len, destination, packet.protocol);
     }
 }
 
@@ -1101,9 +1256,11 @@ static void pump(struct endpoint *end, uint64_t now)
     (void)sipral_stack_poll(end->stack, now, &result);
     flush_signalling(end);
     read_signalling(end, now);
+    run_turn(end, now);
     run_stun(end, now);
     run_media(end, now);
-    run_farewells(end);
+    run_farewells(end, now);
+    close_turn_when_done(end);
     flush_signalling(end);
 }
 
@@ -1378,6 +1535,10 @@ static void close_endpoint(struct endpoint *end)
         (void)close(end->rtp_fd);
         end->rtp_fd = -1;
     }
+    if (end->turn_fd >= 0) {
+        (void)close(end->turn_fd);
+        end->turn_fd = -1;
+    }
 }
 
 /* Bind the sockets, build the stack, and add the account -- everything a flow
@@ -1401,6 +1562,7 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     memset(end, 0, sizeof *end);
     end->sip_fd = -1;
     end->rtp_fd = -1;
+    end->turn_fd = -1;
     end->seen.marker = MARKER;
     end->server = *remote;
     /* from before the first poll, which is when the signalling socket's
@@ -1466,6 +1628,7 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
         config.turn_username_len = strlen(turn_user_for_this_flow);
         config.turn_password = turn_password_for_this_flow;
         config.turn_password_len = strlen(turn_password_for_this_flow);
+        config.turn_transport = turn_transport_for_this_flow;
     }
 
     status = sipral_stack_create(&config, &end->stack);
@@ -2700,11 +2863,21 @@ static int flow_ice_nat(struct endpoint *end, const char *server, const char *ex
                                             "is");
         return -1;
     }
-    if (end->seen.media_mapping != SIPRAL_NAT_MAPPING_LEARNED) {
+    if (turn_transport_for_this_flow == SIPRAL_TRANSPORT_TCP) {
+        /* the relay step drops every datagram to or from coturn at this
+         * end's NAT: a mapping asked over UDP that came back is a block
+         * that does not hold, and a relay over TCP proves nothing then */
+        if (end->seen.media_mapping != SIPRAL_NAT_MAPPING_UNANSWERED) {
+            wrong_text("the STUN server answered over UDP: the network does not drop what goes "
+                       "to the TURN server, and the run proves nothing");
+            return -1;
+        }
+        printf("  ice   UDP to the TURN server is dropped: the media socket's mapping went "
+               "unanswered\n");
+    } else if (end->seen.media_mapping != SIPRAL_NAT_MAPPING_LEARNED) {
         wrong_text("the STUN server did not answer for the media socket");
         return -1;
-    }
-    if (strcmp(end->seen.media_public, end->rtp_address) == 0) {
+    } else if (strcmp(end->seen.media_public, end->rtp_address) == 0) {
         wrong_text("the STUN server saw the media socket at its own address: there is no NAT in "
                    "the way, and the run proves nothing");
         return -1;
@@ -2716,8 +2889,11 @@ static int flow_ice_nat(struct endpoint *end, const char *server, const char *ex
                            end->seen.relay_reason);
             return -1;
         }
-        printf("  ice   media %s appears as %s, relay %s allocated in %u ms\n",
-               end->rtp_address, end->seen.media_public, end->seen.relayed,
+        printf("  ice   media %s appears as %s, relay %s allocated%s in %u ms\n",
+               end->rtp_address,
+               end->seen.media_public[0] != '\0' ? end->seen.media_public : "nothing",
+               end->seen.relayed,
+               turn_transport_for_this_flow == SIPRAL_TRANSPORT_TCP ? " over TCP" : "",
                (unsigned)(end->seen.relay_at_ms - mapping_from));
     } else {
         printf("  ice   media %s appears as %s\n", end->rtp_address, end->seen.media_public);
@@ -2784,6 +2960,12 @@ static int flow_ice_nat(struct endpoint *end, const char *server, const char *ex
                        end->media_to, turn_for_this_flow);
         return -1;
     }
+    if (turn_transport_for_this_flow == SIPRAL_TRANSPORT_TCP
+        && end->media_over != SIPRAL_TRANSPORT_TCP) {
+        wrong_text("the audio for the relay was not marked for the connection to the TURN "
+                   "server");
+        return -1;
+    }
     if (turn_for_this_flow == NULL
         && (address_text(&end->server, callee_nat, sizeof callee_nat) != 0
             || !same_host(end->media_to, callee_nat))) {
@@ -2826,8 +3008,24 @@ static int flow_ice_nat(struct endpoint *end, const char *server, const char *ex
                            end->given_back_to, turn_for_this_flow);
             return -1;
         }
-        printf("  ice   relay given back: a Refresh of lifetime zero to %s\n",
-               end->given_back_to);
+        if (turn_transport_for_this_flow == SIPRAL_TRANSPORT_TCP
+            && end->given_back_over != SIPRAL_TRANSPORT_TCP) {
+            wrong_text("the relay was given back as a datagram, not on the connection it was "
+                       "made on");
+            return -1;
+        }
+        printf("  ice   relay given back: a Refresh of lifetime zero to %s%s\n",
+               end->given_back_to,
+               end->given_back_over == SIPRAL_TRANSPORT_TCP ? ", on the connection" : "");
+        if (turn_transport_for_this_flow == SIPRAL_TRANSPORT_TCP) {
+            /* what came back on the connection reaches the library through
+             * sipral_stack_turn_receive, which counts no packets: `back`
+             * below is the media socket's alone */
+            printf("  ice   the connection to the TURN server carried %zu byte(s) out and %zu "
+                   "in, the tone that came back among them; %u datagram(s) came back on the "
+                   "media socket\n",
+                   end->turn_bytes_out, end->turn_bytes_in, end->received);
+        }
     }
     return 0;
 }
@@ -3995,10 +4193,21 @@ int main(int argc, char **argv)
         turn_for_this_flow = NULL;
         turn_user_for_this_flow = NULL;
         turn_password_for_this_flow = NULL;
+        turn_transport_for_this_flow = 0;
         if (flow == FLOW_ICE_NAT) {
             /* interop/harness/src/ice_nat.rs's own three variables: the
              * callee behind the other NAT reads the same ones */
             const char *turn = getenv("SIPRAL_TURN_SERVER");
+            const char *over = getenv("SIPRAL_TURN_TRANSPORT");
+            if (over != NULL && strcmp(over, "tcp") == 0) {
+                turn_transport_for_this_flow = SIPRAL_TRANSPORT_TCP;
+            } else if (over != NULL && over[0] != '\0' && strcmp(over, "udp") != 0) {
+                printf("  FAIL  %s — SIPRAL_TURN_TRANSPORT is %s, and this harness reaches a "
+                       "TURN server over udp or tcp: it carries no TLS of its own\n",
+                       flow_name(flow), over);
+                failed++;
+                continue;
+            }
             if (turn != NULL && turn[0] != '\0') {
                 turn_for_this_flow = turn;
                 turn_user_for_this_flow = getenv("SIPRAL_TURN_USER");

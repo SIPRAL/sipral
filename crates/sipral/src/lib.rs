@@ -190,6 +190,17 @@ pub use share::{SessionGuard, SessionShare, SessionUnavailable};
 /// [`MappingEvent::Unanswered`] reports it.
 #[cfg(feature = "stun")]
 pub use sipral_nat::stun::Failure as StunFailure;
+/// Why the TCP or TLS connection to a TURN server stopped carrying whole
+/// messages, as [`Relays::receive_stream`] and
+/// [`MediaSession::receive_stream`] report it: the connection is closed after
+/// it, and the relay on it is lost.
+#[cfg(feature = "ice")]
+pub use sipral_nat::turn::FrameError as TurnStreamError;
+/// How a relay reaches its TURN server, [`Relays::over`], and so how what is
+/// written for the server leaves: [`RelayDatagram::transport`],
+/// [`Datagram::transport`].
+#[cfg(feature = "ice")]
+pub use sipral_nat::turn::Transport as TurnTransport;
 /// Why a TURN server gave no relay, or took one back, as
 /// [`RelayEvent::Failed`] reports it.
 #[cfg(feature = "ice")]

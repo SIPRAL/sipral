@@ -34,7 +34,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use crate::stun::TransactionId;
-use crate::turn::{ChannelNumber, Event, Input, SendError, StartError, TurnClient};
+use crate::turn::{
+    ChannelNumber, Event, FrameError, Input, SendError, StartError, Transport, TurnClient,
+};
 
 /// The most reports one holder keeps unread. A holder drains its queue every
 /// time it touches the allocation, so this is only reached by one that has
@@ -96,6 +98,13 @@ impl SharedRelay {
     #[must_use]
     pub fn server(&self) -> SocketAddr {
         self.lock().server
+    }
+
+    /// How it reaches the server: over TCP or TLS, every holder's traffic to
+    /// the server rides the one connection the allocation was made on.
+    #[must_use]
+    pub fn transport(&self) -> Transport {
+        self.lock().client.transport()
     }
 
     /// The relayed address of the family `like` is of, while the allocation
@@ -309,6 +318,42 @@ impl Held {
         let input = pool.client.handle_input(bytes, now);
         Self::spread(&mut pool, Some(now));
         input
+    }
+
+    /// How the shared client reaches its server: over a TCP or TLS
+    /// connection, every holder's traffic to the server rides the one
+    /// connection the allocation was made on.
+    pub(super) fn transport(&self) -> Transport {
+        self.with(|client, _| client.transport())
+    }
+
+    /// Whether the shared allocation is still live, whether or not this
+    /// holder has let go of it: a holder that let go still hears the
+    /// server's answers to what was asked on the connection, its own
+    /// deletion among them.
+    pub(super) fn is_live(&self) -> bool {
+        self.with(|client, _| client.is_allocated())
+    }
+
+    pub(super) fn push_stream(&mut self, bytes: &[u8]) {
+        self.with(|client, _| client.push_stream(bytes));
+    }
+
+    pub(super) fn poll_stream(
+        &mut self,
+        frame: &mut Vec<u8>,
+        now: Instant,
+    ) -> Result<Option<Input>, FrameError> {
+        let mut pool = self.relay.lock();
+        let taken = pool.client.poll_stream(frame, now);
+        Self::spread(&mut pool, Some(now));
+        taken
+    }
+
+    pub(super) fn stream_closed(&mut self, now: Instant) {
+        let mut pool = self.relay.lock();
+        pool.client.stream_closed();
+        Self::spread(&mut pool, Some(now));
     }
 
     pub(super) fn handle_timeout(&mut self, now: Instant) {

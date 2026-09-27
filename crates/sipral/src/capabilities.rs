@@ -189,6 +189,16 @@ pub struct Capabilities {
     ///
     /// [`CallMedia::public_address`]: crate::CallMedia::public_address
     pub stun: bool,
+    /// Whether a relay can reach its TURN server over TCP or over TLS
+    /// (RFC 8656 §3.1) as well as over UDP: [`Relays::over`], for the
+    /// network that lets no UDP out. The connection is the application's,
+    /// and for TLS so is the handshake, with the platform's own stack.
+    ///
+    /// It comes with [`Capabilities::ice`], since a relay is only ever a
+    /// call's relayed ICE candidate.
+    ///
+    /// [`Relays::over`]: crate::Relays::over
+    pub turn_streams: bool,
 }
 
 impl Capabilities {
@@ -213,6 +223,7 @@ impl Capabilities {
             opus: contains_opus(&Codec::ALL),
             ice: cfg!(feature = "ice"),
             stun: cfg!(feature = "stun"),
+            turn_streams: cfg!(feature = "ice"),
         }
     }
 }

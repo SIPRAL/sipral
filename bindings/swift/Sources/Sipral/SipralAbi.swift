@@ -72,6 +72,12 @@ public enum SipralStatus: Int32, Sendable {
     /// instead ships a control that does nothing and finds out from a
     /// customer.
     case notSupported = 11
+    /// A byte stream carried something no message this library reads
+    /// starts with. Nothing in a stream marks where the next message
+    /// begins, so nothing arriving on it later can be read either: close
+    /// the connection. What rode on it is lost with it, and the call that
+    /// said so says what that was.
+    case streamBroken = 12
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -847,6 +853,25 @@ public enum SipralEventKind: UInt32, Sendable {
     /// REFER's transaction ran out: the stack answered it with that status
     /// and the handle is stale from here on.
     case referral = 41
+    /// A media socket's connection to a TURN server reached over TCP or
+    /// TLS (`turn_transport`, RFC 8656 §3.1) is to be opened, or closed.
+    /// Only on a stack created with one.
+    ///
+    /// `payload.turn_stream` says which socket, which server, over what,
+    /// and which of the two. `SIPRAL_TURN_STREAM_OPEN` follows
+    /// `sipral_stack_nat_map`: open the connection from the socket to the
+    /// server — TLS with the platform's own stack, the certificate
+    /// checked against the server's name — and say so with
+    /// `sipral_stack_turn_connected`, then hand everything it carries to
+    /// `sipral_stack_turn_receive` for as long as it is open, and its
+    /// closing to `sipral_stack_turn_closed`. What is written on it comes
+    /// out of `sipral_stack_poll_stun`, `sipral_media_poll_transmit`,
+    /// `sipral_media_capture`, `sipral_media_poll_rtcp` and
+    /// `sipral_stack_poll_farewell`, each marked with its `protocol`.
+    /// `SIPRAL_TURN_STREAM_CLOSE` says nothing more will be: write what
+    /// is still queued for it, and close it. `account` and `call` are
+    /// `SIPRAL_HANDLE_NONE`: a socket is neither.
+    case turnStream = 42
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1106,6 +1131,25 @@ public enum SipralNatRelay: UInt32, Sendable {
     /// took back an allocation it had made. A call on the socket goes
     /// without one, and ICE finds what path it can on the rest.
     case failed = 2
+}
+
+/// What a media socket's connection to the TURN server is to do. Names
+/// for `sipral_turn_stream_event_t::state`.
+public enum SipralTurnStream: UInt32, Sendable {
+    /// Open a connection from the media socket `local` to the TURN
+    /// server at `server`, over `protocol` — TCP, or TLS with the
+    /// server's certificate checked by the platform's own stack — and
+    /// say so with `sipral_stack_turn_connected` once it is open, or
+    /// `sipral_stack_turn_closed` if it cannot be. The socket's relay is
+    /// allocated over it; a call on the socket before that answers
+    /// `SIPRAL_STATUS_WRONG_STATE`.
+    case open = 1
+    /// Nothing more will be written for the connection from `local`:
+    /// its relay was given back or lost, or the call it carried has
+    /// ended. Write what the queues still hold for it —
+    /// `sipral_stack_poll_farewell` and `sipral_stack_poll_stun` — and
+    /// close it.
+    case close = 2
 }
 
 /// Where a subscription is. Names for
@@ -1609,7 +1653,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 28
+    public static let abiVersionMinor: UInt32 = 29
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -1706,6 +1750,18 @@ public enum Sipral {
     /// does not already bring. `SIPRAL_NAT_STUN` keeps its number in a build
     /// without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
     public static let featureStun: UInt32 = 512
+
+    /// See SIPRAL_FEATURE_DTMF. A TURN server reached over TCP or TLS
+    /// (RFC 8656 §3.1): `sipral_stack_config_t::turn_transport`, and the
+    /// connection the application opens for each media socket when
+    /// `SIPRAL_EVENT_KIND_TURN_STREAM` asks — for the network that lets no
+    /// UDP out.
+    ///
+    /// It comes with `SIPRAL_FEATURE_ICE`, since a relay is only ever a
+    /// call's relayed ICE candidate, and without it `turn_transport` other
+    /// than UDP answers `SIPRAL_STATUS_NOT_SUPPORTED` as a `turn_server`
+    /// does.
+    public static let featureTurnStream: UInt32 = 1024
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -4138,6 +4194,7 @@ public enum Sipral {
         try check(status)
     }
 
+    /// Take the next STUN request a media socket has to send.entry! {
     /// Take the next STUN request a media socket has to send.
     ///
     /// The same record and the same rules as `sipral_stack_poll_transmit`,
@@ -4147,7 +4204,11 @@ public enum Sipral {
     /// nobody answered. `source` is always written, and it is the socket to
     /// send from — the whole point is the address the server sees it come
     /// from, so sending it from any other socket learns the wrong one.
-    /// `transport` is zero and names nothing here, and `protocol` is UDP.
+    /// `transport` is zero and names nothing here. `protocol` is UDP for a
+    /// datagram; on a stack whose `turn_transport` is TCP or TLS, what is for
+    /// the TURN server says that instead, and is written, as it is, on the
+    /// connection from `source` that `SIPRAL_EVENT_KIND_TURN_STREAM` asked
+    /// for — never sent as a datagram.
     ///
     /// A call placed, rung or answered on a socket with its relay sends
     /// through here too, for as long as it has no media handle: the Binding
@@ -4223,6 +4284,97 @@ public enum Sipral {
                             }
                         }
                     }
+                }
+            }
+        try check(status)
+    }
+
+    /// Say that the TCP or TLS connection a
+    /// `SIPRAL_EVENT_KIND_TURN_STREAM` of state `SIPRAL_TURN_STREAM_OPEN`
+    /// asked for is open — for TLS, that the handshake has finished and the
+    /// server's certificate was checked against the name the application
+    /// configured, by the platform's own TLS stack, as for SIP over TLS.
+    ///
+    /// The socket's Allocate is waiting in sipral_stack_poll_stun when
+    /// this returns, marked with the connection's `protocol`, to be written
+    /// on it; the answer comes back through sipral_stack_turn_receive,
+    /// and `SIPRAL_EVENT_KIND_NAT_RELAY` says what the server gave, exactly
+    /// as over UDP.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket no connection was asked
+    /// for, and `SIPRAL_STATUS_WRONG_STATE` on a stack created without
+    /// `SIPRAL_NAT_STUN`.
+    ///
+    /// Safety
+    ///
+    /// `local` must be readable for `local_len` bytes.
+    public static func stackTurnConnected(stack: SipralHandle, local: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(local.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_stack_turn_connected(stack, p1.baseAddress, p1.count, nowMs)
+                }
+            }
+        try check(status)
+    }
+
+    /// Hand over bytes read off a media socket's TCP or TLS connection to
+    /// the TURN server, in whatever pieces the connection delivered them.
+    ///
+    /// The messages in them are put back together here (RFC 8656 §12.5)
+    /// and each goes where a datagram from the server would: to the relay
+    /// being made or kept for the socket, or, once a call has taken it, to
+    /// that call — its agent while it waits for its session, and then its
+    /// media, as through `sipral_media_receive`, audio included. So the
+    /// connection is read here for as long as it is open, media handle or
+    /// not, and what the call owes the far end in reply comes out of
+    /// `sipral_media_poll_transmit` as it always does.
+    ///
+    /// `SIPRAL_STATUS_STREAM_BROKEN` when the connection carried something
+    /// no TURN message starts with, which nothing in a stream can recover
+    /// from: close it. The socket's relay is lost with it —
+    /// `SIPRAL_NAT_RELAY_FAILED` for one still waiting for its call — and no
+    /// `SIPRAL_TURN_STREAM_CLOSE` follows. `SIPRAL_STATUS_INVALID_ARGUMENT`
+    /// for a socket with no open connection.
+    ///
+    /// Safety
+    ///
+    /// `local` must be readable for `local_len` bytes, and `data` for `len`.
+    public static func stackTurnReceive(stack: SipralHandle, local: String, data: [UInt8], nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(local.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    data.withUnsafeBufferPointer { p2 in
+                        sipral_stack_turn_receive(stack, p1.baseAddress, p1.count, p2.baseAddress, p2.count, nowMs)
+                    }
+                }
+            }
+        try check(status)
+    }
+
+    /// Say that a media socket's connection to the TURN server closed, or
+    /// could not be opened at all.
+    ///
+    /// The server knew the socket's allocation by that connection (RFC 8656
+    /// §3.2), so the relay went with it: one still being made is
+    /// `SIPRAL_NAT_RELAY_FAILED` at the next poll, and a call on the socket
+    /// goes without it; a call that had taken it keeps the paths ICE found
+    /// that need none, and loses the one through it when its consent runs
+    /// out (RFC 7675). Naming the socket again with `sipral_stack_nat_map`
+    /// asks for a new connection. `SIPRAL_STATUS_OK` for a connection the
+    /// stack had already let go.
+    ///
+    /// Safety
+    ///
+    /// `local` must be readable for `local_len` bytes.
+    public static func stackTurnClosed(stack: SipralHandle, local: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(local.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_stack_turn_closed(stack, p1.baseAddress, p1.count, nowMs)
                 }
             }
         try check(status)

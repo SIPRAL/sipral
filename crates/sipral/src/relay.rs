@@ -27,6 +27,21 @@
 //! [`Relays::take`] gives the finished allocation to
 //! [`CallMedia::relay`](crate::CallMedia::relay).
 //!
+//! # Over TCP or TLS
+//!
+//! A network that lets no UDP out reaches the server over a TCP connection,
+//! or over TLS on one, which is what [`Relays::over`] says (RFC 8656 §3.1);
+//! the relay still speaks UDP to the peer. The application opens the
+//! connection — for TLS it brings the platform's own stack and checks the
+//! server's certificate, as it does for SIP over TLS — one per media socket,
+//! since the server knows an allocation by the connection it was made on
+//! (§3.2). Then everything here is the same but the carriage: what is handed
+//! out for the server is written on that connection, whole and in order,
+//! rather than sent as a datagram ([`RelayDatagram::transport`]); what the
+//! connection delivers goes to [`Relays::receive_stream`], in whatever pieces
+//! it arrives in; and a connection that closes is
+//! [`Relays::stream_closed`], which loses the relay with it.
+//!
 //! From there the allocation is the call's. Its agent installs the
 //! permissions the peer's candidates need, binds a channel for the data
 //! (ChannelData's four bytes against a Send indication's thirty-six), keeps
@@ -54,7 +69,7 @@ use sipral_core::auth::KeySource;
 use sipral_nat::stun::{
     Class, LongTermCredentials, Message, MessageBuilder, Method, TransactionId,
 };
-use sipral_nat::turn::{Event, Input, TurnClient, TurnConfig, TurnError};
+use sipral_nat::turn::{Event, FrameError, Input, Transport, TurnClient, TurnConfig, TurnError};
 
 /// How often a socket holding an allocation, and waiting for its call, sends
 /// the server a Binding indication.
@@ -79,7 +94,8 @@ pub enum RelayEvent {
         /// candidate names.
         relayed: SocketAddr,
         /// Where the server saw the socket from (XOR-MAPPED-ADDRESS), when it
-        /// said.
+        /// said. Never over TCP or TLS, where what the server saw is the
+        /// connection and not the socket.
         mapped: Option<SocketAddr>,
     },
     /// There is no relay for `local`: the server refused, did not answer, or
@@ -103,6 +119,11 @@ pub struct RelayDatagram {
     pub destination: SocketAddr,
     /// The request.
     pub payload: Vec<u8>,
+    /// How it goes: [`Transport::Udp`] is a datagram from `local`, and
+    /// [`Transport::Tcp`] or [`Transport::Tls`] is bytes to write, in order
+    /// and as they are, on `local`'s connection to `destination`
+    /// ([`Relays::over`]).
+    pub transport: Transport,
 }
 
 /// One socket's allocation, while it waits for its call.
@@ -120,6 +141,7 @@ struct Pending {
 /// a clock or draws from the operating system.
 pub struct Relays {
     server: SocketAddr,
+    transport: Transport,
     credentials: LongTermCredentials,
     keys: KeySource,
     sockets: BTreeMap<SocketAddr, Pending>,
@@ -146,6 +168,7 @@ impl Relays {
     pub fn new(server: SocketAddr, username: &str, password: &str, seed: [u8; 32]) -> Self {
         Self {
             server,
+            transport: Transport::Udp,
             credentials: LongTermCredentials::new(username, password),
             keys: KeySource::new(seed),
             sockets: BTreeMap::new(),
@@ -155,10 +178,32 @@ impl Relays {
         }
     }
 
+    /// Reach the server over `transport` rather than UDP: TCP for the
+    /// network that blocks UDP outright, TLS for the one that lets one port
+    /// out, or for the application that wants the server's certificate
+    /// checked (RFC 8656 §3.1). The relay speaks UDP to the peer whichever
+    /// it is.
+    ///
+    /// Over either, [`Relays::allocate`] is called for a socket once its
+    /// connection to [`Relays::server`] is open — and for TLS, once the
+    /// handshake has finished and the certificate has been checked, which is
+    /// the application's with the platform's own TLS, as for SIP.
+    #[must_use]
+    pub const fn over(mut self, transport: Transport) -> Self {
+        self.transport = transport;
+        self
+    }
+
     /// The server every relay is allocated on.
     #[must_use]
     pub const fn server(&self) -> SocketAddr {
         self.server
+    }
+
+    /// How every relay reaches [`Relays::server`].
+    #[must_use]
+    pub const fn transport(&self) -> Transport {
+        self.transport
     }
 
     /// Allocate a relay for `local`.
@@ -166,7 +211,8 @@ impl Relays {
     /// Nothing for a socket that already has one, or is getting one. A server
     /// of the other address family is never asked: the socket is
     /// [`RelayEvent::Failed`] at once, with
-    /// [`TurnError::AddressFamilyNotSupported`].
+    /// [`TurnError::AddressFamilyNotSupported`]. Over TCP or TLS, only once
+    /// `local`'s connection to the server is open ([`Relays::over`]).
     pub fn allocate(&mut self, local: SocketAddr, now: Instant) {
         if self.sockets.contains_key(&local) {
             return;
@@ -192,6 +238,7 @@ impl Relays {
             return;
         }
         let mut client = TurnClient::new(TurnConfig {
+            transport: self.transport,
             credentials: Some(self.credentials.clone()),
             ..TurnConfig::default()
         });
@@ -228,6 +275,9 @@ impl Relays {
     /// is both the STUN and the TURN server, as a coturn usually is. So an
     /// application that keeps both hands a datagram here first and to
     /// `Mappings` after.
+    ///
+    /// Over TCP or TLS no datagram is the server's: it answers on the
+    /// connection, and what arrives there goes to [`Relays::receive_stream`].
     pub fn receive(
         &mut self,
         local: SocketAddr,
@@ -236,6 +286,7 @@ impl Relays {
         now: Instant,
     ) -> bool {
         if from != self.server
+            || self.transport.is_stream()
             || Message::parse(data).is_ok_and(|message| message.method() == Method::BINDING)
         {
             return false;
@@ -250,6 +301,91 @@ impl Relays {
         }
         self.drain(local, now);
         true
+    }
+
+    /// Hand in bytes read off `local`'s TCP or TLS connection to the server
+    /// ([`Relays::over`]), in whatever pieces the connection delivered them:
+    /// the messages in them are put back together here (RFC 8656 §12.5), and
+    /// each is taken as [`Relays::receive`] takes a datagram.
+    ///
+    /// `Ok(false)` when no relay here is being made or kept over that
+    /// connection — the socket was never allocated, its relay was taken by
+    /// a call, or it was lost — and the bytes are nobody's here.
+    ///
+    /// # Errors
+    ///
+    /// The connection carried something that is neither STUN nor a channel
+    /// message, or a STUN message whose length is not whole words: it cannot
+    /// find its place again, since nothing in a stream marks where a message
+    /// starts. The relay is lost — [`RelayEvent::Failed`] with
+    /// [`TurnError::ConnectionLost`] — and the application closes the
+    /// connection.
+    pub fn receive_stream(
+        &mut self,
+        local: SocketAddr,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Result<bool, FrameError> {
+        if !self.transport.is_stream() {
+            return Ok(false);
+        }
+        if let Some(pending) = self.sockets.get_mut(&local) {
+            pending.client.push_stream(bytes);
+            let mut frame = Vec::new();
+            loop {
+                let Some(pending) = self.sockets.get_mut(&local) else {
+                    return Ok(true);
+                };
+                top_up(&mut self.keys, &mut pending.client);
+                let taken = pending.client.poll_stream(&mut frame, now);
+                self.drain(local, now);
+                match taken {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return Ok(true),
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        let Some(client) = self.leaving.get_mut(&local) else {
+            return Ok(false);
+        };
+        client.push_stream(bytes);
+        let mut frame = Vec::new();
+        loop {
+            let Some(client) = self.leaving.get_mut(&local) else {
+                return Ok(true);
+            };
+            top_up(&mut self.keys, client);
+            match client.poll_stream(&mut frame, now) {
+                Ok(Some(Input::Foreign)) => {}
+                Ok(Some(_)) => {
+                    self.settle_leaving(local, now);
+                }
+                Ok(None) => return Ok(true),
+                Err(error) => {
+                    self.leaving.remove(&local);
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// `local`'s TCP or TLS connection to the server closed, and whatever
+    /// relay was being made or kept over it went with it: the server knew
+    /// the allocation by that connection (RFC 8656 §3.2). A socket that was
+    /// waiting for one, or holding one for its call, is
+    /// [`RelayEvent::Failed`] with [`TurnError::ConnectionLost`], and a call
+    /// placed on it goes without; [`Relays::allocate`] on a new connection
+    /// asks again. Nothing for a socket with no relay here.
+    pub fn stream_closed(&mut self, local: SocketAddr, now: Instant) {
+        if !self.transport.is_stream() {
+            return;
+        }
+        self.leaving.remove(&local);
+        if let Some(pending) = self.sockets.get_mut(&local) {
+            pending.client.stream_closed();
+            self.drain(local, now);
+        }
     }
 
     /// The next request to send, from the socket it names.
@@ -303,6 +439,7 @@ impl Relays {
                         local,
                         destination: self.server,
                         payload,
+                        transport: self.transport,
                     });
                 }
             }
@@ -335,8 +472,15 @@ impl Relays {
         if client.handle_input(data, now) == Input::Foreign {
             return false;
         }
+        self.settle_leaving(local, now);
+        true
+    }
+
+    /// A released socket's Allocate was answered: the client is done, and an
+    /// allocation the answer reports goes straight back.
+    fn settle_leaving(&mut self, local: SocketAddr, now: Instant) {
         let Some(mut client) = self.leaving.remove(&local) else {
-            return false;
+            return;
         };
         while client.poll_transmit().is_some() {}
         if client.is_allocated() {
@@ -346,10 +490,10 @@ impl Relays {
                     local,
                     destination: self.server,
                     payload,
+                    transport: self.transport,
                 });
             }
         }
-        true
     }
 
     /// Whether `local` has asked for a relay and the server has not said yet.
@@ -362,6 +506,15 @@ impl Relays {
         self.sockets
             .get(&local)
             .is_some_and(|pending| !pending.client.is_allocated())
+    }
+
+    /// Whether a relay is being made or kept for `local` here: asked for and
+    /// not answered, allocated and waiting for its call, or released before
+    /// its answer came. `false` once [`Relays::take`] has handed it to a
+    /// call, and for a socket that never had one.
+    #[must_use]
+    pub fn holds(&self, local: SocketAddr) -> bool {
+        self.sockets.contains_key(&local) || self.leaving.contains_key(&local)
     }
 
     /// The relay allocated for `local`, for the call about to be placed,
@@ -404,13 +557,19 @@ impl Relays {
             mut client,
         } = relay;
         top_up(&mut self.keys, &mut client);
-        if server != self.server || self.sockets.contains_key(&local) || !client.is_allocated() {
+        if server != self.server
+            || client.transport() != self.transport
+            || self.sockets.contains_key(&local)
+            || !client.is_allocated()
+        {
             let _unallocated = client.delete(now);
+            let transport = client.transport();
             while let Some(payload) = client.poll_transmit() {
                 self.outbox.push_back(RelayDatagram {
                     local,
                     destination: server,
                     payload,
+                    transport,
                 });
             }
             return;
@@ -450,6 +609,7 @@ impl Relays {
                 local,
                 destination: self.server,
                 payload,
+                transport: self.transport,
             });
         }
     }
@@ -464,6 +624,7 @@ impl Relays {
                 local,
                 destination: self.server,
                 payload,
+                transport: self.transport,
             });
         }
         let mut closed = None;
@@ -476,7 +637,7 @@ impl Relays {
                     self.events.push_back(RelayEvent::Allocated {
                         local,
                         relayed,
-                        mapped,
+                        mapped: mapped.filter(|_| !self.transport.is_stream()),
                     });
                 }
                 Event::Closed(failure) => closed = Some(failure),
@@ -504,6 +665,7 @@ impl core::fmt::Debug for Relays {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Relays")
             .field("server", &self.server)
+            .field("transport", &self.transport)
             .field("sockets", &self.sockets.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
@@ -534,6 +696,13 @@ impl Relay {
         self.server
     }
 
+    /// How it reaches [`Relay::server`]: UDP from [`Relay::local`], or the
+    /// TCP or TLS connection from it that the allocation was made on.
+    #[must_use]
+    pub const fn transport(&self) -> Transport {
+        self.client.transport()
+    }
+
     /// Where the server relays from: the relayed candidate's address.
     ///
     /// `None` only for an allocation of no address at all, which
@@ -544,10 +713,14 @@ impl Relay {
     }
 
     /// Where the server saw the socket from, when it said: the same answer a
-    /// STUN server gives, from the same socket.
+    /// STUN server gives, from the same socket. `None` over TCP or TLS, where
+    /// what the server saw is the connection's own mapping, which says
+    /// nothing about where the socket's datagrams appear from.
     #[must_use]
-    pub const fn mapped(&self) -> Option<SocketAddr> {
-        self.client.mapped_address()
+    pub fn mapped(&self) -> Option<SocketAddr> {
+        self.client
+            .mapped_address()
+            .filter(|_| !self.client.transport().is_stream())
     }
 
     /// The server and the client, for the agent that takes the allocation
@@ -589,6 +762,7 @@ impl core::fmt::Debug for Relay {
         f.debug_struct("Relay")
             .field("local", &self.local)
             .field("server", &self.server)
+            .field("transport", &self.transport())
             .field("relayed", &self.relayed())
             .field("mapped", &self.mapped())
             .finish_non_exhaustive()
@@ -630,7 +804,7 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
 
     use sipral_nat::stun::{AttributeType, Class, Message, MessageBuilder, Method};
-    use sipral_nat::turn::{TurnError, method};
+    use sipral_nat::turn::{FrameError, Transport, TurnError, method};
 
     use super::{RelayDatagram, RelayEvent, Relays};
 
@@ -733,6 +907,136 @@ pub(crate) mod tests {
         // the call's now: nothing here keeps it or sends for it any more
         assert!(relays.take(at(MEDIA)).is_none());
         assert_eq!(relays.poll_timeout(), None);
+    }
+
+    /// An Allocate over a TCP connection, its answer handed in `chunk`
+    /// octets at a time.
+    fn allocated_over_tcp(now: Instant, chunk: usize) -> Relays {
+        let mut relays =
+            Relays::new(at(SERVER), "alice", "correct horse", [13; 32]).over(Transport::Tcp);
+        relays.allocate(at(MEDIA), now);
+        let requests = drain(&mut relays);
+        assert_eq!(requests.len(), 1, "one Allocate");
+        assert_eq!(requests[0].transport, Transport::Tcp);
+        assert_eq!(requests[0].destination, at(SERVER));
+        let reply = answer(&requests[0].payload).expect("an answer");
+        for piece in reply.chunks(chunk) {
+            assert_eq!(relays.receive_stream(at(MEDIA), piece, now), Ok(true));
+        }
+        relays
+    }
+
+    #[test]
+    fn an_allocation_over_tcp_arrives_in_whatever_pieces_and_names_no_mapping() {
+        let now = Instant::now();
+        for chunk in [1, 5, 13, 4096] {
+            let mut relays = allocated_over_tcp(now, chunk);
+            // what the server saw is the connection's mapping, which says
+            // nothing about the socket's datagrams
+            assert_eq!(
+                events(&mut relays),
+                vec![RelayEvent::Allocated {
+                    local: at(MEDIA),
+                    relayed: at(RELAYED),
+                    mapped: None,
+                }],
+                "{chunk}"
+            );
+            let relay = relays.take(at(MEDIA)).expect("the relay");
+            assert_eq!(relay.transport(), Transport::Tcp);
+            assert_eq!(relay.mapped(), None);
+        }
+    }
+
+    #[test]
+    fn a_relay_over_tcp_keeps_its_binding_and_goes_back_on_the_connection() {
+        let now = Instant::now();
+        let mut relays = allocated_over_tcp(now, 64);
+        let _ = events(&mut relays);
+        let due = relays.poll_timeout().expect("a keepalive is due");
+        relays.handle_timeout(due);
+        let kept = drain(&mut relays);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].transport, Transport::Tcp);
+        relays.release(at(MEDIA), due);
+        let sent = drain(&mut relays);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(refresh_lifetime(&sent[0].payload), Some(0));
+        assert_eq!(sent[0].transport, Transport::Tcp);
+    }
+
+    #[test]
+    fn a_datagram_from_the_server_is_not_the_answer_over_tcp() {
+        let now = Instant::now();
+        let mut relays =
+            Relays::new(at(SERVER), "alice", "correct horse", [14; 32]).over(Transport::Tcp);
+        relays.allocate(at(MEDIA), now);
+        let request = drain(&mut relays).remove(0);
+        let reply = answer(&request.payload).expect("an answer");
+        assert!(!relays.receive(at(MEDIA), at(SERVER), &reply, now));
+        assert!(relays.pending(at(MEDIA)), "still waiting on the connection");
+    }
+
+    #[test]
+    fn a_closed_connection_fails_its_socket_and_asks_nothing_more() {
+        let now = Instant::now();
+        let mut relays =
+            Relays::new(at(SERVER), "alice", "correct horse", [15; 32]).over(Transport::Tcp);
+        relays.allocate(at(MEDIA), now);
+        let _ = drain(&mut relays);
+        relays.stream_closed(at(MEDIA), now);
+        assert_eq!(
+            events(&mut relays),
+            vec![RelayEvent::Failed {
+                local: at(MEDIA),
+                failure: TurnError::ConnectionLost,
+            }]
+        );
+        assert!(!relays.pending(at(MEDIA)));
+        assert!(relays.take(at(MEDIA)).is_none());
+        assert_eq!(relays.poll_timeout(), None);
+        assert!(drain(&mut relays).is_empty());
+        assert_eq!(
+            relays.receive_stream(at(MEDIA), &[1, 1, 0, 0], now),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_connection_that_stops_making_sense_fails_its_socket() {
+        let now = Instant::now();
+        let mut relays = allocated_over_tcp(now, 64);
+        let _ = events(&mut relays);
+        assert_eq!(
+            relays.receive_stream(at(MEDIA), &[22, 0xfe, 0xfd, 0], now),
+            Err(FrameError::NotTurn(22))
+        );
+        assert_eq!(
+            events(&mut relays),
+            vec![RelayEvent::Failed {
+                local: at(MEDIA),
+                failure: TurnError::ConnectionLost,
+            }]
+        );
+        assert!(relays.take(at(MEDIA)).is_none());
+    }
+
+    #[test]
+    fn a_socket_released_over_tcp_before_its_answer_gives_back_what_the_answer_allocated() {
+        let now = Instant::now();
+        let mut relays =
+            Relays::new(at(SERVER), "alice", "correct horse", [16; 32]).over(Transport::Tcp);
+        relays.allocate(at(MEDIA), now);
+        let request = drain(&mut relays).remove(0);
+        relays.release(at(MEDIA), now);
+        let reply = answer(&request.payload).expect("an answer");
+        let (first, second) = reply.split_at(9);
+        assert_eq!(relays.receive_stream(at(MEDIA), first, now), Ok(true));
+        assert_eq!(relays.receive_stream(at(MEDIA), second, now), Ok(true));
+        let sent = drain(&mut relays);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(refresh_lifetime(&sent[0].payload), Some(0));
+        assert_eq!(sent[0].transport, Transport::Tcp);
     }
 
     #[test]

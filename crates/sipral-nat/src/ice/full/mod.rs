@@ -50,7 +50,7 @@ use super::sdp::RemoteIce;
 use super::server;
 use crate::demux::{Demux, classify};
 use crate::stun::{BindingClient, Class, LongTermCredentials, Message, TransactionId};
-use crate::turn::Input;
+use crate::turn::{FrameError, Input, Transport};
 
 pub use report::{PairOutcome, PairReport, RelayOutcome, RelayReport};
 use shared::Held;
@@ -141,10 +141,17 @@ pub const REFUSAL_CEILING: usize = TRANSMIT_CEILING / 2;
 /// A TURN server to gather a relayed candidate from.
 #[derive(Clone, Debug)]
 pub struct TurnServer {
-    /// Where it listens for UDP.
+    /// Where it listens.
     pub address: SocketAddr,
     /// The long-term credential it expects, if any.
     pub credentials: Option<LongTermCredentials>,
+    /// How each host socket reaches it. Over TCP or TLS the caller opens
+    /// the connection from every host socket of the server's family before
+    /// [`IceAgent::gather`], and carries what the agent sends to the server
+    /// on it ([`Transmit::transport`]); what comes back goes to
+    /// [`IceAgent::push_stream`]. The relay itself speaks UDP to the peer
+    /// whichever it is (RFC 8656 §3.1).
+    pub transport: Transport,
 }
 
 /// How the agent behaves.
@@ -303,6 +310,11 @@ pub struct Transmit {
     pub destination: SocketAddr,
     /// The bytes.
     pub data: Vec<u8>,
+    /// How it leaves: [`Transport::Udp`] is a datagram from `source`, and
+    /// [`Transport::Tcp`] or [`Transport::Tls`] is bytes to write, in order,
+    /// on the connection from `source` to the TURN server at `destination`
+    /// — already framed, so written as they are.
+    pub transport: Transport,
 }
 
 /// Where [`IceAgent::send`] wants application data to go.
@@ -312,6 +324,9 @@ pub struct Route {
     pub source: SocketAddr,
     /// The peer, or the TURN server when the pair is relayed.
     pub destination: SocketAddr,
+    /// A datagram, or bytes for the connection to the TURN server when the
+    /// pair is relayed over one, as [`Transmit::transport`].
+    pub transport: Transport,
 }
 
 /// What a datagram handed to [`IceAgent::handle_datagram`] turned out to be.
@@ -729,10 +744,10 @@ pub struct IceAgent {
     bases: Vec<Base>,
     locals: Vec<LocalCandidate>,
     remotes: Vec<Remote>,
-    /// Every (type, base address, server address) a foundation has been
-    /// handed out for, in the order they were; a foundation is its position
-    /// plus one (RFC 8445 §5.1.1.3).
-    foundations: Vec<(CandidateType, IpAddr, Option<IpAddr>)>,
+    /// Every (type, base address, server address, transport to the server)
+    /// a foundation has been handed out for, in the order they were; a
+    /// foundation is its position plus one (RFC 8445 §5.1.1.3).
+    foundations: Vec<(CandidateType, IpAddr, Option<IpAddr>, Transport)>,
     gatherers: Vec<Gatherer>,
     relays: Vec<Allocation>,
     gathering_until: Option<Instant>,
@@ -1084,11 +1099,11 @@ impl IceAgent {
         if self.on_gatherer_datagram(base, from, data, now) {
             return Received::Consumed;
         }
-        if let Some(relay) = self
-            .relays
-            .iter()
-            .position(|entry| entry.base == base && entry.server == from)
-        {
+        // a relay over a connection hears the server on that connection and
+        // nowhere else: a datagram from its address is not the relay's
+        if let Some(relay) = self.relays.iter().position(|entry| {
+            entry.base == base && entry.server == from && !entry.client.transport().is_stream()
+        }) {
             return self.on_relay_datagram(relay, data, now);
         }
         let Some(host) = self.host_of(base) else {
@@ -1301,6 +1316,7 @@ impl IceAgent {
                 Route {
                     source,
                     destination,
+                    transport: Transport::Udp,
                 }
             }
             Some(relay) => {
@@ -1315,6 +1331,7 @@ impl IceAgent {
                 Route {
                     source,
                     destination: entry.server,
+                    transport: entry.client.transport(),
                 }
             }
         };
@@ -1346,13 +1363,19 @@ impl IceAgent {
             None => Ok(Route {
                 source,
                 destination,
+                transport: Transport::Udp,
             }),
             // a relayed pair's data goes to the server, not to the peer, and
-            // the caller is told the address it will actually send to
-            Some(relay) => Ok(Route {
-                source,
-                destination: self.relays.get(relay).ok_or(SendError::NoRoute)?.server,
-            }),
+            // the caller is told the address it will actually send to, and
+            // how
+            Some(relay) => {
+                let entry = self.relays.get(relay).ok_or(SendError::NoRoute)?;
+                Ok(Route {
+                    source,
+                    destination: entry.server,
+                    transport: entry.client.transport(),
+                })
+            }
         }
     }
 
@@ -1408,16 +1431,128 @@ impl IceAgent {
             .min_by_key(|candidate| (rank(candidate.kind), u32::MAX - candidate.priority))
     }
 
+    /// Hand in bytes read off the TCP or TLS connection from the host socket
+    /// `local` to the TURN server at `server`, the one a relay of this
+    /// agent's runs over ([`TurnServer::transport`]).
+    ///
+    /// `false` when no relay here runs over that connection — none was
+    /// allocated over one, or it has already been lost — and the bytes are
+    /// nobody's. Whole messages come out of [`IceAgent::poll_stream`].
+    pub fn push_stream(&mut self, local: SocketAddr, server: SocketAddr, bytes: &[u8]) -> bool {
+        let Some(relay) = self.stream_relay(local, server) else {
+            return false;
+        };
+        if let Some(entry) = self.relays.get_mut(relay) {
+            entry.client.push_stream(bytes);
+        }
+        true
+    }
+
+    /// The next whole message the connection from `local` to `server` has
+    /// carried, copied into `frame` and taken as [`IceAgent::handle_datagram`]
+    /// takes a datagram from a TURN server: a peer's data comes back as
+    /// [`Received::Data`] at its position in `frame`, and everything else is
+    /// the relay's own and [`Received::Consumed`].
+    ///
+    /// `Ok(None)` when no whole message is waiting. Loop until it says so
+    /// after every [`IceAgent::push_stream`], draining
+    /// [`IceAgent::poll_transmit`] as after any datagram.
+    ///
+    /// # Errors
+    ///
+    /// The stream stopped making sense
+    /// ([`crate::turn::TurnClient::poll_stream`]). The relay is lost with
+    /// it, exactly as if the connection had closed, and the caller closes
+    /// the connection.
+    pub fn poll_stream(
+        &mut self,
+        local: SocketAddr,
+        server: SocketAddr,
+        frame: &mut Vec<u8>,
+        now: Instant,
+    ) -> Result<Option<Received>, FrameError> {
+        let Some(relay) = self.stream_relay(local, server) else {
+            return Ok(None);
+        };
+        self.feed_relay(relay);
+        let Some(entry) = self.relays.get_mut(relay) else {
+            return Ok(None);
+        };
+        let taken = entry.client.poll_stream(frame, now);
+        let input = match taken {
+            Ok(Some(input)) => input,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.drain_relay(relay, now);
+                return Err(error);
+            }
+        };
+        Ok(Some(match self.on_relay_input(relay, input, frame, now) {
+            // a whole frame the relay did not claim is dropped here: on a
+            // connection only the server writes to, there is nobody else it
+            // could be for
+            Received::Foreign => Received::Consumed,
+            received => received,
+        }))
+    }
+
+    /// The connection from `local` to the TURN server at `server` closed,
+    /// and the relay that ran over it is gone with it: the server knew the
+    /// allocation by that connection (RFC 8656 §3.2). The relayed candidate
+    /// carries nothing from here on, and a pair that used it loses consent
+    /// as a pair whose path went silent does (RFC 7675 §5.1). Nothing for a
+    /// connection no relay here runs over.
+    pub fn stream_closed(&mut self, local: SocketAddr, server: SocketAddr, now: Instant) {
+        let Some(relay) = self.stream_relay(local, server) else {
+            return;
+        };
+        if let Some(entry) = self.relays.get_mut(relay) {
+            entry.client.stream_closed(now);
+        }
+        self.drain_relay(relay, now);
+    }
+
+    /// The relay that runs over the connection from the host socket `local`
+    /// to `server`: allocated, or asking to be. One the server has deleted,
+    /// or whose connection was lost, runs over nothing; one this agent let
+    /// go of still hears the answers to what it asked, its own deletion
+    /// among them, while the allocation lasts.
+    fn stream_relay(&self, local: SocketAddr, server: SocketAddr) -> Option<usize> {
+        let base = self.bases.iter().position(|entry| entry.address == local)?;
+        self.relays.iter().position(|entry| {
+            entry.base == base
+                && entry.server == server
+                && entry.client.transport().is_stream()
+                && (entry.client.is_live() || entry.progress == Progress::Running)
+        })
+    }
+
     fn on_relay_datagram(&mut self, relay: usize, data: &[u8], now: Instant) -> Received {
         self.feed_relay(relay);
         let Some(entry) = self.relays.get_mut(relay) else {
+            return Received::Foreign;
+        };
+        let input = entry.client.handle_input(data, now);
+        self.on_relay_input(relay, input, data, now)
+    }
+
+    /// What the agent makes of what a relay made of `data`, a message from
+    /// its server.
+    fn on_relay_input(
+        &mut self,
+        relay: usize,
+        input: Input,
+        data: &[u8],
+        now: Instant,
+    ) -> Received {
+        let Some(entry) = self.relays.get(relay) else {
             return Received::Foreign;
         };
         // an allocation this agent let go of may still be held by the other
         // branches of a fork: the server's answers still finish what was
         // asked, a deletion among them, but what it relays is theirs
         let released = entry.progress == Progress::Freed;
-        let delivered = match entry.client.handle_input(data, now) {
+        let delivered = match input {
             Input::Data { .. } if released => return Received::Foreign,
             Input::Data { peer, range } => entry.candidate.map(|local| (local, peer, range)),
             Input::Consumed | Input::Unreachable { .. } => None,
@@ -1504,6 +1639,7 @@ impl IceAgent {
                 source,
                 destination,
                 data: data.to_vec(),
+                transport: Transport::Udp,
             });
             return true;
         };
@@ -1519,11 +1655,12 @@ impl IceAgent {
         {
             return false;
         }
-        let server = entry.server;
+        let (server, transport) = (entry.server, entry.client.transport());
         self.queue(Transmit {
             source,
             destination: server,
             data: wrapped,
+            transport,
         });
         true
     }
