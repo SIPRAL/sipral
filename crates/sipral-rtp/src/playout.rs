@@ -110,7 +110,30 @@ const BASE_WINDOW: u32 = 512;
 /// path's delay is two or three frames where it was one or two. That frame
 /// is bought in a pause where nobody hears it being bought, and being a
 /// frame long is inaudible where being a frame short is a gap.
+///
+/// One frame in hand covers a slip of one frame in a talk spurt, which is
+/// what any real pair of clocks makes: 250 ppm slips one every eighty
+/// seconds. An earpiece fast enough to slip more than that inside one spurt
+/// takes the frame in hand and then runs dry, in the middle of a word, and
+/// only the pause before the spurt can be stretched to prevent it. So a
+/// pause leaves this many queued or, once the earpiece's pace has been
+/// measured ([`Pace::in_hand`]), the one about to be played and what it is
+/// expected to slip over a spurt as long as the recent ones ([`Spurts`]),
+/// whichever is more.
 const IN_HAND: u16 = 2;
+
+/// Frames of the far end's clock the earpiece's pace is measured over before
+/// the older half of the measure is forgotten: a minute at twenty
+/// milliseconds. Long, because the figure it gives is a ratio of two
+/// crystals, which does not change during a call, and every frame of it
+/// halves what a pull landing either side of an arrival can move it by.
+const PACE_WINDOW: u32 = 3_000;
+
+/// The furthest one arrival may be ahead of the one before it, in sequence
+/// numbers, and still be read as the far end's clock having run on
+/// unbroken between them: a few packets lost on the way, rather than a
+/// stream that stopped and started again.
+const PACE_STEP: u16 = 16;
 
 /// Times the same packet length must repeat before it is believed over the one
 /// the negotiation promised.
@@ -278,6 +301,16 @@ pub struct Quality {
     pub shrunk: u64,
     /// Frames the caller was asked to invent in a pause to push the delay up.
     pub stretched: u64,
+    /// Frames played as nothing because the buffer had run dry while the far
+    /// end was still sending: the earpiece asked for audio before it had
+    /// arrived, and a frame of silence or comfort noise was heard in its
+    /// place, wherever that fell. Counted once playout carries on with the
+    /// packet that follows the last one played on the far end's own clock,
+    /// which is what tells an under-run from a far end that stopped sending
+    /// or packets lost on the way: those are its pause, or [`Quality::lost`].
+    /// No packet is lost or discarded by an under-run, so RFC 3611's figures
+    /// do not see it; [`Quality::loss_rate`] does.
+    pub underruns: u64,
     /// How far behind the newest packet received the playout point currently
     /// is: the delay the far end's voice is actually suffering.
     pub delay: Duration,
@@ -287,9 +320,11 @@ pub struct Quality {
     /// (RFC 3550 §6.4.1). Measured here from the buffer's own arrivals, so it
     /// is available on a session with RTCP switched off.
     pub jitter: Duration,
-    /// Frames concealed as a fraction of frames played, over the last ten
-    /// seconds or so. The cumulative counters say what the call has cost so
-    /// far; this says whether it is bad right now.
+    /// Frames concealed or lost to an under-run ([`Quality::underruns`]) as
+    /// a fraction of frames played, over the last ten seconds or so. Both
+    /// are a frame the listener did not get from the far end, whichever
+    /// side of the network it went missing on. The cumulative counters say
+    /// what the call has cost so far; this says whether it is bad right now.
     pub loss_rate: f32,
 }
 
@@ -304,6 +339,7 @@ struct Counters {
     reordered: u64,
     shrunk: u64,
     stretched: u64,
+    underruns: u64,
 }
 
 #[derive(Debug, Default)]
@@ -587,6 +623,188 @@ impl LossWindow {
     }
 }
 
+/// How many frames of the far end's clock separate a packet from `last`, the
+/// one before it on that clock, when nothing says the clock stopped between
+/// them: no marker opening a new spurt (RFC 3551 §4.1), a sequence number a
+/// few on at most, and a timestamp exactly as many packets on (RFC 3550
+/// §5.1: it "increments monotonically and linearly in time"). `None` for
+/// anything else: a pause the far end took, whether or not its timestamps
+/// ran through it, or a stream that started again.
+fn continues(
+    last: (u16, u32),
+    sequence: u16,
+    timestamp: u32,
+    marker: bool,
+    span: u32,
+) -> Option<u16> {
+    let (last_sequence, last_timestamp) = last;
+    let step = sequence.wrapping_sub(last_sequence);
+    let on = !marker
+        && (1..=PACE_STEP).contains(&step)
+        && timestamp.wrapping_sub(last_timestamp) == u32::from(step).saturating_mul(span);
+    on.then_some(step)
+}
+
+/// How fast the earpiece takes frames, against how fast the far end makes
+/// them, and how many it takes at a time.
+///
+/// The two paces are counted over the same stretches of time: the pulls
+/// made between one arrival and the next, and the frames of the far end's
+/// clock the second is on from the first, wherever [`continues`] says that
+/// clock ran unbroken between them. A pause the far end took is left out
+/// whole, so a far end suppressing silence is measured over its spurts
+/// alone. What is measured is the earpiece's clock and not the network's: a
+/// packet held up on the way is paid back by the ones that arrive behind
+/// it, and the sum over a run of arrivals is the pulls from the first to the
+/// last, off by no more than the pull either side of each end.
+#[derive(Debug, Default)]
+struct Pace {
+    /// Pulls since the last packet that was the newest to arrive.
+    since: u32,
+    /// And that packet's place on the far end's clock.
+    last: Option<(u16, u32)>,
+    pulls: u32,
+    frames: u32,
+    /// Runs of arrivals the sums are made of, each of which can be a pull
+    /// out at either end.
+    runs: u32,
+    /// The frames the earpiece takes at a time, less one: the fewest pulls
+    /// seen between two arrivals, over the last window of [`BURST_WINDOW`].
+    /// An earpiece that takes one frame a callback pulls once between most
+    /// pairs of arrivals; one whose callback is two frames long pulls twice
+    /// at the same instant, and no packet ever arrives between the two.
+    extra: u16,
+    fewest: Option<u32>,
+    seen: u8,
+}
+
+/// Arrivals that had pulls before them, per window of [`Pace::extra`].
+const BURST_WINDOW: u8 = 64;
+
+impl Pace {
+    const fn pulled(&mut self) {
+        self.since = self.since.saturating_add(1);
+    }
+
+    /// Take the arrival of the newest packet there is.
+    fn arrived(&mut self, sequence: u16, timestamp: u32, marker: bool, span: u32) {
+        let pulls = core::mem::take(&mut self.since);
+        if pulls > 0 {
+            self.note_burst(pulls);
+        }
+        let step = self
+            .last
+            .and_then(|last| continues(last, sequence, timestamp, marker, span));
+        self.last = Some((sequence, timestamp));
+        let Some(step) = step else {
+            self.runs = self.runs.saturating_add(1);
+            return;
+        };
+        self.pulls = self.pulls.saturating_add(pulls);
+        self.frames = self.frames.saturating_add(u32::from(step));
+        if self.frames >= PACE_WINDOW {
+            self.pulls /= 2;
+            self.frames /= 2;
+            self.runs = self.runs.div_ceil(2);
+        }
+    }
+
+    fn note_burst(&mut self, pulls: u32) {
+        self.fewest = Some(self.fewest.map_or(pulls, |fewest| fewest.min(pulls)));
+        self.seen = self.seen.saturating_add(1);
+        if self.seen >= BURST_WINDOW {
+            let fewest = self.fewest.take().unwrap_or(1);
+            self.extra = u16::try_from(fewest.saturating_sub(1)).unwrap_or(u16::MAX);
+            self.seen = 0;
+        }
+    }
+
+    /// How many more frames than one the earpiece takes at a time.
+    const fn extra(&self) -> u16 {
+        self.extra
+    }
+
+    /// Forget where the far end's clock was, for a stream that has started
+    /// again on another timeline; how fast the two clocks run is kept.
+    const fn restart(&mut self) {
+        self.last = None;
+    }
+
+    /// The frames to keep in hand for `frames` of the earpiece's own: those
+    /// an earpiece at this pace takes before they have arrived, when it
+    /// takes them faster than they are made, and half a frame over, rounded
+    /// up, for where in a frame its pulls land against the arrivals. One for
+    /// a pace no faster than the far end's once what the ends of the runs
+    /// can be out by is taken off, which is every pace until the measure is
+    /// long enough to say.
+    fn in_hand(&self, frames: u16) -> u16 {
+        // each run's pulls are out by less than one at either end, one way
+        // or the other at random, so what they add up to grows as the root
+        // of how many there are; this is twice that, and one more
+        let noise = self.runs.isqrt().saturating_mul(2).saturating_add(1);
+        let excess = self.pulls.saturating_sub(self.frames).saturating_sub(noise);
+        if excess == 0 {
+            return 1;
+        }
+        // in half frames, so the half frame over is exact
+        let halves = (2 * u64::from(frames) * u64::from(excess)).div_ceil(u64::from(self.pulls));
+        u16::try_from(halves.saturating_add(1).div_ceil(2))
+            .unwrap_or(u16::MAX)
+            .max(1)
+    }
+}
+
+/// How long the far end's talk spurts have been, in frames played.
+///
+/// A spurt starts with a frame the caller's verdict calls speech and ends
+/// with one it calls silence, or where the far end's clock says it stopped
+/// sending ([`continues`]). Only the verdicts on packets count: a frame the
+/// buffer had nothing for, or asked to have invented, is the buffer's own
+/// and says nothing about the far end.
+#[derive(Debug, Default)]
+struct Spurts {
+    /// Whether the last frame out was a packet, whose verdict the next pull
+    /// brings.
+    decoded: bool,
+    speaking: bool,
+    run: u16,
+    /// The longest recent spurt: the last one's length or, when that was
+    /// shorter, a quarter less than the figure before it, so one long
+    /// spurt is remembered for the few after it and not for the call.
+    length: u16,
+}
+
+impl Spurts {
+    fn hear(&mut self, activity: Activity) {
+        if !core::mem::take(&mut self.decoded) {
+            return;
+        }
+        match activity {
+            Activity::Speech if !self.speaking => {
+                self.speaking = true;
+                self.run = 1;
+            }
+            Activity::Speech => {}
+            Activity::Silence => self.end(),
+        }
+    }
+
+    /// A frame of the far end's clock played, a packet or its concealment.
+    const fn consumed(&mut self) {
+        if self.speaking {
+            self.run = self.run.saturating_add(1);
+        }
+    }
+
+    fn end(&mut self) {
+        if self.speaking {
+            self.speaking = false;
+            self.length = self.run.max(self.length - self.length / 4);
+            self.run = 0;
+        }
+    }
+}
+
 /// An adaptive de-jitter buffer for one stream.
 #[derive(Debug)]
 pub struct JitterBuffer {
@@ -602,13 +820,29 @@ pub struct JitterBuffer {
     held: u16,
     next: u16,
     highest: u16,
-    /// Packets accepted since the last pull. A buffer that is starving cannot
-    /// stretch its way out of it, so growth waits for evidence that audio is
-    /// still arriving.
+    /// Packets accepted that the pulls have not yet caught up with: one more
+    /// for each arrival, one less for each pull, never below nothing and
+    /// never more than is held. A buffer that is starving cannot stretch its
+    /// way out of it, so growth waits for evidence that audio is still
+    /// arriving. An earpiece that takes two frames at once, on a device
+    /// callback twice a packet long, pulls twice for the two packets that
+    /// arrived since its last callback, and the second pull has that
+    /// evidence as much as the first: counted since the last pull instead,
+    /// the second of the pair could never stretch, and its floor held only
+    /// on the first.
     arrived: u16,
     anchored: bool,
     playing: bool,
     timing: Timing,
+    pace: Pace,
+    spurts: Spurts,
+    /// The last packet played, as its sequence number and timestamp, which
+    /// the next one played is read against to tell an under-run from a
+    /// pause.
+    last_played: Option<(u16, u32)>,
+    /// Pulls since then that had nothing to play: an under-run, or the far
+    /// end's pause, which only the next packet played can say.
+    silent: u32,
     loss: LossWindow,
     counts: Counters,
     /// RFC 3611 §4.7.2's burst/gap classification, fed exactly once per
@@ -668,6 +902,10 @@ impl JitterBuffer {
             anchored: false,
             playing: false,
             timing: Timing::new(clock_rate.max(1), config.packet_samples.max(1)),
+            pace: Pace::default(),
+            spurts: Spurts::default(),
+            last_played: None,
+            silent: 0,
             loss: LossWindow::new(),
             counts: Counters::default(),
             gmin: GminTracker::new(RECOMMENDED_GMIN),
@@ -757,6 +995,10 @@ impl JitterBuffer {
             arrival,
             header.marker && !reordered,
         );
+        if !reordered {
+            self.pace
+                .arrived(sequence, header.timestamp, header.marker, self.timing.span);
+        }
 
         if displaced > 0 {
             Insert::Displaced(displaced)
@@ -773,13 +1015,28 @@ impl JitterBuffer {
     /// frame, either by dropping a packet that will not be missed or by asking
     /// for a frame that was never sent; during speech it does not move.
     pub fn pull(&mut self, activity: Activity) -> Pull<'_> {
-        let arrived = self.arrived;
-        self.arrived = 0;
+        self.pace.pulled();
+        self.spurts.hear(activity);
+        let arrived = self.arrived.min(self.held);
+        self.arrived = arrived.saturating_sub(1);
         if !self.anchored {
             return Pull::Empty;
         }
+        // A buffer that ran dry in the middle of a spurt played a frame of
+        // silence for it, and that is the frame the caller's verdict is on.
+        // It is no pause while the first packet held carries on from the
+        // last one played on the far end's clock: every frame waited or
+        // stretched on top of it is one more cut out of the far end's words,
+        // so it is played as the spurt it is, and the frames in hand are made
+        // up in the next real pause.
+        let activity = if activity == Activity::Silence && self.silent > 0 && self.resumes() {
+            Activity::Speech
+        } else {
+            activity
+        };
 
         if !self.playing && !self.start(activity) {
+            self.note_silence();
             return Pull::Empty;
         }
 
@@ -789,9 +1046,10 @@ impl JitterBuffer {
             // above any target: an earpiece whose frames land near the edge
             // of an arrival sees the queue go one either way from one pull
             // to the next, and a band of one would answer each of those
-            // with a stretch or a shrink
-            let floor = self.target.max(IN_HAND);
-            if queued > floor.saturating_add(1) {
+            // with a stretch or a shrink. One that takes frames two at a
+            // time sees it go two, and the band is a packet wider for each
+            let floor = self.floor();
+            if queued > floor.saturating_add(1).saturating_add(self.pace.extra()) {
                 self.shorten();
             } else if arrived > 0 && queued < floor {
                 self.counts.stretched = self.counts.stretched.saturating_add(1);
@@ -806,22 +1064,30 @@ impl JitterBuffer {
                 // lost a packet, so the window waits where it is and fills to
                 // the target again before playing on
                 self.playing = false;
+                self.note_silence();
                 return Pull::Empty;
             }
             self.resolve(self.next, PacketOutcome::Lost);
             self.advance_base(1);
             self.counts.lost = self.counts.lost.saturating_add(1);
             self.loss.record(true);
+            self.spurts.consumed();
             return Pull::Conceal;
         }
 
         self.resolve(self.next, PacketOutcome::Received);
         self.advance_base(1);
         self.held = self.held.saturating_sub(1);
-        self.loss.record(false);
+
+        let Some(slot) = self.slots.get(index) else {
+            // it was filled a moment ago, so this cannot happen either
+            return Pull::Empty;
+        };
+        let (sequence, timestamp, marker) = (slot.sequence, slot.timestamp, slot.marker);
+        self.played(sequence, timestamp, marker);
 
         let Some(slot) = self.slots.get_mut(index) else {
-            // it was filled a moment ago, so this cannot happen either
+            // nor this, for the same slot
             return Pull::Empty;
         };
         slot.filled = false;
@@ -851,6 +1117,12 @@ impl JitterBuffer {
         self.anchored = false;
         self.playing = false;
         self.timing.restart();
+        // the next packet is on another timeline, so neither the pace nor an
+        // under-run can be read across to it, and nor can a spurt
+        self.pace.restart();
+        self.spurts.end();
+        self.last_played = None;
+        self.silent = 0;
         // the next packet anchors the window afresh, and nothing behind it
         // is known to have been lost
         self.resolved_lost = [0; LATE_WORDS];
@@ -961,6 +1233,7 @@ impl JitterBuffer {
             reordered: self.counts.reordered,
             shrunk: self.counts.shrunk,
             stretched: self.counts.stretched,
+            underruns: self.counts.underruns,
             delay: self.packets_to_duration(self.queued()),
             target_delay: self.packets_to_duration(self.target),
             jitter: ticks_to_duration(self.clock_rate, self.timing.jitter_scaled >> 4),
@@ -1103,7 +1376,7 @@ impl JitterBuffer {
             return false;
         }
         let wanted = if activity == Activity::Silence {
-            self.target.max(IN_HAND)
+            self.floor()
         } else {
             self.target
         };
@@ -1121,6 +1394,81 @@ impl JitterBuffer {
         }
         self.playing = true;
         true
+    }
+
+    /// Whether the first packet held carries on from the last one played
+    /// without the far end having stopped between them.
+    fn resumes(&self) -> bool {
+        if self.held == 0 {
+            return false;
+        }
+        let span = self.timing.span;
+        let head = self
+            .slots
+            .get(self.index_of(self.next.wrapping_add(self.leading_gap())))
+            .filter(|slot| slot.filled);
+        match (self.last_played, head) {
+            (Some(last), Some(head)) => {
+                continues(last, head.sequence, head.timestamp, head.marker, span).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// The fewest packets a pause leaves queued: the target, or the frames
+    /// in hand ([`IN_HAND`]) an earpiece at the pace measured needs to
+    /// carry it through a spurt as long as the recent ones without running
+    /// dry, whichever is more — and never more in hand than the longest
+    /// delay this buffer may choose.
+    fn floor(&self) -> u16 {
+        let slip = self.pace.in_hand(self.spurts.length);
+        // a spurt that spends what is in hand ends with next to nothing
+        // queued, and an earpiece that takes two frames at once takes the
+        // second of them from that: it is carried in hand as well
+        let burst = if slip > 1 { self.pace.extra() } else { 0 };
+        let in_hand = slip
+            .saturating_add(burst)
+            .saturating_add(1)
+            .min(self.max_delay.max(IN_HAND));
+        self.target.max(in_hand)
+    }
+
+    /// A pull with nothing to play. Once something has been played it is
+    /// either an under-run or the far end's pause, and which is settled by
+    /// the packet played next.
+    const fn note_silence(&mut self) {
+        if self.last_played.is_some() {
+            self.silent = self.silent.saturating_add(1);
+        }
+    }
+
+    /// A packet played: the silence before it was an under-run if the far
+    /// end's clock ran on unbroken from the packet played before it, since
+    /// then every frame of that silence was one it had sent, or was
+    /// sending, and the earpiece asked for before it came. A packet that
+    /// opens a new spurt, or is further on than a few lost ones account for,
+    /// says the far end stopped, and the silence was its own pause.
+    fn played(&mut self, sequence: u16, timestamp: u32, marker: bool) {
+        let span = self.timing.span;
+        let on = self
+            .last_played
+            .and_then(|last| continues(last, sequence, timestamp, marker, span));
+        let silent = core::mem::take(&mut self.silent);
+        if let Some(step) = on {
+            // a packet lost on the way was due in one of those frames, and is
+            // counted where the ones lost are
+            let underruns = silent.saturating_sub(u32::from(step) - 1);
+            self.counts.underruns = self.counts.underruns.saturating_add(u64::from(underruns));
+            for _ in 0..underruns.min(u32::from(LOSS_CAPACITY)) {
+                self.loss.record(true);
+            }
+        } else {
+            self.spurts.end();
+        }
+        self.last_played = Some((sequence, timestamp));
+        self.loss.record(false);
+        self.spurts.consumed();
+        self.spurts.decoded = true;
     }
 
     /// How far on from the playout point the packet after the last gap longer
@@ -1785,12 +2133,12 @@ mod tests {
         // each pull drops one frame until the queue is inside the dead band,
         // so the sequence played skips every other packet on the way down
         let mut played = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..4 {
             if let Pull::Packet(frame) = buffer.pull(Activity::Silence) {
                 played.push(frame.sequence);
             }
         }
-        assert_eq!(played, vec![1, 3, 5, 6, 7]);
+        assert_eq!(played, vec![1, 3, 5, 6]);
         assert_eq!(buffer.quality().shrunk, 3);
         assert_eq!(
             buffer.quality().lost,
@@ -1809,9 +2157,13 @@ mod tests {
             max_delay: 8,
         };
         let mut buffer = JitterBuffer::new(RATE, &deep);
-        for sequence in 0..4 {
+        // a frame of the device's time for every packet while it fills, so
+        // the pulls have caught up with every arrival when it starts
+        for sequence in 0..3 {
             insert(&mut buffer, sequence);
+            assert!(matches!(buffer.pull(Activity::Speech), Pull::Empty));
         }
+        insert(&mut buffer, 3);
         assert_eq!(pull(&mut buffer), Some(0));
         assert_eq!(pull(&mut buffer), Some(1));
 
@@ -1820,8 +2172,8 @@ mod tests {
         assert!(matches!(buffer.pull(Activity::Silence), Pull::Stretch));
         assert_eq!(buffer.quality().stretched, 1);
 
-        // nothing arrived since, so a starving buffer does not stretch itself
-        // into a stall
+        // nothing arrived since that the pulls have not caught up with, so a
+        // starving buffer does not stretch itself into a stall
         assert!(matches!(
             buffer.pull(Activity::Silence),
             Pull::Packet(frame) if frame.sequence == 2
@@ -2175,6 +2527,92 @@ mod tests {
         (buffer, played, dry)
     }
 
+    /// What an earpiece heard of the lab's cadenced tone, as
+    /// `interop/harness` counts it: frames played as silence because the
+    /// buffer had nothing, and the runs of that silence that cut the tone
+    /// off — that began straight after a frame of it, or ended straight into
+    /// one.
+    #[derive(Debug, Default)]
+    struct Heard {
+        dry: u32,
+        cuts: u32,
+    }
+
+    /// An earpiece whose clock is `skew_ppm` off the far end's, taking
+    /// `per_callback` frames at a time the way a device callback longer than
+    /// a frame does, from a far end that sends a packet every frame on a
+    /// clean path: sixty frames of tone and thirty of quiet packets, the
+    /// lab's cadence. The verdict handed to each pull is the one on the frame
+    /// decoded last, as the facade's detector gives it: speech for a frame of
+    /// the tone, silence for a quiet one or for a frame of silence played
+    /// because the buffer had nothing, and whatever it was for a frame the
+    /// buffer asked to have invented, which is built from the one before.
+    fn heard_against(skew_ppm: i64, pulls: u32, per_callback: u32) -> (JitterBuffer, Heard) {
+        const FRAME_US: i64 = 20_000;
+        let mut buffer = JitterBuffer::new(RATE, &BufferConfig::new(SPAN));
+        let pull_every = FRAME_US * 1_000_000 / (1_000_000 + skew_ppm);
+        let mut next_arrival = FRAME_US / 2 + 1;
+        let mut tick = pull_every * i64::from(per_callback);
+        let mut sent = 0_u32;
+        let mut pulled = 0_u32;
+        let mut activity = Activity::Silence;
+        let mut heard = Heard::default();
+        let (mut started, mut was_tone, mut was_dry, mut counted) = (false, false, false, false);
+        while pulled < pulls {
+            let wobble = (i64::from(pulled) * 7_919 % 7 - 3) * 1_000;
+            if next_arrival < tick + wobble {
+                let sequence = u16::try_from(sent % 65_536).unwrap();
+                let bytes = spurt_datagram(sequence, sent, false);
+                let packet = RtpPacket::parse(&bytes).expect("a packet");
+                let at = Duration::from_micros(u64::try_from(next_arrival).unwrap());
+                buffer.insert(&packet, at);
+                sent += 1;
+                next_arrival += FRAME_US;
+                continue;
+            }
+            for _ in 0..per_callback {
+                let (tone, dry) = match buffer.pull(activity) {
+                    Pull::Packet(frame) => {
+                        started = true;
+                        let tone = u32::from(frame.sequence) % 90 < 60;
+                        activity = if tone {
+                            Activity::Speech
+                        } else {
+                            Activity::Silence
+                        };
+                        (tone, false)
+                    }
+                    Pull::Empty if started => {
+                        heard.dry += 1;
+                        activity = Activity::Silence;
+                        (false, true)
+                    }
+                    Pull::Empty => {
+                        activity = Activity::Silence;
+                        (false, false)
+                    }
+                    Pull::Conceal | Pull::Stretch => (false, false),
+                };
+                if dry {
+                    if was_tone {
+                        heard.cuts += 1;
+                        counted = true;
+                    }
+                } else {
+                    if tone && was_dry && !counted {
+                        heard.cuts += 1;
+                    }
+                    counted = false;
+                }
+                was_tone = tone;
+                was_dry = dry;
+                pulled += 1;
+            }
+            tick += pull_every * i64::from(per_callback);
+        }
+        (buffer, heard)
+    }
+
     /// The `sent`th frame of the far end's clock, carried as `sequence`.
     fn spurt_datagram(sequence: u16, sent: u32, marker: bool) -> Vec<u8> {
         let header = RtpHeader {
@@ -2288,5 +2726,137 @@ mod tests {
             1,
             "drift accumulated over a call is not jitter"
         );
+    }
+
+    #[test]
+    fn an_earpiece_that_takes_two_frames_a_callback_keeps_its_frame_in_hand_on_both() {
+        // a callback twice a frame long pulls twice at one instant, for the
+        // two packets that arrived since the last one. The second pull is
+        // the one that leaves the queue short, and it has to be able to
+        // stretch a pause as much as the first; its dead band is as wide as
+        // the two frames it takes at once, or a pull either side of an
+        // arrival is answered with a stretch and then a shrink
+        for skew in [2_000, 5_000] {
+            let (buffer, heard) = heard_against(skew, 12_000, 2);
+            let quality = buffer.quality();
+            assert_eq!(heard.dry, 0, "{skew} ppm: ran dry {} times", heard.dry);
+            assert_eq!(heard.cuts, 0, "{skew} ppm");
+            let drift = u64::try_from(skew).unwrap() * 12_000 / 1_000_000;
+            let net = quality.stretched - quality.shrunk;
+            assert!(
+                (drift..=drift + 2).contains(&net),
+                "{skew} ppm: {drift} frames of drift and the one in hand, stretched {} shrunk {}",
+                quality.stretched,
+                quality.shrunk
+            );
+            assert!(quality.shrunk <= 2, "{skew} ppm: shrunk {}", quality.shrunk);
+        }
+        let (buffer, heard) = heard_against(-2_000, 12_000, 2);
+        let quality = buffer.quality();
+        assert_eq!(heard.dry, 0);
+        assert!(
+            (23..=25).contains(&quality.shrunk),
+            "each frame of drift dropped from a pause, got {}",
+            quality.shrunk
+        );
+        assert!(quality.stretched <= 1, "stretched {}", quality.stretched);
+    }
+
+    #[test]
+    fn an_earpiece_that_slips_frames_by_the_handful_in_a_spurt_has_them_in_hand() {
+        // 50 000 ppm slips three frames in a second of tone and 500 000 ppm
+        // twenty: a frame in hand is gone before the spurt is. Once the pace
+        // and the length of a spurt have been measured, each pause is
+        // stretched by what the next spurt will slip, and the buffer runs dry
+        // only in the seconds it takes to measure them
+        for per_callback in [1, 2] {
+            for skew in [50_000, 500_000] {
+                let (_, measuring) = heard_against(skew, 3_000, per_callback);
+                let (buffer, heard) = heard_against(skew, 24_000, per_callback);
+                assert_eq!(
+                    (heard.dry, heard.cuts),
+                    (measuring.dry, measuring.cuts),
+                    "{skew} ppm, {per_callback} a callback: dry and cut after the first minute"
+                );
+                assert!(
+                    heard.dry < 50,
+                    "{skew} ppm, {per_callback} a callback: dry {} while measuring",
+                    heard.dry
+                );
+                assert_eq!(buffer.quality().underruns, u64::from(heard.dry));
+            }
+        }
+        // and the same from a far end that sends nothing in its pauses, whose
+        // spurts start from an empty buffer: they wait for what is to be in
+        // hand, as a pause
+        for skew in [50_000, 500_000] {
+            let (_, _, measuring) = played_against(skew, 3_000, true);
+            let (buffer, _, dry) = played_against(skew, 24_000, true);
+            assert_eq!(dry, measuring, "{skew} ppm, silent pauses");
+            assert!(
+                dry < 60,
+                "{skew} ppm, silent pauses: dry {dry} while measuring"
+            );
+            assert_eq!(buffer.quality().stretched, 0, "{skew} ppm");
+        }
+    }
+
+    #[test]
+    fn an_earpiece_that_outruns_the_far_end_counts_the_silence_it_played() {
+        let mut buffer = buffer(20, 1);
+        insert(&mut buffer, 0);
+        assert_eq!(pull(&mut buffer), Some(0));
+        // the far end is sending, and its next packet is not here yet
+        for _ in 0..3 {
+            assert!(matches!(buffer.pull(Activity::Speech), Pull::Empty));
+        }
+        insert(&mut buffer, 1);
+        assert_eq!(pull(&mut buffer), Some(1));
+
+        let quality = buffer.quality();
+        assert_eq!(quality.underruns, 3);
+        assert_eq!(quality.lost, 0, "nothing was lost on the way");
+        assert!(
+            (quality.loss_rate - 0.6).abs() < 1e-6,
+            "three of the five frames played were nothing, got {}",
+            quality.loss_rate
+        );
+        // RFC 3611 §4.7.1 counts packets, and no packet was lost or discarded
+        let metrics = buffer.burst_gap_metrics();
+        assert_eq!((metrics.loss_rate, metrics.discard_rate), (0, 0));
+    }
+
+    #[test]
+    fn a_pause_or_a_loss_is_not_an_under_run() {
+        // a far end suppressing silence stops, and comes back on a new spurt:
+        // its timestamps say the frames played as nothing were its pause
+        let mut paused = buffer(20, 1);
+        let first = spurt_datagram(0, 0, true);
+        paused.insert(&RtpPacket::parse(&first).expect("a packet"), FRAME);
+        assert_eq!(pull(&mut paused), Some(0));
+        for _ in 0..3 {
+            assert!(matches!(paused.pull(Activity::Silence), Pull::Empty));
+        }
+        let next = spurt_datagram(1, 4, true);
+        paused.insert(&RtpPacket::parse(&next).expect("a packet"), FRAME * 5);
+        assert!(matches!(paused.pull(Activity::Silence), Pull::Empty));
+        let after = spurt_datagram(2, 5, false);
+        paused.insert(&RtpPacket::parse(&after).expect("a packet"), FRAME * 6);
+        assert_eq!(pull(&mut paused), Some(1));
+        assert_eq!(paused.quality().underruns, 0);
+        assert!(paused.quality().loss_rate < 1e-6);
+
+        // two packets lost on the way and three frames of nothing: two of
+        // them are the loss, and one the earpiece being early for the third
+        let mut buffer = buffer(20, 1);
+        insert(&mut buffer, 0);
+        assert_eq!(pull(&mut buffer), Some(0));
+        for _ in 0..3 {
+            assert!(matches!(buffer.pull(Activity::Speech), Pull::Empty));
+        }
+        insert(&mut buffer, 3);
+        assert_eq!(pull(&mut buffer), Some(3));
+        let quality = buffer.quality();
+        assert_eq!((quality.lost, quality.underruns), (2, 1));
     }
 }

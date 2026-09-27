@@ -35,6 +35,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   sent none. `RtpSession::far_voip_metrics` is the block itself, and
   `QualityReportMetrics::remote` (`RemoteQualityMetrics`) what the report is
   written from.
+- **A buffer that ran dry is counted where call quality is read.**
+  `Quality::underruns` counts the frames played as nothing because the
+  jitter buffer had run dry while the far end was still sending, and
+  `Quality::loss_rate` takes each of them as it takes a concealed frame, so
+  `StreamStatistics::score` and `is_suffering`, and the C ABI's
+  `loss_rate`, `score` and `suffering`, fall with it. RTCP-XR stays as RFC
+  3611 §4.7.1 defines it, a share of packets lost or discarded, which an
+  under-run is neither: a fast earpiece rated R 93 and MOS-LQ 4.4 while its
+  tone was cut off 1 774 times in two minutes (`docs/19-numbers.md`).
 - **The .NET binding can get a call past a NAT.** `SipralStack`'s
   constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
   `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP
@@ -801,6 +810,23 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   zero. It now hands it back through `MediaEngine::poll_returned_relay`,
   still live on its server, for `Relays::put_back` to keep for the next
   call on its socket, as every refused description already did.
+- **An earpiece that takes two frames a callback, or slips more than one
+  in a talk spurt, no longer runs dry in the middle of a word.** A device
+  callback two frames long pulls twice at one instant, and the second pull
+  could never stretch a pause, since the evidence it waited for was an
+  arrival since the last pull; the buffer now counts the arrivals its
+  pulls have not caught up with, and widens the pause's dead band by the
+  frames taken at once, which it reads off the pulls between arrivals. And
+  a pause kept one frame in hand whatever the earpiece's pace: the buffer
+  now measures that pace against the far end's clock and the length of
+  its recent spurts, and keeps in hand what the next spurt will slip. In
+  the crate's own simulation of the lab's tone, two minutes at 2000 ppm
+  with a two-frame callback cut it 10 times before and none after; in
+  `scripts/lab.sh drift` at 500 000 ppm the fast earpiece's tone was cut
+  1 774 times in two minutes before and not once after, at the cost of up
+  to 340 ms held in hand; a buffer that runs dry mid-spurt now starts
+  again at once rather than waiting out a pause's frames in hand
+  (`docs/19-numbers.md`, `docs/05-media.md`).
 - **Apple artefacts are built for the releases they claim.** The macOS
   wheel was tagged with the building Mac's own version (`macosx_26_0`), so
   pip refused it on every older macOS the library runs on; and in every

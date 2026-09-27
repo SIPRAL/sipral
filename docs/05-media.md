@@ -329,7 +329,15 @@ discard rate together, since §4.7.1 keeps the two apart only to say where
 the damage was done — "Both have equal effect on the quality of the voice
 stream". Before that was read, a slow earpiece whose buffer sat at two
 seconds and discarded thousands of packets for overflow still rated R 93
-and MOS-LQ 4.4 (`docs/19-numbers.md`). `emodel::codec_quality_model` tabulates G.113 Table
+and MOS-LQ 4.4 (`docs/19-numbers.md`). A fast earpiece whose buffer runs
+dry still does, and stays literal to §4.7.1 on purpose: its rates are
+shares of packets, and a frame played as nothing because nothing had
+arrived yet is no packet lost or discarded — the packet arrives, late for
+its frame, and is played in the next one. Where that degradation shows is
+where an application reads a call's quality: `Quality::underruns` counts
+those frames, `Quality::loss_rate` takes them as it takes a concealed one,
+and `StreamStatistics::score` and `StreamStatistics::is_suffering`, and
+the C ABI's `loss_rate`, `score` and `suffering`, are read from it. `emodel::codec_quality_model` tabulates G.113 Table
 I.4 for the one codec family it covers (G.711); the facade
 (`Codec::quality_model` in `sipral`) maps this crate's own codec catalogue
 onto it, `None` for G.722 and Opus, which G.113 does not tabulate — RFC
@@ -432,9 +440,61 @@ someone configured once. Design targets:
   Found by measurement: `scripts/lab.sh drift`, which holds calls with
   each earpiece's clock set off by a known skew, heard a fast earpiece's
   every frame of drift as a 20 ms gap before this, one every eighty seconds
-  at 250 ppm (`docs/19-numbers.md`). A skew fast enough to slip more than
-  one frame inside a single talk spurt still runs it dry; 2000 ppm slips one
-  every ten seconds.
+  at 250 ppm (`docs/19-numbers.md`).
+- **An earpiece that takes two frames at once keeps its frame in hand on
+  both.** A device callback twice a packet long pulls twice at the same
+  instant, for the two packets that arrived since the one before. The
+  evidence that audio is still arriving, which a stretch waits for, is the
+  packets that arrived and that the pulls have not yet caught up with,
+  rather than whether one arrived since the last pull: counted that way,
+  the second pull of the pair never had any, never stretched, and a queue
+  that the first pull left at its floor was drained by the second, so the
+  next pair ran dry. And the pause's dead band is a packet wider for every
+  frame past the first that the earpiece takes at once, which the buffer
+  reads off the fewest pulls it sees between two arrivals — two, for such
+  a device, since no packet arrives between two pulls at one instant: the
+  queue such an earpiece sees moves by two from one pull to the next, and
+  a band two packets wide answered a pull either side of an arrival with a
+  stretch and then a shrink.
+- **A fast earpiece keeps in hand what it will slip in a spurt.** One frame
+  in hand covers a slip of one frame inside a talk spurt, which is what any
+  real pair of clocks makes: 2000 ppm slips one every ten seconds. A skew
+  fast enough to slip more than that takes the frame in hand and then runs
+  dry in the middle of a word, and only the pause before the spurt can be
+  stretched to prevent it. So the buffer measures the earpiece's pace
+  against the far end's — the pulls made between arrivals, against the
+  frames of the far end's clock the arrivals move on by, over the runs in
+  which that clock ran unbroken, so a pause the far end took, with or
+  without its timestamps running through it, is left out — and the length
+  of the far end's recent spurts, in frames played between a verdict of
+  speech and one of silence. A pause then keeps in hand the frames that
+  pace slips over a spurt that long, and half a frame over, rounded up;
+  one, as before, until the measure is long enough to say more than the
+  pull either side of each run can put into it; never more than the
+  buffer's longest delay. An earpiece that takes two frames at once keeps
+  the second of them in hand as well once it keeps more than one, since a
+  spurt that has spent what was in hand ends with next to nothing queued.
+  A far end that sends nothing in its pauses gets the same frames in hand
+  by the wait its next spurt starts with.
+- **A buffer that runs dry in a spurt starts again at once.** The caller's
+  verdict after a frame the buffer had nothing for is on that frame of
+  silence, not on the far end. While the first packet held carries on from
+  the last one played on the far end's clock, it is no pause: playout
+  starts again at the target and nothing is stretched, since every frame
+  waited on top of the one already lost is another cut out of the far end's
+  words. The frames in hand are made up in the next real pause.
+- **Every frame played as nothing is counted.** A frame of silence played
+  because the buffer ran dry while the far end was still sending is an
+  under-run: `Quality::underruns` counts it, and `Quality::loss_rate` — the
+  share of the last ten seconds or so that the listener did not get from
+  the far end — takes it as it takes a concealed frame. What tells an
+  under-run from the far end's own pause is the packet playout carries on
+  with: one that follows the last packet played on the far end's clock,
+  no marker and a timestamp exactly as many frames on as its sequence
+  number, says every frame of silence between them was one the far end had
+  sent and the earpiece asked for too soon; a packet lost on the way was
+  due in one of them and is counted lost instead. RTCP-XR does not see an
+  under-run (`What the block reports`, above).
 
 Measured against the exit criterion in [10-roadmap.md](10-roadmap.md): mean
 opinion score under simulated loss and jitter, compared side by side with a

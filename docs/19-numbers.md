@@ -260,22 +260,22 @@ Read together:
 - **A slow earpiece is absorbed where nobody hears it.** Every frame of its
   drift was shrunk, which the buffer only does in a pause, and the audible
   count stayed with the cadence throughout.
-- **A fast one is not.** Not one frame was stretched into a pause. With a
-  clean path the target is one frame, and the stretch only happens when a
-  packet has arrived since the last pull and the buffer holds less than its
-  target — which, at a target of one, is a buffer holding nothing although
-  something arrived. So the buffer runs dry instead, plays one frame of
-  silence wherever that falls, in the tone as readily as in a pause, and
-  starts again from the next packet: at 250 ppm, one 20 ms gap every eighty
-  seconds or so. The mean opinion score does not see it — RTCP-XR counts
-  loss and discard, and nothing was lost or discarded — and neither did the
-  audible-frame check, which a single frame in five minutes does not move.
-  The flow now counts silence that begins straight after the tone, or ends
-  straight into it, as the tone cut off, and fails on any, so it stays red on the fast earpiece until
-  the buffer changes. `docs/05-media.md` says so beside the buffer's design
-  targets; making the stretch reachable at a one-frame target is the change
-  it asks for. That change, and what the same flow measured after it, is
-  the next section.
+- **A fast one was not.** Not one frame was stretched into a pause. With a
+  clean path the target is one frame, and the stretch then only happened
+  when a packet had arrived since the last pull and the buffer held less
+  than its target — which, at a target of one, is a buffer holding nothing
+  although something arrived. So the buffer ran dry instead, played one
+  frame of silence wherever that fell, in the tone as readily as in a
+  pause, and started again from the next packet: at 250 ppm, one 20 ms gap
+  every eighty seconds or so. The mean opinion score did not see it —
+  RTCP-XR counts loss and discard, and nothing was lost or discarded — and
+  neither did the audible-frame check, which a single frame in five
+  minutes does not move. The flow now counts silence that begins straight
+  after the tone, or ends straight into it, as the tone cut off, and fails
+  on any. Making the stretch reachable at a one-frame target was the change
+  that asked for; that change, and what the same flow measured after it,
+  is the next section, and what the application now reads about such a
+  gap is the one after it.
 - **The control is the count's own check.** One frame shrunk early in the
   control's call, and its buffer one frame shallower for it, balance to
   nothing: every frame the other two moved is accounted for by the same
@@ -362,12 +362,13 @@ is now the two together.
 | R factor, MOS-LQ, at every report | 93, 4.4 | 6–7, 1.0 |
 
 The control rated 93 and 4.4 in both runs, and so did the fast earpiece,
-which runs dry rather than discarding: a frame played as silence because
+which ran dry rather than discarding: a frame played as silence because
 nothing had arrived is not a packet lost or discarded, and RTCP-XR has no
-field for it. At 500 000 ppm the fast earpiece slips a frame every other
-pull, far more than a frame in hand per talk spurt can take, and it still
-fails on the tone: 2 750 frames run dry and 1 896 cuts before; 793
-stretched, 1 957 run dry and 1 774 cuts after.
+field for it (the next section has where it is counted instead). At
+500 000 ppm the fast earpiece slips a frame every other pull, far more
+than a frame in hand per talk spurt could take, and it still failed on
+the tone: 2 750 frames run dry and 1 896 cuts before; 793 stretched,
+1 957 run dry and 1 774 cuts after.
 
 Both runs again at `4806c7d`, which has a spurt that starts in a pause
 wait for its frame in hand rather than stretch for it, and brings RTCP-XR's
@@ -379,6 +380,101 @@ counted among the packets expected; the fast one stretched 732, ran dry
 2 018 times and was cut off 1 774 times, the control 93 and 4.4. The
 `scripts/lab.sh netem` profiles passed at both commits with no splice
 clicking.
+
+## 27 September 2026 — `0.0.1`, what a spurt will slip kept in hand
+
+Two ways a fast earpiece still ran dry after the frame in hand, changed
+(`docs/05-media.md`) and measured again. An earpiece that takes two frames
+a callback, a 40 ms device period on 20 ms packets, pulls twice at one
+instant: the second pull could never stretch a pause, since the evidence
+of audio still arriving it waited for was an arrival since the last pull,
+so the queue the first pull left at its floor was drained by the second.
+And one fast enough to slip more than a frame inside a talk spurt spent
+the frame in hand and ran dry in the middle of it; the buffer now measures
+the earpiece's pace against the far end's clock and the length of its
+recent spurts, and keeps in hand what the next spurt will slip. "Before"
+is `4133b7a` (the lab's harness built at `78a25e1`, which differs from it
+only in packaging scripts and documentation), "after" the commit that
+adds this section.
+
+**The lab, `scripts/lab.sh drift`**, the review's short runs as in the
+section above: same machine, toolchain, Asterisk and tone.
+
+| Two minutes at 500 000 ppm, fast earpiece | Before | After |
+|---|---|---|
+| Stretched into a pause | 732 | 2 623 |
+| Played as silence, the buffer run dry | 2 018 | 122 |
+| Of those, in the tone | 1 774 | 0 |
+| Buffer depth at the reports, target 20 ms | 0 ms | 40–340 ms |
+| R factor, MOS-LQ | 93, 4.4 | 93, 4.4 |
+
+The tone was not cut once. What still runs dry does so in the far end's
+pauses, 22, 56, 90 and 122 at the four reports, where a skew that plays
+three frames for every two sent has to stretch more than half the pulls
+of each pause to have the next spurt's slip in hand when it starts. The
+simulation below, whose verdicts of speech and silence are exact, runs
+dry in no pause after its first minute; the lab's come from the facade's
+detector on decoded audio. Those frames are inaudible, and
+`Quality::underruns` counts them. The frames in hand are
+what they cost: up to 340 ms at a report, which the flow's 250 ms ceiling
+fails, as it fails the slow earpiece's two seconds of overflow at every
+report, unchanged at 365 frames shrunk, 2 385 discarded and R 7. The
+control read 0 ppm, nothing moved and R 93, as before. Three minutes at
+2000 ppm read exactly as the 25 September "after" columns and passed:
+−2000.0, 0.0 and +2000.0 ppm, 17 frames shrunk on the slow earpiece and 17
+stretched on the fast one, none run dry, every buffer at 20 ms but the
+slow one's 40.
+
+**The crate's own simulation**, for what the lab's harness does not do:
+its earpiece takes one frame per pull, and a two-frame device period is
+not among its flows. `playout.rs`'s tests play the lab's cadenced tone
+(1.2 s on, 0.6 s off, a packet every 20 ms on a clean path, each pull up to
+3 ms either side of its tick) into a buffer configured as the facade
+configures it, for two minutes of the earpiece's clock, and count what
+`interop/harness` counts: frames played as silence because the buffer had
+nothing, and the runs of that silence that cut the tone off. The far end
+suppressing silence, in the last two rows, sends nothing in its pauses and
+opens each spurt with a marker; there, every frame without a packet inside
+a spurt counts.
+
+| Two minutes of the tone | Before: dry, cuts | After: dry, cuts |
+|---|---|---|
+| One frame a pull, +2000 ppm | 0, 0 | 0, 0 |
+| One frame a pull, +50 000 ppm | 131, 83 | 3, 3 |
+| One frame a pull, +500 000 ppm | 1 357, 589 | 31, 14 |
+| Two frames a pull, +2000 ppm | 10, 10 | 0, 0 |
+| Two frames a pull, +5000 ppm | 21, 21 | 0, 0 |
+| Two frames a pull, +50 000 ppm | 191, 191 | 6, 6 |
+| Two frames a pull, +500 000 ppm | 1 369, 600 | 29, 14 |
+| Silent pauses, +50 000 ppm | 129 | 4 |
+| Silent pauses, +500 000 ppm | 1 269 | 56 |
+
+What remains after is all in the first seconds of a call, while the pace
+and the length of a spurt are being measured, and none of it after:
+`an_earpiece_that_slips_frames_by_the_handful_in_a_spurt_has_them_in_hand`
+runs each skew for eight minutes of the earpiece's clock and fails on a
+single frame run dry after the first. The two-frame earpiece at 2000 ppm
+stretched 13 frames for 12 of drift and the one in hand, and shrank none;
+at −2000 ppm it shrank 11 and stretched the one in hand. With its dead
+band a packet narrower, as before, four minutes at 2000 ppm shrank 161
+frames where the drift called for none. A true or slow earpiece taking
+one frame a pull is as it was; one taking two now buys its frame in hand,
+one frame stretched, as the other always has.
+
+**What the application reads of it.** RTCP-XR's figures stay literal to
+RFC 3611 §4.7.1: a share of packets lost or discarded, and a frame played
+as nothing because the packet for it had not arrived yet is neither, so a
+fast earpiece whose tone was cut 1 774 times in two minutes rated R 93 and
+MOS-LQ 4.4 at every report, above, and would again. The degradation is
+counted where an application reads a call's quality instead:
+`Quality::underruns` counts each such frame — it is, frame for frame, the
+simulation's "dry" count above, which the test asserts — and
+`Quality::loss_rate`, the share of the last ten seconds or so the listener
+did not get from the far end, takes it as it takes a concealed frame, so
+`StreamStatistics::score` and `is_suffering`, and the C ABI's `loss_rate`,
+`score` and `suffering`, fall with it. Three frames of silence among five
+played read as a loss rate of 0.6 with RTCP-XR's loss and discard rates
+both at zero (`an_earpiece_that_outruns_the_far_end_counts_the_silence_it_played`).
 
 ## What would make these numbers worse
 
