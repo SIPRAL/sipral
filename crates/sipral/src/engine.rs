@@ -3177,9 +3177,9 @@ impl MediaEngine {
             // peer's new ones, and checks again, while the pair it had goes
             // on carrying the audio
             #[cfg(feature = "ice")]
-            if let Err(error) = slot
-                .session
-                .follow_ice(settled_ice.as_ref(), peer_ice.as_ref(), now)
+            if let Err(error) =
+                slot.session
+                    .follow_ice(settled_ice.as_ref(), peer_ice.as_ref(), now)
             {
                 self.fail(call, error);
             }
@@ -3637,7 +3637,13 @@ fn withdraw_ice(description: &mut SessionDescription) {
         "end-of-candidates",
         "ice-mismatch",
     ];
-    const SESSION: [&str; 5] = ["ice-ufrag", "ice-pwd", "ice-options", "ice-pacing", "ice-lite"];
+    const SESSION: [&str; 5] = [
+        "ice-ufrag",
+        "ice-pwd",
+        "ice-options",
+        "ice-pacing",
+        "ice-lite",
+    ];
     description
         .attributes
         .retain(|attribute| !SESSION.contains(&attribute.name.as_str()));

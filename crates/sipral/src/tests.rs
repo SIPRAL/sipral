@@ -6504,8 +6504,7 @@ fn checks_sent(stack: &mut Stack, now: Instant) -> Vec<(Vec<u8>, String)> {
 
 #[cfg(feature = "ice")]
 #[test]
-fn an_ice_restart_between_two_full_agents_checks_again_on_new_credentials_and_keeps_the_audio()
-{
+fn an_ice_restart_between_two_full_agents_checks_again_on_new_credentials_and_keeps_the_audio() {
     let (mut pair, call, remote) = ice_call();
     pair.check_paths(call, remote);
     let first = pair.callee.offer_received().expect("the first offer");
@@ -6530,14 +6529,23 @@ fn an_ice_restart_between_two_full_agents_checks_again_on_new_credentials_and_ke
     let offering = ice_value(&restart_offer, "ice-ufrag").expect("a fragment");
     let answering = ice_value(&restart_answer, "ice-ufrag").expect("a fragment");
     let new_pwd = ice_value(&restart_answer, "ice-pwd").expect("a password");
-    assert_ne!(offering, offered_before, "RFC 8839 §4.4.1.1.1: the offer changes both");
+    assert_ne!(
+        offering, offered_before,
+        "RFC 8839 §4.4.1.1.1: the offer changes both"
+    );
     assert_ne!(
         ice_value(&restart_offer, "ice-pwd"),
         ice_value(&first, "ice-pwd"),
         "RFC 8839 §4.4.1.1.1: the offer changes both"
     );
-    assert_ne!(answering, answered_before, "RFC 8839 §4.4.2.1: the answer changes both");
-    assert_ne!(new_pwd, old_pwd, "RFC 8839 §4.4.2.1: the answer changes both");
+    assert_ne!(
+        answering, answered_before,
+        "RFC 8839 §4.4.2.1: the answer changes both"
+    );
+    assert_ne!(
+        new_pwd, old_pwd,
+        "RFC 8839 §4.4.2.1: the answer changes both"
+    );
     for (what, description, before) in [
         ("offer", &restart_offer, &first),
         ("answer", &restart_answer, &answer),
@@ -6595,7 +6603,10 @@ fn an_ice_restart_between_two_full_agents_checks_again_on_new_credentials_and_ke
         "the restart did not reach the caller's agent"
     );
     let heard = tone_after(&mut pair, call, remote);
-    assert!(heard > 4_000, "the tone came back at {heard} during the restart");
+    assert!(
+        heard > 4_000,
+        "the tone came back at {heard} during the restart"
+    );
 
     // and the checks run to a new selection on both ends
     pair.check_paths(call, remote);
@@ -6610,7 +6621,10 @@ fn an_ice_restart_between_two_full_agents_checks_again_on_new_credentials_and_ke
         "the callee's new session selected nothing"
     );
     let heard = tone_after(&mut pair, call, remote);
-    assert!(heard > 4_000, "the tone came back at {heard} after the restart");
+    assert!(
+        heard > 4_000,
+        "the tone came back at {heard} after the restart"
+    );
     assert!(failures(&pair).is_empty(), "{:?}", failures(&pair));
 }
 
@@ -6646,9 +6660,9 @@ fn a_restart_the_far_end_refuses_leaves_ice_as_it_was() {
                 .find(|stream| !stream.is_rejected())
                 .expect("a stream");
             stream.formats = vec!["8".to_owned()];
-            stream.attributes.retain(|attribute| {
-                attribute.name != "rtpmap" && attribute.name != "fmtp"
-            });
+            stream
+                .attributes
+                .retain(|attribute| attribute.name != "rtpmap" && attribute.name != "fmtp");
             with_body(&datagram, "application/sdp", &offer.to_string())
         } else {
             datagram

@@ -26,7 +26,7 @@
 //! inside a call), 481's that it names a dialog (it names none) or 603's
 //! that a person declined. Turned on, it meets the same screening an INVITE
 //! does before anybody hears of it ([`crate::Screen`] and the rate limit
-//! per source, [`crate::screening`]), and what survives is
+//! per source, in this crate's `screening` module), and what survives is
 //! [`UaEvent::ReferralRequested`], answered with
 //! [`UserAgent::accept_transfer`] or [`UserAgent::reject_transfer`].
 //!
@@ -43,7 +43,8 @@
 //! **Taking one is taking a transfer.** The 202 carries the tag that makes
 //! the dialog of the implicit subscription (§2.4.4: the NOTIFYs match the
 //! REFER "as they would if the REFER had been a SUBSCRIBE request"), and
-//! from there it is [`crate::transfer`]'s machinery unchanged: a NOTIFY
+//! from there it is the machinery an in-dialog transfer uses, unchanged
+//! ([`crate::UserAgent::accept_transfer`]): a NOTIFY
 //! with §2.4.5's 100 at once, the call placed with the REFER's own
 //! `Replaces` and `Referred-By` and never the caller's, one NOTIFY per
 //! provisional and the last one `terminated` with the final answer. RFC
