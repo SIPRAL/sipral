@@ -124,6 +124,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   call 330 s after the REGISTER behind the lab's NAT, with the keep-alive on
   and then off. `Endpoint::bound_transport` says what a bound transport
   speaks and where it is bound.
+- **A vulnerability handling policy a buyer's security review can read.**
+  `SECURITY.md` now says what happens after a report — acknowledgement,
+  triage, fix, coordinated disclosure, a GitHub Security Advisory and a
+  CVE through GitHub's CNA program, credit — with the maintainer's own
+  time commitments (acknowledgement within 3 business days; critical or
+  high severity fixed within 30 days of triage; disclosure within 90 days
+  of acknowledgement unless extended by written agreement). Reporting
+  itself stays through the channel a private repository's invited readers
+  already have; GitHub's private vulnerability reporting becomes the
+  channel the day this repository turns public. `docs/20-security-model.md`
+  now links to it.
 - **A CycloneDX SBOM beside every packaged artefact.** `scripts/package/
   {wheels,nuget,aar,xcframework}.sh` each now write a `.cdx.json` next to
   the wheel, `.nupkg`, `.aar` or `.xcframework` they build, listing

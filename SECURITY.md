@@ -12,18 +12,56 @@ refuses each, and what has not been read for this yet — is
 
 ## Reporting a vulnerability
 
-Use GitHub's **private vulnerability reporting** on this repository: the
-Security tab, then "Report a vulnerability". It is private between you and the
-maintainer, and it does not require an email address from either side.
+Do not open a public issue for a vulnerability, on this repository or, once it
+exists, its public successor.
 
-Do not open a public issue for a vulnerability.
+GitHub only offers private vulnerability reporting on a public repository.
+This one is private for now, and the only people who can see it were invited
+by the maintainer, so report the same way you were invited: through that
+channel, to the maintainer directly. GitHub's **private vulnerability
+reporting** — the Security tab on the repository, then "Report a
+vulnerability" — is switched on the day this repository turns public, and
+becomes the channel from that day on: private between you and the
+maintainer, no email address needed from either side, and the one this
+policy's own time commitments below are measured against from then on.
 
-GitHub only offers private vulnerability reporting on public repositories. While
-this repository is private, the only people who can see it were invited by the
-maintainer; report through the channel you were invited by.
+## What happens after a report
 
-Expect an acknowledgement within a few days, an assessment within two weeks, and
-credit in the advisory unless you prefer otherwise.
+1. **Acknowledgement.** The maintainer confirms the report arrived and is
+   being read.
+2. **Triage.** The report is reproduced against the code it names, or the
+   reporter is asked for what is missing to reproduce it; scope is checked
+   against "What is in scope" below, and a severity is assigned.
+3. **Fix.** A fix is written and tested the way every change to this tree
+   is (`scripts/check.sh`, the lab where the change touches signalling or
+   media) before anything about the report becomes public.
+4. **Coordinated disclosure.** The report, and what depends on it, stays
+   private until a fix has shipped, or the disclosure deadline below is
+   reached — whichever comes first. A reporter who wants a different
+   timeline says so when they report; the maintainer agrees to a change in
+   writing before it applies.
+5. **Advisory and CVE.** A GitHub Security Advisory is published once
+   public disclosure is due, describing the vulnerability, the versions it
+   affects and the fixed version. GitHub is a CVE Numbering Authority (CNA)
+   for repositories it hosts advisories for; a CVE ID is requested through
+   that program for anything that qualifies, rather than left unassigned.
+6. **Credit.** The reporter is named in the advisory, unless they ask to
+   stay anonymous or to be named differently.
+
+**Time commitments** — the maintainer's own promise, not a guarantee of
+outcome, and the standard this small a vendor can actually hold:
+
+| From | To | Within |
+|---|---|---|
+| Report received | Acknowledgement | 3 business days |
+| Acknowledgement | Triage (reproduced, scoped, severity assigned) | 10 business days |
+| Triage | A fix, for **critical** or **high** severity | 30 days |
+| Triage | A fix, for **medium** or **low** severity | No fixed deadline; tracked to closure, not silently dropped |
+| Acknowledgement | Public disclosure, fixed or not | 90 days, unless the maintainer and reporter agree in writing to extend it |
+
+A report that turns out to need more than these to fix correctly is not
+rushed past them; the reporter is told why, and given a revised estimate,
+before any deadline above passes silently.
 
 ## What is in scope
 

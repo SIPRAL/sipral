@@ -11,6 +11,10 @@ from that fact, written against this tree rather than against SIP in general:
 every claim below names the file it lives in, and a claim this document cannot
 point at code for does not appear.
 
+Found a way through one of the refusals below, or a gap this document already
+names under "What is not covered yet"? `SECURITY.md` is where to report it,
+and what happens after.
+
 ## What reaches this stack, and what happens to it
 
 | Who | What they can do | What answers it | Where |
