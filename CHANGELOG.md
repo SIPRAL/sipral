@@ -733,6 +733,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   relay was left to lapse on its own ten minutes later. Each layer's own
   NAT tests gained a case with a real (if fake) TURN server that asserts
   the Refresh actually reaches it when the call ends.
+- **A PipeWire node removed between the crate naming it and `pw_stream_connect`
+  reaching the daemon is reported, instead of leaving a silently unlinked
+  stream.** `target.object` is a property the daemon never validates, and
+  `node.dont-fallback` leaves a target it cannot find unlinked rather than
+  rerouted to the default — no state change at all, so the state-based
+  detection `docs/05-media.md` already described never saw it, and nothing
+  said the stream was dead until an unrelated `recover` quietly opened a
+  working one in its place. `sipral-io-pipewire`'s `Session::connect` now
+  looks the target up again itself the moment the stream reports itself
+  connected, and reports `StreamEvent::DeviceLost` right there.
 - **`SipralSampleMac` builds under Swift 6 strict concurrency with no
   warnings.** `AudioBridge.swift`'s two `AVAudioConverter` input callbacks
   captured an `AVAudioPCMBuffer` — not `Sendable` — in a block the compiler

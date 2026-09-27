@@ -608,6 +608,23 @@ impl Session {
     ) -> Result<Self, Error> {
         ensure_init();
         let target = registry::resolve(&config.device, direction)?;
+        Self::open_on(config, direction, channel, target)
+    }
+
+    /// The rest of [`Self::open`], given a target already resolved.
+    ///
+    /// Split out so a test can ask `registry::resolve` for a node, make it
+    /// vanish, and open on the answer regardless — the race
+    /// `check_target_survived` closes, reached without having to win it: the
+    /// same gap between a resolved target and `pw_stream_connect` reaching
+    /// the daemon that [`Self::open`] itself leaves open, just wide enough
+    /// here to always land in it.
+    fn open_on(
+        config: &StreamConfig,
+        direction: Direction,
+        channel: Arc<Channel>,
+        target: Option<DeviceId>,
+    ) -> Result<Self, Error> {
         let format = config.format;
         channel.set_window(window_samples(format.sample_rate_hz()));
         let ring = Ring::new(
@@ -736,7 +753,35 @@ impl Session {
         let outcome = self.connect_locked(direction);
         // SAFETY: balances the lock above.
         unsafe { sys::thread_loop_unlock(self.thread_loop) };
-        outcome
+        outcome?;
+        self.check_target_survived()
+    }
+
+    /// Close the race `open`'s own two steps leave open: `registry::resolve`
+    /// names a node from a snapshot, and everything between that and this
+    /// call taking the loop's lock — building properties, starting the
+    /// thread, PipeWire answering `PW_ID_CORE`'s round trip — is time enough
+    /// for the node to be gone before `pw_stream_connect` ever reaches the
+    /// session manager. `target.object` is a property, not a promise it is
+    /// checked against anything, and `node.dont-fallback` (`abi.rs`) means a
+    /// target it cannot find is left unlinked rather than rerouted — which
+    /// changes nothing about the stream's own state, so `on_state_changed`
+    /// never sees it and never sets [`Shared::lost`]. One look at the
+    /// registry, taken the moment the stream reports itself connected,
+    /// turns that silent, unlinked stream into the same
+    /// [`StreamEvent::DeviceLost`] a node that goes later is reported as.
+    fn check_target_survived(&self) -> Result<(), Error> {
+        let Some(target) = &self.target else {
+            return Ok(());
+        };
+        let direction = self.shared.direction;
+        let present = registry::devices()?
+            .iter()
+            .any(|device| device.direction == direction && &device.id == target);
+        if !present {
+            self.shared.lost.store(true, Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     fn connect_locked(&mut self, direction: Direction) -> Result<(), Error> {
@@ -1152,9 +1197,9 @@ impl PlaybackStream {
 
 #[cfg(test)]
 mod tests {
-    use super::{Meters, StreamConfig, Timing, connect_flags};
+    use super::{CaptureStream, Meters, Session, StreamConfig, Timing, connect_flags};
     use crate::abi::{PwTime, SpaFraction};
-    use crate::device::{DeviceChoice, DeviceId};
+    use crate::device::{DeviceChoice, DeviceId, Direction, StreamEvent};
     use crate::format::StreamFormat;
 
     #[test]
@@ -1227,5 +1272,82 @@ mod tests {
             ..PwTime::default()
         });
         assert_eq!(timing.read(8_000).delay_ticks, 0);
+    }
+
+    /// Against a real PipeWire, reaching the race `check_target_survived`
+    /// closes without having to win it: `registry::resolve` is asked for the
+    /// node while it is still there, exactly as [`Session::open`] asks it,
+    /// and only then is the node made to vanish — before [`Session::open_on`]
+    /// ever builds the stream that names it. `pw_stream_connect` still
+    /// succeeds, because the daemon never validates `target.object` against
+    /// anything; what would have stayed a silently unlinked stream, said
+    /// nothing until an unrelated `recover`, is instead
+    /// [`StreamEvent::DeviceLost`] the moment `open` returns — no polling
+    /// loop, because there is nothing to wait for.
+    #[test]
+    #[ignore = "needs a running PipeWire with pw-loopback on the path"]
+    fn a_node_gone_before_connect_reaches_it_is_reported_without_waiting_for_recover() {
+        use crate::level::{Channel, window_samples};
+        use crate::registry::{self, DeviceMonitor};
+        use std::process::Command;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        const SINK: &str = "sipral-precheck-sink";
+        const SOURCE: &str = "sipral-precheck-source";
+        let patience = Duration::from_secs(10);
+
+        let monitor = DeviceMonitor::new().expect("the registry answers");
+        let mut cable = Command::new("pw-loopback")
+            .arg("-m")
+            .arg("[ MONO ]")
+            .arg(format!(
+                "--capture-props=media.class=Audio/Sink node.name={SINK}"
+            ))
+            .arg(format!(
+                "--playback-props=media.class=Audio/Source node.name={SOURCE}"
+            ))
+            .spawn()
+            .expect("pw-loopback runs");
+
+        let started = Instant::now();
+        while !monitor
+            .devices()
+            .iter()
+            .any(|device| device.id.as_str() == SOURCE)
+        {
+            assert!(started.elapsed() < patience, "the source never appeared");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let id = DeviceId::new(SOURCE);
+        // Resolved while the node is still there — exactly what `open`
+        // itself would have named.
+        let target = registry::resolve(&DeviceChoice::Device(id.clone()), Direction::Input)
+            .expect("the registry answers");
+        assert_eq!(target.as_ref(), Some(&id));
+
+        // Gone before a session is even built from that answer.
+        let _ = cable.kill();
+        let _ = cable.wait();
+        let started = Instant::now();
+        while monitor
+            .devices()
+            .iter()
+            .any(|device| device.id.as_str() == SOURCE)
+        {
+            assert!(started.elapsed() < patience, "the source never left");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let config = StreamConfig::on(id, StreamFormat::narrowband());
+        let channel = Arc::new(Channel::new(window_samples(config.format.sample_rate_hz())));
+        let session = Session::open_on(&config, Direction::Input, channel, target)
+            .expect("a target the daemon never sees is still a stream that connects");
+        let mut strict = CaptureStream { session };
+
+        assert_eq!(strict.poll(), Some(StreamEvent::DeviceLost));
+        assert_eq!(strict.poll(), None, "said once, not on every poll");
+        strict.close().expect("closes");
     }
 }

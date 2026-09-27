@@ -1878,9 +1878,17 @@ state change it did not ask for. Both are needed — WirePlumber 0.5, given only
 the first, left a stream whose node had been removed without a word — and so
 is the naming: a stream left to follow the default, asked not to be
 reconnected, was linked to the new default beside the old one when the default
-changed, a microphone hearing two rooms. `interop/pipewire/run.sh` checks all
-three, by pulling a virtual cable out from under open streams and by moving
-the default under one. On iOS it reports nothing,
+changed, a microphone hearing two rooms. A node gone between the crate naming
+it and `pw_stream_connect` reaching the daemon is a fourth case the state
+change alone misses: `target.object` is a property, not something the daemon
+checks against anything, and `node.dont-fallback` leaves a target it cannot
+find unlinked rather than rerouted, which is no state change at all — so
+`sipral-io-pipewire` looks the node up again itself the moment the stream
+reports itself connected, and reports the same loss immediately rather than
+leaving it for the next `recover` to notice by accident. `interop/pipewire/run.sh`
+checks all four, by pulling a virtual cable out from under open streams, by
+moving the default under one, and by pulling one out from under a stream that
+has not opened yet. On iOS it reports nothing,
 because there
 the route belongs to `AVAudioSession` and its changes are delivered to the
 application; anything else would be a guess dressed as a fact.
