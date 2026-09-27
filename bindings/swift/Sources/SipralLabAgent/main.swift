@@ -202,14 +202,20 @@ func runCall(_ call: Call, _ streams: CallStreams) async {
 /// ordinary hangup.
 func runCallDirect(_ call: Call, patienceMs: UInt64, dwellMs: UInt64) async -> Bool {
     print("answered \(String(call.handle, radix: 16))")
-    let mediaEvents = call.events()
+    // A stream of its own for each reader, the same rule `CallStreams` above
+    // follows and `Call.events()`'s own doc comment gives: one `AsyncStream`
+    // value fed to two separate `for await` loops is not two readers, it is
+    // one reader two loops race for, and the loser waits on a stream nothing
+    // is ever going to deliver to again.
+    let forMedia = call.events()
+    let forEnd = call.events()
 
     let gotMedia: Bool = if call.media != nil {
         true
     } else {
         await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
-                for await _ in mediaEvents where call.media != nil {
+                for await _ in forMedia where call.media != nil {
                     return true
                 }
                 return call.media != nil
@@ -243,7 +249,7 @@ func runCallDirect(_ call: Call, patienceMs: UInt64, dwellMs: UInt64) async -> B
         }
     }
     let endTask = Task {
-        for await _ in mediaEvents {
+        for await _ in forEnd {
             if call.ended { return }
         }
     }
