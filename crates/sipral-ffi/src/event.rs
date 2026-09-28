@@ -2181,6 +2181,12 @@ fn recovery_failure(reason: RecoveryFailure) -> SipralRecoveryFailure {
 }
 
 /// The transform a call is running, on this side of the boundary.
+///
+/// RFC 6188's and RFC 7714's four newer suites (8.2.4) have no word of their
+/// own on this side of the boundary yet — growing one is an ABI change, and
+/// this batch does not make one — so a call running under one of those
+/// reports `Unknown`, the same fallback a signalling event this ABI has no
+/// word for already uses.
 #[cfg(feature = "dtls")]
 const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
     use crate::media::SipralSrtpSuite;
@@ -2188,6 +2194,10 @@ const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
         SrtpSuite::AesCm80 => SipralSrtpSuite::AesCm80,
         SrtpSuite::AesCm32 => SipralSrtpSuite::AesCm32,
         SrtpSuite::AesF8 => SipralSrtpSuite::AesF8,
+        SrtpSuite::Aes256Cm80
+        | SrtpSuite::Aes256Cm32
+        | SrtpSuite::AeadAes128Gcm
+        | SrtpSuite::AeadAes256Gcm => SipralSrtpSuite::Unknown,
     }
 }
 

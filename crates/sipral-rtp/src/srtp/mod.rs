@@ -19,6 +19,7 @@
 //! `Cargo.toml` gives. SHA-1, HMAC, counter mode, f8, the key derivation,
 //! the index estimate and the replay list are written here from the RFCs.
 
+mod aead;
 mod cipher;
 mod index;
 mod kdf;

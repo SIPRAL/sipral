@@ -139,6 +139,17 @@ instructions and falls back to a bitsliced implementation, so it is
 constant-time on every target Sipral ships to. Writing that by hand would be
 slower and worse.
 
+RFC 7714's `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` are the same kind of
+exception, for the same reason: `sipral-rtp` links `aes-gcm` 0.11.1 rather
+than writing GCM's own carry-less multiplication by hand. It is the exact
+version "The primitives under DTLS" below already vets and lists in full —
+`sipral-dtls` links it first, for its own record protection — so `sipral-rtp`
+reaches for an already-audited dependency rather than a second copy of one.
+Everything RFC 7714-specific — the IV formation, the associated data, the
+SRTCP E bit and index placement, and the RFC 6188 key derivation the two GCM
+suites and the two wider `AES_CM` ones share — is written in-tree from the
+RFC and proved against its own §16–§17 test vectors.
+
 | Component | What it is | Licence |
 |---|---|---|
 | `aes` 0.9.3 | the block cipher | MIT OR Apache-2.0 |

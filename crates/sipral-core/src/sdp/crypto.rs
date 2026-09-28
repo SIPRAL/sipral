@@ -16,15 +16,15 @@
 use core::fmt;
 use core::sync::atomic::{Ordering, compiler_fence};
 
-/// Master key length, which is 128 bits for every suite RFC 4568 defines.
+/// Master key length, which is 128 bits for every suite RFC 4568 itself
+/// defines. RFC 6188's and RFC 7714's suites carry a wider one; a caller that
+/// cares which suite it is reads [`CryptoSuite::key_len`] instead.
 pub const MASTER_KEY: usize = 16;
 
-/// Master salt length: 112 bits.
+/// Master salt length: 112 bits, for the same suites `MASTER_KEY` is exact
+/// for. RFC 7714's two AEAD suites use a 96-bit one; see
+/// [`CryptoSuite::salt_len`].
 pub const MASTER_SALT: usize = 14;
-
-/// §6.2.1: "The length of the base64-decoded key and salt value for this
-/// crypto-suite MUST be 30 characters", and §6.2.2 and §6.2.3 repeat it.
-const KEY_SALT: usize = MASTER_KEY + MASTER_SALT;
 
 /// §6.2: the master key lifetime in SRTP packets.
 const SRTP_LIFETIME: u64 = 1 << 48;
@@ -32,12 +32,13 @@ const SRTP_LIFETIME: u64 = 1 << 48;
 /// §6.2: and in SRTCP packets, which is the one that runs out first.
 const SRTCP_LIFETIME: u64 = 1 << 31;
 
-/// The transforms RFC 4568 §6.2 defines.
+/// The transforms this stack implements: RFC 4568 §6.2's three, RFC 6188's
+/// two wider `AES_CM` suites, and RFC 7714's two AEAD ones.
 ///
-/// The names are the tokens on the wire. The formal grammar in §9.2 prints
-/// `F8_128_HMAC_SHA1_32`, which no section defines and which erratum 6808
-/// corrects to `F8_128_HMAC_SHA1_80`; §6.2.3 and the IANA registration both
-/// say 80, so that is what this reads and writes.
+/// The names are the tokens on the wire. The formal grammar in RFC 4568
+/// §9.2 prints `F8_128_HMAC_SHA1_32`, which no section defines and which
+/// erratum 6808 corrects to `F8_128_HMAC_SHA1_80`; §6.2.3 and the IANA
+/// registration both say 80, so that is what this reads and writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoSuite {
     /// `AES_CM_128_HMAC_SHA1_80`, the default.
@@ -47,9 +48,63 @@ pub enum CryptoSuite {
     AesCm32,
     /// `F8_128_HMAC_SHA1_80`.
     AesF8,
+    /// `AES_256_CM_HMAC_SHA1_80` (RFC 6188): `AesCm80` with a 256-bit key.
+    Aes256Cm80,
+    /// `AES_256_CM_HMAC_SHA1_32` (RFC 6188): `AesCm32` with a 256-bit key.
+    Aes256Cm32,
+    /// `AEAD_AES_128_GCM` (RFC 7714 §14.1).
+    AeadAes128Gcm,
+    /// `AEAD_AES_256_GCM` (RFC 7714 §14.1).
+    AeadAes256Gcm,
 }
 
 impl CryptoSuite {
+    /// Every suite this stack implements, strongest first: the order an
+    /// offer names them in, and the order an answerer would pick among a
+    /// peer's own offer if RFC 4568 let it (§5.1.2 does not -- see
+    /// `sipral::keying::acceptable`, which keeps to the offerer's order for
+    /// that reason).
+    pub const STRENGTH: [Self; 7] = [
+        Self::AeadAes256Gcm,
+        Self::AeadAes128Gcm,
+        Self::Aes256Cm80,
+        Self::AesCm80,
+        Self::AesF8,
+        Self::Aes256Cm32,
+        Self::AesCm32,
+    ];
+
+    /// Whether this suite ties confidentiality and integrity into one AEAD
+    /// transform.
+    #[must_use]
+    pub const fn is_aead(self) -> bool {
+        matches!(self, Self::AeadAes128Gcm | Self::AeadAes256Gcm)
+    }
+
+    /// The master key length this suite's `inline:` parameter carries.
+    #[must_use]
+    pub const fn key_len(self) -> usize {
+        match self {
+            Self::AesCm80 | Self::AesCm32 | Self::AesF8 | Self::AeadAes128Gcm => MASTER_KEY,
+            Self::Aes256Cm80 | Self::Aes256Cm32 | Self::AeadAes256Gcm => 32,
+        }
+    }
+
+    /// The master salt length: RFC 7714 §8.1's twelve octets for the AEAD
+    /// suites, RFC 3711 §5.1's fourteen for the rest.
+    #[must_use]
+    pub const fn salt_len(self) -> usize {
+        if self.is_aead() { 12 } else { MASTER_SALT }
+    }
+
+    /// §6.2.1: "The length of the base64-decoded key and salt value for this
+    /// crypto-suite MUST be" this many characters, and §6.2.2, §6.2.3 and RFC
+    /// 6188/7714's own registrations repeat it for their own suites.
+    #[must_use]
+    pub const fn key_salt_len(self) -> usize {
+        self.key_len() + self.salt_len()
+    }
+
     /// The token this suite carries in the line.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -57,6 +112,10 @@ impl CryptoSuite {
             Self::AesCm80 => "AES_CM_128_HMAC_SHA1_80",
             Self::AesCm32 => "AES_CM_128_HMAC_SHA1_32",
             Self::AesF8 => "F8_128_HMAC_SHA1_80",
+            Self::Aes256Cm80 => "AES_256_CM_HMAC_SHA1_80",
+            Self::Aes256Cm32 => "AES_256_CM_HMAC_SHA1_32",
+            Self::AeadAes128Gcm => "AEAD_AES_128_GCM",
+            Self::AeadAes256Gcm => "AEAD_AES_256_GCM",
         }
     }
 
@@ -65,13 +124,14 @@ impl CryptoSuite {
     /// §4: "The values of each of these fields is case-insensitive."
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        [Self::AesCm80, Self::AesCm32, Self::AesF8]
+        Self::STRENGTH
             .into_iter()
             .find(|suite| suite.name().eq_ignore_ascii_case(name))
     }
 
     /// The largest lifetime a key may declare: the smaller of the two limits
-    /// in §6.2, since one master key covers both streams.
+    /// in §6.2, since one master key covers both streams. The same for every
+    /// suite -- RFC 6188 and RFC 7714 do not move it.
     #[must_use]
     pub const fn max_lifetime(self) -> u64 {
         if SRTP_LIFETIME < SRTCP_LIFETIME {
@@ -88,43 +148,48 @@ impl CryptoSuite {
 /// cannot be printed cannot be printed by accident. Overwritten on drop, best
 /// effort and said so plainly, exactly as `Secret` is — a volatile write needs
 /// `unsafe`, which this crate denies.
+///
+/// The key and salt are stored one after the other rather than as two
+/// separate buffers, and `key_len` is where the join is — every suite this
+/// stack implements has a key at least as wide as its salt, so nothing here
+/// needs to store both lengths. Grown rather than fixed, because RFC 6188 and
+/// RFC 7714 add suites whose key and salt are not RFC 4568's original
+/// sixteen and fourteen octets.
 #[derive(Clone, PartialEq, Eq)]
-pub struct KeySalt([u8; KEY_SALT]);
+pub struct KeySalt {
+    bytes: Vec<u8>,
+    key_len: usize,
+}
 
 impl KeySalt {
     /// The concatenation a key management protocol produced.
     #[must_use]
-    pub fn new(key: [u8; MASTER_KEY], salt: [u8; MASTER_SALT]) -> Self {
-        let mut bytes = [0_u8; KEY_SALT];
-        if let Some(head) = bytes.get_mut(..MASTER_KEY) {
-            head.copy_from_slice(&key);
+    pub fn new(key: &[u8], salt: &[u8]) -> Self {
+        let mut bytes = Vec::with_capacity(key.len() + salt.len());
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(salt);
+        Self {
+            bytes,
+            key_len: key.len(),
         }
-        if let Some(tail) = bytes.get_mut(MASTER_KEY..) {
-            tail.copy_from_slice(&salt);
-        }
-        Self(bytes)
     }
 
     /// The master key.
     #[must_use]
-    pub fn key(&self) -> [u8; MASTER_KEY] {
-        let mut key = [0_u8; MASTER_KEY];
-        key.copy_from_slice(self.0.get(..MASTER_KEY).unwrap_or(&[0; MASTER_KEY]));
-        key
+    pub fn key(&self) -> &[u8] {
+        self.bytes.get(..self.key_len).unwrap_or_default()
     }
 
     /// The master salt.
     #[must_use]
-    pub fn salt(&self) -> [u8; MASTER_SALT] {
-        let mut salt = [0_u8; MASTER_SALT];
-        salt.copy_from_slice(self.0.get(MASTER_KEY..).unwrap_or(&[0; MASTER_SALT]));
-        salt
+    pub fn salt(&self) -> &[u8] {
+        self.bytes.get(self.key_len..).unwrap_or_default()
     }
 }
 
 impl Drop for KeySalt {
     fn drop(&mut self) {
-        self.0.fill(0);
+        self.bytes.fill(0);
         compiler_fence(Ordering::SeqCst);
     }
 }
@@ -174,7 +239,7 @@ impl Inline {
     #[must_use]
     pub fn to_value(&self) -> String {
         let mut out = String::from("inline:");
-        out.push_str(&base64_encode(&self.keys.0));
+        out.push_str(&base64_encode(&self.keys.bytes));
         if let Some(lifetime) = self.lifetime {
             out.push('|');
             // the power-of-two form when it is one, since that is what the
@@ -206,12 +271,13 @@ impl Inline {
         let mut fields = rest.split('|');
 
         let decoded = base64_decode(fields.next()?)?;
-        if decoded.len() != KEY_SALT {
+        if decoded.len() != suite.key_salt_len() {
             return None;
         }
-        let mut bytes = [0_u8; KEY_SALT];
-        bytes.copy_from_slice(&decoded);
-        let keys = KeySalt(bytes);
+        let keys = KeySalt {
+            key_len: suite.key_len(),
+            bytes: decoded,
+        };
 
         // §6.1: "the lifetime field never includes a colon, whereas the third
         // field always does", which is how the two optional fields are told
@@ -697,6 +763,63 @@ mod tests {
         );
     }
 
+    // RFC 6188 §4, RFC 7714 §14.1: the widths the new suites carry, and their
+    // own names round-tripping through `from_name`.
+    #[test]
+    fn the_new_suites_have_the_widths_their_rfcs_give_them() {
+        assert_eq!(CryptoSuite::Aes256Cm80.key_len(), 32);
+        assert_eq!(CryptoSuite::Aes256Cm80.salt_len(), 14);
+        assert_eq!(CryptoSuite::Aes256Cm32.key_len(), 32);
+        assert_eq!(CryptoSuite::Aes256Cm32.salt_len(), 14);
+        assert_eq!(CryptoSuite::AeadAes128Gcm.key_len(), 16);
+        assert_eq!(CryptoSuite::AeadAes128Gcm.salt_len(), 12);
+        assert_eq!(CryptoSuite::AeadAes256Gcm.key_len(), 32);
+        assert_eq!(CryptoSuite::AeadAes256Gcm.salt_len(), 12);
+        assert!(!CryptoSuite::Aes256Cm80.is_aead());
+        assert!(CryptoSuite::AeadAes128Gcm.is_aead());
+
+        for suite in CryptoSuite::STRENGTH {
+            assert_eq!(
+                CryptoSuite::from_name(suite.name()),
+                Some(suite),
+                "{}",
+                suite.name()
+            );
+        }
+    }
+
+    /// A line for each new suite, with a key and salt of its own width,
+    /// round-trips exactly as the three RFC 4568 suites already do.
+    #[test]
+    fn the_new_suites_round_trip_a_key_and_salt_of_their_own_width() {
+        for suite in [
+            CryptoSuite::Aes256Cm80,
+            CryptoSuite::Aes256Cm32,
+            CryptoSuite::AeadAes128Gcm,
+            CryptoSuite::AeadAes256Gcm,
+        ] {
+            let keys = base64_encode(&vec![0x5a_u8; suite.key_salt_len()]);
+            let policy = line(&format!("1 {} inline:{keys}", suite.name()))
+                .policy()
+                .unwrap_or_else(|| panic!("{} with a correctly sized key", suite.name()));
+            assert_eq!(policy.suite, suite);
+            let key = policy.keys.first().expect("one key");
+            assert_eq!(key.keys.key().len(), suite.key_len(), "{}", suite.name());
+            assert_eq!(key.keys.salt().len(), suite.salt_len(), "{}", suite.name());
+
+            // one octet short of the suite's own width is refused, not
+            // silently accepted under some other suite's length
+            let short = base64_encode(&vec![0x5a_u8; suite.key_salt_len() - 1]);
+            assert!(
+                line(&format!("1 {} inline:{short}", suite.name()))
+                    .policy()
+                    .is_none(),
+                "{} took a key one octet short",
+                suite.name()
+            );
+        }
+    }
+
     #[test]
     fn a_lifetime_past_the_suite_maximum_makes_the_line_invalid() {
         let keys = base64_encode(&[0x41; 30]);
@@ -739,7 +862,7 @@ mod tests {
     fn an_unknown_suite_is_refused_rather_than_guessed() {
         let keys = base64_encode(&[0x41; 30]);
         assert!(
-            line(&format!("1 AES_CM_256_HMAC_SHA1_80 inline:{keys}"))
+            line(&format!("1 AES_CM_512_HMAC_SHA1_80 inline:{keys}"))
                 .policy()
                 .is_none()
         );
@@ -842,7 +965,7 @@ mod tests {
     fn a_key_written_and_read_back_is_the_same_key() {
         let key = [0x0f_u8; MASTER_KEY];
         let salt = [0xf0_u8; MASTER_SALT];
-        let policy = CryptoPolicy::new(1, CryptoSuite::AesF8, KeySalt::new(key, salt));
+        let policy = CryptoPolicy::new(1, CryptoSuite::AesF8, KeySalt::new(&key, &salt));
         let text = policy.to_crypto().to_value();
         let back = Crypto::parse(&text)
             .expect("valid")
@@ -856,7 +979,7 @@ mod tests {
 
     #[test]
     fn the_keys_are_not_in_the_debug_output() {
-        let keys = KeySalt::new([0xab; MASTER_KEY], [0xcd; MASTER_SALT]);
+        let keys = KeySalt::new(&[0xab; MASTER_KEY], &[0xcd; MASTER_SALT]);
         let printed = format!("{:?}", Inline::new(keys));
         assert!(printed.contains("redacted"), "{printed}");
         assert!(!printed.contains("171"), "{printed}");

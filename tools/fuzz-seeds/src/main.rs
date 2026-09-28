@@ -63,7 +63,7 @@ use sipral_nat::stun::{
     AttributeType, Class, Message, MessageBuilder, Method as StunMethod, TransactionId,
 };
 use sipral_nat::turn::{ChannelData, ChannelNumber, StreamFraming, Transport};
-use sipral_rtp::srtp::{KEY, Master, Policy, Protector, SALT, SrtpError, Suite, Unprotector};
+use sipral_rtp::srtp::{Master, Policy, Protector, SrtpError, Suite, Unprotector};
 use sipral_rtp::{
     CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder, JitterBufferAdaptive,
     PacketBuilder, PacketLossConcealment, ReceiverReportBuilder, RtpHeader, RtpPacket, RxConfig,
@@ -484,6 +484,20 @@ fn crypto_seeds() -> Result<Vec<Seed>, Wrong> {
             "3 AES_CM_128_HMAC_SHA1_80 \
              inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR UNENCRYPTED_SRTCP",
         ),
+        (
+            // RFC 6188 §4: a 32-octet key and a 14-octet salt, forty-six
+            // octets base64-encoded
+            "aes-256-cm-sha1-80",
+            "4 AES_256_CM_HMAC_SHA1_80 \
+             inline:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLg==",
+        ),
+        (
+            // RFC 7714 §14.1: a 32-octet key and a 12-octet salt, forty-four
+            // octets base64-encoded
+            "aead-aes-256-gcm",
+            "5 AEAD_AES_256_GCM \
+             inline:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKyw=",
+        ),
     ];
     let mut out = Vec::new();
     for (name, line) in lines {
@@ -867,7 +881,7 @@ fn rtp_dtmf_seeds() -> Result<Vec<Seed>, Wrong> {
             timestamp: 8_000,
             ssrc: SSRC,
         },
-        &[0xff; 160],
+        &[0x55; 160],
     )?;
     // the datagrams are already length-prefixed, so the run of them goes on
     // the end as it is
@@ -1021,15 +1035,19 @@ fn rtcp_seeds() -> Result<Vec<Seed>, Wrong> {
 /// is ever reached. Three in order and then the first one again, which is
 /// what makes the window say no.
 fn srtp_seeds() -> Result<Vec<Seed>, Wrong> {
-    let key = [0x42; KEY];
-    let salt = [0x24; SALT];
     let mut out = Vec::new();
     for (name, suite) in [
         ("aes-cm-80", Suite::AesCm80),
         ("aes-cm-32", Suite::AesCm32),
         ("aes-f8", Suite::AesF8),
+        ("aes-256-cm-80", Suite::Aes256Cm80),
+        ("aes-256-cm-32", Suite::Aes256Cm32),
+        ("aead-aes-128-gcm", Suite::AeadAes128Gcm),
+        ("aead-aes-256-gcm", Suite::AeadAes256Gcm),
     ] {
-        let mut protector = Protector::new(Policy::new(suite), Master::new(key, salt));
+        let key = vec![0x42_u8; suite.key_len()];
+        let salt = vec![0x24_u8; suite.salt_len()];
+        let mut protector = Protector::new(Policy::new(suite), Master::new(&key, &salt));
         let mut run = Vec::new();
         let mut first = Vec::new();
         for sequence in 1..=3u16 {
@@ -1041,10 +1059,11 @@ fn srtp_seeds() -> Result<Vec<Seed>, Wrong> {
                     timestamp: 8_000 + u32::from(sequence) * 160,
                     ssrc: SSRC,
                 },
-                &[0x55; 160],
+                &[0x11; 160],
             )?;
-            // room for whatever the suite appends: the longest tag this ABI
-            // has is ten octets, and an MKI would be a few more
+            // room for whatever the suite appends: the widest tag any suite
+            // here has is the AEAD ones' sixteen octets, and an MKI would be
+            // a few more
             let mut packet = plain.clone();
             packet.resize(plain.len() + 64, 0);
             let written = protector
@@ -1057,7 +1076,7 @@ fn srtp_seeds() -> Result<Vec<Seed>, Wrong> {
             push_datagram(&mut run, &packet)?;
         }
         push_datagram(&mut run, &first)?;
-        through_unprotector(name, suite, key, salt, &run)?;
+        through_unprotector(name, suite, &key, &salt, &run)?;
         out.push((name, run));
     }
     Ok(out)
@@ -1069,8 +1088,8 @@ fn srtp_seeds() -> Result<Vec<Seed>, Wrong> {
 fn through_unprotector(
     name: &str,
     suite: Suite,
-    key: [u8; KEY],
-    salt: [u8; SALT],
+    key: &[u8],
+    salt: &[u8],
     run: &[u8],
 ) -> Result<(), Wrong> {
     let mut unprotector = Unprotector::new(Policy::new(suite), Master::new(key, salt));

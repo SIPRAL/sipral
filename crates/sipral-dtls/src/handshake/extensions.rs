@@ -101,6 +101,11 @@ impl SrtpProtectionProfile {
     pub const NULL_HMAC_SHA1_80: Self = Self(0x0005);
     /// No encryption, a 32-bit tag. Never negotiated here, for the same reason.
     pub const NULL_HMAC_SHA1_32: Self = Self(0x0006);
+    /// `SRTP_AEAD_AES_128_GCM` (RFC 7714 §14.2): AES-GCM with a 128-bit key,
+    /// its own sixteen-octet tag rather than a paired HMAC.
+    pub const AEAD_AES_128_GCM: Self = Self(0x0007);
+    /// `SRTP_AEAD_AES_256_GCM` (RFC 7714 §14.2): the same, with a 256-bit key.
+    pub const AEAD_AES_256_GCM: Self = Self(0x0008);
 }
 
 /// `UseSRTPData` (RFC 5764 §4.1.1).

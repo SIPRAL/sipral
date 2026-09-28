@@ -1002,6 +1002,7 @@ name = "sipral-rtp"
 version = "0.0.1"
 dependencies = [
  "aes",
+ "aes-gcm",
  "zeroize",
 ]
 

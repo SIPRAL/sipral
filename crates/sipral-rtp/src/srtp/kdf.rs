@@ -8,19 +8,38 @@
 //! one-octet label. The PRF is AES in counter mode over the master key
 //! (§4.3.3), which is why this sits on top of `cipher`.
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::cipher::{self, Counter};
 
-/// Master and session encryption key length, `n_e` (§5.1).
-pub const KEY: usize = cipher::KEY;
+/// Master and session encryption key length, `n_e` (§5.1), for the suite
+/// every implementation has. A caller that cares which suite it is reads the
+/// length off [`super::Suite`] instead.
+pub const KEY: usize = cipher::KEY_128;
 
-/// Master and session salt length, `n_s` (§5.1): 112 bits.
+/// Master and session salt length, `n_s` (§5.1): 112 bits, for AES-CM and
+/// f8. RFC 7714's GCM suites use a 96-bit one instead (§8.1); see
+/// [`super::Suite::salt_len`].
 pub const SALT: usize = 14;
 
 /// Session authentication key length, `n_a` (§5.2): 160 bits, which is
-/// HMAC-SHA-1's block-independent natural key.
+/// HMAC-SHA-1's block-independent natural key. AEAD suites derive none —
+/// RFC 7714 §8.1: "AEAD algorithms do not require a separate authentication
+/// key."
 pub(crate) const AUTH: usize = 20;
+
+/// The three lengths a suite hands the key derivation: `n_e`, `n_s`, and
+/// whether an authentication key is derived at all.
+///
+/// Kept apart from [`super::Suite`] itself, the way [`cipher`] is kept apart
+/// from the suites it serves: this module derives whatever lengths it is
+/// asked for and does not need to know which suite asked.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Lengths {
+    pub(crate) key: usize,
+    pub(crate) salt: usize,
+    pub(crate) auth: bool,
+}
 
 /// The labels of §4.3.1 and §4.3.2. The value is the octet on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,47 +91,45 @@ impl Rate {
 }
 
 /// The master key and salt a key management protocol hands over.
+///
+/// The length of each is whatever the suite calls for — sixteen or
+/// thirty-two octets of key, twelve or fourteen of salt — so this holds them
+/// as grown rather than as one of the fixed shapes; [`Zeroizing`] wipes each
+/// on drop exactly as the fixed arrays did.
 pub struct Master {
-    key: [u8; KEY],
-    salt: [u8; SALT],
-}
-
-impl Drop for Master {
-    fn drop(&mut self) {
-        self.key.zeroize();
-        self.salt.zeroize();
-    }
+    key: Zeroizing<Vec<u8>>,
+    salt: Zeroizing<Vec<u8>>,
 }
 
 /// One direction's session keys, for either SRTP or SRTCP.
+///
+/// `authentication` is `None` for an AEAD suite, which derives no separate
+/// authentication key (RFC 7714 §8.1).
 pub(crate) struct Session {
-    pub(crate) encryption: [u8; KEY],
-    pub(crate) salt: [u8; SALT],
-    pub(crate) authentication: [u8; AUTH],
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        self.encryption.zeroize();
-        self.salt.zeroize();
-        self.authentication.zeroize();
-    }
+    pub(crate) encryption: Zeroizing<Vec<u8>>,
+    pub(crate) salt: Zeroizing<Vec<u8>>,
+    pub(crate) authentication: Option<Zeroizing<[u8; AUTH]>>,
 }
 
 impl Master {
-    /// The key and salt a key management protocol produced. For SDES that is
-    /// the base64 payload of an `inline:` parameter, split at sixteen octets
-    /// (RFC 4568 §6.1).
+    /// The key and salt a key management protocol produced, each the width
+    /// the suite calls for. For SDES that is the base64 payload of an
+    /// `inline:` parameter, split at the suite's own key length (RFC 4568
+    /// §6.1, RFC 7714 §14.1).
     #[must_use]
-    pub const fn new(key: [u8; KEY], salt: [u8; SALT]) -> Self {
-        Self { key, salt }
+    pub fn new(key: &[u8], salt: &[u8]) -> Self {
+        Self {
+            key: Zeroizing::new(key.to_vec()),
+            salt: Zeroizing::new(salt.to_vec()),
+        }
     }
 
     /// The three SRTP session values for the packet index `index`.
-    pub(crate) fn rtp_session(&self, rate: Rate, index: u64) -> Session {
+    pub(crate) fn rtp_session(&self, rate: Rate, index: u64, lengths: Lengths) -> Session {
         self.session(
             rate,
             index,
+            lengths,
             Label::RtpEncryption,
             Label::RtpAuthentication,
             Label::RtpSalt,
@@ -127,10 +144,11 @@ impl Master {
     /// so the two land in the same octet, and notes that implementations do
     /// it the corrected way. Interoperating matters more than the printed
     /// text, and here they agree once the erratum is applied.
-    pub(crate) fn rtcp_session(&self, rate: Rate, index: u32) -> Session {
+    pub(crate) fn rtcp_session(&self, rate: Rate, index: u32, lengths: Lengths) -> Session {
         self.session(
             rate,
             u64::from(index),
+            lengths,
             Label::RtcpEncryption,
             Label::RtcpAuthentication,
             Label::RtcpSalt,
@@ -141,32 +159,51 @@ impl Master {
         &self,
         rate: Rate,
         index: u64,
+        lengths: Lengths,
         encryption: Label,
         authentication: Label,
         salt: Label,
     ) -> Session {
         let phase = rate.phase_of(index);
-        let mut keys = Session {
-            encryption: [0; KEY],
-            salt: [0; SALT],
-            authentication: [0; AUTH],
-        };
-        self.prf(encryption, phase, &mut keys.encryption);
-        self.prf(authentication, phase, &mut keys.authentication);
-        self.prf(salt, phase, &mut keys.salt);
-        keys
+        let mut encryption_key = vec![0_u8; lengths.key];
+        let mut salt_key = vec![0_u8; lengths.salt];
+        self.prf(encryption, phase, lengths.salt, &mut encryption_key);
+        self.prf(salt, phase, lengths.salt, &mut salt_key);
+        let authentication_key = lengths.auth.then(|| {
+            let mut key = [0_u8; AUTH];
+            self.prf(authentication, phase, lengths.salt, &mut key);
+            Zeroizing::new(key)
+        });
+        Session {
+            encryption: Zeroizing::new(encryption_key),
+            salt: Zeroizing::new(salt_key),
+            authentication: authentication_key,
+        }
     }
 
     /// `PRF_n(k_master, x)` where `x = (<label> || r) XOR master_salt`,
     /// right-aligned, and the counter-mode IV is `x * 2^16` (§4.3.3).
-    fn prf(&self, label: Label, phase: u64, out: &mut [u8]) {
+    ///
+    /// `salt_len` is the crypto context's own `n_s`: fourteen octets for
+    /// AES-CM and f8, twelve for RFC 7714's GCM suites. §4.3.1 aligns
+    /// `key_id` and `master_salt` "so that their least significant bits
+    /// agree", and the `*2^16` step always leaves the last two octets of the
+    /// sixteen-octet block zero — so both are right-aligned to octet
+    /// fourteen, whatever width the salt itself is; `key_id` is seven octets
+    /// wide regardless, since the packet index is 48 bits, and so always sits
+    /// at octets seven to fourteen.
+    fn prf(&self, label: Label, phase: u64, salt_len: usize, out: &mut [u8]) {
+        debug_assert_eq!(
+            self.salt.len(),
+            salt_len,
+            "the master salt is always exactly as wide as the suite it is used with"
+        );
         let mut iv = [0_u8; cipher::BLOCK];
-        if let Some(head) = iv.get_mut(..SALT) {
-            head.copy_from_slice(&self.salt);
+        if let Some(head) = iv.get_mut(cipher::BLOCK - 2 - salt_len..cipher::BLOCK - 2) {
+            head.copy_from_slice(self.salt.get(..salt_len).unwrap_or(&self.salt));
         }
 
-        // key_id is the label followed by the six octets of the phase, and
-        // its least significant bit lines up with the salt's
+        // key_id is the label followed by the six octets of the phase
         let mut key_id = [0_u8; 7];
         if let Some(first) = key_id.first_mut() {
             *first = label as u8;
@@ -174,7 +211,11 @@ impl Master {
         if let Some(tail) = key_id.get_mut(1..) {
             tail.copy_from_slice(phase.to_be_bytes().get(2..).unwrap_or_default());
         }
-        for (byte, id) in iv.iter_mut().skip(SALT - key_id.len()).zip(key_id) {
+        for (byte, id) in iv
+            .iter_mut()
+            .skip(cipher::BLOCK - 2 - key_id.len())
+            .zip(key_id)
+        {
             *byte ^= id;
         }
 
@@ -189,20 +230,26 @@ impl Master {
 #[cfg(test)]
 mod tests {
     use super::super::testing::{hex, unhex};
-    use super::{AUTH, KEY, Label, Master, Rate, SALT};
+    use super::{AUTH, KEY, Label, Lengths, Master, Rate, SALT};
+
+    /// The lengths of the suite every implementation has: AES-128, a
+    /// fourteen-octet salt, and an authentication key.
+    const CM_80: Lengths = Lengths {
+        key: KEY,
+        salt: SALT,
+        auth: true,
+    };
 
     fn appendix_b3() -> Master {
-        let mut key = [0_u8; KEY];
-        let mut salt = [0_u8; SALT];
-        key.copy_from_slice(&unhex("e1f97a0d3e018be0d64fa32c06de4139"));
-        salt.copy_from_slice(&unhex("0ec675ad498afeebb6960b3aabe6"));
-        Master::new(key, salt)
+        let key = unhex("e1f97a0d3e018be0d64fa32c06de4139");
+        let salt = unhex("0ec675ad498afeebb6960b3aabe6");
+        Master::new(&key, &salt)
     }
 
     // RFC 3711 Appendix B.3
     #[test]
     fn appendix_b3_cipher_key_and_salt() {
-        let keys = appendix_b3().rtp_session(Rate::ONCE, 0);
+        let keys = appendix_b3().rtp_session(Rate::ONCE, 0, CM_80);
         assert_eq!(hex(&keys.encryption), "c61e7a93744f39ee10734afe3ff7a087");
         assert_eq!(hex(&keys.salt), "30cbbc08863d8c85d49db34a9ae1");
     }
@@ -214,7 +261,7 @@ mod tests {
     fn appendix_b3_authentication_key() {
         let master = appendix_b3();
         let mut long = [0_u8; 94];
-        master.prf(Label::RtpAuthentication, 0, &mut long);
+        master.prf(Label::RtpAuthentication, 0, SALT, &mut long);
         assert_eq!(
             hex(&long),
             "cebe321f6ff7716b6fd4ab49af256a15\
@@ -225,22 +272,42 @@ mod tests {
              6b68642c59bbfc2f34db60dbdfb2"
         );
 
-        let keys = master.rtp_session(Rate::ONCE, 0);
+        let keys = master.rtp_session(Rate::ONCE, 0, CM_80);
+        let authentication = keys.authentication.expect("this suite derives one");
         assert_eq!(
-            hex(&keys.authentication),
+            hex(&*authentication),
             hex(long.get(..AUTH).unwrap_or_default())
         );
     }
 
     #[test]
+    fn an_aead_suite_derives_no_authentication_key() {
+        // a master salt of the AEAD suites' own twelve octets, since a real
+        // one never carries fourteen for a suite whose n_s is twelve
+        let master = Master::new(
+            &unhex("e1f97a0d3e018be0d64fa32c06de4139"),
+            &unhex("0ec675ad498afeebb6960b3aa"),
+        );
+        let lengths = Lengths {
+            key: 16,
+            salt: 12,
+            auth: false,
+        };
+        let keys = master.rtp_session(Rate::ONCE, 0, lengths);
+        assert!(keys.authentication.is_none());
+        assert_eq!(keys.encryption.len(), 16);
+        assert_eq!(keys.salt.len(), 12);
+    }
+
+    #[test]
     fn the_six_labels_give_six_different_keys() {
         let master = appendix_b3();
-        let media = master.rtp_session(Rate::ONCE, 0);
-        let control = master.rtcp_session(Rate::ONCE, 0);
+        let media = master.rtp_session(Rate::ONCE, 0, CM_80);
+        let control = master.rtcp_session(Rate::ONCE, 0, CM_80);
         assert_ne!(media.encryption, control.encryption);
         assert_ne!(media.salt, control.salt);
         assert_ne!(media.authentication, control.authentication);
-        assert_ne!(media.encryption[..], media.salt[..]);
+        assert_ne!(media.encryption, media.salt);
     }
 
     // erratum 3712: the SRTCP index is padded to 48 bits, so an SRTCP
@@ -250,8 +317,8 @@ mod tests {
         let master = appendix_b3();
         let mut media_iv = [0_u8; 16];
         let mut control_iv = [0_u8; 16];
-        master.prf(Label::RtpEncryption, 0, &mut media_iv);
-        master.prf(Label::RtcpEncryption, 0, &mut control_iv);
+        master.prf(Label::RtpEncryption, 0, SALT, &mut media_iv);
+        master.prf(Label::RtcpEncryption, 0, SALT, &mut control_iv);
 
         // derive the two by hand from salts that differ in exactly the octet
         // the labels occupy, and check the PRF agrees
@@ -260,7 +327,7 @@ mod tests {
             *byte ^= 0x03;
         }
         let mut expected = [0_u8; 16];
-        shifted.prf(Label::RtpEncryption, 0, &mut expected);
+        shifted.prf(Label::RtpEncryption, 0, SALT, &mut expected);
         assert_eq!(expected, control_iv);
         assert_ne!(media_iv, control_iv);
     }
@@ -271,8 +338,8 @@ mod tests {
         assert!(!Rate::ONCE.refreshes_at(1));
         assert!(!Rate::ONCE.refreshes_at(1 << 40));
         let master = appendix_b3();
-        let first = master.rtp_session(Rate::ONCE, 0);
-        let later = master.rtp_session(Rate::ONCE, 1_000_000);
+        let first = master.rtp_session(Rate::ONCE, 0, CM_80);
+        let later = master.rtp_session(Rate::ONCE, 1_000_000, CM_80);
         assert_eq!(first.encryption, later.encryption);
     }
 
@@ -280,12 +347,12 @@ mod tests {
     fn a_rate_changes_the_keys_on_its_own_boundary() {
         let rate = Rate::from_exponent(10).expect("in range");
         let master = appendix_b3();
-        let before = master.rtp_session(rate, 1023);
-        let after = master.rtp_session(rate, 1024);
+        let before = master.rtp_session(rate, 1023, CM_80);
+        let after = master.rtp_session(rate, 1024, CM_80);
         assert_ne!(before.encryption, after.encryption);
         assert_eq!(
             before.encryption,
-            master.rtp_session(rate, 0).encryption,
+            master.rtp_session(rate, 0, CM_80).encryption,
             "everything below the boundary shares one derivation"
         );
         assert!(rate.refreshes_at(1024));
@@ -298,5 +365,34 @@ mod tests {
         assert!(Rate::from_exponent(1).is_some());
         assert!(Rate::from_exponent(24).is_some());
         assert!(Rate::from_exponent(25).is_none());
+    }
+
+    // RFC 6188 §7.2: the AES_256_CM_PRF key derivation, with a thirty-two
+    // octet master key and the same fourteen-octet salt AES-CM uses.
+    #[test]
+    fn rfc_6188_aes_256_cm_prf() {
+        let key = unhex("f0f04914b513f2763a1b1fa130f10e2998f6f6e43e4309d1e622a0e332b9f1b6");
+        let salt = unhex("3b04803de51ee7c96423ab5b78d2");
+        assert_eq!(key.len(), 32);
+        assert_eq!(salt.len(), 14);
+        let master = Master::new(&key, &salt);
+        let keys = master.rtp_session(
+            Rate::ONCE,
+            0,
+            Lengths {
+                key: 32,
+                salt: 14,
+                auth: true,
+            },
+        );
+        assert_eq!(
+            hex(&keys.encryption),
+            "5ba1064e30ec51613cad926c5a28ef731ec7fb397f70a960653caf06554cd8c4"
+        );
+        assert_eq!(hex(&keys.salt), "fa31791685ca444a9e07c6c64e93");
+        assert_eq!(
+            hex(&*keys.authentication.expect("this suite derives one")),
+            "fd9c32d39ed5fbb5a9dc96b30818454d1313dc05"
+        );
     }
 }

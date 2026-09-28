@@ -382,10 +382,9 @@ fn both_role_orders_complete_on_a_clean_path_with_and_without_a_cookie_exchange(
             let second = keyed(&pair.events[1]);
             assert_eq!(first.role(), first_role);
             assert_keyed_alike(first, second);
-            assert_eq!(
-                first.profile(),
-                SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80
-            );
+            // both ends offer every keyable profile, strongest first, so a
+            // clean path settles on the strongest they share
+            assert_eq!(first.profile(), SrtpProtectionProfile::AEAD_AES_256_GCM);
             assert_eq!(
                 pair.ends.each_ref().map(Connection::state),
                 [State::Connected; 2]
@@ -960,6 +959,33 @@ fn a_peer_with_no_srtp_profile_in_common_is_refused() {
     assert_eq!(refused(&pair.events[0]), Failure::IllegalParameter);
 }
 
+/// RFC 7714 §14.2's two GCM profiles are this stack's own preference by
+/// default (`both_role_orders_complete_on_a_clean_path...` above), but a
+/// peer that only ever offers the two AES-128-CM profiles from RFC 5764
+/// still completes on one of those -- the server's GCM preference is never
+/// forced on a client that did not offer it.
+#[test]
+fn a_client_offering_only_aes_128_cm_still_completes_on_it() {
+    let (one, other) = (identity(1), identity(2));
+    let mut configs = pair_configs(Role::Client, &one, &other);
+    configs[0].srtp_profiles = vec![
+        SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80,
+        SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32,
+    ];
+    let mut pair = Pair::new(configs, Path::CLEAN, 29);
+    pair.run(Duration::from_secs(10));
+    // the server's own order still puts AES128_CM_HMAC_SHA1_80 ahead of _32
+    // among what this client offered
+    assert_eq!(
+        keyed(&pair.events[1]).profile(),
+        SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80
+    );
+    assert_eq!(
+        pair.ends.each_ref().map(Connection::state),
+        [State::Connected; 2]
+    );
+}
+
 /// The ClientHello body with `use_srtp` holding no profiles and no MKI: the
 /// octets `00 0e 00 03 00 00 00`, which `<2..2^16-1>` does not allow and no
 /// encoder here will write.
@@ -1519,7 +1545,7 @@ fn nothing_secret_is_printed() {
     let keys = keyed(&seen);
     assert_eq!(
         format!("{keys:?} {:?}", hand.server),
-        "SrtpKeying { role: Server, profile: SrtpProtectionProfile(1), .. } \
+        "SrtpKeying { role: Server, profile: SrtpProtectionProfile(8), .. } \
          Connection { role: Server, state: Connected, .. }"
     );
 }

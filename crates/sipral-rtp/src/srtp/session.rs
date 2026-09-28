@@ -10,9 +10,10 @@
 //! That is the same contract the rest of the crate keeps — nothing here
 //! allocates a packet.
 
+use super::aead::{self, Gcm, TagMismatch};
 use super::cipher::{self, Counter, Exhausted, F8};
 use super::index::{Estimate, Receiving, Replay, Sending};
-use super::kdf::{self, Master, Rate, Session};
+use super::kdf::{self, Lengths, Master, Rate, Session};
 use super::sha1;
 
 /// The RTP fixed header, before any CSRC list (RFC 3550 §5.1).
@@ -35,7 +36,8 @@ const RTP_LIMIT: u64 = 1 << 48;
 /// §9.2: "and 2^31 SRTCP packets".
 const RTCP_LIMIT: u64 = 1 << 31;
 
-/// The transforms RFC 4568 §6.2 names, which are the ones a peer can offer.
+/// The transforms this stack implements: RFC 4568 §6.2's three, RFC 6188's
+/// two wider `AES_CM` suites, and RFC 7714's two AEAD ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Suite {
     /// `AES_CM_128_HMAC_SHA1_80`: counter mode with an eighty-bit tag. The
@@ -46,15 +48,78 @@ pub enum Suite {
     AesCm32,
     /// `F8_128_HMAC_SHA1_80`: f8 mode, which is what 3GPP asks for.
     AesF8,
+    /// `AES_256_CM_HMAC_SHA1_80` (RFC 6188): `AesCm80` with a 256-bit key.
+    Aes256Cm80,
+    /// `AES_256_CM_HMAC_SHA1_32` (RFC 6188): `AesCm32` with a 256-bit key.
+    Aes256Cm32,
+    /// `AEAD_AES_128_GCM` (RFC 7714): AES-GCM with a 128-bit key, tying
+    /// confidentiality and integrity into one transform rather than pairing
+    /// AES-CM with a separate HMAC.
+    AeadAes128Gcm,
+    /// `AEAD_AES_256_GCM` (RFC 7714): the same, with a 256-bit key.
+    AeadAes256Gcm,
 }
 
 impl Suite {
-    /// The authentication tag length on SRTP packets, `n_tag`.
+    /// Every suite this stack implements, strongest first: the order the
+    /// facade offers them in, and the order it picks among a DTLS-SRTP
+    /// peer's own offer with (RFC 5764 §4.1.1 leaves that choice to the
+    /// server, unlike RFC 4568's SDES, which is bound to the offerer's own
+    /// order).
+    pub(crate) const STRENGTH: [Self; 7] = [
+        Self::AeadAes256Gcm,
+        Self::AeadAes128Gcm,
+        Self::Aes256Cm80,
+        Self::AesCm80,
+        Self::AesF8,
+        Self::Aes256Cm32,
+        Self::AesCm32,
+    ];
+
+    /// Whether this suite ties confidentiality and integrity into one AEAD
+    /// transform rather than pairing a cipher with a separate HMAC.
+    #[must_use]
+    pub const fn is_aead(self) -> bool {
+        matches!(self, Self::AeadAes128Gcm | Self::AeadAes256Gcm)
+    }
+
+    /// The master and session encryption key length, `n_e`.
+    #[must_use]
+    pub const fn key_len(self) -> usize {
+        match self {
+            Self::AesCm80 | Self::AesCm32 | Self::AesF8 | Self::AeadAes128Gcm => cipher::KEY_128,
+            Self::Aes256Cm80 | Self::Aes256Cm32 | Self::AeadAes256Gcm => cipher::KEY_256,
+        }
+    }
+
+    /// The master and session salt length, `n_s`: RFC 7714 §8.1's twelve
+    /// octets for the AEAD suites, RFC 3711 §5.1's fourteen for the rest.
+    #[must_use]
+    pub const fn salt_len(self) -> usize {
+        if self.is_aead() {
+            aead::SALT
+        } else {
+            kdf::SALT
+        }
+    }
+
+    pub(crate) const fn lengths(self) -> Lengths {
+        Lengths {
+            key: self.key_len(),
+            salt: self.salt_len(),
+            auth: !self.is_aead(),
+        }
+    }
+
+    /// The authentication tag length on SRTP packets, `n_tag`: the AEAD tag
+    /// RFC 7714 §10 fixes at sixteen octets, embedded in the ciphertext
+    /// rather than appended after it, for the two GCM suites.
     #[must_use]
     pub const fn tag(self) -> usize {
         match self {
-            Self::AesCm80 | Self::AesF8 => 10,
-            Self::AesCm32 => 4,
+            Self::AesCm80 | Self::AesF8 | Self::Aes256Cm80 => 10,
+            Self::AesCm32 | Self::Aes256Cm32 => 4,
+            Self::AeadAes128Gcm | Self::AeadAes256Gcm => aead::TAG,
         }
     }
 
@@ -62,26 +127,32 @@ impl Suite {
     ///
     /// §5.2: "for SRTCP, the pre-defined HMAC-SHA1 MUST NOT be applied with a
     /// value of n_tag, nor n_a, that are smaller than these defaults" — so
-    /// the short suite shortens SRTP tags and leaves SRTCP's alone.
+    /// the short suites shorten SRTP tags and leave SRTCP's alone. The AEAD
+    /// suites use the same sixteen-octet tag on both.
     #[must_use]
     pub const fn rtcp_tag(self) -> usize {
-        10
+        if self.is_aead() { aead::TAG } else { 10 }
     }
 
-    /// The name this suite carries in an `a=crypto` line.
+    /// The name this suite carries in an `a=crypto` line (RFC 4568 §6.2, RFC
+    /// 6188 §4, RFC 7714 §14.1).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::AesCm80 => "AES_CM_128_HMAC_SHA1_80",
             Self::AesCm32 => "AES_CM_128_HMAC_SHA1_32",
             Self::AesF8 => "F8_128_HMAC_SHA1_80",
+            Self::Aes256Cm80 => "AES_256_CM_HMAC_SHA1_80",
+            Self::Aes256Cm32 => "AES_256_CM_HMAC_SHA1_32",
+            Self::AeadAes128Gcm => "AEAD_AES_128_GCM",
+            Self::AeadAes256Gcm => "AEAD_AES_256_GCM",
         }
     }
 
     /// The suite an `a=crypto` line names, if it is one we implement.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        [Self::AesCm80, Self::AesCm32, Self::AesF8]
+        Self::STRENGTH
             .into_iter()
             .find(|suite| suite.name().eq_ignore_ascii_case(name))
     }
@@ -166,7 +237,11 @@ impl Policy {
     }
 
     pub(crate) const fn rtp_overhead(&self) -> usize {
-        let tag = if self.authenticate_rtp {
+        // RFC 7714 §8.2: an AEAD suite is always both encrypted and
+        // authenticated, in the one transform, so its tag counts here
+        // whatever `authenticate_rtp` says -- the flag has nothing to turn
+        // off for these two suites
+        let tag = if self.authenticate_rtp || self.suite.is_aead() {
             self.suite.tag()
         } else {
             0
@@ -246,7 +321,9 @@ impl From<Exhausted> for SrtpError {
     }
 }
 
-/// The keystream generator for one direction and one protocol.
+/// The keystream generator for one direction and one protocol, when the
+/// suite pairs a cipher with a separate authentication tag rather than
+/// tying the two together in one AEAD transform.
 #[expect(
     clippy::large_enum_variant,
     reason = "the difference is one AES key schedule, and there is one of these per session, not per packet"
@@ -259,8 +336,13 @@ enum Keystream {
 impl Keystream {
     fn new(suite: Suite, keys: &Session) -> Self {
         match suite {
-            Suite::AesCm80 | Suite::AesCm32 => Self::Counter(Counter::new(&keys.encryption)),
+            Suite::AesCm80 | Suite::AesCm32 | Suite::Aes256Cm80 | Suite::Aes256Cm32 => {
+                Self::Counter(Counter::new(&keys.encryption))
+            }
             Suite::AesF8 => Self::F8(F8::new(&keys.encryption, &keys.salt)),
+            Suite::AeadAes128Gcm | Suite::AeadAes256Gcm => {
+                unreachable!("an AEAD suite never builds a Keystream; see Engine::new")
+            }
         }
     }
 
@@ -272,27 +354,55 @@ impl Keystream {
     }
 }
 
-/// One derivation's worth of session state: the cipher, the salt the counter
-/// IV needs, and the authentication key.
+/// The two families of transform a suite can name: a keystream paired with a
+/// separately computed HMAC tag, or one AEAD transform that produces both at
+/// once.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one AES key schedule either way, and there is one of these per session, not per packet"
+)]
+enum Cipher {
+    Mac {
+        keystream: Keystream,
+        authentication: [u8; kdf::AUTH],
+    },
+    Aead(Gcm),
+}
+
+/// One derivation's worth of session state: the cipher, and the salt the IV
+/// needs.
 struct Engine {
-    keystream: Keystream,
-    salt: [u8; kdf::SALT],
-    authentication: [u8; kdf::AUTH],
+    cipher: Cipher,
+    salt: Vec<u8>,
 }
 
 impl Engine {
     fn new(suite: Suite, keys: &Session) -> Self {
+        let cipher = if suite.is_aead() {
+            Cipher::Aead(Gcm::new(&keys.encryption))
+        } else {
+            Cipher::Mac {
+                keystream: Keystream::new(suite, keys),
+                authentication: match keys.authentication.as_deref() {
+                    Some(key) => *key,
+                    None => {
+                        unreachable!(
+                            "a MAC suite's key derivation always derives an authentication key"
+                        )
+                    }
+                },
+            }
+        };
         Self {
-            keystream: Keystream::new(suite, keys),
-            salt: keys.salt,
-            authentication: keys.authentication,
+            cipher,
+            salt: keys.salt.to_vec(),
         }
     }
 
     /// §4.1.1: `IV = (k_s * 2^16) XOR (SSRC * 2^64) XOR (i * 2^16)`.
     fn counter_iv(&self, ssrc: u32, index: u64) -> [u8; cipher::BLOCK] {
         let mut iv = [0_u8; cipher::BLOCK];
-        if let Some(head) = iv.get_mut(..kdf::SALT) {
+        if let Some(head) = iv.get_mut(..self.salt.len()) {
             head.copy_from_slice(&self.salt);
         }
         for (byte, value) in iv.iter_mut().skip(4).zip(ssrc.to_be_bytes()) {
@@ -306,6 +416,43 @@ impl Engine {
             .zip(index.to_be_bytes().into_iter().skip(2))
         {
             *byte ^= value;
+        }
+        iv
+    }
+
+    /// RFC 7714 §8.1: `IV = (00 || SSRC || ROC || SEQ) XOR salt`, over the
+    /// twelve-octet AEAD salt rather than AES-CM's fourteen.
+    fn aead_rtp_iv(&self, ssrc: u32, roc: u32, seq: u16) -> [u8; aead::SALT] {
+        let mut iv = [0_u8; aead::SALT];
+        if let Some(slot) = iv.get_mut(2..6) {
+            slot.copy_from_slice(&ssrc.to_be_bytes());
+        }
+        if let Some(slot) = iv.get_mut(6..10) {
+            slot.copy_from_slice(&roc.to_be_bytes());
+        }
+        if let Some(slot) = iv.get_mut(10..12) {
+            slot.copy_from_slice(&seq.to_be_bytes());
+        }
+        for (byte, salt) in iv.iter_mut().zip(self.salt.iter()) {
+            *byte ^= salt;
+        }
+        iv
+    }
+
+    /// RFC 7714 §9.1: `IV = (00 || SSRC || 00 || 0+SRTCP index) XOR salt`.
+    /// `index` is the plain 31-bit SRTCP index, without the E bit the wire
+    /// format ORs into the same word — the IV always uses a "0" there,
+    /// whichever way the packet went.
+    fn aead_rtcp_iv(&self, ssrc: u32, index: u32) -> [u8; aead::SALT] {
+        let mut iv = [0_u8; aead::SALT];
+        if let Some(slot) = iv.get_mut(2..6) {
+            slot.copy_from_slice(&ssrc.to_be_bytes());
+        }
+        if let Some(slot) = iv.get_mut(8..12) {
+            slot.copy_from_slice(&(index & !RTCP_ENCRYPTED).to_be_bytes());
+        }
+        for (byte, salt) in iv.iter_mut().zip(self.salt.iter()) {
+            *byte ^= salt;
         }
         iv
     }
@@ -339,6 +486,20 @@ impl Engine {
         iv
     }
 
+    fn keystream(&self) -> &Keystream {
+        match &self.cipher {
+            Cipher::Mac { keystream, .. } => keystream,
+            Cipher::Aead(_) => unreachable!("a MAC path is never taken for an AEAD suite"),
+        }
+    }
+
+    fn gcm(&self) -> &Gcm {
+        match &self.cipher {
+            Cipher::Aead(gcm) => gcm,
+            Cipher::Mac { .. } => unreachable!("an AEAD path is never taken for a MAC suite"),
+        }
+    }
+
     fn encrypt_rtp(
         &self,
         suite: Suite,
@@ -349,10 +510,10 @@ impl Engine {
         payload: &mut [u8],
     ) -> Result<(), Exhausted> {
         let iv = match suite {
-            Suite::AesCm80 | Suite::AesCm32 => self.counter_iv(ssrc, index),
             Suite::AesF8 => Self::f8_rtp_iv(header, roc),
+            _ => self.counter_iv(ssrc, index),
         };
-        self.keystream.apply(&iv, payload)
+        self.keystream().apply(&iv, payload)
     }
 
     fn encrypt_rtcp(
@@ -365,18 +526,126 @@ impl Engine {
         payload: &mut [u8],
     ) -> Result<(), Exhausted> {
         let iv = match suite {
-            Suite::AesCm80 | Suite::AesCm32 => self.counter_iv(ssrc, u64::from(index)),
             Suite::AesF8 => Self::f8_rtcp_iv(header, word),
+            _ => self.counter_iv(ssrc, u64::from(index)),
         };
-        self.keystream.apply(&iv, payload)
+        self.keystream().apply(&iv, payload)
     }
 
     /// §4.2: `HMAC(k_a, M)` truncated to the left-most `tag` octets.
     fn tag(&self, parts: &[&[u8]], tag: usize, out: &mut [u8]) {
-        let full = sha1::hmac(&self.authentication, parts);
+        let authentication = match &self.cipher {
+            Cipher::Mac { authentication, .. } => authentication,
+            Cipher::Aead(_) => unreachable!("an AEAD suite is never authenticated this way"),
+        };
+        let full = sha1::hmac(authentication, parts);
         if let Some(slot) = out.get_mut(..tag) {
             slot.copy_from_slice(full.get(..tag).unwrap_or_default());
         }
+    }
+
+    /// RFC 7714 §8: seal `buffer` (plaintext, with `aead::TAG` octets of room
+    /// after it for the tag) in place under the RTP AAD -- the header, up to
+    /// and including any extension.
+    fn aead_seal_rtp(
+        &self,
+        header: &[u8],
+        ssrc: u32,
+        roc: u32,
+        seq: u16,
+        buffer: &mut [u8],
+    ) -> Result<(), Exhausted> {
+        let iv = self.aead_rtp_iv(ssrc, roc, seq);
+        let plain_len = buffer.len().saturating_sub(aead::TAG);
+        let (plaintext, tag_slot) = buffer.split_at_mut(plain_len);
+        let tag = self.gcm().seal(&iv, header, plaintext)?;
+        if let Some(slot) = tag_slot.get_mut(..aead::TAG) {
+            slot.copy_from_slice(&tag);
+        }
+        Ok(())
+    }
+
+    /// The inverse: `buffer` holds ciphertext followed by its tag, verified
+    /// and decrypted in place under the RTP AAD.
+    fn aead_open_rtp(
+        &self,
+        header: &[u8],
+        ssrc: u32,
+        roc: u32,
+        seq: u16,
+        buffer: &mut [u8],
+    ) -> Result<(), TagMismatch> {
+        let iv = self.aead_rtp_iv(ssrc, roc, seq);
+        let split = buffer.len().saturating_sub(aead::TAG);
+        let (ciphertext, tag_slot) = buffer.split_at_mut(split);
+        let mut tag = [0_u8; aead::TAG];
+        tag.copy_from_slice(tag_slot.get(..aead::TAG).unwrap_or(&[0; aead::TAG]));
+        self.gcm().open(&iv, header, ciphertext, &tag)
+    }
+
+    /// RFC 7714 §9: seal `plaintext` (with `aead::TAG` octets of room after
+    /// it) in place under the RTCP AAD -- the eight-octet header and the
+    /// ESRTCP word -- when `encrypting`; otherwise the AAD is the header, the
+    /// whole of `plaintext` and the word, and `plaintext` is left as it is,
+    /// with only the tag written.
+    fn aead_seal_rtcp(
+        &self,
+        header: &[u8],
+        ssrc: u32,
+        index: u32,
+        word: u32,
+        encrypting: bool,
+        plaintext: &mut [u8],
+    ) -> Result<(), Exhausted> {
+        let iv = self.aead_rtcp_iv(ssrc, index);
+        let body_len = plaintext.len().saturating_sub(aead::TAG);
+        let mut aad = Vec::with_capacity(header.len() + body_len + 4);
+        aad.extend_from_slice(header);
+        if !encrypting {
+            aad.extend_from_slice(plaintext.get(..body_len).unwrap_or_default());
+        }
+        aad.extend_from_slice(&word.to_be_bytes());
+
+        let (body, tag_slot) = plaintext.split_at_mut(body_len);
+        let sealed = if encrypting { body } else { &mut [][..] };
+        let tag = self.gcm().seal(&iv, &aad, sealed)?;
+        if let Some(slot) = tag_slot.get_mut(..aead::TAG) {
+            slot.copy_from_slice(&tag);
+        }
+        Ok(())
+    }
+
+    /// The inverse: `buffer` holds the RTCP payload (ciphertext when
+    /// `encrypted`, plaintext otherwise) followed by its tag, verified and
+    /// decrypted in place.
+    fn aead_open_rtcp(
+        &self,
+        header: &[u8],
+        ssrc: u32,
+        index: u32,
+        word: u32,
+        encrypted: bool,
+        buffer: &mut [u8],
+    ) -> Result<(), TagMismatch> {
+        let iv = self.aead_rtcp_iv(ssrc, index);
+        let body_len = buffer.len().saturating_sub(aead::TAG);
+        let mut tag = [0_u8; aead::TAG];
+        tag.copy_from_slice(
+            buffer
+                .get(body_len..body_len + aead::TAG)
+                .unwrap_or(&[0; aead::TAG]),
+        );
+
+        let mut aad = Vec::with_capacity(header.len() + body_len + 4);
+        aad.extend_from_slice(header);
+        if !encrypted {
+            aad.extend_from_slice(buffer.get(..body_len).unwrap_or_default());
+        }
+        aad.extend_from_slice(&word.to_be_bytes());
+
+        let (body, _) = buffer.split_at_mut(body_len);
+        let opened = if encrypted { body } else { &mut [][..] };
+        self.gcm().open(&iv, &aad, opened, &tag)
     }
 }
 
@@ -393,12 +662,13 @@ struct Derived {
 
 impl Derived {
     fn new(policy: &Policy, master: Master) -> Self {
+        let lengths = policy.suite.lengths();
         Self {
             suite: policy.suite,
             rate: policy.rate,
-            rtp: Engine::new(policy.suite, &master.rtp_session(policy.rate, 0)),
+            rtp: Engine::new(policy.suite, &master.rtp_session(policy.rate, 0, lengths)),
             rtp_phase: 0,
-            rtcp: Engine::new(policy.suite, &master.rtcp_session(policy.rate, 0)),
+            rtcp: Engine::new(policy.suite, &master.rtcp_session(policy.rate, 0, lengths)),
             rtcp_phase: 0,
             master,
         }
@@ -407,7 +677,10 @@ impl Derived {
     fn rtp(&mut self, index: u64) -> &Engine {
         let phase = self.rate.phase_of(index);
         if phase != self.rtp_phase {
-            self.rtp = Engine::new(self.suite, &self.master.rtp_session(self.rate, index));
+            let session = self
+                .master
+                .rtp_session(self.rate, index, self.suite.lengths());
+            self.rtp = Engine::new(self.suite, &session);
             self.rtp_phase = phase;
         }
         &self.rtp
@@ -416,7 +689,10 @@ impl Derived {
     fn rtcp(&mut self, index: u32) -> &Engine {
         let phase = self.rate.phase_of(u64::from(index));
         if phase != self.rtcp_phase {
-            self.rtcp = Engine::new(self.suite, &self.master.rtcp_session(self.rate, index));
+            let session = self
+                .master
+                .rtcp_session(self.rate, index, self.suite.lengths());
+            self.rtcp = Engine::new(self.suite, &session);
             self.rtcp_phase = phase;
         }
         &self.rtcp
@@ -508,22 +784,48 @@ impl Protector {
         let index = self.rtp.next(sequence);
         let roc = self.rtp.rollover();
 
-        if self.policy.encrypt_rtp {
-            let (head, payload) = packet
-                .get_mut(..len)
-                .ok_or(SrtpError::Malformed)?
+        // RFC 7714 §8.2: every AEAD-protected SRTP packet is both encrypted
+        // and authenticated, in the one call that does both; the cipher's
+        // sixteen-octet tag ends up embedded in what this function's other
+        // branch treats as the payload, ahead of the MKI, rather than in a
+        // trailing field of its own
+        let mut at = if self.policy.suite.is_aead() {
+            let sealed_end = len + aead::TAG;
+            let got = packet.len();
+            let (head, buffer) = packet
+                .get_mut(..sealed_end)
+                .ok_or(SrtpError::NoRoom {
+                    need: sealed_end,
+                    got,
+                })?
                 .split_at_mut(header);
             self.keys
                 .rtp(index)
-                .encrypt_rtp(self.policy.suite, head, ssrc, index, roc, payload)?;
-        }
+                .aead_seal_rtp(head, ssrc, roc, sequence, buffer)?;
+            sealed_end
+        } else {
+            if self.policy.encrypt_rtp {
+                let (head, payload) = packet
+                    .get_mut(..len)
+                    .ok_or(SrtpError::Malformed)?
+                    .split_at_mut(header);
+                self.keys.rtp(index).encrypt_rtp(
+                    self.policy.suite,
+                    head,
+                    ssrc,
+                    index,
+                    roc,
+                    payload,
+                )?;
+            }
+            len
+        };
 
-        let mut at = len;
         if let Some(mki) = self.policy.mki {
             mki.write(packet.get_mut(at..).unwrap_or_default());
             at += mki.len();
         }
-        if self.policy.authenticate_rtp {
+        if !self.policy.suite.is_aead() && self.policy.authenticate_rtp {
             let tag = self.policy.suite.tag();
             let mut bytes = [0_u8; sha1::DIGEST];
             self.keys.rtp(index).tag(
@@ -571,42 +873,74 @@ impl Protector {
             index
         };
 
-        if self.policy.encrypt_rtcp {
-            let (head, payload) = packet
-                .get_mut(..len)
-                .ok_or(SrtpError::Malformed)?
+        // RFC 7714 §9.2/§9.3: the AEAD suites always seal, whether or not the
+        // packet is encrypted -- E=0 authenticates the whole packet as
+        // associated data over an empty plaintext, producing a cipher that is
+        // the tag alone. Either way the cipher (ciphertext, or nothing, plus
+        // the sixteen-octet tag) sits right after the header, *before* the
+        // ESRTCP word -- the reverse of where the HMAC tag goes below.
+        let mut at = if self.policy.suite.is_aead() {
+            let sealed_end = len + aead::TAG;
+            let got = packet.len();
+            let (head, body) = packet
+                .get_mut(..sealed_end)
+                .ok_or(SrtpError::NoRoom {
+                    need: sealed_end,
+                    got,
+                })?
                 .split_at_mut(RTCP_HEADER);
-            self.keys.rtcp(index).encrypt_rtcp(
-                self.policy.suite,
+            self.keys.rtcp(index).aead_seal_rtcp(
                 head,
                 ssrc,
                 index,
                 word,
-                payload,
+                self.policy.encrypt_rtcp,
+                body,
             )?;
-        }
+            sealed_end
+        } else {
+            if self.policy.encrypt_rtcp {
+                let (head, payload) = packet
+                    .get_mut(..len)
+                    .ok_or(SrtpError::Malformed)?
+                    .split_at_mut(RTCP_HEADER);
+                self.keys.rtcp(index).encrypt_rtcp(
+                    self.policy.suite,
+                    head,
+                    ssrc,
+                    index,
+                    word,
+                    payload,
+                )?;
+            }
+            len
+        };
 
-        let mut at = len;
         if let Some(slot) = packet.get_mut(at..at + RTCP_INDEX) {
             slot.copy_from_slice(&word.to_be_bytes());
         }
         at += RTCP_INDEX;
 
-        // the tag covers the packet and the index word but not the MKI, so it
-        // is computed here, before the MKI moves `at` along
-        let tag = self.policy.suite.rtcp_tag();
-        let mut bytes = [0_u8; sha1::DIGEST];
-        self.keys
-            .rtcp(index)
-            .tag(&[packet.get(..at).unwrap_or_default()], tag, &mut bytes);
-        if let Some(mki) = self.policy.mki {
+        if !self.policy.suite.is_aead() {
+            // the tag covers the packet and the index word but not the MKI,
+            // so it is computed here, before the MKI moves `at` along
+            let tag = self.policy.suite.rtcp_tag();
+            let mut bytes = [0_u8; sha1::DIGEST];
+            self.keys
+                .rtcp(index)
+                .tag(&[packet.get(..at).unwrap_or_default()], tag, &mut bytes);
+            if let Some(mki) = self.policy.mki {
+                mki.write(packet.get_mut(at..).unwrap_or_default());
+                at += mki.len();
+            }
+            if let Some(slot) = packet.get_mut(at..at + tag) {
+                slot.copy_from_slice(bytes.get(..tag).unwrap_or_default());
+            }
+            at += tag;
+        } else if let Some(mki) = self.policy.mki {
             mki.write(packet.get_mut(at..).unwrap_or_default());
             at += mki.len();
         }
-        if let Some(slot) = packet.get_mut(at..at + tag) {
-            slot.copy_from_slice(bytes.get(..tag).unwrap_or_default());
-        }
-        at += tag;
 
         // §3.4: "incremented by one, modulo 2^31, after each SRTCP packet is
         // sent", and never reset, which is why the counter is separate from
@@ -803,11 +1137,19 @@ impl Unprotector {
     ///
     /// A short or malformed packet, a replay, or a tag that does not match.
     pub fn unprotect_rtp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
-        let tag = if self.policy.authenticate_rtp {
+        let is_aead = self.policy.suite.is_aead();
+        let tag = if is_aead {
+            aead::TAG
+        } else if self.policy.authenticate_rtp {
             self.policy.suite.tag()
         } else {
             0
         };
+        // `body` is the plaintext length -- header plus payload -- in both
+        // families: a MAC suite's tag sits in a trailing field of its own,
+        // after the MKI, while an AEAD suite's sits inside the cipher, right
+        // before the MKI; either way it is `tag` octets wide and this is
+        // where it and the MKI both start counting back from
         let trailer = tag + self.policy.mki_len();
         let body = packet
             .len()
@@ -825,38 +1167,51 @@ impl Unprotector {
             return Err(SrtpError::Replayed);
         }
 
-        self.check_mki(packet, body)?;
-        if tag > 0 {
-            let mut expected = [0_u8; sha1::DIGEST];
-            self.keys.rtp(estimate.index).tag(
-                &[
-                    packet.get(..body).unwrap_or_default(),
-                    &estimate.rollover().to_be_bytes(),
-                ],
-                tag,
-                &mut expected,
-            );
-            let found = packet
-                .get(body + self.policy.mki_len()..)
-                .unwrap_or_default();
-            if !equal(expected.get(..tag).unwrap_or_default(), found) {
-                return Err(SrtpError::NotAuthentic);
-            }
-        }
-
-        if self.policy.encrypt_rtp {
-            let (head, payload) = packet
-                .get_mut(..body)
+        if is_aead {
+            let sealed_end = body + aead::TAG;
+            self.check_mki(packet, sealed_end)?;
+            let (head, cipher_and_tag) = packet
+                .get_mut(..sealed_end)
                 .ok_or(SrtpError::Malformed)?
                 .split_at_mut(header);
-            self.keys.rtp(estimate.index).encrypt_rtp(
-                self.policy.suite,
-                head,
-                ssrc,
-                estimate.index,
-                estimate.rollover(),
-                payload,
-            )?;
+            self.keys
+                .rtp(estimate.index)
+                .aead_open_rtp(head, ssrc, estimate.rollover(), sequence, cipher_and_tag)
+                .map_err(|TagMismatch| SrtpError::NotAuthentic)?;
+        } else {
+            self.check_mki(packet, body)?;
+            if tag > 0 {
+                let mut expected = [0_u8; sha1::DIGEST];
+                self.keys.rtp(estimate.index).tag(
+                    &[
+                        packet.get(..body).unwrap_or_default(),
+                        &estimate.rollover().to_be_bytes(),
+                    ],
+                    tag,
+                    &mut expected,
+                );
+                let found = packet
+                    .get(body + self.policy.mki_len()..)
+                    .unwrap_or_default();
+                if !equal(expected.get(..tag).unwrap_or_default(), found) {
+                    return Err(SrtpError::NotAuthentic);
+                }
+            }
+
+            if self.policy.encrypt_rtp {
+                let (head, payload) = packet
+                    .get_mut(..body)
+                    .ok_or(SrtpError::Malformed)?
+                    .split_at_mut(header);
+                self.keys.rtp(estimate.index).encrypt_rtp(
+                    self.policy.suite,
+                    head,
+                    ssrc,
+                    estimate.index,
+                    estimate.rollover(),
+                    payload,
+                )?;
+            }
         }
 
         stream.index.accept(estimate);
@@ -873,6 +1228,9 @@ impl Unprotector {
     /// As `unprotect_rtp`.
     pub fn unprotect_rtcp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
         let tag = self.policy.suite.rtcp_tag();
+        if self.policy.suite.is_aead() {
+            return self.unprotect_rtcp_aead(packet, tag);
+        }
         let trailer = tag + self.policy.mki_len();
         let with_index = packet
             .len()
@@ -923,6 +1281,42 @@ impl Unprotector {
                 payload,
             )?;
         }
+
+        replay.record(u64::from(index));
+        self.rtcp.put(ssrc, replay);
+        Ok(body)
+    }
+
+    /// The AEAD half of [`Self::unprotect_rtcp`]: the cipher (ciphertext, or
+    /// nothing, plus the sixteen-octet tag) sits right after the RTCP body,
+    /// *before* the ESRTCP word -- the reverse of a MAC suite's layout, where
+    /// the word comes first and the tag trails everything but the MKI.
+    fn unprotect_rtcp_aead(&mut self, packet: &mut [u8], tag: usize) -> Result<usize, SrtpError> {
+        let trailer = tag + RTCP_INDEX + self.policy.mki_len();
+        let body = packet
+            .len()
+            .checked_sub(trailer)
+            .filter(|body| *body >= RTCP_HEADER)
+            .ok_or(SrtpError::TooShort { got: packet.len() })?;
+        let sealed_end = body + tag;
+        let word = read_u32(packet, sealed_end);
+        let index = word & !RTCP_ENCRYPTED;
+        let ssrc = read_u32(packet, 4);
+
+        let mut replay = self.rtcp.get(ssrc).unwrap_or_default();
+        if !replay.accepts(u64::from(index)) {
+            return Err(SrtpError::Replayed);
+        }
+
+        self.check_mki(packet, sealed_end + RTCP_INDEX)?;
+        let (head, buffer) = packet
+            .get_mut(..sealed_end)
+            .ok_or(SrtpError::Malformed)?
+            .split_at_mut(RTCP_HEADER);
+        self.keys
+            .rtcp(index)
+            .aead_open_rtcp(head, ssrc, index, word, word & RTCP_ENCRYPTED != 0, buffer)
+            .map_err(|TagMismatch| SrtpError::NotAuthentic)?;
 
         replay.record(u64::from(index));
         self.rtcp.put(ssrc, replay);
@@ -1206,24 +1600,36 @@ fn equal(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        GRACE, Master, Mki, Policy, Protector, Rate, Rekeyed, SOURCES, Security, SrtpError, Suite,
-        Unprotector,
+        GRACE, Master, Mki, Policy, Protector, RTCP_INDEX, Rate, Rekeyed, SOURCES, Security,
+        SrtpError, Suite, Unprotector,
     };
 
     const SSRC: u32 = 0xdead_beef;
 
     fn master() -> Master {
-        Master::new([0x11; 16], [0x22; 14])
+        Master::new(&[0x11; 16], &[0x22; 14])
     }
 
     fn other_master() -> Master {
-        Master::new([0x33; 16], [0x22; 14])
+        Master::new(&[0x33; 16], &[0x22; 14])
+    }
+
+    /// A master key and salt sized for `suite` -- a wider key for the
+    /// AES-256 suites, a narrower salt for the AEAD ones -- filled with the
+    /// same two repeating octets [`master`] uses, so this agrees with it
+    /// exactly for `Suite::AesCm80`, the suite every other test here that
+    /// does not loop over suites is written against.
+    fn master_for(suite: Suite) -> Master {
+        Master::new(
+            &vec![0x11_u8; suite.key_len()],
+            &vec![0x22_u8; suite.salt_len()],
+        )
     }
 
     fn pair(policy: Policy) -> (Protector, Unprotector) {
         (
-            Protector::new(policy, master()),
-            Unprotector::new(policy, master()),
+            Protector::new(policy, master_for(policy.suite)),
+            Unprotector::new(policy, master_for(policy.suite)),
         )
     }
 
@@ -1256,7 +1662,7 @@ mod tests {
 
     #[test]
     fn a_packet_survives_the_round_trip_under_every_suite() {
-        for suite in [Suite::AesCm80, Suite::AesCm32, Suite::AesF8] {
+        for suite in Suite::STRENGTH {
             let policy = Policy::new(suite);
             let (mut protector, mut unprotector) = pair(policy);
             let plain = packet(1000, b"nine bytes");
@@ -1603,7 +2009,7 @@ mod tests {
 
     #[test]
     fn an_rtcp_packet_survives_the_round_trip() {
-        for suite in [Suite::AesCm80, Suite::AesCm32, Suite::AesF8] {
+        for suite in Suite::STRENGTH {
             let policy = Policy::new(suite);
             let (mut protector, mut unprotector) = pair(policy);
             let plain = compound();
@@ -1612,9 +2018,14 @@ mod tests {
             let len = protector
                 .protect_rtcp(&mut buffer, plain.len())
                 .expect("protects");
-            // four octets of index and ten of tag, whatever the suite says
-            // about SRTP tags: §5.2 forbids shortening SRTCP's
-            assert_eq!(len, plain.len() + 14, "{suite:?}");
+            // four octets of index and the suite's own SRTCP tag: ten octets
+            // of HMAC for every MAC suite (§5.2 forbids shortening SRTCP's,
+            // whatever the SRTP tag says) or sixteen of embedded AEAD tag
+            assert_eq!(
+                len,
+                plain.len() + RTCP_INDEX + suite.rtcp_tag(),
+                "{suite:?}"
+            );
             assert_eq!(buffer.get(..8), plain.get(..8), "{suite:?}");
             assert_ne!(buffer.get(8..plain.len()), plain.get(8..), "{suite:?}");
 
@@ -1795,14 +2206,22 @@ mod tests {
         assert_eq!(Suite::AesCm80.name(), "AES_CM_128_HMAC_SHA1_80");
         assert_eq!(Suite::AesCm32.name(), "AES_CM_128_HMAC_SHA1_32");
         assert_eq!(Suite::AesF8.name(), "F8_128_HMAC_SHA1_80");
-        for suite in [Suite::AesCm80, Suite::AesCm32, Suite::AesF8] {
+        assert_eq!(Suite::Aes256Cm80.name(), "AES_256_CM_HMAC_SHA1_80");
+        assert_eq!(Suite::Aes256Cm32.name(), "AES_256_CM_HMAC_SHA1_32");
+        assert_eq!(Suite::AeadAes128Gcm.name(), "AEAD_AES_128_GCM");
+        assert_eq!(Suite::AeadAes256Gcm.name(), "AEAD_AES_256_GCM");
+        for suite in Suite::STRENGTH {
             assert_eq!(Suite::from_name(suite.name()), Some(suite));
         }
         assert_eq!(
             Suite::from_name("aes_cm_128_hmac_sha1_80"),
             Some(Suite::AesCm80)
         );
-        assert_eq!(Suite::from_name("AES_CM_256_HMAC_SHA1_80"), None);
+        assert_eq!(
+            Suite::from_name("aead_aes_256_gcm"),
+            Some(Suite::AeadAes256Gcm)
+        );
+        assert_eq!(Suite::from_name("AES_CM_512_HMAC_SHA1_80"), None);
     }
 
     // §4.1.1 puts the SSRC in the IV so that one master key can protect more
@@ -2086,7 +2505,7 @@ mod tests {
     // -- re-keying a session that is already running -------------------------
 
     fn third_master() -> Master {
-        Master::new([0x44; 16], [0x22; 14])
+        Master::new(&[0x44; 16], &[0x22; 14])
     }
 
     /// One protected packet, ready to hand to an unprotector.

@@ -15,10 +15,42 @@ use crate::{Error, Role};
 /// RFC 5764 §4.2: "The exporter label for this usage is
 /// "EXTRACTOR-dtls_srtp"."
 pub const DTLS_SRTP_LABEL: &[u8] = b"EXTRACTOR-dtls_srtp";
-/// `master_key_len` of both AES-128 counter-mode profiles: 128 bits.
+/// `master_key_len` of both AES-128 counter-mode profiles: 128 bits. A
+/// profile that carries a different one -- RFC 7714's two AEAD profiles --
+/// is sized by [`master_key_len`] instead; this is what every fixed-width
+/// caller before them assumed.
 pub const SRTP_MASTER_KEY_LEN: usize = 16;
-/// `master_salt_len` of both AES-128 counter-mode profiles: 112 bits.
+/// `master_salt_len` of both AES-128 counter-mode profiles: 112 bits. See
+/// [`master_salt_len`] for a profile that is not one of the two.
 pub const SRTP_MASTER_SALT_LEN: usize = 14;
+
+/// The master key length RFC 5764 and RFC 7714 §14.2 give `profile`, or
+/// [`None`] for a profile this stack does not key (the NULL ones, and
+/// anything unregistered).
+#[must_use]
+pub const fn master_key_len(profile: SrtpProtectionProfile) -> Option<usize> {
+    match profile {
+        SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80
+        | SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32
+        | SrtpProtectionProfile::AEAD_AES_128_GCM => Some(SRTP_MASTER_KEY_LEN),
+        SrtpProtectionProfile::AEAD_AES_256_GCM => Some(32),
+        _ => None,
+    }
+}
+
+/// The master salt length RFC 5764 and RFC 7714 §14.2 give `profile`: twelve
+/// octets for the two AEAD profiles, fourteen for the two AES-CM ones.
+#[must_use]
+pub const fn master_salt_len(profile: SrtpProtectionProfile) -> Option<usize> {
+    match profile {
+        SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80
+        | SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32 => Some(SRTP_MASTER_SALT_LEN),
+        SrtpProtectionProfile::AEAD_AES_128_GCM | SrtpProtectionProfile::AEAD_AES_256_GCM => {
+            Some(12)
+        }
+        _ => None,
+    }
+}
 
 impl MasterSecret {
     /// Keying material exported under `label` (RFC 5705 §4):
@@ -89,22 +121,22 @@ impl MasterSecret {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalValue`] for any profile but the two AES-128 counter-mode
-    /// ones — the NULL profiles are forbidden by RFC 8827 §6.5 and nothing
-    /// else is defined — and the errors of [`MasterSecret::export`].
+    /// [`Error::IllegalValue`] for a profile this stack does not key — the
+    /// NULL profiles are forbidden by RFC 8827 §6.5, and anything
+    /// unregistered has no lengths to export at — and the errors of
+    /// [`MasterSecret::export`].
     pub fn srtp_keys(&self, profile: SrtpProtectionProfile) -> Result<SrtpKeys, Error> {
-        if profile != SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80
-            && profile != SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32
-        {
+        let (Some(key_len), Some(salt_len)) = (master_key_len(profile), master_salt_len(profile))
+        else {
             return Err(Error::IllegalValue);
-        }
+        };
         self.check_export(DTLS_SRTP_LABEL)?;
         let mut keys = SrtpKeys {
             profile,
-            client_key: Zeroizing::new([0; SRTP_MASTER_KEY_LEN]),
-            server_key: Zeroizing::new([0; SRTP_MASTER_KEY_LEN]),
-            client_salt: Zeroizing::new([0; SRTP_MASTER_SALT_LEN]),
-            server_salt: Zeroizing::new([0; SRTP_MASTER_SALT_LEN]),
+            client_key: Zeroizing::new(vec![0; key_len]),
+            server_key: Zeroizing::new(vec![0; key_len]),
+            client_salt: Zeroizing::new(vec![0; salt_len]),
+            server_salt: Zeroizing::new(vec![0; salt_len]),
         };
         prf::prf_fields(
             self.secret(),
@@ -143,10 +175,10 @@ impl MasterSecret {
 /// Wiped when dropped, and never printed.
 pub struct SrtpKeys {
     profile: SrtpProtectionProfile,
-    client_key: Zeroizing<[u8; SRTP_MASTER_KEY_LEN]>,
-    server_key: Zeroizing<[u8; SRTP_MASTER_KEY_LEN]>,
-    client_salt: Zeroizing<[u8; SRTP_MASTER_SALT_LEN]>,
-    server_salt: Zeroizing<[u8; SRTP_MASTER_SALT_LEN]>,
+    client_key: Zeroizing<Vec<u8>>,
+    server_key: Zeroizing<Vec<u8>>,
+    client_salt: Zeroizing<Vec<u8>>,
+    server_salt: Zeroizing<Vec<u8>>,
 }
 
 impl SrtpKeys {
@@ -156,18 +188,20 @@ impl SrtpKeys {
         self.profile
     }
 
-    /// The master key protecting what `writer` sends.
+    /// The master key protecting what `writer` sends: sixteen octets for
+    /// every profile but `AEAD_AES_256_GCM`, which is thirty-two.
     #[must_use]
-    pub fn master_key(&self, writer: Role) -> &[u8; SRTP_MASTER_KEY_LEN] {
+    pub fn master_key(&self, writer: Role) -> &[u8] {
         match writer {
             Role::Client => &self.client_key,
             Role::Server => &self.server_key,
         }
     }
 
-    /// The master salt protecting what `writer` sends.
+    /// The master salt protecting what `writer` sends: fourteen octets for
+    /// the two AES-CM profiles, twelve for the two AEAD ones.
     #[must_use]
-    pub fn master_salt(&self, writer: Role) -> &[u8; SRTP_MASTER_SALT_LEN] {
+    pub fn master_salt(&self, writer: Role) -> &[u8] {
         match writer {
             Role::Client => &self.client_salt,
             Role::Server => &self.server_salt,
@@ -305,15 +339,43 @@ mod tests {
     }
 
     #[test]
-    fn only_the_aes_profiles_have_keys() {
+    fn only_the_keyable_profiles_have_keys() {
         let master = master();
         for profile in [
             SrtpProtectionProfile::NULL_HMAC_SHA1_80,
             SrtpProtectionProfile::NULL_HMAC_SHA1_32,
-            SrtpProtectionProfile(0x0007),
+            SrtpProtectionProfile(0x0009),
         ] {
             assert_eq!(master.srtp_keys(profile).err(), Some(Error::IllegalValue));
         }
+    }
+
+    // RFC 7714 §14.2: the two AEAD profiles export a wider key and a
+    // narrower salt than the two AES-CM ones.
+    #[test]
+    fn the_aead_profiles_export_the_widths_rfc_7714_gives_them() {
+        let master = master();
+        let gcm128 = master
+            .srtp_keys(SrtpProtectionProfile::AEAD_AES_128_GCM)
+            .unwrap();
+        assert_eq!(gcm128.master_key(Role::Client).len(), 16);
+        assert_eq!(gcm128.master_salt(Role::Client).len(), 12);
+
+        let gcm256 = master
+            .srtp_keys(SrtpProtectionProfile::AEAD_AES_256_GCM)
+            .unwrap();
+        assert_eq!(gcm256.master_key(Role::Client).len(), 32);
+        assert_eq!(gcm256.master_salt(Role::Client).len(), 12);
+
+        // both draw from the same P_SHA256 stream (§4.2's export takes no
+        // profile as input, only the requested lengths), so the shorter
+        // export is the wider one's own prefix -- exactly what an
+        // extendable-output PRF promises, and never a collision in practice
+        // since one connection only ever negotiates one profile
+        assert_eq!(
+            gcm128.master_key(Role::Client),
+            &gcm256.master_key(Role::Client)[..16]
+        );
     }
 
     #[test]

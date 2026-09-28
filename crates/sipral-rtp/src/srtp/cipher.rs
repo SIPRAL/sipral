@@ -8,15 +8,25 @@
 //! encryption and decryption are the same call. AES itself comes from the
 //! `aes` crate; everything above the block function is here.
 
-use aes::Aes128Enc;
 use aes::cipher::{Array, BlockCipherEncrypt, KeyInit};
+use aes::{Aes128Enc, Aes256Enc};
 use zeroize::Zeroize;
 
 /// The AES block size, `n_b` in the RFC's notation.
 pub(crate) const BLOCK: usize = 16;
 
-/// The master and session key length for every suite RFC 4568 defines.
-pub(crate) const KEY: usize = 16;
+/// The AES-128 key length: every suite RFC 4568 defines, and the RTP side of
+/// RFC 7714's `AEAD_AES_128_GCM`.
+pub(crate) const KEY_128: usize = 16;
+
+/// The AES-256 key length: RFC 6188's `AES_256_CM` suites and RFC 7714's
+/// `AEAD_AES_256_GCM`.
+pub(crate) const KEY_256: usize = 32;
+
+/// The master and session key length of the suite every implementation has.
+/// Kept for the callers that only ever spoke of the one suite; a caller that
+/// cares which suite it is reads the length off [`super::Suite`] instead.
+pub(crate) const KEY: usize = KEY_128;
 
 /// A keystream long enough to have exhausted the counter.
 ///
@@ -26,18 +36,37 @@ pub(crate) const KEY: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Exhausted;
 
-/// AES in counter mode, keyed once per session.
-pub(crate) struct Counter {
-    // the encrypt-only type: SRTP never runs AES backwards, since both
-    // directions are a keystream exclusive-ORed over the payload, and asking
-    // for the decryption schedule would double the state for nothing
-    cipher: Aes128Enc,
+/// AES in counter mode, keyed once per session, over either key width RFC
+/// 6188 adds to RFC 3711's AES-128: both are "AES_CM" with a different block
+/// cipher underneath, and every other bit of arithmetic here is the same.
+// the encrypt-only types: SRTP never runs AES backwards, since both
+// directions are a keystream exclusive-ORed over the payload, and asking for
+// the decryption schedule would double the state for nothing
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the difference is one AES key schedule, and there is one of these per session, not per packet"
+)]
+pub(crate) enum Counter {
+    Aes128(Aes128Enc),
+    Aes256(Aes256Enc),
 }
 
 impl Counter {
-    pub(crate) fn new(key: &[u8; KEY]) -> Self {
-        Self {
-            cipher: Aes128Enc::new(&Array(*key)),
+    /// A key of sixteen or thirty-two octets. Nothing else reaches this
+    /// module: every caller sizes the key from a [`super::Suite`] first.
+    pub(crate) fn new(key: &[u8]) -> Self {
+        if key.len() == KEY_256 {
+            let mut array = Array([0_u8; KEY_256]);
+            array.copy_from_slice(key);
+            let cipher = Self::Aes256(Aes256Enc::new(&array));
+            array.zeroize();
+            cipher
+        } else {
+            let mut array = Array([0_u8; KEY_128]);
+            array.copy_from_slice(key.get(..KEY_128).unwrap_or(&[0; KEY_128]));
+            let cipher = Self::Aes128(Aes128Enc::new(&array));
+            array.zeroize();
+            cipher
         }
     }
 
@@ -65,7 +94,7 @@ impl Counter {
                 field.copy_from_slice(&base.wrapping_add(step).to_be_bytes());
             }
             let mut block = Array(counter);
-            self.cipher.encrypt_block(&mut block);
+            self.encrypt(&mut block);
             for (byte, key) in chunk.iter_mut().zip(block.0) {
                 *byte ^= key;
             }
@@ -74,10 +103,17 @@ impl Counter {
         Ok(())
     }
 
+    fn encrypt(&self, block: &mut Array<u8, aes::cipher::consts::U16>) {
+        match self {
+            Self::Aes128(cipher) => cipher.encrypt_block(block),
+            Self::Aes256(cipher) => cipher.encrypt_block(block),
+        }
+    }
+
     /// One raw block encryption, which is what the f8 mask needs.
     fn block(&self, block: &mut [u8; BLOCK]) {
         let mut value = Array(*block);
-        self.cipher.encrypt_block(&mut value);
+        self.encrypt(&mut value);
         *block = value.0;
         value.0.zeroize();
     }
@@ -91,13 +127,19 @@ pub(crate) struct F8 {
 
 impl F8 {
     /// §4.1.2.1: the mask is `m = k_s || 0x55..5`, filled out to the key
-    /// length, and the second key is `k_e XOR m`.
-    pub(crate) fn new(key: &[u8; KEY], salt: &[u8]) -> Self {
+    /// length, and the second key is `k_e XOR m`. `F8_128_HMAC_SHA1_80` is
+    /// the only f8 suite this stack implements, so `key` is always sixteen
+    /// octets, but it arrives as a slice because the session key it is cut
+    /// from is one too.
+    pub(crate) fn new(key: &[u8], salt: &[u8]) -> Self {
         let mut mask = [0x55_u8; KEY];
         if let Some(head) = mask.get_mut(..salt.len().min(KEY)) {
             head.copy_from_slice(salt.get(..salt.len().min(KEY)).unwrap_or_default());
         }
-        let mut key_mask = *key;
+        let mut key_mask = [0_u8; KEY];
+        if let Some(head) = key_mask.get_mut(..key.len().min(KEY)) {
+            head.copy_from_slice(key.get(..key.len().min(KEY)).unwrap_or_default());
+        }
         for (byte, m) in key_mask.iter_mut().zip(mask) {
             *byte ^= m;
         }
@@ -145,7 +187,7 @@ impl F8 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{hex, unhex, unhex16 as key16};
+    use super::super::testing::{hex, unhex, unhex16 as key16, unhexn};
     use super::{BLOCK, Counter, Exhausted, F8};
 
     // RFC 3711 Appendix B.2. The session salt is given already shifted, so it
@@ -269,5 +311,54 @@ mod tests {
             "the second block must not repeat the first"
         );
         assert_eq!(second.as_slice(), whole.get(..BLOCK).unwrap_or_default());
+    }
+
+    // RFC 6188 §7.1: the AES-256-CM keystream, at the same counter values
+    // Appendix B.2 of RFC 3711 checks for AES-128-CM.
+    #[test]
+    fn rfc_6188_aes_256_cm_keystream() {
+        let key: [u8; 32] =
+            unhexn("57f82fe3613fd170a85ec93c40b1f0922ec4cb0dc025b58272147cc438944a98");
+        let cipher = Counter::new(&key);
+        let iv = key16("f0f1f2f3f4f5f6f7f8f9fafbfcfd0000");
+
+        let mut stream = vec![0_u8; BLOCK * 3];
+        cipher.apply(&iv, &mut stream).expect("within one segment");
+        assert_eq!(
+            hex(&stream),
+            "92bdd28a93c3f52511c677d08b5515a4\
+             9da71b2378a854f67050756ded165bac\
+             63c4868b7096d88421b563b8c94c9a31"
+        );
+
+        let mut just_fits = vec![0_u8; BLOCK * 0x_ff02];
+        cipher
+            .apply(&iv, &mut just_fits)
+            .expect("exactly at the limit");
+        assert_eq!(
+            hex(just_fits
+                .get(BLOCK * 0x_feff..BLOCK * 0x_ff02)
+                .unwrap_or_default()),
+            "cea518c90fd91ced9cbb18c078a54711\
+             3dbc4814f4da5f00a08772b63c6a046d\
+             6eb246913062a16891433e97dd01a57f"
+        );
+    }
+
+    #[test]
+    fn aes_256_cm_is_a_different_cipher_from_aes_128_cm_under_the_same_bytes() {
+        let key128 = key16("00112233445566778899aabbccddeeff");
+        let mut key256 = [0_u8; 32];
+        key256[..16].copy_from_slice(&key128);
+        let iv = key16("0102030405060708090a0b0c0d0e0000");
+
+        let mut under128 = vec![0_u8; BLOCK];
+        Counter::new(&key128).apply(&iv, &mut under128).unwrap();
+        let mut under256 = vec![0_u8; BLOCK];
+        Counter::new(&key256).apply(&iv, &mut under256).unwrap();
+        assert_ne!(
+            under128, under256,
+            "a wider key must not collapse to the narrow one"
+        );
     }
 }

@@ -4072,7 +4072,7 @@ fn draw_key(keys: &mut KeySource) -> KeySalt {
     for (slot, byte) in salt.iter_mut().zip(block.iter().skip(MASTER_KEY)) {
         *slot = *byte;
     }
-    KeySalt::new(*key, *salt)
+    KeySalt::new(key.as_slice(), salt.as_slice())
 }
 
 /// `len` hexadecimal characters of `token`, starting at `at`, as a number.
@@ -4200,12 +4200,12 @@ mod keying_guards {
             local: sipral_core::sdp::CryptoPolicy::new(
                 1,
                 sipral_core::sdp::CryptoSuite::AesCm80,
-                KeySalt::new([1; 16], [2; 14]),
+                KeySalt::new(&[1; 16], &[2; 14]),
             ),
             remote: sipral_core::sdp::CryptoPolicy::new(
                 1,
                 sipral_core::sdp::CryptoSuite::AesCm80,
-                KeySalt::new([3; 16], [4; 14]),
+                KeySalt::new(&[3; 16], &[4; 14]),
             ),
         });
         let handshake = Some(Keying::Dtls {
@@ -4271,8 +4271,8 @@ mod keying_guards {
     #[test]
     fn a_peer_line_carrying_a_parameter_nobody_read_does_not_open_a_stream() {
         let keyed = Some(Keying::Sdes {
-            local: CryptoPolicy::new(1, CryptoSuite::AesCm80, KeySalt::new([1; 16], [2; 14])),
-            remote: CryptoPolicy::new(1, CryptoSuite::AesCm80, KeySalt::new([3; 16], [4; 14])),
+            local: CryptoPolicy::new(1, CryptoSuite::AesCm80, KeySalt::new(&[1; 16], &[2; 14])),
+            remote: CryptoPolicy::new(1, CryptoSuite::AesCm80, KeySalt::new(&[3; 16], &[4; 14])),
         });
         let catalog = CodecCatalog::new().with_srtp(SrtpPolicy::Offered);
 
@@ -4694,7 +4694,7 @@ mod key_source_tests {
         let mut seen = Vec::new();
         for _ in 0..64 {
             let drawn = draw_key(&mut keys);
-            let pair = (drawn.key(), drawn.salt());
+            let pair = (drawn.key().to_vec(), drawn.salt().to_vec());
             assert!(!seen.contains(&pair), "a key repeated");
             seen.push(pair);
         }

@@ -302,7 +302,7 @@ mod tests {
 
         let offer = CodecCatalog::new()
             .with_srtp(SrtpPolicy::Offered)
-            .offering(Some(KeySalt::new([3; 16], [4; 14])), None)
+            .offering(Some(KeySalt::new(&[3; 16], &[4; 14])), None)
             .offer("audio", 40_000, Direction::SendRecv);
         assert_eq!(offer.proto, "RTP/SAVP");
         assert!(

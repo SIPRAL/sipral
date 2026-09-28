@@ -27,15 +27,29 @@
 use libfuzzer_sys::fuzz_target;
 use sipral_rtp::srtp::{Master, Policy, Suite, Unprotector};
 
-const KEY: [u8; sipral_rtp::srtp::KEY] = [0x42; sipral_rtp::srtp::KEY];
-const SALT: [u8; sipral_rtp::srtp::SALT] = [0x24; sipral_rtp::srtp::SALT];
+/// A key or salt of `len` octets, filled with a fixed, recognisable pattern
+/// -- the exact bytes do not matter, only that authentication fails on
+/// almost anything fuzzing finds, which is the point (see the module docs).
+fn filled(byte: u8, len: usize) -> Vec<u8> {
+    vec![byte; len]
+}
 
 fuzz_target!(|data: &[u8]| {
-    for suite in [Suite::AesCm80, Suite::AesCm32, Suite::AesF8] {
+    for suite in [
+        Suite::AesCm80,
+        Suite::AesCm32,
+        Suite::AesF8,
+        Suite::Aes256Cm80,
+        Suite::Aes256Cm32,
+        Suite::AeadAes128Gcm,
+        Suite::AeadAes256Gcm,
+    ] {
+        let key = filled(0x42, suite.key_len());
+        let salt = filled(0x24, suite.salt_len());
         // one of each for the whole run: RTP and RTCP keep indices and
         // windows of their own, exactly as an endpoint does
-        let mut rtp = Unprotector::new(Policy::new(suite), Master::new(KEY, SALT));
-        let mut rtcp = Unprotector::new(Policy::new(suite), Master::new(KEY, SALT));
+        let mut rtp = Unprotector::new(Policy::new(suite), Master::new(&key, &salt));
+        let mut rtcp = Unprotector::new(Policy::new(suite), Master::new(&key, &salt));
 
         let mut rest = data;
         while let Some((&len, tail)) = rest.split_first() {

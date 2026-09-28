@@ -15,12 +15,19 @@ pub(crate) fn unhex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-/// The same, into a fixed sixteen octets, which is every key in the vectors.
+/// The same, into a fixed sixteen octets, which is every AES-128 key and
+/// every ordinary IV in the vectors.
 pub(crate) fn unhex16(text: &str) -> [u8; 16] {
-    let mut out = [0_u8; 16];
+    unhexn(text)
+}
+
+/// The same, into `N` fixed octets: a thirty-two-octet AES-256 key, a
+/// fourteen-octet salt, a twelve-octet GCM one, and so on.
+pub(crate) fn unhexn<const N: usize>(text: &str) -> [u8; N] {
+    let mut out = [0_u8; N];
     let bytes = unhex(text);
-    if let Some(slot) = out.get_mut(..bytes.len().min(16)) {
-        slot.copy_from_slice(bytes.get(..bytes.len().min(16)).unwrap_or_default());
+    if let Some(slot) = out.get_mut(..bytes.len().min(N)) {
+        slot.copy_from_slice(bytes.get(..bytes.len().min(N)).unwrap_or_default());
     }
     out
 }

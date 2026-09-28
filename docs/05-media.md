@@ -640,21 +640,41 @@ changes what was already there.
 
 ### SRTP
 
-Written in-tree from RFC 3711, over one borrowed primitive: the `aes` block
-cipher, for the reason `THIRD-PARTY-NOTICES.md` gives. Counter mode and f8,
-HMAC-SHA-1, the key derivation, the implicit packet index of §3.3.1 and the
-replay window of §3.3.2 are all here, proved against the test vectors in the
-RFC's own Appendix B. Linking libsrtp2 was the earlier plan and was dropped:
-it is C, this crate denies `unsafe`, and a memory-safe stack that hands every
-arriving packet to a C parser is not one.
+Written in-tree from RFC 3711, over two borrowed primitives: the `aes` block
+cipher and, for the two AEAD suites below, `aes-gcm`, for the reasons
+`THIRD-PARTY-NOTICES.md` gives. Counter mode and f8, HMAC-SHA-1, the key
+derivation, the implicit packet index of §3.3.1 and the replay window of
+§3.3.2 are all here, proved against the test vectors in the RFC's own
+Appendix B. Linking libsrtp2 was the earlier plan and was dropped: it is C,
+this crate denies `unsafe`, and a memory-safe stack that hands every arriving
+packet to a C parser is not one.
 
-The three suites RFC 4568 defines — `AES_CM_128_HMAC_SHA1_80`,
-`AES_CM_128_HMAC_SHA1_32` and `F8_128_HMAC_SHA1_80` — with the first as the
-baseline. `UNENCRYPTED_SRTP`, `UNENCRYPTED_SRTCP` and `UNAUTHENTICATED_SRTP`
-are honoured where a peer insists; SRTCP's tag stays at eighty bits whatever
-the suite says about SRTP's, because §5.2 forbids shortening it. Key material
-is zeroised on drop. Unencrypted RTP arriving on a secured session is dropped,
+Seven suites: RFC 4568's three — `AES_CM_128_HMAC_SHA1_80`,
+`AES_CM_128_HMAC_SHA1_32` and `F8_128_HMAC_SHA1_80`, with the first as the
+baseline — RFC 6188's `AES_256_CM_HMAC_SHA1_80` and `_32`, the same two
+transforms under a 256-bit key and RFC 6188's own `AES_256_CM_PRF` key
+derivation, and RFC 7714's `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM`, which
+tie confidentiality and integrity into one AES-GCM call instead of pairing a
+cipher with a separate HMAC — a 128- or 256-bit key, a twelve-octet salt
+where the other five use fourteen, and a sixteen-octet tag embedded in the
+ciphertext rather than appended after it. `UNENCRYPTED_SRTP`,
+`UNENCRYPTED_SRTCP` and `UNAUTHENTICATED_SRTP` are honoured where a peer
+insists for the five non-AEAD suites — an AEAD suite is always both,
+inherently, and has nothing for those parameters to turn off; SRTCP's tag
+stays at its suite's own width whatever the suite says about SRTP's, because
+§5.2 forbids shortening a MAC suite's SRTCP tag below eighty bits, and RFC
+7714 §9 keeps both at sixteen octets for the AEAD ones. Key material is
+zeroised on drop. Unencrypted RTP arriving on a secured session is dropped,
 never accepted as a fallback.
+
+DTLS-SRTP negotiates the same four `AES_CM`/`AEAD_AES_128/256_GCM` suites
+that SDES offers — `SRTP_AEAD_AES_256_GCM` (`0x0008`) and `_128_GCM`
+(`0x0007`) alongside RFC 5764's original two — and prefers the strongest one
+both ends share; a peer that only ever offers the two AES-128-CM profiles
+from RFC 5764 still completes on one of those. SDES answers stay bound to RFC
+4568 §5.1.2's own rule instead: the offerer's own order of preference, the
+first line this stack understands and can be held to, not this stack's own
+ranking of the suites on offer.
 
 The session owns it rather than the caller. `RtpSession::protected` takes the
 two master keys the negotiation produced — one for each direction, because RFC
@@ -698,7 +718,9 @@ either end of a DTLS-SRTP call, and a call reaches it through the facade's
 tested on its own: the TLS 1.2 PRF with SHA-256, the master secret and RFC
 7627's extended master secret, the Finished `verify_data` and the record key
 block; the RFC 5705 exporter and the key layout of RFC 5764 §4.2 for
-`SRTP_AES128_CM_HMAC_SHA1_80` and `_32`; the record layer with its epoch and
+`SRTP_AES128_CM_HMAC_SHA1_80` and `_32`, and RFC 7714 §14.2's
+`SRTP_AEAD_AES_128_GCM` and `_256_GCM`, each exported at its own key and salt
+width; the record layer with its epoch and
 48-bit sequence number, AES-128-GCM protection per RFC 5288 and the
 anti-replay window of RFC 6347 §4.1.2.6; handshake fragmentation to a path MTU
 and reassembly bounded in message length, pieces and memory; strict codecs for

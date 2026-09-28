@@ -1570,8 +1570,9 @@ fn two_stacks_complete_a_dtls_handshake_on_the_media_path_and_the_tone_crosses_a
         "the caller was told {} times",
         secured.len()
     );
-    // RFC 5764 §4.1.2, and sipral-dtls offers the eighty-bit tag first
-    assert_eq!(secured[0].0, sipral_rtp::srtp::Suite::AesCm80);
+    // RFC 5764 §4.1.2, and sipral-dtls now offers RFC 7714's AEAD_AES_256_GCM
+    // first: the strongest profile both ends here support
+    assert_eq!(secured[0].0, sipral_rtp::srtp::Suite::AeadAes256Gcm);
     assert_eq!(secured[0].1, Some(callee_media()));
 
     // and the audio crosses, which is the far end having decrypted it

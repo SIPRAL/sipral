@@ -407,13 +407,17 @@ fn crypto_lines(stream: &MediaDescription) -> impl Iterator<Item = Crypto> + '_ 
 }
 
 /// The transform a suite names, on the media side of the boundary. Two
-/// enumerations of the same three suites, because the crate that reads SDP
+/// enumerations of the same seven suites, because the crate that reads SDP
 /// and the crate that encrypts packets do not depend on each other.
 const fn transform(suite: CryptoSuite) -> Suite {
     match suite {
         CryptoSuite::AesCm80 => Suite::AesCm80,
         CryptoSuite::AesCm32 => Suite::AesCm32,
         CryptoSuite::AesF8 => Suite::AesF8,
+        CryptoSuite::Aes256Cm80 => Suite::Aes256Cm80,
+        CryptoSuite::Aes256Cm32 => Suite::Aes256Cm32,
+        CryptoSuite::AeadAes128Gcm => Suite::AeadAes128Gcm,
+        CryptoSuite::AeadAes256Gcm => Suite::AeadAes256Gcm,
     }
 }
 
@@ -432,7 +436,7 @@ mod tests {
     /// Thirty octets of nothing in particular; what matters in these tests is
     /// which key ends up where, not what is in it.
     fn keys(fill: u8) -> KeySalt {
-        KeySalt::new([fill; 16], [fill.wrapping_add(1); 14])
+        KeySalt::new(&[fill; 16], &[fill.wrapping_add(1); 14])
     }
 
     fn stream(text: &str) -> sipral_core::sdp::MediaDescription {

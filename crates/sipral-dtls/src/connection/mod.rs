@@ -130,7 +130,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::alert::{Alert, AlertDescription};
-use crate::exporter::{SRTP_MASTER_KEY_LEN, SRTP_MASTER_SALT_LEN, SrtpKeys};
+use crate::exporter::SrtpKeys;
 use crate::handshake::{
     self, Certificate as CertificateMessage, CipherSuite, Fragment, HandshakeType, Limits, Message,
     Offered, Reassembler, SrtpProtectionProfile, Transcript,
@@ -159,9 +159,14 @@ const SUITE: CipherSuite = CipherSuite::ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
 /// with RSA. The record protection and the PRF are the same for both.
 const CLIENT_SUITES: [CipherSuite; 2] = [SUITE, CipherSuite::ECDHE_RSA_WITH_AES_128_GCM_SHA256];
 
-/// The SRTP profiles there are keys for. The NULL profiles are refused
-/// outright: RFC 8827 §6.5 forbids negotiating encryption away.
-const KEYABLE: [SrtpProtectionProfile; 2] = [
+/// The SRTP profiles there are keys for, strongest first: this is the
+/// server's own order of preference among whatever a client offers (RFC
+/// 5764 §4.1.1 leaves the choice to the server), and the order a client
+/// offers them in. The NULL profiles are refused outright: RFC 8827 §6.5
+/// forbids negotiating encryption away.
+const KEYABLE: [SrtpProtectionProfile; 4] = [
+    SrtpProtectionProfile::AEAD_AES_256_GCM,
+    SrtpProtectionProfile::AEAD_AES_128_GCM,
     SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80,
     SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32,
 ];
@@ -407,12 +412,14 @@ pub enum Event {
 /// The SRTP keys a completed handshake exported (RFC 5764 §4.2), arranged for
 /// this end.
 ///
-/// A key and a salt per direction, of the sizes an AES-128 counter-mode SRTP
-/// context takes: in `sipral-rtp`, `srtp::Master::new(key, salt)` for each
-/// direction, and a policy whose suite is the profile's —
-/// `SRTP_AES128_CM_HMAC_SHA1_80` is `AES_CM_128_HMAC_SHA1_80` and `_32` is
-/// `_32`. No MKI is ever agreed, so none is carried. The key derivation rate
-/// is zero, as RFC 5764 §4.1.2 fixes it.
+/// A key and a salt per direction, of the width the negotiated profile's own
+/// SRTP crypto suite calls for -- sixteen or thirty-two octets of key,
+/// fourteen or twelve of salt: in `sipral-rtp`, `srtp::Master::new(key,
+/// salt)` for each direction, and a policy whose suite is the profile's —
+/// `SRTP_AES128_CM_HMAC_SHA1_80` is `AES_CM_128_HMAC_SHA1_80`, `_32` is
+/// `_32`, and `SRTP_AEAD_AES_128_GCM`/`_256_GCM` are `AEAD_AES_128_GCM`/
+/// `AEAD_AES_256_GCM`. No MKI is ever agreed, so none is carried. The key
+/// derivation rate is zero, as RFC 5764 §4.1.2 fixes it.
 ///
 /// Wiped when dropped, and never printed.
 pub struct SrtpKeying {
@@ -435,25 +442,25 @@ impl SrtpKeying {
 
     /// The master key protecting what this end sends.
     #[must_use]
-    pub fn local_master_key(&self) -> &[u8; SRTP_MASTER_KEY_LEN] {
+    pub fn local_master_key(&self) -> &[u8] {
         self.keys.master_key(self.role)
     }
 
     /// The master salt protecting what this end sends.
     #[must_use]
-    pub fn local_master_salt(&self) -> &[u8; SRTP_MASTER_SALT_LEN] {
+    pub fn local_master_salt(&self) -> &[u8] {
         self.keys.master_salt(self.role)
     }
 
     /// The master key protecting what the peer sends.
     #[must_use]
-    pub fn remote_master_key(&self) -> &[u8; SRTP_MASTER_KEY_LEN] {
+    pub fn remote_master_key(&self) -> &[u8] {
         self.keys.master_key(self.role.peer())
     }
 
     /// The master salt protecting what the peer sends.
     #[must_use]
-    pub fn remote_master_salt(&self) -> &[u8; SRTP_MASTER_SALT_LEN] {
+    pub fn remote_master_salt(&self) -> &[u8] {
         self.keys.master_salt(self.role.peer())
     }
 }

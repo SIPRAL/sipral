@@ -98,10 +98,12 @@ pub(crate) const OFFERED_SETUP: Setup = Setup::ActPass;
 /// The most expensive policy a handshake here could settle on, for a stream
 /// sizing its buffers before it knows which one it got.
 ///
-/// Both profiles `sipral-dtls` will negotiate are AES-128 in counter mode and
-/// differ only in the tag, so the longer tag is the upper bound. See
+/// Four profiles are keyable (`connection::KEYABLE`), and the two AEAD ones'
+/// sixteen-octet tag is wider than either AES-CM profile's, so one of them —
+/// which of the two makes no difference, their tags are the same width — is
+/// the upper bound. See
 /// [`RtpSession::awaiting`](sipral_rtp::RtpSession::awaiting).
-pub(crate) const MOST: Policy = Policy::new(Suite::AesCm80);
+pub(crate) const MOST: Policy = Policy::new(Suite::AeadAes256Gcm);
 
 /// Random octets for the handshake, out of the media engine's key stream.
 ///
@@ -587,8 +589,8 @@ fn security_of(keying: &SrtpKeying) -> Result<Exported, MediaError> {
     Ok(Exported {
         suite,
         policy: Policy::new(suite),
-        local: Master::new(*keying.local_master_key(), *keying.local_master_salt()),
-        remote: Master::new(*keying.remote_master_key(), *keying.remote_master_salt()),
+        local: Master::new(keying.local_master_key(), keying.local_master_salt()),
+        remote: Master::new(keying.remote_master_key(), keying.remote_master_salt()),
     })
 }
 
@@ -620,6 +622,8 @@ fn suite_of(profile: SrtpProtectionProfile) -> Result<Suite, MediaError> {
     match profile {
         SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80 => Ok(Suite::AesCm80),
         SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32 => Ok(Suite::AesCm32),
+        SrtpProtectionProfile::AEAD_AES_128_GCM => Ok(Suite::AeadAes128Gcm),
+        SrtpProtectionProfile::AEAD_AES_256_GCM => Ok(Suite::AeadAes256Gcm),
         _ => Err(MediaError::DtlsProfile),
     }
 }
@@ -942,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn the_two_profiles_that_can_be_negotiated_both_have_a_transform() {
+    fn every_keyable_profile_has_a_transform() {
         assert_eq!(
             suite_of(SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80),
             Ok(Suite::AesCm80)
@@ -951,7 +955,21 @@ mod tests {
             suite_of(SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32),
             Ok(Suite::AesCm32)
         );
-        assert_eq!(MOST.suite, Suite::AesCm80);
+        assert_eq!(
+            suite_of(SrtpProtectionProfile::AEAD_AES_128_GCM),
+            Ok(Suite::AeadAes128Gcm)
+        );
+        assert_eq!(
+            suite_of(SrtpProtectionProfile::AEAD_AES_256_GCM),
+            Ok(Suite::AeadAes256Gcm)
+        );
+        assert!(suite_of(SrtpProtectionProfile::NULL_HMAC_SHA1_80).is_err());
+        // an AEAD suite's tag is wider than either AES-CM suite's, so it is
+        // the upper bound `MOST` sizes buffers to
+        assert_eq!(MOST.suite, Suite::AeadAes256Gcm);
+        assert!(MOST.suite.tag() >= Suite::AesCm80.tag());
+        assert!(MOST.suite.tag() >= Suite::AesCm32.tag());
+        assert!(MOST.suite.tag() >= Suite::AeadAes128Gcm.tag());
     }
 
     #[test]
@@ -1170,12 +1188,12 @@ mod tests {
             local: sipral_core::sdp::CryptoPolicy::new(
                 1,
                 sipral_core::sdp::CryptoSuite::AesCm80,
-                sipral_core::sdp::KeySalt::new([1; 16], [2; 14]),
+                sipral_core::sdp::KeySalt::new(&[1; 16], &[2; 14]),
             ),
             remote: sipral_core::sdp::CryptoPolicy::new(
                 1,
                 sipral_core::sdp::CryptoSuite::AesCm80,
-                sipral_core::sdp::KeySalt::new([3; 16], [4; 14]),
+                sipral_core::sdp::KeySalt::new(&[3; 16], &[4; 14]),
             ),
         };
         assert!(

@@ -20,6 +20,10 @@ publish.workspace = true
 # constant-time on every target we ship. SHA-1, HMAC, the counter mode, the
 # key derivation and everything else in `srtp` are ours.
 aes = { version = "=0.9.3", features = ["zeroize"] }
+# RFC 7714's AEAD_AES_128_GCM and AEAD_AES_256_GCM: the same version
+# `sipral-dtls` already vets for its own record protection, reused rather
+# than reaching for a second AES-GCM implementation
+aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "zeroize"] }
 # wiping master and session keys when they go out of scope needs a write the
 # optimiser is not allowed to remove, and that needs `unsafe`, which this
 # crate denies

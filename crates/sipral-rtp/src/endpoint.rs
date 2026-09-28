@@ -3360,8 +3360,8 @@ mod tests {
     /// to open what it sends — RFC 4568 §7.1.1's two master keys.
     fn secured_pair() -> (RtpSession, RtpSession) {
         let policy = Policy::new(Suite::AesCm80);
-        let ours = || Master::new([0x11; 16], [0x22; 14]);
-        let theirs = || Master::new([0x33; 16], [0x44; 14]);
+        let ours = || Master::new(&[0x11; 16], &[0x22; 14]);
+        let theirs = || Master::new(&[0x33; 16], &[0x44; 14]);
 
         let mut caller_config = config();
         caller_config.remote = addr(PEER);
@@ -3512,9 +3512,9 @@ mod tests {
         let policy = Policy::new(Suite::AesCm80);
         assert!(session.keyed(Security::new(
             policy,
-            Master::new([0x11; 16], [0x22; 14]),
+            Master::new(&[0x11; 16], &[0x22; 14]),
             policy,
-            Master::new([0x33; 16], [0x44; 14]),
+            Master::new(&[0x33; 16], &[0x44; 14]),
         )));
         assert_eq!(session.rtp_overhead(), 10);
         assert_eq!(session.rtcp_overhead(), 14);
@@ -3523,8 +3523,8 @@ mod tests {
     #[test]
     fn keys_arriving_open_a_stream_that_was_waiting_for_them() {
         let policy = Policy::new(Suite::AesCm80);
-        let ours = || Master::new([0x11; 16], [0x22; 14]);
-        let theirs = || Master::new([0x33; 16], [0x44; 14]);
+        let ours = || Master::new(&[0x11; 16], &[0x22; 14]);
+        let theirs = || Master::new(&[0x33; 16], &[0x44; 14]);
 
         let mut caller = awaiting_session();
         assert!(caller.keyed(Security::new(policy, ours(), policy, theirs())));
@@ -3574,9 +3574,9 @@ mod tests {
         let policy = Policy::new(Suite::AesCm80);
         assert!(session.keyed(Security::new(
             policy,
-            Master::new([0x11; 16], [0x22; 14]),
+            Master::new(&[0x11; 16], &[0x22; 14]),
             policy,
-            Master::new([0x33; 16], [0x44; 14]),
+            Master::new(&[0x33; 16], &[0x44; 14]),
         )));
 
         let mut plain = RtpSession::new(&config(), 0.5);
@@ -3597,9 +3597,9 @@ mod tests {
         let policy = Policy::new(Suite::AesCm80);
         assert!(!session.keyed(Security::new(
             policy,
-            Master::new([0x11; 16], [0x22; 14]),
+            Master::new(&[0x11; 16], &[0x22; 14]),
             policy,
-            Master::new([0x33; 16], [0x44; 14]),
+            Master::new(&[0x33; 16], &[0x44; 14]),
         )));
         assert_eq!(session.rtp_overhead(), 0, "it took them anyway");
         let mut wire = vec![0_u8; 64];
@@ -3618,9 +3618,9 @@ mod tests {
         let policy = Policy::new(Suite::AesCm32);
         assert!(!caller.keyed(Security::new(
             policy,
-            Master::new([0x55; 16], [0x66; 14]),
+            Master::new(&[0x55; 16], &[0x66; 14]),
             policy,
-            Master::new([0x77; 16], [0x88; 14]),
+            Master::new(&[0x77; 16], &[0x88; 14]),
         )));
         assert_eq!(caller.rtp_overhead(), 10, "the shorter tag was installed");
     }
@@ -3634,9 +3634,9 @@ mod tests {
             0.5,
             Security::new(
                 policy,
-                Master::new([0x55; 16], [0x66; 14]),
+                Master::new(&[0x55; 16], &[0x66; 14]),
                 policy,
-                Master::new([0x77; 16], [0x88; 14]),
+                Master::new(&[0x77; 16], &[0x88; 14]),
             ),
         );
 

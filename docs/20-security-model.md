@@ -324,6 +324,22 @@ In short: SDES is exactly as protected as the transport carrying the SDP,
 never more, and this layer will not pretend otherwise by turning itself on
 without being told the transport is safe.
 
+**RFC 7714's two AEAD suites, and where their nonce uniqueness comes from.**
+`AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` (8.2.4) fold confidentiality and
+integrity into one AES-GCM call, so the property that matters most is the one
+every GCM construction lives or dies by: the (SSRC, ROC, SEQ) triple that
+forms the RTP nonce, and the SRTCP index that forms the RTCP one, must never
+repeat under one master key (RFC 7714 §8.4, §9.4 — reusing a GCM nonce breaks
+both secrecy and authentication at once, unlike AES-CM under a forged tag).
+This implementation adds no new state to get there: the rollover counter, the
+packet index estimate and the `2^48`/`2^31` key-exhaustion limits in
+`crates/sipral-rtp/src/srtp/session.rs` are the same ones RFC 3711's `AES_CM`
+suites already enforce, so an AEAD suite inherits the guarantee rather than
+needing a second one. The SDES and DTLS-SRTP session-key derivation for a
+master key is still one key management event per master key (`Master::new`
+under one salt, never reused across a re-key), which is what keeps a fresh
+nonce space on every re-key rather than continuing an old one.
+
 **The push token stays off every request but `REGISTER`.** RFC 8599 §4.1's own
 requirement. `Account::contact_value` (`crates/sipral-ua/src/account.rs`)
 builds a `Contact` with no push parameters at all and is what every in-dialog
