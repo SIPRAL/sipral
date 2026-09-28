@@ -1520,10 +1520,7 @@ impl MediaEngine {
         let (identity, session_id) = draw(agent);
         // drawn after the identity, so that the same call placed with and
         // without SDES starts from the same SSRC and the same sequence number
-        let keys = catalog
-            .srtp()
-            .offers()
-            .then(|| draw_key_for(CryptoSuite::AesCm80, &mut self.keys));
+        let keys = catalog.srtp().offers().then(|| self.draw_offer_keys());
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
         let ice = self.first_ice(None, &catalog, local, public, handed, true, now)?;
         let described = public.unwrap_or(local);
@@ -1643,10 +1640,7 @@ impl MediaEngine {
         let public = public.or_else(|| handed.mapped());
         let catalog = CallMedia::offering(catalog, public);
         let (identity, session_id) = draw(agent);
-        let keys = catalog
-            .srtp()
-            .offers()
-            .then(|| draw_key_for(CryptoSuite::AesCm80, &mut self.keys));
+        let keys = catalog.srtp().offers().then(|| self.draw_offer_keys());
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
         let ice = self.first_ice(None, &catalog, local, public, handed, true, now)?;
         let described = public.unwrap_or(local);
@@ -1949,8 +1943,6 @@ impl MediaEngine {
         if !keying_allows(&catalog, offered.as_ref()) {
             return Err(MediaError::SrtpRequired);
         }
-        let keys = will_key(&catalog, offered.as_ref())
-            .then(|| draw_key_for(suite_for_own_key(offered.as_ref()), &mut self.keys));
         // an INVITE with no offer leaves this end offering, so which side it
         // is on is decided by what arrived rather than by which method was
         // called
@@ -1969,8 +1961,9 @@ impl MediaEngine {
             offered.is_none(),
             now,
         )?;
-        let mut description = match offered.as_ref() {
-            Some(offer) => write_answer(
+        let mut description = if let Some(offer) = offered.as_ref() {
+            let keys = self.reoffer_keys(&catalog, offer, None);
+            write_answer(
                 &catalog,
                 offer,
                 described,
@@ -1978,15 +1971,17 @@ impl MediaEngine {
                 version,
                 keys.as_ref(),
                 keyed(dtls.as_ref()),
-            )?,
-            None => write_offer(
+            )?
+        } else {
+            let keys = catalog.srtp().offers().then(|| self.draw_offer_keys());
+            write_offer(
                 &catalog,
                 described,
                 session_id,
                 version,
                 keys,
                 keyed(dtls.as_ref()),
-            ),
+            )
         };
         describe_ice(&mut description, ice.as_ref(), offered.as_ref());
         let bytes = description.to_bytes();
@@ -2892,20 +2887,6 @@ impl MediaEngine {
         self.settle(call, now);
     }
 
-    /// The far end offered something the user agent has no policy for: a
-    /// codec change, or anything at all on a secured stream — a hold and a
-    /// session refresh among them, since their answers need this end's key or
-    /// its certificate and role, which the user agent does not hold. It has
-    /// one here: the same answer any offer gets, keyed the way the call
-    /// already is.
-    ///
-    /// Only on a call this engine describes. One the application answered
-    /// with a description of its own is left alone: the event goes on to the
-    /// application untouched, which holds the only description there is and
-    /// answers with `UserAgent::accept_reoffer`. Refusing it here instead
-    /// would answer 488 to every hold the far end puts on such a call — every
-    /// re-offer on a secured one is handed up — and leave the application's
-    /// own answer failing for want of a request to answer.
     /// The key the answer to a re-offer carries: `in_force` repeated where
     /// there is one, since RFC 4568 §7.1.4 warns that changing it opens a
     /// window where the offerer cannot process what this end sends; one drawn
@@ -2923,6 +2904,29 @@ impl MediaEngine {
         })
     }
 
+    /// One key per suite `keying::OFFERED` names, in that order, for a fresh
+    /// offer this end is about to write. Each width matches the suite it is
+    /// drawn for, and RFC 4568 §6.1's "MUST be unique ... with respect to
+    /// other master keys in the entire SDP message" holds because every draw
+    /// moves this engine's own counter on.
+    fn draw_offer_keys(&mut self) -> [KeySalt; keying::OFFERED.len()] {
+        keying::OFFERED.map(|suite| draw_key_for(suite, &mut self.keys))
+    }
+
+    /// The far end offered something the user agent has no policy for: a
+    /// codec change, or anything at all on a secured stream — a hold and a
+    /// session refresh among them, since their answers need this end's key or
+    /// its certificate and role, which the user agent does not hold. It has
+    /// one here: the same answer any offer gets, keyed the way the call
+    /// already is.
+    ///
+    /// Only on a call this engine describes. One the application answered
+    /// with a description of its own is left alone: the event goes on to the
+    /// application untouched, which holds the only description there is and
+    /// answers with `UserAgent::accept_reoffer`. Refusing it here instead
+    /// would answer 488 to every hold the far end puts on such a call — every
+    /// re-offer on a secured one is handed up — and leave the application's
+    /// own answer failing for want of a request to answer.
     fn answer_reoffer(
         &mut self,
         call: CallHandle,
@@ -3721,7 +3725,7 @@ fn write_offer(
     address: SocketAddr,
     session_id: u64,
     version: u64,
-    keys: Option<KeySalt>,
+    keys: Option<[KeySalt; keying::OFFERED.len()]>,
     dtls: Option<Keyed<'_>>,
 ) -> SessionDescription {
     let mut description = SessionDescription::new(

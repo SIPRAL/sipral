@@ -1769,13 +1769,15 @@ fn a_call_that_offered_sdes_carries_none_of_the_plaintext_on_the_wire() {
         loudness(&closed.played)
     );
 
-    // and the octets: an eighty-bit tag longer, the header still readable
-    // because RFC 3711 §3.1 leaves it in the clear, and nothing of the
-    // payload anywhere in it
+    // and the octets: the accepted suite's tag longer -- AEAD_AES_256_GCM,
+    // the strongest this end offers and the first line the answering side
+    // understands, so its sixteen-octet tag rather than AES_CM_128's ten --
+    // the header still readable because RFC 3711 §3.1 leaves it in the
+    // clear, and nothing of the payload anywhere in it
     assert_eq!(
         closed.datagram.len(),
-        open.datagram.len() + 10,
-        "the packet did not grow by the tag of AES_CM_128_HMAC_SHA1_80"
+        open.datagram.len() + 16,
+        "the packet did not grow by AEAD_AES_256_GCM's own tag"
     );
     assert_eq!(
         &closed.datagram[..12],

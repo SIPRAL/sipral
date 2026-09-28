@@ -300,9 +300,20 @@ mod tests {
             "the flag is the list and not a second opinion about it"
         );
 
+        // one key per suite crate::keying::OFFERED names, in that order:
+        // AEAD_AES_256_GCM, AEAD_AES_128_GCM, AES_256_CM_HMAC_SHA1_80, then
+        // AES_CM_128_HMAC_SHA1_80
         let offer = CodecCatalog::new()
             .with_srtp(SrtpPolicy::Offered)
-            .offering(Some(KeySalt::new(&[3; 16], &[4; 14])), None)
+            .offering(
+                Some([
+                    KeySalt::new(&[3; 32], &[4; 12]),
+                    KeySalt::new(&[5; 16], &[6; 12]),
+                    KeySalt::new(&[7; 32], &[8; 14]),
+                    KeySalt::new(&[9; 16], &[10; 14]),
+                ]),
+                None,
+            )
             .offer("audio", 40_000, Direction::SendRecv);
         assert_eq!(offer.proto, "RTP/SAVP");
         assert!(

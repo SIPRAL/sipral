@@ -42,20 +42,27 @@ use sipral_rtp::srtp::{Master, Mki, Policy, Security, Suite};
 
 use crate::error::MediaError;
 
-/// The tag on the one line this end offers. RFC 4568 §4 only asks that a tag
-/// be unique among a media line's own crypto attributes, and with one line
-/// there is nothing to be unique against.
-const TAG: u32 = 1;
-
-/// The suite this end offers.
+/// The suites this end offers, one line each, tagged in this order starting
+/// from 1 — RFC 4568 §4 only asks that a tag be unique among a media line's
+/// own crypto attributes. Strongest first (8.2.4): `AEAD_AES_256_GCM`,
+/// `AEAD_AES_128_GCM`, `AES_256_CM_HMAC_SHA1_80`, then
+/// `AES_CM_128_HMAC_SHA1_80` — RFC 6188's and RFC 7714's suites named ahead
+/// of the one suite every implementation has, so an answerer that itself
+/// prefers strength (§5.1.2 leaves the answerer's own policy free; it binds
+/// only the offerer's own *order*) settles on one of the newer three, and a
+/// peer with nothing but the original suite still finds it, last in the
+/// list. Each carries a master key of its own (§6.1: every key "MUST be
+/// unique ... with respect to other master keys in the entire SDP message").
 ///
-/// One line rather than three. `AES_CM_128_HMAC_SHA1_80` is the suite every
-/// implementation has, each further line would need a master key of its own
-/// (§6.1: every key "MUST be unique ... with respect to other master keys in
-/// the entire SDP message"), and each costs about eighty octets in a body
-/// that `docs/06-nat.md` already argues has to fit a datagram. All three
-/// suites are accepted when a peer offers them; only the offer is narrow.
-const OFFERED: CryptoSuite = CryptoSuite::AesCm80;
+/// The narrower `AES_CM_128_HMAC_SHA1_32` and `F8_128_HMAC_SHA1_80` are
+/// still accepted when a peer offers them (`from_name` reads all seven); only
+/// this end's own offer stays to the four above.
+pub(crate) const OFFERED: [CryptoSuite; 4] = [
+    CryptoSuite::AeadAes256Gcm,
+    CryptoSuite::AeadAes128Gcm,
+    CryptoSuite::Aes256Cm80,
+    CryptoSuite::AesCm80,
+];
 
 /// What a call does about SRTP.
 ///
@@ -180,9 +187,25 @@ impl SrtpPolicy {
     }
 }
 
-/// The `a=crypto` line this end offers, carrying `keys`.
-pub(crate) fn offer_line(keys: KeySalt) -> Crypto {
-    CryptoPolicy::new(TAG, OFFERED, keys).to_crypto()
+/// The `a=crypto` lines this end offers, one per [`OFFERED`] suite in the
+/// same order, tagged 1 through 4, each carrying the matching key of `keys`.
+///
+/// `keys` is one key per offered suite, each already the width that suite's
+/// own `key_len`/`salt_len` calls for — [`crate::engine`]'s `draw_key_for`
+/// draws them that way — and in [`OFFERED`]'s own order, so the tag, the
+/// suite name and the key line up without this function having to ask which
+/// is which.
+pub(crate) fn offer_lines(keys: [KeySalt; OFFERED.len()]) -> Vec<Crypto> {
+    OFFERED
+        .into_iter()
+        .zip(keys)
+        .enumerate()
+        .map(|(index, (suite, key))| {
+            // tags start at 1; OFFERED has four entries, so this always fits
+            let tag = u32::try_from(index).unwrap_or(0) + 1;
+            CryptoPolicy::new(tag, suite, key).to_crypto()
+        })
+        .collect()
 }
 
 /// The line an answer carries: the tag and suite of the accepted offer
@@ -424,7 +447,8 @@ const fn transform(suite: CryptoSuite) -> Suite {
 #[cfg(test)]
 mod tests {
     use super::{
-        Opening, SrtpPolicy, acceptable, is_secure, offer_line, opening, peer_line_holds, usable,
+        OFFERED, Opening, SrtpPolicy, acceptable, is_secure, offer_lines, opening, peer_line_holds,
+        usable,
     };
     use sipral_core::sdp::{Crypto, CryptoSuite, KeySalt, Keying, MediaPlan, parse};
     use sipral_core::sdp::{Direction, NegotiatedCodec, RtcpPlan, RtpMap};
@@ -437,6 +461,18 @@ mod tests {
     /// which key ends up where, not what is in it.
     fn keys(fill: u8) -> KeySalt {
         KeySalt::new(&[fill; 16], &[fill.wrapping_add(1); 14])
+    }
+
+    /// One key per suite [`OFFERED`] names, each the width its own suite
+    /// calls for, filled from `fill` on so the four are never the same
+    /// bytes.
+    fn offer_keys(fill: u8) -> [KeySalt; OFFERED.len()] {
+        OFFERED.map(|suite| {
+            KeySalt::new(
+                &vec![fill; suite.key_len()],
+                &vec![fill.wrapping_add(1); suite.salt_len()],
+            )
+        })
     }
 
     fn stream(text: &str) -> sipral_core::sdp::MediaDescription {
@@ -477,15 +513,28 @@ mod tests {
     }
 
     #[test]
-    fn the_offered_line_is_one_line_at_tag_one() {
-        let line = offer_line(keys(7));
-        assert_eq!(line.tag, 1);
-        assert_eq!(line.suite, "AES_CM_128_HMAC_SHA1_80");
-        assert!(line.key_params.starts_with("inline:"));
-        assert!(line.session_params.is_empty());
-        // thirty octets of key and salt, base64 without padding characters
-        // left over: RFC 4568 §6.2.1 fixes the decoded length at thirty
-        assert_eq!(line.key_params.len(), "inline:".len() + 40);
+    fn the_offer_is_one_line_per_offered_suite_tagged_in_order_strongest_first() {
+        let lines = offer_lines(offer_keys(7));
+        assert_eq!(lines.len(), OFFERED.len());
+        for (index, (line, suite)) in lines.iter().zip(OFFERED).enumerate() {
+            let tag = u32::try_from(index).expect("four fits") + 1;
+            assert_eq!(line.tag, tag, "{}", suite.name());
+            assert_eq!(line.suite, suite.name());
+            assert!(line.key_params.starts_with("inline:"), "{}", suite.name());
+            assert!(line.session_params.is_empty(), "{}", suite.name());
+        }
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.suite.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "AEAD_AES_256_GCM",
+                "AEAD_AES_128_GCM",
+                "AES_256_CM_HMAC_SHA1_80",
+                "AES_CM_128_HMAC_SHA1_80",
+            ]
+        );
     }
 
     /// §5.1.2 has the answerer take the offerer's own first choice among the

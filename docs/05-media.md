@@ -667,14 +667,27 @@ stays at its suite's own width whatever the suite says about SRTP's, because
 zeroised on drop. Unencrypted RTP arriving on a secured session is dropped,
 never accepted as a fallback.
 
+An SDES offer carries four `a=crypto` lines, one per suite, tagged 1 through
+4 and strongest first: `AEAD_AES_256_GCM`, `AEAD_AES_128_GCM`,
+`AES_256_CM_HMAC_SHA1_80`, then `AES_CM_128_HMAC_SHA1_80`, each with a master
+key of its own (§6.1's "MUST be unique ... with respect to other master keys
+in the entire SDP message"). *Answering* one stays bound to RFC 4568 §5.1.2's
+own rule instead: the offerer's own order of preference, the first line this
+stack understands and can be held to, not this stack's own ranking of the
+suites on offer — so a peer that lists `AES_CM_128_HMAC_SHA1_80` first is
+answered with that suite even though this stack would itself have preferred
+one of the newer three. `AES_CM_128_HMAC_SHA1_32` and `F8_128_HMAC_SHA1_80`
+are accepted the same way when a peer offers either; neither is this end's
+own offer.
+
 DTLS-SRTP negotiates the same four `AES_CM`/`AEAD_AES_128/256_GCM` suites
 that SDES offers — `SRTP_AEAD_AES_256_GCM` (`0x0008`) and `_128_GCM`
 (`0x0007`) alongside RFC 5764's original two — and prefers the strongest one
-both ends share; a peer that only ever offers the two AES-128-CM profiles
-from RFC 5764 still completes on one of those. SDES answers stay bound to RFC
-4568 §5.1.2's own rule instead: the offerer's own order of preference, the
-first line this stack understands and can be held to, not this stack's own
-ranking of the suites on offer.
+both ends share, unlike SDES: RFC 5764 §4.1.1 leaves the server's choice
+among a client's offered profiles to the server's own policy, so two calls
+placed with this stack settle on `AEAD_AES_256_GCM`; a peer that only ever
+offers the two AES-128-CM profiles from RFC 5764 still completes on one of
+those.
 
 The session owns it rather than the caller. `RtpSession::protected` takes the
 two master keys the negotiation produced — one for each direction, because RFC

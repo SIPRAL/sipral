@@ -275,15 +275,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `AES_256_CM_HMAC_SHA1_80`/`_32` (RFC 6188) and `AEAD_AES_128_GCM`/
   `AEAD_AES_256_GCM` (RFC 7714) join the three suites SDES already carried;
   the AEAD suites tie confidentiality and integrity into one AES-GCM call
-  rather than pairing AES-CM with a separate HMAC. A peer's SDES offer
-  naming any of the four is answered on RFC 4568 §5.1.2's own terms — the
-  offerer's own order, the first line this stack can be held to. DTLS-SRTP
-  now negotiates `SRTP_AEAD_AES_128_GCM`/`_256_GCM` (RFC 7714 §14.2)
-  alongside the original two AES-128-CM profiles and prefers the strongest
-  one both ends share, so two calls placed with this stack settle on
-  `AEAD_AES_256_GCM`; a peer offering only the two AES-128-CM profiles still
-  completes on one of those. Every RFC 7714 §16–§17 and RFC 6188 §7 test
-  vector passes byte for byte.
+  rather than pairing AES-CM with a separate HMAC. An SDES offer now
+  carries four `a=crypto` lines, strongest first — `AEAD_AES_256_GCM`,
+  `AEAD_AES_128_GCM`, `AES_256_CM_HMAC_SHA1_80`, `AES_CM_128_HMAC_SHA1_80`
+  — each with a master key of its own; *answering* one stays bound to RFC
+  4568 §5.1.2's own terms, the offerer's own order, the first line this
+  stack can be held to, so a peer's own preference is never overridden.
+  DTLS-SRTP now negotiates `SRTP_AEAD_AES_128_GCM`/`_256_GCM` (RFC 7714
+  §14.2) alongside the original two AES-128-CM profiles and prefers the
+  strongest one both ends share — RFC 5764 leaves that choice to the
+  server, unlike SDES — so two calls placed with this stack settle on
+  `AEAD_AES_256_GCM`; a peer offering only the two AES-128-CM profiles
+  still completes on one of those. Every RFC 7714 §16–§17 and RFC 6188 §7
+  test vector passes byte for byte.
 - **The .NET binding can get a call past a NAT.** `SipralStack`'s
   constructor grew `nat`/`stunServer` and `turnServer`/`turnUsername`/
   `turnPassword` for a relay, alongside the codec/frame/DTMF/SRTP

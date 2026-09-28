@@ -702,12 +702,12 @@ impl CodecCatalog {
 
     /// The same, with the keying a description under this policy carries.
     ///
-    /// `keys` is the master key and salt this end will use for what it sends,
-    /// drawn once for the description being written, and `dtls` is the
-    /// fingerprint of this stack's certificate with the `a=setup` that goes
-    /// beside it. A policy that does not offer, or a description with neither
-    /// to write, leaves the offer on `RTP/AVP` with nothing in the body that
-    /// has to be kept secret.
+    /// `keys` is one master key and salt per suite `keying::OFFERED` names,
+    /// each already drawn for the description being written, and `dtls` is
+    /// the fingerprint of this stack's certificate with the `a=setup` that
+    /// goes beside it. A policy that does not offer, or a description with
+    /// neither to write, leaves the offer on `RTP/AVP` with nothing in the
+    /// body that has to be kept secret.
     ///
     /// A DTLS description also asks for `a=rtcp-mux` whatever the catalogue
     /// says, because RFC 5764 §4.2 puts a second handshake on a separate RTCP
@@ -715,7 +715,7 @@ impl CodecCatalog {
     /// becoming a refusal later.
     pub(crate) fn offering(
         &self,
-        keys: Option<KeySalt>,
+        keys: Option<[KeySalt; keying::OFFERED.len()]>,
         dtls: Option<Keyed<'_>>,
     ) -> MediaCapabilities {
         let capabilities = self.capabilities();
@@ -731,7 +731,7 @@ impl CodecCatalog {
         #[cfg(not(feature = "dtls"))]
         let _ = dtls;
         match keys.filter(|_| self.srtp.offers()) {
-            Some(keys) => capabilities.with_srtp(SrtpSupport::Sdes(vec![keying::offer_line(keys)])),
+            Some(keys) => capabilities.with_srtp(SrtpSupport::Sdes(keying::offer_lines(keys))),
             None => capabilities,
         }
     }
