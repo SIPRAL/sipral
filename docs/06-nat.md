@@ -87,11 +87,27 @@ chosen for it rather than for the general case.
 The 143 is measured, not estimated, and pinned by
 `what_declaring_ice_costs_on_the_wire` in `crates/sipral-nat/src/ice/sdp.rs` so
 that this table cannot quietly stop being true. It is the floor: one address,
-one component, one candidate. A laptop with Wi-Fi, Ethernet and a VPN, offering
-RTP and RTCP with a reflexive candidate for each, writes 143 plus eight more
-candidate lines, and an offer that carried them would no longer fit the
-1300-byte datagram floor
-RFC 3261 §18.1.1 sets. That is not hypothetical: a request that outgrew its path
+one component, one candidate. The most the facade offers is three — the host
+candidate, a server-reflexive one and a relayed one, on one component, since
+offering ICE asks for `a=rtcp-mux` — and the whole INVITE that carries them is
+measured against the 1300 bytes RFC 3261 §18.1.1 lets a request take over a
+datagram by `an_invite_with_every_candidate_is_measured_against_the_datagram_floor`
+in `crates/sipral/src/tests.rs`: every codec the default catalogue offers
+(Opus, G.722, PCMU, PCMA, telephone-event), SRTP, the three candidates, and
+the headers every INVITE this stack writes carries (`Via` with `rport`,
+`Contact`, `Supported`, `Allow`, `Session-Expires`), from test addresses in
+the documentation ranges. Keyed by SDES, whose offer names two suites and so
+carries two `a=crypto` lines, it is **1375 bytes**, 75 over; keyed by
+DTLS-SRTP, with its `a=fingerprint` and `a=setup`, it is **1338**, 38 over.
+The endpoint sends neither on UDP — it answers `NeedsStreamTransport` and asks
+for a stream, as it does for any request past the floor. The test holds both
+between 1301 and 1400, so neither moves far without this paragraph being read
+again. Three things the measurement leaves out push a real INVITE further:
+longer addresses than the documentation ranges' (up to six bytes more for each
+of the dozen an INVITE names), a longer user and domain, and the credentials
+on the retry after a digest challenge, which are a couple of hundred bytes by
+themselves. A deployment that offers ICE with a relay therefore needs a stream
+for its signalling. That is not hypothetical: a request that outgrew its path
 and was silently dropped by a NAT is the most expensive failure this project has
 a record of, and NAT-traversal attributes were four hundred of the bytes that did
 it — against a peer that did not speak the protocol at all.

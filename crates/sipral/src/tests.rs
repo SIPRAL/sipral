@@ -6247,6 +6247,79 @@ fn a_closed_connection_takes_the_relay_and_the_path_through_it() {
     assert!(lost, "the path through the lost relay was reported gone");
 }
 
+/// Place the caller's call with every codec the default catalogue offers,
+/// SRTP keyed under `srtp`, and ICE with every candidate the facade gathers
+/// (host, server-reflexive and relayed), and say what became of the INVITE
+/// on the datagram transport: `Ok` with its bytes when it went, `Err` with
+/// the size §18.1.1 refused it at when it did not.
+#[cfg(all(feature = "ice", feature = "dtls", feature = "opus"))]
+fn invite_with_every_candidate(srtp: SrtpPolicy) -> Result<Vec<u8>, usize> {
+    use sipral_core::diag::Reason;
+    use sipral_core::endpoint::SendError;
+
+    let catalog = CodecCatalog::new()
+        .with_srtp(srtp)
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let account = pair.caller.account("alice", callee_sip());
+    let relay = relay_for_the_caller(&mut pair);
+    let media = CallMedia::new(catalog, MediaConfig::default()).relay(relay);
+    let placed = pair.caller.engine.place_with(
+        &mut pair.caller.agent,
+        account,
+        OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+        caller_media(),
+        media,
+        pair.now,
+    );
+    let invite = pair
+        .caller
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "));
+    match placed {
+        Ok(_) => Ok(invite.expect("an INVITE on the datagram transport")),
+        Err(MediaError::Signalling(crate::UaError::Send(SendError::NeedsStreamTransport))) => {
+            assert!(invite.is_none(), "refused, and sent anyway");
+            let endpoint = pair.caller.agent.endpoint();
+            let calls: Vec<_> = endpoint.recorded_calls().cloned().collect();
+            let measure = calls
+                .iter()
+                .filter_map(|call| endpoint.call_record(call))
+                .flat_map(sipral_core::diag::Record::decisions)
+                .find(|decision| decision.reason == Reason::TransportRefusedBySize)
+                .and_then(|decision| decision.measure)
+                .expect("the refusal is in the record, with its size");
+            assert_eq!(measure.limit, 1300);
+            Err(measure.size)
+        }
+        Err(other) => panic!("the call was not placed: {other:?}"),
+    }
+}
+
+/// `docs/06-nat.md`'s budget, measured on the INVITE this stack actually
+/// writes rather than argued: every codec the default catalogue offers,
+/// SRTP, ICE with every candidate the facade gathers, and the headers every
+/// INVITE carries, against the 1300 bytes RFC 3261 §18.1.1 lets a request
+/// take over a datagram. Neither keying fits: SDES offers two `a=crypto`
+/// lines and DTLS-SRTP a fingerprint, and with three candidates either
+/// INVITE is past the floor, so the endpoint refuses it the datagram and
+/// asks for a stream rather than send something the path would fragment.
+/// The sizes are the ones the endpoint wrote in the call's record when it
+/// refused. The page quotes both numbers, and the bounds here keep either
+/// from moving far without the page being read again.
+#[cfg(all(feature = "ice", feature = "dtls", feature = "opus"))]
+#[test]
+fn an_invite_with_every_candidate_is_measured_against_the_datagram_floor() {
+    let sdes = invite_with_every_candidate(SrtpPolicy::Offered)
+        .expect_err("SDES with every candidate needs a stream");
+    assert!((1301..=1400).contains(&sdes), "{sdes} bytes with SDES");
+
+    let dtls = invite_with_every_candidate(SrtpPolicy::DtlsOffered)
+        .expect_err("DTLS-SRTP with every candidate needs a stream");
+    assert!((1301..=1400).contains(&dtls), "{dtls} bytes with DTLS-SRTP");
+}
+
 #[cfg(feature = "ice")]
 #[test]
 fn a_relay_goes_back_when_the_call_ends_before_it_was_answered() {

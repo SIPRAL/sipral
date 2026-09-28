@@ -340,7 +340,9 @@ mod tests {
     /// laptop with Wi-Fi, Ethernet and a VPN, offering both components and a
     /// reflexive candidate for each, adds eight more candidate lines to that
     /// floor — not eight more copies of the fixed attributes, which are
-    /// written once regardless of how many candidates follow.
+    /// written once regardless of how many candidates follow. What a whole
+    /// INVITE with the facade's own candidates comes to is measured beside
+    /// the facade, in `crates/sipral/src/tests.rs`.
     #[test]
     fn what_declaring_ice_costs_on_the_wire() {
         // `n` identical candidates, so every candidate line this writes is
@@ -389,8 +391,8 @@ mod tests {
         assert_eq!(
             nine_candidates,
             one_candidate + 8 * per_extra_line,
-            "docs/06-nat.md says 143 plus eight more candidate lines, not the \
-             143-byte floor multiplied by nine"
+            "each candidate past the first adds one candidate line, not \
+             another copy of the 143-byte floor"
         );
     }
 
