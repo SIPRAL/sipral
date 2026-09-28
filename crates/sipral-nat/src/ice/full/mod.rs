@@ -1456,7 +1456,11 @@ impl IceAgent {
     ///
     /// `Ok(None)` when no whole message is waiting. Loop until it says so
     /// after every [`IceAgent::push_stream`], draining
-    /// [`IceAgent::poll_transmit`] as after any datagram.
+    /// [`IceAgent::poll_transmit`] as after any datagram. For a relay the
+    /// agents of a forked call share ([`SharedRelay`]), whose one connection
+    /// carries every branch's peer, [`IceAgent::next_stream_frame`],
+    /// [`IceAgent::claims`] and [`IceAgent::take_stream_frame`] do the same
+    /// in three steps, so that each message reaches the branch it is for.
     ///
     /// # Errors
     ///
@@ -1471,29 +1475,72 @@ impl IceAgent {
         frame: &mut Vec<u8>,
         now: Instant,
     ) -> Result<Option<Received>, FrameError> {
-        let Some(relay) = self.stream_relay(local, server) else {
+        if !self.next_stream_frame(local, server, frame, now)? {
             return Ok(None);
+        }
+        Ok(Some(
+            match self.take_stream_frame(local, server, frame, now) {
+                // a whole frame the relay did not claim is dropped here: on a
+                // connection only the server writes to, there is nobody else it
+                // could be for
+                Received::Foreign => Received::Consumed,
+                received => received,
+            },
+        ))
+    }
+
+    /// The next whole message the connection from `local` to `server` has
+    /// carried, copied into `frame` and not yet taken: `Ok(false)` when none
+    /// is waiting. Whichever agent holding the same relay it is for takes it
+    /// with [`IceAgent::take_stream_frame`]; [`IceAgent::claims`], asked
+    /// about it as a datagram from `server`, says which.
+    ///
+    /// # Errors
+    ///
+    /// As [`IceAgent::poll_stream`], and the relay is lost the same way.
+    pub fn next_stream_frame(
+        &mut self,
+        local: SocketAddr,
+        server: SocketAddr,
+        frame: &mut Vec<u8>,
+        now: Instant,
+    ) -> Result<bool, FrameError> {
+        frame.clear();
+        let Some(relay) = self.stream_relay(local, server) else {
+            return Ok(false);
+        };
+        let Some(entry) = self.relays.get_mut(relay) else {
+            return Ok(false);
+        };
+        let taken = entry.client.next_stream_frame(frame, now);
+        if taken.is_err() {
+            self.drain_relay(relay, now);
+        }
+        taken
+    }
+
+    /// Take `frame`, one whole message off the connection from `local` to
+    /// `server` ([`IceAgent::next_stream_frame`]), as
+    /// [`IceAgent::poll_stream`] takes the ones it reads itself.
+    /// [`Received::Foreign`] when no relay here runs over that connection,
+    /// or when this agent let go of the relay and the message is a peer's:
+    /// another agent that holds it may want it.
+    pub fn take_stream_frame(
+        &mut self,
+        local: SocketAddr,
+        server: SocketAddr,
+        frame: &[u8],
+        now: Instant,
+    ) -> Received {
+        let Some(relay) = self.stream_relay(local, server) else {
+            return Received::Foreign;
         };
         self.feed_relay(relay);
         let Some(entry) = self.relays.get_mut(relay) else {
-            return Ok(None);
+            return Received::Foreign;
         };
-        let taken = entry.client.poll_stream(frame, now);
-        let input = match taken {
-            Ok(Some(input)) => input,
-            Ok(None) => return Ok(None),
-            Err(error) => {
-                self.drain_relay(relay, now);
-                return Err(error);
-            }
-        };
-        Ok(Some(match self.on_relay_input(relay, input, frame, now) {
-            // a whole frame the relay did not claim is dropped here: on a
-            // connection only the server writes to, there is nobody else it
-            // could be for
-            Received::Foreign => Received::Consumed,
-            received => received,
-        }))
+        let input = entry.client.handle_input(frame, now);
+        self.on_relay_input(relay, input, frame, now)
     }
 
     /// The connection from `local` to the TURN server at `server` closed,

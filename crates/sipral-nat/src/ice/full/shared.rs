@@ -339,13 +339,15 @@ impl Held {
         self.with(|client, _| client.push_stream(bytes));
     }
 
-    pub(super) fn poll_stream(
+    /// The next whole message the one connection carried, whichever holder
+    /// it turns out to be for.
+    pub(super) fn next_stream_frame(
         &mut self,
         frame: &mut Vec<u8>,
         now: Instant,
-    ) -> Result<Option<Input>, FrameError> {
+    ) -> Result<bool, FrameError> {
         let mut pool = self.relay.lock();
-        let taken = pool.client.poll_stream(frame, now);
+        let taken = pool.client.next_stream_frame(frame);
         Self::spread(&mut pool, Some(now));
         taken
     }

@@ -552,6 +552,16 @@ enum Branch {
     None,
 }
 
+/// Which call reads the messages back off a relay's connection, once its
+/// bytes went in through that call ([`MediaEngine::receive_stream`]).
+#[cfg(feature = "ice")]
+enum StreamReader {
+    /// An agent waiting for its session, by the call it was described for.
+    Waiting(CallHandle),
+    /// A call's session.
+    Session(share::Held),
+}
+
 /// What a call's first description left of the relay it was given.
 #[cfg(feature = "ice")]
 enum Kept {
@@ -1481,14 +1491,19 @@ impl MediaEngine {
     /// whatever pieces it delivered them, and say whether a call's relay
     /// runs over it.
     ///
-    /// The call whose relay it is takes them: the session, as
-    /// [`MediaSession::receive_stream`](crate::MediaSession::receive_stream),
-    /// or the agent of a call described there and waiting for its session —
-    /// the refresh's answer above all, as [`MediaEngine::receive_waiting`]
-    /// takes it off a datagram. Drain [`MediaEngine::poll_transmit`] and
-    /// [`MediaEngine::poll_turn_stream`] after it. `Ok(false)` leaves the
-    /// bytes to [`crate::Relays::receive_stream`], for a socket no call has
-    /// taken the relay of yet.
+    /// The connection is one per socket and server, and the branches of a
+    /// forked call hold the one allocation over it, so its bytes are put
+    /// back together once and every whole message goes to the call it is
+    /// for, as a datagram from the server would ([`MediaEngine::receive_early`]
+    /// says how a branch is found): a session, as
+    /// [`MediaSession::receive_stream`](crate::MediaSession::receive_stream)
+    /// takes one, or the agent of a call described there and waiting for its
+    /// session — the refresh's answer above all, as
+    /// [`MediaEngine::receive_waiting`] takes it off a datagram. Drain
+    /// [`MediaEngine::poll_transmit`] and [`MediaEngine::poll_turn_stream`]
+    /// after it. `Ok(false)` leaves the bytes to
+    /// [`crate::Relays::receive_stream`], for a socket no call has taken the
+    /// relay of yet.
     ///
     /// # Errors
     ///
@@ -1501,33 +1516,95 @@ impl MediaEngine {
         bytes: &[u8],
         now: Instant,
     ) -> Result<bool, crate::TurnStreamError> {
-        for ice in self.gathered.values_mut() {
-            if ice.local() != local || ice.stream_server().is_none() {
-                continue;
+        let Some((reader, server)) = self.push_stream(local, bytes) else {
+            return Ok(false);
+        };
+        let mut frame = Vec::new();
+        loop {
+            let whole = match &reader {
+                StreamReader::Waiting(call) => match self.gathered.get_mut(call) {
+                    Some(ice) => {
+                        ice.top_up();
+                        ice.next_stream_frame(&mut frame, now)?
+                    }
+                    None => false,
+                },
+                StreamReader::Session(held) => share::lock(held)
+                    .session
+                    .next_stream_frame(&mut frame, now)?,
+            };
+            if !whole {
+                return Ok(true);
             }
-            ice.top_up();
-            if !ice.push_stream(bytes) {
-                continue;
-            }
-            // before its session a call has nowhere to play what a peer sent
-            // through the relay, and the peer sends it again once the answer
-            // lands; the agent's own answers are what matter here
-            let mut frame = Vec::new();
-            loop {
-                ice.top_up();
-                if ice.poll_stream(&mut frame, now)?.is_none() {
-                    return Ok(true);
-                }
+            match self.branch_for(local, server, &frame) {
+                Branch::Session(held) => share::lock(&held)
+                    .session
+                    .take_stream_frame(&mut frame, now),
+                Branch::Waiting => self.take_waiting_frame(local, server, &frame, now),
+                Branch::None => {}
             }
         }
-        let open = self.calls.iter().find_map(|(call, managed)| {
-            (managed.address == Some(local))
-                .then(|| self.sessions.get(call))
-                .flatten()
-        });
-        match open {
-            Some(held) => share::lock(held).session.receive_stream(bytes, now),
-            None => Ok(false),
+    }
+
+    /// Put `bytes` from the connection on `local` into the relay that runs
+    /// over it, through the first call there that holds one — an agent
+    /// waiting for its session before a session — and say which call reads
+    /// the messages back, and the server the connection goes to.
+    #[cfg(feature = "ice")]
+    fn push_stream(
+        &mut self,
+        local: SocketAddr,
+        bytes: &[u8],
+    ) -> Option<(StreamReader, SocketAddr)> {
+        for (call, ice) in &mut self.gathered {
+            if ice.local() != local {
+                continue;
+            }
+            let Some(server) = ice.stream_server() else {
+                continue;
+            };
+            ice.top_up();
+            if ice.push_stream(bytes) {
+                return Some((StreamReader::Waiting(*call), server));
+            }
+        }
+        self.calls
+            .iter()
+            .filter(|(_, managed)| managed.address == Some(local))
+            .filter_map(|(call, _)| self.sessions.get(call))
+            .find_map(|held| {
+                let server = share::lock(held).session.push_stream(bytes)?;
+                Some((StreamReader::Session(Arc::clone(held)), server))
+            })
+    }
+
+    /// A whole message off the relay's connection on `local` for the agents
+    /// waiting there for their sessions: the one that claims it, or failing
+    /// that the first whose relay runs over the connection. What a peer sent
+    /// through the relay has nowhere to play before a session, and the peer
+    /// sends it again once the answer lands; the agent's own answers are
+    /// what matter here.
+    #[cfg(feature = "ice")]
+    fn take_waiting_frame(
+        &mut self,
+        local: SocketAddr,
+        server: SocketAddr,
+        frame: &[u8],
+        now: Instant,
+    ) {
+        use sipral_nat::ice::Claim;
+
+        let over =
+            |ice: &crate::ice::Ice| ice.local() == local && ice.stream_server() == Some(server);
+        let claiming = self
+            .gathered
+            .iter()
+            .find(|(_, ice)| over(ice) && ice.claims(server, frame) == Claim::Mine)
+            .or_else(|| self.gathered.iter().find(|(_, ice)| over(ice)))
+            .map(|(call, _)| *call);
+        if let Some(ice) = claiming.and_then(|call| self.gathered.get_mut(&call)) {
+            ice.top_up();
+            let _ = ice.take_stream_frame(frame, now);
         }
     }
 

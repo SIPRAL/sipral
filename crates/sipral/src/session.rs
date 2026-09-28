@@ -852,36 +852,79 @@ impl MediaSession {
         let Some(ice) = self.ice.as_mut() else {
             return Ok(false);
         };
-        let Some(server) = ice.stream_server() else {
-            return Ok(false);
-        };
-        if !ice.push_stream(bytes) {
+        if ice.stream_server().is_none() || !ice.push_stream(bytes) {
             return Ok(false);
         }
         let mut frame = core::mem::take(&mut self.stream_in);
         let result = loop {
-            let Some(ice) = self.ice.as_mut() else {
-                break Ok(true);
-            };
-            ice.top_up();
-            let taken = ice.poll_stream(&mut frame, now);
-            self.drain_ice(now);
-            match taken {
-                Ok(Some(Taken::Data(range))) => {
-                    // the server is where a relayed datagram comes from, on
-                    // a connection as on UDP, and it is what the rest of the
-                    // path has always been handed for one
-                    if let Some(payload) = frame.get_mut(range) {
-                        let _ = self.receive_payload(payload, server, now);
-                    }
-                }
-                Ok(Some(Taken::Consumed | Taken::Foreign)) => {}
-                Ok(None) => break Ok(true),
+            match self.next_stream_frame(&mut frame, now) {
+                Ok(true) => self.take_stream_frame(&mut frame, now),
+                Ok(false) => break Ok(true),
                 Err(error) => break Err(error),
             }
         };
         self.stream_in = frame;
         result
+    }
+
+    /// Hand the relay bytes read off its connection to the TURN server, for
+    /// [`MediaSession::next_stream_frame`] to read back whole, and name that
+    /// server; `None` when this call's relay runs over no connection.
+    #[cfg(feature = "ice")]
+    pub(crate) fn push_stream(&mut self, bytes: &[u8]) -> Option<SocketAddr> {
+        let ice = self.ice.as_mut()?;
+        let server = ice.stream_server()?;
+        ice.push_stream(bytes).then_some(server)
+    }
+
+    /// The next whole message the connection this call's relay runs over
+    /// carried, copied into `frame` and not yet taken: `Ok(false)` once none
+    /// is waiting. The engine reads the one connection the branches of a
+    /// forked call share this way, and hands each message to the branch it
+    /// is for ([`MediaSession::take_stream_frame`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`MediaSession::receive_stream`].
+    #[cfg(feature = "ice")]
+    pub(crate) fn next_stream_frame(
+        &mut self,
+        frame: &mut Vec<u8>,
+        now: Instant,
+    ) -> Result<bool, crate::TurnStreamError> {
+        let Some(ice) = self.ice.as_mut() else {
+            frame.clear();
+            return Ok(false);
+        };
+        ice.top_up();
+        let taken = ice.next_stream_frame(frame, now);
+        self.drain_ice(now);
+        taken
+    }
+
+    /// Take `frame`, one whole message off the relay's connection, as
+    /// [`MediaSession::receive_stream`] takes each it reads: a peer's data
+    /// goes where a relayed datagram goes, from the server's address, and
+    /// the relay's own traffic stays with the relay.
+    #[cfg(feature = "ice")]
+    pub(crate) fn take_stream_frame(&mut self, frame: &mut [u8], now: Instant) {
+        let Some(ice) = self.ice.as_mut() else {
+            return;
+        };
+        let Some(server) = ice.stream_server() else {
+            return;
+        };
+        ice.top_up();
+        let taken = ice.take_stream_frame(frame, now);
+        self.drain_ice(now);
+        // the server is where a relayed datagram comes from, on a connection
+        // as on UDP, and it is what the rest of the path has always been
+        // handed for one
+        if let Taken::Data(range) = taken
+            && let Some(payload) = frame.get_mut(range)
+        {
+            let _ = self.receive_payload(payload, server, now);
+        }
     }
 
     /// The connection this call's relay ran over to its TURN server closed,

@@ -7033,12 +7033,14 @@ fn a_branch_that_answers_after_one_was_kept_leaves_the_relay_where_it_is() {
 /// The TURN server of the forked-call tests: it answers every request with
 /// success (`crate::relay::tests::answer`), keeps the permissions and
 /// channels it is asked for, and relays — which the other tests here never
-/// need, since their two ends reach each other directly.
+/// need, since their two ends reach each other directly. Over a connection
+/// it pads a channel message to whole words (RFC 8656 §12.5).
 #[cfg(feature = "ice")]
 #[derive(Default)]
 struct Relaying {
     permitted: Vec<std::net::IpAddr>,
     channels: Vec<(u16, SocketAddr)>,
+    transport: crate::TurnTransport,
 }
 
 /// What the TURN server does with a datagram from the client.
@@ -7124,7 +7126,7 @@ impl Relaying {
     /// relayed address, if its permission lets it through.
     fn for_client(&self, peer: SocketAddr, data: &[u8]) -> Option<Vec<u8>> {
         use sipral_nat::stun::{AttributeType, Class, MessageBuilder, TransactionId};
-        use sipral_nat::turn::{ChannelData, ChannelNumber, Transport, method};
+        use sipral_nat::turn::{ChannelData, ChannelNumber, method};
 
         if !self.permitted.contains(&peer.ip()) {
             return None;
@@ -7134,7 +7136,7 @@ impl Relaying {
             ChannelData::encode(
                 ChannelNumber::new(*number)?,
                 data,
-                Transport::Udp,
+                self.transport,
                 &mut frame,
             )
             .ok()?;
@@ -7179,12 +7181,44 @@ struct Fork {
     /// Each phone's side of its call.
     answered: [CallHandle; 2],
     turn: Relaying,
+    /// What the server has read off the caller's connection to it, when the
+    /// relay runs over one, and not yet taken whole.
+    at_server: sipral_nat::turn::StreamFraming,
     now: Instant,
+}
+
+/// A relay allocated for `media` over a TCP connection to the forked-call
+/// tests' TURN server, as [`relays_with_one_for`] allocates one over UDP.
+#[cfg(feature = "ice")]
+fn relays_over_tcp_with_one_for(
+    stack: &mut Stack,
+    media: SocketAddr,
+    now: Instant,
+) -> crate::Relays {
+    use crate::relay::tests::{SERVER, answer};
+
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    let mut relays = stack
+        .engine
+        .relays(server, "alice", "correct horse")
+        .over(crate::TurnTransport::Tcp);
+    relays.allocate(media, now);
+    while let Some(request) = relays.poll_transmit() {
+        let reply = answer(&request.payload).expect("an answer");
+        assert_eq!(relays.receive_stream(request.local, &reply, now), Ok(true));
+    }
+    while relays.poll_event().is_some() {}
+    relays
 }
 
 #[cfg(feature = "ice")]
 impl Fork {
     fn new() -> Self {
+        Self::over(crate::TurnTransport::Udp)
+    }
+
+    /// [`Fork::new`], with the caller's relay reached over `transport`.
+    fn over(transport: crate::TurnTransport) -> Self {
         let now = Instant::now();
         let catalog = CodecCatalog::with_order(&["PCMU"])
             .expect("an order")
@@ -7198,7 +7232,11 @@ impl Fork {
         for phone in &mut phones {
             let _ = phone.account("bob", caller_sip());
         }
-        let mut relays = relays_with_one_for(&mut caller, caller_media(), now);
+        let mut relays = if transport.is_stream() {
+            relays_over_tcp_with_one_for(&mut caller, caller_media(), now)
+        } else {
+            relays_with_one_for(&mut caller, caller_media(), now)
+        };
         let relay = relays.take(caller_media()).expect("the relay");
         let catalog = CodecCatalog::with_order(&["PCMU"])
             .expect("an order")
@@ -7260,9 +7298,59 @@ impl Fork {
             phones,
             branches: [root, sibling],
             answered,
-            turn: Relaying::default(),
+            turn: Relaying {
+                transport,
+                ..Relaying::default()
+            },
+            at_server: sipral_nat::turn::StreamFraming::new(),
             now,
         }
+    }
+
+    /// What the TURN server sends the caller: a datagram to its socket, or
+    /// bytes on its connection, each through the engine, which finds the
+    /// branch.
+    fn server_sends(&mut self, bytes: &[u8]) {
+        let server: SocketAddr = crate::relay::tests::SERVER.parse().expect("an address");
+        if self.turn.transport.is_stream() {
+            assert_eq!(
+                self.caller
+                    .engine
+                    .receive_stream(caller_media(), bytes, self.now),
+                Ok(true),
+                "a call's relay runs over the connection"
+            );
+        } else {
+            self.caller
+                .engine
+                .receive_early(caller_media(), server, bytes, self.now);
+        }
+    }
+
+    /// Everything the caller has for its TURN server, as whole messages:
+    /// its datagrams to the server, or what it wrote on the connection, put
+    /// back together as the server reads it.
+    fn caller_sends(&mut self) -> Vec<Vec<u8>> {
+        let server: SocketAddr = crate::relay::tests::SERVER.parse().expect("an address");
+        let mut messages = Vec::new();
+        while let Some((_, destination, payload)) = self.caller.engine.poll_transmit(self.now) {
+            if destination == server {
+                messages.push(payload);
+            }
+        }
+        while let Some((_, written)) = self.caller.engine.poll_turn_stream() {
+            assert_eq!(written.local, caller_media());
+            assert_eq!(written.destination, server);
+            self.at_server.push(&written.payload);
+        }
+        while let Some(frame) = self
+            .at_server
+            .next_frame()
+            .expect("the caller writes whole messages")
+        {
+            messages.push(frame.to_vec());
+        }
+        messages
     }
 
     /// Which phone, by the address it sends from.
@@ -7278,20 +7366,12 @@ impl Fork {
     /// outside; everything the TURN server passes on reaches the caller
     /// through `MediaEngine::receive_early`, which finds the branch.
     fn step(&mut self) -> bool {
-        let server: SocketAddr = crate::relay::tests::SERVER.parse().expect("an address");
         let relayed: SocketAddr = crate::relay::tests::RELAYED.parse().expect("an address");
         let mut moved = false;
-        while let Some((_, destination, payload)) = self.caller.engine.poll_transmit(self.now) {
+        for payload in self.caller_sends() {
             moved = true;
-            if destination != server {
-                continue;
-            }
             match self.turn.on_client(&payload) {
-                FromClient::Reply(reply) => {
-                    self.caller
-                        .engine
-                        .receive_early(caller_media(), server, &reply, self.now);
-                }
+                FromClient::Reply(reply) => self.server_sends(&reply),
                 FromClient::Relay(peer, mut data) => {
                     if let Some(phone) = Self::phone_at(peer) {
                         let answered = self.answered[phone];
@@ -7312,9 +7392,7 @@ impl Fork {
                 if destination == relayed
                     && let Some(wrapped) = self.turn.for_client(source, &payload)
                 {
-                    self.caller
-                        .engine
-                        .receive_early(caller_media(), server, &wrapped, self.now);
+                    self.server_sends(&wrapped);
                 }
             }
         }
@@ -7357,7 +7435,6 @@ impl Fork {
     /// One frame of `samples` from `phone` to its branch through the relay,
     /// and what each of the caller's branches played after it.
     fn heard_from(&mut self, phone: usize, samples: &[i16]) -> [i64; 2] {
-        let server: SocketAddr = crate::relay::tests::SERVER.parse().expect("an address");
         let source = [callee_media(), mobile_media()][phone];
         let sent = self.phones[phone]
             .engine
@@ -7369,9 +7446,7 @@ impl Fork {
         if let Some(sent) = sent
             && let Some(wrapped) = self.turn.for_client(source, &sent)
         {
-            self.caller
-                .engine
-                .receive_early(caller_media(), server, &wrapped, self.now);
+            self.server_sends(&wrapped);
         }
         let mut loudness_of = [0; 2];
         for (index, branch) in self.branches.into_iter().enumerate() {
@@ -7472,6 +7547,48 @@ fn two_answered_branches_of_a_fork_both_run_on_the_one_relay_until_one_hangs_up(
     assert_eq!(
         relays_given_back(&mut fork.caller),
         vec![(mobile_branch, server)]
+    );
+}
+
+/// The same fork with the relay reached over TCP: one connection carries
+/// both branches' peers, and each message on it still reaches the branch it
+/// is for, as a datagram from the server does.
+#[cfg(feature = "ice")]
+#[test]
+fn two_branches_of_a_fork_share_the_one_relay_over_tcp_each_hearing_its_own_phone() {
+    use crate::relay::tests::RELAYED;
+
+    let mut fork = Fork::over(crate::TurnTransport::Tcp);
+    let [desk_branch, mobile_branch] = fork.branches;
+    fork.connect();
+    let relayed: SocketAddr = RELAYED.parse().expect("an address");
+    for (branch, phone) in [
+        (desk_branch, callee_media()),
+        (mobile_branch, mobile_media()),
+    ] {
+        let path = fork
+            .caller
+            .engine
+            .session(branch)
+            .expect("the branch's media")
+            .ice_path()
+            .expect("a path");
+        assert_eq!(path, (relayed, phone), "{branch:?}");
+    }
+    let [desk_heard, mobile_heard] = fork.tone_from(0);
+    assert!(desk_heard > 4_000, "the desk's branch heard {desk_heard}");
+    assert!(
+        mobile_heard < 500,
+        "the mobile's branch heard the desk: {mobile_heard}"
+    );
+    let [desk_heard, mobile_heard] = fork.tone_from(1);
+    assert!(
+        mobile_heard > 4_000,
+        "the mobile's branch heard {mobile_heard}"
+    );
+    assert!(
+        desk_heard < 500,
+        "the desk's branch heard the mobile: {desk_heard}"
     );
 }
 

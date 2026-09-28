@@ -551,7 +551,13 @@ rounded up to whole words — and wherever the relay is at that moment takes
 each one: `Relays::receive_stream` before the call,
 `MediaEngine::receive_stream` after, which reaches a call's agent still
 waiting for its session or the session itself, whose audio is unwrapped and
-played as a relayed datagram's is. Over the C ABI all of it is one entry
+played as a relayed datagram's is. The branches of a forked call hold the one
+allocation, and so the one connection, beside each other: the engine puts
+the bytes back together once and hands each whole message to the branch it
+is for, asking the branches exactly what it asks of a datagram from the
+server (`IceAgent::claims`), so each phone's audio reaches its own branch
+and the server's answers reach whichever holds the allocation. Over the C
+ABI all of it is one entry
 point, `sipral_stack_turn_receive`, whatever the socket's call is doing. A
 datagram from the server's address is not the relay's over a connection, and
 is taken as any other stranger's would be. A stream that carries something no

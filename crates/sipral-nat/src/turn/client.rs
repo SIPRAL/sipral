@@ -826,16 +826,36 @@ impl TurnClient {
         frame: &mut Vec<u8>,
         now: Instant,
     ) -> Result<Option<Input>, FrameError> {
-        frame.clear();
-        match self.framing.next_frame() {
-            Ok(Some(message)) => frame.extend_from_slice(message),
-            Ok(None) => return Ok(None),
-            Err(error) => {
-                self.lose_stream();
-                return Err(error);
-            }
+        if !self.next_stream_frame(frame)? {
+            return Ok(None);
         }
         Ok(Some(self.handle_input(frame, now)))
+    }
+
+    /// The next whole message [`TurnClient::push_stream`] has been given,
+    /// copied into `frame` and not yet taken: `false` when none has arrived
+    /// whole. [`TurnClient::poll_stream`] is this and
+    /// [`TurnClient::handle_input`] in one; apart, a caller that shares the
+    /// allocation among several users can look at a message
+    /// ([`TurnClient::peek`]) before choosing whose it is.
+    ///
+    /// # Errors
+    ///
+    /// As [`TurnClient::poll_stream`], and the allocation is lost the same
+    /// way.
+    pub fn next_stream_frame(&mut self, frame: &mut Vec<u8>) -> Result<bool, FrameError> {
+        frame.clear();
+        match self.framing.next_frame() {
+            Ok(Some(message)) => {
+                frame.extend_from_slice(message);
+                Ok(true)
+            }
+            Ok(None) => Ok(false),
+            Err(error) => {
+                self.lose_stream();
+                Err(error)
+            }
+        }
     }
 
     /// The TCP or TLS connection to the server closed. The allocation is

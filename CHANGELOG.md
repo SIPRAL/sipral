@@ -1022,6 +1022,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A forked call's relay over TCP or TLS reaches every branch.** The
+  branches of a forked call hold the one allocation, and a relay reached
+  over a connection has one connection for all of them; everything read off
+  it went to the first branch's session, so the other branch's checks and
+  audio never reached it and the fork found no path. `MediaEngine::
+  receive_stream` now puts the bytes back together once and hands each whole
+  message to the branch it is for, as a datagram from the server already
+  was; `IceAgent::next_stream_frame` and `take_stream_frame` are the two
+  halves of `poll_stream` that let it.
 - **A Python call closed the moment it ends still gives its relay back.**
   `Stack` sent a call's farewells — its RTCP BYE and the TURN Refresh with a
   lifetime of zero — only after the poll that ended the call had delivered

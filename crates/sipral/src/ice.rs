@@ -1223,7 +1223,7 @@ impl Ice {
 
     /// Hand the relay bytes read off its connection to the TURN server, and
     /// say whether this agent has one that runs over a connection at all.
-    /// Whole messages come out of [`Ice::poll_stream`].
+    /// Whole messages come out of [`Ice::next_stream_frame`].
     pub(crate) fn push_stream(&mut self, bytes: &[u8]) -> bool {
         let (Some(server), Running::Full(full)) = (self.stream, &mut self.running) else {
             return false;
@@ -1232,30 +1232,39 @@ impl Ice {
     }
 
     /// The next whole message the relay's connection carried, copied into
-    /// `frame`: a peer's data as [`Taken::Data`] at its position there, and
-    /// the relay's own traffic as [`Taken::Consumed`]. `Ok(None)` once no
-    /// whole one is waiting.
+    /// `frame` and not yet taken, for whichever branch of a fork holding the
+    /// same relay it is for ([`IceAgent::next_stream_frame`]). `Ok(false)`
+    /// once no whole one is waiting.
     ///
     /// # Errors
     ///
     /// The connection stopped making sense, and the relay is lost with it
     /// ([`IceAgent::poll_stream`]).
-    pub(crate) fn poll_stream(
+    pub(crate) fn next_stream_frame(
         &mut self,
         frame: &mut Vec<u8>,
         now: Instant,
-    ) -> Result<Option<Taken>, FrameError> {
+    ) -> Result<bool, FrameError> {
         let (Some(server), Running::Full(full)) = (self.stream, &mut self.running) else {
-            return Ok(None);
+            frame.clear();
+            return Ok(false);
         };
-        Ok(full
-            .agent
-            .poll_stream(self.local, server, frame, now)?
-            .map(|received| match received {
-                Received::Data { range, .. } => Taken::Data(range),
-                Received::Consumed => Taken::Consumed,
-                Received::Foreign => Taken::Foreign,
-            }))
+        full.agent.next_stream_frame(self.local, server, frame, now)
+    }
+
+    /// Take `frame`, a whole message off the relay's connection that
+    /// [`Ice::next_stream_frame`] read: a peer's data as [`Taken::Data`] at
+    /// its position there, and the relay's own traffic as
+    /// [`Taken::Consumed`] ([`IceAgent::take_stream_frame`]).
+    pub(crate) fn take_stream_frame(&mut self, frame: &[u8], now: Instant) -> Taken {
+        let (Some(server), Running::Full(full)) = (self.stream, &mut self.running) else {
+            return Taken::Foreign;
+        };
+        match full.agent.take_stream_frame(self.local, server, frame, now) {
+            Received::Data { range, .. } => Taken::Data(range),
+            Received::Consumed => Taken::Consumed,
+            Received::Foreign => Taken::Foreign,
+        }
     }
 
     /// The relay's connection to the TURN server closed, and the relay went
