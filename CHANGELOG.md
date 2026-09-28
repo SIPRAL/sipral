@@ -29,6 +29,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   both gives an address the same pseudonym in the two, behind the
   `redaction` feature, on by default and left off by the C ABI
   (`docs/14-diagnostics.md`).
+- **The lab reaches TURN over TCP and TLS from the Kotlin, .NET and Swift
+  agents.** Each agent's direct call reads `SIPRAL_TURN_TRANSPORT`,
+  `SIPRAL_TURN_NAME` and `SIPRAL_TURN_CA` as the Python one does, and the
+  relay step places the call from behind a NAT that drops every datagram to
+  coturn: Kotlin and .NET over TCP and over TLS, trusting only the run's own
+  certificate, and Swift over TCP alone, since its TLS is Network.framework's
+  and the lab's containers are Linux.
 - **A call's audio on Android survives what the platform does to it.**
   `SipralCallAudio` (in the `ConnectionService` helper) keeps one call's
   microphone and speaker through a cellular call answered over it — the
@@ -1091,6 +1098,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   2xx to the INVITE held behind the reliable provisional response never
   went. The 408 now ends the offer at both layers, the call takes the next
   one, and the held 2xx goes.
+- **A hung agent in the lab no longer holds the lab lock.** Every agent and
+  harness `scripts/lab.sh` runs in a container of its own gets a wall-clock
+  derived from the calls it places and what starting it takes; past it, only
+  that container is removed and the step fails by name. The relay step also
+  counts the relays coturn has to have given back as its steps run, so a
+  binding skipped before another no longer throws the later counts off.
 - **Silence played for a packet lost on the way is counted, apart from the
   under-runs.** A packet lost with nothing behind it yet to conceal it from
   left the buffer empty, and the earpiece played a frame of silence that no

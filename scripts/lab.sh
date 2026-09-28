@@ -41,12 +41,14 @@
 #                               full ICE on what coturn told them, then the
 #                               same two with the path between them blocked,
 #                               through a relay on coturn as a TURN server
-#   scripts/lab.sh turn         only that last, relayed, step, the call placed
-#                               from the Rust harness, through the C ABI and
-#                               through the Python bindings; then again from
+#   scripts/lab.sh turn         only that last, relayed, step: the call placed
+#                               from the Rust harness, then through the C
+#                               ABI and through each idiomatic binding --
+#                               Python, Kotlin, .NET, Swift -- and again from
 #                               behind a NAT that drops every datagram to
 #                               coturn, the relay reached over TCP from the
-#                               C ABI and over TLS from the Python bindings
+#                               C ABI, over TLS from Python, over TCP and TLS
+#                               from Kotlin and .NET, and over TCP from Swift
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -221,6 +223,65 @@ FAIL=0
 pass() { printf '  ok    %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; FAIL=1; }
 step() { printf '\n%s\n' "$1"; }
+
+# Every agent and harness a step runs in a container of its own goes through
+# lab_run, with a wall-clock of its own: one that hangs would otherwise hold
+# the lab lock above until something outside it gave up, and every run
+# queued behind it with it. The limit is derived from what the run does --
+# the calls it places, each LAB_CALL_S at most, plus what starting it takes
+# -- so a run that takes longer is stuck, not slow. Past it, only the
+# container this run started is removed, by the name it was given, and the
+# step fails by the label it passed, with LAB_RUN_TIMED_OUT as its status so
+# that a step expecting a call to fail does not read a hang as that failure.
+#
+# One call, whoever places it: the ICE flows' patience for a path
+# (interop/harness/src/ice_lite.rs's PATIENCE, interop/harness-c's
+# ICE_PATIENCE_MS, 30 s), the 8 s a mapping is waited for before it
+# (ice_nat.rs's MAPPING_PATIENCE), the 3 s dwell and the farewell after it.
+# The harness's ordinary flows wait 20 s for each answer
+# (SIPRAL_PATIENCE_MS) and dwell 2 s, and the idiomatic agents are told the
+# same (LAB_PATIENCE_MS, LAB_DWELL_MS), all of which fit inside it.
+LAB_CALL_S=45
+LAB_PATIENCE_MS=20000
+LAB_DWELL_MS=2000
+# What starting a run takes before its first call: a binary run as it is;
+# a container that installs a package first; the Kotlin agent, whose JNI
+# shim is compiled and a JVM started; the .NET one, whose `dotnet run`
+# builds the binding and the sample.
+LAB_START_S=15
+LAB_START_APT_S=90
+LAB_START_KOTLIN_S=60
+LAB_START_DOTNET_S=240
+# and the PipeWire step, which compiles the facade inside its container
+# before its call
+LAB_START_BUILD_S=1800
+# The most calls one run of the harness's ordinary flows places: thirteen
+# flows against Asterisk, the transfers placing more than one call each.
+LAB_SUITE_CALLS=20
+LAB_RUN_TIMED_OUT=124
+LAB_RUN_SEQ=0
+lab_run() {
+    local label="$1" limit="$2" name status waited logs
+    shift 2
+    LAB_RUN_SEQ=$((LAB_RUN_SEQ + 1))
+    name="${COMPOSE_PROJECT_NAME:-sipral-interop}-run-$$-$LAB_RUN_SEQ"
+    docker run -d --name "$name" "$@" >/dev/null \
+        || { printf '  FAIL  %s: its container did not start\n' "$label"; return 1; }
+    docker logs -f "$name" 2>&1 &
+    logs=$!
+    status=$(timeout "$limit" docker wait "$name" 2>/dev/null)
+    waited=$?
+    if [ "$waited" -eq 124 ]; then
+        printf '  FAIL  %s: still running after %s s, its container stopped\n' "$label" "$limit"
+        docker rm -f "$name" >/dev/null 2>&1
+        wait "$logs" 2>/dev/null
+        return "$LAB_RUN_TIMED_OUT"
+    fi
+    wait "$logs" 2>/dev/null
+    docker rm -f "$name" >/dev/null 2>&1
+    [ "$waited" -eq 0 ] || return 1
+    return "${status:-1}"
+}
 
 WANT="${1:-all}"
 
@@ -533,7 +594,8 @@ wait_for asterisk "Asterisk Ready" || exit 1
 # are swapped is "no such file or directory" for a file that is plainly there.
 flows() {
     local server="$1" capture="$2"
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the harness's flows against $server" $((LAB_START_APT_S + LAB_SUITE_CALLS * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
@@ -565,7 +627,8 @@ flows_c() {
     # be the machine that built either, and on the one of ours that cannot
     # build them the two live under /opt rather than here
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the C harness's flows against $server" $((LAB_START_APT_S + LAB_SUITE_CALLS * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 \
         -e LD_LIBRARY_PATH=/lib-sipral \
@@ -989,7 +1052,8 @@ headless_socket_agent() {
 # dialling baresip's accounts from scripts/lab.sh kamailio or asterisk.
 flows_baresip() {
     local capture="$1"
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the harness's calls to baresip" $((LAB_START_APT_S + 4 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip \
         -e SIPRAL_FLOWS=call,hold,peersrtp,peerdtls \
@@ -1015,7 +1079,8 @@ flows_baresip_c() {
     local capture="$1" beside
     [ -n "$HARNESS_C" ] || return 0
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the C harness's calls to baresip" $((LAB_START_APT_S + 4 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip \
         -e SIPRAL_FLOWS=call,hold,peersrtp,peerdtls \
@@ -1073,7 +1138,8 @@ flows_baresip_hangup() {
     local status trigger_pid
     ( sleep 2; baresip_ctrl_hangup ) &
     trigger_pid=$!
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the harness's call baresip hangs up" $((LAB_START_S + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip-hangup \
         -e SIPRAL_FLOWS=peerhangup \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
@@ -1093,7 +1159,8 @@ flows_baresip_hangup_c() {
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
     ( sleep 2; baresip_ctrl_hangup ) &
     trigger_pid=$!
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the C harness's call baresip hangs up" $((LAB_START_S + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip-hangup \
         -e SIPRAL_FLOWS=peerhangup \
         -e LD_LIBRARY_PATH=/lib-sipral \
@@ -1134,7 +1201,8 @@ nat_flow() {
     nat_up || return 1
     printf '  behind %s, STUN at %s:3478, Asterisk at %s\n' "$NAT_GATEWAY" "$NAT_STUN" "$NAT_ASTERISK"
 
-    docker run --rm --network "${project}_inside" \
+    lab_run "the C harness behind the NAT" $((LAB_START_S + 2 * LAB_CALL_S)) \
+        --network "${project}_inside" \
         --cap-add NET_ADMIN \
         --add-host "asterisk:$NAT_ASTERISK" \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=nat \
@@ -1417,7 +1485,8 @@ ice_lite_flow() {
     address=$(docker inspect -f \
         "{{with index .NetworkSettings.Networks \"$LAB_NETWORK\"}}{{.IPAddress}}{{end}}" \
         "$ICE_APP_NAME")
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the harness's call to the ICE-lite application" $((LAB_START_S + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=icelite \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
@@ -1562,7 +1631,8 @@ stop_c_listener() {
 refer_the_listener() {
     local flow="$1" address
     address=$(c_listener_address)
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the harness's REFER to the C listener" $((LAB_START_S + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         -e "SIPRAL_FLOWS=$flow" \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
@@ -1614,7 +1684,8 @@ ice_lite_c_flow() {
     local address status log
     start_c_listener off lite || return 1
     address=$(c_listener_address)
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the harness's call to the ICE-lite C listener" $((LAB_START_S + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=icelite \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
@@ -1699,7 +1770,8 @@ nat_pair_down() {
 # bash 3.2 calls a bare "$@" with no arguments unbound under `set -u`). The
 # callee's NAT forwards its SIP port -- signalling is not what this proves --
 # and nothing else. Both halves' output is printed; the status is 0 only
-# when both passed. NAT_PAIR_CALLER=c, set for the call, places it from the
+# when both passed, and LAB_RUN_TIMED_OUT when the caller ran past the
+# wall-clock lab_run gave it -- one call and its start -- and was stopped. NAT_PAIR_CALLER=c, set for the call, places it from the
 # C harness instead (interop/harness-c's own FLOW_ICE_NAT, the same flow key
 # and the same variables), with the Rust harness still answering; with
 # NAT_PAIR_CALLER_TURN=1 as well, that caller alone is given the relay
@@ -1776,7 +1848,8 @@ nat_pair_call() {
 
     if [ "$status" -eq 0 ] && [ "${NAT_PAIR_CALLER:-rust}" = c ]; then
         beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
-        docker run --rm --network "${project}_inside" \
+        lab_run "the C harness's call across the NAT pair" $((LAB_START_S + LAB_CALL_S)) \
+            --network "${project}_inside" \
             --cap-add NET_ADMIN \
             -e SIPRAL_FLOWS=icenat \
             -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
@@ -1810,11 +1883,13 @@ nat_pair_call() {
                 || { printf '  could not build the Python agent'"'"'s own NAT image\n'; status=1; }
         fi
         if [ "$status" -eq 0 ]; then
-            docker run --rm --network "${project}_inside" \
+            lab_run "the Python agent's call across the NAT pair" $((LAB_START_S + LAB_CALL_S)) \
+                --network "${project}_inside" \
                 --cap-add NET_ADMIN \
                 -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
                 -e "SIPRAL_PEER_HOST=$NAT_PAIR_OUTSIDE2" -e SIPRAL_PEER_PORT=5060 \
                 -e SIPRAL_ICE=required \
+                -e "SIPRAL_PATIENCE_MS=$LAB_PATIENCE_MS" -e "SIPRAL_DWELL_MS=$LAB_DWELL_MS" \
                 -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
                 ${1+"$@"} \
                 ${caller_only[@]+"${caller_only[@]}"} \
@@ -1848,11 +1923,13 @@ nat_pair_call() {
                 || { printf '  could not build the Kotlin agent'"'"'s own NAT image\n'; status=1; }
         fi
         if [ "$status" -eq 0 ]; then
-            docker run --rm --network "${project}_inside" \
+            lab_run "the Kotlin agent's call across the NAT pair" $((LAB_START_KOTLIN_S + LAB_CALL_S)) \
+                --network "${project}_inside" \
                 --cap-add NET_ADMIN \
                 -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
                 -e "SIPRAL_PEER_HOST=$NAT_PAIR_OUTSIDE2" -e SIPRAL_PEER_PORT=5060 \
                 -e SIPRAL_ICE=required \
+                -e "SIPRAL_PATIENCE_MS=$LAB_PATIENCE_MS" -e "SIPRAL_DWELL_MS=$LAB_DWELL_MS" \
                 ${1+"$@"} \
                 ${caller_only[@]+"${caller_only[@]}"} \
                 -v "$beside:/lib-sipral:ro" \
@@ -1895,11 +1972,13 @@ nat_pair_call() {
                 || { printf '  could not build the .NET agent'"'"'s own NAT image\n'; status=1; }
         fi
         if [ "$status" -eq 0 ]; then
-            docker run --rm --network "${project}_inside" \
+            lab_run "the .NET agent's call across the NAT pair" $((LAB_START_DOTNET_S + LAB_CALL_S)) \
+                --network "${project}_inside" \
                 --cap-add NET_ADMIN \
                 -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
                 -e "SIPRAL_PEER_HOST=$NAT_PAIR_OUTSIDE2" -e SIPRAL_PEER_PORT=5060 \
                 -e SIPRAL_ICE=required \
+                -e "SIPRAL_PATIENCE_MS=$LAB_PATIENCE_MS" -e "SIPRAL_DWELL_MS=$LAB_DWELL_MS" \
                 -e SIPRAL_LIBRARY=/lib-sipral/libsipral_ffi.so \
                 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e DOTNET_NOLOGO=1 \
                 ${1+"$@"} \
@@ -1930,11 +2009,13 @@ nat_pair_call() {
             printf '  could not build the Swift agent'"'"'s own NAT image\n'
             status=1
         else
-            docker run --rm --network "${project}_inside" \
+            lab_run "the Swift agent's call across the NAT pair" $((LAB_START_S + LAB_CALL_S)) \
+                --network "${project}_inside" \
                 --cap-add NET_ADMIN \
                 -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
                 -e "SIPRAL_PEER_HOST=$NAT_PAIR_OUTSIDE2" -e SIPRAL_PEER_PORT=5060 \
                 -e SIPRAL_ICE=required \
+                -e "SIPRAL_PATIENCE_MS=$LAB_PATIENCE_MS" -e "SIPRAL_DWELL_MS=$LAB_DWELL_MS" \
                 ${1+"$@"} \
                 ${caller_only[@]+"${caller_only[@]}"} \
                 -v "$ROOT":/work:ro -v "${SWIFT_LIB_DIR:-$ROOT/target/release}":/work/target/release:ro \
@@ -1944,7 +2025,8 @@ nat_pair_call() {
             status=$?
         fi
     elif [ "$status" -eq 0 ]; then
-        docker run --rm --network "${project}_inside" \
+        lab_run "the Rust harness's call across the NAT pair" $((LAB_START_S + LAB_CALL_S)) \
+            --network "${project}_inside" \
             --cap-add NET_ADMIN \
             -e SIPRAL_FLOWS=icenat \
             -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
@@ -1956,9 +2038,12 @@ nat_pair_call() {
                 exec /harness $NAT_PAIR_OUTSIDE2 5060 callee"
         status=$?
     fi
-    callee_status=$(timeout 90 docker wait "$ICE_CALLEE_NAME" 2>/dev/null || echo 1)
+    # the callee's own patience for the call is two of them (ice_nat.rs's
+    # CALLEE_PATIENCE); past that it is stuck, and only it is removed
+    callee_status=$(timeout $((LAB_CALL_S * 2)) docker wait "$ICE_CALLEE_NAME" 2>/dev/null || echo 1)
     docker logs "$ICE_CALLEE_NAME" 2>&1 | sed 's/^/    callee  /'
     docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
+    [ "$status" -ne "$LAB_RUN_TIMED_OUT" ] || return "$LAB_RUN_TIMED_OUT"
     [ "$status" -eq 0 ] || return 1
     [ "$callee_status" = 0 ] || { printf '  the callee did not pass\n'; return 1; }
 }
@@ -1985,21 +2070,30 @@ nat_pair_call() {
 # still answering, so the relay is proved from both drivers on every run of
 # the word. Without TURN that call has to find no path too, and coturn's log
 # has to count its two allocations as given back on top of the first two.
-# Last, the C caller alone is given TURN: the only path left runs through its
-# own relay, and its one allocation has to be given back as well. Then again
-# with the caller's NAT dropping every datagram to or from coturn, the relay
-# reached over TCP through the C ABI and, after the Python bindings' own
-# pair of calls, over TLS through them.
+# Then the C caller alone is given TURN: the only path left runs through its
+# own relay, and its one allocation has to be given back as well. Last, the
+# same with the caller's NAT dropping every datagram to or from coturn, the
+# relay reached over TCP.
 #
 # Then the same two calls again from each idiomatic binding in turn --
 # Python, Kotlin, .NET, Swift -- each placing the call itself through its
 # own `Stack`/`Client`/`SipralStack`, not through a harness written for this
 # lab, so the same claim is proved from every layer an application would
-# actually use. Each is skipped, rather than failed, when its own build step
-# above found nothing to run -- except under `scripts/lab.sh turn`, asked
-# for by name, where a skip fails the run instead of passing silently.
+# actually use; and then, the caller's NAT dropping every datagram to or
+# from coturn, that binding's caller alone reaching its relay over the
+# connection it opens itself: Python over TLS, Kotlin and .NET over TCP and
+# over TLS, Swift over TCP only -- its TLS is Network.framework's, which only
+# Apple's platforms have, and the lab's containers are Linux. Each is
+# skipped, rather than failed, when its own build step above found nothing
+# to run -- except under `scripts/lab.sh turn`, asked for by name, where a
+# skip fails the run instead of passing silently.
+#
+# coturn's log is the container's whole life, so every relay allocated so
+# far is counted in TURN_ALLOCATED as the steps go, and each step's
+# turn_given_back asks for that many, whichever steps before it ran.
 ice_turn_flow() {
-    local status=0
+    local status=0 caller
+    TURN_ALLOCATED=0
     SIPRAL_TURN_USER=sipral-lab
     SIPRAL_TURN_PASSWORD=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     export SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD
@@ -2018,21 +2112,11 @@ ice_turn_flow() {
 
     if [ "$status" -eq 0 ]; then
         printf '  without TURN: the call has to find no path\n'
-        if nat_pair_call; then
-            printf '  the call connected with the path between the NATs blocked: the block does not hold\n'
-            status=1
-        fi
+        turn_blocked "" || status=1
     fi
     if [ "$status" -eq 0 ]; then
         printf '  with TURN: the call has to go through coturn\n'
-        nat_pair_call \
-            -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
-            -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
-            -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
-            || status=1
-    fi
-    if [ "$status" -eq 0 ]; then
-        turn_given_back 2 || status=1
+        turn_both_ends "" || status=1
     fi
     if [ "$status" -eq 0 ] && [ -z "$HARNESS_C" ]; then
         if [ "$WANT" = turn ]; then
@@ -2044,20 +2128,10 @@ ice_turn_flow() {
         fi
     elif [ "$status" -eq 0 ]; then
         printf '  without TURN, through the C ABI: the call has to find no path\n'
-        if NAT_PAIR_CALLER=c nat_pair_call; then
-            printf '  the call through the C ABI connected with the path between the NATs blocked: the block does not hold\n'
-            status=1
-        fi
+        turn_blocked c "through the C ABI" || status=1
         if [ "$status" -eq 0 ]; then
             printf '  with TURN, through the C ABI: the call has to go through coturn\n'
-            NAT_PAIR_CALLER=c nat_pair_call \
-                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
-                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
-                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
-                || status=1
-        fi
-        if [ "$status" -eq 0 ]; then
-            turn_given_back 4 || status=1
+            turn_both_ends c || status=1
         fi
         # with both ends relayed, ICE settles on the callee's relay and the
         # caller's own goes back unused; with the caller's alone, the block
@@ -2068,7 +2142,8 @@ ice_turn_flow() {
             NAT_PAIR_CALLER=c NAT_PAIR_CALLER_TURN=1 nat_pair_call || status=1
         fi
         if [ "$status" -eq 0 ]; then
-            turn_given_back 5 || status=1
+            TURN_ALLOCATED=$((TURN_ALLOCATED + 1))
+            turn_given_back "$TURN_ALLOCATED" || status=1
         fi
         # and from behind a NAT that also drops every datagram to or from
         # coturn: the mapping asked over UDP goes unanswered, which the
@@ -2076,145 +2151,119 @@ ice_turn_flow() {
         # relay there can be is one reached over TCP -- the connection the
         # library asks for, carrying the Allocate, the permission, the
         # channel, the tone both ways and the Refresh that gives it back
-        if [ "$status" -eq 0 ]; then
-            printf '  with TURN over TCP at the C caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over the connection\n'
-            turn_udp_dropped -I || status=1
-            [ "$status" -ne 0 ] \
-                || NAT_PAIR_CALLER=c NAT_PAIR_CALLER_TURN=1 NAT_PAIR_TURN_TRANSPORT=tcp nat_pair_call \
-                || status=1
-            turn_udp_dropped -D
-        fi
-        if [ "$status" -eq 0 ]; then
-            turn_given_back 6 || status=1
-        fi
+        [ "$status" -ne 0 ] || turn_over_stream c tcp C || status=1
     fi
-    if [ "$status" -eq 0 ] && [ -z "$HARNESS_C" ]; then
-        if [ "$WANT" = turn ]; then
-            # the Python bindings load the same library the C ABI step
-            # above needs, so no C harness means no relayed call to place
-            # through them either
-            printf '  there is no C harness, so there is no libsipral for the relayed call through the Python bindings\n'
-            status=1
-        else
-            printf '  note  no C harness, so the relayed call through the Python bindings is skipped with the other C flows\n'
-        fi
-    elif [ "$status" -eq 0 ]; then
-        printf '  without TURN, through the Python bindings: the call has to find no path\n'
-        if NAT_PAIR_CALLER=python nat_pair_call; then
-            printf '  the call through the Python bindings connected with the path between the NATs blocked: the block does not hold\n'
-            status=1
-        fi
-        if [ "$status" -eq 0 ]; then
-            printf '  with TURN, through the Python bindings: the call has to go through coturn\n'
-            NAT_PAIR_CALLER=python nat_pair_call \
-                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
-                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
-                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
-                || status=1
-        fi
-        if [ "$status" -eq 0 ]; then
-            turn_given_back 8 || status=1
-        fi
-        # the same network again, the relay reached over TLS on 5349 with
-        # the certificate made for this run: the Python bindings open the
-        # connection with the platform's ssl, told to trust that certificate
-        # and to check it against the name it was made for
-        if [ "$status" -eq 0 ]; then
-            printf '  with TURN over TLS at the Python caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over TLS\n'
-            turn_udp_dropped -I || status=1
-            [ "$status" -ne 0 ] \
-                || NAT_PAIR_CALLER=python NAT_PAIR_CALLER_TURN=1 NAT_PAIR_TURN_TRANSPORT=tls nat_pair_call \
-                || status=1
-            turn_udp_dropped -D
-        fi
-        if [ "$status" -eq 0 ]; then
-            turn_given_back 9 || status=1
-        fi
-    fi
-    if [ "$status" -eq 0 ] \
-        && { [ -z "${KOTLIN_AGENT_JAR:-}" ] || [ -z "${KOTLIN_STDLIB_JAR:-}" ] \
-            || [ -z "${KOTLIN_COROUTINES_JAR:-}" ] || [ -z "$HARNESS_C" ]; }; then
-        if [ "$WANT" = turn ]; then
-            printf '  no Kotlin agent jar built, or no C harness for the libsipral it loads, so there is no relayed call through the Kotlin bindings\n'
-            status=1
-        else
-            printf '  note  no Kotlin agent jar, or no C harness, so the relayed call through the Kotlin bindings is skipped with the other C flows\n'
-        fi
-    elif [ "$status" -eq 0 ]; then
-        printf '  without TURN, through the Kotlin bindings: the call has to find no path\n'
-        if NAT_PAIR_CALLER=kotlin nat_pair_call; then
-            printf '  the call through the Kotlin bindings connected with the path between the NATs blocked: the block does not hold\n'
-            status=1
-        fi
-        if [ "$status" -eq 0 ]; then
-            printf '  with TURN, through the Kotlin bindings: the call has to go through coturn\n'
-            NAT_PAIR_CALLER=kotlin nat_pair_call \
-                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
-                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
-                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
-                || status=1
-        fi
-        if [ "$status" -eq 0 ]; then
-            turn_given_back 11 || status=1
-        fi
-    fi
-    if [ "$status" -eq 0 ] && [ -z "$HARNESS_C" ]; then
-        if [ "$WANT" = turn ]; then
-            # the .NET bindings load the same library the C ABI step above
-            # needs, so no C harness means no relayed call to place through
-            # them either
-            printf '  there is no C harness, so there is no libsipral for the relayed call through the .NET bindings\n'
-            status=1
-        else
-            printf '  note  no C harness, so the relayed call through the .NET bindings is skipped with the other C flows\n'
-        fi
-    elif [ "$status" -eq 0 ]; then
-        printf '  without TURN, through the .NET bindings: the call has to find no path\n'
-        if NAT_PAIR_CALLER=dotnet nat_pair_call; then
-            printf '  the call through the .NET bindings connected with the path between the NATs blocked: the block does not hold\n'
-            status=1
-        fi
-        if [ "$status" -eq 0 ]; then
-            printf '  with TURN, through the .NET bindings: the call has to go through coturn\n'
-            NAT_PAIR_CALLER=dotnet nat_pair_call \
-                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
-                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
-                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
-                || status=1
-        fi
-        if [ "$status" -eq 0 ]; then
-            turn_given_back 13 || status=1
-        fi
-    fi
-    if [ "$status" -eq 0 ] && [ -z "$SWIFT_AGENT" ]; then
-        if [ "$WANT" = turn ]; then
-            printf '  no Swift lab agent built, so there is no relayed call through the Swift bindings\n'
-            status=1
-        else
-            printf '  note  no Swift lab agent, so the relayed call through the Swift bindings is skipped with the other C flows\n'
-        fi
-    elif [ "$status" -eq 0 ]; then
-        printf '  without TURN, through the Swift bindings: the call has to find no path\n'
-        if NAT_PAIR_CALLER=swift nat_pair_call; then
-            printf '  the call through the Swift bindings connected with the path between the NATs blocked: the block does not hold\n'
-            status=1
-        fi
-        if [ "$status" -eq 0 ]; then
-            printf '  with TURN, through the Swift bindings: the call has to go through coturn\n'
-            NAT_PAIR_CALLER=swift nat_pair_call \
-                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
-                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
-                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
-                || status=1
-        fi
-        if [ "$status" -eq 0 ]; then
-            turn_given_back 15 || status=1
-        fi
-    fi
+    for caller in python kotlin dotnet swift; do
+        [ "$status" -eq 0 ] || break
+        turn_binding "$caller" || status=1
+    done
     nat_pair_down -f compose.yaml -f turn/compose.override.yaml
     rm -rf "$SIPRAL_TURN_CERTS"
     unset SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD SIPRAL_TURN_CERTS
     return "$status"
+}
+
+# The call across the blocked pair with no TURN anywhere, from the caller
+# NAT_PAIR_CALLER=$1 names (empty for the Rust harness), which has to find
+# no path: a call that connects is a block that does not hold, and a caller
+# stopped for running past its time proved nothing either way. $2 is how
+# that caller is named in what is printed.
+turn_blocked() {
+    local placed
+    NAT_PAIR_CALLER="${1:-rust}" nat_pair_call
+    placed=$?
+    if [ "$placed" -eq 0 ]; then
+        printf '  the call%s connected with the path between the NATs blocked: the block does not hold\n' \
+            "${2:+ $2}"
+        return 1
+    fi
+    [ "$placed" -ne "$LAB_RUN_TIMED_OUT" ]
+}
+
+# The call across the blocked pair with both ends given TURN over UDP, from
+# the caller NAT_PAIR_CALLER=$1 names (empty for the Rust harness), and both
+# relays given back after it.
+turn_both_ends() {
+    NAT_PAIR_CALLER="${1:-rust}" nat_pair_call \
+        -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
+        -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
+        -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
+        || return 1
+    TURN_ALLOCATED=$((TURN_ALLOCATED + 2))
+    turn_given_back "$TURN_ALLOCATED"
+}
+
+# The caller NAT_PAIR_CALLER=$1 names given TURN alone, over $2 (tcp or
+# tls), with every datagram to or from coturn dropped at its NAT for the
+# length of the call, and its one relay given back after it. $3 is how that
+# caller is named in what is printed.
+turn_over_stream() {
+    local caller="$1" over="$2" said="$3" placed=0 upper how
+    upper=$(printf '%s' "$over" | tr '[:lower:]' '[:upper:]')
+    how="the connection"
+    [ "$over" = tls ] && how="TLS"
+    printf '  with TURN over %s at the %s caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over %s\n' \
+        "$upper" "$said" "$how"
+    turn_udp_dropped -I || return 1
+    NAT_PAIR_CALLER="$caller" NAT_PAIR_CALLER_TURN=1 NAT_PAIR_TURN_TRANSPORT="$over" nat_pair_call \
+        || placed=1
+    turn_udp_dropped -D
+    [ "$placed" -eq 0 ] || return 1
+    TURN_ALLOCATED=$((TURN_ALLOCATED + 1))
+    turn_given_back "$TURN_ALLOCATED"
+}
+
+# One idiomatic binding's relayed calls, placed through its own layer by
+# NAT_PAIR_CALLER=$1: the pair with no TURN and with TURN at both ends, then
+# its caller alone over each stream transport its platform has here. A
+# binding whose build step found nothing to run is noted and skipped, or,
+# under `scripts/lab.sh turn`, fails the run.
+turn_binding() {
+    local caller="$1" said missing="" over
+    local -a streams=()
+    case "$caller" in
+    python)
+        said="Python bindings"
+        streams=(tls)
+        [ -n "$HARNESS_C" ] || missing="no C harness, so there is no libsipral for the relayed call through the Python bindings"
+        ;;
+    kotlin)
+        said="Kotlin bindings"
+        streams=(tcp tls)
+        if [ -z "${KOTLIN_AGENT_JAR:-}" ] || [ -z "${KOTLIN_STDLIB_JAR:-}" ] \
+            || [ -z "${KOTLIN_COROUTINES_JAR:-}" ] || [ -z "$HARNESS_C" ]; then
+            missing="no Kotlin agent jar built, or no C harness for the libsipral it loads, so there is no relayed call through the Kotlin bindings"
+        fi
+        ;;
+    dotnet)
+        said=".NET bindings"
+        streams=(tcp tls)
+        [ -n "$HARNESS_C" ] || missing="no C harness, so there is no libsipral for the relayed call through the .NET bindings"
+        ;;
+    swift)
+        said="Swift bindings"
+        streams=(tcp)
+        [ -n "$SWIFT_AGENT" ] || missing="no Swift lab agent built, so there is no relayed call through the Swift bindings"
+        ;;
+    esac
+    if [ -n "$missing" ]; then
+        if [ "$WANT" = turn ]; then
+            printf '  %s\n' "$missing"
+            return 1
+        fi
+        printf '  note  %s -- skipped\n' "$missing"
+        return 0
+    fi
+    printf '  without TURN, through the %s: the call has to find no path\n' "$said"
+    turn_blocked "$caller" "through the $said" || return 1
+    printf '  with TURN, through the %s: the call has to go through coturn\n' "$said"
+    turn_both_ends "$caller" || return 1
+    if [ "$caller" = swift ]; then
+        printf '  note  the Swift layer'"'"'s TLS is Network.framework'"'"'s, which only Apple'"'"'s platforms have; this Linux container reaches the relay over TCP alone, and TLS is proved by its own TurnStreamTests on macOS\n'
+    fi
+    for over in "${streams[@]}"; do
+        turn_over_stream "$caller" "$over" "${said% bindings}" || return 1
+    done
 }
 
 # The name the relay step's TLS certificate is made for, and the one the
@@ -2311,7 +2360,8 @@ bad_network() {
     WHY=""; NETEM=""; REQUIRE=""; DWELL_MS=""; DURING=""
     . "$ROOT/interop/impairment/$profile.sh"
     printf '  %-10s %s\n' "$profile" "$WHY"
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the harness over $profile" $((LAB_START_APT_S + 2 * (LAB_CALL_S + ${DWELL_MS:-2000} / 1000))) \
+        --network "$LAB_NETWORK" \
         --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=register,call \
         -e SIPRAL_AUDIO_GATE=1 \
@@ -2370,7 +2420,8 @@ bad_network() {
 # network is the Compose project's own, so a copy of the lab under a
 # COMPOSE_PROJECT_NAME of its own runs this against its own Asterisk.
 drift_flow() {
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the drift flow's six calls" $((LAB_START_S + ${SIPRAL_DRIFT_MS:-3600000} / 1000 + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=drift \
         -e SIPRAL_DRIFT_MS="${SIPRAL_DRIFT_MS:-3600000}" \
         -e SIPRAL_DRIFT_REPORT_MS="${SIPRAL_DRIFT_REPORT_MS:-300000}" \
@@ -2400,7 +2451,8 @@ drift_under_netem() {
     WHY=""; NETEM=""; REQUIRE=""
     . "$ROOT/interop/impairment/$profile.sh"
     printf '  %-10s %s\n' "$profile" "$WHY"
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the drift flow's six calls over $profile" $((LAB_START_APT_S + ${SIPRAL_DRIFT_MS:-180000} / 1000 + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         --cap-add NET_ADMIN \
         -e SIPRAL_FLOWS=drift \
         -e SIPRAL_AUDIO_GATE=1 \
@@ -2453,7 +2505,8 @@ fi
 # with two real clocks. interop/harness/src/latency.rs's own module doc says
 # why a round trip halved is what is reported instead.
 latency_flow() {
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the latency flow's call" $((LAB_START_S + ${SIPRAL_LATENCY_MS:-120000} / 1000 + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=latency \
         -e SIPRAL_LATENCY_MS="${SIPRAL_LATENCY_MS:-120000}" \
         -e SIPRAL_LATENCY_MARK_MS="${SIPRAL_LATENCY_MARK_MS:-2000}" \
@@ -2476,7 +2529,8 @@ fi
 # which this lab's own kamailio.cfg forwards to FreeSWITCH and nowhere else).
 volume_flow() {
     local server="$1"
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the volume flow's calls to $server" $((LAB_START_APT_S + ${SIPRAL_VOLUME_CALLS:-100} * ${SIPRAL_VOLUME_STAGGER_MS:-50} / 1000 + ${SIPRAL_VOLUME_HOLD_MS:-5000} / 1000 + 2 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
         -e SIPRAL_FLOWS=volume \
         -e SIPRAL_VOLUME_CALLS="${SIPRAL_VOLUME_CALLS:-100}" \
         -e SIPRAL_VOLUME_STAGGER_MS="${SIPRAL_VOLUME_STAGGER_MS:-50}" \
@@ -2798,7 +2852,7 @@ if [ "$WANT" = pipewire ]; then
     step "a call on a Linux desktop's devices -- PipeWire, straight at Asterisk"
     docker build -q -t sipral-pipewire interop/pipewire >/dev/null 2>&1 \
         && pass "the PipeWire image" || { fail "docker build interop/pipewire"; exit 1; }
-    docker run --rm --network "$LAB_NETWORK" \
+    lab_run "the PipeWire step" $((LAB_START_BUILD_S + LAB_CALL_S)) --network "$LAB_NETWORK" \
         -v "$ROOT:/src:ro" -v sipral-pipewire-target:/target \
         -e CARGO_TARGET_DIR=/target -w /src \
         sipral-pipewire bash interop/pipewire/run.sh call \

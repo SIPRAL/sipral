@@ -20,6 +20,7 @@ import Darwin
 import Glibc
 #endif
 import Dispatch
+import Foundation
 import Sipral
 
 // Unbuffered: this agent's log is read from `docker logs` while it is still
@@ -312,7 +313,13 @@ func runCallDirect(_ call: Call, patienceMs: UInt64, dwellMs: UInt64) async -> B
 ///
 /// SIPRAL_STUN_SERVER turns on STUN the same way `SipralStack`'s own
 /// initializer already offers any application; SIPRAL_TURN_SERVER/
-/// SIPRAL_TURN_USER/SIPRAL_TURN_PASSWORD ride on it, and SIPRAL_ICE=required
+/// SIPRAL_TURN_USER/SIPRAL_TURN_PASSWORD ride on it. SIPRAL_TURN_TRANSPORT
+/// is `udp`, `tcp` or `tls` (RFC 8656 §3.1); over TLS the server's
+/// certificate is checked against SIPRAL_TURN_NAME and trusted if it chains
+/// to a certificate in the PEM file SIPRAL_TURN_CA names, the system's
+/// roots otherwise. TLS needs Network.framework, which only Apple's
+/// platforms have: on Linux the stack opens the connection with a plain
+/// socket, over TCP, and a relay asked for over TLS fails. SIPRAL_ICE=required
 /// asks `SipralIce.required` of the stack, which is what makes a call that
 /// cannot find a path fail outright rather than fall back to the address
 /// this end bound to -- the one thing that would let a run through a
@@ -329,11 +336,25 @@ func runDirectCall() async -> Bool {
 
     let stunServer = environmentValue("SIPRAL_STUN_SERVER")
     let turnServer = environmentValue("SIPRAL_TURN_SERVER")
+    let over = environmentValue("SIPRAL_TURN_TRANSPORT") ?? "udp"
+    let transport: SipralTransport
+    switch over {
+    case "udp": transport = .udp
+    case "tcp": transport = .tcp
+    case "tls": transport = .tls
+    default:
+        print("SIPRAL_TURN_TRANSPORT is udp, tcp or tls, not \(over)")
+        return false
+    }
+    let trusted = environmentValue("SIPRAL_TURN_CA").map(certificatesIn) ?? []
     let turn = turnServer.map {
         TurnServer(
             address: $0,
             username: environmentValue("SIPRAL_TURN_USER") ?? "",
-            password: environmentValue("SIPRAL_TURN_PASSWORD") ?? ""
+            password: environmentValue("SIPRAL_TURN_PASSWORD") ?? "",
+            transport: transport,
+            serverName: environmentValue("SIPRAL_TURN_NAME"),
+            trustedCertificates: trusted
         )
     }
     let ice: SipralIce? = environmentValue("SIPRAL_ICE") == "required" ? .required : nil
@@ -352,7 +373,35 @@ func runDirectCall() async -> Bool {
     }
     let patienceMs = UInt64(environmentValue("SIPRAL_PATIENCE_MS") ?? "20000") ?? 20000
     let dwellMs = UInt64(environmentValue("SIPRAL_DWELL_MS") ?? "2000") ?? 2000
-    return await runCallDirect(call, patienceMs: patienceMs, dwellMs: dwellMs)
+    let ok = await runCallDirect(call, patienceMs: patienceMs, dwellMs: dwellMs)
+    if ok, let turnServer, transport != .udp {
+        print("relay over \(over.uppercased()) to \(turnServer): the call ran through it")
+    }
+    return ok
+}
+
+/// The DER of every certificate in the PEM file at `path`, which is what
+/// `TurnServer.trustedCertificates` takes: how the lab's coturn, whose
+/// certificate is made for the run, is trusted over TLS.
+func certificatesIn(_ path: String) -> [[UInt8]] {
+    guard let pem = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+    var found: [[UInt8]] = []
+    var body = ""
+    var inside = false
+    for line in pem.split(whereSeparator: \.isNewline) {
+        if line.hasPrefix("-----BEGIN CERTIFICATE-----") {
+            inside = true
+            body = ""
+        } else if line.hasPrefix("-----END CERTIFICATE-----") {
+            inside = false
+            if let der = Data(base64Encoded: body) {
+                found.append([UInt8](der))
+            }
+        } else if inside {
+            body += line.trimmingCharacters(in: .whitespaces)
+        }
+    }
+    return found
 }
 
 // The lab's own NAT-pair flow (`ice_turn_flow`) runs this mode instead of

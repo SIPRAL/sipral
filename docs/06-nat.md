@@ -645,7 +645,12 @@ certificate and to check it against its name (`SIPRAL_TURN_CA`,
 `SIPRAL_TURN_NAME`), with the platform's own `ssl`. coturn's log has to count
 both allocations given back, beside the UDP ones. The C harness carries no
 TLS of its own; TLS is the Python agent's to prove, the platform's stack
-being exactly what an application brings.
+being exactly what an application brings. Kotlin and .NET place it over TCP
+and then over TLS with the same three variables, through an `SSLSocket` and
+an `SslStream` trusting only the run's certificate; Swift places it over TCP
+alone, since its TLS is Network.framework's, which only Apple's platforms
+have and the lab's Linux containers do not, and its TLS is proved by
+`TurnStreamTests.swift` on macOS instead.
 
 ## ICE-lite
 

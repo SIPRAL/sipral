@@ -22,6 +22,7 @@
 
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using Sipral;
 
 // Which of this host's addresses a datagram to `address` leaves from. That
@@ -276,7 +277,12 @@ async Task<bool> RunCallDirectAsync(Call call, int patienceMs, int dwellMs)
 //
 // SIPRAL_STUN_SERVER turns on STUN the same way SipralStack's constructor
 // already offers any application; SIPRAL_TURN_SERVER/SIPRAL_TURN_USER/
-// SIPRAL_TURN_PASSWORD ride on it, and SIPRAL_ICE=required asks
+// SIPRAL_TURN_PASSWORD ride on it. SIPRAL_TURN_TRANSPORT is udp, tcp or
+// tls (RFC 8656 §3.1); over TLS the server's certificate is checked
+// against SIPRAL_TURN_NAME and trusted if it chains to the PEM file
+// SIPRAL_TURN_CA names, the platform's roots otherwise -- the lab's own
+// coturn presents a certificate made for the run, and this is how the run
+// tells the agent to trust it. SIPRAL_ICE=required asks
 // SipralIce.Required of the stack, which is what makes a call that
 // cannot find a path fail outright rather than fall back to the address
 // this end bound to -- the one thing that would let a run through a
@@ -293,6 +299,20 @@ async Task<bool> RunDirectCallAsync()
     var stunServer = Environment.GetEnvironmentVariable("SIPRAL_STUN_SERVER");
     var turnServer = Environment.GetEnvironmentVariable("SIPRAL_TURN_SERVER");
     var ice = Environment.GetEnvironmentVariable("SIPRAL_ICE") == "required" ? SipralIce.Required : (SipralIce?)null;
+    var over = Environment.GetEnvironmentVariable("SIPRAL_TURN_TRANSPORT") ?? "udp";
+    var turnTransport = over switch
+    {
+        "udp" => SipralTransport.Udp,
+        "tcp" => SipralTransport.Tcp,
+        "tls" => SipralTransport.Tls,
+        _ => throw new InvalidOperationException($"SIPRAL_TURN_TRANSPORT is udp, tcp or tls, not {over}"),
+    };
+    X509Certificate2Collection? trusted = null;
+    if (Environment.GetEnvironmentVariable("SIPRAL_TURN_CA") is { } caPath)
+    {
+        trusted = new X509Certificate2Collection();
+        trusted.ImportFromPemFile(caPath);
+    }
 
     using var stack = new SipralStack(
         bindHost: host,
@@ -301,7 +321,10 @@ async Task<bool> RunDirectCallAsync()
         stunServer: stunServer,
         turnServer: turnServer,
         turnUsername: Environment.GetEnvironmentVariable("SIPRAL_TURN_USER"),
-        turnPassword: Environment.GetEnvironmentVariable("SIPRAL_TURN_PASSWORD"));
+        turnPassword: Environment.GetEnvironmentVariable("SIPRAL_TURN_PASSWORD"),
+        turnTransport: turnTransport,
+        turnServerName: Environment.GetEnvironmentVariable("SIPRAL_TURN_NAME"),
+        turnTrustedCertificates: trusted);
     var account = stack.AddAccount($"sip:caller@{stack.BindAddress}", registrarAddress: peer);
     Console.WriteLine($"dialling sip:{peerUser}@{peer} from {stack.BindAddress}");
     Call call;
@@ -316,7 +339,12 @@ async Task<bool> RunDirectCallAsync()
     }
     var patienceMs = int.Parse(Environment.GetEnvironmentVariable("SIPRAL_PATIENCE_MS") ?? "20000");
     var dwellMs = int.Parse(Environment.GetEnvironmentVariable("SIPRAL_DWELL_MS") ?? "2000");
-    return await RunCallDirectAsync(call, patienceMs, dwellMs);
+    var ok = await RunCallDirectAsync(call, patienceMs, dwellMs);
+    if (ok && turnServer is not null && turnTransport != SipralTransport.Udp)
+    {
+        Console.WriteLine($"relay over {over.ToUpperInvariant()} to {turnServer}: the call ran through it");
+    }
+    return ok;
 }
 
 // The lab's own NAT-pair flow (ice_turn_flow) runs this mode instead of

@@ -15,8 +15,14 @@
 
 package org.sipral.examples
 
+import java.io.File
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.security.KeyStore
+import java.security.cert.CertificateFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManagerFactory
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -31,6 +37,7 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralIce
 import org.sipral.SipralStreamStats
+import org.sipral.SipralTransport
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.SipralTurnServer
@@ -236,7 +243,12 @@ private suspend fun runCallDirect(call: SipralCall, patienceMs: Long, dwellMs: L
  *
  * SIPRAL_STUN_SERVER turns on STUN the same way [SipralClient.open] already
  * offers any application; SIPRAL_TURN_SERVER/SIPRAL_TURN_USER/
- * SIPRAL_TURN_PASSWORD ride on it, and SIPRAL_ICE=required asks
+ * SIPRAL_TURN_PASSWORD ride on it. SIPRAL_TURN_TRANSPORT is `udp`, `tcp` or
+ * `tls` (RFC 8656 §3.1); over TLS the server's certificate is checked
+ * against SIPRAL_TURN_NAME and trusted if it chains to the PEM file
+ * SIPRAL_TURN_CA names, the platform's roots otherwise -- the lab's own
+ * coturn presents a certificate made for the run, and this is how the run
+ * tells the agent to trust it. SIPRAL_ICE=required asks
  * [SipralIce.REQUIRED] of the call this places, which is what makes a call
  * that cannot find a path fail outright rather than fall back to the
  * address this end bound to -- the one thing that would let a run through a
@@ -251,11 +263,21 @@ private suspend fun runDirectCall(): Boolean {
 
     val stunServer = System.getenv("SIPRAL_STUN_SERVER")
     val turnServer = System.getenv("SIPRAL_TURN_SERVER")
+    val over = System.getenv("SIPRAL_TURN_TRANSPORT") ?: "udp"
+    val transport = when (over) {
+        "udp" -> SipralTransport.UDP
+        "tcp" -> SipralTransport.TCP
+        "tls" -> SipralTransport.TLS
+        else -> error("SIPRAL_TURN_TRANSPORT is udp, tcp or tls, not $over")
+    }
     val turn = if (turnServer != null) {
         SipralTurnServer(
             address = turnServer,
             username = System.getenv("SIPRAL_TURN_USER") ?: "",
             password = System.getenv("SIPRAL_TURN_PASSWORD") ?: "",
+            transport = transport,
+            serverName = System.getenv("SIPRAL_TURN_NAME"),
+            sslSocketFactory = System.getenv("SIPRAL_TURN_CA")?.let(::trusting),
         )
     } else {
         null
@@ -276,7 +298,24 @@ private suspend fun runDirectCall(): Boolean {
     val dwellMs = System.getenv("SIPRAL_DWELL_MS")?.toLong() ?: 2_000L
     val ok = runCallDirect(call, patienceMs, dwellMs)
     client.close()
+    if (ok && turn != null && transport != SipralTransport.UDP) {
+        println("relay over ${over.uppercase()} to $turnServer: the call ran through it")
+    }
     return ok
+}
+
+/** A socket factory that trusts the certificates in the PEM file at `path`
+ * and nothing else: how the lab's coturn, whose certificate is made for the
+ * run, is trusted over TLS. */
+private fun trusting(path: String): SSLSocketFactory {
+    val anchors = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null, null) }
+    File(path).inputStream().use { input ->
+        CertificateFactory.getInstance("X.509").generateCertificates(input).forEachIndexed { index, certificate ->
+            anchors.setCertificateEntry("turn-$index", certificate)
+        }
+    }
+    val trust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(anchors) }
+    return SSLContext.getInstance("TLS").apply { init(null, trust.trustManagers, null) }.socketFactory
 }
 
 fun main() = runBlocking {
