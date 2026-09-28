@@ -251,9 +251,13 @@ class _TwoStacks(unittest.IsolatedAsyncioTestCase):
         if host is None:
             self.skipTest("no routable address on this machine for ICE to gather a host candidate from")
         self.host = host
+        # before any server exists: a TLS case skips here on a machine with
+        # no openssl, and a cleanup already registered would then close a
+        # server that was never made
+        certificate = self.certificate()
         self.stun = _FakeStunServer(*self.PUBLIC)
+        self.turn = _FakeTurnOverStream(("alice-turn", "turn-secret-7"), certificate)
         self.addAsyncCleanup(self._close_servers)
-        self.turn = _FakeTurnOverStream(("alice-turn", "turn-secret-7"), self.certificate())
         loop = asyncio.get_running_loop()
         self.alice_stack = Stack(
             bind_host=host,
