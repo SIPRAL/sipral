@@ -1055,7 +1055,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the miss a stalled stream. It now counts a call as up only once the far end
   answers it, reports the ones left in early media apart as the server
   declining under the offered rate, and fails only on a stall of a call that
-  was answered — the real media defect the watchdog is there to catch.
+  was answered — the real media defect the watchdog is there to catch,
+  including a call answered while its early media was still silent that stays
+  silent, which the watchdog, firing once per silence, does not report twice.
+  A call refused with a `5xx` before it was answered, which FreeSWITCH sends
+  at a 50 ms stagger, is reported apart the same way; a `4xx` or `6xx` still
+  fails the run, since it says the request was wrong, not that the server was
+  busy.
 - **A Python call closed the moment it ends still gives its relay back.**
   `Stack` sent a call's farewells — its RTCP BYE and the TURN Refresh with a
   lifetime of zero — only after the poll that ended the call had delivered

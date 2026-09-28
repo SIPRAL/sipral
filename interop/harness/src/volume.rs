@@ -38,7 +38,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use sipral::{
-    CallEndReason, CallHandle, CallMedia, Event, MediaConfig, MediaEvent, OutgoingCall, UaEvent,
+    CallEndReason, CallHandle, CallMedia, Event, MediaConfig, MediaEvent, OutgoingCall, StatusCode,
+    UaEvent,
 };
 
 use crate::{Endpoint, catalog, place_call, run_folded, uri};
@@ -71,6 +72,7 @@ fn sized(name: &str, fallback: u64) -> u64 {
         .unwrap_or(fallback)
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct Leg {
     call: Option<CallHandle>,
     placed_at: Option<Instant>,
@@ -78,11 +80,16 @@ struct Leg {
     /// A 2xx arrived: the far end answered this call, rather than only
     /// promising early media in a provisional response.
     confirmed: bool,
-    /// The far end refused this call before answering it — a `4xx`/`5xx` to
-    /// the INVITE. Seen when a server sheds load harder than leaving the call
-    /// in early media: at a `50 ms` stagger FreeSWITCH answers 500 rather than
-    /// ring. Counted apart, not as this end ending a live call.
+    /// The far end refused this call before answering it with a `5xx` to the
+    /// INVITE (see [`is_load_refusal`]). Seen when a server sheds load harder
+    /// than leaving the call in early media: at a `50 ms` stagger FreeSWITCH
+    /// answers 500 rather than ring. Counted apart, not as this end ending a
+    /// live call.
     refused: bool,
+    /// The stall watchdog fired before the far end answered and nothing has
+    /// arrived since. The watchdog fires once per silence, so a call answered
+    /// while still silent gets no second event; [`Leg::why_failed`] judges it.
+    silent: bool,
     ended: bool,
     failure: Option<String>,
 }
@@ -95,9 +102,20 @@ impl Leg {
             started: None,
             confirmed: false,
             refused: false,
+            silent: false,
             ended: false,
             failure: None,
         }
+    }
+
+    /// Why this leg failed, if it did. Besides a failure recorded as it
+    /// happened, a call the far end answered while the stream it promised
+    /// in early media was still silent, and that stayed silent to the end,
+    /// stalled as surely as one that went quiet after the answer.
+    fn why_failed(&self) -> Option<&str> {
+        self.failure
+            .as_deref()
+            .or_else(|| (self.confirmed && self.silent).then_some("the stream stalled"))
     }
 
     /// This leg has had its chance and will not change state on its own: it
@@ -123,8 +141,25 @@ impl Leg {
         if self.confirmed {
             self.failure
                 .get_or_insert_with(|| "the stream stalled".to_owned());
+        } else {
+            self.silent = true;
         }
     }
+
+    /// Record that packets are arriving again after a stall.
+    fn note_resumed(&mut self) {
+        self.silent = false;
+    }
+}
+
+/// Whether a call's end is the far end declining it under load: refused
+/// before it was answered, with a `5xx`, the class RFC 3261 §21.5 gives a
+/// server that has itself failed to carry out a valid request. A `4xx` says
+/// the request itself was wrong (§21.4) — a `488` to this end's offer, say —
+/// and a `6xx` that no server will take it (§21.6); neither is load, and
+/// either still fails the run.
+fn is_load_refusal(reason: CallEndReason, status: Option<StatusCode>) -> bool {
+    reason == CallEndReason::Refused && status.is_some_and(|status| status.get() / 100 == 5)
 }
 
 /// Register once, place `SIPRAL_VOLUME_CALLS` calls to the tone extension
@@ -193,12 +228,13 @@ pub(crate) fn run(
                     if let Some(leg) = legs.iter_mut().find(|leg| leg.call == Some(call)) {
                         leg.ended = true;
                         if hung_up.is_none() && leg.failure.is_none() {
-                            if !leg.confirmed && reason == CallEndReason::Refused {
+                            if !leg.confirmed && is_load_refusal(reason, status) {
                                 // the far end refused a call it had never
-                                // answered: a decline at setup, the harder edge
-                                // of the same load-shedding that leaves other
-                                // calls in early media — not this end dropping a
-                                // call that was up.
+                                // answered, as a server that could not take
+                                // it: a decline at setup, the harder edge of
+                                // the same load-shedding that leaves other
+                                // calls in early media — not this end dropping
+                                // a call that was up.
                                 leg.refused = true;
                             } else {
                                 leg.failure = Some(format!(
@@ -225,6 +261,14 @@ pub(crate) fn run(
                 } => {
                     if let Some(leg) = legs.iter_mut().find(|leg| leg.call == Some(call)) {
                         leg.note_stall();
+                    }
+                }
+                Event::Media {
+                    call,
+                    event: MediaEvent::Resumed { .. },
+                } => {
+                    if let Some(leg) = legs.iter_mut().find(|leg| leg.call == Some(call)) {
+                        leg.note_resumed();
                     }
                 }
                 _ => {}
@@ -338,14 +382,11 @@ fn verdict(legs: &[Leg]) -> Result<String, String> {
     // RTP, then this end cancelled it. See [`Leg::note_stall`].
     let in_early_media = legs
         .iter()
-        .filter(|leg| !leg.confirmed && !leg.refused && leg.failure.is_none())
+        .filter(|leg| !leg.confirmed && !leg.refused && leg.why_failed().is_none())
         .count();
     // Refused at setup, the harder edge of the same load-shedding.
     let refused = legs.iter().filter(|leg| leg.refused).count();
-    let failed: Vec<&str> = legs
-        .iter()
-        .filter_map(|leg| leg.failure.as_deref())
-        .collect();
+    let failed: Vec<&str> = legs.iter().filter_map(Leg::why_failed).collect();
     let mut left = String::new();
     if in_early_media > 0 {
         let _ = write!(
@@ -385,7 +426,9 @@ fn verdict(legs: &[Leg]) -> Result<String, String> {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{Leg, percentile, verdict};
+    use sipral::{CallEndReason, StatusCode};
+
+    use super::{Leg, is_load_refusal, percentile, verdict};
 
     #[test]
     fn percentile_reads_off_the_sorted_list() {
@@ -486,6 +529,44 @@ mod tests {
         legs.push(broken);
         let why = verdict(&legs).expect_err("a stall after answer is a real defect");
         assert!(why.contains("the stream stalled"), "{why}");
+    }
+
+    #[test]
+    fn a_call_answered_into_the_silence_of_its_early_media_still_fails() {
+        // The watchdog fires once per silence: a stall in early media is not
+        // raised again when the far end then answers, so an answered call
+        // that never carries a packet would pass unless the earlier stall
+        // is remembered.
+        let mut legs: Vec<Leg> = (0..99).map(|_| answered()).collect();
+        let mut silent = early_media_only();
+        silent.note_stall();
+        silent.confirmed = true;
+        legs.push(silent);
+        let why = verdict(&legs).expect_err("an answered call that never carried audio stalled");
+        assert!(why.contains("the stream stalled"), "{why}");
+    }
+
+    #[test]
+    fn a_call_answered_after_its_early_media_stalled_passes_once_audio_comes() {
+        let mut leg = early_media_only();
+        leg.note_stall();
+        leg.confirmed = true;
+        leg.note_resumed();
+        assert_eq!(leg.why_failed(), None);
+    }
+
+    #[test]
+    fn only_a_server_failure_counts_as_refused_under_load() {
+        let status = |code| StatusCode::new(code).ok();
+        assert!(is_load_refusal(CallEndReason::Refused, status(500)));
+        assert!(is_load_refusal(CallEndReason::Refused, status(503)));
+        // this end's offer or request was wrong, or nowhere takes the call:
+        // those are not load and must still fail the run
+        assert!(!is_load_refusal(CallEndReason::Refused, status(488)));
+        assert!(!is_load_refusal(CallEndReason::Refused, status(403)));
+        assert!(!is_load_refusal(CallEndReason::Refused, status(603)));
+        assert!(!is_load_refusal(CallEndReason::Refused, None));
+        assert!(!is_load_refusal(CallEndReason::Unreachable, status(503)));
     }
 
     #[test]
