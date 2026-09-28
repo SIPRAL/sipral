@@ -25,7 +25,8 @@ pub enum Role {
     /// this session believes is lite too (§6.1.1); it is never the outcome
     /// of answering a Binding request; a full peer is always controlling
     /// (§6.1.1), so that answering side's role-conflict handling never lets
-    /// a message move this agent into it.
+    /// a message move this agent into it, and the first ICE-CONTROLLING
+    /// request, which proves the peer full, moves it out.
     Controlling,
     /// This agent waits for a nomination and accepts it.
     Controlled,
@@ -257,8 +258,12 @@ impl LiteAgent {
         // arithmetic in §7.3.1.1 is not run in this agent's favour, so it
         // cannot move this agent to the controlling role roughly half the
         // time, one it can never act on (no candidate gathering beyond
-        // host) and that would leave the call unable to find a path.
-        if server::resolve_role(&mut self.role, self.tiebreaker, &message, false) {
+        // host) and that would leave the call unable to find a path. The
+        // same holds the other way round: an ICE-CONTROLLING request to this
+        // agent in the controlling role it took believing the peer lite too
+        // is that full peer, and this agent yields to it rather than let the
+        // tiebreaker keep it in charge of checks it never sends.
+        if server::resolve_role(&mut self.role, self.tiebreaker, &message, true) {
             return server::error_signed(
                 &message,
                 error_code::ROLE_CONFLICT,
@@ -830,23 +835,40 @@ mod tests {
     }
 
     #[test]
-    fn a_controlling_agent_facing_an_equal_or_smaller_tiebreaker_keeps_control_and_answers_487() {
-        for theirs in [100, 50] {
+    fn a_controlling_lite_agent_always_yields_to_a_full_peer_whatever_the_tiebreaker_says() {
+        // the both-lite case (RFC 8445 SS6.1.1) starts the offerer
+        // controlling, but a Binding request only ever comes from a full
+        // peer, and SS6.1.1 makes a full peer controlling against a lite one
+        // unconditionally. SS7.3.1.1's arithmetic would keep control and
+        // answer 487 whenever this tiebreaker (100, fixed by `agent()`) is
+        // the larger: a role a lite agent can never act on, since it sends
+        // no checks and so nominates nothing, and the call would have no
+        // path. It yields instead, and takes the nomination the same
+        // request carries
+        for theirs in [0, 50, 100, u64::MAX] {
             let mut agent = agent(Role::Controlling);
             let datagram = check(|builder| {
                 builder
                     .add_u64(AttributeType::ICE_CONTROLLING, theirs)
                     .expect("ice-controlling");
+                builder
+                    .add_flag(AttributeType::USE_CANDIDATE)
+                    .expect("use-candidate");
             });
             let response = agent
                 .handle_binding_request(ComponentId::RTP, local(), peer(), &datagram)
                 .expect("a reply");
             assert_eq!(
-                error_code_of(&response),
-                error_code::ROLE_CONFLICT,
+                parsed(&response).class(),
+                Class::Success,
                 "theirs = {theirs}"
             );
-            assert_eq!(agent.role(), Role::Controlling, "theirs = {theirs}");
+            assert_eq!(agent.role(), Role::Controlled, "theirs = {theirs}");
+            assert_eq!(
+                agent.valid_pair(ComponentId::RTP).map(|pair| pair.remote),
+                Some(peer()),
+                "theirs = {theirs}"
+            );
         }
     }
 

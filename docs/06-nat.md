@@ -717,7 +717,14 @@ opens on demand. What it does, in the order a call meets it:
   roles backwards, honestly or by an attacker's forgery, does not get to move
   a lite end to a controlling role it can never act on (no candidate
   gathering beyond host) and leave the call unable to find a path. The
-  answers wait for `poll_transmit` under the full role's ceiling and drop
+  same defence holds the other way round. Between two lite ends the offerer
+  starts controlling (§6.1.1), so a lite end that read `a=ice-lite` from a
+  peer that is in fact full starts in a role that peer will contest: its
+  first check arrives with ICE-CONTROLLING, and that request is the proof
+  the peer is full. The lite end moves to controlled and answers it,
+  nomination included, whatever the tiebreaker says, rather than answer 487
+  and keep a controlling role in which it would send no checks and nominate
+  nothing. The answers wait for `poll_transmit` under the full role's ceiling and drop
   policy (below, "The outbox").
 - **The path.** The pair a check carrying USE-CANDIDATE arrives on is the
   media path (§7.3.2), and it is reported as `MediaEvent::PathChosen` —

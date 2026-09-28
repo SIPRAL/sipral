@@ -1069,6 +1069,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   at a 50 ms stagger, is reported apart the same way; a `4xx` or `6xx` still
   fails the run, since it says the request was wrong, not that the server was
   busy.
+- **A lite ICE end that started controlling yields to a full peer.** Two
+  lite ends make the offerer controlling (RFC 8445 §6.1.1), so a lite end
+  told the peer was lite too started controlling; when the peer was in fact
+  full, its checks arrived with ICE-CONTROLLING and the §7.3.1.1 tiebreaker
+  kept the lite end in charge about half the time, answering 487 while
+  never sending a check of its own, and the call found no path. The first
+  such request now moves it to controlled, and its nomination is taken.
 - **A change offered in an UPDATE or a PRACK that the application never
   answers no longer blocks the call for good.** The endpoint answers such a
   request 408 after 64·T1, but the offer went on counting as unanswered, so

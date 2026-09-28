@@ -83,7 +83,7 @@ impl IceAgent {
         let mut role = self.role;
         // both sides here are full agents (or believe they might be), so
         // either half of the arithmetic is a real conflict to settle
-        if server::resolve_role(&mut role, self.tiebreaker, message, true) {
+        if server::resolve_role(&mut role, self.tiebreaker, message, false) {
             if let Some(reply) = server::error_signed(
                 message,
                 error_code::ROLE_CONFLICT,

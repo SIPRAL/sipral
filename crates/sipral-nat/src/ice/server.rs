@@ -129,27 +129,32 @@ pub(super) fn remote_ufrag<'m>(username: &'m [u8], local_ufrag: &[u8]) -> Option
 /// request naming the role this agent does not hold — ICE-CONTROLLING to a
 /// controlled agent, or the reverse — is no conflict and changes nothing.
 ///
-/// `allow_switch_to_controlling` gates only the controlled agent's half of
-/// the arithmetic: when it is `false`, an ICE-CONTROLLED request is always
-/// answered with a 487 that keeps the controlled role, whatever the
-/// tiebreaker says. A full agent has no reason to pass `false` — either side
-/// of a full-full conflict is a real ambiguity the arithmetic is meant to
-/// settle. A lite agent does: §6.1.1 makes "one full, one lite" the full
-/// agent's controlling role unconditionally, so an ICE-CONTROLLED request
-/// naming that lite agent's controlled role is not a genuine conflict for
-/// the arithmetic to settle — it is the one case the RFC never predicts, and
-/// [`super::agent`] never lets the tiebreaker decide it.
+/// `lite` is whether the agent answering is a lite one, and for a lite agent
+/// neither half of the arithmetic is a real conflict. A Binding request only
+/// ever reaches a lite agent from a full peer — two lite agents exchange no
+/// checks (§6.1.1) — and §6.1.1 makes "one full, one lite" the full agent's
+/// controlling role unconditionally. So an ICE-CONTROLLED request naming a
+/// lite agent's controlled role is always answered with a 487 that keeps
+/// that role, and an ICE-CONTROLLING request reaching a lite agent that
+/// started controlling — because the description it read said the peer was
+/// lite too — always moves it to controlled and is answered, whatever the
+/// tiebreaker says: the peer that sent it is the one doing the checks and
+/// the nominating, and a lite agent that kept a role it can never act on,
+/// sending no checks and nominating nothing, would leave the call with no
+/// path about half the time. A full agent passes `false`: either side of a
+/// full-full conflict is the real ambiguity the arithmetic is there to
+/// settle.
 pub(super) fn resolve_role(
     role: &mut Role,
     tiebreaker: u64,
     message: &Message<'_>,
-    allow_switch_to_controlling: bool,
+    lite: bool,
 ) -> bool {
     if let Some(theirs) = message.ice_controlling() {
         if *role != Role::Controlling {
             return false;
         }
-        if tiebreaker >= theirs {
+        if !lite && tiebreaker >= theirs {
             return true;
         }
         *role = Role::Controlled;
@@ -157,7 +162,7 @@ pub(super) fn resolve_role(
         if *role != Role::Controlled {
             return false;
         }
-        if allow_switch_to_controlling && tiebreaker >= theirs {
+        if !lite && tiebreaker >= theirs {
             *role = Role::Controlling;
         } else {
             return true;
