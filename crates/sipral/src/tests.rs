@@ -1964,6 +1964,58 @@ fn a_plain_re_offer_inside_a_call_that_requires_srtp_is_refused() {
 const OURS: &str = "inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const THEIRS: &str = "inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 
+/// An INVITE carrying an SDES offer still fits a datagram once a server's
+/// digest challenge is answered in it.
+///
+/// Over 1300 octets, with the path MTU unknown, RFC 3261 §18.1.1 moves a
+/// request to a congestion-controlled transport, and a phone registered over
+/// UDP alone has none: the answered INVITE never leaves, and the call is never
+/// placed. Every `a=crypto` line of the offer is in that INVITE, so the offer
+/// is kept to what leaves room for an `Authorization` field the shape of the
+/// one the lab's Asterisk asks for, with the lab's own digest values in it.
+#[test]
+fn an_sdes_offer_leaves_an_answered_invite_room_in_a_datagram() {
+    const AUTHORIZATION: &str = "Authorization: Digest username=\"labuser-srtp\", \
+        realm=\"asterisk\", nonce=\"1790633099/25f6972d5eee33b81b72468670c2b3e3\", \
+        uri=\"sip:bob@example.com\", response=\"0817df17685071240abceef36b2be782\", \
+        algorithm=MD5, qop=auth, nc=00000001, cnonce=\"d32af035a347eb032cf6229e22b7b6bf\", \
+        opaque=\"7defcb0c4fbb9048\"\r\n";
+
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    pair.caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    let invite = pair
+        .caller
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("the INVITE");
+    assert!(
+        String::from_utf8_lossy(&invite).contains("a=crypto:"),
+        "the offer carries SDES"
+    );
+    let answered = invite.len() + AUTHORIZATION.len();
+    assert!(
+        answered <= 1_300,
+        "the INVITE is {} octets, {answered} once the challenge is answered",
+        invite.len()
+    );
+}
+
 /// Plain RTP arriving on a secured stream is dropped rather than played.
 ///
 /// The other half of what makes the encryption worth having: a stream that

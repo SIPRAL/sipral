@@ -44,25 +44,23 @@ use crate::error::MediaError;
 
 /// The suites this end offers, one line each, tagged in this order starting
 /// from 1 — RFC 4568 §4 only asks that a tag be unique among a media line's
-/// own crypto attributes. Strongest first (8.2.4): `AEAD_AES_256_GCM`,
-/// `AEAD_AES_128_GCM`, `AES_256_CM_HMAC_SHA1_80`, then
-/// `AES_CM_128_HMAC_SHA1_80` — RFC 6188's and RFC 7714's suites named ahead
-/// of the one suite every implementation has, so an answerer that itself
-/// prefers strength (§5.1.2 leaves the answerer's own policy free; it binds
-/// only the offerer's own *order*) settles on one of the newer three, and a
-/// peer with nothing but the original suite still finds it, last in the
-/// list. Each carries a master key of its own (§6.1: every key "MUST be
-/// unique ... with respect to other master keys in the entire SDP message").
+/// own crypto attributes. Strongest first (8.2.4): `AEAD_AES_256_GCM`, then
+/// `AES_CM_128_HMAC_SHA1_80` — RFC 7714's stronger suite named ahead of the
+/// one suite every implementation has, so an answerer that itself prefers
+/// strength (§5.1.2 leaves the answerer's own policy free; it binds only the
+/// offerer's own *order*) settles on it, and a peer with nothing but the
+/// original suite still finds that, last in the list. Each carries a master
+/// key of its own (§6.1: every key "MUST be unique ... with respect to other
+/// master keys in the entire SDP message").
 ///
-/// The narrower `AES_CM_128_HMAC_SHA1_32` and `F8_128_HMAC_SHA1_80` are
-/// still accepted when a peer offers them (`from_name` reads all seven); only
-/// this end's own offer stays to the four above.
-pub(crate) const OFFERED: [CryptoSuite; 4] = [
-    CryptoSuite::AeadAes256Gcm,
-    CryptoSuite::AeadAes128Gcm,
-    CryptoSuite::Aes256Cm80,
-    CryptoSuite::AesCm80,
-];
+/// Two and not all four the stack runs, because every line is in the
+/// INVITE, and so in the INVITE that answers a server's digest challenge:
+/// with `AEAD_AES_128_GCM` and `AES_256_CM_HMAC_SHA1_80` as well, that
+/// request passes RFC 3261 §18.1.1's 1300 octets and needs a stream a phone
+/// registered over UDP alone does not have, and the call is never placed —
+/// the lab's Asterisk showed it. The other five suites are still accepted
+/// when a peer offers them (`from_name` reads all seven).
+pub(crate) const OFFERED: [CryptoSuite; 2] = [CryptoSuite::AeadAes256Gcm, CryptoSuite::AesCm80];
 
 /// What a call does about SRTP.
 ///
@@ -188,7 +186,7 @@ impl SrtpPolicy {
 }
 
 /// The `a=crypto` lines this end offers, one per [`OFFERED`] suite in the
-/// same order, tagged 1 through 4, each carrying the matching key of `keys`.
+/// same order, tagged from 1, each carrying the matching key of `keys`.
 ///
 /// `keys` is one key per offered suite, each already the width that suite's
 /// own `key_len`/`salt_len` calls for — [`crate::engine`]'s `draw_key_for`
@@ -201,7 +199,7 @@ pub(crate) fn offer_lines(keys: [KeySalt; OFFERED.len()]) -> Vec<Crypto> {
         .zip(keys)
         .enumerate()
         .map(|(index, (suite, key))| {
-            // tags start at 1; OFFERED has four entries, so this always fits
+            // tags start at 1; OFFERED has two entries, so this always fits
             let tag = u32::try_from(index).unwrap_or(0) + 1;
             CryptoPolicy::new(tag, suite, key).to_crypto()
         })
@@ -517,7 +515,7 @@ mod tests {
         let lines = offer_lines(offer_keys(7));
         assert_eq!(lines.len(), OFFERED.len());
         for (index, (line, suite)) in lines.iter().zip(OFFERED).enumerate() {
-            let tag = u32::try_from(index).expect("four fits") + 1;
+            let tag = u32::try_from(index).expect("two fits") + 1;
             assert_eq!(line.tag, tag, "{}", suite.name());
             assert_eq!(line.suite, suite.name());
             assert!(line.key_params.starts_with("inline:"), "{}", suite.name());
@@ -528,12 +526,7 @@ mod tests {
                 .iter()
                 .map(|line| line.suite.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "AEAD_AES_256_GCM",
-                "AEAD_AES_128_GCM",
-                "AES_256_CM_HMAC_SHA1_80",
-                "AES_CM_128_HMAC_SHA1_80",
-            ]
+            ["AEAD_AES_256_GCM", "AES_CM_128_HMAC_SHA1_80"]
         );
     }
 

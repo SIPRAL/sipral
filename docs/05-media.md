@@ -671,18 +671,23 @@ stays at its suite's own width whatever the suite says about SRTP's, because
 zeroised on drop. Unencrypted RTP arriving on a secured session is dropped,
 never accepted as a fallback.
 
-An SDES offer carries four `a=crypto` lines, one per suite, tagged 1 through
-4 and strongest first: `AEAD_AES_256_GCM`, `AEAD_AES_128_GCM`,
-`AES_256_CM_HMAC_SHA1_80`, then `AES_CM_128_HMAC_SHA1_80`, each with a master
+An SDES offer carries two `a=crypto` lines, tagged 1 and 2 and strongest
+first: `AEAD_AES_256_GCM`, then `AES_CM_128_HMAC_SHA1_80`, each with a master
 key of its own (§6.1's "MUST be unique ... with respect to other master keys
-in the entire SDP message"). *Answering* one stays bound to RFC 4568 §5.1.2's
-own rule instead: the offerer's own order of preference, the first line this
-stack understands and can be held to, not this stack's own ranking of the
-suites on offer — so a peer that lists `AES_CM_128_HMAC_SHA1_80` first is
-answered with that suite even though this stack would itself have preferred
-one of the newer three. `AES_CM_128_HMAC_SHA1_32` and `F8_128_HMAC_SHA1_80`
-are accepted the same way when a peer offers either; neither is this end's
-own offer.
+in the entire SDP message"). Two and not all four the stack could offer,
+because every line is in the INVITE, and so in the INVITE that answers a
+server's digest challenge: with `AEAD_AES_128_GCM` and
+`AES_256_CM_HMAC_SHA1_80` as well, that request passes RFC 3261 §18.1.1's
+1300 octets, needs a stream transport a phone registered over UDP alone does
+not have, and never leaves — the lab's Asterisk showed exactly that.
+*Answering* one stays bound to RFC 4568 §5.1.2's own rule instead: the
+offerer's own order of preference, the first line this stack understands
+and can be held to, not this stack's own ranking of the suites on offer — so
+a peer that lists `AES_CM_128_HMAC_SHA1_80` first is answered with that suite
+even though this stack would itself have preferred `AEAD_AES_256_GCM`.
+`AEAD_AES_128_GCM`, `AES_256_CM_HMAC_SHA1_80` and `_32`,
+`AES_CM_128_HMAC_SHA1_32` and `F8_128_HMAC_SHA1_80` are accepted the same way
+when a peer offers them; none is this end's own offer.
 
 DTLS-SRTP negotiates the same four `AES_CM`/`AEAD_AES_128/256_GCM` suites
 that SDES offers — `SRTP_AEAD_AES_256_GCM` (`0x0008`) and `_128_GCM`

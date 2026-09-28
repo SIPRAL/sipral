@@ -315,11 +315,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `AEAD_AES_256_GCM` (RFC 7714) join the three suites SDES already carried;
   the AEAD suites tie confidentiality and integrity into one AES-GCM call
   rather than pairing AES-CM with a separate HMAC. An SDES offer now
-  carries four `a=crypto` lines, strongest first — `AEAD_AES_256_GCM`,
-  `AEAD_AES_128_GCM`, `AES_256_CM_HMAC_SHA1_80`, `AES_CM_128_HMAC_SHA1_80`
-  — each with a master key of its own; *answering* one stays bound to RFC
-  4568 §5.1.2's own terms, the offerer's own order, the first line this
-  stack can be held to, so a peer's own preference is never overridden.
+  carries two `a=crypto` lines, strongest first — `AEAD_AES_256_GCM`, then
+  `AES_CM_128_HMAC_SHA1_80` — each with a master key of its own: four
+  pushed the INVITE that answers a digest challenge past RFC 3261
+  §18.1.1's 1300 octets, and a phone on UDP alone never placed the call.
+  The other five suites are accepted when offered; *answering* one stays
+  bound to RFC 4568 §5.1.2's own terms, the offerer's own order, the first
+  line this stack can be held to, so a peer's own preference is never
+  overridden.
   DTLS-SRTP now negotiates `SRTP_AEAD_AES_128_GCM`/`_256_GCM` (RFC 7714
   §14.2) alongside the original two AES-128-CM profiles and prefers the
   strongest one both ends share — RFC 5764 leaves that choice to the
