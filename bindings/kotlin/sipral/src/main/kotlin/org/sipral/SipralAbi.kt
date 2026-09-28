@@ -778,6 +778,28 @@ enum class SipralSrtpSuite(val value: Int) {
      * SDES only; RFC 5764 §4.1.2 defines no DTLS-SRTP profile for it.
      */
     AES_F8(3),
+    /**
+     * `AES_256_CM_HMAC_SHA1_80` (RFC 6188): `AesCm80` with a 256-bit
+     * key. Reachable by SDES only, like `AesF8`: no DTLS-SRTP profile
+     * names it.
+     */
+    AES256_CM80(4),
+    /**
+     * `AES_256_CM_HMAC_SHA1_32` (RFC 6188): `AesCm32` with a 256-bit
+     * key. SDES only, as `Aes256Cm80`.
+     */
+    AES256_CM32(5),
+    /**
+     * `AEAD_AES_128_GCM` (RFC 7714): AES-GCM, one transform for both
+     * confidentiality and integrity. DTLS-SRTP profile 0x0007.
+     */
+    AEAD_AES128_GCM(6),
+    /**
+     * `AEAD_AES_256_GCM` (RFC 7714): the same with a 256-bit key, and
+     * what two ends of this stack settle on over DTLS-SRTP. Profile
+     * 0x0008.
+     */
+    AEAD_AES256_GCM(7),
     ;
 
     companion object {

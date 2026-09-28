@@ -39,6 +39,7 @@ __all__ = [
     "CandidateKind",
     "Transport",
     "TurnStream",
+    "SrtpSuite",
 ]
 
 
@@ -148,3 +149,8 @@ Transport = _enum(
 #: A `sipral_turn_stream_t`, carried on `SIPRAL_EVENT_KIND_TURN_STREAM`:
 #: open the media socket's connection to the TURN server, or close it.
 TurnStream = _enum("TurnStream", "SIPRAL_TURN_STREAM_")
+
+#: A `sipral_srtp_suite_t`, carried in `payload.media.suite` on
+#: `SIPRAL_EVENT_KIND_MEDIA_SECURED`: the transform a call is running, from
+#: `AES_CM80` to RFC 7714's `AEAD_AES256_GCM`.
+SrtpSuite = _enum("SrtpSuite", "SIPRAL_SRTP_SUITE_")

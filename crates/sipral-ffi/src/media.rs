@@ -507,6 +507,20 @@ codes! {
         /// `F8_128_HMAC_SHA1_80`, which is what 3GPP asks for. Reachable by
         /// SDES only; RFC 5764 §4.1.2 defines no DTLS-SRTP profile for it.
         AesF8 = 3,
+        /// `AES_256_CM_HMAC_SHA1_80` (RFC 6188): `AesCm80` with a 256-bit
+        /// key. Reachable by SDES only, like `AesF8`: no DTLS-SRTP profile
+        /// names it.
+        Aes256Cm80 = 4,
+        /// `AES_256_CM_HMAC_SHA1_32` (RFC 6188): `AesCm32` with a 256-bit
+        /// key. SDES only, as `Aes256Cm80`.
+        Aes256Cm32 = 5,
+        /// `AEAD_AES_128_GCM` (RFC 7714): AES-GCM, one transform for both
+        /// confidentiality and integrity. DTLS-SRTP profile 0x0007.
+        AeadAes128Gcm = 6,
+        /// `AEAD_AES_256_GCM` (RFC 7714): the same with a 256-bit key, and
+        /// what two ends of this stack settle on over DTLS-SRTP. Profile
+        /// 0x0008.
+        AeadAes256Gcm = 7,
     }
 }
 

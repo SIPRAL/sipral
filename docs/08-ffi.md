@@ -1001,7 +1001,12 @@ and every arrival is `SIPRAL_ARRIVAL_NOT_KEYED` — because a stream that agreed
 to be encrypted and sent one packet in the clear has leaked exactly what it
 was asked to protect. `SIPRAL_EVENT_KIND_MEDIA_SECURED` carries
 `payload.media.suite`, the transform the handshake chose, which the signalling
-never named.
+never named: `SIPRAL_SRTP_SUITE_AEAD_AES256_GCM` between two ends of this
+stack, and one of RFC 5764's two AES-CM profiles with a peer that offers only
+those. Every suite the stack runs has its own `sipral_srtp_suite_t` since
+ABI 0.29, RFC 6188's `AES256_CM80`/`_CM32` (4, 5) and RFC 7714's
+`AEAD_AES128_GCM`/`AEAD_AES256_GCM` (6, 7) included; `UNKNOWN` is left for an
+event that is not about a transform.
 
 `srtp` is appended at the tail of both structs, and the pinned `MIN_SIZE` of
 each is unmoved: a caller built against a header from before this member

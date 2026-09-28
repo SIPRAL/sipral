@@ -12,6 +12,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The C ABI names every SRTP suite the stack runs.**
+  `sipral_srtp_suite_t` grew `SIPRAL_SRTP_SUITE_AES256_CM80` (4),
+  `_AES256_CM32` (5), `_AEAD_AES128_GCM` (6) and `_AEAD_AES256_GCM` (7), so
+  `SIPRAL_EVENT_KIND_MEDIA_SECURED` says which of RFC 6188's and RFC 7714's
+  suites a call is running rather than `UNKNOWN`; the Swift, Kotlin and .NET
+  enums are printed with them, and Python gains `sipral.enums.SrtpSuite`
+  (ABI 0.29).
 - **A call's audio on Android survives what the platform does to it.**
   `SipralCallAudio` (in the `ConnectionService` helper) keeps one call's
   microphone and speaker through a cellular call answered over it — the

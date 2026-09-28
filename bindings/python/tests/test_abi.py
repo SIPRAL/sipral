@@ -91,5 +91,27 @@ class StructSizesMatchAbiSizes(unittest.TestCase):
                 self.assertEqual(ffi.sizeof(name), current)
 
 
+class SrtpSuitesHaveNames(unittest.TestCase):
+    """`SrtpSuite` names every transform the stack runs, RFC 6188's and
+    RFC 7714's included, so a MEDIA_SECURED event's `suite` reads as one."""
+
+    def test_every_suite_the_stack_runs_is_a_member(self) -> None:
+        from sipral.enums import SrtpSuite
+
+        self.assertEqual(
+            {member.name: int(member) for member in SrtpSuite},
+            {
+                "UNKNOWN": 0,
+                "AES_CM80": 1,
+                "AES_CM32": 2,
+                "AES_F8": 3,
+                "AES256_CM80": 4,
+                "AES256_CM32": 5,
+                "AEAD_AES128_GCM": 6,
+                "AEAD_AES256_GCM": 7,
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

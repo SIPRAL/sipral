@@ -2214,13 +2214,9 @@ fn recovery_failure(reason: RecoveryFailure) -> SipralRecoveryFailure {
     }
 }
 
-/// The transform a call is running, on this side of the boundary.
-///
-/// RFC 6188's and RFC 7714's four newer suites (8.2.4) have no word of their
-/// own on this side of the boundary yet — growing one is an ABI change, and
-/// this batch does not make one — so a call running under one of those
-/// reports `Unknown`, the same fallback a signalling event this ABI has no
-/// word for already uses.
+/// The transform a call is running, on this side of the boundary: every
+/// suite the stack implements has a word of its own (ABI 0.29), and `Unknown`
+/// is left for an event that is not about one.
 #[cfg(feature = "dtls")]
 const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
     use crate::media::SipralSrtpSuite;
@@ -2228,10 +2224,10 @@ const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
         SrtpSuite::AesCm80 => SipralSrtpSuite::AesCm80,
         SrtpSuite::AesCm32 => SipralSrtpSuite::AesCm32,
         SrtpSuite::AesF8 => SipralSrtpSuite::AesF8,
-        SrtpSuite::Aes256Cm80
-        | SrtpSuite::Aes256Cm32
-        | SrtpSuite::AeadAes128Gcm
-        | SrtpSuite::AeadAes256Gcm => SipralSrtpSuite::Unknown,
+        SrtpSuite::Aes256Cm80 => SipralSrtpSuite::Aes256Cm80,
+        SrtpSuite::Aes256Cm32 => SipralSrtpSuite::Aes256Cm32,
+        SrtpSuite::AeadAes128Gcm => SipralSrtpSuite::AeadAes128Gcm,
+        SrtpSuite::AeadAes256Gcm => SipralSrtpSuite::AeadAes256Gcm,
     }
 }
 
@@ -2836,5 +2832,33 @@ mod tests {
         assert_eq!(millis(Duration::from_secs(1)), 1_000);
         assert_eq!(millis(Duration::ZERO), 0);
         assert_eq!(millis(Duration::MAX), u64::MAX);
+    }
+
+    /// A call secured under any suite the stack runs says which one: none of
+    /// them falls back to `Unknown`, which is kept for an event that is not
+    /// about a transform, and no two share a number.
+    #[cfg(feature = "dtls")]
+    #[test]
+    fn every_suite_the_stack_runs_has_a_word_of_its_own() {
+        use crate::media::SipralSrtpSuite;
+        use sipral::SrtpSuite;
+
+        let named = [
+            (SrtpSuite::AesCm80, 1),
+            (SrtpSuite::AesCm32, 2),
+            (SrtpSuite::AesF8, 3),
+            (SrtpSuite::Aes256Cm80, 4),
+            (SrtpSuite::Aes256Cm32, 5),
+            (SrtpSuite::AeadAes128Gcm, 6),
+            (SrtpSuite::AeadAes256Gcm, 7),
+        ];
+        let mut seen = Vec::new();
+        for (suite, number) in named {
+            let word = super::suite_of(suite);
+            assert_ne!(word, SipralSrtpSuite::Unknown, "{suite:?}");
+            assert_eq!(word as u32, number, "{suite:?}");
+            assert!(!seen.contains(&number), "{suite:?}");
+            seen.push(number);
+        }
     }
 }
