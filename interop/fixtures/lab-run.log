@@ -1,11 +1,12 @@
+
 the harness
-  ok    taken as given: /opt/sipral-w37-int/target-linux/release/sipral-interop
+  ok    taken as given: /opt/sipral-wA-follow-lab/target/release/sipral-interop
 
 the harness, in C
-  ok    taken as given: /opt/sipral-w37-int/target-linux/release/harness-c
+  ok    taken as given: /opt/sipral-wA-follow-lab/target/release/harness-c
 
 the socket-framed agent
-  ok    taken as given: /opt/sipral-w37-int/target-linux/release/examples/headless-socket-agent, /opt/sipral-w37-int/target-linux/release/examples/agent
+  ok    taken as given: /opt/sipral-wA-follow-lab/target/release/examples/headless-socket-agent, /opt/sipral-wA-follow-lab/target/release/examples/agent
 
 the Swift binding's lab agent
   ok    built
@@ -21,26 +22,26 @@ waiting for the servers to listen
 
 register, call, hold, resume, transfer -- through the proxy
 lab: kamailio:5060 at 172.18.0.4:5060, extension 9000, as labuser
-seed: 0573727518bb9fd6fda0b0e00e695fd2b2942b15cacf16265d6bc7dbaf3346a2
+seed: 4fbf6e426b86794849a6368d962e2a4e35e17cbe94da51bde7d9f77a394a7776
   pass  register
-  pass  call   (101 sent, 98 back, 67 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  call   (102 sent, 98 back, 67 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  hold and resume   (27 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  blind transfer   (5 sent, 2 back, 1 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  attended transfer   (2 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
-  pass  DTLS-SRTP, held and resumed   (129 sent, 102 back, 71 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
-  pass  forked, the second phone answering first   (the mobile kept, the desk cancelled; 118 audible frames at the caller, 119 at the mobile)
+  pass  DTLS-SRTP, held and resumed   (128 sent, 103 back, 71 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  forked, the second phone answering first   (the mobile kept, the desk cancelled; 118 audible frames at the caller, 118 at the mobile)
 every flow passed
   ok    kamailio to freeswitch
 
 the same, through the C ABI -- through the proxy
 lab: kamailio:5060 at 172.18.0.4:5060, extension 9000, as labuser
-seed: 01fc9e3549c1c44ecdde2ddd8e24d5cae7983988e7f0de45ac7864af5c64b469
+seed: 2e16a473dee3103e2653ea061957d345159616e3116b89237658e31af0ee1271
   pass  register
   pass  call   (123 sent, 124 back, 91 audible, 1 refused)
-  pass  hold and resume   (49 sent, 26 back, 25 audible, 1 refused)
+  pass  hold and resume   (53 sent, 27 back, 26 audible, 1 refused)
   pass  blind transfer   (77 sent, 75 back, 58 audible, 1 refused)
-  pass  attended transfer   (28 sent, 28 back, 26 audible, 2 refused)
-  pass  DTLS-SRTP, held and resumed   (152 sent, 129 back, 97 audible, 1 refused)
+  pass  attended transfer   (26 sent, 28 back, 25 audible, 2 refused)
+  pass  DTLS-SRTP, held and resumed   (154 sent, 131 back, 99 audible, 1 refused)
 every flow passed
   ok    kamailio to freeswitch, in C
 
@@ -48,31 +49,31 @@ register, call, hold, resume, transfer -- through OpenSIPS
   ok    opensips container up
   ok    opensips: Listening on
 lab: opensips:5060 at 172.18.0.5:5060, extension 9000, as labuser
-seed: ec22dfdb706b1f71726e58955cea922753271cd0f3a8efb1f2e6e1a097693bbb
+seed: 6f764ad848cbdd804d4c6a7143401ef890db8f5d01152989c81ae003df9e7323
   pass  register
   pass  call   (101 sent, 98 back, 67 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
-  pass  hold and resume   (27 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  hold and resume   (28 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  blind transfer   (5 sent, 2 back, 1 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  attended transfer   (2 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
-  pass  DTLS-SRTP, held and resumed   (129 sent, 102 back, 71 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  DTLS-SRTP, held and resumed   (129 sent, 102 back, 71 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
 every flow passed
   ok    opensips to freeswitch
 
 the same, through the C ABI -- through OpenSIPS
 lab: opensips:5060 at 172.18.0.5:5060, extension 9000, as labuser
-seed: 213fe145602f6d21d8a1f816df4fa89be5a0d77c4ffe538b76897b358960e631
+seed: f37f05ace2a22e82c03cc9c86e9f3b0bf856193b6d2414584e9ea5816233cbd9
   pass  register
-  pass  call   (123 sent, 124 back, 92 audible, 1 refused)
-  pass  hold and resume   (52 sent, 27 back, 25 audible, 1 refused)
-  pass  blind transfer   (76 sent, 75 back, 58 audible, 1 refused)
-  pass  attended transfer   (27 sent, 27 back, 25 audible, 2 refused)
-  pass  DTLS-SRTP, held and resumed   (151 sent, 126 back, 92 audible, 1 refused)
+  pass  call   (120 sent, 124 back, 91 audible, 1 refused)
+  pass  hold and resume   (52 sent, 26 back, 25 audible, 1 refused)
+  pass  blind transfer   (74 sent, 75 back, 58 audible, 1 refused)
+  pass  attended transfer   (25 sent, 27 back, 23 audible, 2 refused)
+  pass  DTLS-SRTP, held and resumed   (150 sent, 125 back, 91 audible, 1 refused)
 every flow passed
   ok    opensips to freeswitch, in C
 
 register, call, hold, resume, transfer -- straight at Asterisk
-lab: asterisk:5060 at 172.18.0.2:5060, extension 9000, as labuser
-seed: 9b10d79be73f09f6338fdf71d110ccaf8e98b5a31a21c3113326e256bcc9710c
+lab: asterisk:5060 at 172.18.0.3:5060, extension 9000, as labuser
+seed: 20f1207fab144117eea4aa8aed43faaf13c1bf6a855a49975b8bc16d86cbc45a
   pass  register
   pass  call   (101 sent, 99 back, 67 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 1; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  hold and resume   (2 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
@@ -80,43 +81,43 @@ seed: 9b10d79be73f09f6338fdf71d110ccaf8e98b5a31a21c3113326e256bcc9710c
   pass  attended transfer   (2 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  DTMF, RFC 4733   (22 sent, 10 back, 0 audible, 1 refused; lost 0, late 0, jitter 4ms, delay 40ms of 120ms, shrunk 1, stretched 5; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  DTMF, SIP INFO   (11 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
-  pass  SRTP   (101 sent, 99 back, 67 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 40ms of 40ms, shrunk 0, stretched 1; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  SRTP   (101 sent, 99 back, 67 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 1; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  hold with a codec change   (2 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  MESSAGE, echoed
   pass  message waiting indication   (101 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
   pass  G.729, echoed   (101 sent, 99 back, 67 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R n/a, MOS-LQ n/a, MOS-CQ n/a)
-  pass  DTLS-SRTP, held and resumed   (104 sent, 52 back, 19 audible, 1 refused; lost 50, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 1; R 6, MOS-LQ 1.0, MOS-CQ 1.0)
+  pass  DTLS-SRTP, held and resumed   (104 sent, 51 back, 18 audible, 1 refused; lost 51, late 0, jitter 0ms, delay 40ms of 40ms, shrunk 0, stretched 1; R 6, MOS-LQ 1.0, MOS-CQ 1.0)
   pass  local conference   (300 frame(s) mixed, 12 carried the tone extension's audio back by way of the echo extension while the tone extension itself was silent)
 every flow passed
   ok    asterisk
 
 the same, through the C ABI -- straight at Asterisk
-lab: asterisk:5060 at 172.18.0.2:5060, extension 9000, as labuser
-seed: f1bad1b8a01d0fc20080b81b5fddb9ffe4df60cad879480897e76ec894dbd103
+lab: asterisk:5060 at 172.18.0.3:5060, extension 9000, as labuser
+seed: c51d8327d449b49b7578e886d8fe16c6be4d20140fc5b215d3e579e8bf8bd5f0
   pass  register
-  pass  call   (122 sent, 122 back, 90 audible, 1 refused)
-  pass  hold and resume   (27 sent, 26 back, 24 audible, 1 refused)
-  pass  blind transfer   (76 sent, 73 back, 59 audible, 1 refused)
-  pass  attended transfer   (27 sent, 26 back, 23 audible, 1 refused)
-  pass  DTMF, RFC 4733   (53 sent, 9 back, 0 audible, 1 refused)
+  pass  call   (123 sent, 123 back, 90 audible, 1 refused)
+  pass  hold and resume   (29 sent, 24 back, 23 audible, 1 refused)
+  pass  blind transfer   (73 sent, 74 back, 59 audible, 1 refused)
+  pass  attended transfer   (28 sent, 26 back, 24 audible, 1 refused)
+  pass  DTMF, RFC 4733   (51 sent, 8 back, 0 audible, 1 refused)
   pass  DTMF, SIP INFO   (37 sent, 0 back, 0 audible, 0 refused)
-  pass  SRTP   (120 sent, 122 back, 89 audible, 1 refused)
-  pass  hold with a codec change   (86 sent, 88 back, 56 audible, 1 refused)
+  pass  SRTP   (122 sent, 123 back, 90 audible, 1 refused)
+  pass  hold with a codec change   (86 sent, 87 back, 56 audible, 1 refused)
   pass  MESSAGE, echoed   (0 sent, 0 back, 0 audible, 0 refused)
-  pass  message waiting indication   (122 sent, 0 back, 0 audible, 0 refused)
-  pass  G.729, echoed   (122 sent, 120 back, 88 audible, 1 refused)
-  pass  DTLS-SRTP, held and resumed   (127 sent, 77 back, 42 audible, 1 refused)
+  pass  message waiting indication   (124 sent, 0 back, 0 audible, 0 refused)
+  pass  G.729, echoed   (122 sent, 120 back, 89 audible, 1 refused)
+  pass  DTLS-SRTP, held and resumed   (128 sent, 78 back, 42 audible, 1 refused)
   pass  local conference   (132 frame(s) mixed, 39 crossed)
 every flow passed
   ok    asterisk, in C
 
 the Python example agent, called by Asterisk
-    listening on 172.18.0.5:47804
+    listening on 172.18.0.5:33179
     answered 1200000000
     dtmf 1
     dtmf 2
     dtmf #
-    ended 1200000000: {'codec': 1, 'round_trip_us': None, 'packets_sent': 202, 'octets_sent': 32320, 'packets_received': 179, 'packets_lost': 0, 'delay_us': 0, 'jitter_us': 13500, 'loss_rate': 0.0, 'score': 100.0, 'suffering': False, 'frames_underrun': 0}
+    ended 1200000000: {'codec': 1, 'round_trip_us': None, 'packets_sent': 200, 'octets_sent': 32000, 'packets_received': 179, 'packets_lost': 0, 'delay_us': 40000, 'jitter_us': 13750, 'loss_rate': 0.0, 'score': 92.0, 'suffering': False, 'frames_underrun': 0}
   ok    agent.py answered, echoed and hung up
 
 the socket-framed agent, called by Asterisk
@@ -132,9 +133,9 @@ the socket-framed agent, called by Asterisk
     agent  dtmf 2
     agent  dtmf #
     agent  call CallHandle(0) state: Ended { reason: Some("hung up here") }
-    app    listening on 172.18.0.5:5060; registering labuser-agent-headless@asterisk at 172.18.0.2:5060
+    app    listening on 172.18.0.5:5060; registering labuser-agent-headless@asterisk at 172.18.0.3:5060
     app    waiting for the agent to connect on 0.0.0.0:7001
-    app    agent connected from 172.18.0.6:43586
+    app    agent connected from 172.18.0.6:60462
     app    registered
     app    answered CallHandle(0)
     app    dtmf 1
@@ -144,53 +145,53 @@ the socket-framed agent, called by Asterisk
   ok    headless-socket-agent answered, echoed and carried DTMF
 
 the Swift binding's example agent, called by Asterisk
-    listening on 172.18.0.5:43295
+    listening on 172.18.0.5:47136
     answered 1200000000
     dtmf 1
     dtmf 2
     dtmf #
     state 1200000000: confirmed
-    ended 1200000000: packets_sent=202 packets_received=180
+    ended 1200000000: packets_sent=205 packets_received=179
   ok    SipralLabAgent answered, echoed and carried DTMF
 
 the Kotlin idiomatic-layer agent, called by Asterisk
-    listening on 172.18.0.5:36963
+    listening on 172.18.0.5:38404
     answered 1200000000
     dtmf 1
     dtmf 2
     dtmf #
-    ended 1200000000 packets_sent=193 packets_received=179
+    ended 1200000000 packets_sent=196 packets_received=179
   ok    Agent.kt answered, echoed and carried DTMF
 
 the .NET sample agent, called by Asterisk
-    listening on 172.18.0.5:53918
+    listening on 172.18.0.5:56594
     answered 1
     dtmf 1
     dtmf 2
     dtmf #
-    ended 1: packets_received=179 packets_sent=210
+    ended 1: packets_received=179 packets_sent=211
   ok    Sipral.Sample.Agent answered, echoed and hung up
 
 a REFER from outside any call -- refused by a C ABI stack that does not take them
 lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension sip:9008@asterisk, as labuser
-seed: 61ec7403d9eb227a1f7bb099a5fddb869ba307e53d2363037739838d2a876056
-  pass  a REFER from outside any call, referraloff — refused 403 in 2030 ms, nothing after it
+seed: 75eab6e78db7913b8bf481a5048d9fa5d130046971e7fd8dbca52b07aa2e9359
+  pass  a REFER from outside any call, referraloff — refused 403 in 2020 ms, nothing after it
 every flow passed
-    c      seed: c69104271def17cd7110f6b147ed02e4969aeb9dc3d083f99b3bb272994ca076
+    c      seed: b2c0618e91ac878e345b7368bb4b8dd8df83520d1f48457409fdc6f69ad89a67
     c      waiting for a call or a referral at 172.18.0.5:5060 (ice off, referrals off)
   ok    refused 403, and the program never heard of it
 
 a REFER from outside any call -- taken by a C ABI stack, calling Asterisk's echo
 lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension sip:9008@asterisk, as labuser
-seed: 513416ac0b2bbb14fd77178c8cc16e5619fa844583b65a3ea97768271b9f813b
-  pass  a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 55 ms
+seed: c7826ceee55134f61c79bf3431adab18071db6eae866069dec3b82619769e8b6
+  pass  a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 46 ms
 every flow passed
-    c      seed: 1e8cef0f47b0bddfdc99ae50b13a5477a35473aa901b2d51803be1ca6823ae69
+    c      seed: 184d5fefbbbe0474bed778d229447e483a5ecb7bc3ff8dbb878feeebefa255c3
     c      waiting for a call or a referral at 172.18.0.5:5060 (ice off, referrals on)
     c      referral asked: sip:9008@asterisk
     c      referral taken: ok
     c      confirmed
-    c      ended packets_sent=118 packets_received=116 audible=82 refused=1
+    c      ended packets_sent=121 packets_received=119 audible=87 refused=1
   ok    taken; 202, then 100 and 200 to the switchboard, and the echo heard
 
 phone to phone -- baresip through the proxy
@@ -199,87 +200,87 @@ phone to phone -- baresip through the proxy
   ok    baresip: baresip-srtp@kamailio: (prio 0) {0/UDP/v4} 200 OK
   ok    baresip: baresip-dtls@kamailio: (prio 0) {0/UDP/v4} 200 OK
 lab: kamailio:5060 at 172.18.0.4:5060, extension baresip, as labuser
-seed: c56b34855f996bd0d7d62ae03f13a0f623e6684bc5fa32889a414ae502b92e05
+seed: 7fa0d729fc2896b0fb303f1b86b48c8b2b96bc3e58733962e66403f3334cede5
   pass  call   (101 sent, 99 back, 98 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
   pass  hold and resume   (2 sent, 1 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
-  pass  SRTP, phone to phone   (101 sent, 100 back, 98 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
-  pass  DTLS-SRTP, phone to phone   (103 sent, 102 back, 100 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  SRTP, phone to phone   (101 sent, 99 back, 98 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  DTLS-SRTP, phone to phone   (103 sent, 101 back, 101 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
 every flow passed
   ok    sipral to baresip
 
 the same, through the C ABI -- baresip through the proxy
 lab: kamailio:5060 at 172.18.0.4:5060, extension baresip, as labuser
-seed: 1cc1167cae09834cdb2c599e2fdfd9c7b4f8e212cc3f3ef7eaf863852f46e266
-  pass  call   (120 sent, 125 back, 119 audible, 1 refused)
-  pass  hold and resume   (27 sent, 27 back, 26 audible, 1 refused)
-  pass  SRTP, phone to phone   (121 sent, 125 back, 120 audible, 1 refused)
-  pass  DTLS-SRTP, phone to phone   (127 sent, 128 back, 123 audible, 1 refused)
+seed: 9e36e642b8b241e3a3d8036ca9281bf40de5405185edbf0bd631e1686cfb7b0b
+  pass  call   (121 sent, 125 back, 120 audible, 1 refused)
+  pass  hold and resume   (29 sent, 28 back, 26 audible, 1 refused)
+  pass  SRTP, phone to phone   (124 sent, 126 back, 123 audible, 1 refused)
+  pass  DTLS-SRTP, phone to phone   (123 sent, 128 back, 119 audible, 1 refused)
 every flow passed
   ok    sipral to baresip, in C
   ok    baresip-hangup: baresip-hangup@kamailio: (prio 0) {0/UDP/v4} 200 OK
 lab: kamailio:5060 at 172.18.0.4:5060, extension baresip-hangup, as labuser
-seed: fdd1e71a41b5817500d44689bb86ce569d139e7485beaa48e7f103c32bad5a50
-  pass  call, ended by the far end   (668 sent, 666 back, 665 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 20ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+seed: 0e0976af7207089153cfe1a7519b9113cb2d9fceabf5b8ce9743ea6e50b8f3d5
+  pass  call, ended by the far end   (677 sent, 674 back, 674 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 0ms of 20ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
 every flow passed
   ok    baresip hangs the call up on its own
 lab: kamailio:5060 at 172.18.0.4:5060, extension baresip-hangup, as labuser
-seed: 1e7c7dd009539b5e40e6652d86366f455d83b78b57bbc773f3c4b8128c8a299c
-  pass  call, ended by the far end   (646 sent, 674 back, 645 audible, 1 refused)
+seed: 45ab24d0d5c84cb27048e6e60c213601b8b964cfac512d80d1ee95cc06ed869a
+  pass  call, ended by the far end   (646 sent, 667 back, 645 audible, 1 refused)
 every flow passed
   ok    baresip hangs the call up on its own, in C
 
 behind a NAT -- STUN against coturn, then register and call Asterisk, in C
   ok    natbox: nat: masquerading out of
   ok    coturn: Listener address to use
-  behind 172.19.0.2, STUN at 172.18.0.6:3478, Asterisk at 172.18.0.2
-lab: asterisk:5060 at 172.18.0.2:5060, extension 9000, as labuser
-seed: 2e079fcd5ed1d88bc49fedcc7f5a7a7b9cc648e486256bdc202c7fad44b20379
+  behind 172.19.0.2, STUN at 172.18.0.6:3478, Asterisk at 172.18.0.3
+lab: asterisk:5060 at 172.18.0.3:5060, extension 9000, as labuser
+seed: 8906beae0a4b588a4da2c7ec7eca66341078537968f63dde5778672cb168d851
   nat   signalling 172.19.0.3:5062 appears as 172.18.0.5:15062
   nat   media 172.19.0.3:40062 appears as 172.18.0.5:45062
-  pass  behind a NAT, through STUN   (171 sent, 176 back, 117 audible, 1 refused)
+  pass  behind a NAT, through STUN   (170 sent, 175 back, 117 audible, 1 refused)
 every flow passed
   ok    registered and heard from behind the NAT, at the address STUN reported
 
 called behind a NAT -- STUN against coturn, then Asterisk calls in, in C
   ok    natbox: nat: masquerading out of
   ok    coturn: Listener address to use
-  behind 172.19.0.2, STUN at 172.18.0.6:3478, Asterisk at 172.18.0.2
-lab: asterisk:5060 at 172.18.0.2:5060, extension 9000, as labuser
-seed: 4ba20263b868784ed0f1b248afdc0ade854ad6c557f80ce9f17d4a090e815b29
+  behind 172.19.0.2, STUN at 172.18.0.6:3478, Asterisk at 172.18.0.3
+lab: asterisk:5060 at 172.18.0.3:5060, extension 9000, as labuser
+seed: 7bffc6279e80f5fd98b42702858a2ceaa464531090004908f15f3778a89ecb22
   nat   signalling 172.19.0.3:5062 appears as 172.18.0.5:15062
   nat   registrar keep-alive on (the default)
   nat   waiting for a call to sip:labuser@172.18.0.5:15062
   nat   media 172.19.0.3:40062 appears as 172.18.0.5:45062
   nat   answered with Contact: <sip:labuser@172.18.0.5:15062>
-  pass  called behind a NAT, through STUN   (390 sent, 388 back, 263 audible, 1 refused)
+  pass  called behind a NAT, through STUN   (386 sent, 384 back, 259 audible, 1 refused)
 every flow passed
   ok    called behind the NAT: the 2xx named the address STUN reported, and the ACK, the BYE and the echo reached it
 
 called 330 s after registering, behind a filtering NAT, keep-alive on, in C
   ok    natbox: nat: masquerading out of
   ok    coturn: Listener address to use
-  behind 172.19.0.2, STUN at 172.18.0.6:3478, Asterisk at 172.18.0.2, keep-alive on
-  registered; calling sip:labuser@172.18.0.5:15062 in 330 s
-lab: asterisk:5060 at 172.18.0.2:5060, extension 9000, as labuser
-seed: 5a4d963406e278ce7c16e1f9fd769426cdfbb35e940b2f3f1dce4a43f650834c
-  nat   signalling 172.19.0.3:5062 appears as 172.18.0.5:15062
+  behind 172.19.0.2, STUN at 172.18.0.5:3478, Asterisk at 172.18.0.3, keep-alive on
+  registered; calling sip:labuser@172.18.0.6:15062 in 330 s
+lab: asterisk:5060 at 172.18.0.3:5060, extension 9000, as labuser
+seed: 674d4640901c75fe44b17711e581bdc42b8db1fc4d2cf10f9985f0796d2f55e1
+  nat   signalling 172.19.0.3:5062 appears as 172.18.0.6:15062
   nat   registrar keep-alive on (the default)
-  nat   waiting for a call to sip:labuser@172.18.0.5:15062
-  nat   media 172.19.0.3:40062 appears as 172.18.0.5:45062
-  nat   answered with Contact: <sip:labuser@172.18.0.5:15062>
-  pass  called behind a NAT, through STUN   (389 sent, 386 back, 263 audible, 1 refused)
+  nat   waiting for a call to sip:labuser@172.18.0.6:15062
+  nat   media 172.19.0.3:40062 appears as 172.18.0.6:45062
+  nat   answered with Contact: <sip:labuser@172.18.0.6:15062>
+  pass  called behind a NAT, through STUN   (388 sent, 385 back, 260 audible, 1 refused)
 every flow passed
   ok    called 330 s after the REGISTER: the registrar keep-alive held the NAT's filter open
 
 ICE-lite -- a call that requires ICE, placed at the headless agent answering as lite
 lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension agent, as labuser
-seed: 401da9cdf82d5bd63308091b60b960604d579dfdef773b32588516eb6ce9c715
-  pass  ICE required, against 172.18.0.5   (path 172.18.0.7:36323 -> 172.18.0.5:39651, chosen 70 ms after the offer and 59 ms after the answer; 153 sent, 149 back, 115 audible)
+seed: ceffdaf475d7e3cd0cde2d3ebbc9503b1522ea2f4f286c366e5c72842c14183c
+  pass  ICE required, against 172.18.0.5   (path 172.18.0.7:46051 -> 172.18.0.5:48687, chosen 69 ms after the offer and 60 ms after the answer; 153 sent, 149 back, 115 audible)
 every flow passed
     agent  connecting to sipral-lab-icelite-app:7001
     agent  connected
     agent  session open: 16000 Hz, 20 ms frames
-    agent  call CallHandle(0) from sip:harness@172.18.0.7:35090
+    agent  call CallHandle(0) from sip:harness@172.18.0.7:54460
     agent  call CallHandle(0) state: Ringing
     agent  call CallHandle(0) state: Answered
     agent  call CallHandle(0) speaking
@@ -288,9 +289,9 @@ every flow passed
     agent  call CallHandle(0) state: Ended { reason: Some("hung up there") }
     app    listening on 172.18.0.5:5060; dial sip:agent@172.18.0.5:5060
     app    waiting for the agent to connect on 0.0.0.0:7001
-    app    agent connected from 172.18.0.6:52326
+    app    agent connected from 172.18.0.6:38058
     app    answered CallHandle(0)
-    app    path chosen 172.18.0.5:39651 -> 172.18.0.7:36323
+    app    path chosen 172.18.0.5:48687 -> 172.18.0.7:46051
     app    ended CallHandle(0): packets_received=152 packets_sent=150 capture_dropped=0 audio_dropped=0
   ok    the full caller chose a path on the lite end, and the tone came back on it
 
@@ -308,12 +309,12 @@ ICE-lite -- Asterisk's own ICE calling the headless agent
     agent  dtmf 2
     agent  dtmf #
     agent  call CallHandle(0) state: Ended { reason: Some("hung up here") }
-    app    listening on 172.18.0.5:5060; registering labuser-agent-ice@asterisk at 172.18.0.2:5060
+    app    listening on 172.18.0.5:5060; registering labuser-agent-ice@asterisk at 172.18.0.3:5060
     app    waiting for the agent to connect on 0.0.0.0:7001
-    app    agent connected from 172.18.0.6:58720
+    app    agent connected from 172.18.0.6:47476
     app    registered
     app    answered CallHandle(0)
-    app    path chosen 172.18.0.5:38387 -> 172.18.0.2:13598
+    app    path chosen 172.18.0.5:53372 -> 172.18.0.3:10062
     app    dtmf 1
     app    dtmf 2
     app    dtmf #
@@ -322,30 +323,30 @@ ICE-lite -- Asterisk's own ICE calling the headless agent
 
 ICE-lite -- the same call, placed at a C ABI stack answering as lite
 lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension agent, as labuser
-seed: 716979874491c10f0d33f221f994b733aa5ba8c340f4c03d8c1ab414190d9020
-  pass  ICE required, against 172.18.0.5   (path 172.18.0.6:32975 -> 172.18.0.5:59430, chosen 91 ms after the offer and 63 ms after the answer; 151 sent, 144 back, 110 audible)
+seed: 4d557bf2ef19850776e838b9dcc1ac4e74b69d7983938af3867066b6283c6755
+  pass  ICE required, against 172.18.0.5   (path 172.18.0.6:40432 -> 172.18.0.5:44672, chosen 108 ms after the offer and 72 ms after the answer; 151 sent, 142 back, 111 audible)
 every flow passed
-    c      seed: 7c5a61ceb767523a1455f081741afa6f20322317b11f796a784307194a6a4239
+    c      seed: a848bd220e054bb60b10922b8d749e548f4e2be3594a9a272cd46b177c6c5897
     c      waiting for a call or a referral at 172.18.0.5:5060 (ice lite, referrals off)
     c      answered: ok
     c      confirmed
     c      path chosen
-    c      ended packets_sent=147 packets_received=150 audible=115 refused=1
+    c      ended packets_sent=145 packets_received=150 audible=116 refused=1
   ok    the full caller chose a path on SIPRAL_ICE_LITE, and the tone came back on it
 
 full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them
   ok    natbox: nat: masquerading out of
   ok    natbox2: nat: masquerading out of
   ok    coturn: Listener address to use
-  caller behind 172.19.0.2, callee behind 172.20.0.2 (172.18.0.7 outside), STUN at 172.18.0.5:3478
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
-seed: 0d72b9004acd734aaca48b32133e2d0d5bb29eadca0eb4b5951b75750c71f427
-  pass  full ICE through two NATs, calling   (path 172.18.0.6:56529 -> 172.18.0.7:39052, chosen 1116 ms after the offer and 1113 ms after the answer; 200 sent, 202 back, 140 audible); this end at 172.19.0.3:56529, mapped to 172.18.0.6:56529
+  caller behind 172.19.0.2, callee behind 172.20.0.2 (172.18.0.6 outside), STUN at 172.18.0.7:3478
+lab: 172.18.0.6:5060 at 172.18.0.6:5060, extension callee, as labuser
+seed: 3f4ccd794a7c11000d35f48e7b9166ec8ae4e99468dbc861867ca8cfc769d227
+  pass  full ICE through two NATs, calling   (path 172.18.0.5:33298 -> 172.18.0.6:35277, chosen 1118 ms after the offer and 1113 ms after the answer; 200 sent, 202 back, 140 audible); this end at 172.19.0.3:33298, mapped to 172.18.0.5:33298
 every flow passed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 4fcee1cc636697de549b43ae3d0b939a69fb8f361a749c1fc6da8813facc5563
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:39052, mapped to 172.18.0.7:39052
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.7:39052 -> 172.18.0.6:56529, chosen 1112 ms after the offer and 1109 ms after the answer; 203 sent, 199 back, 138 audible); this end at 172.20.0.3:39052, mapped to 172.18.0.7:39052
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 5ebc9af7739179a6e8fa8a31f3ba94ad85fba9cae51d355dca3f773c92feff1a
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:35277, mapped to 172.18.0.6:35277
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.6:35277 -> 172.18.0.5:33298, chosen 1114 ms after the offer and 1110 ms after the answer; 203 sent, 199 back, 138 audible); this end at 172.20.0.3:35277, mapped to 172.18.0.6:35277
     callee  every flow passed
   ok    the call found its path through both NATs, and the tone crossed it both ways
 
@@ -353,420 +354,826 @@ full ICE through a relay -- the path between the two NATs blocked, coturn as TUR
   ok    natbox: nat: masquerading out of
   ok    natbox2: nat: masquerading out of
   ok    coturn: Listener address to use
-  caller behind 172.19.0.2 (172.18.0.6 outside), callee behind 172.20.0.2 (172.18.0.7 outside), TURN at 172.18.0.5:3478
+  caller behind 172.19.0.2 (172.18.0.6 outside), callee behind 172.20.0.2 (172.18.0.5 outside), TURN at 172.18.0.7:3478
   without TURN: the call has to find no path
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
-seed: eb47e660d52db75c611121c48e5d8e19a8edac7a5f9c4ec15b5be9b52da53acc
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+seed: 5bec226a35f3546f7e351398bd26de58627161eabe0a187d63301962fd5ae708
   FAIL  full ICE through two NATs, calling — no path was ever chosen (0 sent, 0 back): the far end answered no check
 1 flow(s) failed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: b983943179d7fa6ed0448e6eacd3a0abd02dfa38800072f3ff0d6f4411550520
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:57574, mapped to 172.18.0.7:57574
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: ed7279be19202f1cbe6d53d3d14007bc37cf0ed5509ef23d3208ddd8df1890c4
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:54599, mapped to 172.18.0.5:54599
     callee    FAIL  full ICE through two NATs, answering — no path was ever chosen (0 sent, 0 back): the far end answered no check
     callee  1 flow(s) failed
   with TURN: the call has to go through coturn
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
-seed: 7538ea14c066937e0c50e95242fea408715709b380b6e9096391fe9f52e5a9d5
-  pass  full ICE through two NATs, calling   (path 172.18.0.6:40532 -> 172.18.0.5:49171, chosen 1118 ms after the offer and 1113 ms after the answer; 200 sent, 197 back, 135 audible); this end at 172.19.0.3:40532, mapped to 172.18.0.6:40532, relay 172.18.0.5:49243 allocated in 6 ms
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+seed: 47b786dd847dee213ebaab1ecbc431b2a0ea337158ca4e8c5d66c281ff5c52c5
+  pass  full ICE through two NATs, calling   (path 172.18.0.6:56527 -> 172.18.0.7:49248, chosen 1119 ms after the offer and 1115 ms after the answer; 200 sent, 197 back, 135 audible); this end at 172.19.0.3:56527, mapped to 172.18.0.6:56527, relay 172.18.0.7:49211 allocated in 6 ms
 every flow passed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 93c145709ca7d2696ed411ea87df8ec5d186474df4830f6a8d628e57668029b5
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:51821, mapped to 172.18.0.7:51821, relay 172.18.0.5:49171 allocated in 6 ms
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:49171 -> 172.18.0.6:40532, chosen 1113 ms after the offer and 1110 ms after the answer; 198 sent, 199 back, 137 audible); this end at 172.20.0.3:51821, mapped to 172.18.0.7:51821, relay 172.18.0.5:49171 allocated in 6 ms
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: f6af6c78927ae826bb3b152dbd582e876dfd26320a11ea3ed2df4f60de3de675
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:42731, mapped to 172.18.0.5:42731, relay 172.18.0.7:49248 allocated in 6 ms
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.7:49248 -> 172.18.0.6:56527, chosen 1116 ms after the offer and 1114 ms after the answer; 198 sent, 199 back, 137 audible); this end at 172.20.0.3:42731, mapped to 172.18.0.5:42731, relay 172.18.0.7:49248 allocated in 6 ms
     callee  every flow passed
-    coturn  coturn-1  | 2026-09-27T16:31:07.163+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.742+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.750+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.750+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.751+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:08.858+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:11.865+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:11.868+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:25.974+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.557+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:27.676+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:30.679+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:30.682+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000001)
   coturn: 2 allocation(s), 2 given back
   without TURN, through the C ABI: the call has to find no path
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
-seed: 065846e32d6e4c4a5dde9f0719c01c50036ca3a53aeca3e19f5c248c18bb8379
-  ice   media 172.19.0.3:56836 appears as 172.18.0.6:56836
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+seed: 5b5936e00bc9b095a69b4e48503c8b2025b11588066b6c05054c765334a6422d
+  ice   media 172.19.0.3:50832 appears as 172.18.0.6:50832
   FAIL  full ICE through two NATs, calling — no path was ever chosen (0 sent, 0 back): the far end answered no check
 1 flow(s) failed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 6139bc7092465d53e26c588d887903ae35941124d382a323308dcbaf162d96a4
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:40009, mapped to 172.18.0.7:40009
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 4b48611bc5b20b071afee0ff4aa82f874c97491ca0b4df6ec6e264bc9ee7f0c4
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:38701, mapped to 172.18.0.5:38701
     callee    FAIL  full ICE through two NATs, answering — no path was ever chosen (0 sent, 0 back): the far end answered no check
     callee  1 flow(s) failed
   with TURN, through the C ABI: the call has to go through coturn
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
-seed: 48529750a120a4de5c1cbdcb74285591c7930410ae7c9c1d9fb6d8e9fd13c5ad
-  ice   media 172.19.0.3:60677 appears as 172.18.0.6:60677, relay 172.18.0.5:49218 allocated in 51 ms
-  ice   path sends to 172.18.0.5:49239, chosen 1237 ms after the offer and 1216 ms after the answer
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+seed: 1d6c3a9c91ccb94bb9ad1366d49f723d44e0fe4026cffa2bf12378dbac404c8f
+  ice   media 172.19.0.3:49172 appears as 172.18.0.6:49172, relay 172.18.0.7:49213 allocated in 48 ms
+  ice   path sends to 172.18.0.7:49230, chosen 1257 ms after the offer and 1232 ms after the answer
   ice   0 datagram(s) on the media socket before its media handle, 0 of them refused
-  ice   relay given back: a Refresh of lifetime zero to 172.18.0.5:3478
-  pass  full ICE through two NATs, calling   (192 sent, 202 back, 139 audible, 1 refused)
+  ice   relay given back: a Refresh of lifetime zero to 172.18.0.7:3478
+  pass  full ICE through two NATs, calling   (196 sent, 203 back, 140 audible, 1 refused)
 every flow passed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 3755d6a2f7bcd8eedbf1c17401701eed293bc5b1f4dcc150c1783df9a03cf7b6
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:44297, mapped to 172.18.0.7:44297, relay 172.18.0.5:49239 allocated in 6 ms
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:49239 -> 172.18.0.6:60677, chosen 1214 ms after the offer and 1197 ms after the answer; 203 sent, 191 back, 125 audible); this end at 172.20.0.3:44297, mapped to 172.18.0.7:44297, relay 172.18.0.5:49239 allocated in 6 ms
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: d81cac0cf65cbd6c8dcce75ff7ed508fb36cefec6cd923064b32a79323ddcbac
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:37854, mapped to 172.18.0.5:37854, relay 172.18.0.7:49230 allocated in 6 ms
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.7:49230 -> 172.18.0.6:49172, chosen 1233 ms after the offer and 1214 ms after the answer; 205 sent, 195 back, 132 audible); this end at 172.20.0.3:37854, mapped to 172.18.0.5:37854, relay 172.18.0.7:49230 allocated in 6 ms
     callee  every flow passed
-    coturn  coturn-1  | 2026-09-27T16:31:07.163+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.742+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.750+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.750+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.751+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:08.858+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:11.865+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:11.868+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:44.689+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.285+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.335+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.335+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.336+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:46.530+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:49.565+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:49.572+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:25.974+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.557+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:27.676+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:30.679+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:30.682+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:03.720+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.349+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.402+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:05.614+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.641+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.668+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
   coturn: 4 allocation(s), 4 given back
   with TURN at the C caller alone: the call has to go through its own relay
-lab: 172.18.0.7:5060 at 172.18.0.7:5060, extension callee, as labuser
-seed: 43f8c53fb57981086b9a3fd728e6c2b4f5e01cde731ff5ae449b6a14f82f3b8b
-  ice   media 172.19.0.3:41339 appears as 172.18.0.6:41339, relay 172.18.0.5:49222 allocated in 52 ms
-  ice   path sends to 172.18.0.5:3478, chosen 1241 ms after the offer and 1220 ms after the answer
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+seed: e83377aea990419f52f8877df08c2a454316d26738f6e97c0d985b6cda33ffba
+  ice   media 172.19.0.3:48598 appears as 172.18.0.6:48598, relay 172.18.0.7:49251 allocated in 41 ms
+  ice   path sends to 172.18.0.7:3478, chosen 1221 ms after the offer and 1200 ms after the answer
   ice   0 datagram(s) on the media socket before its media handle, 0 of them refused
-  ice   relay given back: a Refresh of lifetime zero to 172.18.0.5:3478
-  pass  full ICE through two NATs, calling   (195 sent, 205 back, 142 audible, 1 refused)
+  ice   relay given back: a Refresh of lifetime zero to 172.18.0.7:3478
+  pass  full ICE through two NATs, calling   (199 sent, 205 back, 142 audible, 1 refused)
 every flow passed
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 5b7c08809ba604b55c233c8a3e4d274749f73f226ce29cca020f46045cd8be13
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:53709, mapped to 172.18.0.7:53709
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.7:53709 -> 172.18.0.5:49222, chosen 1217 ms after the offer and 1202 ms after the answer; 207 sent, 194 back, 132 audible); this end at 172.20.0.3:53709, mapped to 172.18.0.7:53709
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 847a9168fc69915e438000831c1d83726f652a7a3c7f05c03b95079f626c5018
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:50951, mapped to 172.18.0.5:50951
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:50951 -> 172.18.0.7:49251, chosen 1197 ms after the offer and 1181 ms after the answer; 206 sent, 198 back, 136 audible); this end at 172.20.0.3:50951, mapped to 172.18.0.5:50951
     callee  every flow passed
-    coturn  coturn-1  | 2026-09-27T16:31:07.163+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.742+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.750+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.750+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.751+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:08.858+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:11.865+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:11.868+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:44.689+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.285+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.335+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.335+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.336+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:46.530+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:49.565+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:49.572+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:52.017+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:52.101+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:52.101+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:53.281+0000 INFO peer 172.18.0.7 lifetime updated: 600 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:56.317+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 004000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:25.974+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.557+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:27.676+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:30.679+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:30.682+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:03.720+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.349+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.402+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:05.614+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.641+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.668+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.229+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:12.473+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:15.525+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
   coturn: 5 allocation(s), 5 given back
+  with TURN over TCP at the C caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over the connection
+lab: 172.18.0.5:5060 at 172.18.0.5:5060, extension callee, as labuser
+seed: ccbbd81c65f18c5b19501cbc8bf4866b8e579bc89163651ba1f36ac3695634da
+  ice   UDP to the TURN server is dropped: the media socket's mapping went unanswered
+  ice   media 172.19.0.3:59235 appears as nothing, relay 172.18.0.7:49203 allocated over TCP in 58 ms
+  ice   path sends to 172.18.0.7:3478, chosen 1165 ms after the offer and 1140 ms after the answer
+  ice   0 datagram(s) on the media socket before its media handle, 0 of them refused
+  ice   relay given back: a Refresh of lifetime zero to 172.18.0.7:3478, on the connection
+  ice   the connection to the TURN server carried 37036 byte(s) out and 38408 in, the tone that came back among them; 0 datagram(s) came back on the media socket
+  pass  full ICE through two NATs, calling   (192 sent, 0 back, 138 audible, 0 refused)
+every flow passed
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: f314bfb8ebd7953ad9cd419d63f3afebdbb2fa0d6039f2a865ad329b352b29c2
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:47998, mapped to 172.18.0.5:47998
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:47998 -> 172.18.0.7:49203, chosen 1140 ms after the offer and 1121 ms after the answer; 204 sent, 191 back, 126 audible); this end at 172.20.0.3:47998, mapped to 172.18.0.5:47998
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-28T23:23:25.974+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.557+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:27.676+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:30.679+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:30.682+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:03.720+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.349+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.402+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:05.614+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.641+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.668+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.229+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:12.473+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:15.525+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:18.089+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:24.773+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:27.821+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 007000000000000001)
+  coturn: 6 allocation(s), 6 given back
   without TURN, through the Python bindings: the call has to find no path
-dialling sip:callee@172.18.0.7:5060 from 172.19.0.3:53458
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:58202
 answered 1200000000
 ended 1200000000: {'codec': 1, 'round_trip_us': None, 'packets_sent': 0, 'octets_sent': 0, 'packets_received': 0, 'packets_lost': 0, 'delay_us': 0, 'jitter_us': 0, 'loss_rate': 0.0, 'score': 100.0, 'suffering': False, 'frames_underrun': 0}
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 31e9b725d9f4b2f67b8aab37ab96ee9ec23592e58ca8cd76eafd7f8be2cc5bce
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:46443, mapped to 172.18.0.7:46443
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: c085ff900dc2376f69c0df84fa9b3346d3f59bb44fd993e4e6238c3b290f8c40
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:53055, mapped to 172.18.0.5:53055
     callee    FAIL  full ICE through two NATs, answering — no path was ever chosen (0 sent, 0 back): the far end answered no check
     callee  1 flow(s) failed
   the callee did not pass
   with TURN, through the Python bindings: the call has to go through coturn
-dialling sip:callee@172.18.0.7:5060 from 172.19.0.3:58608
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:36037
 answered 1200000000
-ended 1200000000: {'codec': 1, 'round_trip_us': 7492, 'packets_sent': 92, 'octets_sent': 14720, 'packets_received': 91, 'packets_lost': 0, 'delay_us': 20000, 'jitter_us': 125, 'loss_rate': 0.0, 'score': 96.0, 'suffering': False, 'frames_underrun': 0}
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 21479eb35b6ab0d6cf5f73725e9a80c616ff3883a97dea172e0f2a164673ab54
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:39259, mapped to 172.18.0.7:39259, relay 172.18.0.5:49245 allocated in 6 ms
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:49245 -> 172.18.0.6:47512, chosen 1255 ms after the offer and 1215 ms after the answer; 95 sent, 93 back, 60 audible); this end at 172.20.0.3:39259, mapped to 172.18.0.7:39259, relay 172.18.0.5:49245 allocated in 6 ms
+ended 1200000000: {'codec': 1, 'round_trip_us': None, 'packets_sent': 92, 'octets_sent': 14720, 'packets_received': 93, 'packets_lost': 0, 'delay_us': 40000, 'jitter_us': 250, 'loss_rate': 0.0, 'score': 92.0, 'suffering': False, 'frames_underrun': 0}
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 83def3b9ea18edb0ce80759f04236f1a8c1057e797207a9635563c4273cd9365
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:46628, mapped to 172.18.0.5:46628, relay 172.18.0.7:49171 allocated in 6 ms
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.7:49171 -> 172.18.0.6:35092, chosen 1262 ms after the offer and 1228 ms after the answer; 96 sent, 93 back, 60 audible); this end at 172.20.0.3:46628, mapped to 172.18.0.5:46628, relay 172.18.0.7:49171 allocated in 6 ms
     callee  every flow passed
-    coturn  coturn-1  | 2026-09-27T16:31:07.163+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.742+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.749+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.750+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.750+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:07.751+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:08.858+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:11.865+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:11.868+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:44.689+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.285+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.335+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.335+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.336+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:46.530+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:49.565+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:49.572+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:52.017+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:52.101+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:52.101+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:53.281+0000 INFO peer 172.18.0.7 lifetime updated: 600 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:56.317+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:02.694+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.106+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:05.412+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:06.265+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:06.267+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 010000000000000001)
-  coturn: 7 allocation(s), 7 given back
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:26.564+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:27.676+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:30.679+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:30.682+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:03.720+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.349+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.402+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:05.614+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.641+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.668+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.229+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:12.473+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:15.525+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:18.089+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:24.773+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:27.821+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:34.592+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.023+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.152+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:37.345+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.189+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.192+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 002000000000000001)
+  coturn: 8 allocation(s), 8 given back
+  with TURN over TLS at the Python caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over TLS
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:53631
+answered 1200000000
+ended 1200000000: {'codec': 1, 'round_trip_us': 5920, 'packets_sent': 95, 'octets_sent': 15200, 'packets_received': 97, 'packets_lost': 0, 'delay_us': 40000, 'jitter_us': 1125, 'loss_rate': 0.0, 'score': 92.0, 'suffering': False, 'frames_underrun': 0}
+relay over TLS to 172.18.0.7:5349: the call ran through it
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 0cf199a552d958676d29a5005a0b1d3314d8a5b175921882c4956bdb178735b4
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:42969, mapped to 172.18.0.5:42969
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:42969 -> 172.18.0.7:49154, chosen 1180 ms after the offer and 1146 ms after the answer; 99 sent, 94 back, 63 audible); this end at 172.20.0.3:42969, mapped to 172.18.0.5:42969
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-28T23:23:27.676+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:23:30.679+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:23:30.682+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:03.720+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.349+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.402+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.403+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:04.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:05.614+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.641+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.668+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.229+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:12.473+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:15.525+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:18.089+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:24.773+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:27.821+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:34.592+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.023+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.152+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:37.345+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.189+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.192+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:40.865+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:47.597+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:48.479+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+  coturn: 9 allocation(s), 9 given back
   without TURN, through the Kotlin bindings: the call has to find no path
-dialling sip:callee@172.18.0.7:5060 from 172.19.0.3:55061
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:40857
 answered 1200000000
 ended 1200000000: packets_sent=0 packets_received=0
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: bf2dc8fdb2730dc9373826b83ceaf7bc10c10c87f472aba0dd2a20d5b9382af7
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:54145, mapped to 172.18.0.7:54145
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 93ef5abd23183b1f1726dec3f01a32f901767fef682380ee5acc2f7385207c97
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:40822, mapped to 172.18.0.5:40822
     callee    FAIL  full ICE through two NATs, answering — no path was ever chosen (0 sent, 0 back): the far end answered no check
     callee  1 flow(s) failed
   the callee did not pass
   with TURN, through the Kotlin bindings: the call has to go through coturn
-dialling sip:callee@172.18.0.7:5060 from 172.19.0.3:50346
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:47315
 answered 1200000000
-ended 1200000000: packets_sent=91 packets_received=92
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 858a3fafba9bf75371a4ddcc25ec56d64fe2779727fb35e09f84e4daa8a50490
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:32824, mapped to 172.18.0.7:32824, relay 172.18.0.5:49177 allocated in 6 ms
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:49177 -> 172.18.0.6:52605, chosen 1212 ms after the offer and 1191 ms after the answer; 94 sent, 90 back, 55 audible); this end at 172.20.0.3:32824, mapped to 172.18.0.7:32824, relay 172.18.0.5:49177 allocated in 6 ms
+ended 1200000000: packets_sent=90 packets_received=91
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 823c9b893a441277dfee2961bd31b6da55aec2546c7116b70d7f68af50aca194
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:49737, mapped to 172.18.0.5:49737, relay 172.18.0.7:49224 allocated in 6 ms
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.7:49224 -> 172.18.0.6:49415, chosen 1210 ms after the offer and 1191 ms after the answer; 93 sent, 89 back, 55 audible); this end at 172.20.0.3:49737, mapped to 172.18.0.5:49737, relay 172.18.0.7:49224 allocated in 6 ms
     callee  every flow passed
-    coturn  coturn-1  | 2026-09-27T16:31:11.865+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 012000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:11.868+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:44.689+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.285+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.335+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.335+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.336+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:45.369+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:46.530+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:49.565+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:49.572+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:52.017+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:52.101+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:52.101+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:53.281+0000 INFO peer 172.18.0.7 lifetime updated: 600 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:56.317+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:02.694+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.106+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:05.412+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:06.265+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:06.267+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:12.414+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.553+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.619+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.619+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.619+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.625+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.626+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.626+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:15.808+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:16.676+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:16.678+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 007000000000000001)
-  coturn: 9 allocation(s), 9 given back
-  without TURN, through the .NET bindings: the call has to find no path
-dialling sip:callee@172.18.0.7:5060 from 172.19.0.3:46540
-answered
-ended: packets_sent=0 packets_received=0
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: c087698367270780eaf2ffe75153dfac43e623a67dc2864accb8293ca590dbd4
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:52457, mapped to 172.18.0.7:52457
-    callee    FAIL  full ICE through two NATs, answering — no path was ever chosen (0 sent, 0 back): the far end answered no check
-    callee  1 flow(s) failed
-  the callee did not pass
-  with TURN, through the .NET bindings: the call has to go through coturn
-dialling sip:callee@172.18.0.7:5060 from 172.19.0.3:34943
-answered
-ended: packets_sent=95 packets_received=90
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: c240169cf7e50fa8e472e53f74518977bd0b1ea5b67e83cbaa8317aef5d9579e
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:44998, mapped to 172.18.0.7:44998, relay 172.18.0.5:49209 allocated in 6 ms
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:49209 -> 172.18.0.6:40899, chosen 1230 ms after the offer and 1222 ms after the answer; 92 sent, 94 back, 56 audible); this end at 172.20.0.3:44998, mapped to 172.18.0.7:44998, relay 172.18.0.5:49209 allocated in 6 ms
-    callee  every flow passed
-    coturn  coturn-1  | 2026-09-27T16:31:49.565+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 015000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:49.572+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:31:52.017+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:52.101+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:52.101+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:53.281+0000 INFO peer 172.18.0.7 lifetime updated: 600 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:31:56.317+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 004000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:02.694+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.106+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:05.412+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:06.265+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:06.267+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:12.414+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.553+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.619+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.619+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.619+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.625+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.626+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.626+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:15.808+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:16.676+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:16.678+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:28.848+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:36.914+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:36.975+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:36.975+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:36.976+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:36.977+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:36.978+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:36.978+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:38.195+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:38.982+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:38.983+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 015000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:24:05.614+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.641+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:08.668+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 014000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.229+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:12.473+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:15.525+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:18.089+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:24.773+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:27.821+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:34.592+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.023+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.152+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:37.345+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.189+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.192+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:40.865+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:47.597+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:48.479+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:55.076+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.364+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:58.617+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000001)
   coturn: 11 allocation(s), 11 given back
+  with TURN over TCP at the Kotlin caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over the connection
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:38076
+answered 1200000000
+ended 1200000000: packets_sent=95 packets_received=98
+relay over TCP to 172.18.0.7:3478: the call ran through it
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 7d23fa55c52c2c7eef49502d66cb825d5310604a09cefb4156b28bb2acf25f73
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:33032, mapped to 172.18.0.5:33032
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:33032 -> 172.18.0.7:49247, chosen 1126 ms after the offer and 1105 ms after the answer; 100 sent, 95 back, 62 audible); this end at 172.20.0.3:33032, mapped to 172.18.0.5:33032
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-28T23:24:11.309+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:12.473+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:15.525+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 008000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:18.089+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:24.773+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:27.821+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:34.592+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.023+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.152+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:37.345+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.189+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.192+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:40.865+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:47.597+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:48.479+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:55.076+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.364+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:58.617+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:03.999+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.483+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.484+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:10.595+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:11.549+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 026000000000000001)
+  coturn: 12 allocation(s), 12 given back
+  with TURN over TLS at the Kotlin caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over TLS
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:33483
+answered 1200000000
+ended 1200000000: packets_sent=93 packets_received=98
+relay over TLS to 172.18.0.7:5349: the call ran through it
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 070f86700040ba737d061601bffd4c4a17b42db05713209cf780841e6c96123b
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:39270, mapped to 172.18.0.5:39270
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:39270 -> 172.18.0.7:49159, chosen 1145 ms after the offer and 1124 ms after the answer; 100 sent, 92 back, 62 audible); this end at 172.20.0.3:39270, mapped to 172.18.0.5:39270
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-28T23:24:23.673+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:24.773+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:27.821+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 007000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:34.592+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.023+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.119+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.151+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:36.152+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:37.345+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.189+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.192+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:40.865+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:47.597+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:48.479+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:55.076+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.364+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:58.617+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:03.999+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.483+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.484+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:10.595+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:11.549+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:15.871+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.108+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.109+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:22.241+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:23.147+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+  coturn: 13 allocation(s), 13 given back
+  without TURN, through the .NET bindings: the call has to find no path
+Unhandled exception. Sipral.SipralException: InvalidArgument: sipral_stack_create: invalid argument: turn_username, turn_password or turn_transport is set and turn_server names no server to use them with
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 672e564edcf17d6461ca813963c0b8afb3060998a1b4a077ad7f5ea09760911d
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:55343, mapped to 172.18.0.5:55343
+    callee    FAIL  full ICE through two NATs, answering — no call arrived
+    callee  1 flow(s) failed
+  with TURN, through the .NET bindings: the call has to go through coturn
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:50322
+answered
+ended: packets_sent=95 packets_received=91
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 5b11b6778ff7fe1d50d164ddf8bcd33fb2cf46897a2aec80e175f83c9f4985bc
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:33712, mapped to 172.18.0.5:33712, relay 172.18.0.7:49232 allocated in 6 ms
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.7:49232 -> 172.18.0.6:46251, chosen 1219 ms after the offer and 1210 ms after the answer; 93 sent, 94 back, 57 audible); this end at 172.20.0.3:33712, mapped to 172.18.0.5:33712, relay 172.18.0.7:49232 allocated in 6 ms
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-28T23:24:37.345+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.189+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 011000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:38.192+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 002000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:40.865+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:47.597+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:48.479+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:55.076+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.364+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:58.617+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:03.999+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.483+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.484+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:10.595+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:11.549+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:15.871+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.108+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.109+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:22.241+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:23.147+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:25.414+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.575+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.636+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:34.844+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:35.644+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:35.645+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000002)
+  coturn: 15 allocation(s), 15 given back
+  with TURN over TCP at the .NET caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over the connection
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:44543
+answered
+ended: packets_sent=97 packets_received=96
+relay over TCP to 172.18.0.7:3478: the call ran through it
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: b01c78342d53fc4428c780dde7d349c23b778094b842fa75a88989b8fee2b6bc
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:47158, mapped to 172.18.0.5:47158
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:47158 -> 172.18.0.7:49235, chosen 1175 ms after the offer and 1166 ms after the answer; 97 sent, 96 back, 61 audible); this end at 172.20.0.3:47158, mapped to 172.18.0.5:47158
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-28T23:24:46.467+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:47.597+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:48.479+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 006000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:55.076+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.364+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:58.617+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:03.999+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.483+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.484+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:10.595+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:11.549+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:15.871+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.108+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.109+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:22.241+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:23.147+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:25.414+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.575+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.636+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:34.844+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:35.644+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:35.645+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:44.949+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:50.384+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:50.384+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:51.564+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:52.388+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000003)
+  coturn: 16 allocation(s), 16 given back
+  with TURN over TLS at the .NET caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over TLS
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:37489
+answered
+ended: packets_sent=97 packets_received=97
+relay over TLS to 172.18.0.7:5349: the call ran through it
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 237c1491f778c7295f7ddff4d2373fecfc7fda977a05e19eb99e18e120831ce9
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:40541, mapped to 172.18.0.5:40541
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:40541 -> 172.18.0.7:49206, chosen 1175 ms after the offer and 1166 ms after the answer; 98 sent, 96 back, 62 audible); this end at 172.20.0.3:40541, mapped to 172.18.0.5:40541
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.428+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:57.437+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:58.617+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 001000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:24:59.464+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:03.999+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.483+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:09.484+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:10.595+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:11.549+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:15.871+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.108+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.109+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:22.241+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:23.147+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:25.414+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.575+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.636+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:34.844+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:35.644+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:35.645+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:44.949+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:50.384+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:50.384+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:51.564+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:52.388+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:02.774+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:07.910+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:07.910+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:09.090+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:09.916+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 007000000000000002)
+  coturn: 17 allocation(s), 17 given back
   without TURN, through the Swift bindings: the call has to find no path
-dialling sip:callee@172.18.0.7:5060 from 172.19.0.3:55712
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:55203
 answered 1200000000
 ended 1200000000: packets_sent=0 packets_received=0
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 5975be9bcd434a4000df0e19ee70b1527c89e2a67c291b6a3210dcc098b669f2
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:34978, mapped to 172.18.0.7:34978
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: ee2a22fa0db1aeb415218dc2dd0d6c7d681ad5dd3f8cef7a73370431dfd15828
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:57023, mapped to 172.18.0.5:57023
     callee    FAIL  full ICE through two NATs, answering — no path was ever chosen (0 sent, 0 back): the far end answered no check
     callee  1 flow(s) failed
   the callee did not pass
   with TURN, through the Swift bindings: the call has to go through coturn
-dialling sip:callee@172.18.0.7:5060 from 172.19.0.3:46635
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:46728
 answered 1200000000
 ended 1200000000: packets_sent=91 packets_received=90
-    callee  lab: 172.18.0.5:3478 at 172.18.0.5:3478, extension callee, as labuser
-    callee  seed: 5c1abdca019ccdd49c6ff2546fdb557dbccf41de457e8285caa7f1ba510572c4
-    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:39092, mapped to 172.18.0.7:39092, relay 172.18.0.5:49193 allocated in 6 ms
-    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:49193 -> 172.18.0.6:49985, chosen 1212 ms after the offer and 1209 ms after the answer; 92 sent, 90 back, 56 audible); this end at 172.20.0.3:39092, mapped to 172.18.0.7:39092, relay 172.18.0.5:49193 allocated in 6 ms
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: 7a725ed7ee80f662ad9bbd14ba1df0e5a6f866b90b5fd1d9d093d24753cec311
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:51215, mapped to 172.18.0.5:51215, relay 172.18.0.7:49229 allocated in 6 ms
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.7:49229 -> 172.18.0.6:54467, chosen 1211 ms after the offer and 1208 ms after the answer; 92 sent, 90 back, 56 audible); this end at 172.20.0.3:51215, mapped to 172.18.0.5:51215, relay 172.18.0.7:49229 allocated in 6 ms
     callee  every flow passed
-    coturn  coturn-1  | 2026-09-27T16:32:04.199+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:04.220+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:05.412+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:06.265+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 022000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:06.267+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 010000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:12.414+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.553+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.619+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.619+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.619+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.625+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.626+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:14.626+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:15.808+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:16.676+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 005000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:16.678+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 007000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:28.848+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:36.914+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:36.975+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:36.975+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:36.976+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:36.977+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:36.978+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:36.978+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:38.195+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:38.982+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 006000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:38.983+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 015000000000000002)
-    coturn  coturn-1  | 2026-09-27T16:32:44.358+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 024000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:45.365+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 003000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:45.418+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 003000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:45.419+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 003000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:45.419+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 003000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:45.420+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 024000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:45.420+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 024000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:45.420+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 024000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:46.627+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 024000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:47.426+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 003000000000000001)
-    coturn  coturn-1  | 2026-09-27T16:32:47.427+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 024000000000000001)
-  coturn: 13 allocation(s), 13 given back
+    coturn  coturn-1  | 2026-09-28T23:25:09.484+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:10.595+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:11.549+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 026000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:15.871+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.108+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:21.109+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:22.241+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:23.147+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:25.414+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.575+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.636+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:34.844+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:35.644+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:35.645+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:44.949+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:50.384+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:50.384+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:51.564+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:52.388+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:02.774+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:07.910+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:07.910+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:09.090+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:09.916+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:15.488+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:16.581+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.635+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.635+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.635+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.636+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:16.636+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:16.636+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:17.842+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:18.642+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:18.644+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 027000000000000001)
+  coturn: 19 allocation(s), 19 given back
+  note  the Swift layer's TLS is Network.framework's, which only Apple's platforms have; this Linux container reaches the relay over TCP alone, and TLS is proved by its own TurnStreamTests on macOS
+  with TURN over TCP at the Swift caller alone, UDP to coturn dropped at its NAT: the call has to go through its relay over the connection
+dialling sip:callee@172.18.0.5:5060 from 172.19.0.3:59111
+answered 1200000000
+ended 1200000000: packets_sent=94 packets_received=96
+relay over TCP to 172.18.0.7:3478: the call ran through it
+    callee  lab: 172.18.0.7:3478 at 172.18.0.7:3478, extension callee, as labuser
+    callee  seed: fea86dff82fefc5e447d1a17d6c21f4c3d19fe46c1d342e16694e36704d3eb42
+    callee  waiting for the call on 172.20.0.3:5060, media at 172.20.0.3:59259, mapped to 172.18.0.5:59259
+    callee    pass  full ICE through two NATs, answering   (path 172.18.0.5:59259 -> 172.18.0.7:49237, chosen 1111 ms after the offer and 1108 ms after the answer; 97 sent, 93 back, 61 audible); this end at 172.20.0.3:59259, mapped to 172.18.0.5:59259
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-28T23:25:21.109+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:22.241+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:25:23.147+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 013000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:25.414+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.575+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.636+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.637+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:33.640+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:34.844+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:35.644+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 030000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:26:35.645+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:26:44.949+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:50.384+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:50.384+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:51.564+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:52.388+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:02.774+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:07.910+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:07.910+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:09.090+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:09.916+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:15.488+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:16.581+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.635+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.635+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.635+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.636+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:16.636+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:16.636+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:17.842+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:18.642+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:18.644+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:21.143+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 006000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:26.570+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 006000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:26.570+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:27.696+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 006000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:28.577+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 006000000000000002)
+  coturn: 20 allocation(s), 20 given back
+  forked through the proxy to two phones behind the NAT, every end relayed: media on both branches until one answers
+lab: 172.18.0.4:5060 at 172.18.0.4:5060, extension forked, as labuser
+seed: 9b0b4fbd7348200a12947a4a5ed8dd6ce7db03277b69c0be41d279a487e9dae6
+  pass  forked to two phones behind a NAT, relayed, calling   (the branch lost on 172.18.0.6:52143 -> 172.18.0.7:49192, 45 audible before the answer; the branch kept on 172.18.0.6:52143 -> 172.18.0.7:49204, 45 audible before the answer); this end at 172.19.0.3:52143, mapped to 172.18.0.6:52143, relay 172.18.0.7:49189 allocated in 6 ms
+every flow passed
+    callee  lab: 172.18.0.4:5060 at 172.18.0.4:5060, extension forked, as labuser
+    callee  seed: baf773ca2a1146eb6d1338c9ef0808f68cdc0a8452edf3298198388dfb5bb0c0
+    callee  waiting for the call: the desk at 172.18.0.5:5060, the mobile at 172.18.0.5:5062
+    callee    pass  forked to two phones behind a NAT, relayed, answering   (the desk on 172.18.0.7:49192 -> 172.18.0.6:52143, 47 audible before the answer; the mobile on 172.18.0.7:49204 -> 172.18.0.6:52143, 47 audible before the answer; the desk cancelled)
+    callee  every flow passed
+    coturn  coturn-1  | 2026-09-28T23:26:51.564+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:26:52.388+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 018000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:02.774+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:07.910+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:07.910+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:09.090+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:09.916+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0, cipher=TLS_AES_256_GCM_SHA384, method=TLSv1.3 (session 007000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:15.488+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:16.581+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.635+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.635+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.635+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:16.636+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:16.636+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:16.636+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:17.842+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:18.642+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 009000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:18.644+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 027000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:21.143+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 006000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:26.570+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 006000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:26.570+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 006000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:27.696+0000 INFO peer 172.18.0.5 lifetime updated: 600 (session 006000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:28.577+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 006000000000000002)
+    coturn  coturn-1  | 2026-09-28T23:27:30.130+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 006000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:30.138+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 000000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:30.721+0000 INFO allocation new, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=600 (session 021000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:30.726+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 006000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:30.726+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 006000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:30.726+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 006000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:30.726+0000 INFO peer 172.19.0.3 lifetime updated: 300 (session 000000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:30.726+0000 INFO peer 172.18.0.6 lifetime updated: 300 (session 000000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:30.726+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 000000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:30.729+0000 INFO peer 172.20.0.3 lifetime updated: 300 (session 021000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:30.729+0000 INFO peer 172.18.0.5 lifetime updated: 300 (session 021000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:30.729+0000 INFO peer 172.18.0.7 lifetime updated: 300 (session 021000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:31.842+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 006000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:31.842+0000 INFO peer 172.18.0.6 lifetime updated: 600 (session 000000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:31.849+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 006000000000000003)
+    coturn  coturn-1  | 2026-09-28T23:27:34.847+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 021000000000000001)
+    coturn  coturn-1  | 2026-09-28T23:27:34.853+0000 INFO allocation refreshed, realm=<lab.sipral.test>, username=<sipral-lab>, lifetime=0 (session 000000000000000001)
+  coturn: 23 allocation(s), 23 given back
   ok    no path without TURN; with it, every call went through coturn and every relay was given back
 
 the same call, over a bad network
   lossy      bursty loss, jitter and reordering together
-  out: qdisc netem 8490: root refcnt 129 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 9398965167990663153 gap 1
+  out: qdisc netem 84aa: root refcnt 129 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 10269838103621142785 gap 1
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
-  in:  qdisc netem 8491: root refcnt 2 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 16436564774812504043 gap 1
+  in:  qdisc netem 84ab: root refcnt 2 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 6603854154825537436 gap 1
 lab: kamailio:5060 at 172.18.0.4:5060, extension 9000, as labuser
-seed: e93f22c831f687e1a06e69fa59dab7d5fbf02b553ec81c455640c1f0320936f1
+seed: 0adaec04bd32adbb360214ba4a2262bf1c1af571ecf0517f5a5a57f75459eebe
   pass  register
-  pass  call   (102 sent, 94 back, 65 audible, 1 refused; segSNR 34.1dB over 65 frames, concealed 3, clicks 0/2, worst splice 46% of its threshold; lost 3, late 0, jitter 11ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 53, MOS-LQ 2.7, MOS-CQ 2.7)
+  pass  call   (102 sent, 90 back, 63 audible, 1 refused; segSNR 33.0dB over 63 frames, concealed 7, clicks 0/9, worst splice 47% of its threshold; lost 8, late 0, jitter 9ms, delay 20ms of 40ms, shrunk 0, stretched 1; R 31, MOS-LQ 1.6, MOS-CQ 1.6)
 every flow passed
   ok    lossy: audio survived it
   mobile     two per cent loss in bursts, on a link whose delay moves
-  out: qdisc netem 8492: root refcnt 129 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 3211213654992116705
+  out: qdisc netem 84ac: root refcnt 129 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 7279801796195315066
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
-  in:  qdisc netem 8493: root refcnt 2 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 9253682487908244357
+  in:  qdisc netem 84ad: root refcnt 2 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 3002727621949291354
 lab: kamailio:5060 at 172.18.0.4:5060, extension 9000, as labuser
-seed: d0f03e69a46b6fa64f6bd0816b7b5bc7d2558bd967447c485273422a9043e675
+seed: 80bd92749d8db4bf8eb8cb66fd3d9bf41a48e4e924ce9fa0bb2b43ed09799ee7
   pass  register
-  pass  call   (101 sent, 88 back, 54 audible, 6 refused; segSNR 31.5dB over 52 frames, concealed 10, clicks 0/6, worst splice 47% of its threshold; lost 4, late 1, jitter 41ms, delay 100ms of 120ms, shrunk 4, stretched 6; R 48, MOS-LQ 2.5, MOS-CQ 2.5)
+  pass  call   (101 sent, 83 back, 55 audible, 7 refused; segSNR 33.8dB over 53 frames, concealed 13, clicks 0/4, worst splice 46% of its threshold; lost 9, late 0, jitter 44ms, delay 140ms of 140ms, shrunk 3, stretched 5; R 26, MOS-LQ 1.5, MOS-CQ 1.5)
 every flow passed
   ok    mobile: audio survived it
   satellite  a geostationary carrier: half a second of round trip, and steady
-  out: qdisc netem 8494: root refcnt 129 limit 1000 delay 250ms  10ms loss 0.5% seed 5824289168522583459
+  out: qdisc netem 84ae: root refcnt 129 limit 1000 delay 250ms  10ms loss 0.5% seed 4103180636249025416
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
-  in:  qdisc netem 8495: root refcnt 2 limit 1000 delay 250ms  10ms loss 0.5% seed 3487100038240100465
+  in:  qdisc netem 84af: root refcnt 2 limit 1000 delay 250ms  10ms loss 0.5% seed 243921900366960505
 lab: kamailio:5060 at 172.18.0.4:5060, extension 9000, as labuser
-seed: 9f63ad0c7b56e4aa2acea0ec70c1bb94d89cf9c20ae014aef32e751f483b7250
+seed: ede0d3dd82891707cd44e304f741a52ea6510303daab7e7a179ba3e28ad353cf
   pass  register
-  pass  call   (102 sent, 99 back, 66 audible, 1 refused; segSNR 34.4dB over 66 frames, concealed 3, clicks 0/0, worst splice 0% of its threshold; lost 0, late 0, jitter 14ms, delay 60ms of 60ms, shrunk 2, stretched 3; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  call   (103 sent, 95 back, 63 audible, 3 refused; segSNR 34.2dB over 63 frames, concealed 4, clicks 0/2, worst splice 15% of its threshold; lost 2, late 0, jitter 14ms, delay 80ms of 60ms, shrunk 2, stretched 2; R 64, MOS-LQ 3.3, MOS-CQ 3.3)
 every flow passed
   ok    satellite: audio survived it
   blackout   the link disappears for eight seconds in the middle of the call
-  out: qdisc netem 8496: root refcnt 129 limit 1000 seed 1696915666100309253
+  out: qdisc netem 84b0: root refcnt 129 limit 1000 seed 16271012168401894491
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
-  in:  qdisc netem 8497: root refcnt 2 limit 1000 seed 16049389841566495586
+  in:  qdisc netem 84b1: root refcnt 2 limit 1000 seed 16057316591702177689
 lab: kamailio:5060 at 172.18.0.4:5060, extension 9000, as labuser
-seed: f2ab8d69e6c6d475edf22dd8a878e183f71800b20678f4e2a0c886e16348b39f
+seed: 3e846e0a429f6cb3d6eb3f9c4f6f750d7bf0916f1bb9a79b0de0480e098ee191
   pass  register
-  pass  call   (1001 sent, 597 back, 416 audible, 1 refused; segSNR 34.4dB over 416 frames, concealed 0, clicks 0/0, worst splice 0% of its threshold; lost 401, late 0, jitter 0ms, delay 20ms of 20ms, shrunk 0, stretched 0; R 7, MOS-LQ 1.0, MOS-CQ 1.0)
+  pass  call   (1001 sent, 597 back, 416 audible, 1 refused; segSNR 34.4dB over 416 frames, concealed 0, clicks 0/0, worst splice 0% of its threshold; lost 401, late 0, jitter 1ms, delay 20ms of 20ms, shrunk 0, stretched 0; R 7, MOS-LQ 1.0, MOS-CQ 1.0)
 every flow passed
   ok    blackout: audio survived it
 
 the capture
 total 2812
--rw-r--r-- 1 tcpdump _ssh 689781 Sep 27 19:20 asterisk-c.pcap
--rw-r--r-- 1 tcpdump _ssh 661252 Sep 27 19:19 asterisk.pcap
--rw-r--r-- 1 tcpdump _ssh 278165 Sep 27 19:18 opensips-c.pcap
--rw-r--r-- 1 tcpdump _ssh 195729 Sep 27 19:18 opensips.pcap
--rw-r--r-- 1 tcpdump _ssh 248176 Sep 27 19:22 proxy-baresip-c.pcap
--rw-r--r-- 1 tcpdump _ssh 206392 Sep 27 19:22 proxy-baresip.pcap
--rw-r--r-- 1 tcpdump _ssh 282792 Sep 27 19:17 proxy-c.pcap
--rw-r--r-- 1 tcpdump _ssh 302171 Sep 27 19:17 proxy.pcap
+-rw-r--r-- 1 tcpdump _ssh 690555 Sep 29 02:12 asterisk-c.pcap
+-rw-r--r-- 1 tcpdump _ssh 661036 Sep 29 02:11 asterisk.pcap
+-rw-r--r-- 1 tcpdump _ssh 275473 Sep 29 02:11 opensips-c.pcap
+-rw-r--r-- 1 tcpdump _ssh 195961 Sep 29 02:10 opensips.pcap
+-rw-r--r-- 1 tcpdump _ssh 248254 Sep 29 02:14 proxy-baresip-c.pcap
+-rw-r--r-- 1 tcpdump _ssh 205760 Sep 29 02:14 proxy-baresip.pcap
+-rw-r--r-- 1 tcpdump _ssh 284488 Sep 29 02:10 proxy-c.pcap
+-rw-r--r-- 1 tcpdump _ssh 302972 Sep 29 02:09 proxy.pcap
 
 the lab agrees

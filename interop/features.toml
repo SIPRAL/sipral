@@ -176,6 +176,7 @@ unit_tested = true
 flows = [
     "full ICE through two NATs, calling, via TURN",
     "full ICE through two NATs, calling, via TURN, caller relay only",
+    "forked to two phones behind a NAT, relayed, calling, via TURN",
 ]
 
 [[feature]]
