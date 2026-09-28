@@ -1062,6 +1062,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   at a 50 ms stagger, is reported apart the same way; a `4xx` or `6xx` still
   fails the run, since it says the request was wrong, not that the server was
   busy.
+- **A change offered in an UPDATE or a PRACK that the application never
+  answers no longer blocks the call for good.** The endpoint answers such a
+  request 408 after 64·T1, but the offer went on counting as unanswered, so
+  every later UPDATE on the call was refused 500 until Timer J ran out, and
+  every later offer of any kind for the rest of the call; for a PRACK, the
+  2xx to the INVITE held behind the reliable provisional response never
+  went. The 408 now ends the offer at both layers, the call takes the next
+  one, and the held 2xx goes.
 - **A Python call closed the moment it ends still gives its relay back.**
   `Stack` sent a call's farewells — its RTCP BYE and the TURN Refresh with a
   lifetime of zero — only after the poll that ended the call had delivered

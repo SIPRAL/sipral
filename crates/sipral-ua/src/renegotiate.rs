@@ -51,7 +51,9 @@ use std::time::{Duration, Instant};
 use sipral_core::endpoint::{Event, OutgoingInDialogRequest, OutgoingResponse};
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode};
 use sipral_core::sdp::{self, SessionDescription};
-use sipral_core::transaction::{AnyTransactionId, DialogId, ProvisionalResponseId};
+use sipral_core::transaction::{
+    AnyTransactionId, DialogId, NonInviteServerState, ProvisionalResponseId,
+};
 
 use crate::agent::UserAgent;
 use crate::call::{Answering, Author, CallHandle, CallState, Direction, Offer};
@@ -1189,6 +1191,52 @@ impl UserAgent {
         let gone = OutgoingResponse::new(StatusCode::REQUEST_TERMINATED);
         self.answer_with(call, answering.transaction, &gone, now)
             .ok();
+    }
+
+    /// A change the far end offered in an UPDATE or a PRACK that the
+    /// application never answered, and that the endpoint has answered 408
+    /// itself after 64·T1, or whose transaction is gone.
+    ///
+    /// RFC 3311 §5.2 refuses a second offer only while the first is still
+    /// unanswered; this one has been answered now, by the timeout, so it
+    /// stops counting — left in place, every later offer on the call would
+    /// be told 500 to come back after a change nobody is ever going to
+    /// finish. The session stands as it was (RFC 3261 §14.1). A PRACK is
+    /// different in one way: the endpoint matched it to the reliable
+    /// provisional response it names when it arrived and stopped that
+    /// response's retransmissions (RFC 3262 §3), so the 2xx to the INVITE
+    /// that response was holding back goes now rather than waiting on a
+    /// PRACK the far end has no reason to send again.
+    ///
+    /// Read from the transaction's state rather than from its
+    /// `TransactionTerminated`: on a datagram transport the 408 is followed
+    /// by Timer J's 32 seconds in `Completed` (RFC 3261 §17.2.2), all of
+    /// them spent refusing offers the far end is entitled to make.
+    pub(crate) fn settle_unanswered_changes(&mut self, now: Instant) {
+        let endpoint = &self.endpoint;
+        let settled: Vec<(CallHandle, bool)> = self
+            .calls
+            .iter()
+            .filter_map(|(handle, held)| {
+                let answering = held.answering.as_ref()?;
+                let AnyTransactionId::NonInviteServer(transaction) = answering.transaction else {
+                    return None;
+                };
+                let open = matches!(
+                    endpoint.transaction_state(transaction),
+                    Some(NonInviteServerState::Trying | NonInviteServerState::Proceeding)
+                );
+                (!open).then_some((*handle, answering.prack.is_some()))
+            })
+            .collect();
+        for (call, prack) in settled {
+            if let Some(held) = self.calls.get_mut(&call) {
+                held.answering = None;
+            }
+            if prack {
+                self.acknowledged(call, now);
+            }
+        }
     }
 
     /// Answer an offer that changes nothing this layer would have to ask

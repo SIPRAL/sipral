@@ -811,6 +811,7 @@ impl UserAgent {
         self.settle_subscription_challenges(now);
         self.settle_message_challenges();
         self.settle_announcements(now);
+        self.settle_unanswered_changes(now);
         // last, so that every change this round finished — answered, refused,
         // or given up on after a challenge — has let go of its call first
         self.send_waiting_holds(now);

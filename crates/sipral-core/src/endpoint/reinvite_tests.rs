@@ -667,6 +667,41 @@ fn a_second_update_before_the_first_is_answered_gets_500_and_a_retry_after() {
 }
 
 #[test]
+fn an_update_the_endpoint_answered_408_itself_no_longer_holds_off_the_next() {
+    // RFC 3311 5.2 counts an UPDATE pending until a final response has gone
+    // out. The 408 the endpoint writes at 64*T1 for an application that never
+    // answered is one, and Timer J's 32 seconds after it are no reason to go
+    // on refusing
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, ack) = call_up(&mut endpoint, t0);
+
+    deliver(&mut endpoint, &reversed(&ack, "UPDATE", "forgotten", 4), t0);
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    let later = t0 + 64 * T1;
+    endpoint.handle_timeout(later);
+    assert!(answered(&mut endpoint).starts_with(b"SIP/2.0 408 "));
+
+    deliver(
+        &mut endpoint,
+        &reversed(&ack, "UPDATE", "afterwards", 5),
+        later,
+    );
+    assert!(
+        transmits(&mut endpoint).is_empty(),
+        "the next UPDATE was refused as too soon"
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(*event, Event::IncomingInDialog { .. })),
+        "the next one is handed up"
+    );
+}
+
+#[test]
 fn answering_their_renegotiation_frees_the_dialog_for_ours() {
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);

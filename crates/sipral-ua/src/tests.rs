@@ -6552,6 +6552,52 @@ fn a_change_the_far_end_is_waiting_on_is_answered_when_the_call_ends() {
 }
 
 #[test]
+fn an_update_offer_nobody_answers_stops_blocking_the_next_one_once_the_endpoint_answers_408() {
+    // RFC 3311 §5.2 refuses a second offer only while the first is still
+    // unanswered. The endpoint's 408 at 64·T1 is that answer, and from then
+    // on the far end may offer again: it is not told 500 for good
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "UPDATE", "forgotten", 1, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    events(&mut agent);
+    transmits(&mut agent);
+
+    let later = t0 + Duration::from_secs(33);
+    agent.handle_timeout(later);
+    assert!(
+        transmits(&mut agent)
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 408 ")),
+        "the endpoint answers the UPDATE nobody did"
+    );
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "UPDATE", "afterwards", 2, Some(THEIR_NEW_CODEC)),
+        later,
+    );
+    assert!(
+        transmits(&mut agent)
+            .iter()
+            .all(|bytes| !bytes.starts_with(b"SIP/2.0 500 ")),
+        "the next offer is refused as too soon"
+    );
+    assert!(
+        events(&mut agent).iter().any(
+            |event| matches!(event, UaEvent::Reoffer { call: offered, .. } if *offered == call)
+        ),
+        "the next offer reaches the application"
+    );
+}
+
+#[test]
 fn an_offer_the_application_wrote_gets_a_version_that_has_moved() {
     // RFC 3264 §8: "the version in the origin field MUST increment by one" —
     // and its other half, that an unchanged version promises unchanged bytes,
@@ -7570,6 +7616,43 @@ fn an_offer_in_a_prack_the_application_refuses_leaves_the_provisional_unacknowle
     let written = transmits(&mut agent);
     assert!(prack_answer(&written, 3).starts_with(b"SIP/2.0 200 OK\r\n"));
     assert!(invite_answered(&written));
+}
+
+#[test]
+fn an_offer_in_a_prack_nobody_answers_lets_the_held_2xx_go_once_the_endpoint_answers_408() {
+    // the endpoint matched the PRACK to the 183 when it arrived and stopped
+    // retransmitting it (RFC 3262 §3): once its own 408 has answered the
+    // offer nobody else did, the 2xx held behind the 183 goes, and the call
+    // takes offers again
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (call, progress, rack) = early_media_held(&mut agent, "relforgot", t0);
+    let offer = their_new_offer("8", "");
+    let prack = carrying(
+        &in_dialog(&progress, "PRACK", "relforgotprack", 2),
+        "application/sdp",
+        &rack,
+        std::str::from_utf8(&offer).expect("text"),
+    );
+    deliver(&mut agent, &prack, t0);
+    assert!(!invite_answered(&transmits(&mut agent)));
+    events(&mut agent);
+
+    let later = t0 + Duration::from_secs(33);
+    agent.handle_timeout(later);
+    let written = transmits(&mut agent);
+    assert!(prack_answer(&written, 2).starts_with(b"SIP/2.0 408 "));
+    assert!(
+        invite_answered(&written),
+        "the 2xx the provisional held goes"
+    );
+    assert!(
+        agent
+            .reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, later)
+            .is_err(),
+        "the change is no longer anyone's to answer"
+    );
 }
 
 #[test]

@@ -1553,6 +1553,10 @@ impl Endpoint {
         };
         let effects = entry.machine.respond(message, now);
         self.apply(effects, flow, AnyTransactionId::NonInviteServer(id));
+        // the 408 is the final response RFC 3311 §5.2 counts an UPDATE as
+        // pending until, exactly as one the application sends would be
+        self.reinvites
+            .answered_theirs(AnyTransactionId::NonInviteServer(id));
         self.note(
             call.as_ref().map(CallId::as_bytes),
             Decision::of(Reason::RequestAnsweredByTimeout)
