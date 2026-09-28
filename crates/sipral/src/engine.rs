@@ -66,7 +66,7 @@ use sipral_core::msg::OwnedMessage;
 #[cfg(any(feature = "dtls", feature = "ice"))]
 use sipral_core::sdp::RtcpPlan;
 use sipral_core::sdp::{
-    AcceptedStream, Attribute, Connection, Direction, KeySalt, Keying, MASTER_KEY, MASTER_SALT,
+    AcceptedStream, Attribute, Connection, CryptoSuite, Direction, KeySalt, Keying,
     MediaDescription, MediaPlan, NegotiatedCodec, Origin, SessionDescription, StreamAnswer, parse,
     static_rtpmap,
 };
@@ -1520,7 +1520,10 @@ impl MediaEngine {
         let (identity, session_id) = draw(agent);
         // drawn after the identity, so that the same call placed with and
         // without SDES starts from the same SSRC and the same sequence number
-        let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
+        let keys = catalog
+            .srtp()
+            .offers()
+            .then(|| draw_key_for(CryptoSuite::AesCm80, &mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
         let ice = self.first_ice(None, &catalog, local, public, handed, true, now)?;
         let described = public.unwrap_or(local);
@@ -1640,7 +1643,10 @@ impl MediaEngine {
         let public = public.or_else(|| handed.mapped());
         let catalog = CallMedia::offering(catalog, public);
         let (identity, session_id) = draw(agent);
-        let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
+        let keys = catalog
+            .srtp()
+            .offers()
+            .then(|| draw_key_for(CryptoSuite::AesCm80, &mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
         let ice = self.first_ice(None, &catalog, local, public, handed, true, now)?;
         let described = public.unwrap_or(local);
@@ -1797,7 +1803,8 @@ impl MediaEngine {
         if !keying_allows(&catalog, Some(&offer)) {
             return Err(MediaError::SrtpRequired);
         }
-        let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
+        let keys = will_key(&catalog, Some(&offer))
+            .then(|| draw_key_for(suite_for_own_key(Some(&offer)), &mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Answering, Some(&offer), None, now)?;
         let ice = self.first_ice(Some(call), &catalog, local, public, handed, false, now)?;
         let mut description = write_answer(
@@ -1942,7 +1949,8 @@ impl MediaEngine {
         if !keying_allows(&catalog, offered.as_ref()) {
             return Err(MediaError::SrtpRequired);
         }
-        let keys = will_key(&catalog, offered.as_ref()).then(|| draw_key(&mut self.keys));
+        let keys = will_key(&catalog, offered.as_ref())
+            .then(|| draw_key_for(suite_for_own_key(offered.as_ref()), &mut self.keys));
         // an INVITE with no offer leaves this end offering, so which side it
         // is on is decided by what arrived rather than by which method was
         // called
@@ -2898,6 +2906,23 @@ impl MediaEngine {
     /// would answer 488 to every hold the far end puts on such a call — every
     /// re-offer on a secured one is handed up — and leave the application's
     /// own answer failing for want of a request to answer.
+    /// The key the answer to a re-offer carries: `in_force` repeated where
+    /// there is one, since RFC 4568 §7.1.4 warns that changing it opens a
+    /// window where the offerer cannot process what this end sends; one drawn
+    /// fresh, at the width of whichever suite `offer` will be answered under,
+    /// only where there is none to repeat. `None` where the stream will not
+    /// be keyed at all.
+    fn reoffer_keys(
+        &mut self,
+        catalog: &CodecCatalog,
+        offer: &SessionDescription,
+        in_force: Option<KeySalt>,
+    ) -> Option<KeySalt> {
+        will_key(catalog, Some(offer)).then(|| {
+            in_force.unwrap_or_else(|| draw_key_for(suite_for_own_key(Some(offer)), &mut self.keys))
+        })
+    }
+
     fn answer_reoffer(
         &mut self,
         call: CallHandle,
@@ -2958,8 +2983,7 @@ impl MediaEngine {
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         }
-        let keys = will_key(&catalog, Some(&offer))
-            .then(|| in_force.unwrap_or_else(|| draw_key(&mut self.keys)));
+        let keys = self.reoffer_keys(&catalog, &offer, in_force);
         let dtls = match self.dtls_lines(&catalog, Side::Answering, Some(&offer), Some(call), now) {
             Ok(lines) => lines,
             Err(error) => {
@@ -3729,6 +3753,25 @@ fn will_key(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> boo
     catalog.srtp().offers() || offered.is_some_and(any_secure_stream)
 }
 
+/// The suite this end's own SDES key is drawn for: the suite
+/// `keying::acceptable` would take from the peer's offer, the same suite
+/// `take_stream` accepts a few frames later, or this end's own offered suite
+/// when there is no peer description to read one from — an INVITE with no
+/// body leaves this end offering rather than answering, and a description
+/// with no crypto line at all leaves nothing for `acceptable` to read either,
+/// in which case the width is never used since `will_key` said no key is
+/// wanted (8.2.4).
+///
+/// Computed here rather than threaded down from `take_stream` because the
+/// key has to exist before that function is reached: `write_answer` takes the
+/// key already drawn, not a suite to draw one from.
+fn suite_for_own_key(offered: Option<&SessionDescription>) -> CryptoSuite {
+    offered
+        .and_then(|offer| offer.media.first())
+        .and_then(keying::acceptable)
+        .map_or(CryptoSuite::AesCm80, |policy| policy.suite)
+}
+
 /// Whether any live stream of a description is on one of the secure profiles.
 fn any_secure_stream(description: &SessionDescription) -> bool {
     description
@@ -4030,49 +4073,73 @@ fn draw(agent: &mut UserAgent) -> (StreamIdentity, u64) {
     (identity, hex(&token, 0, 16))
 }
 
-/// The master key and salt for one description, out of the engine's own seed.
+/// The widest key and salt any suite this stack offers or answers needs
+/// together: `Aes256Cm80`'s thirty-two-octet key and fourteen-octet salt
+/// (8.2.4). Held apart from `CryptoSuite::key_len() + salt_len()` so the
+/// block-count arithmetic below reads as what it is — two of the engine's
+/// thirty-two byte blocks always cover it — rather than a suite lookup on
+/// every draw.
+const MAX_KEY_SALT: usize = 46;
+
+/// The master key and salt for one description under `suite`, out of the
+/// engine's own seed.
 ///
 /// Its own and not the endpoint's, which is the whole point: the endpoint's
 /// seed is written in clear into every replay recording, so a recording made
 /// from a stack that shared one generator would carry the means to derive
 /// every key that stack had ever offered and every key it ever would.
 ///
-/// One block of `SHA-256(media seed || counter)` covers both halves — thirty
-/// of its thirty-two bytes — and the counter never repeats, which is what
-/// RFC 4568 §7.1.2 needs when it says "the master key(s) in the answer MUST
-/// be different from those in the offer". **What a poor media seed costs is
-/// the whole of the encryption**, and it costs it silently: SDES then
-/// protects the media against nobody while every message still looks right.
+/// One or two blocks of `SHA-256(media seed || counter)` cover the width
+/// `suite` calls for — one for everything up to thirty-two octets, which is
+/// every suite but `Aes256Cm80`'s forty-six, and RFC 4568 §7.1.2's "the
+/// master key(s) in the answer MUST be different from those in the offer"
+/// holds because the counter behind each block never repeats. **What a poor
+/// media seed costs is the whole of the encryption**, and it costs it
+/// silently: SDES then protects the media against nobody while every message
+/// still looks right.
 ///
-/// The block, and the key and salt sliced from it, live in [`Zeroizing`]
+/// The blocks, and the key and salt sliced from them, live in [`Zeroizing`]
 /// rather than a plain array (8.2.9). A buffer that is merely dropped is a
 /// buffer that stays on the stack for whatever runs next; `Zeroizing` wipes
 /// its bytes in its own `Drop`, which a later edit to this function cannot
 /// silently stop doing the way it could stop a `fill(0)` written by hand.
 ///
-/// Both halves are copied out a byte at a time rather than sliced, because
-/// this is the one function in the tree where reading past the end must not
-/// be recoverable: a fallible slice with a zero-filled fallback would hand
-/// out a key of zeros, and the paragraph above is about exactly how quiet
-/// that failure is. The assertion beside it holds the two lengths to the
-/// block, so a later change to either one stops the build rather than
-/// shortening a key.
+/// Every octet is copied out one at a time rather than sliced, because this
+/// is the one function in the tree where reading past the end must not be
+/// recoverable: a fallible slice with a zero-filled fallback would hand out a
+/// key of zeros, and the paragraph above is about exactly how quiet that
+/// failure is. `MAX_KEY_SALT` holds the width no suite here exceeds, so a
+/// later suite wider than that stops the build rather than silently handing
+/// out a truncated key.
 const _: () = assert!(
-    MASTER_KEY + MASTER_SALT <= 32,
-    "the key and the salt come out of one thirty-two byte block"
+    MAX_KEY_SALT <= 64,
+    "two of the engine's own blocks must cover the widest suite"
 );
 
-fn draw_key(keys: &mut KeySource) -> KeySalt {
-    let block = Zeroizing::new(keys.block());
-    let mut key = Zeroizing::new([0_u8; MASTER_KEY]);
-    let mut salt = Zeroizing::new([0_u8; MASTER_SALT]);
+fn draw_key_for(suite: CryptoSuite, keys: &mut KeySource) -> KeySalt {
+    let first = Zeroizing::new(keys.block());
+    let mut block = Zeroizing::new([0_u8; 64]);
+    for (slot, byte) in block.iter_mut().zip(first.iter()) {
+        *slot = *byte;
+    }
+    if suite.key_salt_len() > 32 {
+        let second = Zeroizing::new(keys.block());
+        for (slot, byte) in block.iter_mut().skip(32).zip(second.iter()) {
+            *slot = *byte;
+        }
+    }
+    let mut key = Zeroizing::new([0_u8; 32]);
+    let mut salt = Zeroizing::new([0_u8; 14]);
     for (slot, byte) in key.iter_mut().zip(block.iter()) {
         *slot = *byte;
     }
-    for (slot, byte) in salt.iter_mut().zip(block.iter().skip(MASTER_KEY)) {
+    for (slot, byte) in salt.iter_mut().zip(block.iter().skip(suite.key_len())) {
         *slot = *byte;
     }
-    KeySalt::new(key.as_slice(), salt.as_slice())
+    KeySalt::new(
+        key.get(..suite.key_len()).unwrap_or_default(),
+        salt.get(..suite.salt_len()).unwrap_or_default(),
+    )
 }
 
 /// `len` hexadecimal characters of `token`, starting at `at`, as a number.
@@ -4661,7 +4728,11 @@ mod counter_wiring {
 
 #[cfg(test)]
 mod key_source_tests {
-    use super::{KeySource, draw_key};
+    use super::{CryptoSuite, KeySource, draw_key_for};
+
+    fn draw(keys: &mut KeySource) -> sipral_core::sdp::KeySalt {
+        draw_key_for(CryptoSuite::AesCm80, keys)
+    }
 
     #[test]
     fn the_media_key_follows_the_media_seed_and_nothing_else() {
@@ -4672,15 +4743,15 @@ mod key_source_tests {
         let mut other = KeySource::new([2; 32]);
         let mut same_again = KeySource::new([1; 32]);
 
-        let first = draw_key(&mut one);
+        let first = draw(&mut one);
         assert_ne!(
             first.key(),
-            draw_key(&mut other).key(),
+            draw(&mut other).key(),
             "two media seeds, two keys"
         );
         assert_eq!(
             first.key(),
-            draw_key(&mut same_again).key(),
+            draw(&mut same_again).key(),
             "and a seed is a stream, so the same one still reproduces"
         );
     }
@@ -4693,31 +4764,44 @@ mod key_source_tests {
         let mut keys = KeySource::new([0; 32]);
         let mut seen = Vec::new();
         for _ in 0..64 {
-            let drawn = draw_key(&mut keys);
+            let drawn = draw(&mut keys);
             let pair = (drawn.key().to_vec(), drawn.salt().to_vec());
             assert!(!seen.contains(&pair), "a key repeated");
             seen.push(pair);
         }
     }
 
-    /// The block `draw_key` reads and the key and salt sliced out of it
-    /// (8.2.9) hold the SRTP master key and salt, so all three have to be the
-    /// type that wipes itself on drop rather than a plain array left to be
-    /// merely dropped, or a `Vec` that leaves its last copy in freed memory.
-    /// A wipe is not observable from safe Rust and Miri cannot be pointed at
-    /// this, so what is asserted is the one thing that is visible: which type
-    /// the function declares its buffers as. The needles are assembled at
-    /// runtime, so the test cannot pass by matching its own assertion — the
-    /// same check `sipral-core` runs on `A1` in
+    /// Every suite this end can answer with draws a key and salt of its own
+    /// width, and two different suites drawn from the same point in the
+    /// stream do not share the octets each takes as its key (8.2.4).
+    #[test]
+    fn every_suite_draws_its_own_width() {
+        for suite in CryptoSuite::STRENGTH {
+            let mut keys = KeySource::new([7; 32]);
+            let drawn = draw_key_for(suite, &mut keys);
+            assert_eq!(drawn.key().len(), suite.key_len(), "{}", suite.name());
+            assert_eq!(drawn.salt().len(), suite.salt_len(), "{}", suite.name());
+        }
+    }
+
+    /// The block(s) `draw_key_for` reads and the key and salt sliced out of
+    /// them (8.2.9, generalised in 8.2.4) hold the SRTP master key and salt,
+    /// so all three have to be the type that wipes itself on drop rather than
+    /// a plain array left to be merely dropped, or a `Vec` that leaves its
+    /// last copy in freed memory. A wipe is not observable from safe Rust and
+    /// Miri cannot be pointed at this, so what is asserted is the one thing
+    /// that is visible: which type the function declares its buffers as. The
+    /// needles are assembled at runtime, so the test cannot pass by matching
+    /// its own assertion — the same check `sipral-core` runs on `A1` in
     /// `auth::digest::tests::the_password_is_never_built_in_a_buffer_that_is_not_wiped`.
     #[test]
     fn the_media_key_and_salt_are_never_built_in_a_buffer_that_is_not_wiped() {
         let source = include_str!("engine.rs").replace("\r\n", "\n");
-        let opens = "fn draw_key(keys: &mut KeySource) -> KeySalt {";
-        let from = source.find(opens).expect("draw_key is in this file");
+        let opens = "fn draw_key_for(suite: CryptoSuite, keys: &mut KeySource) -> KeySalt {";
+        let from = source.find(opens).expect("draw_key_for is in this file");
         let rest = source.get(from..).expect("the rest of the file");
         let to = rest.find("\n}\n").map_or(rest.len(), |at| at + 1);
-        let body = rest.get(..to).expect("the body of draw_key");
+        let body = rest.get(..to).expect("the body of draw_key_for");
         assert!(
             body.len() > opens.len(),
             "the slice is the function, not the signature"
