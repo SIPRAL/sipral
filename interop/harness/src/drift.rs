@@ -52,10 +52,13 @@
 //! [`TOLERANCE`] from the one it was given, the controls included: a count
 //! that does not add up is a frame going somewhere nothing here can see. And
 //! a report in which the frames the earpiece played as silence and the
-//! frames the stack counted as under-runs (`Quality::underruns`, the C ABI's
-//! `frames_underrun`) differ by more than the run of silence that can be in
-//! progress when a report falls: every frame the listener lost that way is
-//! one the application must be able to read.
+//! frames the stack counted for it differ by more than the run of silence
+//! that can be in progress when a report falls: every frame the listener
+//! lost that way is one the application must be able to read. The stack
+//! counts it one of two ways -- an under-run (`Quality::underruns`, the C
+//! ABI's `frames_underrun`), the earpiece asking before the next packet
+//! arrived, or a packet lost on the way with nothing behind it to conceal
+//! it from (`Quality::silenced`), which only a lossy link gives.
 //!
 //! Up to [`ABSORBED_PPM`], a skew any device runs at with room over, the
 //! buffer has to absorb the drift where nobody hears it: a report in which a
@@ -499,16 +502,23 @@ fn measured(first: &(Quality, Heard), now: &(Quality, Heard)) -> f64 {
 }
 
 /// The frames of silence the earpiece played from `first` to `now` that
-/// the stack did not count as under-runs, or the other way about, past what
-/// a run of silence still going on when either was taken accounts for: the
-/// stack settles a run only once the packet after it is played.
+/// the stack did not count, or the other way about, past what a run of
+/// silence still going on when either was taken accounts for: the stack
+/// settles a run only once the packet after it is played. A frame of
+/// silence is counted one of two ways: an under-run
+/// ([`Quality::underruns`]), the buffer having nothing to play because the
+/// earpiece asked early, or a packet lost on the way with nothing behind it
+/// to conceal it from ([`Quality::silenced`]) -- a lossy link gives the
+/// second as well as the first, and a clean one only the first.
 fn uncounted(first: &(Quality, Heard), now: &(Quality, Heard)) -> Option<String> {
     let heard = u64::from(now.1.silent.saturating_sub(first.1.silent));
-    let counted = now.0.underruns.saturating_sub(first.0.underruns);
+    let underruns = now.0.underruns.saturating_sub(first.0.underruns);
+    let silenced = now.0.silenced.saturating_sub(first.0.silenced);
+    let counted = underruns.saturating_add(silenced);
     (heard.abs_diff(counted) > u64::from(now.1.longest_silence)).then(|| {
         format!(
-            "the earpiece played {heard} frames as silence and the stack counted {counted} \
-             under-runs"
+            "the earpiece played {heard} frames as silence and the stack counted {underruns} \
+             under-runs and {silenced} lost frames heard as silence"
         )
     })
 }
@@ -550,7 +560,8 @@ fn report(
     leg.suffered |= suffering;
     let mut line = format!(
         "  drift {:>14} {minutes:3}:{seconds:02}  delay {:3} ms of {:3} ms, jitter {} ms; \
-         shrunk {}, stretched {}, ran dry {} ({} in the tone, {} counted), concealed {}, \
+         shrunk {}, stretched {}, ran dry {} ({} in the tone, {} under-runs and {} lost \
+         counted), concealed {}, \
          late {}, overflow {}; played {}, audible {} of {:.0} due; measured {:+.1} ppm; \
          score {score:.0}{}",
         leg.name(),
@@ -562,6 +573,7 @@ fn report(
         heard.silent.saturating_sub(first.1.silent),
         heard.cut.saturating_sub(first.1.cut),
         quality.underruns.saturating_sub(first.0.underruns),
+        quality.silenced.saturating_sub(first.0.silenced),
         heard
             .concealed
             .saturating_sub(first.1.concealed)
@@ -848,9 +860,29 @@ mod tests {
         quality.underruns = 30;
         let why = uncounted(&start, &(quality, heard)).expect("ten frames went uncounted");
         assert!(
-            why.contains("played 40") && why.contains("counted 30"),
+            why.contains("played 40") && why.contains("counted 30 under-runs"),
             "{why}"
         );
+    }
+
+    /// Over a lossy link part of the silence is packets lost on the way
+    /// with nothing behind them to conceal them from, which the stack counts
+    /// apart from the under-runs: the two together are what the earpiece
+    /// played as silence, and neither alone is (`scripts/lab.sh
+    /// drift-netem` under `lossy`, where 12 frames of silence were 3
+    /// under-runs).
+    #[test]
+    fn silence_for_a_lost_packet_is_counted_beside_the_under_runs() {
+        let start = at(0, 0, FRAME, 0);
+        let (mut quality, mut heard) = at(0, 0, FRAME, 9_000);
+        heard.silent = 12;
+        heard.longest_silence = 2;
+        quality.underruns = 3;
+        quality.silenced = 9;
+        assert_eq!(uncounted(&start, &(quality, heard)), None);
+        quality.silenced = 0;
+        let why = uncounted(&start, &(quality, heard)).expect("nine frames went uncounted");
+        assert!(why.contains("played 12"), "{why}");
     }
 
     /// A call the stack itself said had stopped receiving audio fails, even

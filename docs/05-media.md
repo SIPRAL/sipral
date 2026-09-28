@@ -343,7 +343,10 @@ arrived yet is no packet lost or discarded — the packet arrives, late for
 its frame, and is played in the next one. Where that degradation shows is
 where an application reads a call's quality: `Quality::underruns` counts
 those frames, and the C ABI carries the count as
-`sipral_stream_stats_t::frames_underrun`; `Quality::loss_rate` takes them
+`sipral_stream_stats_t::frames_underrun`. A frame of silence played for a
+packet lost on the way, with nothing behind it yet to conceal it from, is
+no under-run: `Quality::silenced` counts those, beside it, and the lost
+packet is in `Quality::lost` as well. `Quality::loss_rate` takes under-runs
 as it takes a concealed one, and `StreamStatistics::score` and
 `StreamStatistics::is_suffering`, and the C ABI's `loss_rate`, `score` and
 `suffering`, are read from it. `emodel::codec_quality_model` tabulates G.113 Table

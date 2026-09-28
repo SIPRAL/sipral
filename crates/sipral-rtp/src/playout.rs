@@ -341,6 +341,14 @@ pub struct Quality {
     /// No packet is lost or discarded by an under-run, so RFC 3611's figures
     /// do not see it; [`Quality::loss_rate`] does.
     pub underruns: u64,
+    /// Frames played as nothing because the packet due in them was lost on
+    /// the way and nothing behind it had arrived yet to conceal it from: the
+    /// other half of the silence the earpiece heard while the far end was
+    /// sending, beside [`Quality::underruns`]. Each is one of
+    /// [`Quality::lost`] as well, which also holds the lost packets that
+    /// were concealed; this is the share of them the listener heard as
+    /// silence rather than as a frame made up in their place.
+    pub silenced: u64,
     /// How far behind the newest packet received the playout point currently
     /// is: the delay the far end's voice is actually suffering.
     pub delay: Duration,
@@ -370,6 +378,7 @@ struct Counters {
     shrunk: u64,
     stretched: u64,
     underruns: u64,
+    silenced: u64,
 }
 
 #[derive(Debug, Default)]
@@ -1264,6 +1273,7 @@ impl JitterBuffer {
             shrunk: self.counts.shrunk,
             stretched: self.counts.stretched,
             underruns: self.counts.underruns,
+            silenced: self.counts.silenced,
             delay: self.packets_to_duration(self.queued()),
             target_delay: self.packets_to_duration(self.target),
             jitter: ticks_to_duration(self.clock_rate, self.timing.jitter_scaled >> 4),
@@ -1497,9 +1507,13 @@ impl JitterBuffer {
             .and_then(|last| continues(last, sequence, timestamp, marker, span));
         let silent = core::mem::take(&mut self.silent);
         if let Some(step) = on {
-            // a packet lost on the way was due in one of those frames, and is
-            // counted where the ones lost are
-            let underruns = silent.saturating_sub(u32::from(step) - 1);
+            // a packet lost on the way was due in one of those frames: it is
+            // counted where the ones lost are, and the frame of silence that
+            // stood for it as silenced; the rest of the silence is the
+            // earpiece asking before the far end's next packet arrived
+            let silenced = silent.min(u32::from(step) - 1);
+            let underruns = silent - silenced;
+            self.counts.silenced = self.counts.silenced.saturating_add(u64::from(silenced));
             self.counts.underruns = self.counts.underruns.saturating_add(u64::from(underruns));
             for _ in 0..underruns.min(u32::from(LOSS_CAPACITY)) {
                 self.loss.record(true);
@@ -2992,5 +3006,39 @@ mod tests {
         assert_eq!(pull(&mut buffer), Some(3));
         let quality = buffer.quality();
         assert_eq!((quality.lost, quality.underruns), (2, 1));
+        assert_eq!(
+            quality.silenced, 2,
+            "the two lost were heard as silence, and are counted as such"
+        );
+    }
+
+    /// Every frame of silence heard while the far end was sending is either
+    /// an under-run or a lost packet heard as silence: the two counts
+    /// together are the silence, whichever way the loss fell.
+    #[test]
+    fn the_silence_heard_is_under_runs_and_losses_silenced() {
+        let mut buffer = buffer(20, 1);
+        insert(&mut buffer, 0);
+        assert_eq!(pull(&mut buffer), Some(0));
+        let mut heard = 0_u64;
+        // one lost with a frame of silence for it; three lost with five
+        // frames of silence, two of them early; one lost and concealed from
+        // the packet behind it, with no silence at all
+        for (next, silence) in [(2_u16, 1), (6, 5)] {
+            for _ in 0..silence {
+                assert!(matches!(buffer.pull(Activity::Speech), Pull::Empty));
+                heard += 1;
+            }
+            insert(&mut buffer, next);
+            assert_eq!(pull(&mut buffer), Some(next));
+        }
+        insert(&mut buffer, 8);
+        assert!(matches!(buffer.pull(Activity::Speech), Pull::Conceal));
+        assert_eq!(pull(&mut buffer), Some(8));
+
+        let quality = buffer.quality();
+        assert_eq!(quality.lost, 5);
+        assert_eq!((quality.silenced, quality.underruns), (4, 2));
+        assert_eq!(quality.silenced + quality.underruns, heard);
     }
 }

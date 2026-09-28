@@ -475,6 +475,23 @@ did not get from the far end, takes it as it takes a concealed frame, so
 played read as a loss rate of 0.6 with RTCP-XR's loss and discard rates
 both at zero (`an_earpiece_that_outruns_the_far_end_counts_the_silence_it_played`).
 
+**Silence for a packet lost on the way is not an under-run.** An
+under-run is the buffer having nothing to play because the earpiece asked
+before the far end's next packet arrived. A packet lost on the way with a
+later one already held is concealed, and counted in `Quality::lost`; one
+lost with nothing behind it yet leaves the buffer empty too, and the
+earpiece plays a frame of silence for it. That frame is
+`Quality::silenced`, beside `Quality::underruns`: the two together are
+every frame of silence heard while the far end was sending, frame for
+frame (`the_silence_heard_is_under_runs_and_losses_silenced`), and
+`Quality::lost` still holds the lost packet as well. The C ABI's
+`frames_underrun` is `Quality::underruns` alone, as before; the silenced
+count is read from the Rust facade (`StreamStatistics::quality`). The
+drift flow under `lossy` is where the two came apart: the earpiece played
+12 frames as silence where the stack had counted 3 under-runs, the other
+nine being lost packets, and `interop/harness/src/drift.rs` now sets the
+silence it heard against both counts.
+
 ## 27 September 2026 — `0.0.1`, Opus against G.711, and the load test's memory on Linux
 
 `scripts/bench.sh`'s new step, `crates/sipral/src/pipeline::tests::cost_of_a_frame_by_codec`

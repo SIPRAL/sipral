@@ -1091,6 +1091,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   2xx to the INVITE held behind the reliable provisional response never
   went. The 408 now ends the offer at both layers, the call takes the next
   one, and the held 2xx goes.
+- **Silence played for a packet lost on the way is counted, apart from the
+  under-runs.** A packet lost with nothing behind it yet to conceal it from
+  left the buffer empty, and the earpiece played a frame of silence that no
+  counter held: `Quality::underruns` is the earpiece asking before the next
+  packet arrived, and the lost packet itself was only in `Quality::lost`,
+  beside the concealed ones. `Quality::silenced` now counts those frames, so
+  the two together are every frame of silence heard while the far end was
+  sending. The drift flow's check, which failed under `lossy` with 12 frames
+  of silence played against 3 under-runs counted, sets the silence against
+  both. The C ABI's `frames_underrun` is unchanged.
 - **A Python call closed the moment it ends still gives its relay back.**
   `Stack` sent a call's farewells — its RTCP BYE and the TURN Refresh with a
   lifetime of zero — only after the poll that ended the call had delivered
