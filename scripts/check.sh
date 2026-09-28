@@ -75,6 +75,22 @@ captures=$(tracked | grep -E '\.pcapng?$' | grep -v '^fixtures/rfc4475/' || true
     fail "captures tracked:"; printf '        %s\n' $captures
 }
 
+step "security policy"
+# A buyer's security review reads SECURITY.md first: how to report, what
+# happens next, which versions get fixes. Its reporting channel is never an
+# address -- "no addresses to harvest" below already scans it with the rest.
+if [ -n "$(tracked | grep -x 'SECURITY.md')" ]; then
+    missing=""
+    for h in '## Reporting a vulnerability' '## What happens after a report' '## Supported versions'; do
+        grep -qxF "$h" SECURITY.md || missing="$missing|$h"
+    done
+    [ -z "$missing" ] && pass "SECURITY.md says how to report, what happens next, and what is supported" || {
+        fail "SECURITY.md lacks a section:"; printf '%s' "$missing" | tr '|' '\n' | sed '/^$/d; s/^/        /'
+    }
+else
+    fail "SECURITY.md is not tracked"
+fi
+
 step "rfc 4475 corpus is byte exact"
 if [ -f fixtures/rfc4475/manifest.toml ]; then
     bad=$(awk -F'"' '/^file = /{f=$2} /^sha256 = /{print f, $2}' fixtures/rfc4475/manifest.toml \

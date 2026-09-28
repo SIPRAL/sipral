@@ -134,7 +134,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   itself stays through the channel a private repository's invited readers
   already have; GitHub's private vulnerability reporting becomes the
   channel the day this repository turns public. `docs/20-security-model.md`
-  now links to it.
+  now links to it, and `scripts/check.sh` fails when `SECURITY.md` is
+  untracked or loses its reporting, handling or supported-versions section.
 - **A CycloneDX SBOM beside every packaged artefact.** `scripts/package/
   {wheels,nuget,aar,xcframework}.sh` each now write a `.cdx.json` next to
   the wheel, `.nupkg`, `.aar` or `.xcframework` they build, listing
