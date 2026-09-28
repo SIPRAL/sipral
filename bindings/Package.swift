@@ -49,9 +49,17 @@ let package = Package(
             name: "SipralLabAgent", dependencies: ["Sipral"], path: "swift/Sources/SipralLabAgent",
             linkerSettings: linkAgainstSipralFfi
         ),
-        .executableTarget(
-            name: "SipralSampleMac", dependencies: ["Sipral"], path: "swift/Sources/SipralSampleMac",
-            linkerSettings: linkAgainstSipralFfi
-        ),
     ]
 )
+
+// The SwiftUI sample is a macOS app, and SwiftUI exists nowhere else a
+// manifest is read: declared on Linux it would stop `swift test`, which
+// builds every target, before a single test ran.
+#if os(macOS)
+package.targets.append(
+    .executableTarget(
+        name: "SipralSampleMac", dependencies: ["Sipral"], path: "swift/Sources/SipralSampleMac",
+        linkerSettings: linkAgainstSipralFfi
+    )
+)
+#endif

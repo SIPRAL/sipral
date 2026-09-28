@@ -871,6 +871,22 @@ if rustup target list --installed 2>/dev/null | grep -qx aarch64-apple-ios; then
         -- -D warnings >/dev/null 2>&1 \
         && pass "cargo clippy -p sipral-io-coreaudio for iOS" \
         || fail "cargo clippy -p sipral-io-coreaudio --target aarch64-apple-ios --all-targets"
+    # Rustdoc for every crate that builds for iOS: sipral-ffi's own graph,
+    # which is what scripts/package/xcframework.sh compiles for the device,
+    # read from cargo rather than listed here so a crate that joins it is
+    # covered the day it does, and sipral-io-coreaudio, whose iOS half no
+    # other target compiles.
+    ios_docs=$(cargo tree -p sipral-ffi --target aarch64-apple-ios -e normal --prefix none 2>/dev/null \
+        | awk '$1 ~ /^sipral/ && $3 ~ /^\(/ { print $1 }' | sort -u | tr '\n' ' ')
+    ios_docs="${ios_docs}sipral-io-coreaudio"
+    ios_args=""
+    for crate in $ios_docs; do
+        ios_args="$ios_args -p $crate"
+    done
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --target aarch64-apple-ios $ios_args \
+        >/dev/null 2>&1 \
+        && pass "cargo doc for iOS: $ios_docs" \
+        || fail "RUSTDOCFLAGS=-D warnings cargo doc --no-deps --target aarch64-apple-ios$ios_args"
 else
     fail "aarch64-apple-ios is not installed: rustup target add aarch64-apple-ios"
 fi

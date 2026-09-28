@@ -244,9 +244,12 @@ final class NatTests: XCTestCase {
         defer { freeifaddrs(list) }
         var found: String?
         for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let flags = Int32(entry.pointee.ifa_flags)
+            // `Int` on both sides: Darwin imports the `IFF_*` flags as
+            // `Int32` and Glibc as `Int`, and `ifa_flags` is a `UInt32`
+            let flags = Int(entry.pointee.ifa_flags)
             guard let address = entry.pointee.ifa_addr, address.pointee.sa_family == sa_family_t(AF_INET),
-                  flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0, flags & IFF_POINTOPOINT == 0 else { continue }
+                  flags & Int(IFF_UP) != 0, flags & Int(IFF_LOOPBACK) == 0,
+                  flags & Int(IFF_POINTOPOINT) == 0 else { continue }
             var text = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
             address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { inet in
                 var sin = inet.pointee.sin_addr

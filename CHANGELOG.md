@@ -1069,6 +1069,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   at a 50 ms stagger, is reported apart the same way; a `4xx` or `6xx` still
   fails the run, since it says the request was wrong, not that the server was
   busy.
+- **The Swift package's tests build and run on Linux.** `NatTests` masked
+  the interface flags as `Int32`, which Glibc imports as `Int`, and the
+  macOS SwiftUI sample was declared on every platform, so `swift test`
+  failed to compile under Swift 6.1 on Linux before any test ran. The
+  sample is now declared on macOS only; the NAT suite passes in a
+  `swift:6.1` container.
 - **A lite ICE end that started controlling yields to a full peer.** Two
   lite ends make the offerer controlling (RFC 8445 §6.1.1), so a lite end
   told the peer was lite too started controlling; when the peer was in fact
