@@ -34,6 +34,9 @@
 //! - [`SessionShare`] — one call's media, for a thread that carries its audio
 //!   while another runs signalling. Each session has its own lock, so neither
 //!   thread waits on the other for longer than a frame.
+//! - [`redacted_call_record`] and [`redacted_recording`] — a call's D1 record
+//!   and a D2 recording with the personal data taken out, for a report that
+//!   leaves the organisation.
 //! - Everything `sipral-ua` exports, re-exported, so that an application
 //!   depends on this crate and nothing else.
 //!
@@ -134,6 +137,7 @@ mod capabilities;
 mod clock;
 mod codec;
 mod counters;
+mod diagnostics;
 #[cfg(feature = "dtls")]
 mod dtls;
 mod dtmf;
@@ -163,6 +167,9 @@ pub use capabilities::{Capabilities, SrtpKeying};
 pub use clock::WallClock;
 pub use codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME_MS};
 pub use counters::{CallDispositionCounts, Counter, Counters, Gauge, RegistrationFailureCounts};
+pub use diagnostics::{
+    RedactError, RedactionMode, Redactor, redacted_call_record, redacted_recording,
+};
 #[cfg(feature = "dtls")]
 pub use dtls::Identity;
 pub use dtmf::{DEFAULT_DIGIT, DIGIT_GAP, Digit, LONGEST_DIGIT, SHORTEST_DIGIT};
@@ -229,6 +236,9 @@ pub use sipral_rtp::{Discard, Quality, UNAVAILABLE, VoipMetricsBlock};
 /// `sipral-core::sdp` both have a `Direction` and they are about different
 /// things, so the one an application meets less often gets the longer name.
 pub use sipral_ua::Direction as CallDirection;
+/// What [`UserAgent::stop_recording`] hands back, for [`redacted_recording`]
+/// to be named against.
+pub use sipral_ua::Recording;
 /// The whole user agent, so that a softphone depends on this crate and nothing
 /// else: accounts, registration, calls, hold, transfer, and the five calls
 /// that drive them.

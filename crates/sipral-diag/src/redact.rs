@@ -35,6 +35,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
+use sipral_core::diag::Record;
 use sipral_core::msg::{
     self, CommaList, HeaderName, HostRef, MessageKind, NameAddrRef, ParseError, ParseMode,
     ParseScratch, RouteRef, UriRef, UriScheme,
@@ -280,6 +281,35 @@ pub fn redact_message(bytes: &[u8], red: &mut Redactor) -> Result<Vec<u8>, Redac
     Ok(out)
 }
 
+/// Redact one D1 record (`docs/14-diagnostics.md`), returned as the same
+/// JSON [`Record::to_json`] writes.
+///
+/// A record names no user, no display name and no body — that is its own
+/// rule — so what it carries of GDPR's list is IP literals: the socket
+/// address of every decision that has one, and any address a `Call-ID`
+/// was written with. Each goes through `red` exactly as it does in
+/// [`redact_message`], so one [`Redactor`] handed a call's record and then
+/// its D2 recording gives an address the same pseudonym in both, and the
+/// two still line up. The `Call-ID` otherwise stays, for the reason it
+/// stays in a redacted message.
+#[must_use]
+pub fn redact_record(record: &Record, red: &mut Redactor) -> String {
+    redact_record_json(&record.to_json(), red)
+}
+
+/// [`redact_record`] over a record already serialised, or over the whole
+/// document `Endpoint::diagnostics_json` writes, which is the same shape
+/// around several records.
+///
+/// JSON can be scanned as it stands: every key and every string value is
+/// quoted, and a quotation mark ends a run of address characters, so a run
+/// that parses as an address is one a decision or a `Call-ID` carried and
+/// never a key, a reason code or an offset.
+#[must_use]
+pub fn redact_record_json(json: &str, red: &mut Redactor) -> String {
+    String::from_utf8(scan_ip_literals(json.as_bytes(), red)).unwrap_or_else(|_| json.to_owned())
+}
+
 /// SDES key material dropped from an `a=crypto:` line; everything else in
 /// the body passes through unchanged here, and picks up its IP redaction
 /// from [`scan_ip_literals`] over the whole message afterwards.
@@ -511,7 +541,7 @@ fn scan_ip_literals_str(text: &str, red: &mut Redactor) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mode, Redactor, redact_message};
+    use super::{Mode, Redactor, redact_message, redact_record_json};
 
     fn hash_redactor() -> Redactor {
         Redactor::new(Mode::Hash(b"organisation-secret".to_vec()))
@@ -774,6 +804,50 @@ Contact: <sip:alice@example.com;maddr=192.0.2.55>\r\n\
 Content-Length: 0\r\n\r\n";
         let out = redact(msg, &mut hash_redactor());
         assert!(!out.contains("192.0.2.55"), "maddr IP leaked: {out}");
+    }
+
+    #[test]
+    fn a_d1_record_loses_its_addresses_and_keeps_everything_else() {
+        let record = r#"{"call_id":"f222a20b@192.0.2.44","dropped":0,"decisions":[{"at_us":0,"reason":"transport.selected","address":"192.0.2.9:5060","protocol":"UDP"},{"at_us":38000,"reason":"request.sent","direction":"out","method":"INVITE","bytes":1216,"address":"[2001:db8::7]:5061","protocol":"TLS","size":1216,"limit":1300}]}"#;
+        let out = redact_record_json(record, &mut hash_redactor());
+        for real in ["192.0.2.44", "192.0.2.9", "2001:db8::7"] {
+            assert!(!out.contains(real), "{real} leaked: {out}");
+        }
+        for kept in [
+            r#""call_id":"f222a20b@"#,
+            r#""at_us":38000"#,
+            r#""reason":"transport.selected""#,
+            r#""method":"INVITE""#,
+            r#""bytes":1216"#,
+            r#""size":1216,"limit":1300"#,
+            ":5060\"",
+            "]:5061\"",
+        ] {
+            assert!(out.contains(kept), "{kept} lost: {out}");
+        }
+    }
+
+    #[test]
+    fn a_d1_record_and_a_message_redacted_together_agree_on_an_address() {
+        let mut red = hash_redactor();
+        let record = redact_record_json(r#"{"address":"192.0.2.9:5060"}"#, &mut red);
+        let message = redact(
+            b"OPTIONS sip:example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK1\r\n\
+From: <sip:a@example.com>;tag=1\r\n\
+To: <sip:example.com>\r\n\
+Call-ID: a@b\r\n\
+CSeq: 1 OPTIONS\r\n\
+Content-Length: 0\r\n\r\n",
+            &mut red,
+        );
+        let pseudonym = record
+            .trim_start_matches(r#"{"address":""#)
+            .trim_end_matches(r#":5060"}"#);
+        assert!(
+            message.contains(&format!("UDP {pseudonym}:5060")),
+            "{record} / {message}"
+        );
     }
 
     #[test]

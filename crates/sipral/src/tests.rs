@@ -11243,3 +11243,58 @@ fn an_earpiece_past_any_real_clock_is_held_to_its_budget_and_says_so() {
         );
     }
 }
+
+/// A call's two diagnostic artefacts leave redacted: the D1 record without
+/// the address the far end signalled from, and the D2 recording without the
+/// caller's user part or that address, while the same recording exported
+/// plainly still has both — which is what makes the absence mean anything.
+#[test]
+fn a_calls_record_and_recording_are_handed_over_redacted() {
+    let mut pair = Pair::new(CodecCatalog::new());
+    pair.callee.agent.start_recording(None);
+    let _ = pair.connect();
+    let call = pair.callee.call().expect("the callee has the call");
+    let caller_address = caller_sip().ip().to_string();
+
+    let mut redactor = crate::Redactor::new(crate::RedactionMode::Hash(b"org key".to_vec()));
+    let record = crate::redacted_call_record(&mut pair.callee.agent, call, &mut redactor)
+        .expect("the call has a record");
+    assert!(record.contains("\"decisions\":[{"), "{record}");
+    assert!(!record.contains(&caller_address), "{record}");
+    let identity = pair
+        .callee
+        .agent
+        .call_identity(call)
+        .expect("the call is known");
+    let plain_record = pair
+        .callee
+        .agent
+        .endpoint()
+        .call_record(&sipral_core::dialog::CallId::new(&identity.call_id))
+        .map(sipral_core::diag::Record::to_json)
+        .expect("the record, plain");
+    assert!(plain_record.contains(&caller_address), "{plain_record}");
+
+    let recording = pair
+        .callee
+        .agent
+        .stop_recording()
+        .expect("a recording was running")
+        .expect("it finished")
+        .clone();
+    let contains = |haystack: &[u8], needle: &[u8]| {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    };
+    let plain = sipral_diag::export(&recording, None).expect("the plain export");
+    assert!(contains(&plain, b"alice"));
+    assert!(contains(&plain, caller_address.as_bytes()));
+    let redacted = crate::redacted_recording(&recording, redactor).expect("the redacted export");
+    assert!(
+        contains(&redacted, b"INVITE sip:"),
+        "the messages are still there"
+    );
+    assert!(!contains(&redacted, b"alice"));
+    assert!(!contains(&redacted, caller_address.as_bytes()));
+}

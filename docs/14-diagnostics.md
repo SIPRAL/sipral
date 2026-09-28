@@ -293,10 +293,50 @@ still a password a large enough dictionary reverses. Two modes:
 `Call-ID` and every `tag` are left alone — the file has to keep correlating a
 dialog's own messages to remain a call flow — and so is a domain name that is
 not a literal address. `sipral_diag::redact::redact_message` is the Rust
-function behind both modes; it takes one message's bytes and a `Redactor` and
-is independent of the C ABI, so a facade that links `sipral-diag` can offer
-the same redaction to an application without a new entry point in
-`sipral.h`. The redacted pcapng still decodes as SIP: `tshark -r out.pcapng -Y
-sip` finds every message, by method and status, same as the unredacted one —
-checked against `tshark` itself, not only against this crate's own tests, on
-the lab VM.
+function behind both modes; it takes one message's bytes and a `Redactor`.
+The redacted pcapng still decodes as SIP: `tshark -r out.pcapng -Y sip` finds
+every message, by method and status, same as the unredacted one — checked
+against `tshark` itself, not only against this crate's own tests, on the lab
+VM.
+
+## Handing a call's diagnostics over redacted, from an application
+
+The `sipral` crate offers both artefacts redacted, in Rust (there is no C
+entry point for this; a binding exports through `diag-export` or its own
+Rust shim):
+
+```rust
+pub fn redacted_call_record(
+    agent: &mut UserAgent,
+    call: CallHandle,
+    redactor: &mut Redactor,
+) -> Option<String>;
+
+pub fn redacted_recording(
+    recording: &Recording,
+    redactor: Redactor,
+) -> Result<Vec<u8>, RedactError>;
+```
+
+`Redactor::new(RedactionMode::Hash(key))` or
+`Redactor::new(RedactionMode::Delete)` builds one per export, with the modes
+above.
+
+- **`redacted_call_record`** is the call's D1 record as the JSON under "The
+  JSON", with every IP literal pseudonymised — the address on each decision
+  and any address the `Call-ID` was written with. The record carries nothing
+  else from GDPR's list (see "What it deliberately does not contain"), so
+  nothing else changes: reasons, offsets, sizes, limits, methods and statuses
+  read exactly as they did. `None` once the call is gone, since the record
+  is found through the call's `Call-ID`. `sipral_diag::redact_record_json`
+  does the same to any record already serialised, or to the whole document
+  `Endpoint::diagnostics_json` writes.
+- **`redacted_recording`** takes the `Recording` that
+  `UserAgent::stop_recording` hands back and returns the pcapng file
+  `diag-export --redact` would have written from it, packet addresses
+  included. A message the parser cannot read stops it with a `RedactError`
+  rather than going into the file unredacted.
+
+Handing the same `Redactor` to the record first and then to the recording
+gives each address one pseudonym across both, so the decision that names the
+far end and the packets from it still line up.

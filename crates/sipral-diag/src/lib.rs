@@ -52,4 +52,4 @@ pub mod pcapng;
 pub mod redact;
 
 pub use export::export;
-pub use redact::{Mode, RedactError, Redactor, redact_message};
+pub use redact::{Mode, RedactError, Redactor, redact_message, redact_record, redact_record_json};

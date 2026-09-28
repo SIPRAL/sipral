@@ -95,6 +95,9 @@ all-features = true
 sipral-core.workspace = true
 sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
 sipral-rtp = { path = "../sipral-rtp", version = "0.0.1" }
+# the redaction behind `redacted_call_record` and `redacted_recording`; it
+# brings `hmac` and `sha2`, which `dtls` already links at the same pins
+sipral-diag = { path = "../sipral-diag", version = "0.0.1" }
 # `default-features = false` is what makes this crate's own feature mean
 # anything: without it, `--no-default-features` on this crate would still link
 # libopus through `sipral-media` and prove nothing.

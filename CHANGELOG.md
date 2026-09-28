@@ -21,6 +21,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   (ABI 0.29). The lab's Rust harness names the suite each SDES and
   DTLS-SRTP flow ran under on its result line, and the C harness the one
   each DTLS-SRTP handshake chose.
+- **A call's diagnostics can be handed over redacted from Rust.**
+  `sipral::redacted_call_record` returns a call's D1 record as JSON with
+  every IP literal pseudonymised, and `sipral::redacted_recording` turns a
+  D2 recording into a pcapng file with every message redacted, under a
+  `Redactor` in `Hash` (keyed HMAC) or `Delete` mode; one redactor over
+  both gives an address the same pseudonym in the two
+  (`docs/14-diagnostics.md`).
 - **A call's audio on Android survives what the platform does to it.**
   `SipralCallAudio` (in the `ConnectionService` helper) keeps one call's
   microphone and speaker through a cellular call answered over it — the
