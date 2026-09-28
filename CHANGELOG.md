@@ -29,6 +29,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   both gives an address the same pseudonym in the two, behind the
   `redaction` feature, on by default and left off by the C ABI
   (`docs/14-diagnostics.md`).
+- **The lab forks a call to two phones behind a NAT, every end relayed.**
+  `scripts/lab.sh turn` (and `ice`) has Kamailio fork a call from a caller
+  behind one NAT to two phones behind the other, each end with a relay on
+  coturn and the path between the NATs blocked: both branches have to choose
+  a path through coturn and carry the tone both ways before the mobile
+  answers, the desk is cancelled, and all three relays have to be given back
+  (`interop/harness/src/fork_ice.rs`).
 - **The lab reaches TURN over TCP and TLS from the Kotlin, .NET and Swift
   agents.** Each agent's direct call reads `SIPRAL_TURN_TRANSPORT`,
   `SIPRAL_TURN_NAME` and `SIPRAL_TURN_CA` as the Python one does, and the

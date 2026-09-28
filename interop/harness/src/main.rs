@@ -40,6 +40,7 @@
 mod audio;
 mod drift;
 mod fork;
+mod fork_ice;
 mod ice_lite;
 mod ice_nat;
 mod join;
@@ -501,6 +502,33 @@ fn extra_flows(
             Ok(said) => println!("  pass  full ICE through two NATs, answering{said}"),
             Err(why) => {
                 println!("  FAIL  full ICE through two NATs, answering — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // a call forked by the proxy to two phones behind a NAT, every end on a
+    // relay: the phones' container behind the second NAT answers, the
+    // caller's behind the first calls, and `server` is the proxy's address
+    // for both, since neither container resolves the lab's names (see
+    // `fork_ice`)
+    if wanted.split(',').any(|name| name.trim() == "forkice") {
+        match fork_ice::call(remote) {
+            Ok(said) => {
+                println!("  pass  forked to two phones behind a NAT, relayed, calling{said}");
+            }
+            Err(why) => {
+                println!("  FAIL  forked to two phones behind a NAT, relayed, calling — {why}");
+                failures += 1;
+            }
+        }
+    }
+    if wanted.split(',').any(|name| name.trim() == "forkiceanswer") {
+        match fork_ice::answer(remote) {
+            Ok(said) => {
+                println!("  pass  forked to two phones behind a NAT, relayed, answering{said}");
+            }
+            Err(why) => {
+                println!("  FAIL  forked to two phones behind a NAT, relayed, answering — {why}");
                 failures += 1;
             }
         }
@@ -2705,6 +2733,15 @@ mod tests {
             fork::MOBILE_MEDIA_SEED => crate::fork::MOBILE_MEDIA_SEED,
             fork::CALLER_SEED => crate::fork::CALLER_SEED,
             fork::CALLER_MEDIA_SEED => crate::fork::CALLER_MEDIA_SEED,
+            fork_ice::CALLER_SEED => crate::fork_ice::CALLER_SEED,
+            fork_ice::CALLER_MEDIA_SEED => crate::fork_ice::CALLER_MEDIA_SEED,
+            fork_ice::CALLER_RELAY_SEED => crate::fork_ice::CALLER_RELAY_SEED,
+            fork_ice::DESK_SEED => crate::fork_ice::DESK_SEED,
+            fork_ice::DESK_MEDIA_SEED => crate::fork_ice::DESK_MEDIA_SEED,
+            fork_ice::DESK_RELAY_SEED => crate::fork_ice::DESK_RELAY_SEED,
+            fork_ice::MOBILE_SEED => crate::fork_ice::MOBILE_SEED,
+            fork_ice::MOBILE_MEDIA_SEED => crate::fork_ice::MOBILE_MEDIA_SEED,
+            fork_ice::MOBILE_RELAY_SEED => crate::fork_ice::MOBILE_RELAY_SEED,
             ice_lite::SEED => crate::ice_lite::SEED,
             ice_lite::MEDIA_SEED => crate::ice_lite::MEDIA_SEED,
             ice_nat::CALLER_SEED => crate::ice_nat::CALLER_SEED,

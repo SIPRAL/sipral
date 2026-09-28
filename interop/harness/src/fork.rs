@@ -47,8 +47,8 @@ const AUDIBLE_WANTED: u32 = 10;
 
 /// The user both phones register as, and its password: the lab's own, in
 /// `interop/kamailio/kamailio.cfg`.
-const FORK_USER: &str = "forked";
-const FORK_PASS: &str = "forkedpass";
+pub(crate) const FORK_USER: &str = "forked";
+pub(crate) const FORK_PASS: &str = "forkedpass";
 
 /// This flow's own endpoint identity constants, each folded with the run's
 /// own entropy before anything binds with it (`run_folded`, `main.rs`).

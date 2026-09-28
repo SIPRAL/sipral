@@ -652,6 +652,17 @@ alone, since its TLS is Network.framework's, which only Apple's platforms
 have and the lab's Linux containers do not, and its TLS is proved by
 `TurnStreamTests.swift` on macOS instead.
 
+The same pair carries a forked call (`interop/harness/src/fork_ice.rs`):
+two phones behind the second NAT, registered at Kamailio as the one user it
+forks, and a caller behind the first NAT calling that user through the
+proxy, every end with a relay of its own. Both phones ring with media, so
+both branches run ICE over the caller's one relayed candidate — held by both
+branches' agents at once — and carry the tone both ways before the mobile
+answers; each branch's path has to go through coturn, each end has to hear
+the other on it before the answer, the desk is cancelled and the caller's
+branch to it ends lost to the fork, and coturn has to count all three relays
+given back once the kept call ends.
+
 ## ICE-lite
 
 RFC 8445 for the lite role's behaviour; the SDP side, `a=ice-lite` and the

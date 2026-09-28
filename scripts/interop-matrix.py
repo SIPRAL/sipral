@@ -437,13 +437,14 @@ def parse_netem_section(
             )
 
 
-# The five runs TURN_RELAY_SECTION prints, each under its own literal marker
+# The runs TURN_RELAY_SECTION prints, each under its own literal marker
 # line lab.sh prints before it -- a closed, ordered list for the same reason
 # FLOW_SECTIONS's own headers are one: a marker whose wording changes is a
-# marker this file has to be told about too. All five print the identical
+# marker this file has to be told about too. Five of them print the identical
 # flow name ("full ICE through two NATs, calling"), since it is the same
-# harness flow run five ways, so the qualifier here is what tells the five
-# rows apart in the Results table -- and it is also what keeps the two
+# harness flow run five ways, so the qualifier here is what tells those
+# rows apart in the Results table; the forked call prints its own name. The
+# qualifier is also what keeps the two
 # "blocked without TURN" runs, negative controls proving the block holds
 # before TURN is offered (see invert_negative_control()), out of every
 # feature's `flows` list: a passing TURN relay must never read "partial"
@@ -451,6 +452,10 @@ def parse_netem_section(
 TURN_RELAY_BLOCKS = {
     "  without TURN: the call has to find no path": ("rust", "blocked without TURN"),
     "  with TURN: the call has to go through coturn": ("rust", "via TURN"),
+    "  forked through the proxy to two phones behind the NAT, every end relayed: media on both branches until one answers": (
+        "rust",
+        "via TURN",
+    ),
     "  without TURN, through the C ABI: the call has to find no path": ("c", "blocked without TURN"),
     "  with TURN, through the C ABI: the call has to go through coturn": ("c", "via TURN"),
     "  with TURN at the C caller alone: the call has to go through its own relay": (

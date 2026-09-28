@@ -7339,11 +7339,22 @@ fn relays_over_tcp_with_one_for(
 #[cfg(feature = "ice")]
 impl Fork {
     fn new() -> Self {
-        Self::over(crate::TurnTransport::Udp)
+        Self::placed(crate::TurnTransport::Udp, false)
     }
 
     /// [`Fork::new`], with the caller's relay reached over `transport`.
     fn over(transport: crate::TurnTransport) -> Self {
+        Self::placed(transport, false)
+    }
+
+    /// The same call, both phones ringing with media — a 183 carrying the
+    /// answer, the session open on it — and neither picking up: the
+    /// branches run early.
+    fn ringing() -> Self {
+        Self::placed(crate::TurnTransport::Udp, true)
+    }
+
+    fn placed(transport: crate::TurnTransport, early: bool) -> Self {
         let now = Instant::now();
         let catalog = CodecCatalog::with_order(&["PCMU"])
             .expect("an order")
@@ -7380,19 +7391,33 @@ impl Fork {
             )
             .expect("the INVITE goes");
         caller.drain(now, false);
-        // the proxy hands the one INVITE to both phones, and both pick up
+        // the proxy hands the one INVITE to both phones, and both pick up,
+        // or both ring with media
         let invite = caller.outbound();
         let mut answers = Vec::new();
         for phone in &mut phones {
             for datagram in &invite {
                 phone.deliver(datagram, caller_sip(), now);
             }
-            phone.drain(now, true);
+            phone.drain(now, !early);
+            if early {
+                let incoming = phone.call().expect("the INVITE");
+                let media = phone.media;
+                phone
+                    .engine
+                    .ring(&mut phone.agent, incoming, media, now)
+                    .expect("the 183 goes");
+            }
+            let wanted: &[u8] = if early {
+                b"SIP/2.0 183"
+            } else {
+                b"SIP/2.0 200"
+            };
             answers.extend(
                 phone
                     .outbound()
                     .into_iter()
-                    .filter(|datagram| datagram.starts_with(b"SIP/2.0 200")),
+                    .filter(|datagram| datagram.starts_with(wanted)),
             );
         }
         for answer in &answers {
@@ -7406,7 +7431,7 @@ impl Fork {
                 Event::Signalling(UaEvent::CallForked { sibling, .. }) => Some(*sibling),
                 _ => None,
             })
-            .expect("the mobile's 2xx came from a second dialog");
+            .expect("the mobile's response came from a second dialog");
         for ack in caller.outbound() {
             let to_mobile = String::from_utf8_lossy(&ack).contains("192.0.2.3");
             phones[usize::from(to_mobile)].deliver(&ack, caller_sip(), now);
@@ -7598,6 +7623,40 @@ impl Fork {
         }
         heard
     }
+}
+
+/// Both phones ring with media before either answers: each branch runs its
+/// own ICE over the one relay and chooses a path to its own phone, and each
+/// carries that phone's audio, before anybody picks up.
+#[cfg(feature = "ice")]
+#[test]
+fn two_branches_ringing_with_media_each_find_their_phone_over_the_one_relay() {
+    use crate::relay::tests::RELAYED;
+
+    let mut fork = Fork::ringing();
+    let [desk_branch, mobile_branch] = fork.branches;
+    fork.connect();
+    let relayed: SocketAddr = RELAYED.parse().expect("an address");
+    for (branch, phone) in [
+        (desk_branch, callee_media()),
+        (mobile_branch, mobile_media()),
+    ] {
+        let path = fork
+            .caller
+            .engine
+            .session(branch)
+            .expect("the branch's early media")
+            .ice_path()
+            .expect("a path");
+        assert_eq!(path, (relayed, phone), "{branch:?}");
+    }
+    let [desk_heard, _] = fork.tone_from(0);
+    assert!(desk_heard > 4_000, "the desk's branch heard {desk_heard}");
+    let [_, mobile_heard] = fork.tone_from(1);
+    assert!(
+        mobile_heard > 4_000,
+        "the mobile's branch heard {mobile_heard}"
+    );
 }
 
 #[cfg(feature = "ice")]

@@ -72,7 +72,7 @@ pub(crate) const ANSWER_MEDIA_SEED: u8 = 12;
 pub(crate) const ANSWER_RELAY_SEED: u8 = 13;
 
 /// The STUN server both ends ask, from `SIPRAL_STUN_SERVER`.
-fn stun_server() -> Result<SocketAddr, String> {
+pub(crate) fn stun_server() -> Result<SocketAddr, String> {
     env::var("SIPRAL_STUN_SERVER")
         .ok()
         .and_then(|text| text.parse().ok())
@@ -132,7 +132,7 @@ fn map(
 ///
 /// # Errors
 /// A server that is not an address, or one named without a credential.
-fn turn_server() -> Result<Option<(SocketAddr, String, String)>, String> {
+pub(crate) fn turn_server() -> Result<Option<(SocketAddr, String, String)>, String> {
     let Ok(server) = env::var("SIPRAL_TURN_SERVER") else {
         return Ok(None);
     };
@@ -195,12 +195,12 @@ fn relay(
 }
 
 /// A relay handed to a call, and how long its allocation took.
-type Allocated = Option<(Relay, Duration)>;
+pub(crate) type Allocated = Option<(Relay, Duration)>;
 
 /// A media socket bound, where it appears from outside — its address for the
 /// call and its server-reflexive one — and, with a TURN server named, a relay
 /// for it and how long that took.
-fn mapped_media(
+pub(crate) fn mapped_media(
     toward: SocketAddr,
     stun: SocketAddr,
     seed: [u8; 32],
@@ -220,7 +220,7 @@ fn mapped_media(
 }
 
 /// `media` with the relay, when there is one, and what to say about it.
-fn with_relay(media: CallMedia, relayed: Allocated) -> (CallMedia, String) {
+pub(crate) fn with_relay(media: CallMedia, relayed: Allocated) -> (CallMedia, String) {
     match relayed {
         Some((relay, took)) => {
             let said = format!(

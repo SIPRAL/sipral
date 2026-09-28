@@ -42,7 +42,10 @@
 #                               same two with the path between them blocked,
 #                               through a relay on coturn as a TURN server
 #   scripts/lab.sh turn         only that last, relayed, step: the call placed
-#                               from the Rust harness, then through the C
+#                               from the Rust harness, then forked by
+#                               Kamailio to two phones behind the second NAT,
+#                               every end relayed, both branches carrying
+#                               media until one answers; then through the C
 #                               ABI and through each idiomatic binding --
 #                               Python, Kotlin, .NET, Swift -- and again from
 #                               behind a NAT that drops every datagram to
@@ -2088,6 +2091,10 @@ nat_pair_call() {
 # to run -- except under `scripts/lab.sh turn`, asked for by name, where a
 # skip fails the run instead of passing silently.
 #
+# Last, the same pair carries a call Kamailio forks to two phones behind the
+# second NAT (turn_forked, below), every end on a relay and both branches
+# carrying media before one answers.
+#
 # coturn's log is the container's whole life, so every relay allocated so
 # far is counted in TURN_ALLOCATED as the steps go, and each step's
 # turn_given_back asks for that many, whichever steps before it ran.
@@ -2157,10 +2164,103 @@ ice_turn_flow() {
         [ "$status" -eq 0 ] || break
         turn_binding "$caller" || status=1
     done
+    if [ "$status" -eq 0 ]; then
+        printf '  forked through the proxy to two phones behind the NAT, every end relayed: media on both branches until one answers\n'
+        turn_forked || status=1
+    fi
     nat_pair_down -f compose.yaml -f turn/compose.override.yaml
     rm -rf "$SIPRAL_TURN_CERTS"
     unset SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD SIPRAL_TURN_CERTS
     return "$status"
+}
+
+# The call a proxy forks, across the blocked pair (interop/harness/src/fork_ice.rs):
+# two phones, the desk and the mobile, in one container behind the second
+# NAT, each on a SIP port of its own the NAT forwards and each with a relay
+# on coturn, registered at Kamailio as the one user interop/kamailio forks;
+# the caller behind the first NAT, with a relay of its own, calls that user
+# through the proxy. Neither side's container resolves the lab's names, so
+# the proxy is handed to both by address, and as `kamailio` for the name it
+# writes into Record-Route. Both phones ring with media, so both branches
+# run ICE through the relays and carry the tone both ways before the mobile
+# answers; the desk is cancelled, the caller keeps the mobile's branch and
+# hangs up, and the three relays -- the caller's one, held by both of its
+# branches, and each phone's -- have to be given back.
+turn_forked() {
+    local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    local phones="${project}-fork-phones" proxy address status=0 placed phones_status tries=0
+    proxy=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
+        "$(cd interop && docker compose ps -q kamailio)" 2>/dev/null)
+    [ -n "$proxy" ] || { printf '  could not read the proxy'"'"'s address\n'; return 1; }
+    docker rm -f "$phones" >/dev/null 2>&1
+    docker run -d --name "$phones" --network "${project}_inside2" \
+        --cap-add NET_ADMIN \
+        --add-host "kamailio:$proxy" \
+        -e SIPRAL_FLOWS=forkiceanswer \
+        -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+        -e "SIPRAL_CONTACT=$NAT_PAIR_OUTSIDE2" \
+        -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
+        -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
+        -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        sipral-lab-nat sh -c "
+            ip route replace default via $NAT_PAIR_GATEWAY2 || exit 1
+            exec /harness $proxy 5060 forked" >/dev/null \
+        || { printf '  could not start the phones\n'; return 1; }
+    address=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_inside2\"}}{{.IPAddress}}{{end}}" \
+        "$phones" 2>/dev/null)
+    # the proxy reaches each phone at the port it registered as its contact
+    # on the NAT's outside address (interop/harness/src/fork_ice.rs's
+    # PHONE_PORTS), and nothing else is forwarded
+    docker exec "$NAT_PAIR_BOX2" sh -c "
+        lab=\$(ip -o route get $NAT_PAIR_COTURN | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p')
+        iptables -t nat -F PREROUTING
+        iptables -t nat -I PREROUTING -i \"\$lab\" -p udp --dport 5060 \
+            -j DNAT --to-destination $address:5060
+        iptables -t nat -I PREROUTING -i \"\$lab\" -p udp --dport 5062 \
+            -j DNAT --to-destination $address:5062" \
+        || { printf '  could not forward SIP to the phones\n'; status=1; }
+    until [ "$status" -ne 0 ] \
+        || docker logs "$phones" 2>&1 | grep -q '^waiting for the call'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$phones" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 30 ]; then
+            printf '  the phones never registered\n'
+            status=1
+            break
+        fi
+        sleep 1
+    done
+    placed=1
+    if [ "$status" -eq 0 ]; then
+        lab_run "the forked call's caller" $((LAB_START_S + LAB_CALL_S)) \
+            --network "${project}_inside" \
+            --cap-add NET_ADMIN \
+            --add-host "kamailio:$proxy" \
+            -e SIPRAL_FLOWS=forkice \
+            -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+            -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
+            -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
+            -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
+            ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+            -v "$HARNESS:/harness:ro" \
+            sipral-lab-nat sh -c "
+                ip route replace default via $NAT_PAIR_GATEWAY || exit 1
+                exec /harness $proxy 5060 forked"
+        placed=$?
+    fi
+    # the phones wait for the call for two of them at most, and then give
+    # their bindings back; past that they are stuck, and only they go
+    phones_status=$(timeout $((LAB_CALL_S * 2)) docker wait "$phones" 2>/dev/null || echo 1)
+    docker logs "$phones" 2>&1 | sed 's/^/    callee  /'
+    docker rm -f "$phones" >/dev/null 2>&1
+    [ "$placed" -eq 0 ] || return 1
+    [ "$phones_status" = 0 ] || { printf '  the phones did not pass\n'; return 1; }
+    TURN_ALLOCATED=$((TURN_ALLOCATED + 3))
+    turn_given_back "$TURN_ALLOCATED"
 }
 
 # The call across the blocked pair with no TURN anywhere, from the caller

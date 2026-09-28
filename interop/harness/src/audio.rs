@@ -262,6 +262,12 @@ fn carries_sid(datagram: &[u8]) -> bool {
 /// One call's RTP socket, and what has crossed it.
 pub(crate) struct Media {
     socket: UdpSocket,
+    /// Whether [`Media::turn`] reads the socket for its session. Not when
+    /// the socket is shared by the branches of a forked call
+    /// ([`Media::share`]): only the engine can say which branch a datagram
+    /// is for, so the flow reads it once and hands it to the engine
+    /// ([`Media::receive_early`]).
+    reads: bool,
     /// Whether a session has been driven on this socket yet: the pace below
     /// starts from the first turn, not from the moment the socket was bound.
     running: bool,
@@ -303,8 +309,14 @@ impl Media {
         socket
             .set_nonblocking(true)
             .map_err(|error| format!("cannot make the RTP socket non-blocking: {error}"))?;
-        Ok(Self {
+        Ok(Self::bind_on(socket, now))
+    }
+
+    /// A call's media on `socket`, already bound and non-blocking.
+    fn bind_on(socket: UdpSocket, now: Instant) -> Self {
+        Self {
             socket,
+            reads: true,
             running: false,
             started: now,
             next: now,
@@ -321,7 +333,43 @@ impl Media {
                 .then(quality::Gate::new),
             pending_mark: None,
             marks: Vec::new(),
-        })
+        }
+    }
+
+    /// A second call's own capture, earpiece and count on this socket: the
+    /// sibling of a forked call, which one offer described on the socket the
+    /// call placed was. From here on neither reads the socket in
+    /// [`Media::turn`]; [`Media::receive_early`] reads it for both.
+    ///
+    /// # Errors
+    /// When the socket cannot be shared.
+    pub(crate) fn share(&mut self, now: Instant) -> Result<Self, String> {
+        let socket = self
+            .socket
+            .try_clone()
+            .map_err(|error| format!("cannot share the RTP socket: {error}"))?;
+        self.reads = false;
+        let mut shared = Self::bind_on(socket, now);
+        shared.reads = false;
+        Ok(shared)
+    }
+
+    /// Hand whatever arrived on this socket, known to the calls as `local`,
+    /// to `engine`, which gives each datagram to the branch it is for
+    /// (`MediaEngine::receive_early`). How many arrived.
+    pub(crate) fn receive_early(
+        &mut self,
+        engine: &mut sipral::MediaEngine,
+        local: SocketAddr,
+        now: Instant,
+    ) -> u32 {
+        let mut arrived = 0_u32;
+        while let Ok((length, from)) = self.socket.recv_from(&mut self.inbox) {
+            let data = self.inbox.get(..length).unwrap_or_default();
+            let _ = engine.receive_early(local, from, data, now);
+            arrived = arrived.saturating_add(1);
+        }
+        arrived
     }
 
     /// Arm a marker for the next captured frame in place of whatever else
@@ -521,7 +569,7 @@ impl Media {
             self.next += PACE;
         }
 
-        loop {
+        while self.reads {
             match self.socket.recv_from(&mut self.inbox) {
                 Ok((length, from)) => {
                     let datagram = self.inbox.get_mut(..length).unwrap_or_default();
