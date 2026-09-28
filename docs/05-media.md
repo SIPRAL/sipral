@@ -698,6 +698,13 @@ placed with this stack settle on `AEAD_AES_256_GCM`; a peer that only ever
 offers the two AES-128-CM profiles from RFC 5764 still completes on one of
 those.
 
+What the lab's peers settle on, from the suite each SRTP flow names on its
+result line: baresip takes `AEAD_AES_256_GCM` both ways, answering the SDES
+offer with it and settling the DTLS-SRTP handshake on it; Asterisk 22.10.1
+answers the SDES offer with `AES_CM_128_HMAC_SHA1_80`, and Asterisk and
+FreeSWITCH 1.10.12 both settle DTLS-SRTP on it too, as the lab configures
+them.
+
 The session owns it rather than the caller. `RtpSession::protected` takes the
 two master keys the negotiation produced — one for each direction, because RFC
 4568 §7.1.1 forbids using one key for both — and from then on everything built
