@@ -559,6 +559,7 @@ public enum SipralDtmf: UInt32, Sendable {
 ///
 /// Numbers already spent on features this build does not have:
 /// - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
+/// - 44: held for a second audio device event, which the audio engine did not need; spent all the same
 public enum SipralEventKind: UInt32, Sendable {
     /// The stack is running on this thread.
     ///
@@ -912,6 +913,19 @@ public enum SipralEventKind: UInt32, Sendable {
     /// choice on hearing the second. `account` and `call` are
     /// `SIPRAL_HANDLE_NONE`: a device is neither.
     case audioDevicesChanged = 43
+    /// The network changed under this call and the address its media
+    /// was described at is gone: the far end is still sending its audio
+    /// there.
+    ///
+    /// One for every call that can still be offered a new description,
+    /// raised by `sipral_stack_network_changed` when it answers
+    /// `SIPRAL_RECOVERY_REBUILD`. Answer it by binding a media socket on
+    /// the new network and handing its address to
+    /// `sipral_call_media_readdress`, after `sipral_account_rebind`, so
+    /// that the re-INVITE carries the new `Contact` as well as the new
+    /// `c=` and port. `call` is the call; the payload is
+    /// `payload.call`, as for every other call event.
+    case callAddressWanted = 45
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1929,6 +1943,12 @@ public enum Sipral {
     /// This crate's own answer rather than the facade's: the engine sits
     /// beside the facade, not under it, so the facade has nothing to say.
     public static let featureAudioDevice: UInt32 = 2048
+
+    /// See SIPRAL_FEATURE_DTMF. A call in progress moves with the
+    /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
+    /// call whose media address is gone, and `sipral_call_media_readdress`
+    /// offers it at the socket the application bound on the new network.
+    public static let featureCallReaddress: UInt32 = 8192
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -3114,6 +3134,49 @@ public enum Sipral {
     public static func callRestartIce(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws {
         try ensureAbi()
         let status = sipral_call_restart_ice(stack, call, nowMs)
+        try check(status)
+    }
+
+    /// Describe a call's media at the socket the application bound for it on
+    /// a new network, and offer that to the far end (RFC 3264 §8.3.1): what
+    /// `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks for.
+    ///
+    /// `media_address` is where the new socket is bound, as `host:port`;
+    /// `public_address` is where it appears from outside when the
+    /// application has learned that for it, or null with a length of zero
+    /// to describe the call by `media_address` itself. The re-INVITE carries
+    /// the call's last description with only `c=` and the port on `m=`
+    /// moved — codecs, direction, keys and fingerprint stay as they were —
+    /// and the account's `Contact` as it is when this is called, so
+    /// `sipral_account_rebind` goes first. The new socket is the call's from
+    /// here on whatever the far end answers; the answer arrives as
+    /// `SIPRAL_EVENT_KIND_SESSION_CHANGED` and `SIPRAL_EVENT_KIND_MEDIA_CHANGED`,
+    /// a refusal as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`.
+    ///
+    /// For a call whose media the stack describes: one placed or answered
+    /// with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a call the
+    /// stack writes no description for, one whose session runs ICE (which
+    /// moves by a restart gathered on the new socket, not by this), one with
+    /// no description yet, or while another change is on its way — asking
+    /// again once that change is answered moves it then.
+    ///
+    /// Safety
+    ///
+    /// `media_address` must be readable for `media_address_len` bytes, and
+    /// `public_address` for `public_address_len` bytes or null with a length
+    /// of zero.
+    public static func callMediaReaddress(stack: SipralHandle, call: SipralHandle, mediaAddress: String, publicAddress: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(mediaAddress.utf8).withUnsafeBufferPointer { raw2 in
+                raw2.withMemoryRebound(to: CChar.self) { p2 in
+                    Array(publicAddress.utf8).withUnsafeBufferPointer { raw3 in
+                        raw3.withMemoryRebound(to: CChar.self) { p3 in
+                            sipral_call_media_readdress(stack, call, p2.baseAddress, p2.count, p3.baseAddress, p3.count, nowMs)
+                        }
+                    }
+                }
+            }
         try check(status)
     }
 

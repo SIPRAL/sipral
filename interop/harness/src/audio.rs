@@ -442,6 +442,26 @@ impl Media {
             .map_err(|error| format!("the RTP socket has no address: {error}"))
     }
 
+    /// Bind this call's socket again at `ip`, on a port of its own, keeping
+    /// everything counted so far: what an application does once the address
+    /// its old socket was bound to has left the machine. Answers where the
+    /// new socket is.
+    ///
+    /// # Errors
+    /// When the new socket cannot be bound or put in non-blocking mode.
+    pub(crate) fn rebind(&mut self, ip: std::net::IpAddr) -> Result<SocketAddr, String> {
+        let socket = UdpSocket::bind(SocketAddr::new(ip, 0))
+            .map_err(|error| format!("cannot bind an RTP socket at {ip}: {error}"))?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|error| format!("cannot make the RTP socket non-blocking: {error}"))?;
+        let local = socket
+            .local_addr()
+            .map_err(|error| format!("the RTP socket has no address: {error}"))?;
+        self.socket = socket;
+        Ok(local)
+    }
+
     /// Send a datagram the engine handed back — a periodic report, or the
     /// goodbye — from this call's own socket.
     pub(crate) fn send(&self, destination: SocketAddr, payload: &[u8]) {

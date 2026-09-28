@@ -545,6 +545,27 @@ beside a record with no `size`, which only an array is made of. So does a call
 that answers with text and takes a list, directly or in a struct, because such
 a call is printed with its parameters handed through as they came.
 
+### A call that moves with the network
+
+`sipral_stack_network_changed` answering `SIPRAL_RECOVERY_REBUILD` also
+raises `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` (45, ABI 0.29) for every call
+that can still be offered a new description — up, or early in a dialog that
+allows UPDATE — with `call` naming it and `payload.call` filled like every
+other call event. Its media was described at an address the network no longer
+has, and the far end is still sending there. The application binds the SIP
+transport at the new address (`sipral_stack_transport_bind`), answers the
+ladder with `sipral_account_rebind`, binds a media socket on the new network,
+and hands its address to `sipral_call_media_readdress(stack, call,
+media_address, public_address, now_ms)`: a re-INVITE with the call's last
+description, only `c=` and the port on `m=` moved, and the account's
+`Contact` as it is then. The answer arrives as
+`SIPRAL_EVENT_KIND_SESSION_CHANGED`, a refusal as
+`SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`, and the new socket is the call's
+either way. `SIPRAL_STATUS_WRONG_STATE` for a call whose description is the
+application's, one whose session runs ICE (`sipral_call_restart_ice` moves
+that), or one with a change already on its way. `SIPRAL_FEATURE_CALL_READDRESS`
+(`1 << 13`) says the build has both. `docs/16-lifecycle.md` has the reasoning.
+
 ### Behind a NAT
 
 **`nat` and `stun_server` on `sipral_stack_config_t`** (appended at

@@ -2501,6 +2501,108 @@ impl MediaEngine {
         }
         Ok(())
     }
+
+    /// Describe a call's media at the socket the application bound for it
+    /// after the network changed, and offer that to the far end (RFC 3264
+    /// §8.3.1).
+    ///
+    /// What a call in progress needs once the address it was placed or
+    /// answered from is gone: [`UaEvent::CallAddressWanted`] says which
+    /// calls, the application binds a media socket on the new network and
+    /// hands its address over here. `public` is where that socket appears
+    /// from outside, as [`CallMedia::public_address`] takes it, when the
+    /// application has learned one for the new socket; `None` describes the
+    /// call by `local` itself.
+    ///
+    /// The offer is the description this end last wrote with only the
+    /// address moved: `c=` wherever it appears and the port on `m=`, with
+    /// the codecs, the direction, the key or the fingerprint carried across
+    /// the way [`MediaEngine::change_codecs`] carries them. The `o=` line
+    /// keeps its address, since §8 wants it identical but for the version.
+    /// A DTLS association outlives the move — a datagram transport lets one
+    /// span several 5-tuples (RFC 8842 §3.2) — so `a=setup` is offered
+    /// again as `actpass` and the fingerprint is the one the call already
+    /// has.
+    ///
+    /// The re-INVITE carries the account's `Contact` as it is when this is
+    /// called, so [`UserAgent::rebind`] goes first: the far end addresses
+    /// the rest of the dialog to that target (RFC 3261 §12.2). The new
+    /// socket is this call's from here on, whatever the far end answers —
+    /// the old one names an address the network no longer has. Audio from
+    /// the far end arrives at the new socket once it has taken the offer,
+    /// and [`MediaEvent::Changed`] follows that answer like any other.
+    ///
+    /// A call whose session runs ICE is not moved this way: its candidates
+    /// were gathered on the old socket, and moving it is a restart gathered
+    /// on the new one. A call that offered ICE to a peer that answered
+    /// without any is an ordinary call, and the offer leaves the ICE lines
+    /// out.
+    ///
+    /// # Errors
+    /// [`MediaError::NoSuchCall`] for a call this engine does not manage;
+    /// [`MediaError::NoDescription`] before this end has described it;
+    /// [`MediaError::MovesWithIce`] for one that runs ICE; and
+    /// [`MediaError::Signalling`] when the user agent will not send it —
+    /// [`UaError::ChangeInProgress`] while another change is on its way,
+    /// chiefly, which leaves the call where it was, to be moved again once
+    /// that change is answered.
+    pub fn readdress(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        local: SocketAddr,
+        public: Option<SocketAddr>,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
+        if managed.address.is_none() {
+            return Err(MediaError::NoDescription);
+        }
+        #[cfg(feature = "ice")]
+        let offered_ice = managed.ice.is_some();
+        #[cfg(feature = "ice")]
+        if self
+            .sessions
+            .get(&call)
+            .is_some_and(|held| share::lock(held).session.runs_ice())
+        {
+            return Err(MediaError::MovesWithIce);
+        }
+        let mut offer = managed.local.clone().ok_or(MediaError::NoDescription)?;
+        let version = managed.version.saturating_add(1);
+        let described = public.unwrap_or(local);
+
+        #[cfg(feature = "ice")]
+        if offered_ice {
+            withdraw_ice(&mut offer);
+        }
+        let connection = Connection::new(described.ip());
+        if offer.connection.is_some() {
+            offer.connection = Some(connection.clone());
+        }
+        for stream in &mut offer.media {
+            if stream.connection.is_some() {
+                stream.connection = Some(connection.clone());
+            }
+            if !stream.is_rejected() {
+                stream.port = described.port();
+            }
+            stream.offer_roles_again();
+        }
+        offer.origin.version = version;
+
+        agent.change_formats(call, &offer.to_bytes(), now)?;
+        if let Some(managed) = self.calls.get_mut(&call) {
+            managed.address = Some(local);
+            managed.public = public;
+            #[cfg(feature = "ice")]
+            {
+                managed.ice = None;
+                managed.restarting = None;
+            }
+        }
+        Ok(())
+    }
 }
 
 // -- draining ----------------------------------------------------------------

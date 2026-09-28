@@ -221,6 +221,15 @@ pub enum MediaError {
     /// replace.
     #[cfg(feature = "ice")]
     NoIce,
+    /// [`MediaEngine::readdress`](crate::MediaEngine::readdress) was asked
+    /// of a call whose session runs ICE.
+    ///
+    /// Nothing is sent. Its candidates were gathered on the socket the call
+    /// started on, so a description that moved only `c=` and `m=` would
+    /// contradict every candidate line beside them (RFC 8839 §4.2.5): a call
+    /// that runs ICE moves by a restart gathered on the new socket.
+    #[cfg(feature = "ice")]
+    MovesWithIce,
     /// The call asked for SRTP and would have carried audio without it: a
     /// plain offer arriving at a call set to [`SrtpPolicy::Required`], or a
     /// plain re-offer inside one.
@@ -461,6 +470,10 @@ impl MediaError {
             Self::IcePathLost => "consent to send on the path ICE selected has been withdrawn",
             #[cfg(feature = "ice")]
             Self::NoIce => "this call runs no ICE agent to restart",
+            #[cfg(feature = "ice")]
+            Self::MovesWithIce => {
+                "this call runs ICE, which moves by a restart and not a new address"
+            }
             Self::SrtpRequired => "this call requires SRTP and the far end described none",
             Self::UnusableKeying => "the crypto line asks for terms this build will not be held to",
             _ => return None,
@@ -631,6 +644,8 @@ mod tests {
             MediaError::IcePathLost,
             #[cfg(feature = "ice")]
             MediaError::NoIce,
+            #[cfg(feature = "ice")]
+            MediaError::MovesWithIce,
         ];
         let mut said: Vec<String> = Vec::new();
         for refusal in refusals {

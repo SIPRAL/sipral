@@ -656,6 +656,22 @@ pub enum UaEvent {
         /// How long until the next rung, when there is going to be one.
         next_in: Option<Duration>,
     },
+    /// The address this call's media was described at is gone: the network
+    /// changed under it ([`Recovery::Rebuild`](crate::Recovery::Rebuild)),
+    /// and the far end is still sending its audio to the old one.
+    ///
+    /// One for every call that can still be offered a new description — up,
+    /// or early in a dialog that allows UPDATE — raised as the change is
+    /// reported. Nothing here opens a socket: the application binds one on
+    /// the new network and offers the call there, with
+    /// `sipral::MediaEngine::readdress` for a call whose media the facade
+    /// describes, or [`UserAgent::change_formats`](crate::UserAgent::change_formats)
+    /// with a description of its own. [`UserAgent::rebind`](crate::UserAgent::rebind)
+    /// goes first, so that the re-INVITE carries the new `Contact`.
+    CallAddressWanted {
+        /// The call.
+        call: CallHandle,
+    },
     /// Every rung of a recovery ladder was climbed and none of them worked.
     ///
     /// Nothing more happens by itself. Bindings whose REGISTER reached a

@@ -199,6 +199,12 @@ pub struct Capabilities {
     ///
     /// [`Relays::over`]: crate::Relays::over
     pub turn_streams: bool,
+    /// Whether a call in progress can be described at a new address after
+    /// the network under it changed: [`MediaEngine::readdress`], asked for by
+    /// [`UaEvent::CallAddressWanted`](crate::UaEvent::CallAddressWanted).
+    ///
+    /// [`MediaEngine::readdress`]: crate::MediaEngine::readdress
+    pub call_readdress: bool,
 }
 
 impl Capabilities {
@@ -224,6 +230,7 @@ impl Capabilities {
             ice: cfg!(feature = "ice"),
             stun: cfg!(feature = "stun"),
             turn_streams: cfg!(feature = "ice"),
+            call_readdress: true,
         }
     }
 }

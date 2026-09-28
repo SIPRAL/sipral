@@ -538,6 +538,21 @@ event_kinds! {
         /// choice on hearing the second. `account` and `call` are
         /// `SIPRAL_HANDLE_NONE`: a device is neither.
         43 = AudioDevicesChanged, c"audio devices changed";
+        reserved 44 = "held for a second audio device event, which the audio engine did not need; spent all the same";
+
+        /// The network changed under this call and the address its media
+        /// was described at is gone: the far end is still sending its audio
+        /// there.
+        ///
+        /// One for every call that can still be offered a new description,
+        /// raised by `sipral_stack_network_changed` when it answers
+        /// `SIPRAL_RECOVERY_REBUILD`. Answer it by binding a media socket on
+        /// the new network and handing its address to
+        /// `sipral_call_media_readdress`, after `sipral_account_rebind`, so
+        /// that the re-INVITE carries the new `Contact` as well as the new
+        /// `c=` and port. `call` is the call; the payload is
+        /// `payload.call`, as for every other call event.
+        45 = CallAddressWanted, c"call address wanted";
     }
 }
 
@@ -603,6 +618,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::Referral, "referral"),
     (SipralEventKind::TurnStream, "turn_stream"),
     (SipralEventKind::AudioDevicesChanged, "audio"),
+    (SipralEventKind::CallAddressWanted, "call"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1986,6 +2002,15 @@ fn about_a_call(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEve
             payload.status_code = u32::from(status.get());
             Some(call_event(known, SipralEventKind::DtmfSent, call, payload))
         }
+        UaEvent::CallAddressWanted { call } => {
+            let payload = call_payload(known, call);
+            Some(call_event(
+                known,
+                SipralEventKind::CallAddressWanted,
+                call,
+                payload,
+            ))
+        }
         _ => None,
     }
 }
@@ -2778,7 +2803,8 @@ mod tests {
         assert_eq!(SipralEventKind::Referral as u32, 41);
         assert_eq!(SipralEventKind::TurnStream as u32, 42);
         assert_eq!(SipralEventKind::AudioDevicesChanged as u32, 43);
-        assert_eq!(SipralEventKind::ALL.len(), 42, "and there are no others");
+        assert_eq!(SipralEventKind::CallAddressWanted as u32, 45);
+        assert_eq!(SipralEventKind::ALL.len(), 43, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2837,7 +2863,7 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        // one number is held: 16, for audio devices; 34 to 37, held while
+        // two numbers are held: 16 and 44, both for audio devices; 34 to 37, held while
         // MESSAGE and RTCP-XR were written apart, are live now
         assert_eq!(name(16), None, "16 is reserved, not live");
         assert_eq!(
@@ -2855,7 +2881,13 @@ mod tests {
             Some("audio devices changed"),
             "43 is live"
         );
-        assert_eq!(name(44), None, "past the last kind");
+        assert_eq!(name(44), None, "44 is reserved, not live");
+        assert_eq!(
+            name(45).as_deref(),
+            Some("call address wanted"),
+            "45 is live"
+        );
+        assert_eq!(name(46), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

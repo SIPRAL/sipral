@@ -47,6 +47,7 @@ mod join;
 mod latency;
 #[cfg(test)]
 mod local;
+mod moved;
 mod pair;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 mod pipewire;
@@ -601,6 +602,18 @@ fn extra_flows(
             }
         }
     }
+    // a call whose address moves under it, and only when named: see
+    // `moved`'s own module doc for what `scripts/lab.sh` does to the
+    // container while it waits
+    if server == "asterisk" && wanted.split(',').any(|name| name.trim() == "move") {
+        match moved::run(server, remote, user, pass) {
+            Ok(said) => println!("  pass  a call moved to another address{said}"),
+            Err(why) => {
+                println!("  FAIL  a call moved to another address — {why}");
+                failures += 1;
+            }
+        }
+    }
     // a hundred calls (or however many `SIPRAL_VOLUME_CALLS` asks for) at
     // once rather than one, and only when named: see `volume`'s own module
     // doc for why `server` is "kamailio" for the proxy and FreeSWITCH behind
@@ -917,6 +930,36 @@ impl Endpoint {
                 .credentials(Credentials::new(user, pass))
                 .expires(Duration::from_secs(300)),
         ))
+    }
+
+    /// Bind the SIP socket again at `ip`, on a port of its own, and tell the
+    /// agent its transport is bound there now: the `Via` of every request
+    /// from here on names it. Answers where the new socket is.
+    ///
+    /// # Errors
+    /// Whatever binding the socket or telling the agent returns.
+    fn rebind_sip(&mut self, ip: std::net::IpAddr, now: Instant) -> Result<SocketAddr, String> {
+        let sip = UdpSocket::bind(SocketAddr::new(ip, 0))
+            .map_err(|error| format!("cannot bind at {ip}: {error}"))?;
+        sip.set_nonblocking(true)
+            .map_err(|error| format!("cannot make the SIP socket non-blocking: {error}"))?;
+        let local = sip
+            .local_addr()
+            .map_err(|error| format!("the SIP socket has no address: {error}"))?;
+        self.agent
+            .receive(
+                Input::TransportBound {
+                    transport: self.transport,
+                    protocol: TransportProtocol::Udp,
+                    local,
+                    remote: None,
+                },
+                now,
+            )
+            .map_err(|error| format!("cannot bind the transport again: {error}"))?;
+        self.sip = sip;
+        self.local = local;
+        Ok(local)
     }
 
     /// Bind a fresh RTP socket for a call about to be placed or answered, and
@@ -2760,6 +2803,8 @@ mod tests {
             drift::MEDIA_SEED => crate::drift::MEDIA_SEED,
             latency::SEED => crate::latency::SEED,
             latency::MEDIA_SEED => crate::latency::MEDIA_SEED,
+            moved::SEED => crate::moved::SEED,
+            moved::MEDIA_SEED => crate::moved::MEDIA_SEED,
             volume::SEED => crate::volume::SEED,
             volume::MEDIA_SEED => crate::volume::MEDIA_SEED,
         ];

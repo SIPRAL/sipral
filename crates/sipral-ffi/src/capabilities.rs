@@ -139,6 +139,11 @@ constants! {
     /// This crate's own answer rather than the facade's: the engine sits
     /// beside the facade, not under it, so the facade has nothing to say.
     pub const SIPRAL_FEATURE_AUDIO_DEVICE: u32 = 1 << 11;
+    /// See [`SIPRAL_FEATURE_DTMF`]. A call in progress moves with the
+    /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
+    /// call whose media address is gone, and `sipral_call_media_readdress`
+    /// offers it at the socket the application bound on the new network.
+    pub const SIPRAL_FEATURE_CALL_READDRESS: u32 = 1 << 13;
 }
 
 record! {
@@ -251,6 +256,9 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if crate::audio::available() {
         features |= SIPRAL_FEATURE_AUDIO_DEVICE;
     }
+    if capabilities.call_readdress {
+        features |= SIPRAL_FEATURE_CALL_READDRESS;
+    }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -283,7 +291,8 @@ entry! {
 #[cfg(test)]
 mod tests {
     use super::{
-        SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE,
+        SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_CALL_READDRESS, SIPRAL_FEATURE_DTMF,
+        SIPRAL_FEATURE_ICE,
         SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING,
         SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS,
         SIPRAL_FEATURE_TURN_STREAM, SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS,
@@ -423,6 +432,17 @@ mod tests {
             ))
         );
         assert_eq!(SIPRAL_FEATURE_AUDIO_DEVICE, 2048);
+    }
+
+    /// Moving a call with the network is the facade's answer as well, and
+    /// has no feature of its own to be missing from.
+    #[test]
+    fn moving_a_call_with_the_network_reads_present_exactly_when_the_facade_says() {
+        assert_eq!(
+            read().features & SIPRAL_FEATURE_CALL_READDRESS != 0,
+            Capabilities::of_this_build().call_readdress
+        );
+        assert_eq!(SIPRAL_FEATURE_CALL_READDRESS, 1 << 13);
     }
 
     #[test]

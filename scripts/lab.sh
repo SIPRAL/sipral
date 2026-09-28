@@ -30,6 +30,11 @@
 #                               it does not take them, taken when it does,
 #                               the call placed to Asterisk's echo (part of
 #                               the Asterisk run too)
+#   scripts/lab.sh move         only the call whose address moves under it:
+#                               the harness's container taken off the lab
+#                               network and connected again elsewhere
+#                               mid-call, the echo heard after (part of the
+#                               Asterisk run too)
 #   scripts/lab.sh icelite      only the call that requires ICE placed at a
 #                               C ABI stack answering as ICE-lite (part of
 #                               the ice run too)
@@ -2780,6 +2785,65 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = referral ]; then
     else
         printf '  note  no C harness, so the REFER from outside any call is skipped with the other C flows\n'
     fi
+fi
+
+# A call whose address moves under it (interop/harness/src/moved.rs): the
+# Rust harness calls Asterisk's echo from the lab network, and once it says
+# the echo is coming back, this takes its container off the network and
+# connects it again at another address -- a laptop moving between networks,
+# as the stack on it sees it. Asterisk's own endpoint keeps its defaults, so
+# it sends the echo to the `c=` it was given and nowhere else: the audio
+# comes back only if the stack offered the call again at the new address.
+# The new address is near the top of the network's own subnet, which Docker
+# hands out last. Part of the Asterisk run, and a word of its own.
+MOVE_NAME="sipral-lab-move-${COMPOSE_PROJECT_NAME:-sipral-interop}"
+move_address() {
+    local subnet base bits a b c d n
+    subnet=$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' "$LAB_NETWORK" \
+        | tr ' ' '\n' | grep -m1 '^[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*/')
+    [ -n "$subnet" ] || return 1
+    base=${subnet%/*}
+    bits=${subnet#*/}
+    IFS=. read -r a b c d <<<"$base"
+    n=$(( (a << 24) + (b << 16) + (c << 8) + d + (1 << (32 - bits)) - 10 ))
+    printf '%d.%d.%d.%d\n' $(( (n >> 24) & 255 )) $(( (n >> 16) & 255 )) \
+        $(( (n >> 8) & 255 )) $(( n & 255 ))
+}
+move_flow() {
+    local to status tries=0
+    to=$(move_address) || { printf '  cannot read the lab network'"'"'s subnet\n'; return 1; }
+    docker rm -f "$MOVE_NAME" >/dev/null 2>&1
+    docker run -d --name "$MOVE_NAME" --network "$LAB_NETWORK" \
+        -e SIPRAL_FLOWS=move \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim /harness asterisk 5060 9000 >/dev/null \
+        || { printf '  could not start the harness\n'; return 1; }
+    until docker logs "$MOVE_NAME" 2>&1 | grep -q '^  move  the call is up at'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$MOVE_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 45 ]; then
+            printf '  the harness never said the call was up\n'
+            docker logs "$MOVE_NAME" 2>&1
+            docker rm -f "$MOVE_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 1
+    done
+    printf '  moving the harness to %s\n' "$to"
+    docker network disconnect "$LAB_NETWORK" "$MOVE_NAME" >/dev/null 2>&1 \
+        && docker network connect --ip "$to" "$LAB_NETWORK" "$MOVE_NAME" >/dev/null 2>&1 \
+        || printf '  could not move the harness to %s\n' "$to"
+    status=$(timeout 90 docker wait "$MOVE_NAME" 2>/dev/null || echo 1)
+    docker logs "$MOVE_NAME" 2>&1
+    docker rm -f "$MOVE_NAME" >/dev/null 2>&1
+    [ "$status" = 0 ]
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = move ]; then
+    step "a call whose address moves under it -- straight at Asterisk"
+    move_flow && pass "offered again at the new address, and the echo heard after" \
+        || fail "a call whose address moves under it"
 fi
 
 # The one step in this file where the far end is a client stack rather than

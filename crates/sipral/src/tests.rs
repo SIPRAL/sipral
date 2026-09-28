@@ -34,8 +34,9 @@ use crate::keying::SrtpPolicy;
 use crate::record::tests::Buffer;
 use crate::session::{Arrival, MediaConfig, MediaSession, Playback, Start, StreamIdentity};
 use crate::{
-    Account, AccountId, CallHandle, CallMedia, EndpointConfig, Input, MediaEngine, OutgoingCall,
-    OutgoingExtras, TransportId, TransportProtocol, UaEvent, Uri, UserAgent, WallClock,
+    Account, AccountId, CallHandle, CallMedia, EndpointConfig, Input, Link, MediaEngine, Network,
+    OutgoingCall, OutgoingExtras, Recovery, TransportId, TransportProtocol, UaEvent, Uri,
+    UserAgent, WallClock,
 };
 
 const UDP: TransportId = TransportId(1);
@@ -11430,4 +11431,305 @@ fn a_calls_record_and_recording_are_handed_over_redacted() {
     );
     assert!(!contains(&redacted, b"alice"));
     assert!(!contains(&redacted, caller_address.as_bytes()));
+}
+
+// -- a call that moves to another network ------------------------------------
+
+/// Where the caller is once its network has changed under a call.
+fn moved_sip() -> SocketAddr {
+    "198.51.100.7:5060".parse().expect("an address")
+}
+
+fn moved_media() -> SocketAddr {
+    "198.51.100.7:41000".parse().expect("an address")
+}
+
+/// A call from alice to bob, placed on an account whose handle the test
+/// keeps, taken all the way to confirmed.
+fn connect_on_account(pair: &mut Pair) -> (AccountId, CallHandle, CallHandle) {
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let call = pair
+        .caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    (account, call, remote)
+}
+
+/// Everything each side wants to write, handed to the other with the
+/// caller at `caller_at`, until nothing more moves.
+fn settle_from(pair: &mut Pair, caller_at: SocketAddr) {
+    for _ in 0..12 {
+        let dialled = pair.caller.outbound();
+        let answered = pair.callee.outbound();
+        if dialled.is_empty() && answered.is_empty() {
+            break;
+        }
+        for datagram in dialled {
+            pair.callee.deliver(&datagram, caller_at, pair.now);
+        }
+        for datagram in answered {
+            pair.caller.deliver(&datagram, callee_sip(), pair.now);
+        }
+        pair.caller.drain(pair.now, false);
+        pair.callee.drain(pair.now, true);
+    }
+}
+
+/// Move the caller of a confirmed call to `moved_sip`: its transport is
+/// bound there, the change is reported, and the calls the stack asked to
+/// move are handed back.
+fn move_the_caller(pair: &mut Pair) -> Vec<CallHandle> {
+    pair.caller.heard.clear();
+    pair.caller.local = moved_sip();
+    pair.caller
+        .agent
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: moved_sip(),
+                remote: None,
+            },
+            pair.now,
+        )
+        .expect("binding the new transport");
+    let recovery = pair.caller.agent.network_changed(
+        &Network::new(Link::Wifi)
+            .address(caller_sip().ip())
+            .resolves(true),
+        &Network::new(Link::Cellular)
+            .address(moved_sip().ip())
+            .resolves(true),
+        pair.now,
+    );
+    assert_eq!(recovery, Recovery::Rebuild);
+    pair.caller.drain(pair.now, false);
+    pair.caller
+        .heard
+        .iter()
+        .filter_map(|event| match event {
+            Event::Signalling(UaEvent::CallAddressWanted { call }) => Some(*call),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The caller's network changes under a call placed without ICE: the stack
+/// says which call has to move, the application binds a new socket and
+/// hands its address over, and the re-INVITE that goes names it in `c=`,
+/// on `m=` and in `Contact`, and nowhere else changes. Once the far end
+/// has taken it, its audio goes to the new socket and the caller's own is
+/// heard from there.
+#[test]
+fn a_call_whose_network_changed_offers_its_new_address_and_is_heard_both_ways_after() {
+    let mut pair = Pair::new(CodecCatalog::with_order(&["PCMU"]).expect("an order"));
+    let (account, call, remote) = connect_on_account(&mut pair);
+    let first = pair.callee.offer_received().expect("the first offer");
+
+    assert_eq!(
+        move_the_caller(&mut pair),
+        vec![call],
+        "the call is named, once"
+    );
+    pair.caller
+        .agent
+        .rebind(
+            account,
+            UDP,
+            callee_sip(),
+            &uri("sip:alice@198.51.100.7"),
+            pair.now,
+        )
+        .expect("the account is repointed");
+    pair.caller
+        .engine
+        .readdress(&mut pair.caller.agent, call, moved_media(), None, pair.now)
+        .expect("the re-offer goes");
+    assert!(
+        pair.caller.engine.describes(moved_media()),
+        "the new socket is the call's"
+    );
+    assert!(!pair.caller.engine.describes(caller_media()));
+
+    let written = pair.caller.outbound();
+    let reinvite = written
+        .iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("a re-INVITE went out")
+        .clone();
+    let text = String::from_utf8_lossy(&reinvite).into_owned();
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("Contact:") && line.contains("198.51.100.7")),
+        "the target moves with the address: {text}"
+    );
+    let offer = parse(&wire_message_body(&reinvite)).expect("an offer that reads");
+    let (was, now) = (one_stream(&first), one_stream(&offer));
+    assert_eq!(now.port, moved_media().port());
+    assert_eq!(
+        offer
+            .connection
+            .as_ref()
+            .and_then(sipral_core::sdp::Connection::ip),
+        Some(moved_media().ip())
+    );
+    assert_eq!(
+        offer.origin.address, first.origin.address,
+        "RFC 3264 section 8 keeps o= but for its version"
+    );
+    assert_eq!(offer.origin.version, first.origin.version + 1);
+    assert_eq!(now.formats, was.formats, "the codecs stay");
+    assert_eq!(all_but_the_codecs(&now), all_but_the_codecs(&was));
+
+    for datagram in written {
+        pair.callee.deliver(&datagram, moved_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.caller.drain(pair.now, false);
+    settle_from(&mut pair, moved_sip());
+
+    // the far end sends to the new socket from here on
+    let mut frame = vec![0_i16; 160];
+    let mut phase = 0;
+    tone(&mut frame, 8000, &mut phase);
+    let toward = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("the callee's media")
+        .capture(&frame, pair.now)
+        .expect("the frame encodes")
+        .map(|datagram| datagram.destination)
+        .expect("a frame goes out");
+    assert_eq!(toward, moved_media());
+
+    // and the audio crosses both ways, the caller's arriving from there
+    let (far, near) = heard_both_ways(&mut pair, (call, remote), moved_media(), &mut phase);
+    assert!(far > 10, "the far end heard {far} frames");
+    assert!(near > 10, "this end heard {near} frames");
+}
+
+/// Twenty-five frames of the tone each way between the caller's `call` and
+/// the callee's `remote`, the caller's arriving from `caller_at`, and how
+/// many frames each end then played that were loud enough to be it: the far
+/// end's count first.
+fn heard_both_ways(
+    pair: &mut Pair,
+    (call, remote): (CallHandle, CallHandle),
+    caller_at: SocketAddr,
+    phase: &mut u32,
+) -> (u32, u32) {
+    let mut frame = vec![0_i16; 160];
+    let (mut far, mut near) = (0, 0);
+    for _ in 0..25 {
+        tone(&mut frame, 8000, phase);
+        let sent = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .capture(&frame, pair.now)
+            .expect("the frame encodes")
+            .map(|datagram| datagram.payload.to_vec());
+        if let Some(mut datagram) = sent {
+            let mut session = pair.callee.engine.session(remote).expect("media");
+            let _ = session.receive(&mut datagram, caller_at, pair.now);
+        }
+        let back = pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media")
+            .capture(&frame, pair.now)
+            .expect("the frame encodes")
+            .map(|datagram| datagram.payload.to_vec());
+        if let Some(mut datagram) = back {
+            let mut session = pair.caller.engine.session(call).expect("media");
+            let _ = session.receive(&mut datagram, callee_media(), pair.now);
+        }
+        let mut played = vec![0_i16; 160];
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .playback(&mut played);
+        if loudness(&played) > 0 {
+            far += 1;
+        }
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .playback(&mut played);
+        if loudness(&played) > 0 {
+            near += 1;
+        }
+        pair.advance();
+    }
+    (far, near)
+}
+
+/// A change of network that keeps the address raises nothing about calls:
+/// every socket bound to it still receives.
+#[test]
+fn a_roam_that_keeps_the_address_asks_no_call_to_move() {
+    let mut pair = Pair::new(CodecCatalog::with_order(&["PCMU"]).expect("an order"));
+    let _ = connect_on_account(&mut pair);
+    pair.caller.heard.clear();
+    let recovery = pair.caller.agent.network_changed(
+        &Network::new(Link::Wifi)
+            .address(caller_sip().ip())
+            .resolves(true),
+        &Network::new(Link::Tunnel)
+            .address(caller_sip().ip())
+            .resolves(true),
+        pair.now,
+    );
+    assert_eq!(recovery, Recovery::Reregister);
+    pair.caller.drain(pair.now, false);
+    assert!(
+        !pair
+            .caller
+            .heard
+            .iter()
+            .any(|event| matches!(event, Event::Signalling(UaEvent::CallAddressWanted { .. }))),
+        "{:?}",
+        pair.caller.heard
+    );
+}
+
+/// A move asked of a call while another change is on its way is refused
+/// and leaves the call where it was, so that it can be asked again.
+#[test]
+fn a_move_refused_for_a_change_in_progress_leaves_the_call_where_it_was() {
+    let mut pair = Pair::new(CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order"));
+    let (_, call, _) = connect_on_account(&mut pair);
+    pair.caller
+        .engine
+        .change_codecs(&mut pair.caller.agent, call, &["PCMA"], pair.now)
+        .expect("the codec change goes");
+    let refused =
+        pair.caller
+            .engine
+            .readdress(&mut pair.caller.agent, call, moved_media(), None, pair.now);
+    assert!(
+        matches!(
+            refused,
+            Err(MediaError::Signalling(crate::UaError::ChangeInProgress))
+        ),
+        "{refused:?}"
+    );
+    assert!(pair.caller.engine.describes(caller_media()));
+    assert!(!pair.caller.engine.describes(moved_media()));
 }

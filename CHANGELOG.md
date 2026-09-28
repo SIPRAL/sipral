@@ -37,6 +37,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   that pumps its own frames, the four idiomatic layers included. The gate
   refuses a `target-cpu` or `target-feature` anywhere in the tree, so the
   packaged library needs no instruction beyond its target's baseline.
+- **A call in progress moves with the network under it.** A change of
+  address used to redo the registration and nothing else, so a call up at
+  the time stayed up with the far end's audio going to an address that was
+  gone. `UserAgent::network_changed` answering `Recovery::Rebuild` now
+  raises `UaEvent::CallAddressWanted` for every call that can be offered a
+  new description, and `MediaEngine::readdress` offers it at the media
+  socket the application bound on the new network: a re-INVITE with `c=`
+  and the port moved and nothing else, carrying the rebound account's
+  `Contact` (RFC 3264 §8.3.1). A call running ICE is refused with
+  `MediaError::MovesWithIce`. Over the C ABI (0.29):
+  `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` (45),
+  `sipral_call_media_readdress` and `SIPRAL_FEATURE_CALL_READDRESS`
+  (`1 << 13`). `Link`, `Network` and `Recovery` are re-exported from the
+  facade. The lab's new `move` step takes the harness's container off the
+  network mid-call and back at another address, and hears Asterisk's echo
+  after the re-INVITE.
 
 - **The C ABI names every SRTP suite the stack runs.**
   `sipral_srtp_suite_t` grew `SIPRAL_SRTP_SUITE_AES256_CM80` (4),

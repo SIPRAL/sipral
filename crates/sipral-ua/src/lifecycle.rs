@@ -74,6 +74,7 @@ use sipral_core::msg::{HostRef, Uri};
 
 use crate::account::AccountId;
 use crate::agent::UserAgent;
+use crate::call::{CallHandle, CallState};
 use crate::contact::{contact_at, contact_names};
 use crate::error::UaError;
 use crate::event::{RegistrationState, UaEvent};
@@ -586,7 +587,36 @@ impl UserAgent {
     pub fn network_changed(&mut self, from: &Network, to: &Network, now: Instant) -> Recovery {
         let recovery = Recovery::choose(from, to);
         self.recover(recovery, now);
+        if recovery == Recovery::Rebuild {
+            self.want_call_addresses();
+        }
         recovery
+    }
+
+    /// A [`UaEvent::CallAddressWanted`] for every call that can be offered a
+    /// new description, in handle order.
+    ///
+    /// Only a change of address or interface raises them. A roam that keeps
+    /// the address keeps every socket bound to it, and the far end's audio
+    /// still arrives; a wake proves the transport before anything else, and
+    /// a machine that slept on the same network is still at the same place.
+    fn want_call_addresses(&mut self) {
+        let mut moving: Vec<CallHandle> = self
+            .calls
+            .iter()
+            .filter(|(_, held)| {
+                held.dialog.is_some()
+                    && match held.state {
+                        CallState::Confirmed | CallState::Consulting => true,
+                        early => early.is_early() && held.update_allowed,
+                    }
+            })
+            .map(|(call, _)| *call)
+            .collect();
+        moving.sort_unstable();
+        for call in moving {
+            self.events.push_back(UaEvent::CallAddressWanted { call });
+        }
     }
 
     /// There is no usable interface.

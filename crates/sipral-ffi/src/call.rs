@@ -1105,6 +1105,80 @@ fn restart_ice(
 }
 
 entry! {
+    /// Describe a call's media at the socket the application bound for it on
+    /// a new network, and offer that to the far end (RFC 3264 §8.3.1): what
+    /// `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks for.
+    ///
+    /// `media_address` is where the new socket is bound, as `host:port`;
+    /// `public_address` is where it appears from outside when the
+    /// application has learned that for it, or null with a length of zero
+    /// to describe the call by `media_address` itself. The re-INVITE carries
+    /// the call's last description with only `c=` and the port on `m=`
+    /// moved — codecs, direction, keys and fingerprint stay as they were —
+    /// and the account's `Contact` as it is when this is called, so
+    /// `sipral_account_rebind` goes first. The new socket is the call's from
+    /// here on whatever the far end answers; the answer arrives as
+    /// `SIPRAL_EVENT_KIND_SESSION_CHANGED` and `SIPRAL_EVENT_KIND_MEDIA_CHANGED`,
+    /// a refusal as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`.
+    ///
+    /// For a call whose media the stack describes: one placed or answered
+    /// with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a call the
+    /// stack writes no description for, one whose session runs ICE (which
+    /// moves by a restart gathered on the new socket, not by this), one with
+    /// no description yet, or while another change is on its way — asking
+    /// again once that change is answered moves it then.
+    ///
+    /// # Safety
+    ///
+    /// `media_address` must be readable for `media_address_len` bytes, and
+    /// `public_address` for `public_address_len` bytes or null with a length
+    /// of zero.
+    fn sipral_call_media_readdress(
+        stack: SipralHandle,
+        call: SipralHandle,
+        media_address: *const c_char,
+        media_address_len: usize,
+        public_address: *const c_char,
+        public_address_len: usize,
+        now_ms: u64,
+    ) {
+        let local = unsafe { address(media_address, media_address_len, "media_address") }?;
+        let public = match unsafe { text(public_address, public_address_len, "public_address") }?
+        {
+            None => None,
+            Some(written) => Some(written.parse::<SocketAddr>().map_err(|_| {
+                fail(
+                    SipralStatus::InvalidArgument,
+                    format!("public_address is {written:?}, which is not an address and a port"),
+                )
+            })?),
+        };
+        with_stack_at(stack, now_ms, |state, now| {
+            let id = state.calls.get(call).map_err(handle_failed)?;
+            state
+                .engine
+                .readdress(&mut state.agent, id, local, public, now)
+                .map_err(|error| match error {
+                    // the call is real — the handle was just found — so what
+                    // the engine does not know is its media
+                    sipral::MediaError::NoSuchCall => fail(
+                        SipralStatus::WrongState,
+                        "the stack writes no description for this call: it was placed or \
+                         answered without media_address, so its offers are the application's",
+                    ),
+                    #[cfg(feature = "ice")]
+                    sipral::MediaError::MovesWithIce => fail(
+                        SipralStatus::WrongState,
+                        "this call runs ICE, whose candidates name the old socket: \
+                         sipral_call_restart_ice moves it, not a new address",
+                    ),
+                    other => media_failed(&other),
+                })
+        })
+    }
+}
+
+entry! {
     /// Join two active calls into a local conference of three: from here on,
     /// each call's far end hears the other's far end and this end's own
     /// microphone, mixed. [`sipral_media_mix`](crate::media::sipral_media_mix)
@@ -1801,10 +1875,10 @@ pub(crate) mod tests {
         SipralCallConfig, SipralDtmf, dtmf_form, keypad, sipral_call_accept_session,
         sipral_call_accept_transfer, sipral_call_answer, sipral_call_answer_media,
         sipral_call_change_codecs, sipral_call_consult, sipral_call_hangup, sipral_call_hold,
-        sipral_call_hold_state, sipral_call_place, sipral_call_reject, sipral_call_reject_session,
-        sipral_call_reject_transfer, sipral_call_resume, sipral_call_ring, sipral_call_ring_media,
-        sipral_call_send_dtmf, sipral_call_state, sipral_call_transfer, sipral_call_transfer_to,
-        tone_length,
+        sipral_call_hold_state, sipral_call_media_readdress, sipral_call_place, sipral_call_reject,
+        sipral_call_reject_session, sipral_call_reject_transfer, sipral_call_resume,
+        sipral_call_ring, sipral_call_ring_media, sipral_call_send_dtmf, sipral_call_state,
+        sipral_call_transfer, sipral_call_transfer_to, tone_length,
     };
     use crate::account::{
         SipralAccountConfig, sipral_account_add, sipral_account_register, sipral_account_remove,
@@ -4322,6 +4396,140 @@ a=sendrecv\r\n";
         assert!(
             !kinds.contains(&SipralEventKind::SessionChangeFailed),
             "{kinds:?}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// Tell the stack its address moved from `192.0.2.1` to `198.51.100.7`,
+    /// and hand back what it decided.
+    fn moved_network(stack: SipralHandle, now_ms: u64) -> u32 {
+        let (from, from_len) = as_text("192.0.2.1");
+        let (to, to_len) = as_text("198.51.100.7");
+        let mut recovery = 0_u32;
+        let status = unsafe {
+            crate::lifecycle::sipral_stack_network_changed(
+                stack,
+                1,
+                from,
+                from_len,
+                ptr::null(),
+                0,
+                1,
+                3,
+                to,
+                to_len,
+                ptr::null(),
+                0,
+                1,
+                now_ms,
+                &raw mut recovery,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        recovery
+    }
+
+    fn readdress(
+        stack: SipralHandle,
+        call: SipralHandle,
+        local: &str,
+        now_ms: u64,
+    ) -> SipralStatus {
+        let (address, address_len) = as_text(local);
+        unsafe {
+            sipral_call_media_readdress(stack, call, address, address_len, ptr::null(), 0, now_ms)
+        }
+    }
+
+    /// The network changes under a call placed with `media_address`: the
+    /// stack names the call, and the address handed back goes out in a
+    /// re-INVITE's `c=` and on its `m=`, with nothing else in the stream
+    /// moved.
+    #[test]
+    fn a_call_whose_network_changed_is_named_and_offered_at_the_new_address() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let (status, call) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle);
+        observed.events.clear();
+        observed.named.clear();
+
+        assert_eq!(
+            moved_network(handle, 2_000),
+            crate::lifecycle::SipralRecovery::Rebuild as u32
+        );
+        poll(handle, 2_000);
+        let wanted: Vec<SipralHandle> = observed
+            .events
+            .iter()
+            .zip(&observed.named)
+            .filter(|(event, _)| event.1 == SipralEventKind::CallAddressWanted)
+            .map(|(_, named)| named.1)
+            .collect();
+        assert_eq!(wanted, vec![call], "{:?}", observed.kinds());
+
+        assert_eq!(
+            readdress(handle, call, "198.51.100.7:42000", 2_010),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let reinvite = sent(handle)
+            .into_iter()
+            .find(|message| start_line(message).starts_with("INVITE"))
+            .expect("the re-offer goes");
+        let offered = String::from_utf8_lossy(&body(&reinvite)).into_owned();
+        assert!(offered.contains("c=IN IP4 198.51.100.7\r\n"), "{offered}");
+        assert!(offered.contains("m=audio 42000 "), "{offered}");
+        let first = String::from_utf8_lossy(&body(&invite)).into_owned();
+        let origin = |sdp: &str| {
+            sdp.lines()
+                .find(|line| line.starts_with("o="))
+                .map(|line| line.rsplit(' ').next().unwrap_or_default().to_owned())
+        };
+        assert_eq!(origin(&offered), origin(&first), "o= keeps its address");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// What `sipral_call_media_readdress` refuses: an address that is not
+    /// one, a call whose description is the application's, and a call
+    /// already changing.
+    #[test]
+    fn moving_a_call_says_why_it_cannot() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let (status, managed) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle);
+
+        assert_eq!(
+            readdress(handle, managed, "not an address", 1_200),
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sipral_call_hold(handle, managed, 1_300) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            readdress(handle, managed, "198.51.100.7:42000", 1_310),
+            SipralStatus::WrongState,
+            "a move asked while the hold is on its way is refused, never taken and lost"
+        );
+
+        let (status, described) = place(handle, account, &call_config(), 1_400);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = sent(handle);
+        assert_eq!(
+            readdress(handle, described, "198.51.100.7:42000", 1_410),
+            SipralStatus::WrongState,
+            "a call whose description the application wrote is the application's to move"
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }

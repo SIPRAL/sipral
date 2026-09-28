@@ -223,6 +223,14 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_AUDIO_DEVICE 2048
 
 /**
+ * See SIPRAL_FEATURE_DTMF. A call in progress moves with the
+ * network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
+ * call whose media address is gone, and `sipral_call_media_readdress`
+ * offers it at the socket the application bound on the new network.
+ */
+#define SIPRAL_FEATURE_CALL_READDRESS 8192
+
+/**
  * The buffer a caller has to bring for one outgoing packet.
  *
  * Not a path MTU — RTP does not discover one — but the bound the session
@@ -1165,6 +1173,7 @@ enum {
  *
  * Numbers already spent on features this build does not have:
  * - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
+ * - 44: held for a second audio device event, which the audio engine did not need; spent all the same
  */
 typedef uint32_t sipral_event_kind_t;
 enum {
@@ -1604,6 +1613,21 @@ enum {
      * `SIPRAL_HANDLE_NONE`: a device is neither.
      */
     SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED = 43,
+    /**
+     * The network changed under this call and the address its media
+     * was described at is gone: the far end is still sending its audio
+     * there.
+     *
+     * One for every call that can still be offered a new description,
+     * raised by `sipral_stack_network_changed` when it answers
+     * `SIPRAL_RECOVERY_REBUILD`. Answer it by binding a media socket on
+     * the new network and handing its address to
+     * `sipral_call_media_readdress`, after `sipral_account_rebind`, so
+     * that the re-INVITE carries the new `Contact` as well as the new
+     * `c=` and port. `call` is the call; the payload is
+     * `payload.call`, as for every other call event.
+     */
+    SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED = 45,
 };
 
 /**
@@ -6424,6 +6448,38 @@ sipral_status_t sipral_call_change_codecs(sipral_handle_t stack, sipral_handle_t
  * Safe to call with any handle values.
  */
 sipral_status_t sipral_call_restart_ice(sipral_handle_t stack, sipral_handle_t call, uint64_t now_ms);
+
+/**
+ * Describe a call's media at the socket the application bound for it on
+ * a new network, and offer that to the far end (RFC 3264 §8.3.1): what
+ * `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks for.
+ *
+ * `media_address` is where the new socket is bound, as `host:port`;
+ * `public_address` is where it appears from outside when the
+ * application has learned that for it, or null with a length of zero
+ * to describe the call by `media_address` itself. The re-INVITE carries
+ * the call's last description with only `c=` and the port on `m=`
+ * moved — codecs, direction, keys and fingerprint stay as they were —
+ * and the account's `Contact` as it is when this is called, so
+ * `sipral_account_rebind` goes first. The new socket is the call's from
+ * here on whatever the far end answers; the answer arrives as
+ * `SIPRAL_EVENT_KIND_SESSION_CHANGED` and `SIPRAL_EVENT_KIND_MEDIA_CHANGED`,
+ * a refusal as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`.
+ *
+ * For a call whose media the stack describes: one placed or answered
+ * with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a call the
+ * stack writes no description for, one whose session runs ICE (which
+ * moves by a restart gathered on the new socket, not by this), one with
+ * no description yet, or while another change is on its way — asking
+ * again once that change is answered moves it then.
+ *
+ * Safety
+ *
+ * `media_address` must be readable for `media_address_len` bytes, and
+ * `public_address` for `public_address_len` bytes or null with a length
+ * of zero.
+ */
+sipral_status_t sipral_call_media_readdress(sipral_handle_t stack, sipral_handle_t call, const char *media_address, size_t media_address_len, const char *public_address, size_t public_address_len, uint64_t now_ms);
 
 /**
  * Join two active calls into a local conference of three: from here on,

@@ -210,6 +210,49 @@ answer is returned from the call as well as reported as an event, so an
 application does not have to read an event to find out whether anything
 happened.
 
+### A call in progress moves with the address
+
+The ladders are about bindings; a call up at the moment of a `Rebuild` has a
+problem none of them touches. Its media was described at the old address, and
+the far end goes on sending the audio there — to a socket that no longer
+exists. A stack that only registers again keeps the call up and silent in one
+direction, which is what a laptop moving from Wi-Fi to a tethered phone did
+until 8.10.
+
+So a `Rebuild` also raises `UaEvent::CallAddressWanted` for every call that
+can still be offered a new description: up, or early in a dialog that allows
+UPDATE. A roam that keeps the address raises nothing, because every socket
+bound to it still receives. What the application does, in this order:
+
+1. bind the SIP transport at the new address and say so
+   (`Input::TransportBound`, same `TransportId`), and answer the ladder's
+   `WantTransport` with `rebind(account, transport, remote, contact)`;
+2. bind a media socket for each named call on the new network;
+3. hand its address to `MediaEngine::readdress(call, local, public)`
+   (`sipral_call_media_readdress` in C).
+
+The re-INVITE is the call's last description with only `c=` and the port on
+`m=` moved: codecs, direction, keys and fingerprint stay, `o=` keeps its
+address (RFC 3264 §8 wants it identical but for the version), and a DTLS
+association outlives the move because a datagram transport lets one span
+several 5-tuples (RFC 8842 §3.2). It carries the account's `Contact` as it is
+then — which is why `rebind` goes first — so the far end addresses the rest of
+the dialog, the BYE included, to the new target. The new socket is the call's
+from the moment it is handed over, whatever the far end answers: the old one
+names nothing any more.
+
+A call running ICE is refused (`MediaError::MovesWithIce`): its candidates
+were gathered on the old socket, and moving it is a restart gathered on the
+new one. A call that offered ICE to a peer that answered without it is an
+ordinary call, and its re-offer leaves the ICE lines out.
+
+The lab proves it against Asterisk on its default endpoint settings, which
+send RTP to the `c=` they were given and nowhere else (`scripts/lab.sh move`):
+the harness's container is taken off the lab network mid-call and connected
+again at another address, and the echo comes back after the re-INVITE. A
+re-INVITE that refreshed the target and kept the old `c=` was answered 200 and
+brought back no audio at all, which is the difference `readdress` makes.
+
 ## interface_lost — nothing is tried, and that is the recovery
 
 `Recovery::Detach`. One rung, `Distrust`, and then the machine rests.

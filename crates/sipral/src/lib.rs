@@ -246,10 +246,10 @@ pub use sipral_ua::Recording;
 /// that drive them.
 pub use sipral_ua::{
     Account, AccountId, CallEndReason, CallHandle, CallState, Credentials, DtmfError, DtmfInfoForm,
-    EndpointConfig, ForkPolicy, Hold, Incoming, Input, MAX_UNSAFE_BODY_BYTES, MessageHandle,
-    MessageSummary, OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Refusals,
-    RegistrationFailure, RegistrationState, Replacing, Screen, Screening, StatusCode, Subscribe,
-    SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit, TransportId,
+    EndpointConfig, ForkPolicy, Hold, Incoming, Input, Link, MAX_UNSAFE_BODY_BYTES, MessageHandle,
+    MessageSummary, Network, OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Recovery,
+    Refusals, RegistrationFailure, RegistrationState, Replacing, Screen, Screening, StatusCode,
+    Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit, TransportId,
     TransportProtocol, UaError, UaEvent, Uri, UserAgent,
 };
 
