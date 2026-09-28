@@ -338,6 +338,9 @@ struct seen {
     uint32_t end_reason;
     int media_started;
     int media_secured;
+    /* the transform `SIPRAL_EVENT_KIND_MEDIA_SECURED` said the DTLS-SRTP
+     * handshake chose, as `sipral_srtp_suite_t` */
+    uint32_t secured_suite;
     int media_failed;
     int transfer_done;
     int transfer_failed;
@@ -542,6 +545,7 @@ static void on_event(const sipral_event_t *event, void *user_data)
         break;
     case SIPRAL_EVENT_KIND_MEDIA_SECURED:
         seen->media_secured = 1;
+        seen->secured_suite = event->payload.media.suite;
         break;
     case SIPRAL_EVENT_KIND_MEDIA_FAILED:
         seen->media_failed = 1;
@@ -1791,6 +1795,30 @@ enum flow {
     FLOW_ICE_NAT,
     FLOW_COUNT
 };
+
+/* The suite a DTLS-SRTP handshake chose, by the name RFC 4568, RFC 6188 and
+ * RFC 7714 give it, for the result line. */
+static const char *suite_name(uint32_t suite)
+{
+    switch (suite) {
+    case SIPRAL_SRTP_SUITE_AES_CM80:
+        return "AES_CM_128_HMAC_SHA1_80";
+    case SIPRAL_SRTP_SUITE_AES_CM32:
+        return "AES_CM_128_HMAC_SHA1_32";
+    case SIPRAL_SRTP_SUITE_AES_F8:
+        return "F8_128_HMAC_SHA1_80";
+    case SIPRAL_SRTP_SUITE_AES256_CM80:
+        return "AES_256_CM_HMAC_SHA1_80";
+    case SIPRAL_SRTP_SUITE_AES256_CM32:
+        return "AES_256_CM_HMAC_SHA1_32";
+    case SIPRAL_SRTP_SUITE_AEAD_AES128_GCM:
+        return "AEAD_AES_128_GCM";
+    case SIPRAL_SRTP_SUITE_AEAD_AES256_GCM:
+        return "AEAD_AES_256_GCM";
+    default:
+        return "an unnamed suite";
+    }
+}
 
 static const char *flow_name(enum flow which)
 {
@@ -4241,6 +4269,10 @@ int main(int argc, char **argv)
         if (outcome == 0) {
             if (flow == FLOW_REGISTER) {
                 printf("  pass  %s\n", flow_name(flow));
+            } else if (end.seen.media_secured) {
+                printf("  pass  %s   (%u sent, %u back, %u audible, %u refused; SRTP %s)\n",
+                       flow_name(flow), end.sent, end.received, end.audible,
+                       end.refused, suite_name(end.seen.secured_suite));
             } else {
                 printf("  pass  %s   (%u sent, %u back, %u audible, %u refused)\n",
                        flow_name(flow), end.sent, end.received, end.audible,

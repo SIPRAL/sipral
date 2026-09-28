@@ -18,7 +18,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `SIPRAL_EVENT_KIND_MEDIA_SECURED` says which of RFC 6188's and RFC 7714's
   suites a call is running rather than `UNKNOWN`; the Swift, Kotlin and .NET
   enums are printed with them, and Python gains `sipral.enums.SrtpSuite`
-  (ABI 0.29).
+  (ABI 0.29). The lab's Rust harness names the suite each SDES and
+  DTLS-SRTP flow ran under on its result line, and the C harness the one
+  each DTLS-SRTP handshake chose.
 - **A call's audio on Android survives what the platform does to it.**
   `SipralCallAudio` (in the `ConnectionService` helper) keeps one call's
   microphone and speaker through a cellular call answered over it — the

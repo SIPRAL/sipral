@@ -67,9 +67,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sipral::{
     Account, AccountId, CallEndReason, CallHandle, CallMedia, CallState, Codec, CodecCatalog,
     Credentials, DEFAULT_DIGIT, Digit, DtmfInfoForm, EndpointConfig, Event, Input, MediaConfig,
-    MediaEngine, MediaEvent, OutgoingCall, Quality, SrtpPolicy, StreamStatistics, Subscribe,
-    TransportId, TransportProtocol, UNAVAILABLE, UaEvent, Uri, UserAgent, VoipMetricsBlock,
-    WallClock,
+    MediaEngine, MediaEvent, OutgoingCall, Quality, SrtpPolicy, SrtpSuite, StreamStatistics,
+    Subscribe, TransportId, TransportProtocol, UNAVAILABLE, UaEvent, Uri, UserAgent,
+    VoipMetricsBlock, WallClock,
 };
 use sipral_core::msg::{HeaderName, OwnedMessage};
 
@@ -1035,6 +1035,10 @@ struct Script {
     /// closed it: by the time a flow is judged its call has usually ended, and
     /// the engine has let the session go with it.
     ended: Option<StreamStatistics>,
+    /// The SRTP transform the primary call ran under, for the result line:
+    /// the one the DTLS-SRTP handshake chose, or the one the far end's SDES
+    /// answer accepted out of this end's offer.
+    suite: Option<SrtpSuite>,
     step: Step,
     asked: bool,
     /// When to hang up a call that is only there to carry audio or a digit.
@@ -1113,6 +1117,7 @@ impl Script {
             consulted: None,
             original_codec: None,
             ended: None,
+            suite: None,
             step: Step::Registering,
             asked: false,
             listen_until: None,
@@ -1155,7 +1160,8 @@ impl Script {
                 state: CallState::Ringing | CallState::EarlyMedia,
                 ..
             } => self.seen.saw(Fact::Ringing),
-            UaEvent::CallConfirmed { call, .. } => {
+            UaEvent::CallConfirmed { call, response, .. } => {
+                self.note_suite(*call, response.as_ref());
                 if Some(*call) == self.consulted {
                     self.seen.saw(Fact::Consulted);
                 } else {
@@ -1366,9 +1372,10 @@ impl Script {
             // the handshake finished and its keys are in: the one event that
             // says a DTLS-SRTP call is encrypted, since at `Started` it is
             // still waiting for them
-            MediaEvent::Secured { .. }
+            MediaEvent::Secured { suite, .. }
                 if Some(call) == self.call && matches!(self.flow, Flow::Dtls | Flow::PeerDtls) =>
             {
+                self.suite = Some(suite);
                 self.seen.saw(Fact::Encrypted);
             }
             // a handshake that gave up, a role or a certificate the far end
@@ -1765,6 +1772,17 @@ impl Script {
             .and_then(Media::quality_report)
     }
 
+    /// The SDES suite the far end's 2xx accepted, for an SRTP flow's
+    /// primary call.
+    fn note_suite(&mut self, call: CallHandle, response: Option<&OwnedMessage>) {
+        if Some(call) == self.call
+            && matches!(self.flow, Flow::Srtp | Flow::PeerSrtp)
+            && let Some(response) = response
+        {
+            self.suite = answered_suite(response.as_raw().body());
+        }
+    }
+
     fn hang_up(&mut self, endpoint: &mut Endpoint, now: Instant) {
         if self.step == Step::Ending || self.step == Step::Done {
             return;
@@ -2137,8 +2155,23 @@ fn run(
             mos(block.mos_cq)
         );
     }
+    if let Some(suite) = script.suite {
+        use std::fmt::Write as _;
+        let _ = write!(said, "; SRTP {}", suite.name());
+    }
     said.push(')');
     Ok(said)
+}
+
+/// The SDES suite an answer accepted: the one `a=crypto` line RFC 4568
+/// §5.1.2 has an answerer send back, naming the suite it chose out of the
+/// offer.
+fn answered_suite(body: &[u8]) -> Option<SrtpSuite> {
+    let text = std::str::from_utf8(body).ok()?;
+    text.lines().find_map(|line| {
+        let rest = line.trim_end().strip_prefix("a=crypto:")?;
+        SrtpSuite::from_name(rest.split_whitespace().nth(1)?)
+    })
 }
 
 /// The address to put in `Contact`, which is the one the far end can reach.
@@ -2716,5 +2749,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The result line names the suite the far end's SDES answer accepted,
+    /// RFC 7714's AEAD ones included, and nothing for an answer with no
+    /// `a=crypto` line.
+    #[test]
+    fn the_suite_an_sdes_answer_accepted_is_read_off_its_crypto_line() {
+        use sipral::SrtpSuite;
+
+        let answer = "v=0\r\nm=audio 4000 RTP/SAVP 0\r\n\
+            a=crypto:1 AEAD_AES_256_GCM inline:QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ\r\n";
+        assert_eq!(
+            super::answered_suite(answer.as_bytes()),
+            Some(SrtpSuite::AeadAes256Gcm)
+        );
+        let answer = "v=0\r\nm=audio 4000 RTP/SAVP 0\r\n\
+            a=crypto:4 AES_CM_128_HMAC_SHA1_80 inline:QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB\r\n";
+        assert_eq!(
+            super::answered_suite(answer.as_bytes()),
+            Some(SrtpSuite::AesCm80)
+        );
+        assert_eq!(
+            super::answered_suite(b"v=0\r\nm=audio 4000 RTP/AVP 0\r\n"),
+            None
+        );
     }
 }
