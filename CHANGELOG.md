@@ -1043,6 +1043,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   message to the branch it is for, as a datagram from the server already
   was; `IceAgent::next_stream_frame` and `take_stream_frame` are the two
   halves of `poll_stream` that let it.
+- **The volume flow no longer blames this end for a call the far end never
+  answered.** `scripts/lab.sh volume` through Kamailio to FreeSWITCH at a
+  100 ms stagger reported two or three of a hundred calls as "the stream
+  stalled", reproducibly. The capture shows those calls get a `183` that
+  promises early media, which opens a session this end counts as up, and then
+  no RTP at all before the far end is cancelled 15 s later — FreeSWITCH
+  shedding load at the edge of its own session-rate throttle, never answering
+  them. The stall watchdog fired correctly on the early media that never came,
+  but the flow counted an unanswered call among those that came up and called
+  the miss a stalled stream. It now counts a call as up only once the far end
+  answers it, reports the ones left in early media apart as the server
+  declining under the offered rate, and fails only on a stall of a call that
+  was answered — the real media defect the watchdog is there to catch.
 - **A Python call closed the moment it ends still gives its relay back.**
   `Stack` sent a call's farewells — its RTCP BYE and the TURN Refresh with a
   lifetime of zero — only after the poll that ended the call had delivered

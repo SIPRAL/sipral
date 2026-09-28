@@ -37,7 +37,9 @@ use std::env;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use sipral::{CallHandle, CallMedia, Event, MediaConfig, MediaEvent, OutgoingCall, UaEvent};
+use sipral::{
+    CallEndReason, CallHandle, CallMedia, Event, MediaConfig, MediaEvent, OutgoingCall, UaEvent,
+};
 
 use crate::{Endpoint, catalog, place_call, run_folded, uri};
 
@@ -73,6 +75,14 @@ struct Leg {
     call: Option<CallHandle>,
     placed_at: Option<Instant>,
     started: Option<Instant>,
+    /// A 2xx arrived: the far end answered this call, rather than only
+    /// promising early media in a provisional response.
+    confirmed: bool,
+    /// The far end refused this call before answering it — a `4xx`/`5xx` to
+    /// the INVITE. Seen when a server sheds load harder than leaving the call
+    /// in early media: at a `50 ms` stagger FreeSWITCH answers 500 rather than
+    /// ring. Counted apart, not as this end ending a live call.
+    refused: bool,
     ended: bool,
     failure: Option<String>,
 }
@@ -83,8 +93,36 @@ impl Leg {
             call: None,
             placed_at: None,
             started: None,
+            confirmed: false,
+            refused: false,
             ended: false,
             failure: None,
+        }
+    }
+
+    /// This leg has had its chance and will not change state on its own: it
+    /// started media, or failed, or the far end refused it. A leg that is not
+    /// settled is one still expected to come up, which the hold waits for and
+    /// which counts against the patience as one that never started its media.
+    fn settled(&self) -> bool {
+        self.started.is_some() || self.failure.is_some() || self.refused
+    }
+
+    /// Record a stall the watchdog reported.
+    ///
+    /// A stall on a call the far end answered is a real media defect: the
+    /// stream carried audio and then stopped. A stall on a call that was
+    /// never answered is a different thing — the far end sent a `183` that
+    /// promised early media, opened a session for it, and then sent no RTP at
+    /// all before this end gave up and cancelled. That is the far end
+    /// declining to complete the call, seen most often when a server sheds
+    /// load under a volume of calls placed faster than it will set them up;
+    /// it is counted as unanswered, not as a stream that stalled, so the
+    /// summary does not blame this end's media for the server's own throttle.
+    fn note_stall(&mut self) {
+        if self.confirmed {
+            self.failure
+                .get_or_insert_with(|| "the stream stalled".to_owned());
         }
     }
 }
@@ -141,6 +179,11 @@ pub(crate) fn run(
         for event in endpoint.pump(now) {
             match event {
                 Event::Signalling(UaEvent::Registered { .. }) => registered = true,
+                Event::Signalling(UaEvent::CallConfirmed { call, .. }) => {
+                    if let Some(leg) = legs.iter_mut().find(|leg| leg.call == Some(call)) {
+                        leg.confirmed = true;
+                    }
+                }
                 Event::Signalling(UaEvent::CallEnded {
                     call,
                     reason,
@@ -150,12 +193,21 @@ pub(crate) fn run(
                     if let Some(leg) = legs.iter_mut().find(|leg| leg.call == Some(call)) {
                         leg.ended = true;
                         if hung_up.is_none() && leg.failure.is_none() {
-                            leg.failure = Some(format!(
-                                "ended before it was told to: {reason:?}{}",
-                                status
-                                    .map(|status| format!(" ({status})"))
-                                    .unwrap_or_default()
-                            ));
+                            if !leg.confirmed && reason == CallEndReason::Refused {
+                                // the far end refused a call it had never
+                                // answered: a decline at setup, the harder edge
+                                // of the same load-shedding that leaves other
+                                // calls in early media — not this end dropping a
+                                // call that was up.
+                                leg.refused = true;
+                            } else {
+                                leg.failure = Some(format!(
+                                    "ended before it was told to: {reason:?}{}",
+                                    status
+                                        .map(|status| format!(" ({status})"))
+                                        .unwrap_or_default()
+                                ));
+                            }
                         }
                     }
                 }
@@ -172,8 +224,7 @@ pub(crate) fn run(
                     event: MediaEvent::Stalled { .. },
                 } => {
                     if let Some(leg) = legs.iter_mut().find(|leg| leg.call == Some(call)) {
-                        leg.failure
-                            .get_or_insert_with(|| "the stream stalled".to_owned());
+                        leg.note_stall();
                     }
                 }
                 _ => {}
@@ -203,9 +254,12 @@ pub(crate) fn run(
                 .all(|leg| leg.call.is_some() || leg.failure.is_some())
             && now > began + PATIENCE
         {
-            // every leg that was ever going to start has had its chance
+            // every leg that was ever going to start has had its chance — bar
+            // one the far end refused before it could, which is the far end's
+            // own answer and already accounted for, not a call whose media
+            // never came up.
             for leg in &mut legs {
-                if leg.call.is_some() && leg.started.is_none() && leg.failure.is_none() {
+                if leg.call.is_some() && !leg.settled() {
                     leg.failure = Some("never started media".to_owned());
                 }
             }
@@ -218,9 +272,11 @@ pub(crate) fn run(
         endpoint.timers(now);
 
         if hung_up.is_none() {
-            let every_leg_settled = legs
-                .iter()
-                .all(|leg| leg.started.is_some() || leg.failure.is_some());
+            // A refused leg has had its answer from the far end and will never
+            // start media; it counts as settled so the hold begins once every
+            // other leg has, rather than waiting the full patience out for a
+            // call that is already over.
+            let every_leg_settled = legs.iter().all(Leg::settled);
             if every_leg_settled && all_started_at.is_none() {
                 all_started_at = Some(now);
             }
@@ -266,41 +322,70 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 }
 
 fn verdict(legs: &[Leg]) -> Result<String, String> {
+    use std::fmt::Write as _;
+    // The setup time is measured over answered calls: for a call the far end
+    // only ever promised early media on and never answered, "how long to its
+    // first frame" is a question about a frame that never came.
     let mut setups: Vec<Duration> = legs
         .iter()
+        .filter(|leg| leg.confirmed)
         .filter_map(|leg| Some(leg.started?.saturating_duration_since(leg.placed_at?)))
         .collect();
     setups.sort();
+    let answered = legs.iter().filter(|leg| leg.confirmed).count();
+    // Placed, reached early media, but never answered and never a real failure
+    // of its own: the far end left it in a provisional response and sent no
+    // RTP, then this end cancelled it. See [`Leg::note_stall`].
+    let in_early_media = legs
+        .iter()
+        .filter(|leg| !leg.confirmed && !leg.refused && leg.failure.is_none())
+        .count();
+    // Refused at setup, the harder edge of the same load-shedding.
+    let refused = legs.iter().filter(|leg| leg.refused).count();
     let failed: Vec<&str> = legs
         .iter()
         .filter_map(|leg| leg.failure.as_deref())
         .collect();
+    let mut left = String::new();
+    if in_early_media > 0 {
+        let _ = write!(
+            left,
+            "; {in_early_media} the far end left in early media, never answered"
+        );
+    }
+    if refused > 0 {
+        let _ = write!(left, "; {refused} the far end refused under load");
+    }
     let said = format!(
-        "   ({} of {} up; setup min {:.0} ms, p50 {:.0} ms, p90 {:.0} ms, max {:.0} ms)",
-        setups.len(),
+        "   ({answered} of {} answered{left}; setup min {:.0} ms, p50 {:.0} ms, p90 {:.0} ms, max {:.0} ms)",
         legs.len(),
         percentile(&setups, 0.0).as_secs_f64() * 1e3,
         percentile(&setups, 50.0).as_secs_f64() * 1e3,
         percentile(&setups, 90.0).as_secs_f64() * 1e3,
         percentile(&setups, 100.0).as_secs_f64() * 1e3,
     );
-    if failed.is_empty() {
-        Ok(said)
-    } else {
+    if !failed.is_empty() {
         Err(format!(
             "{} of {} failed: {}{said}",
             failed.len(),
             legs.len(),
             failed.first().unwrap_or(&"")
         ))
+    } else if answered == 0 {
+        // Nothing answered at all is the run itself being untrustworthy, the
+        // way this flow's own doc says it errs; a shortfall the far end
+        // explains by shedding load is not.
+        Err(format!("nothing answered{said}"))
+    } else {
+        Ok(said)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use super::percentile;
+    use super::{Leg, percentile, verdict};
 
     #[test]
     fn percentile_reads_off_the_sorted_list() {
@@ -310,5 +395,102 @@ mod tests {
             .collect();
         assert_eq!(percentile(&sorted, 0.0), Duration::from_millis(10));
         assert_eq!(percentile(&sorted, 100.0), Duration::from_millis(40));
+    }
+
+    fn answered() -> Leg {
+        let now = Instant::now();
+        let mut leg = Leg::new();
+        leg.placed_at = Some(now);
+        leg.started = Some(now + Duration::from_millis(11));
+        leg.confirmed = true;
+        leg
+    }
+
+    /// A call the far end only ever gave a `183` for, opened an early-media
+    /// session for, and then never answered: the state the throttled calls in
+    /// `scripts/lab.sh volume` are left in.
+    fn early_media_only() -> Leg {
+        let now = Instant::now();
+        let mut leg = Leg::new();
+        leg.placed_at = Some(now);
+        leg.started = Some(now + Duration::from_millis(11));
+        leg
+    }
+
+    #[test]
+    fn a_stall_on_an_answered_call_is_a_failure() {
+        let mut leg = answered();
+        leg.note_stall();
+        assert_eq!(leg.failure.as_deref(), Some("the stream stalled"));
+    }
+
+    #[test]
+    fn a_stall_on_a_call_never_answered_is_not_a_failure() {
+        // The far end promised early media and sent none; the watchdog fires,
+        // but this is the far end declining the call, not this end's media
+        // stalling. Without this distinction the whole run fails whenever a
+        // server sheds load under the volume.
+        let mut leg = early_media_only();
+        leg.note_stall();
+        assert_eq!(leg.failure, None);
+    }
+
+    #[test]
+    fn calls_the_far_end_never_answered_do_not_fail_the_run() {
+        let mut legs: Vec<Leg> = (0..97).map(|_| answered()).collect();
+        for _ in 0..3 {
+            let mut leg = early_media_only();
+            leg.note_stall();
+            legs.push(leg);
+        }
+        let said = verdict(&legs).expect("a shortfall the far end explains must not fail the run");
+        assert!(said.contains("97 of 100 answered"), "{said}");
+        assert!(said.contains("3 the far end left in early media"), "{said}");
+    }
+
+    #[test]
+    fn a_refused_leg_is_settled_and_never_counted_as_not_started() {
+        // The loop waits on unsettled legs to come up and, past its patience,
+        // fails one still not started as "never started media". A refused leg
+        // has had the far end's answer and will never start, so it must count
+        // as settled — otherwise the run stalls the whole patience out and
+        // then blames the far end's refusal on this end's media.
+        let mut leg = early_media_only();
+        leg.started = None;
+        assert!(!leg.settled());
+        leg.refused = true;
+        assert!(leg.settled());
+    }
+
+    #[test]
+    fn calls_the_far_end_refused_at_setup_do_not_fail_the_run() {
+        // At a 50 ms stagger FreeSWITCH answers 500 rather than ring; a call
+        // refused before it was ever answered is the server declining under the
+        // offered rate, not this end ending a call that was up.
+        let mut legs: Vec<Leg> = (0..52).map(|_| answered()).collect();
+        for _ in 0..48 {
+            let mut leg = early_media_only();
+            leg.refused = true;
+            legs.push(leg);
+        }
+        let said = verdict(&legs).expect("refusals under load must not fail the run");
+        assert!(said.contains("52 of 100 answered"), "{said}");
+        assert!(said.contains("48 the far end refused under load"), "{said}");
+    }
+
+    #[test]
+    fn a_real_stall_after_answer_still_fails() {
+        let mut legs: Vec<Leg> = (0..99).map(|_| answered()).collect();
+        let mut broken = answered();
+        broken.note_stall();
+        legs.push(broken);
+        let why = verdict(&legs).expect_err("a stall after answer is a real defect");
+        assert!(why.contains("the stream stalled"), "{why}");
+    }
+
+    #[test]
+    fn nothing_answered_is_untrustworthy() {
+        let legs: Vec<Leg> = (0..100).map(|_| early_media_only()).collect();
+        assert!(verdict(&legs).is_err());
     }
 }
