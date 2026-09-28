@@ -11321,6 +11321,7 @@ fn an_earpiece_past_any_real_clock_is_held_to_its_budget_and_says_so() {
 /// the address the far end signalled from, and the D2 recording without the
 /// caller's user part or that address, while the same recording exported
 /// plainly still has both — which is what makes the absence mean anything.
+#[cfg(feature = "redaction")]
 #[test]
 fn a_calls_record_and_recording_are_handed_over_redacted() {
     let mut pair = Pair::new(CodecCatalog::new());

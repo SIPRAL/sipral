@@ -65,7 +65,15 @@ publish = true
 # only makes the policy nameable. `headless` beside `ice` names it too, and
 # `sipral-ffi` turns this on, because a server behind that ABI is written in
 # whatever language its owner chose and still wants the role.
-default = ["opus", "dtls", "ice", "stun"]
+#
+# `redaction` is `redacted_call_record` and `redacted_recording`, over
+# `sipral-diag`, which brings `hmac` and `sha2`: two of the four crates
+# `dtls` above is off to keep out of a build that has no use for them. On by
+# default, since a Rust application that asked for nothing gets the whole
+# facade; `sipral-ffi` takes no default feature and has no C entry point for
+# it, so the C ABI, and every binding and platform package built over it,
+# links none of it.
+default = ["opus", "dtls", "ice", "stun", "redaction"]
 opus = ["sipral-media/opus"]
 dtls = ["dep:sipral-dtls", "dep:sipral-nat"]
 ice = ["dep:sipral-nat"]
@@ -84,6 +92,7 @@ example-tls = ["dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
 # none of it, and `sipral-headless` itself still names no Sipral crate —
 # only this feature's edge exists, and only in this manifest.
 headless = ["dep:sipral-headless"]
+redaction = ["dep:sipral-diag"]
 
 # with `opus` off there is no `Codec::Opus` and the enumeration is three long,
 # so docs.rs is told to build the whole surface rather than whichever half a
@@ -95,9 +104,10 @@ all-features = true
 sipral-core.workspace = true
 sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
 sipral-rtp = { path = "../sipral-rtp", version = "0.0.1" }
-# the redaction behind `redacted_call_record` and `redacted_recording`; it
-# brings `hmac` and `sha2`, which `dtls` already links at the same pins
-sipral-diag = { path = "../sipral-diag", version = "0.0.1" }
+# the redaction behind `redacted_call_record` and `redacted_recording`, behind
+# the `redaction` feature; `hmac` and `sha2` come with it, at the pins `dtls`
+# links them at
+sipral-diag = { path = "../sipral-diag", version = "0.0.1", optional = true }
 # `default-features = false` is what makes this crate's own feature mean
 # anything: without it, `--no-default-features` on this crate would still link
 # libopus through `sipral-media` and prove nothing.

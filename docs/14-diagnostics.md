@@ -301,9 +301,11 @@ VM.
 
 ## Handing a call's diagnostics over redacted, from an application
 
-The `sipral` crate offers both artefacts redacted, in Rust (there is no C
-entry point for this; a binding exports through `diag-export` or its own
-Rust shim):
+The `sipral` crate offers both artefacts redacted, in Rust, behind its
+`redaction` feature (on by default; there is no C entry point for this, and
+`sipral-ffi` leaves the feature off, so a binding exports through
+`diag-export` or its own Rust shim). The feature is what brings `hmac` and
+`sha2` into a build without `dtls`:
 
 ```rust
 pub fn redacted_call_record(

@@ -26,7 +26,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   every IP literal pseudonymised, and `sipral::redacted_recording` turns a
   D2 recording into a pcapng file with every message redacted, under a
   `Redactor` in `Hash` (keyed HMAC) or `Delete` mode; one redactor over
-  both gives an address the same pseudonym in the two
+  both gives an address the same pseudonym in the two, behind the
+  `redaction` feature, on by default and left off by the C ABI
   (`docs/14-diagnostics.md`).
 - **A call's audio on Android survives what the platform does to it.**
   `SipralCallAudio` (in the `ConnectionService` helper) keeps one call's

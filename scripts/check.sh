@@ -957,6 +957,16 @@ cargo test -p sipral --no-default-features >/dev/null 2>&1 \
     && pass "cargo test -p sipral" || fail "cargo test -p sipral --no-default-features"
 cargo test -p sipral-ffi --no-default-features >/dev/null 2>&1 \
     && pass "cargo test -p sipral-ffi" || fail "cargo test -p sipral-ffi --no-default-features"
+# `dtls` is off to keep the RustCrypto crates out (crates/sipral/Cargo.toml),
+# and nothing else the facade links by default may bring them back
+facade_tree=$(cargo tree -p sipral --no-default-features -e normal --prefix none 2>/dev/null)
+if [ -z "$facade_tree" ]; then
+    fail "cargo tree -p sipral --no-default-features printed nothing"
+elif printf '%s\n' "$facade_tree" | grep -qE '^(hmac|sha2|p256|aes-gcm) '; then
+    fail "cargo tree -p sipral --no-default-features names a crate only dtls should bring"
+else
+    pass "no RustCrypto crate in the facade without dtls"
+fi
 
 # A Cargo feature belongs to the crate that declares it and features are
 # additive, so the ABI crate without its own `opus` over a facade that linked
