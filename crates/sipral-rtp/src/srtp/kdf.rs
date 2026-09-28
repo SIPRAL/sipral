@@ -181,17 +181,20 @@ impl Master {
         }
     }
 
-    /// `PRF_n(k_master, x)` where `x = (<label> || r) XOR master_salt`,
-    /// right-aligned, and the counter-mode IV is `x * 2^16` (§4.3.3).
+    /// `PRF_n(k_master, x)` where `x = (<label> || r) XOR master_salt`, and
+    /// the counter-mode IV is `x * 2^16` (§4.3.3).
     ///
     /// `salt_len` is the crypto context's own `n_s`: fourteen octets for
-    /// AES-CM and f8, twelve for RFC 7714's GCM suites. §4.3.1 aligns
-    /// `key_id` and `master_salt` "so that their least significant bits
-    /// agree", and the `*2^16` step always leaves the last two octets of the
-    /// sixteen-octet block zero — so both are right-aligned to octet
-    /// fourteen, whatever width the salt itself is; `key_id` is seven octets
-    /// wide regardless, since the packet index is 48 bits, and so always sits
-    /// at octets seven to fourteen.
+    /// AES-CM and f8, twelve for RFC 7714's GCM suites. The PRF is defined
+    /// over RFC 3711's 112-bit salt, and §4.3.1 aligns `key_id` with it "so
+    /// that their least significant bits agree": `key_id` is seven octets
+    /// wide whatever the suite, since the packet index is 48 bits, and sits
+    /// at octets seven to fourteen, the `*2^16` step leaving the last two of
+    /// the sixteen-octet block zero. RFC 7714 §11 runs its GCM suites through
+    /// that same PRF and says nothing about widening their 96-bit salt to
+    /// it; the SRTP stacks a call meets widen it with two zero octets on the
+    /// right, so the salt starts at octet zero whatever its width, and the
+    /// fourteen-octet one lands exactly where §4.3.1 puts it either way.
     fn prf(&self, label: Label, phase: u64, salt_len: usize, out: &mut [u8]) {
         debug_assert_eq!(
             self.salt.len(),
@@ -199,8 +202,8 @@ impl Master {
             "the master salt is always exactly as wide as the suite it is used with"
         );
         let mut iv = [0_u8; cipher::BLOCK];
-        if let Some(head) = iv.get_mut(cipher::BLOCK - 2 - salt_len..cipher::BLOCK - 2) {
-            head.copy_from_slice(self.salt.get(..salt_len).unwrap_or(&self.salt));
+        if let Some(head) = iv.get_mut(..salt_len.min(cipher::BLOCK - 2)) {
+            head.copy_from_slice(self.salt.get(..head.len()).unwrap_or_default());
         }
 
         // key_id is the label followed by the six octets of the phase
@@ -297,6 +300,55 @@ mod tests {
         assert!(keys.authentication.is_none());
         assert_eq!(keys.encryption.len(), 16);
         assert_eq!(keys.salt.len(), 12);
+    }
+
+    /// A GCM suite's 96-bit master salt goes through RFC 3711's 112-bit PRF
+    /// as that salt with two zero octets after it, which is how the SRTP
+    /// stacks a call meets widen it: the keys it derives are the ones a
+    /// fourteen-octet salt ending in two zeros derives, both the session key
+    /// and the twelve octets of session salt, for SRTP and SRTCP alike and
+    /// at a later derivation too. Right-aligned instead, every packet either
+    /// end protects fails the other's tag check.
+    #[test]
+    fn a_twelve_octet_salt_derives_what_it_does_padded_with_two_zeros() {
+        let key = unhex("e1f97a0d3e018be0d64fa32c06de4139");
+        let salt = unhex("0ec675ad498afeebb6960b3a");
+        assert_eq!(salt.len(), 12);
+        let mut padded = salt.clone();
+        padded.extend_from_slice(&[0, 0]);
+        let aead = Lengths {
+            key: 16,
+            salt: 12,
+            auth: false,
+        };
+        let widened = Lengths {
+            key: 16,
+            salt: 14,
+            auth: false,
+        };
+        let short = Master::new(&key, &salt);
+        let long = Master::new(&key, &padded);
+        let rate = Rate::from_exponent(4).expect("a rate");
+        for index in [0_u64, 16, 1 << 20] {
+            let (media, media_long) = (
+                short.rtp_session(rate, index, aead),
+                long.rtp_session(rate, index, widened),
+            );
+            assert_eq!(hex(&media.encryption), hex(&media_long.encryption));
+            assert_eq!(
+                hex(&media.salt),
+                hex(media_long.salt.get(..12).unwrap_or_default())
+            );
+            let (control, control_long) = (
+                short.rtcp_session(rate, 7, aead),
+                long.rtcp_session(rate, 7, widened),
+            );
+            assert_eq!(hex(&control.encryption), hex(&control_long.encryption));
+            assert_eq!(
+                hex(&control.salt),
+                hex(control_long.salt.get(..12).unwrap_or_default())
+            );
+        }
     }
 
     #[test]

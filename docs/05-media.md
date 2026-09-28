@@ -657,7 +657,11 @@ derivation, and RFC 7714's `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM`, which
 tie confidentiality and integrity into one AES-GCM call instead of pairing a
 cipher with a separate HMAC — a 128- or 256-bit key, a twelve-octet salt
 where the other five use fourteen, and a sixteen-octet tag embedded in the
-ciphertext rather than appended after it. `UNENCRYPTED_SRTP`,
+ciphertext rather than appended after it. RFC 7714 §11 derives their session
+keys with RFC 3711's PRF, which is defined over a fourteen-octet salt, and
+does not say how the twelve-octet one fills it; it is widened the way the
+SRTP stacks a call meets widen it, two zero octets after it, which the lab's
+baresip is the proof of. `UNENCRYPTED_SRTP`,
 `UNENCRYPTED_SRTCP` and `UNAUTHENTICATED_SRTP` are honoured where a peer
 insists for the five non-AEAD suites — an AEAD suite is always both,
 inherently, and has nothing for those parameters to turn off; SRTCP's tag

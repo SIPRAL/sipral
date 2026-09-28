@@ -1024,6 +1024,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **SRTP under AES-GCM interoperates.** RFC 7714's two suites derive their
+  session keys with RFC 3711's PRF, over a salt two octets narrower than
+  the one it is defined for; `sipral-rtp` put the twelve-octet salt at the
+  right of the PRF's block, the SRTP stacks a call meets put it at the left
+  with two zero octets after it, and every packet either end protected
+  failed the other's tag check. The salt now goes at the left, which
+  changes nothing for the fourteen-octet suites.
 - **A forked call's relay over TCP or TLS reaches every branch.** The
   branches of a forked call hold the one allocation, and a relay reached
   over a connection has one connection for all of them; everything read off
