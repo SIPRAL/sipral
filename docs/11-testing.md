@@ -667,8 +667,8 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | Swift agent example | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | Kotlin agent example | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | .NET agent example | pass | 2026-09-29 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2008 ms, nothing after it (C ABI) | pass | 2026-09-29 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 58 ms (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2022 ms, nothing after it (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 48 ms (C ABI) | pass | 2026-09-29 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | call | pass | 2026-09-29 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | hold and resume | pass | 2026-09-29 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | SRTP, phone to phone | pass | 2026-09-29 |
