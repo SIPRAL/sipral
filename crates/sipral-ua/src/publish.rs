@@ -287,12 +287,15 @@ impl Publication {
         }
     }
 
-    /// Ask for `expires` instead. Zero is not a lifetime — `Expires: 0` is
-    /// what a removal says — and leaves the one already asked for.
+    /// Ask for `expires` instead, in the whole seconds `Expires` carries, and
+    /// at most the 2^32 - 1 it can say (RFC 3261 §20.19). Less than a second
+    /// is not a lifetime — `Expires: 0` is what a removal says — and leaves
+    /// the one already asked for.
     #[must_use]
     pub fn expires(mut self, expires: Duration) -> Self {
-        if !expires.is_zero() {
-            self.asking = expires;
+        let seconds = expires.as_secs().min(u64::from(u32::MAX));
+        if seconds != 0 {
+            self.asking = Duration::from_secs(seconds);
         }
         self
     }
@@ -794,6 +797,26 @@ Call-ID: pub@example.com\r\nCSeq: 1 PUBLISH\r\n{extra}Content-Length: 0\r\n\r\n"
         assert_eq!(publication.etag(), None);
         assert_eq!(publication.poll_timeout(), None);
         assert_eq!(publication.remove(), Err(PublishError::NothingPublished));
+    }
+
+    #[test]
+    fn a_lifetime_that_is_zero_on_the_wire_is_not_asked_for() {
+        for expires in [Duration::ZERO, Duration::from_millis(999)] {
+            let mut publication = Publication::new("presence").expires(expires);
+            publication.publish("application/pidf+xml", body("<presence/>"));
+            let request = only(&mut publication);
+            assert_eq!(request.expires(), HOUR, "{expires:?}");
+        }
+        let mut publication = Publication::new("presence").expires(Duration::from_millis(1_500));
+        publication.publish("application/pidf+xml", body("<presence/>"));
+        assert_eq!(only(&mut publication).expires(), Duration::from_secs(1));
+        // RFC 3261 §20.19: delta-seconds up to 2^32 - 1
+        let mut publication = Publication::new("presence").expires(Duration::MAX);
+        publication.publish("application/pidf+xml", body("<presence/>"));
+        assert_eq!(
+            only(&mut publication).expires(),
+            Duration::from_secs(u64::from(u32::MAX))
+        );
     }
 
     #[test]
