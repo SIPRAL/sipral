@@ -34,7 +34,8 @@
 //! lost segment is not a part.
 //!
 //! **What a part is.** Its own `Content-Type` (absent, it is
-//! `text/plain; charset=us-ascii`, §5.1), its own `Content-Disposition`
+//! `text/plain; charset=us-ascii`, §5.1, except in a `multipart/digest`,
+//! where it is `message/rfc822`, §5.1.5), its own `Content-Disposition`
 //! (RFC 3261 §20.11) and its own `Content-ID` (RFC 2045 §7). A part whose
 //! type is itself `multipart` is read too, down to [`MultipartLimits`]'
 //! depth; every other header field of a part is kept as written and can be
@@ -263,6 +264,8 @@ pub enum MultipartKind<'a> {
 pub struct BodyPart<'a> {
     headers: &'a [u8],
     content_type: Option<MediaTypeRef<'a>>,
+    /// The part is one of a `multipart/digest`, so untyped it is a message.
+    in_digest: bool,
     disposition: Option<DispositionRef<'a>>,
     content_id: Option<&'a [u8]>,
     body: &'a [u8],
@@ -278,12 +281,23 @@ impl<'a> BodyPart<'a> {
 
     /// Whether the part is of this type, matched without case.
     ///
-    /// A part without `Content-Type` is `text/plain` (RFC 2046 §5.1).
+    /// A part without `Content-Type` is `text/plain` (RFC 2046 §5.1), or
+    /// `message/rfc822` when it is one of a `multipart/digest` (§5.1.5).
     #[must_use]
     pub fn is(&self, kind: &str, subtype: &str) -> bool {
-        match self.content_type {
-            Some(media) => media.is(kind, subtype),
-            None => kind.eq_ignore_ascii_case("text") && subtype.eq_ignore_ascii_case("plain"),
+        if let Some(media) = self.content_type {
+            return media.is(kind, subtype);
+        }
+        let (implicit_kind, implicit_subtype) = self.implicit_type();
+        kind.eq_ignore_ascii_case(implicit_kind) && subtype.eq_ignore_ascii_case(implicit_subtype)
+    }
+
+    /// The type a part without `Content-Type` has.
+    const fn implicit_type(&self) -> (&'static str, &'static str) {
+        if self.in_digest {
+            ("message", "rfc822")
+        } else {
+            ("text", "plain")
         }
     }
 
@@ -454,6 +468,7 @@ impl<'a> Multipart<'a> {
             }
             return Err(refused.unwrap_or(Unsupported {
                 content_type: None,
+                implicit: ("text", "plain"),
                 disposition: None,
             }));
         }
@@ -480,6 +495,7 @@ fn part_check<'a, F: Fn(&BodyPart<'a>) -> bool>(
     } else {
         Err(Unsupported {
             content_type: part.content_type,
+            implicit: part.implicit_type(),
             disposition: part.disposition,
         })
     }
@@ -490,11 +506,14 @@ fn part_check<'a, F: Fn(&BodyPart<'a>) -> bool>(
 #[derive(Clone, Copy, Debug)]
 pub struct Unsupported<'a> {
     content_type: Option<MediaTypeRef<'a>>,
+    /// The type the part has when `content_type` is absent.
+    implicit: (&'static str, &'static str),
     disposition: Option<DispositionRef<'a>>,
 }
 
 impl<'a> Unsupported<'a> {
-    /// The part's `Content-Type`; `None` for an implicit `text/plain`.
+    /// The part's `Content-Type`; `None` for an implicit `text/plain` (or
+    /// `message/rfc822` in a `multipart/digest`).
     #[must_use]
     pub const fn content_type(&self) -> Option<MediaTypeRef<'a>> {
         self.content_type
@@ -517,7 +536,11 @@ impl fmt::Display for Unsupported<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.content_type {
             Some(media) => write!(f, "required body part {media} is not understood"),
-            None => f.write_str("required body part text/plain is not understood"),
+            None => write!(
+                f,
+                "required body part {}/{} is not understood",
+                self.implicit.0, self.implicit.1
+            ),
         }
     }
 }
@@ -565,6 +588,7 @@ impl Reader {
         dash.extend_from_slice(b"\r\n--");
         dash.extend_from_slice(&boundary);
 
+        let in_digest = subtype.eq_ignore_ascii_case(b"digest");
         let mut parts = Vec::new();
         let mut start = opening(body, &dash)?;
         loop {
@@ -576,7 +600,7 @@ impl Reader {
             }
             self.parts_left -= 1;
             let raw = body.get(start..at).unwrap_or_default();
-            parts.push(self.part(raw, depth)?);
+            parts.push(self.part(raw, depth, in_digest)?);
             if close {
                 break;
             }
@@ -589,7 +613,12 @@ impl Reader {
         })
     }
 
-    fn part<'a>(&mut self, raw: &'a [u8], depth: usize) -> Result<BodyPart<'a>, MultipartError> {
+    fn part<'a>(
+        &mut self,
+        raw: &'a [u8],
+        depth: usize,
+        in_digest: bool,
+    ) -> Result<BodyPart<'a>, MultipartError> {
         // body-part := MIME-part-headers [CRLF *OCTET]; the CRLF that ends
         // the last field is part of that field, so a part with no fields
         // starts with the separating CRLF, and a part with no content has no
@@ -608,6 +637,7 @@ impl Reader {
         let mut part = BodyPart {
             headers,
             content_type: None,
+            in_digest,
             disposition: None,
             content_id: None,
             body,
@@ -1126,6 +1156,30 @@ Content-ID: <meta@example.com>\r\n\
             body.find("application", "sdp")
                 .is_some_and(|p| p.body() == b"v=0")
         );
+    }
+
+    #[test]
+    fn an_untyped_part_of_a_digest_is_a_message_not_text() {
+        // RFC 2046 §5.1.5: in a digest the default is message/rfc822
+        let body = b"--b\r\n\r\nSubject: one\r\n\r\nx\r\n\
+--b\r\nContent-Type: text/plain\r\n\r\ny\r\n--b--";
+        let parsed = read(b"multipart/digest;boundary=b", body).expect("a body");
+        let [untyped, typed] = parsed.parts() else {
+            panic!("two parts");
+        };
+        assert!(untyped.is("message", "rfc822"));
+        assert!(!untyped.is("text", "plain"));
+        assert!(typed.is("text", "plain"));
+        let refused = parsed
+            .check(|p| p.is("text", "plain"))
+            .expect_err("refused");
+        assert_eq!(
+            refused.to_string(),
+            "required body part message/rfc822 is not understood"
+        );
+        // and everywhere else it stays text/plain
+        let mixed = read(b"multipart/mixed;boundary=b", body).expect("a body");
+        assert!(mixed.parts().first().is_some_and(|p| p.is("text", "plain")));
     }
 
     #[test]
