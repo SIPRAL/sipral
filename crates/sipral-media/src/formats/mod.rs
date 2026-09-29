@@ -5,10 +5,16 @@
 //! payload format that is nothing but samples.
 //!
 //! [`ogg`] is the container of RFC 3533, pages and all, with a reader strict
-//! enough to check what the writer produced.
+//! enough to check what the writer produced. [`ogg_opus`] puts Opus packets
+//! that were already encoded into it the way RFC 7845 asks, so a call
+//! recording in Opus costs no second encode.
+//!
+//! None of it needs the `opus` feature. The Ogg Opus writer takes packets
+//! and their durations; where they came from is the caller's business.
 //!
 //! Unlike the codecs, the writers here allocate their buffers when they are
 //! built and write to any [`std::io::Write`]: they belong on a thread that
 //! may block on a disk, never on the audio thread.
 
 pub mod ogg;
+pub mod ogg_opus;
