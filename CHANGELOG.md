@@ -193,6 +193,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   interleaved left first, the static payload types 10 and 11, and the
   `L16/rate[/channels]` rtpmap encoding. Not yet wired into the call
   recording, the codec negotiation or the C ABI.
+- **Conformance fixtures for RFC 5118 and RFC 4317.** The twelve IPv6
+  torture messages of RFC 5118 and the offer/answer exchanges of RFC 4317
+  sections 2.1, 2.2, 2.4, 3.1, 4.1 and 4.3 live under `fixtures/rfc5118/`
+  and `fixtures/rfc4317/` with SHA-256 manifests, and `sipral-core` tests
+  hold the message parser, the answer builder and the media planner to
+  each one.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when
