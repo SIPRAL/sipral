@@ -205,6 +205,76 @@ fn numbers_are_canonicalised_as_rfc_8224_section_8_3_says() {
     );
 }
 
+/// RFC 8224 §8.5: `scheme ":" user "@" host`, everything after the host
+/// and the password dropped, lower case, unreserved escapes decoded.
+#[test]
+fn sip_uris_are_canonicalised_as_rfc_8224_section_8_5_says() {
+    for (written, canonical) in [
+        ("sip:alice@example.com", "sip:alice@example.com"),
+        (
+            "SIP:Alice:secret@Example.COM:5061;transport=tcp?Subject=hi",
+            "sip:alice@example.com",
+        ),
+        (
+            "sips:bob@biloxi.example.com;lr",
+            "sips:bob@biloxi.example.com",
+        ),
+        ("sip:%61lice@example.com", "sip:alice@example.com"),
+        ("sip:a%2fb@example.com", "sip:a%2Fb@example.com"),
+        ("sip:carol@[2001:DB8::1]:5060", "sip:carol@[2001:db8::1]"),
+        ("sip:example.com:5060;user=phone", "sip:example.com"),
+        (" sip:dave@192.0.2.1 ", "sip:dave@192.0.2.1"),
+        ("TEL:+1-215-555-1212", "tel:+1-215-555-1212"),
+        ("https://example.com/X", "https://example.com/X"),
+    ] {
+        assert_eq!(canonical_uri(written), canonical, "{written}");
+    }
+    let dest = Dest::uri("sip:Alice@Example.com:5060;transport=udp");
+    assert_eq!(dest.uri, ["sip:alice@example.com"]);
+    assert!(dest.names_uri("sip:alice@example.com;user=phone"));
+    assert!(dest.names_uri("SIP:ALICE@EXAMPLE.COM"));
+    assert!(!dest.names_uri("sip:mallory@example.com"));
+    assert!(!dest.names_number(&tn("12125551213")));
+    let numbers = Dest::tn(tn("12125551213"));
+    assert!(numbers.names_number(&tn("12125551213")));
+    assert!(!numbers.names_uri("sip:12125551213@example.com"));
+}
+
+/// The signer writes each `dest.uri` in the canonical form of RFC 8224
+/// §8.5, however the claims gave it; what is signed is what a verifier
+/// rebuilding a compact form from the request's To derives.
+#[test]
+fn the_signer_writes_dest_uri_canonical() {
+    let pki = Pki::new();
+    let mut to_a_name = claims(NOW);
+    to_a_name.dest = Dest {
+        tn: Vec::new(),
+        uri: vec!["sip:Alice:pw@Example.COM:5070;transport=tcp".to_owned()],
+    };
+    let identity = signer().identity(&to_a_name).unwrap();
+    let claims_segment = identity.split('.').nth(1).unwrap();
+    let json = String::from_utf8(base64::decode_url(claims_segment.as_bytes()).unwrap()).unwrap();
+    assert!(
+        json.contains(r#""dest":{"uri":["sip:alice@example.com"]}"#),
+        "{json}"
+    );
+    let Verdict::Valid(verified) = verdict(&identity, &pki.chain(), &pki) else {
+        panic!("not valid");
+    };
+    assert_eq!(verified.dest.uri, ["sip:alice@example.com"]);
+
+    // the compact form verifies against claims rebuilt from the request's
+    // own To, written however that To was written
+    let compact = signer().identity_compact(&to_a_name).unwrap();
+    let mut rebuilt = to_a_name.clone();
+    rebuilt.dest = Dest::uri("sip:alice@example.com;user=ip");
+    let pending = Verifier::default().start(&compact, Some(&rebuilt)).unwrap();
+    assert!(matches!(
+        pending.verify(&pki.chain(), &anchors(&pki), NOW),
+        Verdict::Valid(_)
+    ));
+}
+
 #[test]
 fn a_pem_chain_verifies_too() {
     let pki = Pki::new();
@@ -1076,22 +1146,26 @@ fn coverage_by_service_provider_code_is_policy() {
     );
     let chain = chain_with_leaf(&pki, &leaf);
     let identity = signer().identity(&claims(NOW)).unwrap();
-    let Verdict::Valid(verified) = verdict(&identity, &chain, &pki) else {
+
+    // by default a code covers no number: only the application knows
+    // whether the provider it names may vouch for this one
+    assert!(!Config::default().accept_service_provider_codes);
+    assert_eq!(
+        verdict(&identity, &chain, &pki),
+        Verdict::Invalid(Failure::TnNotCovered)
+    );
+
+    let providers = Verifier::new(Config {
+        accept_service_provider_codes: true,
+        ..Config::default()
+    });
+    let pending = providers.start(&identity, None).unwrap();
+    let Verdict::Valid(verified) = pending.verify(&chain, &anchors(&pki), NOW) else {
         panic!("not valid");
     };
     assert_eq!(
         verified.coverage,
         Coverage::ServiceProvider("709J".to_owned())
-    );
-
-    let numbers_only = Verifier::new(Config {
-        accept_service_provider_codes: false,
-        ..Config::default()
-    });
-    let pending = numbers_only.start(&identity, None).unwrap();
-    assert_eq!(
-        pending.verify(&chain, &anchors(&pki), NOW),
-        Verdict::Invalid(Failure::TnNotCovered)
     );
 }
 

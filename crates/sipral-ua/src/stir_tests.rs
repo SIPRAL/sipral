@@ -53,15 +53,16 @@ fn wall(credentials: &Credentials) -> u64 {
 
 /// The INVITE the calling agent sends, signed.
 fn signed_invite(credentials: &Credentials, t0: Instant) -> Vec<u8> {
+    signed_invite_to(credentials, &format!("sip:{CALLED}@example.com"), t0)
+}
+
+/// The INVITE the calling agent sends to `target`, signed.
+fn signed_invite_to(credentials: &Credentials, target: &str, t0: Instant) -> Vec<u8> {
     let mut caller = agent(t0);
     caller.set_wall_clock(t0, wall(credentials));
     let id = caller.add_account(caller_account(credentials));
     caller
-        .call(
-            id,
-            &OutgoingCall::new(uri(&format!("sip:{CALLED}@example.com"))),
-            t0,
-        )
+        .call(id, &OutgoingCall::new(uri(target)), t0)
         .expect("a signed call goes");
     sent(&mut caller)
 }
@@ -430,4 +431,149 @@ fn an_account_that_signs_needs_the_time() {
         .expect("signed for the URI");
     let invite = sent(&mut caller);
     assert!(!header(&invite, HeaderName::Identity).is_empty());
+}
+
+/// The verdict a reporting agent trusting `credentials`' root reaches on
+/// `invite`, its certificate fetched, under `config`.
+fn verdict_on(
+    credentials: &Credentials,
+    invite: &[u8],
+    config: impl FnOnce(StirConfig) -> StirConfig,
+    t0: Instant,
+) -> Arc<CallerVerification> {
+    let (mut reporting, _) = called(credentials, true, StirVerification::Report, t0);
+    let mut trusted = TrustAnchors::new();
+    trusted
+        .add(credentials.anchor.as_bytes())
+        .expect("the test root");
+    reporting.set_stir(config(StirConfig::new(trusted)));
+    deliver(&mut reporting, invite, t0);
+    let (call, _) = wanted(&events(&mut reporting)).expect("wanted");
+    reporting
+        .stir_certificate(call, Some(credentials.chain.as_bytes()), t0)
+        .expect("waiting");
+    verdict(&events(&mut reporting)).expect("verdict")
+}
+
+/// The claims of the INVITE's full-form PASSporT, as JSON text.
+fn signed_claims(invite: &[u8]) -> String {
+    let identity = String::from_utf8(header(invite, HeaderName::Identity)).expect("text");
+    let segment = identity.split('.').nth(1).expect("a full form");
+    // base64url without padding (RFC 7515 §2), six bits a character
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut json = Vec::new();
+    let (mut bits, mut held) = (0_u32, 0);
+    for c in segment.bytes() {
+        let value = alphabet.iter().position(|a| *a == c).expect("base64url");
+        bits = (bits << 6) | u32::try_from(value).expect("six bits");
+        held += 6;
+        if held >= 8 {
+            held -= 8;
+            json.push(u8::try_from((bits >> held) & 0xff).expect("a byte"));
+        }
+    }
+    String::from_utf8(json).expect("JSON")
+}
+
+/// RFC 8224 §8.5: a call to a name is signed for the canonical form of the
+/// URI it is to, whatever parameters, port or case the target carried.
+#[test]
+fn a_call_to_a_name_is_signed_for_its_canonical_uri() {
+    let t0 = Instant::now();
+    let credentials = credentials(&[CALLER]);
+    let invite = signed_invite_to(&credentials, "sip:Alice@Example.COM:5070;transport=udp", t0);
+    let claims = signed_claims(&invite);
+    assert!(
+        claims.contains(r#""dest":{"uri":["sip:alice@example.com"]}"#),
+        "{claims}"
+    );
+}
+
+/// RFC 8224 §6.2: the called party is compared in every case. A PASSporT
+/// signed for a SIP URI holds for a request to that URI and not for a
+/// request to anyone else, which a `To` that is not a number used to let
+/// through unchecked.
+#[test]
+fn a_passport_for_a_sip_uri_holds_only_for_a_request_to_that_uri() {
+    let t0 = Instant::now();
+    let credentials = credentials(&[CALLER]);
+    let invite = signed_invite_to(&credentials, "sip:alice@example.com", t0);
+
+    let matching = verdict_on(&credentials, &invite, |config| config, t0);
+    assert_eq!(matching.outcome, VerificationOutcome::Valid, "{matching:?}");
+
+    let text = String::from_utf8(invite).expect("text");
+    let pasted = text.replace("sip:alice@example.com", "sip:mallory@example.com");
+    assert_ne!(pasted, text, "the To and the Request-URI were rewritten");
+    let other = verdict_on(&credentials, pasted.as_bytes(), |config| config, t0);
+    assert_eq!(other.outcome, VerificationOutcome::Invalid);
+    assert_eq!(other.failure, Some(VerificationFailure::DestMismatch));
+    assert_eq!(other.response.as_ref().map(|(code, _)| *code), Some(438));
+    let detail = other.detail.as_deref().expect("a reason");
+    assert!(
+        detail.contains("signed for uri sip:alice@example.com")
+            && detail.contains("uri sip:mallory@example.com"),
+        "{detail}"
+    );
+}
+
+/// A number in a SIP URI with `user=phone` (RFC 8224 §8.1) is signed as a
+/// number and compared as one: the same number written another way holds,
+/// another number does not.
+#[test]
+fn a_number_in_a_sip_uri_with_user_phone_is_compared_as_a_number() {
+    let t0 = Instant::now();
+    let credentials = credentials(&[CALLER]);
+    let invite = signed_invite_to(
+        &credentials,
+        "sip:+1-212-555-1213@example.com;user=phone",
+        t0,
+    );
+    let claims = signed_claims(&invite);
+    assert!(
+        claims.contains(&format!(r#""dest":{{"tn":["{CALLED}"]}}"#)),
+        "{claims}"
+    );
+    let text = String::from_utf8(invite).expect("text");
+
+    let rewritten = text.replace("+1-212-555-1213", "+12125551213");
+    assert_ne!(rewritten, text);
+    let same = verdict_on(&credentials, rewritten.as_bytes(), |config| config, t0);
+    assert_eq!(same.outcome, VerificationOutcome::Valid, "{same:?}");
+
+    let other = text.replace("+1-212-555-1213", "+1-212-555-9999");
+    let refused = verdict_on(&credentials, other.as_bytes(), |config| config, t0);
+    assert_eq!(refused.failure, Some(VerificationFailure::DestMismatch));
+    let detail = refused.detail.as_deref().expect("a reason");
+    assert!(
+        detail.contains(&format!("signed for tn {CALLED}")) && detail.contains("tn 12125559999"),
+        "{detail}"
+    );
+}
+
+/// A certificate naming only a service provider code covers no number
+/// unless the verification service is told to take codes as covering any.
+#[test]
+fn a_service_provider_code_covers_numbers_only_when_the_application_says_so() {
+    let t0 = Instant::now();
+    let credentials = sipral_stir::testing::provider_credentials("709J");
+    let invite = signed_invite(&credentials, t0);
+
+    let numbers_only = verdict_on(&credentials, &invite, |config| config, t0);
+    assert_eq!(
+        numbers_only.failure,
+        Some(VerificationFailure::NumberNotCovered)
+    );
+
+    let providers = verdict_on(
+        &credentials,
+        &invite,
+        |config| config.accept_service_provider_codes(true),
+        t0,
+    );
+    assert_eq!(
+        providers.outcome,
+        VerificationOutcome::Valid,
+        "{providers:?}"
+    );
 }

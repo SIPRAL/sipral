@@ -14,7 +14,7 @@
 //! beside the `Date` §6.1 Step 3 has the authentication service add. The
 //! full form, because §4.1 requires it of a signer that takes `iat` from its
 //! own clock; a call to something that is not a number is signed for the
-//! URI it is to (§4.1's `dest.uri`).
+//! URI it is to (§4.1's `dest.uri`), in the canonical form of §8.5.
 //!
 //! # Verifying
 //!
@@ -30,10 +30,15 @@
 //!
 //! What the crate below leaves to its caller is done here: the calling
 //! number the request names (the asserted identity from a trusted peer,
-//! otherwise `From`) must be the PASSporT's `orig`, and the called number in
-//! `To` one of its `dest` (§6.2 Step 2, §6.2.4). Of several `Identity`
-//! header fields the first that can be started on is verified; one naming a
-//! `ppt` this end does not support is ignored (§6.2 Step 1).
+//! otherwise `From`) must be the PASSporT's `orig`, and one of its `dest`
+//! must name the called party — the number or the SIP URI in `To` or in the
+//! Request-URI, each compared in the canonical form of §8.3 or §8.5 (§6.2
+//! Step 2, §6.2.4). A certificate has authority over the numbers its
+//! TNAuthList names; one that names a service provider code covers any
+//! number only when [`StirConfig::accept_service_provider_codes`] says so.
+//! Of several `Identity` header fields the first that can be started on is
+//! verified; one naming a `ppt` this end does not support is ignored (§6.2
+//! Step 1).
 //!
 //! An account set to [`StirVerification::Strict`] refuses a call that does
 //! not verify with the response §6.2.2 prescribes; every other call is
@@ -73,19 +78,34 @@ pub struct StirConfig {
     pub(crate) anchors: TrustAnchors,
     pub(crate) freshness: u64,
     pub(crate) certificate_wait: Duration,
+    pub(crate) accept_service_provider_codes: bool,
 }
 
 impl StirConfig {
     /// Verify against `anchors` — the STI-PA's approved roots, in a SHAKEN
     /// deployment — with the sixty seconds of freshness RFC 8224 §6.2 Step 4
-    /// recommends and [`DEFAULT_CERTIFICATE_WAIT`].
+    /// recommends and [`DEFAULT_CERTIFICATE_WAIT`], a certificate having
+    /// authority only over the numbers its TNAuthList names.
     #[must_use]
     pub fn new(anchors: TrustAnchors) -> Self {
         Self {
             anchors,
             freshness: sipral_stir::DEFAULT_FRESHNESS,
             certificate_wait: DEFAULT_CERTIFICATE_WAIT,
+            accept_service_provider_codes: false,
         }
+    }
+
+    /// Whether a certificate whose TNAuthList carries a service provider
+    /// code (RFC 8226 §9) has authority over every calling number. Off
+    /// unless this says otherwise: a code names a provider, not numbers, and
+    /// taking it as covering any number is a trust decision about the
+    /// providers the anchors certify — the one a SHAKEN deployment, whose
+    /// certificates carry codes and no numbers, makes by turning this on.
+    #[must_use]
+    pub const fn accept_service_provider_codes(mut self, accept: bool) -> Self {
+        self.accept_service_provider_codes = accept;
+        self
     }
 
     /// How far `iat` may be from the time of verification, either way.
@@ -110,6 +130,10 @@ impl fmt::Debug for StirConfig {
             .field("anchors", &self.anchors.len())
             .field("freshness", &self.freshness)
             .field("certificate_wait", &self.certificate_wait)
+            .field(
+                "accept_service_provider_codes",
+                &self.accept_service_provider_codes,
+            )
             .finish()
     }
 }
@@ -192,7 +216,39 @@ struct Held {
 #[derive(Debug, Clone, Default)]
 struct Numbers {
     orig: Option<Tn>,
-    dest: Option<Tn>,
+    /// Who the request is for, as its `To` names it and then as its
+    /// Request-URI does: each as a number when it is one (RFC 8224 §8.1),
+    /// and a SIP URI also as its canonical URI (§8.5).
+    called: Vec<Called>,
+}
+
+/// One way a request names who it is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Called {
+    /// A telephone number, canonical (RFC 8224 §8.3).
+    Number(Tn),
+    /// A URI, canonical (RFC 8224 §8.5).
+    Uri(String),
+}
+
+impl fmt::Display for Called {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Number(number) => write!(f, "tn {number}"),
+            Self::Uri(uri) => write!(f, "uri {uri}"),
+        }
+    }
+}
+
+impl Numbers {
+    /// The destination a compact form's claims are rebuilt with: the number
+    /// `To` names, or failing that its canonical URI.
+    fn dest(&self) -> Option<Dest> {
+        self.called.first().map(|called| match called {
+            Called::Number(number) => Dest::tn(number.clone()),
+            Called::Uri(uri) => Dest::uri(uri),
+        })
+    }
 }
 
 /// Where an incoming INVITE goes next.
@@ -347,7 +403,8 @@ impl UserAgent {
         let config = self.stir.config.as_ref();
         let verifier = Verifier::new(Config {
             freshness: config.map_or(sipral_stir::DEFAULT_FRESHNESS, |config| config.freshness),
-            accept_service_provider_codes: true,
+            accept_service_provider_codes: config
+                .is_some_and(|config| config.accept_service_provider_codes),
         });
         let raw = held.request.as_raw();
         let unix = self.unix_at(now).unwrap_or(0);
@@ -355,10 +412,10 @@ impl UserAgent {
             .numbers
             .orig
             .clone()
-            .zip(held.numbers.dest.clone())
+            .zip(held.numbers.dest())
             .map(|(orig, dest)| Claims {
                 orig,
-                dest: Dest::tn(dest),
+                dest,
                 iat: raw
                     .header(HeaderName::Date)
                     .and_then(date_of)
@@ -478,13 +535,9 @@ impl UserAgent {
             return Ok(None);
         };
         let iat = self.unix_at(now).ok_or(UaError::NoWallClock)?;
-        let dest = match number_of(target) {
-            Some(number) => Dest::tn(number),
-            None => Dest {
-                tn: Vec::new(),
-                uri: vec![target.as_str().to_owned()],
-            },
-        };
+        // a name rather than a number is signed as the canonical URI of RFC
+        // 8224 §8.5, which is what the verifier derives from its To
+        let dest = number_of(target).map_or_else(|| Dest::uri(target.as_str()), Dest::tn);
         let claims = Claims {
             orig: signing.orig.clone(),
             dest,
@@ -554,7 +607,7 @@ const fn attestation_of(attest: Attest) -> Attestation {
 
 /// The numbers a request names, canonical: the caller the application will
 /// be shown — the asserted identity from a trusted peer, otherwise `From` —
-/// and the number in `To`.
+/// and who the request is for, from `To` and the Request-URI.
 fn numbers_of(request: &RawMessage<'_>, identity: Option<&CallIdentity>) -> Numbers {
     let asserted = identity
         .map(|identity| &identity.caller.asserted)
@@ -571,16 +624,40 @@ fn numbers_of(request: &RawMessage<'_>, identity: Option<&CallIdentity>) -> Numb
             .as_ref()
             .and_then(number_of)
     };
-    let dest = request
+    let to = request
         .to()
         .ok()
-        .and_then(|to| Uri::parse(to.uri_bytes()).ok())
-        .as_ref()
-        .and_then(number_of);
+        .and_then(|to| Uri::parse(to.uri_bytes()).ok());
+    let target = request
+        .request_uri_bytes()
+        .and_then(|uri| Uri::parse(uri).ok());
+    let mut called = Vec::new();
+    for uri in [to, target].iter().flatten() {
+        for named in called_of(uri) {
+            if !called.contains(&named) {
+                called.push(named);
+            }
+        }
+    }
     Numbers {
         orig: asserted.or_else(from),
-        dest,
+        called,
     }
+}
+
+/// Who `uri` names as the called party: its number when it has one, and a
+/// SIP or SIPS URI also as the canonical URI of RFC 8224 §8.5, since a
+/// signer that did not take its user part for a number (§8.1 leaves that to
+/// local policy) signed the URI instead.
+fn called_of(uri: &Uri) -> Vec<Called> {
+    let mut called = Vec::new();
+    if let Some(number) = number_of(uri) {
+        called.push(Called::Number(number));
+    }
+    if matches!(uri.scheme(), UriScheme::Sip | UriScheme::Sips) {
+        called.push(Called::Uri(sipral_stir::canonical_uri(uri.as_str())));
+    }
+    called
 }
 
 /// The telephone number a URI names, canonical (RFC 8224 §8.1, §8.3): a
@@ -620,10 +697,10 @@ fn judged(verdict: &Verdict, numbers: &Numbers) -> CallerVerification {
                 response: None,
                 refused: false,
             },
-            Some(failure) => CallerVerification {
+            Some((failure, detail)) => CallerVerification {
                 outcome: VerificationOutcome::Invalid,
                 failure: Some(failure),
-                detail: Some(failure.to_string().into_boxed_str()),
+                detail: Some(detail.into_boxed_str()),
                 attestation: None,
                 orig: None,
                 origid: None,
@@ -655,15 +732,60 @@ fn judged(verdict: &Verdict, numbers: &Numbers) -> CallerVerification {
     }
 }
 
-/// Which of the request's numbers a valid PASSporT was not signed for.
-fn mismatch(verified: &Verified, numbers: &Numbers) -> Option<VerificationFailure> {
+/// Which of the request's parties a valid PASSporT was not signed for, and
+/// the words that say so.
+///
+/// The caller is the request's (RFC 8224 §6.2.4). The called party is
+/// compared in every case, whatever the request names it with: a number
+/// against `dest.tn`, a SIP URI against `dest.uri`, both canonical (§8.3,
+/// §8.5), from `To` or from the Request-URI. A PASSporT whose `dest` names
+/// none of them was signed for another call, and a request that names no
+/// called party at all cannot be one it was signed for.
+fn mismatch(verified: &Verified, numbers: &Numbers) -> Option<(VerificationFailure, String)> {
     if numbers.orig.as_ref() != Some(&verified.orig) {
-        return Some(VerificationFailure::OrigMismatch);
+        let failure = VerificationFailure::OrigMismatch;
+        let requested = numbers
+            .orig
+            .as_ref()
+            .map_or_else(|| "no number".to_owned(), |orig| format!("tn {orig}"));
+        return Some((
+            failure,
+            format!(
+                "{failure}: signed for tn {}, the request is from {requested}",
+                verified.orig
+            ),
+        ));
     }
-    match numbers.dest.as_ref() {
-        Some(dest) if !verified.dest.tn.contains(dest) => Some(VerificationFailure::DestMismatch),
-        _ => None,
+    let named = numbers.called.iter().any(|called| match called {
+        Called::Number(number) => verified.dest.names_number(number),
+        Called::Uri(uri) => verified.dest.names_uri(uri),
+    });
+    if named {
+        return None;
     }
+    let failure = VerificationFailure::DestMismatch;
+    let signed = verified
+        .dest
+        .tn
+        .iter()
+        .map(|number| format!("tn {number}"))
+        .chain(verified.dest.uri.iter().map(|uri| format!("uri {uri}")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let requested = if numbers.called.is_empty() {
+        "no called party".to_owned()
+    } else {
+        numbers
+            .called
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Some((
+        failure,
+        format!("{failure}: signed for {signed}, the request is for {requested}"),
+    ))
 }
 
 const fn failure_of(failure: Failure) -> VerificationFailure {

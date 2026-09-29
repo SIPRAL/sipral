@@ -32,10 +32,14 @@ pub struct Config {
     /// seconds, before the request is stale.
     pub freshness: u64,
     /// Whether a service provider code in the TNAuthList covers any
-    /// originating number. That is what a SHAKEN certificate carries (its
-    /// TNAuthList names the provider, not the numbers), so it is on by
-    /// default; off, only a number or a range naming the originating number
-    /// gives a certificate authority over it.
+    /// originating number. Off by default: only a number or a range naming
+    /// the originating number gives a certificate authority over it.
+    ///
+    /// A SHAKEN certificate names its provider rather than the numbers, and
+    /// whether that provider may vouch for a given number is known only to
+    /// whoever decided to trust it — the application, with the roots of a
+    /// SHAKEN deployment, which turns this on. On, a certificate carrying
+    /// any code vouches for every number there is.
     pub accept_service_provider_codes: bool,
 }
 
@@ -43,7 +47,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             freshness: DEFAULT_FRESHNESS,
-            accept_service_provider_codes: true,
+            accept_service_provider_codes: false,
         }
     }
 }

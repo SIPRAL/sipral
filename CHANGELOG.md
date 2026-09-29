@@ -1425,6 +1425,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A PASSporT holds only for the called party it was signed for, whatever the request names it with.** The verifier compared `dest` with the request only when `To` was a number, so a PASSporT signed for `sip:alice@example.com` vouched for a request to anyone else; now the number or SIP URI in `To` or the Request-URI is held against `dest.tn` and `dest.uri` in every case, both canonical (RFC 8224 §8.3, §8.5), and `DestMismatch`'s `detail` names what was signed and what was asked for. The signer writes `dest.uri` in §8.5's canonical form (`sip:user@host`, lower case, no port, parameters or headers), and `sipral_stir::canonical_uri`, `Dest::uri`, `Dest::names_number` and `Dest::names_uri` do the same for any caller.
 - **The Kotlin binding loads with every 0.31 event arm.** Each payload arm's numbers now cross JNI in one `long[]`, so the event's `deliver` stays inside the JVM's 255 parameter slots; `SipralEvent.payload` reads the same.
 - **The Swift binding hands an empty list over as a null pointer.** `Sipral.callAnswerWith` with no header fields was refused `headers is not read here`, because an empty Swift array still carried a buffer; every printed wrapper that takes a list now passes null and zero for an empty one, as the .NET and Kotlin layers already did.
 - **A 2xx lost on UDP is sent again until its ACK arrives.** RFC 3261
@@ -2370,6 +2371,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **A service provider code in a STIR certificate covers no number unless the application says so.** `sipral_stir::Config::accept_service_provider_codes` is off by default, and `StirConfig::accept_service_provider_codes(true)` turns it on for an agent: a certificate whose TNAuthList names only a code (RFC 8226 §9) vouched for every number there is.
 - **A call that cannot meet a required SRTP policy is refused by the stack.**
   An INVITE whose offer a `Required`, `DtlsRequired` or `DtlsOrSdes` call
   will not carry audio on is answered 488 by `MediaEngine::answer` and

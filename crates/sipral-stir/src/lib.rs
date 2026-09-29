@@ -63,7 +63,9 @@
 //!   the signing certificate's own list decides.
 //! - **The request.** A full-form PASSporT's `orig` and `dest` are returned
 //!   in [`Verified`], and comparing them with the request's From and To (RFC
-//!   8224 §6.2) is the application's; so is choosing among several Identity
+//!   8224 §6.2) is the application's, with [`Dest::names_number`] and
+//!   [`Dest::names_uri`] comparing in the canonical forms of §8.3 and §8.5
+//!   ([`canonical_uri`]); so is choosing among several Identity
 //!   header fields, and deciding what a verdict does to the call.
 //! - **Which algorithms and extensions.** ES256 is the only algorithm and
 //!   `shaken` the only `ppt`; RFC 8443's `rph` and RFC 8946's `div`, and
@@ -120,7 +122,7 @@ pub use cert::{
     AnchorError, MAX_CERTIFICATE_LEN, MAX_CHAIN_CERTIFICATES, MAX_CHAIN_LEN, TrustAnchors,
 };
 pub use identity::Identity;
-pub use passport::{Attest, Claims, Dest, OrigId, Shaken, Tn};
+pub use passport::{Attest, Claims, Dest, OrigId, Shaken, Tn, canonical_uri};
 pub use sign::{SignError, Signer};
 pub use tnauthlist::{Coverage, TnAuthList, TnEntry};
 pub use verdict::{
