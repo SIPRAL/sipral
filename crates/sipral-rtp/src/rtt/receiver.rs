@@ -50,7 +50,8 @@ pub struct ReceiverConfig {
     pub t140_payload_type: u8,
     /// The payload type negotiated for `red/1000`, if it was.
     pub red_payload_type: Option<u8>,
-    /// How long a gap no copy has filled holds up the text behind it.
+    /// How long a block may be held behind a gap no copy has filled before
+    /// the gap is given up.
     pub reorder_wait: Duration,
     /// The most blocks held behind a gap; one more gives the gap up at once.
     pub max_pending: usize,
@@ -99,9 +100,8 @@ pub struct TextReceiver {
     /// The extended sequence number of the next block due, once one packet
     /// has said where the stream is.
     expected: Option<u64>,
-    pending: BTreeMap<u64, Vec<u8>>,
-    /// Since when the first gap has held text up.
-    gap_since: Option<Duration>,
+    /// Blocks behind a gap, with when each arrived.
+    pending: BTreeMap<u64, (Vec<u8>, Duration)>,
     decoder: Decoder,
     events: VecDeque<TextEvent>,
     /// Events were dropped for want of room; a marker is owed.
@@ -124,7 +124,6 @@ impl TextReceiver {
             config,
             expected: None,
             pending: BTreeMap::new(),
-            gap_since: None,
             decoder: Decoder::new(),
             events: VecDeque::new(),
             dropped: false,
@@ -143,7 +142,6 @@ impl TextReceiver {
     pub fn restart(&mut self) {
         self.expected = None;
         self.pending.clear();
-        self.gap_since = None;
         self.decoder.reset();
     }
 
@@ -198,18 +196,13 @@ impl TextReceiver {
             if place < expected || self.pending.contains_key(&place) {
                 continue;
             }
-            self.pending.insert(place, data.to_vec());
+            self.pending.insert(place, (data.to_vec(), now));
             fresh = true;
         }
         self.drain();
         while self.pending.len() > self.config.max_pending {
             self.skip_gap();
         }
-        self.gap_since = if self.pending.is_empty() {
-            None
-        } else {
-            self.gap_since.or(Some(now))
-        };
         if fresh {
             Arrival::Accepted
         } else {
@@ -217,26 +210,23 @@ impl TextReceiver {
         }
     }
 
-    /// When [`poll`](Self::poll) must next be called: when the gap holding
-    /// text up has waited long enough, if one is.
+    /// When [`poll`](Self::poll) must next be called: when the block that
+    /// has been held behind a gap the longest has waited its time, if any
+    /// block is held.
     #[must_use]
     pub fn deadline(&self) -> Option<Duration> {
-        self.gap_since.map(|since| since + self.config.reorder_wait)
+        self.pending
+            .values()
+            .map(|(_, arrived)| *arrived)
+            .min()
+            .map(|arrived| arrived + self.config.reorder_wait)
     }
 
-    /// Give up on any gap that has waited its time by `now`.
+    /// Give up on every gap that has held a block back for its whole wait
+    /// by `now`.
     pub fn poll(&mut self, now: Duration) {
-        while let Some(deadline) = self.deadline() {
-            if now < deadline {
-                break;
-            }
+        while self.deadline().is_some_and(|deadline| deadline <= now) {
             self.skip_gap();
-            // the next gap, if there is one, starts its own wait now
-            self.gap_since = if self.pending.is_empty() {
-                None
-            } else {
-                Some(now)
-            };
         }
     }
 
@@ -275,7 +265,7 @@ impl TextReceiver {
         let Some(mut expected) = self.expected else {
             return;
         };
-        while let Some(data) = self.pending.remove(&expected) {
+        while let Some((data, _)) = self.pending.remove(&expected) {
             self.deliver(&data);
             expected += 1;
         }
@@ -300,7 +290,6 @@ impl TextReceiver {
         while !self.pending.is_empty() {
             self.skip_gap();
         }
-        self.gap_since = None;
     }
 
     fn deliver(&mut self, data: &[u8]) {
@@ -504,12 +493,15 @@ mod tests {
         rx.receive(bare(1, b"a"), ms(0));
         rx.receive(bare(4, b"b"), ms(0));
         rx.receive(bare(8, b"c"), ms(0));
+        rx.receive(bare(10, b"d"), ms(50));
         rx.poll(ms(100));
-        assert_eq!(transcript(&mut rx), "a\u{FFFD}b");
-        // the second gap waits its own time from when the first gave up
-        assert_eq!(rx.deadline(), Some(ms(200)));
-        rx.poll(ms(200));
-        assert_eq!(transcript(&mut rx), "\u{FFFD}c");
+        // the blocks that have waited their time come out, a marker for
+        // each gap in front of them; the one that arrived later still waits
+        assert_eq!(transcript(&mut rx), "a\u{FFFD}b\u{FFFD}c");
+        assert_eq!(rx.deadline(), Some(ms(150)));
+        rx.poll(ms(150));
+        assert_eq!(transcript(&mut rx), "\u{FFFD}d");
+        assert_eq!(rx.deadline(), None);
     }
 
     #[test]
