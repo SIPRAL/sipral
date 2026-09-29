@@ -6175,10 +6175,11 @@ public enum Sipral {
     /// Replaces whatever an earlier call set. Every account that reports —
     /// the default — verifies once there is at least one anchor, and none
     /// does with none; an account set to `SIPRAL_STIR_VERIFICATION_STRICT`
-    /// verifies either way. `config.unix_seconds`, when set, is the wall
-    /// clock at `now_ms`, and the stack signs and verifies by it from here
-    /// on; without it the stack must have been created with
-    /// `media_clock_unix_seconds`, or this is `SIPRAL_STATUS_WRONG_STATE`.
+    /// verifies either way. `config.unix_seconds` is the wall clock at
+    /// `now_ms`, and the stack signs and verifies by it from here on; zero
+    /// keeps what an earlier call gave, and is `SIPRAL_STATUS_WRONG_STATE`
+    /// on the first. A stack whose accounts only sign calls makes this call
+    /// too, with no anchors.
     ///
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anchors that are not
     /// certificates, or whose key is not P-256; `SIPRAL_STATUS_NOT_SUPPORTED`

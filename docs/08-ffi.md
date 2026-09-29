@@ -609,9 +609,13 @@ ABI 0.31, behind `SIPRAL_FEATURE_STIR` (`1 << 16`), the Rust side of which is
 | `stir_orig` | the number it signs as, or null for the one in `aor` |
 | `stir_origid`, `stir_attestation` | RFC 8588's `origid` (null draws one for the account) and `attest` (zero is `A`) |
 
-A signing account needs the stack's wall clock: `media_clock_unix_seconds` at
-creation, or `unix_seconds` in `sipral_stack_stir`; without one
-`sipral_account_add` answers `SIPRAL_STATUS_WRONG_STATE`.
+A signing account needs the wall clock, which `sipral_stack_stir` gives the
+stack as `unix_seconds` paired with its `now_ms` — the one pairing only the
+application can make, since `now_ms` counts from wherever the application's
+clock does; without it `sipral_account_add` answers
+`SIPRAL_STATUS_WRONG_STATE`. A stack that only signs makes that call with no
+anchors. `media_clock_unix_seconds` is not taken for it: it goes with no
+`now_ms`.
 
 `sipral_stack_stir(stack, &config, now_ms)` takes a `sipral_stir_config_t`:
 the trust anchors (PEM or DER, one after another), `freshness_seconds` (zero

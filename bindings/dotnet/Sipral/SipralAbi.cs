@@ -4050,8 +4050,8 @@ public struct SipralAccountConfig
     /// The P-256 private key this account signs its calls with (RFC 8224
     /// §6.1): the bare 32-octet scalar, or an `EC PRIVATE KEY` or
     /// `PRIVATE KEY` in DER or PEM. Null and zero signs nothing. Needs the
-    /// stack's wall clock (`media_clock_unix_seconds`, or `unix_seconds`
-    /// in `sipral_stack_stir`); `SIPRAL_STATUS_WRONG_STATE` without it.
+    /// wall clock `sipral_stack_stir` gives the stack in `unix_seconds`;
+    /// `SIPRAL_STATUS_WRONG_STATE` without it.
     /// </summary>
     public IntPtr StirKey;
     /// <summary>
@@ -6740,9 +6740,11 @@ public struct SipralStirConfig
     public ulong CertificateWaitMs;
     /// <summary>
     /// The wall clock at `now_ms`, in seconds since 1970, or zero to keep
-    /// the one the stack was created with
-    /// (`sipral_stack_config_t::media_clock_unix_seconds`). A PASSporT is
-    /// judged against the time, so a stack that has neither is refused.
+    /// the one an earlier call gave. A PASSporT is signed and judged by
+    /// the time, and only the caller can say which `now_ms` a time goes
+    /// with, so the first call must give it.
+    /// (`sipral_stack_config_t::media_clock_unix_seconds` goes with no
+    /// `now_ms` at all, and is not taken for it.)
     /// </summary>
     public ulong UnixSeconds;
 
@@ -11379,10 +11381,11 @@ public static class Sipral
     /// Replaces whatever an earlier call set. Every account that reports —
     /// the default — verifies once there is at least one anchor, and none
     /// does with none; an account set to `SIPRAL_STIR_VERIFICATION_STRICT`
-    /// verifies either way. `config.unix_seconds`, when set, is the wall
-    /// clock at `now_ms`, and the stack signs and verifies by it from here
-    /// on; without it the stack must have been created with
-    /// `media_clock_unix_seconds`, or this is `SIPRAL_STATUS_WRONG_STATE`.
+    /// verifies either way. `config.unix_seconds` is the wall clock at
+    /// `now_ms`, and the stack signs and verifies by it from here on; zero
+    /// keeps what an earlier call gave, and is `SIPRAL_STATUS_WRONG_STATE`
+    /// on the first. A stack whose accounts only sign calls makes this call
+    /// too, with no anchors.
     ///
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anchors that are not
     /// certificates, or whose key is not P-256; `SIPRAL_STATUS_NOT_SUPPORTED`

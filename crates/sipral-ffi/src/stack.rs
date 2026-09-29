@@ -1490,12 +1490,6 @@ fn agent_policy(
     now: Instant,
 ) -> Result<(), Fail> {
     agent.allow_referrals(toggled(config.referrals, "referrals", false)?);
-    // the one wall clock a stack is given, which a PASSporT is signed and
-    // judged by as well as the RTCP reports it was named for; zero is the
-    // epoch there, and here no clock at all
-    if config.media_clock_unix_seconds != 0 {
-        agent.set_wall_clock(now, config.media_clock_unix_seconds);
-    }
     agent
         .keep_registrar_flows_alive(registrar_keepalive(config)?, now)
         .map_err(|error| {

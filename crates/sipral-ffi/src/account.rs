@@ -226,8 +226,8 @@ record! {
         /// The P-256 private key this account signs its calls with (RFC 8224
         /// §6.1): the bare 32-octet scalar, or an `EC PRIVATE KEY` or
         /// `PRIVATE KEY` in DER or PEM. Null and zero signs nothing. Needs the
-        /// stack's wall clock (`media_clock_unix_seconds`, or `unix_seconds`
-        /// in `sipral_stack_stir`); `SIPRAL_STATUS_WRONG_STATE` without it.
+        /// wall clock `sipral_stack_stir` gives the stack in `unix_seconds`;
+        /// `SIPRAL_STATUS_WRONG_STATE` without it.
         pub stir_key: *const u8,
         /// How many bytes of it.
         pub stir_key_len: usize,

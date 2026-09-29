@@ -1816,6 +1816,19 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     account.srtp = account_srtp_for_this_flow;
     account.stir_verification = stir_verification_for_this_flow;
     if (stir_key_for_this_flow != NULL && stir_url_for_this_flow != NULL) {
+        /* a signing account needs the wall clock, paired with this
+         * program's own `now_ms`: a stack that only signs gives it with no
+         * anchors */
+        sipral_stir_config_t clock;
+        memset(&clock, 0, sizeof clock);
+        clock.size = sizeof clock;
+        clock.unix_seconds = (uint64_t)time(NULL);
+        status = sipral_stack_stir(end->stack, &clock, now_ms());
+        if (status != SIPRAL_STATUS_OK) {
+            wrong("sipral_stack_stir", status);
+            close_endpoint(end);
+            return -1;
+        }
         account.stir_key = stir_key_for_this_flow;
         account.stir_key_len = stir_key_len_for_this_flow;
         account.stir_certificate_url = stir_url_for_this_flow;
@@ -4478,6 +4491,7 @@ static int stir_call(const char *label, const char *key_path, const char *url,
     stir.size = sizeof stir;
     stir.anchors = anchor;
     stir.anchors_len = anchor_len;
+    stir.unix_seconds = (uint64_t)time(NULL);
     status = sipral_stack_stir(callee.stack, &stir, now_ms());
     if (status != SIPRAL_STATUS_OK) {
         printf("  FAIL  %s — sipral_stack_stir: %s\n", label, sipral_status_name(status));
@@ -4556,8 +4570,9 @@ static int stir_call(const char *label, const char *key_path, const char *url,
     } else if (callee.seen.verification_outcome != outcome
                || callee.seen.verification_code != code
                || (callee.seen.verification_refused != 0) != refused) {
-        printf("  FAIL  %s — the verdict was outcome %u, response %u, refused %u\n", label,
-               (unsigned)callee.seen.verification_outcome,
+        printf("  FAIL  %s — the verdict was outcome %u, failure %u, response %u, refused %u\n",
+               label, (unsigned)callee.seen.verification_outcome,
+               (unsigned)callee.seen.verification_failure,
                (unsigned)callee.seen.verification_code,
                (unsigned)callee.seen.verification_refused);
     } else if (refused && (caller.seen.confirmed || callee.seen.incoming != SIPRAL_HANDLE_NONE)) {

@@ -127,13 +127,32 @@ fn stack_hearing(heard: &mut Heard, credentials: &Credentials, second: bool) -> 
     let mut config = config(record, &mut unused);
     config.event_callback = Some(listen);
     config.event_user_data = ptr::from_mut(heard).cast::<c_void>();
-    config.media_clock_unix_seconds = credentials.not_before + 1_000;
     if second {
         config.entropy = OTHER_SEED.as_ptr();
     }
     let (status, handle) = create(&config);
     assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    stir(handle, &[], credentials.not_before + 1_000);
     handle
+}
+
+/// `sipral_stack_stir` with these anchors and this wall clock at `now_ms`
+/// zero.
+fn stir(handle: SipralHandle, anchors: &[u8], unix_seconds: u64) {
+    let config = SipralStirConfig {
+        size: size_of::<SipralStirConfig>(),
+        anchors: if anchors.is_empty() {
+            ptr::null()
+        } else {
+            anchors.as_ptr()
+        },
+        anchors_len: anchors.len(),
+        freshness_seconds: 0,
+        certificate_wait_ms: 0,
+        unix_seconds,
+    };
+    let status = unsafe { sipral_stack_stir(handle, ptr::from_ref(&config), 0) };
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
 }
 
 fn account(handle: SipralHandle, config: &SipralAccountConfig) -> (SipralStatus, SipralHandle) {
@@ -150,16 +169,8 @@ fn called_account(verification: u32) -> SipralAccountConfig {
 }
 
 fn trust(handle: SipralHandle, credentials: &Credentials) {
-    let stir = SipralStirConfig {
-        size: size_of::<SipralStirConfig>(),
-        anchors: credentials.anchor.as_ptr(),
-        anchors_len: credentials.anchor.len(),
-        freshness_seconds: 0,
-        certificate_wait_ms: 0,
-        unix_seconds: 0,
-    };
-    let status = unsafe { sipral_stack_stir(handle, ptr::from_ref(&stir), 0) };
-    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    // zero keeps the wall clock the stack was already given
+    stir(handle, credentials.anchor.as_bytes(), 0);
 }
 
 /// The INVITE a signing account on its own stack places to [`CALLED`].
@@ -341,9 +352,12 @@ fn what_an_account_says_about_stir_is_checked_before_it_is_added() {
     assert_eq!(account(handle, &bad_key).0, SipralStatus::InvalidArgument);
     assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
 
-    // a stack that was never told the time cannot sign
+    // a stack that was never told the time cannot sign; the media clock's
+    // seconds go with no `now_ms`, and are not taken for the time
     let mut unused = Observed::default();
-    let (status, clockless) = create(&config(record, &mut unused));
+    let mut created = config(record, &mut unused);
+    created.media_clock_unix_seconds = credentials.not_before + 1_000;
+    let (status, clockless) = create(&created);
     assert_eq!(status, SipralStatus::Ok);
     let mut signing = called_account(0);
     signing.stir_key = credentials.key.as_ptr();
