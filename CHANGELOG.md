@@ -1149,6 +1149,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A packet still on its way from where the far end was does not take a
+  moved call back there.** After a re-INVITE moved the far end's media, the
+  first packet read closed the stream's latch wherever it came from; one
+  the far end had sent from its old address just before it moved, read
+  after the re-INVITE, held the stream on an address nobody listened at
+  and refused every packet from the new one, for the rest of the call. Such
+  a packet is still played but leaves the latch open, until half a second
+  of them says the far end is sending from there still.
 - **SRTP under AES-GCM interoperates.** RFC 7714's two suites derive their
   session keys with RFC 3711's PRF, over a salt two octets narrower than
   the one it is defined for; `sipral-rtp` put the twelve-octet salt at the

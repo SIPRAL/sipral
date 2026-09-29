@@ -272,6 +272,12 @@ struct Outbound {
     sent_since_report: bool,
 }
 
+/// How many packets from the address a re-INVITE moved the far end away
+/// from it takes, with nothing arriving from anywhere else, to believe the
+/// far end is sending from there still: half a second of 20 ms packets.
+/// What was merely in flight when it moved is a handful at most.
+const STILL_THERE: u16 = 25;
+
 // each bool here is an independent yes/no fact learned about the remote
 // side at a different point in the stream's life, not a state a caller
 // steps through, which is what the lint is guarding against
@@ -281,6 +287,19 @@ struct Inbound {
     accepted: PayloadTypes,
     signalled: SocketAddr,
     latch: Option<SocketAddr>,
+    /// The address a re-INVITE moved the far end away from
+    /// ([`RtpSession::relocate`]), until the latch closes somewhere else.
+    ///
+    /// A packet the far end sent from there just before it moved can still
+    /// be read after the re-INVITE was: on another thread, or behind it in
+    /// a queue. Its audio is the far end's and is played, but it does not
+    /// close the latch, which would otherwise hold the stream on an address
+    /// nobody listens at any more and refuse every packet from the one the
+    /// far end moved to. The count is how many have come from there since;
+    /// at [`STILL_THERE`] the far end is taken to be sending from there
+    /// still, as one behind a NAT that kept its mapping while its own
+    /// address changed does, and the latch closes on it after all.
+    left: Option<(SocketAddr, u16)>,
     /// Whether the latch follows the far end rather than holding: a packet
     /// from another address is taken, and moves the latch there, once it has
     /// passed everything a packet from the latched address would have to.
@@ -377,6 +396,7 @@ impl RtpSession {
                 accepted: config.accepted,
                 signalled: config.remote,
                 latch: None,
+                left: None,
                 following: false,
                 rtcp_latch: None,
                 source: None,
@@ -616,9 +636,21 @@ impl RtpSession {
         // first thing this function does. Merging is how someone who can guess
         // a port gets their audio into the call. A stream told to follow
         // (`set_following`) moves an already closed latch too, but only at the
-        // very end, for a packet the stream took
+        // very end, for a packet the stream took. Not onto the address a
+        // re-INVITE moved the far end away from, though, unless the far end
+        // turns out to be sending from there still (`Inbound::left`)
         if self.inbound.latch.is_none() {
-            self.inbound.latch = Some(from);
+            let stale = match &mut self.inbound.left {
+                Some((was, heard)) if *was == from => {
+                    *heard = heard.saturating_add(1);
+                    *heard < STILL_THERE
+                }
+                _ => false,
+            };
+            if !stale {
+                self.inbound.latch = Some(from);
+                self.inbound.left = None;
+            }
         }
 
         // A second SSRC on a two-party stream is either the far end restarting
@@ -909,8 +941,12 @@ impl RtpSession {
     }
 
     /// Point the stream at a new address and forget the latch, for a
-    /// re-INVITE that moved the far end. The next valid packet latches again.
+    /// re-INVITE that moved the far end. The next valid packet latches again,
+    /// unless it comes from where the far end was: that one is still played,
+    /// and leaves the latch open until [`STILL_THERE`] of them have.
     pub fn relocate(&mut self, remote: SocketAddr) {
+        let was = self.inbound.latch.unwrap_or(self.inbound.signalled);
+        self.inbound.left = (was != remote).then_some((was, 0));
         self.inbound.signalled = remote;
         self.inbound.latch = None;
         self.inbound.rtcp_latch = None;
@@ -1563,7 +1599,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
 
-    use super::{Discard, Received, RtcpReceived, RtpSession, StreamConfig};
+    use super::{Discard, Received, RtcpReceived, RtpSession, STILL_THERE, StreamConfig};
     use crate::dtmf::{EventReceiver, EventReport, Outcome, Outgoing, Reported};
     use crate::playout::{Activity, BufferConfig, Frame, Pull};
     use crate::rtcp::{
@@ -2475,6 +2511,64 @@ mod tests {
         assert_eq!(session.destination(), addr(IMPOSTOR));
         session.receive(&mut datagram(7, 102, 8), addr(IMPOSTOR), Duration::ZERO);
         assert_eq!(session.latched(), Some(addr(IMPOSTOR)));
+    }
+
+    #[test]
+    fn a_packet_still_on_its_way_from_where_the_far_end_left_does_not_take_the_latch_back() {
+        // the far end sent this from its old address just before it moved,
+        // and it is read only after the re-INVITE that moved it: latching on
+        // it would hold the stream on an address nobody listens at any more,
+        // and refuse every packet from the one the far end moved to
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+        session.relocate(addr(IMPOSTOR));
+
+        assert_eq!(
+            session.receive(&mut datagram(7, 102, 8), addr(PEER), Duration::ZERO),
+            Received::Queued,
+            "its audio is still the far end's, and is played"
+        );
+        assert_eq!(session.latched(), None, "but it does not close the latch");
+        assert_eq!(session.destination(), addr(IMPOSTOR));
+
+        assert_eq!(
+            session.receive(&mut datagram(7, 103, 8), addr(IMPOSTOR), Duration::ZERO),
+            Received::Queued,
+            "the far end at the address it moved to is heard"
+        );
+        assert_eq!(session.latched(), Some(addr(IMPOSTOR)));
+        assert_eq!(
+            session.receive(&mut datagram(7, 104, 8), addr(PEER), Duration::ZERO),
+            Received::Dropped(Discard::ForeignAddress),
+            "and once it is, the old address is a stranger like any other"
+        );
+    }
+
+    #[test]
+    fn a_far_end_that_keeps_sending_from_where_it_was_takes_the_latch_back_in_time() {
+        // a re-INVITE moved the description and not the source, as a far end
+        // behind a NAT that kept its mapping while its own address changed
+        // does: heard all along, and latched onto once it has plainly not
+        // gone anywhere
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+        session.relocate(addr(IMPOSTOR));
+        let first = 102_u16;
+        for sequence in first..first + STILL_THERE - 1 {
+            assert_eq!(
+                session.receive(&mut datagram(7, sequence, 8), addr(PEER), Duration::ZERO),
+                Received::Queued
+            );
+            assert_eq!(session.latched(), None);
+            assert_eq!(session.destination(), addr(IMPOSTOR));
+        }
+        session.receive(
+            &mut datagram(7, first + STILL_THERE - 1, 8),
+            addr(PEER),
+            Duration::ZERO,
+        );
+        assert_eq!(session.latched(), Some(addr(PEER)));
+        assert_eq!(session.destination(), addr(PEER));
     }
 
     #[test]
