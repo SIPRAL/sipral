@@ -244,9 +244,11 @@ The decisions, and why each one is what it is:
   gathering timeout. The RFC's default Rc of seven waits 39.5 seconds, which
   for the first answer is a REGISTER or a call held that long for a server that
   is not there.
-- **When the server does not answer.** The socket is described by its own
-  address, exactly as it would have been with STUN off — the fallback is the
-  configuration that already worked — and the event says so.
+- **When the server does not answer.** With more than one server named,
+  the next one is asked; see "More than one server" below. With none left,
+  the socket is described by its own address, exactly as it would have been
+  with STUN off — the fallback is the configuration that already worked —
+  and the event says so.
 - **Refresh.** The signalling socket is asked again every 25 seconds for as
   long as it is bound: the figure the endpoint's own stream keepalive uses,
   short enough for the NATs that release an idle UDP mapping after thirty
@@ -322,8 +324,10 @@ The decisions, and why each one is what it is:
   agent is not asked to query the server a second time. An address equal to
   the host's own — a host with no NAT in front of it — adds nothing, as §5.1.3
   asks.
-- **Who is believed.** Only the configured server's address, and only an
-  answer carrying the id of a request this end sent. The ids come from the
+- **Who is believed.** Only a configured server's address, only the one the
+  socket's own transaction asked, and only an answer carrying the id of a
+  request this end sent. A late answer from a server the socket has since
+  moved off is taken off the wire and believed by nobody. The ids come from the
   media engine's generator, the one SRTP keys come from: an attacker off the
   path who could guess one could answer first and have this end advertise an
   address of the attacker's choosing, in every `Contact` and every offer. A
@@ -332,6 +336,53 @@ The decisions, and why each one is what it is:
   mechanism (§9.2.5), which a mapping asked without credentials does not run,
   and it would protect nothing there, since nothing an unauthenticated
   exchange receives can be told from what anyone on the path writes.
+
+### More than one server
+
+A public STUN server is somebody else's machine, and it goes away without
+notice; a softphone configured with one server and no second has lost its
+public address the day that server does. So the stack takes an ordered list:
+`stun_fallbacks` beside `stun_server` on `sipral_stack_config_t` (`host:port`
+addresses separated by commas, appended at the tail in 0.30), or
+`Mappings::fallbacks` from Rust, and `stun_fallbacks` / `stunFallbacks` in
+the four idiomatic layers.
+
+- **When to move.** A transaction that ends without an address — no answer in
+  the five and a half seconds above, or a refusal, since a server that answers
+  without an address is no more use than a silent one — moves every socket
+  asking that server to the next one in the list at once, not only the socket
+  that found out, so a second socket does not spend its own five and a half
+  seconds on a server already known to be gone.
+- **Back-off.** The server that failed is passed over for thirty seconds —
+  past the twenty-five-second refresh, so the refresh straight after a
+  failure goes to the server that took over — then twice as long each time it
+  fails again, up to ten minutes. An answer from it clears that.
+- **Coming back.** Only a signalling socket's refresh goes back to a better
+  server once its back-off is over; a media socket, whose first answer a call
+  is waiting for, asks the server in use. A better server that recovers is in
+  use again within one refresh of its back-off ending, and no call ever waits
+  on finding out.
+- **What is said.** `SIPRAL_EVENT_KIND_STUN_SERVER` (46, `MappingEvent::ServerChanged`)
+  when the server in use moves, with the one before it, and
+  `SIPRAL_STUN_SERVER_STATE_ALL_FAILED` (`MappingEvent::ServersFailed`) when
+  every server of the socket's address family has failed and each is backing
+  off — said once, until one answers again. The sockets then keep what they
+  learned, or are described by their own address, and refreshes go on asking
+  the server whose back-off ends first.
+- **Changing the list on a running stack.** `sipral_stack_stun_servers`
+  (`Mappings::set_servers`) replaces the list without creating the stack
+  again: every socket kept mapped is asked of the new first server at once,
+  what each learned stands until it answers, and a server kept from the old
+  list keeps its back-off, so naming the list again does not make a dead
+  server look alive. On a stack created with `SIPRAL_NAT_OFF` it starts STUN
+  on the main transport; an empty list stops it, moving every account's
+  `Contact` back to its socket's own address.
+- **Address families.** A socket is asked of the servers of its own family,
+  in list order; an IPv6 server further down the list is the first an IPv6
+  socket asks, and an IPv4 one is never tried for it.
+
+`scripts/lab.sh robust` runs the NAT pair's call with the first server dead:
+both ends move to coturn, say so, and the call crosses both NATs.
 
 ## TURN
 

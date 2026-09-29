@@ -9,6 +9,7 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralLink
 import org.sipral.SipralNatEvent
 import org.sipral.SipralNatRelayEvent
+import org.sipral.SipralStunServerEvent
 import org.sipral.SipralTransport
 import org.sipral.SipralTurnStreamEvent
 
@@ -70,6 +71,14 @@ fun relayOf(event: SipralEvent): SipralNatRelayEvent? =
  */
 fun turnStreamOf(event: SipralEvent): SipralTurnStreamEvent? =
     if (event.kind == SipralEventKind.TURN_STREAM.value.toLong()) event.payload.turnStream else null
+
+/**
+ * The `SIPRAL_EVENT_KIND_STUN_SERVER` payload -- the STUN server in use
+ * moved to another in [SipralClient.open]'s list, or every one of them
+ * failed -- or null for an event of any other kind.
+ */
+fun stunServerOf(event: SipralEvent): SipralStunServerEvent? =
+    if (event.kind == SipralEventKind.STUN_SERVER.value.toLong()) event.payload.stunServer else null
 
 /**
  * The network the device is on, in as much detail as the stack's decision

@@ -348,6 +348,12 @@ proves each on the wire against a STUN and TURN server inside the test, and
 carries a call between two stacks that require ICE and one between a lite
 stack and a full one.
 
+`stunFallbacks: ["198.51.100.2:3478"]` names the STUN servers to turn to, in
+order, when `stunServer` stops answering; every socket moves on by itself,
+and a `.stunServer` event (`stunServerData`: the state, the server, the one
+before it) says when the server in use changed or every one failed
+(`docs/06-nat.md`, "More than one server").
+
 Behind a NAT, every account `stunServer` showed to be behind one keeps its
 registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
 seconds, so that a NAT filtering by address and port keeps letting the

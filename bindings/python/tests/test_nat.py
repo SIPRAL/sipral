@@ -58,6 +58,7 @@ from sipral.enums import (
     NatRelay,
     PathKind,
     PathOutcome,
+    StunServerState,
 )
 
 _MAGIC_COOKIE = 0x2112A442
@@ -289,6 +290,47 @@ def _moved(port: int, distance: int) -> int:
     address naming the socket's own port cannot pass for the mapped or
     relayed one."""
     return port - distance if port > 40000 else port + distance
+
+
+class ASilentFirstServerHandsOver(unittest.IsolatedAsyncioTestCase):
+    """``stun_fallbacks``: the first server named never answers, and the
+    signalling socket is asked of the next one once five and a half seconds
+    have gone by, with `SIPRAL_EVENT_KIND_STUN_SERVER` saying so."""
+
+    PUBLIC_HOST = "203.0.113.7"  # RFC 5737 TEST-NET-3: never a real route
+    PUBLIC_PORT = 40010
+
+    async def asyncSetUp(self) -> None:
+        self.silent = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+        self.silent.bind(("127.0.0.1", 0))
+        self.silent_address = f"127.0.0.1:{self.silent.getsockname()[1]}"
+        self.server = _FakeStunServer(self.PUBLIC_HOST, self.PUBLIC_PORT)
+        self.stack = Stack(
+            loop=asyncio.get_running_loop(),
+            audio=AudioMode.APPLICATION,
+            nat=Nat.STUN,
+            stun_server=self.silent_address,
+            stun_fallbacks=[self.server.address],
+        )
+
+    async def asyncTearDown(self) -> None:
+        self.stack.close()
+        self.server.close()
+        self.silent.close()
+
+    async def test_the_next_server_is_asked_and_the_change_is_said(self) -> None:
+        changed = None
+        mapped = None
+        while changed is None or mapped is None:
+            event = await asyncio.wait_for(self.stack.events.get(), timeout=10)
+            if event.kind == EventKind.STUN_SERVER:
+                changed = event
+            elif event.kind == EventKind.NAT_MAPPING:
+                mapped = event
+        self.assertEqual(changed.fields["state"], StunServerState.CHANGED)
+        self.assertEqual(changed.fields["previous"], self.silent_address)
+        self.assertEqual(changed.fields["server"], self.server.address)
+        self.assertEqual(mapped.fields["mapped"], f"{self.PUBLIC_HOST}:{self.PUBLIC_PORT}")
 
 
 class TwoStacksTalkThroughStun(unittest.IsolatedAsyncioTestCase):

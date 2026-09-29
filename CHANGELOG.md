@@ -12,6 +12,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **More than one STUN server, with failover.** `stun_fallbacks` beside
+  `stun_server` (ABI 0.30; `Mappings::fallbacks` in Rust, `stun_fallbacks` /
+  `stunFallbacks` in Python, .NET, Kotlin and Swift) names the servers to
+  turn to, in order. A server that does not answer in five and a half
+  seconds, or answers without an address, hands every socket asking it to
+  the next at once and is passed over for thirty seconds, twice as long each
+  time it fails again, up to ten minutes; a signalling socket's refresh finds
+  a better server that came back. `SIPRAL_EVENT_KIND_STUN_SERVER` (46) says
+  when the server in use moves and when every one has failed, and
+  `sipral_stack_stun_servers` replaces the list on a running stack, starts
+  STUN on one created without it, or stops it.
+
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when
@@ -1149,6 +1161,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A registration that stops being evidence is said at once.** When names
+  stop resolving, the machine wakes, or the network changes, each binding
+  that becomes unverified raises `UaEvent::Unverified` —
+  `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED` with
+  `SIPRAL_REGISTRATION_STATE_UNVERIFIED` across the C ABI — instead of
+  changing state in silence until a refresh failed minutes later.
+- **The reference loop no longer drops a name its resolver cannot answer.**
+  `sipral_ua::Runtime` tells the agent names stopped resolving and hands the
+  `ResolveNeeded` event to the application, where it used to leave the
+  dialog's question unanswered without a word.
+- **The C ABI's documentation of a request too large for a datagram says
+  what happens.** The call that asked for it is refused with
+  `SIPRAL_STATUS_NOT_SENT` beside `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, and
+  asking again once the stream is bound sends it; it said the stack sent it
+  again by itself, which it never did.
 - **A packet still on its way from where the far end was does not take a
   moved call back there.** After a re-INVITE moved the far end's media, the
   first packet read closed the stream's latch wherever it came from; one

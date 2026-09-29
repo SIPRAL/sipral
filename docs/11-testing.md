@@ -76,6 +76,42 @@ distribution tables (`normal.dist` and the rest) ship at a multiarch path
 confirms it every time. What did not apply, on any kernel, was the
 impairment reaching the audio these three profiles measure — see below.
 
+## What a field failure is answered by
+
+Eleven failures a softphone built on another stack meets in the field, each
+held to something that runs and fails if the guarantee breaks. Where the
+failure is in-process, a unit or facade test holds it; where it needs a real
+network, `scripts/lab.sh robust` does, on the lab's own containers, with the
+link made bad the way the failure needs. Test names are the functions, in the
+file named.
+
+| Failure in the field | What guarantees it here |
+|---|---|
+| A C ABI call from a thread the library was never told about, under load, crashes the process | `crates/sipral-ffi/src/robust.rs`, `threads_nobody_registered_calling_under_load_get_a_status_never_a_crash`: eight unregistered threads call a mix of entry points on one stack while it is destroyed under them; every call gets a status, never `SIPRAL_STATUS_PANIC`, and every call after the destroy is a stale handle |
+| A SUBSCRIBE right after the account is added, or on a transport that died, crashes or silently never goes | `robust.rs`, `a_subscription_asked_for_the_moment_its_account_exists_goes_and_is_reported` and `a_subscription_on_a_transport_that_has_died_is_told_never_a_crash`: the SUBSCRIBE leaves and an event says where it stands; on a closed TCP or TLS connection it is refused with a reason or reported as an event |
+| Registered, then DNS disappears, and nothing says so | `crates/sipral-ua/src/lifecycle.rs`, `losing_the_resolver_untrusts_the_bindings_that_needed_one_and_no_others`, and `crates/sipral-ffi/src/lifecycle.rs`, `losing_the_resolver_untrusts_only_the_bindings_that_needed_one`: each binding whose registrar is a name is announced unverified at once (`UaEvent::Unverified`, `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`), a literal one is left alone; `crates/sipral-ua/src/runtime.rs`, `a_name_the_resolver_cannot_answer_is_reported_and_not_dropped`: the reference loop's own resolver failing tells the agent and the application instead of dropping the question |
+| A capability the build lacks is accepted and does nothing | `robust.rs`, `every_feature_this_build_lacks_is_refused_where_it_is_asked_for_never_ignored`: every optional feature's setting is `SIPRAL_STATUS_NOT_SUPPORTED` when `sipral_capabilities` says it is absent and anything else when present, run in the default build and in the one without default features |
+| Busy lamps for extension 10 and extension 100 mix up | `crates/sipral-ffi/src/subscription.rs`, `extensions_ten_and_a_hundred_keep_their_lamps_apart`: two subscriptions on one account, each notification, lamp and refresh kept to its own dialog |
+| A string without a NUL terminator is read past its end | `robust.rs`, `no_text_crosses_the_boundary_without_its_length_or_a_terminator` walks the whole declared surface: every text pointer in either direction has its length beside it, and the few static names handed out without one are NUL-terminated; `text_handed_in_is_read_for_its_length_and_not_to_a_nul`. `docs/08-ffi.md`, "The shape", states the rule |
+| An INVITE carrying ICE grows past 1500 bytes, is sent as a datagram, fragments, and the NAT drops the fragments | `scripts/lab.sh robust`, the fragments run (`interop/harness-c`'s `robust` mode against `interop/robust/listener.py`): the harness's egress drops every IP fragment, a 1600-byte control datagram is shown not to arrive, and INVITEs with ICE at exactly 1300, 1301 and 1600 bytes go out as a datagram, over TCP and over TCP; no datagram over 1300 bytes is ever written. In-process: `crates/sipral-core/src/endpoint/tests.rs`, `a_request_too_large_for_a_datagram_moves_to_a_stream` |
+| A TCP or TLS connection that is accepted and never answered, or whose path goes dark, holds a call for as long as the operating system retransmits | `robust.rs`, `a_stream_that_takes_the_invite_and_never_answers_ends_the_call_at_timer_b`, over TCP and TLS: the call ends at 32000 ms, unreachable, with the INVITE written once; `scripts/lab.sh robust`, the silent and dark runs: the same over a real connection, once with the peer silent and once with every segment to it dropped after the handshake |
+| The move from UDP to TCP (RFC 3261 section 18.1.1) happens a few bytes early or late | `crates/sipral-core/src/endpoint/tests.rs`, `the_move_to_a_stream_happens_at_1301_bytes_and_not_one_byte_sooner`: every size from 1296 to 1305 bytes, a datagram up to 1300 and a stream from 1301; `crates/sipral-core/src/endpoint/config.rs`, `with_no_known_mtu_the_line_is_1300`; and the lab's fragments run at 1300 and 1301 on a real link |
+| A storm of INVITEs at one line lets one call's CANCEL or refusal reach another | `robust.rs`, `an_invite_storm_at_one_line_keeps_every_call_to_itself`: 120 INVITEs inside one millisecond, each sent twice, every call its own, every CANCEL and refusal reaching only its call, and the rate floor refusing on the wire past it without touching the calls admitted |
+| A UTF-8 display name split between two TCP segments is decoded half at a time | `robust.rs`, `a_display_name_cut_between_two_reads_arrives_whole`: an INVITE over TCP cut inside every multi-byte character of the caller's name, and the name arrives whole; the `framer` fuzz target asserts the same for any input, comparing each display name read in the fuzzer's pieces with the one read a byte at a time, from a seed cut mid-character |
+
+Three more from the same list, held the same way:
+
+| Need | What guarantees it here |
+|---|---|
+| NAT, STUN and transport settings change on a running stack, without creating it again | `crates/sipral-ffi/src/nat.rs`, `the_servers_are_replaced_on_a_running_stack_and_asked_at_once` and `stun_starts_on_a_stack_created_without_it` (`sipral_stack_stun_servers`); `crates/sipral-ffi/src/resolve.rs`, `a_retargeted_account_registers_at_the_new_address` (`sipral_account_retarget`); `crates/sipral-ffi/src/lifecycle.rs`, `rebind_points_the_account_at_a_new_contact_before_the_next_register` (`sipral_account_rebind`); a transport is opened or replaced with `sipral_stack_transport_bind` at any time |
+| Events are stamped to the millisecond | `robust.rs`, `an_event_is_raised_at_the_millisecond_its_deadline_names`: a retransmission due at 500 ms goes at a poll at 500 and not at 499, and Timer B's end is raised by the poll at 32000 ms and not by the one at 31999; `docs/14-diagnostics.md`, "What an entry carries" |
+| A CANCEL is never sent before a provisional response (RFC 3261 section 9.1) | `robust.rs`, `a_hangup_before_any_provisional_holds_the_cancel_until_one_arrives`, `a_hangup_held_for_a_provisional_goes_on_a_ringing_as_on_a_trying` and `a_hangup_before_any_provisional_to_a_silent_peer_sends_no_cancel_and_still_ends` |
+
+A STUN server list rides the same step: `scripts/lab.sh robust` runs the NAT
+pair's call with the first STUN server dead, and both ends — the C harness
+calling, the Rust harness answering — have to report the server in use moving
+before their mapping counts.
+
 ## The audio quality gate
 
 Packet counts say a call connected and ended; they say nothing about whether

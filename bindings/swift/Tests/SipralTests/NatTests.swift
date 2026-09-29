@@ -346,6 +346,31 @@ final class NatTests: XCTestCase {
         XCTAssertTrue(invite.contains("a=rtcp-mux"), "one mapping describes one port, so the offer asks for rtcp-mux")
     }
 
+    /// `stunFallbacks`: the first server named never answers, and the
+    /// signalling socket is asked of the next one once five and a half
+    /// seconds have gone by, with `SipralEventKind.stunServer` saying so.
+    func testASilentFirstServerHandsTheSocketToTheNext() async throws {
+        let silent = try UDPSocket(host: "127.0.0.1", port: 0)
+        defer { silent.close() }
+        let stun = try FakeStunServer()
+        defer { stun.stop() }
+        stun.open = true
+        let alice = try SipralStack(
+            audio: .application, stunServer: silent.localAddress, stunFallbacks: [stun.address]
+        )
+        defer { alice.close() }
+        let events = alice.events()
+
+        let moved = await first(events, within: 12) { $0.stunServerData != nil }
+        let change = try XCTUnwrap(moved?.stunServerData, "no STUN server event after the first stayed silent")
+        XCTAssertEqual(change.state, .changed)
+        XCTAssertEqual(change.previous, silent.localAddress)
+        XCTAssertEqual(change.server, stun.address)
+        let signalling = await first(events) { $0.natData?.signalling == true }
+        let nat = try XCTUnwrap(signalling?.natData, "the next server's answer never became a mapping")
+        XCTAssertEqual(nat.mapped, FakeStunServer.mapped(alice.bindAddress))
+    }
+
     /// An account the STUN answer showed behind a NAT keeps its registrar's
     /// flow open: a double CRLF, alone in a datagram, reaches the registrar
     /// within the interval asked for, and none does with the keep-alive off.

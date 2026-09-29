@@ -1003,12 +1003,14 @@ enum class SipralEventKind(val value: Int) {
      * `payload.transport_wanted` says where it was going, over what
      * protocol, and how it measured against the datagram it did not fit.
      *
-     * B1. Answered with
+     * B1. The call that asked for the request — placing a call,
+     * registering — was refused with `SIPRAL_STATUS_NOT_SENT`, and
+     * nothing went on the wire. Answered with
      * sipral_stack_transport_bind:
-     * once the application binds a transport to that destination, the
-     * stack sends the request again by itself and this ABI raises
-     * nothing further about it — there is no "it went" event, the same
-     * way there is none for an ordinary request that fit the first time.
+     * once the application has bound a transport to that destination,
+     * asking again sends the request on it, and this ABI raises nothing
+     * further about it — there is no "it went" event, the same way there
+     * is none for an ordinary request that fit the first time.
      */
     TRANSPORT_WANTED(18),
     /**
@@ -1359,6 +1361,27 @@ enum class SipralEventKind(val value: Int) {
      * `payload.call`, as for every other call event.
      */
     CALL_ADDRESS_WANTED(45),
+    /**
+     * The STUN server a stack asks changed, or every one of them failed.
+     * Only on a stack created with `SIPRAL_NAT_STUN`, or given servers by
+     * `sipral_stack_stun_servers`.
+     *
+     * `payload.stun_server` says which:
+     * `SIPRAL_STUN_SERVER_STATE_CHANGED` when the server in use moved --
+     * the one before it failed, one earlier in the list answered again,
+     * or the list was replaced -- and
+     * `SIPRAL_STUN_SERVER_STATE_ALL_FAILED` when every server in
+     * `stun_server` and `stun_fallbacks` has failed and none is left to
+     * turn to. A server fails when it does not answer in five and a half
+     * seconds, or answers without an address, and is then passed over
+     * for thirty seconds, twice as long each time it fails again, up to
+     * ten minutes. Nothing is asked of the application: the sockets move
+     * to the next server by themselves, and
+     * `SIPRAL_EVENT_KIND_NAT_MAPPING` says what each one learns there.
+     * `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
+     * neither.
+     */
+    STUN_SERVER(46),
     ;
 
     companion object {
@@ -1877,6 +1900,33 @@ enum class SipralTurnStream(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralTurnStream? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What happened to the STUN servers a stack asks. Names for
+ * `sipral_stun_server_event_t::state`.
+ */
+enum class SipralStunServerState(val value: Int) {
+    /**
+     * The server in use is another one now: `previous` failed and
+     * `server`, the next in the list, took over; a refresh found
+     * `server`, earlier in the list, answering again; or
+     * `sipral_stack_stun_servers` named another list.
+     */
+    CHANGED(1),
+    /**
+     * Every server in the list has failed and each is backing off:
+     * `server` is the last one that did. The sockets keep what they
+     * learned, or are described by their own address, and a
+     * signalling socket's refresh goes on asking. Said once until a
+     * server answers again.
+     */
+    ALL_FAILED(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralStunServerState? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -4076,6 +4126,24 @@ class SipralStackConfig(
      * taken at its word.
      */
     val audioDeviceRateHz: Long = 0,
+    /**
+     * The STUN servers to turn to, in this order, when `stun_server`
+     * fails: `host:port` addresses separated by commas, not names.
+     * Optional, and only beside a `stun_server`. A server fails when it
+     * does not answer in five and a half seconds, or answers without an
+     * address; every socket asking it moves to the next one at once,
+     * and the one that failed is passed over for thirty seconds, then
+     * twice as long each time it fails again, up to ten minutes. Only a
+     * signalling socket's refresh goes back to a better server once its
+     * time is up, so a call waiting for its media socket's address is
+     * never spent on finding out. `SIPRAL_EVENT_KIND_STUN_SERVER` says
+     * when the server in use moves, and when every one has failed.
+     * Copied; the caller's buffer is its own again when this returns.
+     *
+     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val stunFallbacks: String? = null,
 )
 
 /**
@@ -5183,6 +5251,30 @@ data class SipralAudioEvent(
 )
 
 /**
+ * What a SipralEventKind.STUN_SERVER
+ * carries.
+ *
+ * The addresses are `host:port`, not NUL-terminated, and the library's:
+ * valid for as long as the callback runs.
+ */
+data class SipralStunServerEvent(
+    /**
+     * A SipralStunServerState.
+     */
+    val state: Long,
+    /**
+     * For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server in use now; for
+     * `SIPRAL_STUN_SERVER_STATE_ALL_FAILED`, the last one that failed.
+     */
+    val server: String?,
+    /**
+     * For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server that was in use.
+     * Empty otherwise.
+     */
+    val previous: String?,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -5255,6 +5347,10 @@ class SipralEventPayload(
      * For SipralEventKind.AUDIO_DEVICES_CHANGED.
      */
     val audio: SipralAudioEvent,
+    /**
+     * For SipralEventKind.STUN_SERVER.
+     */
+    val stunServer: SipralStunServerEvent,
 )
 
 class SipralEvent(
@@ -5884,6 +5980,20 @@ class SipralEvent(
      * the one that went — or zero.
      */
     private val payloadAudioDevice: Long = 0,
+    /**
+     * A SipralStunServerState.
+     */
+    private val payloadStunServerState: Long = 0,
+    /**
+     * For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server in use now; for
+     * `SIPRAL_STUN_SERVER_STATE_ALL_FAILED`, the last one that failed.
+     */
+    private val payloadStunServerServer: String? = null,
+    /**
+     * For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server that was in use.
+     * Empty otherwise.
+     */
+    private val payloadStunServerPrevious: String? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -5903,6 +6013,7 @@ class SipralEvent(
             SipralReferralEvent(payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget, payloadReferralReferredBy),
             SipralTurnStreamEvent(payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal, payloadTurnStreamServer),
             SipralAudioEvent(payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice),
+            SipralStunServerEvent(payloadStunServerState, payloadStunServerServer, payloadStunServerPrevious),
         )
 }
 
@@ -5974,10 +6085,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long, payloadStunServerState: Long, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice, payloadStunServerState, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -6393,7 +6504,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 29)
+        agree(0, 30)
     }
 
     /**
@@ -6417,7 +6528,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configStunFallbacks: ByteArray?, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -6503,6 +6614,7 @@ internal object SipralNative {
     external fun sipral_stack_transport_bind(stack: Long, transport: Long, protocol: Long, local: ByteArray, remote: ByteArray, nowMs: Long, transportId: LongArray): Int
     external fun sipral_stack_transport_failed(stack: Long, transport: Long, error: Long, nowMs: Long): Int
     external fun sipral_stack_stream_closed(stack: Long, transport: Long, nowMs: Long): Int
+    external fun sipral_stack_stun_servers(stack: Long, servers: ByteArray, nowMs: Long): Int
     external fun sipral_stack_nat_map(stack: Long, local: ByteArray, nowMs: Long): Int
     external fun sipral_stack_nat_unmap(stack: Long, local: ByteArray, nowMs: Long): Int
     external fun sipral_stack_poll_stun(stack: Long, transmit: Long): Int
@@ -6569,7 +6681,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 29
+    const val ABI_VERSION_MINOR: Long = 30
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -7021,12 +7133,13 @@ object Sipral {
         val configTurnServer = config.turnServer?.toByteArray(Charsets.UTF_8)
         val configTurnUsername = config.turnUsername?.toByteArray(Charsets.UTF_8)
         val configTurnPassword = config.turnPassword?.toByteArray(Charsets.UTF_8)
+        val configStunFallbacks = config.stunFallbacks?.toByteArray(Charsets.UTF_8)
         val stackSlot = LongArray(1)
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         val configAudioTransmitCallback = SipralAudioTransmitListeners.register(config.audioTransmitListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, configStunFallbacks, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
             SipralAudioTransmitListeners.made(configAudioTransmitCallback, status, stackSlot[0])
@@ -9128,10 +9241,11 @@ object Sipral {
      *
      * This is also how a request
      * SipralEventKind.TRANSPORT_WANTED
-     * named gets to leave: once this returns `SIPRAL_STATUS_OK` for the
-     * protocol and destination the event gave, the stack sends the request
-     * again by itself on the next `sipral_stack_poll` — there is no further
-     * event about that one request.
+     * named gets to leave: the call that asked for it was refused with
+     * `SIPRAL_STATUS_NOT_SENT` and nothing went on the wire, and once this
+     * returns `SIPRAL_STATUS_OK` for the protocol and destination the event
+     * gave, asking again — placing the call, registering — sends it on the
+     * stream just bound. There is no further event about that one request.
      *
      * Safety
      *
@@ -9185,6 +9299,40 @@ object Sipral {
      */
     fun stackStreamClosed(stack: Long, transport: Long, nowMs: Long) {
         check(SipralNative.sipral_stack_stream_closed(stack, transport, nowMs))
+    }
+
+    /**
+     * Ask these STUN servers from now on, without creating the stack again.
+     *
+     * `servers` is `host:port` addresses separated by commas, in order of
+     * preference: the first is what `stun_server` would have named, the
+     * rest what `stun_fallbacks` would. On a stack that asks already, every
+     * socket it keeps mapped is asked again of the new list at once, and
+     * what each one learned stands until the new server answers —
+     * `SIPRAL_EVENT_KIND_STUN_SERVER` says the server in use moved, and
+     * `SIPRAL_EVENT_KIND_NAT_MAPPING` what the new one answers. A server
+     * kept from the old list keeps its back-off. On a stack created with
+     * `SIPRAL_NAT_OFF` the main transport starts being kept mapped, as it
+     * would have been with `SIPRAL_NAT_STUN`; a further datagram transport
+     * joins it the next time it is bound with
+     * `sipral_stack_transport_bind`.
+     *
+     * An empty list — `servers_len` zero — asks nobody any more: every
+     * account whose `Contact` a STUN answer moved goes back to the socket's
+     * own address and registers it, every media socket named is forgotten,
+     * and a call is described by its socket's own address from then on.
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for that on a stack with a TURN
+     * server, whose relays ride on the media sockets STUN names, and for an
+     * entry that is not an address and a port. `SIPRAL_STATUS_NOT_SUPPORTED`
+     * for a list in a build without `SIPRAL_FEATURE_STUN`.
+     *
+     * Safety
+     *
+     * `servers` must be readable for `servers_len` bytes.
+     */
+    fun stackStunServers(stack: Long, servers: String, nowMs: Long) {
+        val serversBytes = servers.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_stack_stun_servers(stack, serversBytes, nowMs))
     }
 
     /**

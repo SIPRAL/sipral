@@ -83,6 +83,8 @@ mod names;
 pub mod nat;
 pub mod record;
 pub mod resolve;
+#[cfg(test)]
+mod robust;
 pub mod screening;
 pub mod stack;
 pub mod status;

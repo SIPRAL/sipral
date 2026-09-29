@@ -623,12 +623,14 @@ public enum SipralEventKind: UInt32, Sendable {
     /// `payload.transport_wanted` says where it was going, over what
     /// protocol, and how it measured against the datagram it did not fit.
     ///
-    /// B1. Answered with
+    /// B1. The call that asked for the request — placing a call,
+    /// registering — was refused with `SIPRAL_STATUS_NOT_SENT`, and
+    /// nothing went on the wire. Answered with
     /// sipral_stack_transport_bind:
-    /// once the application binds a transport to that destination, the
-    /// stack sends the request again by itself and this ABI raises
-    /// nothing further about it — there is no "it went" event, the same
-    /// way there is none for an ordinary request that fit the first time.
+    /// once the application has bound a transport to that destination,
+    /// asking again sends the request on it, and this ABI raises nothing
+    /// further about it — there is no "it went" event, the same way there
+    /// is none for an ordinary request that fit the first time.
     case transportWanted = 18
     /// Nothing has arrived on the media path for longer than the configured
     /// threshold, while signalling is perfectly happy.
@@ -926,6 +928,25 @@ public enum SipralEventKind: UInt32, Sendable {
     /// `c=` and port. `call` is the call; the payload is
     /// `payload.call`, as for every other call event.
     case callAddressWanted = 45
+    /// The STUN server a stack asks changed, or every one of them failed.
+    /// Only on a stack created with `SIPRAL_NAT_STUN`, or given servers by
+    /// `sipral_stack_stun_servers`.
+    ///
+    /// `payload.stun_server` says which:
+    /// `SIPRAL_STUN_SERVER_STATE_CHANGED` when the server in use moved --
+    /// the one before it failed, one earlier in the list answered again,
+    /// or the list was replaced -- and
+    /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED` when every server in
+    /// `stun_server` and `stun_fallbacks` has failed and none is left to
+    /// turn to. A server fails when it does not answer in five and a half
+    /// seconds, or answers without an address, and is then passed over
+    /// for thirty seconds, twice as long each time it fails again, up to
+    /// ten minutes. Nothing is asked of the application: the sockets move
+    /// to the next server by themselves, and
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` says what each one learns there.
+    /// `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
+    /// neither.
+    case stunServer = 46
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1204,6 +1225,22 @@ public enum SipralTurnStream: UInt32, Sendable {
     /// `sipral_stack_poll_farewell` and `sipral_stack_poll_stun` — and
     /// close it.
     case close = 2
+}
+
+/// What happened to the STUN servers a stack asks. Names for
+/// `sipral_stun_server_event_t::state`.
+public enum SipralStunServerState: UInt32, Sendable {
+    /// The server in use is another one now: `previous` failed and
+    /// `server`, the next in the list, took over; a refresh found
+    /// `server`, earlier in the list, answering again; or
+    /// `sipral_stack_stun_servers` named another list.
+    case changed = 1
+    /// Every server in the list has failed and each is backing off:
+    /// `server` is the last one that did. The sockets keep what they
+    /// learned, or are described by their own address, and a
+    /// signalling socket's refresh goes on asking. Said once until a
+    /// server answers again.
+    case allFailed = 2
 }
 
 /// Where a subscription is. Names for
@@ -1901,7 +1938,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 29
+    public static let abiVersionMinor: UInt32 = 30
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -4486,10 +4523,11 @@ public enum Sipral {
     ///
     /// This is also how a request
     /// SipralEventKind.transportWanted
-    /// named gets to leave: once this returns `SIPRAL_STATUS_OK` for the
-    /// protocol and destination the event gave, the stack sends the request
-    /// again by itself on the next `sipral_stack_poll` — there is no further
-    /// event about that one request.
+    /// named gets to leave: the call that asked for it was refused with
+    /// `SIPRAL_STATUS_NOT_SENT` and nothing went on the wire, and once this
+    /// returns `SIPRAL_STATUS_OK` for the protocol and destination the event
+    /// gave, asking again — placing the call, registering — sends it on the
+    /// stream just bound. There is no further event about that one request.
     ///
     /// Safety
     ///
@@ -4550,6 +4588,44 @@ public enum Sipral {
     public static func stackStreamClosed(stack: SipralHandle, transport: UInt32, nowMs: UInt64) throws {
         try ensureAbi()
         let status = sipral_stack_stream_closed(stack, transport, nowMs)
+        try check(status)
+    }
+
+    /// Ask these STUN servers from now on, without creating the stack again.
+    ///
+    /// `servers` is `host:port` addresses separated by commas, in order of
+    /// preference: the first is what `stun_server` would have named, the
+    /// rest what `stun_fallbacks` would. On a stack that asks already, every
+    /// socket it keeps mapped is asked again of the new list at once, and
+    /// what each one learned stands until the new server answers —
+    /// `SIPRAL_EVENT_KIND_STUN_SERVER` says the server in use moved, and
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` what the new one answers. A server
+    /// kept from the old list keeps its back-off. On a stack created with
+    /// `SIPRAL_NAT_OFF` the main transport starts being kept mapped, as it
+    /// would have been with `SIPRAL_NAT_STUN`; a further datagram transport
+    /// joins it the next time it is bound with
+    /// `sipral_stack_transport_bind`.
+    ///
+    /// An empty list — `servers_len` zero — asks nobody any more: every
+    /// account whose `Contact` a STUN answer moved goes back to the socket's
+    /// own address and registers it, every media socket named is forgotten,
+    /// and a call is described by its socket's own address from then on.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for that on a stack with a TURN
+    /// server, whose relays ride on the media sockets STUN names, and for an
+    /// entry that is not an address and a port. `SIPRAL_STATUS_NOT_SUPPORTED`
+    /// for a list in a build without `SIPRAL_FEATURE_STUN`.
+    ///
+    /// Safety
+    ///
+    /// `servers` must be readable for `servers_len` bytes.
+    public static func stackStunServers(stack: SipralHandle, servers: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(servers.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_stack_stun_servers(stack, p1.baseAddress, p1.count, nowMs)
+                }
+            }
         try check(status)
     }
 

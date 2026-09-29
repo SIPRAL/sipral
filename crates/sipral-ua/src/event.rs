@@ -207,6 +207,16 @@ pub enum UaEvent {
         /// Which account.
         account: AccountId,
     },
+    /// A binding the registrar granted is no longer evidence of anything:
+    /// the machine slept, the network under it changed, or names stopped
+    /// resolving and its registrar was one. Its state is
+    /// [`RegistrationState::Unverified`](crate::RegistrationState::Unverified)
+    /// from now until a 2xx proves it again; the recovery that follows says
+    /// what it tries in [`UaEvent::Lifecycle`].
+    Unverified {
+        /// Which account.
+        account: AccountId,
+    },
     /// The INVITE for a call a push had already announced has arrived
     /// (RFC 8599).
     ///

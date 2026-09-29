@@ -42,7 +42,9 @@ use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
 use crate::names::Names;
-use crate::nat::{SipralNatEvent, SipralNatRelayEvent, SipralTurnStreamEvent};
+use crate::nat::{
+    SipralNatEvent, SipralNatRelayEvent, SipralStunServerEvent, SipralTurnStreamEvent,
+};
 use crate::subscription::{SipralSubscriptionState, named_end, named_state};
 
 /// Declare the event number space, once.
@@ -246,12 +248,14 @@ event_kinds! {
         /// `payload.transport_wanted` says where it was going, over what
         /// protocol, and how it measured against the datagram it did not fit.
         ///
-        /// B1. Answered with
+        /// B1. The call that asked for the request — placing a call,
+        /// registering — was refused with `SIPRAL_STATUS_NOT_SENT`, and
+        /// nothing went on the wire. Answered with
         /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind):
-        /// once the application binds a transport to that destination, the
-        /// stack sends the request again by itself and this ABI raises
-        /// nothing further about it — there is no "it went" event, the same
-        /// way there is none for an ordinary request that fit the first time.
+        /// once the application has bound a transport to that destination,
+        /// asking again sends the request on it, and this ABI raises nothing
+        /// further about it — there is no "it went" event, the same way there
+        /// is none for an ordinary request that fit the first time.
         18 = TransportWanted, c"transport wanted";
         /// Nothing has arrived on the media path for longer than the configured
         /// threshold, while signalling is perfectly happy.
@@ -553,6 +557,25 @@ event_kinds! {
         /// `c=` and port. `call` is the call; the payload is
         /// `payload.call`, as for every other call event.
         45 = CallAddressWanted, c"call address wanted";
+        /// The STUN server a stack asks changed, or every one of them failed.
+        /// Only on a stack created with `SIPRAL_NAT_STUN`, or given servers by
+        /// `sipral_stack_stun_servers`.
+        ///
+        /// `payload.stun_server` says which:
+        /// `SIPRAL_STUN_SERVER_STATE_CHANGED` when the server in use moved --
+        /// the one before it failed, one earlier in the list answered again,
+        /// or the list was replaced -- and
+        /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED` when every server in
+        /// `stun_server` and `stun_fallbacks` has failed and none is left to
+        /// turn to. A server fails when it does not answer in five and a half
+        /// seconds, or answers without an address, and is then passed over
+        /// for thirty seconds, twice as long each time it fails again, up to
+        /// ten minutes. Nothing is asked of the application: the sockets move
+        /// to the next server by themselves, and
+        /// `SIPRAL_EVENT_KIND_NAT_MAPPING` says what each one learns there.
+        /// `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
+        /// neither.
+        46 = StunServer, c"stun server";
     }
 }
 
@@ -619,6 +642,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::TurnStream, "turn_stream"),
     (SipralEventKind::AudioDevicesChanged, "audio"),
     (SipralEventKind::CallAddressWanted, "call"),
+    (SipralEventKind::StunServer, "stun_server"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1319,6 +1343,8 @@ record! {
         pub turn_stream: SipralTurnStreamEvent,
         /// For [`SipralEventKind::AudioDevicesChanged`].
         pub audio: SipralAudioEvent,
+        /// For [`SipralEventKind::StunServer`].
+        pub stun_server: SipralStunServerEvent,
     }
 }
 
@@ -1508,6 +1534,17 @@ pub(crate) fn started(stack: SipralHandle) -> SipralEvent {
 #[cfg(feature = "stun")]
 pub(crate) fn nat_mapping(stack: SipralHandle, payload: SipralNatEvent) -> SipralEvent {
     SipralEvent::of(stack, SipralEventKind::NatMapping, payload!(nat: payload))
+}
+
+/// What happened to the STUN servers a stack asks, as C reads it. The
+/// pointers in `payload` point into text the caller keeps beside the event.
+#[cfg(feature = "stun")]
+pub(crate) fn stun_server(stack: SipralHandle, payload: SipralStunServerEvent) -> SipralEvent {
+    SipralEvent::of(
+        stack,
+        SipralEventKind::StunServer,
+        payload!(stun_server: payload),
+    )
 }
 
 /// What a TURN server said about one media socket's relay, as C reads it.
@@ -2012,7 +2049,8 @@ fn about_registration(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sip
     match *event {
         UaEvent::Registering { account }
         | UaEvent::Refreshing { account }
-        | UaEvent::Unregistered { account } => {
+        | UaEvent::Unregistered { account }
+        | UaEvent::Unverified { account } => {
             let payload = registration_payload(known, account, None);
             Some(registration_event(known, account, payload))
         }
@@ -2976,7 +3014,8 @@ mod tests {
         assert_eq!(SipralEventKind::TurnStream as u32, 42);
         assert_eq!(SipralEventKind::AudioDevicesChanged as u32, 43);
         assert_eq!(SipralEventKind::CallAddressWanted as u32, 45);
-        assert_eq!(SipralEventKind::ALL.len(), 43, "and there are no others");
+        assert_eq!(SipralEventKind::StunServer as u32, 46);
+        assert_eq!(SipralEventKind::ALL.len(), 44, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -3059,7 +3098,8 @@ mod tests {
             Some("call address wanted"),
             "45 is live"
         );
-        assert_eq!(name(46), None, "past the last kind");
+        assert_eq!(name(46).as_deref(), Some("stun server"), "46 is live");
+        assert_eq!(name(47), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

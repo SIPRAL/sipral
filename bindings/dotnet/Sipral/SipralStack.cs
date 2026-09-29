@@ -256,7 +256,16 @@ public sealed class SipralStack : IDisposable
     /// for three seconds): a driver that does not answer is
     /// <see cref="SipralStatus.DeviceTimedOut"/>, not a hang.
     /// <paramref name="audioDeviceRateHz"/> is the rate the devices are asked
-    /// for (<c>0</c> for 48 000).</summary>
+    /// for (<c>0</c> for 48 000).
+    ///
+    /// <paramref name="stunFallbacks"/> are the STUN servers to turn to, in
+    /// order, when <paramref name="stunServer"/> does not answer in five and
+    /// a half seconds or answers without an address, each <c>host:port</c>:
+    /// every socket asking the one that failed moves to the next at once, the
+    /// one that failed is passed over for thirty seconds and twice as long
+    /// each time it fails again, up to ten minutes, and
+    /// <see cref="SipralEventKind.StunServer"/> says when the server in use
+    /// moves or every one has failed.</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -281,7 +290,8 @@ public sealed class SipralStack : IDisposable
         SipralAudio? audio = null,
         SipralAudioActivation audioActivation = SipralAudioActivation.Automatic,
         ulong audioProbeMs = 0,
-        uint audioDeviceRateHz = 0)
+        uint audioDeviceRateHz = 0,
+        IReadOnlyList<string>? stunFallbacks = null)
     {
         _nat = nat;
         _turn = turnServer is not null;
@@ -321,6 +331,9 @@ public sealed class SipralStack : IDisposable
         var entropy = RandomBytes(32);
         var mediaSeed = RandomBytes(32);
         var stunServerBytes = stunServer is null ? null : Encoding.UTF8.GetBytes(stunServer);
+        var stunFallbacksBytes = stunFallbacks is null || stunFallbacks.Count == 0
+            ? null
+            : Encoding.UTF8.GetBytes(string.Join(",", stunFallbacks));
         var turnServerBytes = turnServer is null ? null : Encoding.UTF8.GetBytes(turnServer);
         var turnUsernameBytes = turnUsername is null ? null : Encoding.UTF8.GetBytes(turnUsername);
         var turnPasswordBytes = turnPassword is null ? null : Encoding.UTF8.GetBytes(turnPassword);
@@ -333,6 +346,7 @@ public sealed class SipralStack : IDisposable
         using (var entropyPin = Pin(entropy))
         using (var seedPin = Pin(mediaSeed))
         using (var stunServerPin = Pin(stunServerBytes))
+        using (var stunFallbacksPin = Pin(stunFallbacksBytes))
         using (var turnServerPin = Pin(turnServerBytes))
         using (var turnUsernamePin = Pin(turnUsernameBytes))
         using (var turnPasswordPin = Pin(turnPasswordBytes))
@@ -378,6 +392,8 @@ public sealed class SipralStack : IDisposable
             }
             config.AudioProbeMs = audioProbeMs;
             config.AudioDeviceRateHz = audioDeviceRateHz;
+            config.StunFallbacks = stunFallbacksPin.Pointer;
+            config.StunFallbacksLen = (nuint)(stunFallbacksBytes?.Length ?? 0);
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }

@@ -79,12 +79,41 @@ pub(crate) fn stun_server() -> Result<SocketAddr, String> {
         .ok_or_else(|| "SIPRAL_STUN_SERVER does not name an address".to_owned())
 }
 
-/// Where `media`'s socket, known to the call as `local`, appears from
-/// outside, asked of `server`.
+/// The STUN servers to turn to when the first fails, from
+/// `SIPRAL_STUN_FALLBACKS`: `host:port` addresses separated by commas, none
+/// when it is unset.
 ///
 /// # Errors
-/// When the server does not answer, or answers with the socket's own address
-/// — a call from there would prove nothing about a NAT.
+/// An entry that is not an address.
+pub(crate) fn stun_fallbacks() -> Result<Vec<SocketAddr>, String> {
+    let Ok(list) = env::var("SIPRAL_STUN_FALLBACKS") else {
+        return Ok(Vec::new());
+    };
+    list.split(',')
+        .filter(|entry| !entry.trim().is_empty())
+        .map(|entry| {
+            entry.trim().parse().map_err(|_| {
+                format!("SIPRAL_STUN_FALLBACKS names {entry:?}, which is not an address")
+            })
+        })
+        .collect()
+}
+
+/// Whether the run says the first STUN server is dead on purpose, so that a
+/// mapping learned without the server in use moving is a failure:
+/// `SIPRAL_STUN_EXPECT_FAILOVER=1`, which only `scripts/lab.sh robust` sets.
+fn failover_expected() -> bool {
+    env::var("SIPRAL_STUN_EXPECT_FAILOVER").is_ok_and(|value| value == "1")
+}
+
+/// Where `media`'s socket, known to the call as `local`, appears from
+/// outside, asked of `server` and, when it fails, of the servers
+/// `SIPRAL_STUN_FALLBACKS` names.
+///
+/// # Errors
+/// When no server answers, or one answers with the socket's own address — a
+/// call from there would prove nothing about a NAT — or when the run
+/// expected the first server to fail and it did not.
 fn map(
     media: &mut Media,
     server: SocketAddr,
@@ -92,7 +121,14 @@ fn map(
     seed: [u8; 32],
 ) -> Result<SocketAddr, String> {
     let started = Instant::now();
-    let mut mappings = Mappings::new(server, seed);
+    let fallbacks = stun_fallbacks()?;
+    // five and a half seconds for each server that may stay silent before
+    // the one that answers
+    let patience = MAPPING_PATIENCE
+        + Duration::from_millis(5_500)
+            .saturating_mul(u32::try_from(fallbacks.len()).unwrap_or(u32::MAX));
+    let mut mappings = Mappings::new(server, seed).fallbacks(fallbacks);
+    let mut moved = false;
     mappings.map(local, Keep::Once, started);
     loop {
         let now = Instant::now();
@@ -108,7 +144,19 @@ fn map(
                          there is no NAT in the way"
                     ));
                 }
+                MappingEvent::Learned { .. } if failover_expected() && !moved => {
+                    return Err(format!(
+                        "{server} was to be dead and answered: the failover was never exercised"
+                    ));
+                }
                 MappingEvent::Learned { public, .. } => return Ok(public),
+                MappingEvent::ServerChanged { previous, server } => {
+                    println!("  stun  {previous} did not answer; asking {server}");
+                    moved = true;
+                }
+                MappingEvent::ServersFailed { last } => {
+                    println!("  stun  every server failed, {last} last");
+                }
                 MappingEvent::Unanswered { failure, .. } => {
                     return Err(format!(
                         "{server} never said where the media socket appears: {failure:?}"
@@ -117,7 +165,7 @@ fn map(
                 MappingEvent::Moved { .. } => {}
             }
         }
-        if now > started + MAPPING_PATIENCE {
+        if now > started + patience {
             return Err(format!("{server} never answered for the media socket"));
         }
         if mappings.poll_timeout().is_some_and(|due| due <= now) {

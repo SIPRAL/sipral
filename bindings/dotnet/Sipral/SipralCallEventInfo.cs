@@ -180,6 +180,16 @@ public sealed record SipralTurnStreamEventInfo(
     string? Local,
     string? Server);
 
+/// <summary>What a <see cref="SipralEventKind.StunServer"/> event carries —
+/// the fields of <c>sipral_stun_server_event_t</c>: the STUN server in use
+/// is <see cref="Server"/> now and was <see cref="Previous"/>, or every
+/// server in the list has failed and <see cref="Server"/> was the last
+/// one.</summary>
+public sealed record SipralStunServerEventInfo(
+    SipralStunServerState State,
+    string? Server,
+    string? Previous);
+
 /// <summary>A snapshot of <c>sipral_stream_stats_t</c>, copied field by
 /// field — never the library's own pointer, which is valid only for the
 /// callback that carried it. <see cref="FramesUnderrun"/> is

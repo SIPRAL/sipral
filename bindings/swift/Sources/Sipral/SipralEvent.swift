@@ -39,6 +39,19 @@ public struct SipralEvent: Sendable {
     public let turnStreamData: TurnStreamEventData?
     /// `payload.audio`, for `SipralEventKind.audioDevicesChanged` only.
     public let audioData: AudioEventData?
+    /// `payload.stun_server`, for `SipralEventKind.stunServer` only.
+    public let stunServerData: StunServerEventData?
+}
+
+/// The STUN server in use moved to another in the list, or every one of
+/// them failed (`sipral_stun_server_event_t`).
+public struct StunServerEventData: Sendable {
+    public let stateRaw: UInt32
+    public let state: SipralStunServerState?
+    /// The server in use now, or the last one that failed.
+    public let server: String
+    /// The server that was in use, for `.changed`; `nil` otherwise.
+    public let previous: String?
 }
 
 /// A media socket's connection to a TURN server reached over TCP or TLS
@@ -373,6 +386,15 @@ enum SipralEventDecoder {
         )
     }
 
+    private static func stunServerData(_ server: sipral_stun_server_event_t) -> StunServerEventData {
+        StunServerEventData(
+            stateRaw: server.state,
+            state: SipralStunServerState(rawValue: server.state),
+            server: textC(server.server, server.server_len) ?? "",
+            previous: textC(server.previous, server.previous_len)
+        )
+    }
+
     private static func referralData(_ referral: sipral_referral_event_t) -> ReferralEventData {
         ReferralEventData(
             statusCode: referral.status_code,
@@ -399,8 +421,11 @@ enum SipralEventDecoder {
         var referralData: ReferralEventData?
         var turnStreamData: TurnStreamEventData?
         var audioData: AudioEventData?
+        var stunServerData: StunServerEventData?
 
-        if kindRaw == SipralEventKind.audioDevicesChanged.rawValue {
+        if kindRaw == SipralEventKind.stunServer.rawValue {
+            stunServerData = self.stunServerData(raw.payload.stun_server)
+        } else if kindRaw == SipralEventKind.audioDevicesChanged.rawValue {
             audioData = self.audioData(raw.payload.audio)
         } else if kindRaw == SipralEventKind.turnStream.rawValue {
             turnStreamData = self.turnStreamData(raw.payload.turn_stream)
@@ -437,7 +462,8 @@ enum SipralEventDecoder {
             relayData: relayData,
             referralData: referralData,
             turnStreamData: turnStreamData,
-            audioData: audioData
+            audioData: audioData,
+            stunServerData: stunServerData
         )
     }
 }

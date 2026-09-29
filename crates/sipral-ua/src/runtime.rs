@@ -19,7 +19,11 @@
 //! `ToSocketAddrs` gives back and the RFC 3263 ordering never happens. A
 //! deployment that reaches a carrier through SRV supplies its own resolver —
 //! every platform has one, and on a phone it is the only one allowed to answer
-//! while the radio is asleep.
+//! while the radio is asleep. A lookup the resolver cannot answer at all is
+//! not dropped: the loop tells the agent
+//! [`UserAgent::name_resolution_lost`](crate::UserAgent::name_resolution_lost),
+//! whose registrations then say so, and hands the event on to the
+//! application with the name that did not resolve.
 //!
 //! **TLS.** No implementation is linked here and none will be.
 //! `TransportProtocol::Tls` describes a transport the caller has already
@@ -130,6 +134,7 @@ pub struct Runtime {
     local: SocketAddr,
     next: u32,
     cap: Option<Duration>,
+    resolver: Resolver,
 }
 
 impl Runtime {
@@ -159,6 +164,7 @@ impl Runtime {
             local,
             next: 2,
             cap: Some(IDLE),
+            resolver: look_up,
         };
         runtime
             .links
@@ -306,13 +312,31 @@ impl Runtime {
             match event {
                 UaEvent::Unclaimed(Event::ResolveNeeded {
                     dialog,
-                    ref host,
+                    host,
                     port,
                     protocol,
                 }) => {
-                    let addresses = look_up(host, port, protocol);
-                    if !addresses.is_empty() {
-                        self.agent.endpoint().resolved(dialog, &addresses, protocol);
+                    if let Ok(addresses) = (self.resolver)(&host, port, protocol) {
+                        if !addresses.is_empty() {
+                            self.agent.endpoint().resolved(dialog, &addresses, protocol);
+                        }
+                    } else {
+                        // the resolver itself failed, which is the one thing
+                        // this loop knows and the stack cannot: the bindings
+                        // whose registrar was a name stop being trusted, and
+                        // the application hears the name that did not
+                        // resolve rather than nothing at all
+                        self.agent.name_resolution_lost(now);
+                        handler.on_event(
+                            &mut self.agent,
+                            UaEvent::Unclaimed(Event::ResolveNeeded {
+                                dialog,
+                                host,
+                                port,
+                                protocol,
+                            }),
+                            now,
+                        );
                     }
                 }
                 // opened here, and reported anyway: the two sizes on it are
@@ -483,14 +507,25 @@ impl Runtime {
     }
 }
 
+/// How a name becomes addresses: [`look_up`], unless a test says otherwise.
+type Resolver = fn(&Host, Option<u16>, Option<TransportProtocol>) -> io::Result<Vec<SocketAddr>>;
+
 /// The addresses a name stands for.
 ///
 /// An A lookup and nothing else: the ordering RFC 3263 asks for needs SRV,
 /// which `std::net` cannot ask for. A host that is already an address needs no
 /// answer at all, and gets none.
-fn look_up(host: &Host, port: Option<u16>, protocol: Option<TransportProtocol>) -> Vec<SocketAddr> {
+///
+/// # Errors
+/// Whatever the system resolver says when it cannot answer: a name it does
+/// not know, or no resolver to ask.
+fn look_up(
+    host: &Host,
+    port: Option<u16>,
+    protocol: Option<TransportProtocol>,
+) -> io::Result<Vec<SocketAddr>> {
     let Host::Name(ref name) = *host else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let port = port
         .or_else(|| protocol.and_then(TransportProtocol::default_port))
@@ -498,7 +533,6 @@ fn look_up(host: &Host, port: Option<u16>, protocol: Option<TransportProtocol>) 
     (name.as_ref(), port)
         .to_socket_addrs()
         .map(Iterator::collect)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -770,6 +804,117 @@ mod tests {
         assert!(
             !runtime.links.contains_key(&stream),
             "the connection that refused the write is still linked"
+        );
+    }
+
+    /// What a machine whose resolver has gone answers every name with.
+    fn no_resolver(
+        _host: &sipral_core::endpoint::Host,
+        _port: Option<u16>,
+        _protocol: Option<TransportProtocol>,
+    ) -> std::io::Result<Vec<SocketAddr>> {
+        Err(std::io::Error::other("no resolver to ask"))
+    }
+
+    /// The value of `name` in `message`, as written.
+    fn field(message: &str, name: &str) -> String {
+        message
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(": "))
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Registered, then the resolver goes: the loop that asked for a name
+    /// and got nothing back used to drop the question, and the stack went on
+    /// believing every address it had learned from one. Now the agent is
+    /// told its names stopped resolving, and the application hears which
+    /// name it was.
+    #[test]
+    fn a_name_the_resolver_cannot_answer_is_reported_and_not_dropped() {
+        let far = std::net::UdpSocket::bind("127.0.0.1:0").expect("a far end");
+        far.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("a read timeout");
+        let far_address = far.local_addr().expect("its address");
+        let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
+        let mut runtime =
+            Runtime::bind(EndpointConfig::default(), [17; 32], local).expect("a loopback socket");
+        runtime.resolver = no_resolver;
+        let transport = runtime.transport();
+        let t0 = Instant::now();
+        let invite = OutgoingRequest::new(
+            Method::Invite,
+            Uri::parse_str("sip:bob@127.0.0.1").expect("a URI"),
+            transport,
+            far_address,
+        )
+        .to(b"<sip:bob@127.0.0.1>")
+        .from(b"Alice <sip:alice@127.0.0.1>")
+        .contact(b"<sip:alice@127.0.0.1>");
+        runtime
+            .agent()
+            .endpoint()
+            .invite(&invite, t0)
+            .expect("the INVITE goes");
+        let mut recorder = Recorder::default();
+        runtime.turn(&mut recorder, t0).expect("a turn");
+
+        // the far end answers, and its Contact is a name
+        let mut buffer = [0_u8; 4_096];
+        let (read, _) = far.recv_from(&mut buffer).expect("the INVITE arrives");
+        let request = String::from_utf8_lossy(buffer.get(..read).unwrap_or_default()).into_owned();
+        let answer = format!(
+            "SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=far\r\nCall-ID: {}\r\n\
+             CSeq: {}\r\nContact: <sip:bob@callee.invalid>\r\nContent-Length: 0\r\n\r\n",
+            field(&request, "Via"),
+            field(&request, "From"),
+            field(&request, "To"),
+            field(&request, "Call-ID"),
+            field(&request, "CSeq"),
+        );
+        far.send_to(answer.as_bytes(), runtime.local())
+            .expect("the answer goes");
+
+        let mut at = t0;
+        for _ in 0..20 {
+            if recorder
+                .seen
+                .iter()
+                .any(|event| matches!(*event, UaEvent::Unclaimed(Event::ResolveNeeded { .. })))
+            {
+                break;
+            }
+            // the recorder stops every turn before its wait, so the wait
+            // that takes the answer in is run here
+            at += Duration::from_millis(10);
+            runtime.wait(at);
+            runtime.turn(&mut recorder, at).expect("a turn");
+        }
+        let asked = recorder.seen.iter().find_map(|event| match *event {
+            UaEvent::Unclaimed(Event::ResolveNeeded { ref host, .. }) => Some(host.to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            asked.as_deref(),
+            Some("callee.invalid"),
+            "the name that did not resolve never reached the application: {:?}",
+            recorder.seen
+        );
+        assert_eq!(
+            runtime.agent().lifecycle(),
+            crate::LifecycleState::ResolutionLost,
+            "the agent was never told its names stopped resolving"
+        );
+        assert!(
+            recorder.seen.iter().any(|event| matches!(
+                *event,
+                UaEvent::Lifecycle {
+                    state: crate::LifecycleState::ResolutionLost,
+                    ..
+                }
+            )),
+            "{:?}",
+            recorder.seen
         );
     }
 }

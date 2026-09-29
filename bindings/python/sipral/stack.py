@@ -118,6 +118,7 @@ class Stack:
         ice: int = 0,
         nat: int = 0,
         stun_server: str | None = None,
+        stun_fallbacks: Sequence[str] | None = None,
         turn_server: str | None = None,
         turn_username: str | None = None,
         turn_password: str | None = None,
@@ -184,6 +185,14 @@ class Stack:
         REGISTER. On by default; ``False`` turns it off, and an interval
         with it off is refused. Nothing is sent while the stack is
         suspended.
+
+        ``stun_fallbacks`` are the STUN servers to turn to, in order, when
+        ``stun_server`` does not answer in five and a half seconds or answers
+        without an address, each ``host:port``: every socket asking the one
+        that failed moves to the next at once, the one that failed is passed
+        over for thirty seconds and twice as long each time it fails again,
+        up to ten minutes, and `SIPRAL_EVENT_KIND_STUN_SERVER` says when the
+        server in use moves or every one has failed.
 
         ``nat=Nat.STUN`` needs ``stun_server`` as ``host:port``;
         ``turn_server`` rides on it and needs ``turn_username`` and
@@ -297,6 +306,8 @@ class Stack:
         stun_server_buf = (
             ffi.new("char[]", stun_server.encode("utf-8")) if stun_server else None
         )
+        stun_fallbacks_text = ",".join(stun_fallbacks).encode("utf-8") if stun_fallbacks else b""
+        stun_fallbacks_buf = ffi.new("char[]", stun_fallbacks_text) if stun_fallbacks_text else None
         turn_server_buf = (
             ffi.new("char[]", turn_server.encode("utf-8")) if turn_server else None
         )
@@ -331,6 +342,9 @@ class Stack:
         if stun_server_buf is not None:
             config.stun_server = stun_server_buf
             config.stun_server_len = len(stun_server.encode("utf-8"))
+        if stun_fallbacks_buf is not None:
+            config.stun_fallbacks = stun_fallbacks_buf
+            config.stun_fallbacks_len = len(stun_fallbacks_text)
         config.g729_annex_b = _toggle(g729_annex_b)
         if turn_server_buf is not None:
             config.turn_server = turn_server_buf

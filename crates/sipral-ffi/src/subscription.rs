@@ -1429,6 +1429,155 @@ mod tests {
         );
     }
 
+    /// A dialog-info document about `entity`, in `state`, at `version`.
+    fn about(entity: &str, version: u32, state: &str) -> Vec<u8> {
+        format!(
+            "<?xml version=\"1.0\"?>\n<dialog-info xmlns=\"urn:ietf:params:xml:ns:dialog-info\" \
+             version=\"{version}\" state=\"full\" entity=\"{entity}\">\n  \
+             <dialog id=\"d-{version}\"><state>{state}</state></dialog>\n</dialog-info>"
+        )
+        .into_bytes()
+    }
+
+    /// `notification` in a transaction of its own: the `n`th in the
+    /// subscription `who` names.
+    fn numbered(subscribe: &[u8], who: &str, n: u32, body: &[u8]) -> Vec<u8> {
+        String::from_utf8_lossy(&notification(subscribe, "active;expires=600", body, true))
+            .replace("z9hG4bK-notify-one", &format!("z9hG4bK-notify-{who}-{n}"))
+            .replace("CSeq: 1 NOTIFY", &format!("CSeq: {n} NOTIFY"))
+            .into_bytes()
+    }
+
+    fn lamp(handle: SipralHandle, subscription: SipralHandle) -> u32 {
+        let mut phase = u32::MAX;
+        assert_eq!(
+            unsafe { sipral_subscription_lamp(handle, subscription, &raw mut phase) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        phase
+    }
+
+    /// Extension 10 and extension 100 on one account, the pair a PBX with
+    /// two- and three-digit numbers always has: a lamp is the subscription's
+    /// own, found by its dialog, and one number being the start of the
+    /// other mixes nothing up — not the lamps, not the notifications, not
+    /// the refreshes.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn extensions_ten_and_a_hundred_keep_their_lamps_apart() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let account = account_on(handle);
+        let subscribe = |target: &str| {
+            let config = watch(target);
+            let mut subscription = SIPRAL_HANDLE_NONE;
+            let status = unsafe {
+                sipral_account_subscribe(
+                    handle,
+                    account,
+                    ptr::from_ref(&config),
+                    &raw mut subscription,
+                    1_000,
+                )
+            };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            (subscription, one(handle))
+        };
+        let (ten, to_ten) = subscribe("sip:10@example.com");
+        let (hundred, to_hundred) = subscribe("sip:100@example.com");
+        assert_ne!(ten, hundred);
+        assert!(to_ten.starts_with(b"SUBSCRIBE sip:10@example.com SIP/2.0\r\n"));
+        assert!(to_hundred.starts_with(b"SUBSCRIBE sip:100@example.com SIP/2.0\r\n"));
+        for request in [&to_ten, &to_hundred] {
+            deliver(handle, &granted(request, 600), 1_000);
+        }
+        poll(handle, 1_000);
+
+        // a hundred rings; ten is on a call
+        deliver(
+            handle,
+            &numbered(
+                &to_hundred,
+                "hundred",
+                1,
+                &about("sip:100@example.com", 1, "early"),
+            ),
+            2_000,
+        );
+        deliver(
+            handle,
+            &numbered(
+                &to_ten,
+                "ten",
+                1,
+                &about("sip:10@example.com", 1, "confirmed"),
+            ),
+            2_000,
+        );
+        poll(handle, 2_000);
+        assert_eq!(lamp(handle, hundred), SipralDialogPhase::Early as u32);
+        assert_eq!(lamp(handle, ten), SipralDialogPhase::Confirmed as u32);
+        let notified: Vec<SipralHandle> = what_was_watched(&observed)
+            .iter()
+            .filter(|one| one.kind == SipralEventKind::Notified)
+            .map(|one| one.subscription)
+            .collect();
+        assert_eq!(notified, vec![hundred, ten], "each notification is its own");
+
+        // a hundred's call is over, and ten's lamp does not go out with it
+        deliver(
+            handle,
+            &numbered(
+                &to_hundred,
+                "hundred",
+                2,
+                &about("sip:100@example.com", 2, "terminated"),
+            ),
+            3_000,
+        );
+        poll(handle, 3_000);
+        assert_eq!(lamp(handle, hundred), SipralDialogPhase::Idle as u32);
+        assert_eq!(lamp(handle, ten), SipralDialogPhase::Confirmed as u32);
+
+        // and each refresh stays in its own dialog, naming its own number
+        poll(handle, 600_000);
+        let mut refreshed: Vec<(Vec<u8>, Vec<u8>)> = sent(handle)
+            .iter()
+            .filter(|message| message.starts_with(b"SUBSCRIBE "))
+            .map(|message| {
+                (
+                    field(message, HeaderName::CallId),
+                    field(message, HeaderName::To),
+                )
+            })
+            .collect();
+        refreshed.sort();
+        let mut expected: Vec<(Vec<u8>, &[u8])> = vec![
+            (field(&to_ten, HeaderName::CallId), b"sip:10@example.com"),
+            (
+                field(&to_hundred, HeaderName::CallId),
+                b"sip:100@example.com",
+            ),
+        ];
+        expected.sort();
+        assert_eq!(refreshed.len(), 2, "{refreshed:?}");
+        for ((call_id, to), (wanted_id, number)) in refreshed.iter().zip(&expected) {
+            assert_eq!(call_id, wanted_id);
+            let to = String::from_utf8_lossy(to);
+            let number = String::from_utf8_lossy(number);
+            assert!(
+                to.contains(&format!("<{number}>")),
+                "{to} is not {number}'s"
+            );
+        }
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
     #[test]
     fn a_target_that_is_not_a_uri_is_refused_before_anything_is_sent() {
         let mut observed = Observed::default();

@@ -84,11 +84,13 @@
 //! This is also where §18.1.1's promotion lands: a request too large for a
 //! datagram now arrives as [`crate::event::SipralEventKind::TransportWanted`]
 //! (event 18, previously reserved), naming where it was going and over what
-//! protocol. The application answers it with
+//! protocol, and the call that asked for it is refused with
+//! `SIPRAL_STATUS_NOT_SENT`. The application answers it with
 //! [`sipral_stack_transport_bind`] the same way it answers a network change
-//! that took a transport with it, and the stack sends the request again by
-//! itself once the bind succeeds — there is no separate "it went" event, the
-//! same as for a request that fit the first time.
+//! that took a transport with it, and asks again — places the call, registers
+//! — once the bind succeeds: the request then leaves on that stream, and
+//! there is no separate "it went" event, the same as for a request that fit
+//! the first time.
 //!
 //! # A datagram, a stream, and a WebSocket
 //!
@@ -546,10 +548,11 @@ entry! {
     ///
     /// This is also how a request
     /// [`SipralEventKind::TransportWanted`](crate::event::SipralEventKind::TransportWanted)
-    /// named gets to leave: once this returns `SIPRAL_STATUS_OK` for the
-    /// protocol and destination the event gave, the stack sends the request
-    /// again by itself on the next `sipral_stack_poll` — there is no further
-    /// event about that one request.
+    /// named gets to leave: the call that asked for it was refused with
+    /// `SIPRAL_STATUS_NOT_SENT` and nothing went on the wire, and once this
+    /// returns `SIPRAL_STATUS_OK` for the protocol and destination the event
+    /// gave, asking again — placing the call, registering — sends it on the
+    /// stream just bound. There is no further event about that one request.
     ///
     /// # Safety
     ///

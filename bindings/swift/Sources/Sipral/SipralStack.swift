@@ -208,6 +208,14 @@ public final class SipralStack: @unchecked Sendable {
     /// `network` is the network the stack starts on, what the first
     /// `networkChanged(to:)` compares with: a wired link at `bindHost`, on no
     /// interface in particular, unless the application knows better.
+    ///
+    /// `stunFallbacks` are the STUN servers to turn to, in order, when
+    /// `stunServer` does not answer in five and a half seconds or answers
+    /// without an address, each `host:port`: every socket asking the one that
+    /// failed moves to the next at once, the one that failed is passed over
+    /// for thirty seconds and twice as long each time it fails again, up to
+    /// ten minutes, and `SipralEventKind.stunServer` says when the server in
+    /// use moves or every one has failed.
     public init(
         audio: AudioMode = .platformDefault,
         bindHost: String = "127.0.0.1",
@@ -226,7 +234,8 @@ public final class SipralStack: @unchecked Sendable {
         registrarKeepaliveMs: UInt64 = 0,
         audioProbeMs: UInt64 = 0,
         audioDeviceRateHz: UInt32 = 0,
-        network: Network? = nil
+        network: Network? = nil,
+        stunFallbacks: [String] = []
     ) throws {
         let socket = try UDPSocket(host: bindHost, port: bindPort)
         self.socket = socket
@@ -249,7 +258,10 @@ public final class SipralStack: @unchecked Sendable {
         self.handle = try entropy.withUnsafeBufferPointer { entropyBuf in
             try mediaSeed.withUnsafeBufferPointer { seedBuf in
                 try CStrings.with(
-                    [socket.localAddress, userAgent, codecs, stunServer, turn?.address, turn?.username, turn?.password]
+                    [
+                        socket.localAddress, userAgent, codecs, stunServer, turn?.address, turn?.username,
+                        turn?.password, stunFallbacks.isEmpty ? nil : stunFallbacks.joined(separator: ","),
+                    ]
                 ) { parts in
                     var config = sipral_stack_config_t.sized()
                     config.event_callback = sipralStackEventTrampoline
@@ -287,6 +299,10 @@ public final class SipralStack: @unchecked Sendable {
                         config.nat = SipralNat.stun.rawValue
                         config.stun_server = stunPointer
                         config.stun_server_len = parts[3].count
+                    }
+                    if let fallbacksPointer = parts[7].pointer {
+                        config.stun_fallbacks = fallbacksPointer
+                        config.stun_fallbacks_len = parts[7].count
                     }
                     if let turnPointer = parts[4].pointer {
                         config.turn_server = turnPointer

@@ -63,7 +63,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR 29
+#define SIPRAL_ABI_VERSION_MINOR 30
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -383,6 +383,7 @@ typedef struct sipral_nat_relay_event sipral_nat_relay_event_t;
 typedef struct sipral_referral_event sipral_referral_event_t;
 typedef struct sipral_turn_stream_event sipral_turn_stream_event_t;
 typedef struct sipral_audio_event sipral_audio_event_t;
+typedef struct sipral_stun_server_event sipral_stun_server_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -1319,12 +1320,14 @@ enum {
      * `payload.transport_wanted` says where it was going, over what
      * protocol, and how it measured against the datagram it did not fit.
      *
-     * B1. Answered with
+     * B1. The call that asked for the request — placing a call,
+     * registering — was refused with `SIPRAL_STATUS_NOT_SENT`, and
+     * nothing went on the wire. Answered with
      * sipral_stack_transport_bind:
-     * once the application binds a transport to that destination, the
-     * stack sends the request again by itself and this ABI raises
-     * nothing further about it — there is no "it went" event, the same
-     * way there is none for an ordinary request that fit the first time.
+     * once the application has bound a transport to that destination,
+     * asking again sends the request on it, and this ABI raises nothing
+     * further about it — there is no "it went" event, the same way there
+     * is none for an ordinary request that fit the first time.
      */
     SIPRAL_EVENT_KIND_TRANSPORT_WANTED = 18,
     /**
@@ -1675,6 +1678,27 @@ enum {
      * `payload.call`, as for every other call event.
      */
     SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED = 45,
+    /**
+     * The STUN server a stack asks changed, or every one of them failed.
+     * Only on a stack created with `SIPRAL_NAT_STUN`, or given servers by
+     * `sipral_stack_stun_servers`.
+     *
+     * `payload.stun_server` says which:
+     * `SIPRAL_STUN_SERVER_STATE_CHANGED` when the server in use moved --
+     * the one before it failed, one earlier in the list answered again,
+     * or the list was replaced -- and
+     * `SIPRAL_STUN_SERVER_STATE_ALL_FAILED` when every server in
+     * `stun_server` and `stun_fallbacks` has failed and none is left to
+     * turn to. A server fails when it does not answer in five and a half
+     * seconds, or answers without an address, and is then passed over
+     * for thirty seconds, twice as long each time it fails again, up to
+     * ten minutes. Nothing is asked of the application: the sockets move
+     * to the next server by themselves, and
+     * `SIPRAL_EVENT_KIND_NAT_MAPPING` says what each one learns there.
+     * `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
+     * neither.
+     */
+    SIPRAL_EVENT_KIND_STUN_SERVER = 46,
 };
 
 /**
@@ -2133,6 +2157,29 @@ enum {
      * close it.
      */
     SIPRAL_TURN_STREAM_CLOSE = 2,
+};
+
+/**
+ * What happened to the STUN servers a stack asks. Names for
+ * `sipral_stun_server_event_t::state`.
+ */
+typedef uint32_t sipral_stun_server_state_t;
+enum {
+    /**
+     * The server in use is another one now: `previous` failed and
+     * `server`, the next in the list, took over; a refresh found
+     * `server`, earlier in the list, answering again; or
+     * `sipral_stack_stun_servers` named another list.
+     */
+    SIPRAL_STUN_SERVER_STATE_CHANGED = 1,
+    /**
+     * Every server in the list has failed and each is backing off:
+     * `server` is the last one that did. The sockets keep what they
+     * learned, or are described by their own address, and a
+     * signalling socket's refresh goes on asking. Said once until a
+     * server answers again.
+     */
+    SIPRAL_STUN_SERVER_STATE_ALL_FAILED = 2,
 };
 
 /**
@@ -3371,6 +3418,28 @@ struct sipral_stack_config {
      * taken at its word.
      */
     uint32_t audio_device_rate_hz;
+    /**
+     * The STUN servers to turn to, in this order, when `stun_server`
+     * fails: `host:port` addresses separated by commas, not names.
+     * Optional, and only beside a `stun_server`. A server fails when it
+     * does not answer in five and a half seconds, or answers without an
+     * address; every socket asking it moves to the next one at once,
+     * and the one that failed is passed over for thirty seconds, then
+     * twice as long each time it fails again, up to ten minutes. Only a
+     * signalling socket's refresh goes back to a better server once its
+     * time is up, so a call waiting for its media socket's address is
+     * never spent on finding out. `SIPRAL_EVENT_KIND_STUN_SERVER` says
+     * when the server in use moves, and when every one has failed.
+     * Copied; the caller's buffer is its own again when this returns.
+     *
+     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    const char *stun_fallbacks;
+    /**
+     * How many bytes of it.
+     */
+    size_t stun_fallbacks_len;
 };
 
 /**
@@ -5423,6 +5492,38 @@ struct sipral_audio_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_STUN_SERVER
+ * carries.
+ *
+ * The addresses are `host:port`, not NUL-terminated, and the library's:
+ * valid for as long as the callback runs.
+ */
+struct sipral_stun_server_event {
+    /**
+     * A sipral_stun_server_state_t.
+     */
+    uint32_t state;
+    /**
+     * For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server in use now; for
+     * `SIPRAL_STUN_SERVER_STATE_ALL_FAILED`, the last one that failed.
+     */
+    const char *server;
+    /**
+     * How many bytes of it.
+     */
+    size_t server_len;
+    /**
+     * For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server that was in use.
+     * Empty otherwise.
+     */
+    const char *previous;
+    /**
+     * How many bytes of it.
+     */
+    size_t previous_len;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -5495,6 +5596,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED.
      */
     sipral_audio_event_t audio;
+    /**
+     * For SIPRAL_EVENT_KIND_STUN_SERVER.
+     */
+    sipral_stun_server_event_t stun_server;
 };
 
 /**
@@ -7812,10 +7917,11 @@ sipral_status_t sipral_stack_receive_stream(sipral_handle_t stack, uint32_t tran
  *
  * This is also how a request
  * SIPRAL_EVENT_KIND_TRANSPORT_WANTED
- * named gets to leave: once this returns `SIPRAL_STATUS_OK` for the
- * protocol and destination the event gave, the stack sends the request
- * again by itself on the next `sipral_stack_poll` — there is no further
- * event about that one request.
+ * named gets to leave: the call that asked for it was refused with
+ * `SIPRAL_STATUS_NOT_SENT` and nothing went on the wire, and once this
+ * returns `SIPRAL_STATUS_OK` for the protocol and destination the event
+ * gave, asking again — placing the call, registering — sends it on the
+ * stream just bound. There is no further event about that one request.
  *
  * Safety
  *
@@ -7860,6 +7966,37 @@ sipral_status_t sipral_stack_transport_failed(sipral_handle_t stack, uint32_t tr
  * Safe to call with any handle value. Reads no memory the caller owns.
  */
 sipral_status_t sipral_stack_stream_closed(sipral_handle_t stack, uint32_t transport, uint64_t now_ms);
+
+/**
+ * Ask these STUN servers from now on, without creating the stack again.
+ *
+ * `servers` is `host:port` addresses separated by commas, in order of
+ * preference: the first is what `stun_server` would have named, the
+ * rest what `stun_fallbacks` would. On a stack that asks already, every
+ * socket it keeps mapped is asked again of the new list at once, and
+ * what each one learned stands until the new server answers —
+ * `SIPRAL_EVENT_KIND_STUN_SERVER` says the server in use moved, and
+ * `SIPRAL_EVENT_KIND_NAT_MAPPING` what the new one answers. A server
+ * kept from the old list keeps its back-off. On a stack created with
+ * `SIPRAL_NAT_OFF` the main transport starts being kept mapped, as it
+ * would have been with `SIPRAL_NAT_STUN`; a further datagram transport
+ * joins it the next time it is bound with
+ * `sipral_stack_transport_bind`.
+ *
+ * An empty list — `servers_len` zero — asks nobody any more: every
+ * account whose `Contact` a STUN answer moved goes back to the socket's
+ * own address and registers it, every media socket named is forgotten,
+ * and a call is described by its socket's own address from then on.
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for that on a stack with a TURN
+ * server, whose relays ride on the media sockets STUN names, and for an
+ * entry that is not an address and a port. `SIPRAL_STATUS_NOT_SUPPORTED`
+ * for a list in a build without `SIPRAL_FEATURE_STUN`.
+ *
+ * Safety
+ *
+ * `servers` must be readable for `servers_len` bytes.
+ */
+sipral_status_t sipral_stack_stun_servers(sipral_handle_t stack, const char *servers, size_t servers_len, uint64_t now_ms);
 
 /**
  * Ask where a media socket appears from, before a call is described

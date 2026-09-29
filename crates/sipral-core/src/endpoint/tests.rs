@@ -1790,6 +1790,59 @@ fn a_request_too_large_for_a_datagram_moves_to_a_stream() {
     );
 }
 
+/// §18.1.1 at its edge, a few octets either side of it: every request of
+/// 1300 bytes or fewer goes in a datagram, and every one of 1301 or more goes
+/// on the stream open to the same place — the line drawn on the bytes the
+/// datagram would have carried, not on an estimate of them. A stack that
+/// rounds, or measures the request before its `Via` is written, sends a
+/// message a few bytes over the line as a datagram, which is the one that
+/// arrives in fragments and is dropped by the NAT in front of the phone.
+#[test]
+fn the_move_to_a_stream_happens_at_1301_bytes_and_not_one_byte_sooner() {
+    let t0 = Instant::now();
+    let mut seen = Vec::new();
+    for padding in 940..1_000 {
+        let mut endpoint = endpoint(t0);
+        endpoint
+            .receive(
+                Input::TransportBound {
+                    transport: TCP,
+                    protocol: TransportProtocol::Tcp,
+                    local: local(),
+                    remote: Some(peer()),
+                },
+                t0,
+            )
+            .expect("binding TCP");
+        transmits(&mut endpoint);
+        let big = request(Method::Options).header(HeaderName::Subject, &vec![b'x'; padding]);
+        endpoint.request(&big, t0).expect("the request goes");
+        let out = transmits(&mut endpoint);
+        let sent = out.first().expect("one message");
+        // what the datagram would have carried: the same message with the
+        // transport its `Via` names put back to UDP
+        let as_datagram = String::from_utf8_lossy(&sent.payload)
+            .replacen("SIP/2.0/TCP", "SIP/2.0/UDP", 1)
+            .len();
+        seen.push((as_datagram, sent.protocol));
+    }
+    for &(size, protocol) in &seen {
+        let expected = if size <= 1_300 {
+            TransportProtocol::Udp
+        } else {
+            TransportProtocol::Tcp
+        };
+        assert_eq!(protocol, expected, "{size} bytes went over {protocol:?}");
+    }
+    for size in 1_296..=1_305 {
+        assert!(
+            seen.iter().any(|&(seen, _)| seen == size),
+            "no request of exactly {size} bytes was tried: {:?}",
+            seen.iter().map(|&(size, _)| size).collect::<Vec<_>>()
+        );
+    }
+}
+
 #[test]
 fn a_request_too_large_with_nowhere_to_move_it_asks_for_a_transport() {
     let t0 = Instant::now();
