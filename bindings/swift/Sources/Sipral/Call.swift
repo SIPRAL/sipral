@@ -237,11 +237,10 @@ public final class Call: @unchecked Sendable {
             config.codecs_len = parts[2].count
             config.focus = focus ? 1 : 0
             config.feedback = feedback ? SipralToggle.on.rawValue : 0
-            // straight to the C entry point: the printed wrapper points
-            // `headers` at an empty array, and an answer is refused any
-            // `headers` at all
             try retryingBusy {
-                try Sipral.check(sipral_call_answer_with(stack.handle, handle, &config, stack.nowMs()))
+                try Sipral.callAnswerWith(
+                    stack: stack.handle, call: handle, config: config, configHeaders: [], nowMs: stack.nowMs()
+                )
             }
         }
     }

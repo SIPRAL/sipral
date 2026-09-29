@@ -111,7 +111,8 @@ public extension sipral_processor_event_t {
 /// piece of text in every element into one buffer, points an array of
 /// sipral_header_t into it and hands that array on for as long as one closure
 /// runs, with the list's own count. An empty piece of text crosses as a
-/// null pointer with a length of zero.
+/// null pointer with a length of zero, and an empty list as a null
+/// pointer with a count of zero.
 public struct SipralHeader: Sendable {
     public var name: String
     public var value: String
@@ -150,6 +151,9 @@ public struct SipralHeader: Sendable {
                 at += lengths[part]
                 part += 1
                 array.append(record)
+            }
+            if array.isEmpty {
+                return try body(UnsafeBufferPointer(start: nil, count: 0))
             }
             return try array.withUnsafeBufferPointer(body)
         }

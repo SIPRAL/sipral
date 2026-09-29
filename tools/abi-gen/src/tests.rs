@@ -2853,6 +2853,10 @@ fn every_binding_hands_over_a_list_with_its_own_count() {
          config.headers_len = p2Headers.count\n                \
          return sipral_call_place(stack, account, &config, &call, nowMs)\n",
         "config: sipral_account_config_t, configHeaders: [SipralHeader]) throws -> SipralHandle {\n",
+        // an empty list is a null pointer, which an entry point taking no
+        // list at all accepts, and not an empty array's own buffer
+        "            if array.isEmpty {\n                \
+         return try body(UnsafeBufferPointer(start: nil, count: 0))\n            }\n",
     ] {
         assert!(printed.contains(line), "Swift: no `{line}`");
     }

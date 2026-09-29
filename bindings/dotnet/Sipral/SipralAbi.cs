@@ -4923,8 +4923,11 @@ public struct SipralCallConfig
     /// RTCP (RFC 5506), and runs RFC 4585's timing when the answer takes
     /// it; zero leaves it off, as it is by default, because a far end
     /// that knows only RTP/AVP refuses a profile it does not know. Read
-    /// only with `media_address`. An offer that asks for it is answered
-    /// in kind whatever this says.
+    /// only with `media_address`. An offer on a feedback profile is
+    /// answered on that profile whatever this says, since RFC 4585 §4.1
+    /// leaves an answerer no other way to take the stream; the Generic
+    /// NACKs and reduced-size RTCP it asks for are agreed only when this
+    /// is on, on the answer too.
     /// </summary>
     public uint Feedback;
     /// <summary>

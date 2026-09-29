@@ -528,7 +528,8 @@ fn element_structs(surface: &Surface) -> Result<String, Refused> {
         ));
         for line in [
             " runs, with the list's own count. An empty piece of text crosses as a",
-            " null pointer with a length of zero.",
+            " null pointer with a length of zero, and an empty list as a null",
+            " pointer with a count of zero.",
         ] {
             about.push(line.to_owned());
         }
@@ -591,8 +592,14 @@ fn element_structs(surface: &Surface) -> Result<String, Refused> {
                 len = safe(text.len.member.name),
             );
         }
+        // an empty Swift array may still have a buffer, and C reads a list
+        // of none as a null pointer and a count of zero: an entry point that
+        // takes no list at all refuses any pointer
         out.push_str(
             "                array.append(record)\n\
+             \x20           }\n\
+             \x20           if array.isEmpty {\n\
+             \x20               return try body(UnsafeBufferPointer(start: nil, count: 0))\n\
              \x20           }\n\
              \x20           return try array.withUnsafeBufferPointer(body)\n\
              \x20       }\n\
