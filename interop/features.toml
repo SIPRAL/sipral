@@ -262,3 +262,9 @@ name = "SIP over TCP and TLS through the four idiomatic layers"
 implemented = true
 unit_tested = true
 flows = ["agent.py over TLS", "Agent.kt over TLS", "Sipral.Sample.Agent over TLS", "SipralLabAgent over TCP"]
+
+[[feature]]
+name = "Local conference of N calls, each on its own codec"
+implemented = true
+unit_tested = true
+flows = ["N-way local conference, three calls through the proxy"]

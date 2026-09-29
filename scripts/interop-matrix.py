@@ -96,6 +96,10 @@ FLOW_SECTIONS = {
         "c",
     ),
     "STIR/SHAKEN between two C ABI stacks -- one signs, one verifies": ("stir_pair", "c"),
+    "an N-way local conference -- three calls through the proxy, each on its own codec": (
+        "kamailio",
+        "rust",
+    ),
 }
 # The FLOW_SECTIONS headers whose harness prints no "lab: ..." line before
 # its flows: the STIR/SHAKEN step runs two stacks of the C harness against

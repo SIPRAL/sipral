@@ -88,6 +88,13 @@
 #                               and carried, an unsigned one refused 428, one
 #                               signed by an authority nobody trusts refused
 #                               437 (part of a run that names nothing too)
+#   scripts/lab.sh nway         only the local conference: three of the
+#                               harness's own stacks registered at Kamailio,
+#                               each on a codec of its own, called by a
+#                               fourth that mixes the three; each hears the
+#                               other two and not itself, and the two left
+#                               go on hearing each other once one hangs up
+#                               (part of a run that names nothing too)
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -2865,6 +2872,28 @@ if [ "$WANT" = all ] || [ "$WANT" = kamailio ]; then
         flows_c kamailio proxy-c && pass "kamailio to freeswitch, in C" \
             || fail "kamailio to freeswitch, in C"
     fi
+fi
+
+# A local conference of three of the harness's own stacks, each registered at
+# Kamailio as one of the users kamailio.cfg keeps for it and each on a codec
+# of its own, called by a fourth that mixes the three itself
+# (interop/harness/src/nway.rs): each has to hear the other two and not
+# itself, and the two left have to go on hearing each other once one hangs
+# up. The step keeps its title, which scripts/interop-matrix.py reads the
+# section by.
+nway_flow() {
+    lab_run "the harness's local conference" $((LAB_START_S + 2 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        -e SIPRAL_FLOWS=nway \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim sh -c "/harness kamailio 5060 9000"
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = kamailio ] || [ "$WANT" = nway ]; then
+    step "an N-way local conference -- three calls through the proxy, each on its own codec"
+    nway_flow && pass "three calls mixed, each heard the other two, and two kept talking" \
+        || fail "an N-way local conference"
 fi
 
 # OpenSIPS carries the `opensips` Compose profile, so it never came up with
