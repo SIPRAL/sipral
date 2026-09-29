@@ -50,9 +50,8 @@
 //! word is at least 120 ms, a syllable's length, so a click or a breath is
 //! not one, and 60 ms of silence separates two, less than the pause
 //! between words of normal speech. Three seconds without a word is longer
-//! than a person takes to answer the phone to their ear, and six seconds is
-//! as long as a dialler can hold a person who said hello before they hang
-//! up on the silence.
+//! than a person takes to bring the phone to their ear, and six seconds
+//! is about as long as anyone stays on a line that has not answered them.
 //!
 //! What the rules cannot see is meaning. A recording that opens with one
 //! word and 700 ms of silence — "Hello … you've reached …" — is read as a

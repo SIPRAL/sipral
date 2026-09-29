@@ -242,8 +242,9 @@ const HISTORY: usize = 18;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProgressConfig {
     /// The least level, in dBm0, a tone's frequencies may have together.
-    /// Default −38 dBm0: E.180 Supplement 2's quietest tables send about
-    /// −24 dBm0, and a long connection loses some of that.
+    /// Default −38 dBm0, a judgement: well under the level a network plays
+    /// these tones at, even after a long connection's loss, and well over
+    /// the idle noise of a line.
     pub min_level_dbm0: f64,
     /// How far a tone's frequencies together must stand above everything
     /// else in the window, in dB. Default 6 dB, which a steady tone clears
@@ -254,8 +255,9 @@ pub struct ProgressConfig {
     /// level, and a tone with one of its pair missing is another tone.
     pub max_imbalance_db: f64,
     /// How far a burst or a silence may be from its nominal length, as a
-    /// fraction of it. Default 0.2: E.180 allows a sender ±10 %, and this is
-    /// twice that.
+    /// fraction of it. Default 0.2, a judgement: wide enough for a
+    /// network's own drift and the measurement's error, narrow enough that
+    /// busy and congestion, 500 and 250 ms, stay apart.
     pub cadence_tolerance: f64,
     /// The same, as a floor in milliseconds, for the short bursts where a
     /// fraction is less than the measurement's own error. Default 40.

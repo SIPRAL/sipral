@@ -27,8 +27,8 @@
 //! it. Levels read that way are what twist is computed from, and they do not
 //! drift with a tone's frequency error. The Hann window also buries a tone
 //! more than two bins from a filter under sidelobes 31 dB down and falling,
-//! where a rectangular window would leave the other group's tone of a DTMF
-//! pair 13 dB down in every filter.
+//! where a rectangular window's first sidelobe is only 13 dB down and the
+//! ones after it fall slowly.
 //!
 //! # Edges
 //!
