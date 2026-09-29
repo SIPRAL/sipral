@@ -450,6 +450,14 @@ impl UserAgent {
     pub const fn endpoint(&mut self) -> &mut Endpoint {
         &mut self.endpoint
     }
+
+    /// The endpoint underneath, to read what it counts —
+    /// [`Endpoint::retransmissions`], [`Endpoint::refused`] — where only a
+    /// shared borrow of this agent is at hand.
+    #[must_use]
+    pub const fn endpoint_ref(&self) -> &Endpoint {
+        &self.endpoint
+    }
 }
 
 /// A recorded session is fed back into whichever layer the bug is thought to

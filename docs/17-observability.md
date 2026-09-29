@@ -272,7 +272,9 @@ saying so; and **redacted**, through the same `redact_text` as the log.
 `sipral_stack_state(stack, buffer, capacity, &len)` is the C ABI's, and adds
 what only that layer holds: the transports bound, the last eight calls into
 the stack that were refused (when, with what status, and the sentence), the
-event and farewell queues, the RTP port range with how many pairs are
+event and farewell queues, the signalling counters of ABI 0.30 (requests and
+responses sent again, transactions timed out, requests refused at a limit),
+the RTP port range with how many pairs are
 reserved, and the log's own level and suppressed count. It is never longer
 than `SIPRAL_STATE_TEXT_MAX` (16384) bytes with its NUL, so a buffer that size
 always fits it, and it shares the log's pseudonym key, so an address reads the

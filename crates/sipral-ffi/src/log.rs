@@ -272,6 +272,17 @@ impl Watch {
             state.farewells_dropped,
             state.farewells.len()
         );
+        let endpoint = state.agent.endpoint_ref();
+        let repeated = endpoint.retransmissions();
+        let _ = writeln!(
+            extra,
+            "signalling: requests retransmitted {}, responses retransmitted {}, transactions \
+             timed out {}, refused at a limit {}",
+            repeated.requests,
+            repeated.responses,
+            repeated.timeouts,
+            endpoint.refused()
+        );
         match state.engine.rtp_ports() {
             Some(range) => {
                 let _ = writeln!(
@@ -618,6 +629,8 @@ mod tests {
             "incoming",
             "transports: 1",
             "transport 0: UDP",
+            "signalling: requests retransmitted 0, responses retransmitted 0, transactions timed \
+             out 0, refused at a limit 0",
             "rtp ports: any",
             "log: off",
             "last errors: 1",
