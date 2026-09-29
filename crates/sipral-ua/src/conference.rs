@@ -33,6 +33,10 @@
 //! again, so a focus that keeps notifying while the refresh is in flight does
 //! not turn into one SUBSCRIBE per NOTIFY.
 //!
+//! **What is held is bounded like what is read.** Every document is bounded,
+//! but partial ones only add up: a merge that would hold more than one
+//! full-state document can carry is not kept, and is answered like a gap.
+//!
 //! **What is keyed is merged; what is not is replaced.** Under §4.6 a partial
 //! element's children are matched to what is held by their key — a user and
 //! an endpoint by `entity`, a media stream by `id`, an available-media entry
@@ -1071,6 +1075,177 @@ impl Section for ConferenceStatus {
     }
 }
 
+// -- what is held, weighed ---------------------------------------------------
+
+/// What each element and each value costs on top of its text: less than the
+/// markup of any of them (`<a/>`, `a=""`), so that a picture read from one
+/// document never weighs more than the document did.
+const MARKUP: usize = 4;
+
+/// What holding something costs, counted in the bytes of the document it
+/// would take to say it.
+trait Weigh {
+    fn weigh(&self) -> usize;
+}
+
+impl Weigh for Box<str> {
+    fn weigh(&self) -> usize {
+        MARKUP.saturating_add(self.len())
+    }
+}
+
+impl<T: Weigh> Weigh for Option<T> {
+    fn weigh(&self) -> usize {
+        self.as_ref().map_or(0, Weigh::weigh)
+    }
+}
+
+impl<T: Weigh> Weigh for Vec<T> {
+    fn weigh(&self) -> usize {
+        self.iter()
+            .map(Weigh::weigh)
+            .fold(MARKUP, usize::saturating_add)
+    }
+}
+
+/// The sum of what `parts` weigh, and the element around them.
+fn weigh_all(parts: &[&dyn Weigh]) -> usize {
+    parts
+        .iter()
+        .map(|part| part.weigh())
+        .fold(MARKUP, usize::saturating_add)
+}
+
+// a value the schema lists weighs nothing; one kept as written, its text
+
+impl Weigh for MediaStatus {
+    fn weigh(&self) -> usize {
+        if let Self::Other(ref text) = *self {
+            text.weigh()
+        } else {
+            0
+        }
+    }
+}
+
+impl Weigh for EndpointStatus {
+    fn weigh(&self) -> usize {
+        if let Self::Other(ref text) = *self {
+            text.weigh()
+        } else {
+            0
+        }
+    }
+}
+
+impl Weigh for JoiningMethod {
+    fn weigh(&self) -> usize {
+        if let Self::Other(ref text) = *self {
+            text.weigh()
+        } else {
+            0
+        }
+    }
+}
+
+impl Weigh for DisconnectionMethod {
+    fn weigh(&self) -> usize {
+        if let Self::Other(ref text) = *self {
+            text.weigh()
+        } else {
+            0
+        }
+    }
+}
+
+impl Weigh for UriEntry {
+    fn weigh(&self) -> usize {
+        weigh_all(&[&self.uri, &self.display_text, &self.purpose])
+    }
+}
+
+impl Weigh for AvailableMedia {
+    fn weigh(&self) -> usize {
+        weigh_all(&[
+            &self.label,
+            &self.display_text,
+            &self.media_type,
+            &self.status,
+        ])
+    }
+}
+
+impl Weigh for ExecutionInfo {
+    fn weigh(&self) -> usize {
+        weigh_all(&[&self.when, &self.reason, &self.by])
+    }
+}
+
+impl Weigh for Media {
+    fn weigh(&self) -> usize {
+        weigh_all(&[
+            &self.id,
+            &self.display_text,
+            &self.media_type,
+            &self.label,
+            &self.src_id,
+            &self.status,
+        ])
+    }
+}
+
+impl Weigh for Endpoint {
+    fn weigh(&self) -> usize {
+        weigh_all(&[
+            &self.entity,
+            &self.display_text,
+            &self.status,
+            &self.joining_method,
+            &self.joining_info,
+            &self.disconnection_method,
+            &self.disconnection_info,
+            &self.media,
+        ])
+    }
+}
+
+impl Weigh for User {
+    fn weigh(&self) -> usize {
+        weigh_all(&[
+            &self.entity,
+            &self.display_text,
+            &self.roles,
+            &self.endpoints,
+        ])
+    }
+}
+
+impl Weigh for ConferenceDescription {
+    fn weigh(&self) -> usize {
+        weigh_all(&[
+            &self.display_text,
+            &self.subject,
+            &self.free_text,
+            &self.keywords,
+            &self.conf_uris,
+            &self.service_uris,
+            &self.available_media,
+        ])
+    }
+}
+
+impl Weigh for HostInfo {
+    fn weigh(&self) -> usize {
+        weigh_all(&[&self.display_text, &self.web_page, &self.uris])
+    }
+}
+
+impl Weigh for ConferenceStatus {
+    fn weigh(&self) -> usize {
+        MARKUP
+    }
+}
+
 /// What one document did to a [`Conference`] (§4.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1081,8 +1256,10 @@ pub enum ConferenceUpdate {
     /// or repeated, and was discarded.
     Stale,
     /// It carries partial state and the version before it never arrived (or
-    /// nothing has arrived yet), so it was not applied. A refresh gets full
-    /// state back: [`UserAgent::request_full_state`].
+    /// nothing has arrived yet), or merging it would hold more than one
+    /// full-state document can carry, so it was not applied. A refresh gets
+    /// full state back: [`UserAgent::request_full_state`]. (A conference too
+    /// large for that is then refused by [`ConferenceInfo::parse`].)
     Resubscribe,
     /// It carries partial state while full state is already being asked
     /// for, so it was discarded without asking again.
@@ -1174,21 +1351,38 @@ impl Conference {
                 version: Some(document.version),
                 ..Self::default()
             };
-        } else {
-            // partial state is a change against the version just before it,
-            // and against nothing else
-            let follows = self
-                .version
-                .is_some_and(|held| document.version == held.saturating_add(1));
-            if self.awaiting_full {
-                return ConferenceUpdate::AwaitingFullState;
-            }
-            if !follows {
-                self.awaiting_full = true;
-                return ConferenceUpdate::Resubscribe;
-            }
-            self.version = Some(document.version);
+            self.merge(document);
+            return ConferenceUpdate::Applied;
         }
+        // partial state is a change against the version just before it,
+        // and against nothing else
+        let follows = self
+            .version
+            .is_some_and(|held| document.version == held.saturating_add(1));
+        if self.awaiting_full {
+            return ConferenceUpdate::AwaitingFullState;
+        }
+        if !follows {
+            self.awaiting_full = true;
+            return ConferenceUpdate::Resubscribe;
+        }
+        // merged on a copy, kept only while it holds no more than one
+        // full-state document could carry: every partial document is bounded,
+        // but what they add up to is not, and a picture larger than any full
+        // state this reads is not one the focus can ever confirm
+        let mut merged = self.clone();
+        merged.version = Some(document.version);
+        merged.merge(document);
+        if merged.weigh() > MAX_BYTES {
+            self.awaiting_full = true;
+            return ConferenceUpdate::Resubscribe;
+        }
+        *self = merged;
+        ConferenceUpdate::Applied
+    }
+
+    /// Merge a document's sections and users into what is held.
+    fn merge(&mut self, document: &ConferenceInfo) {
         merge_section(&mut self.description, document.description.as_ref());
         merge_section(&mut self.host, document.host.as_ref());
         merge_section(&mut self.status, document.status.as_ref());
@@ -1199,7 +1393,17 @@ impl Conference {
                 ElementState::Partial => merge_rows(&mut self.users, &users.users, MAX_USERS),
             }
         }
-        ConferenceUpdate::Applied
+    }
+
+    /// What everything held weighs.
+    fn weigh(&self) -> usize {
+        weigh_all(&[
+            &self.entity,
+            &self.description,
+            &self.host,
+            &self.status,
+            &self.users,
+        ])
     }
 
     /// Read a body and merge it in.
@@ -1304,7 +1508,7 @@ mod tests {
 
     use super::{
         Conference, ConferenceInfo, ConferenceInfoError, ConferenceUpdate, DisconnectionMethod,
-        ElementState, EndpointStatus, JoiningMethod, MAX_DEPTH, MAX_USERS, MediaStatus,
+        ElementState, EndpointStatus, JoiningMethod, MAX_BYTES, MAX_DEPTH, MAX_USERS, MediaStatus,
     };
     use crate::account::Account;
     use crate::agent::UserAgent;
@@ -1795,6 +1999,84 @@ version=\"2\"><users><user entity=\"sip:erin@example.com\"/></users></conference
             ConferenceInfo::parse(body.as_bytes()),
             Err(ConferenceInfoError::TooLarge("users"))
         );
+    }
+
+    /// The text a conference holds in its users, counted from what it shows.
+    fn held_text(conference: &Conference) -> usize {
+        let text = |value: &Option<Box<str>>| value.as_deref().map_or(0, str::len);
+        conference
+            .users()
+            .iter()
+            .map(|user| {
+                user.entity.len()
+                    + text(&user.display_text)
+                    + user.roles.iter().map(|role| role.len()).sum::<usize>()
+                    + user
+                        .endpoints
+                        .iter()
+                        .map(|endpoint| {
+                            endpoint.entity.len()
+                                + text(&endpoint.display_text)
+                                + endpoint
+                                    .media
+                                    .iter()
+                                    .map(|media| media.id.len() + text(&media.display_text))
+                                    .sum::<usize>()
+                        })
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn partial_notifications_cannot_grow_the_conference_past_one_full_document() {
+        assert!(
+            held().weigh() <= FULL.len(),
+            "what one document holds weighs no more than the document"
+        );
+        let mut conference = Conference::new();
+        let empty =
+            "<conference-info entity=\"sips:conf233@example.com\" state=\"full\" version=\"1\"/>";
+        assert_eq!(
+            conference.apply(&document(empty)),
+            ConferenceUpdate::Applied
+        );
+        let long = "x".repeat(990);
+        let mut outcome = Vec::new();
+        for version in 2..12_u32 {
+            let mut users = String::new();
+            for n in 0..100 {
+                write!(
+                    users,
+                    "<user entity=\"sip:{version}-{n}-{long}@example.com\">\
+<display-text>{long}</display-text></user>"
+                )
+                .expect("a string");
+            }
+            let body = partial(version, &users);
+            assert!(
+                body.len() <= MAX_BYTES,
+                "each document is one a focus may send"
+            );
+            outcome.push(conference.apply(&document(&body)));
+            assert!(
+                held_text(&conference) <= MAX_BYTES,
+                "version {version}: {} bytes held",
+                held_text(&conference)
+            );
+        }
+        // the second batch would hold more than any full-state document
+        // could carry: the picture is not one the focus can confirm, so it
+        // is not merged, and full state is asked for
+        assert_eq!(outcome[0], ConferenceUpdate::Applied);
+        assert_eq!(outcome[1], ConferenceUpdate::Resubscribe);
+        assert!(
+            outcome[2..]
+                .iter()
+                .all(|update| *update == ConferenceUpdate::AwaitingFullState)
+        );
+        assert_eq!(conference.version(), Some(2));
+        assert_eq!(conference.users().len(), 100);
     }
 
     #[test]
