@@ -535,6 +535,23 @@ with it, and `stop()` hangs it up. `ProtocolsCheck.kt`, run with
 `IdiomaticCheck.kt`, proves each of these on loopback, against a
 notifier, a compositor and a recording server played by the check itself.
 
+## A local conference
+
+`SipralLocalConference(client)` mixes any number of this client's calls,
+each on its own codec and rate, so that every member hears everybody but
+itself -- this end too, unless it is made with `local = false`. `add(call)`
+and `remove(call)` take calls in and out (a full conference, a call already
+in one, or a codec it cannot mix throw with
+`SipralStatus.CONFERENCE_REFUSED`); `setMuted` and `setGain` act on one way
+of a member, `null` naming this end; `memberList()` and `talkers()` say who
+is in it and who is talking, loudest first; `record(path)` records the whole
+mix. In device mode the library's engine carries it; in application mode its
+own thread does, with `sendAudio` as this end's microphone and `frames` what
+it hears. `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`, read with
+`localConferenceOf(event)`, says who joined or left and why and who is
+talking. `LocalConferenceCheck.kt` bridges two calls between three clients
+on loopback.
+
 ## The ConnectionService helper
 
 Split in two, so that the part worth testing needs no Android:

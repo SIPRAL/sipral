@@ -125,8 +125,10 @@ class Media:
 
         Used by :class:`sipral.stack.Stack` to send the RTCP BYE
         `sipral_stack_poll_farewell` hands back once the signalling that
-        owned it has already ended; nothing about ordinary audio goes
-        through this, which is what :meth:`send_audio` is for.
+        owned it has already ended, and by
+        :class:`sipral.conference.LocalConference` for the audio it encodes
+        for this call while the call is a member; a call's own audio goes
+        through :meth:`send_audio`.
         """
         host, _, port = address.rpartition(":")
         try:

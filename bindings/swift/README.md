@@ -589,6 +589,22 @@ session follows the call's holds and transfers and ends with it, and
 `stop()` hangs it up. `Tests/SipralTests/RecordingServerTests.swift` and
 `ProtocolsTests.swift` prove each of these.
 
+## A local conference
+
+`LocalConference(stack:)` mixes any number of this stack's calls, each on
+its own codec and rate, so that every member hears everybody but itself --
+this end too, unless it is made with `local: false`. `add(_:)` and
+`remove(_:)` take calls in and out (a full conference, a call already in
+one, or a codec it cannot mix throw with `.conferenceRefused`); `setMuted`
+and `setGain` act on one way of a member, `nil` naming this end;
+`memberList()` and `talkers()` say who is in it and who is talking, loudest
+first; `record(to:)` records the whole mix. In device mode the library's
+engine carries it; in application mode its own thread does, with
+`sendAudio` as this end's microphone and `frames()` what it hears.
+`SipralEventKind.localConferenceChanged`, with `localConferenceData`, says
+who joined or left and why and who is talking. `LocalConferenceTests.swift`
+bridges two calls between three stacks on loopback.
+
 ## Samples
 
 `Sources/SipralLabAgent` — a headless voice agent (answers, echoes, hangs up

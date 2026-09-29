@@ -36,6 +36,8 @@ __all__ = [
     "AmdReason",
     "RecordingFormat",
     "RecordingLayout",
+    "LocalConferenceChange",
+    "Departure",
     "Direction",
     "MediaFault",
     "Ice",
@@ -362,6 +364,15 @@ SubscriptionState = _enum("SubscriptionState", "SIPRAL_SUBSCRIPTION_STATE_")
 #: A `sipral_conference_update_t`: what one conference document did,
 #: :attr:`sipral.events.ConferenceNotice.update`.
 ConferenceUpdate = _enum("ConferenceUpdate", "SIPRAL_CONFERENCE_UPDATE_")
+
+#: What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` says happened, as
+#: :attr:`sipral.events.LocalConferenceNotice.change`: a member joined or
+#: left, who is talking changed, or the recording stopped by itself.
+LocalConferenceChange = _enum("LocalConferenceChange", "SIPRAL_LOCAL_CONFERENCE_CHANGE_")
+
+#: Why a member left a local conference, as
+#: :attr:`sipral.events.LocalConferenceNotice.departure`.
+Departure = _enum("Departure", "SIPRAL_DEPARTURE_")
 
 #: A `sipral_endpoint_status_t`: where one endpoint of a conference is (RFC
 #: 4575 §5.7.2).

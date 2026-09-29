@@ -40,6 +40,7 @@ from __future__ import annotations
 from .account import Account
 from .audio import Audio, AudioDevice, AudioInfo
 from .call import Call
+from .conference import LocalConference
 from .counters import Counters
 from .errors import SipralError
 from .events import (
@@ -49,6 +50,7 @@ from .events import (
     ConferenceNotice,
     EndCause,
     Event,
+    LocalConferenceNotice,
     Presence,
     Protection,
     TypedText,
@@ -76,6 +78,8 @@ __all__ = [
     "EndCause",
     "Event",
     "InviteLimit",
+    "LocalConference",
+    "LocalConferenceNotice",
     "Media",
     "Participant",
     "Presence",

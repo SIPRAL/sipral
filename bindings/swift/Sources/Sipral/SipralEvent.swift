@@ -53,6 +53,24 @@ public struct SipralEvent: Sendable {
     public internal(set) var textData: TextEventData? = nil
     /// `payload.presence`, for `SipralEventKind.presenceChanged` only.
     public internal(set) var presenceData: PresenceEventData? = nil
+    /// `payload.local_conference`, for `SipralEventKind.localConferenceChanged`
+    /// only.
+    public internal(set) var localConferenceData: LocalConferenceEventData? = nil
+}
+
+/// What a `SipralEventKind.localConferenceChanged` carries
+/// (`sipral_local_conference_event_t`): which `LocalConference`, what
+/// changed -- a member joined or left and why, who is talking, a recording
+/// that stopped by itself -- and how it stands now. `member` and `loudest`
+/// are call handles, or the conference's own handle for this end.
+public struct LocalConferenceEventData: Sendable, Equatable {
+    public let conference: SipralHandle
+    public let change: SipralLocalConferenceChange?
+    public let departure: SipralDeparture?
+    public let member: SipralHandle
+    public let members: UInt32
+    public let talkers: UInt32
+    public let loudest: SipralHandle
 }
 
 /// What a `SipralEventKind.callerVerification` carries
@@ -588,6 +606,18 @@ enum SipralEventDecoder {
                 error: SipralTransportError(rawValue: lost.error),
                 tls: SipralTlsFailure(rawValue: lost.tls),
                 detail: textC(lost.detail, lost.detail_len)
+            )
+        }
+        if kindRaw == SipralEventKind.localConferenceChanged.rawValue {
+            let changed = raw.payload.local_conference
+            event.localConferenceData = LocalConferenceEventData(
+                conference: changed.conference,
+                change: SipralLocalConferenceChange(rawValue: changed.change),
+                departure: SipralDeparture(rawValue: changed.departure),
+                member: changed.member,
+                members: changed.members,
+                talkers: changed.talkers,
+                loudest: changed.loudest
             )
         }
         if kindRaw == SipralEventKind.conferenceChanged.rawValue {

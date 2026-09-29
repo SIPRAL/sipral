@@ -441,6 +441,23 @@ two seconds, past which a call is answered 480. A voice agent behind a
 trunk takes `SipralInviteLimit.VoiceAgent`, a hundred and twenty-eight at
 once and twenty a second.
 
+## A local conference
+
+`new SipralLocalConference(stack)` mixes any number of this stack's calls,
+each on its own codec and rate, so that every member hears everybody but
+itself -- this end too, unless it is made with `local: false`. `Add(call)`
+and `Remove(call)` take calls in and out (a full conference, a call already
+in one, or a codec it cannot mix throw with
+`SipralStatus.ConferenceRefused`); `SetMuted` and `SetGain` act on one way
+of a member, `null` naming this end; `Members()` and `Talkers()` say who is
+in it and who is talking, loudest first; `Record(path)` records the whole
+mix. In device mode the library's engine carries it; in application mode
+its own thread does, with `SendAudio` as this end's microphone and `Frames`
+what it hears. `SipralEventKind.LocalConferenceChanged`, with
+`SipralEventArgs.LocalConference`, says who joined or left and why and who
+is talking. `LocalConferenceTests.cs` bridges two calls between three
+stacks on loopback.
+
 ## Samples
 
 `samples/Sipral.Sample.Agent` — a headless voice agent (answers, echoes,

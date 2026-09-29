@@ -105,12 +105,20 @@ public sealed class CallMedia : IDisposable
     /// (device mode): then no frame crosses here — <see cref="Frames"/> stays
     /// empty, <see cref="FrameDecoded"/> never fires and
     /// <see cref="SendAudio"/> throws — and this media's thread only reads
-    /// the socket and sends what RTCP and DTMF owe.</summary>
-    public bool Pumped { get; }
+    /// the socket and sends what RTCP and DTMF owe. Also true while the call
+    /// is a member of a <see cref="SipralLocalConference"/>, which carries
+    /// its frames.</summary>
+    public bool Pumped
+    {
+        get => _pumped;
+        internal set => _pumped = value;
+    }
+
+    private volatile bool _pumped;
 
     internal CallMedia(SipralStack stack, ulong callHandle, Socket socket, bool pumped = false, Socket? textSocket = null)
     {
-        Pumped = pumped;
+        _pumped = pumped;
         _stack = stack;
         _socket = socket;
         _socket.Blocking = false;

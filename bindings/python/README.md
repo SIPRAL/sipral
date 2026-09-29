@@ -374,6 +374,23 @@ it up. `tests/test_protocols.py` proves each: text and feedback between two
 stacks on loopback, and the conference, presence and recording server
 played by hand.
 
+## A local conference
+
+`LocalConference(stack)` mixes any number of this stack's calls, each on its
+own codec and rate, so that every member hears everybody but itself -- this
+end too, unless it is made with `local=False`. `add(call)` and
+`remove(call)` take calls in and out (a full conference, a call already in
+one, or a codec it cannot mix raise with `Status.CONFERENCE_REFUSED`);
+`set_muted` and `set_gain` act on one way of a member, `None` naming this
+end; `members()` and `talkers()` say who is in it and who is talking,
+loudest first; `record(path)` records the whole mix. In device mode the
+library's engine carries it; in application mode its own thread does, with
+`send_audio` as this end's microphone and `frames` what it hears.
+`EventKind.LOCAL_CONFERENCE_CHANGED` on `stack.events`, read with
+`event.local_conference`, says who joined or left and why and who is
+talking. `tests/test_local_conference.py` bridges two calls between three
+stacks on loopback.
+
 ## SIP over TCP or TLS
 
 ```python
