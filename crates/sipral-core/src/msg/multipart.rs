@@ -28,7 +28,10 @@
 //! The CRLF in front of a delimiter belongs to the delimiter, not to the part
 //! before it, so an SDP body that ends in CRLF comes back out ending in CRLF.
 //! A line that starts with the boundary but carries anything other than
-//! padding after it is not a delimiter, and is read as content. The preamble
+//! padding after it is not a delimiter, and is read as content. That is the
+//! grammar's reading; §5.1.1 forbids such a line in a part at all, and its
+//! note to implementors would take the boundary at the start of any line as
+//! a delimiter whatever follows it. No conforming sender writes one. The preamble
 //! and the epilogue are skipped, as §5.1.1 says they are. A body without the
 //! close delimiter is refused rather than guessed at: a part cut short by a
 //! lost segment is not a part.
@@ -42,10 +45,10 @@
 //! asked for by name.
 //!
 //! **What a receiver has to refuse.** The `handling` parameter of a part's
-//! disposition says whether the part may be ignored (RFC 5621 §3.2). A
-//! part that is required and not understood makes the whole request one the
-//! user agent cannot process, and RFC 5621 §9 makes that a 415
-//! (Unsupported Media Type). [`Multipart::check`] walks the tree and returns
+//! disposition says whether the part may be ignored (RFC 3261 §20.11,
+//! RFC 5621 §8.2). A part that is required and not understood makes the whole
+//! request one the user agent cannot process, and RFC 3261 §8.2.3 makes that a
+//! 415 (Unsupported Media Type). [`Multipart::check`] walks the tree and returns
 //! that part as an [`Unsupported`], whose status is the 415. The parts of a
 //! `multipart/alternative` are one choice rather than several bodies (RFC 2046
 //! §5.1.4): their own handling is not consulted, and the alternative as a
@@ -416,7 +419,8 @@ impl<'a> Multipart<'a> {
     }
 
     /// The part with this `Content-ID` at any level, depth first, compared
-    /// exactly: a `cid:` URL is resolved against it (RFC 2392 §2).
+    /// exactly: a `cid:` URL is resolved against it once its `cid:` prefix is
+    /// dropped and its %-escapes are undone (RFC 2392 §2).
     #[must_use]
     pub fn by_content_id(&self, id: &[u8]) -> Option<&BodyPart<'a>> {
         self.parts.iter().find_map(|part| {
@@ -439,7 +443,7 @@ impl<'a> Multipart<'a> {
     }
 
     /// Whether every part the sender requires is one this receiver
-    /// understands (RFC 5621 §3.2 and §9).
+    /// understands (RFC 3261 §8.2.3, RFC 5621 §8.2).
     ///
     /// `understood` is asked about every part that is not itself multipart,
     /// and can judge its type, its disposition or both. A nested multipart
@@ -502,7 +506,7 @@ fn part_check<'a, F: Fn(&BodyPart<'a>) -> bool>(
 }
 
 /// A required part the receiver does not understand: the request is answered
-/// with 415 (RFC 5621 §9).
+/// with 415 (RFC 3261 §8.2.3).
 #[derive(Clone, Copy, Debug)]
 pub struct Unsupported<'a> {
     content_type: Option<MediaTypeRef<'a>>,
@@ -685,7 +689,7 @@ impl Reader {
     }
 }
 
-/// `msg-id = "<" addr-spec ">"` (RFC 2045 §7, RFC 822 §6): the brackets are
+/// `msg-id = "<" addr-spec ">"` (RFC 2045 §7, RFC 822 §4.1): the brackets are
 /// taken off when both are there.
 fn content_id(value: &[u8]) -> Result<&[u8], MultipartError> {
     let value = trim(value);
