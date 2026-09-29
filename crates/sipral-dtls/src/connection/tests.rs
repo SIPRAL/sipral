@@ -1048,20 +1048,17 @@ fn a_profile_is_agreed_in_the_servers_order_or_the_handshake_fails_for_want_of_o
         assert!(!offers.is_empty(), "{what}");
         assert!(offers.iter().all(|offer| offer == client), "{what}");
 
-        match agreed {
-            Some(profile) => {
-                let (client_keys, server_keys) = (keyed(&pair.events[0]), keyed(&pair.events[1]));
-                assert_eq!(client_keys.profile(), profile, "{what}");
-                assert_keyed_alike(client_keys, server_keys);
-            }
-            None => {
-                assert_eq!(refused(&pair.events[1]), Failure::NoSrtpProfile, "{what}");
-                assert_eq!(
-                    refused(&pair.events[0]),
-                    Failure::PeerAlert(AlertDescription::HANDSHAKE_FAILURE),
-                    "{what}"
-                );
-            }
+        if let Some(profile) = agreed {
+            let (client_keys, server_keys) = (keyed(&pair.events[0]), keyed(&pair.events[1]));
+            assert_eq!(client_keys.profile(), profile, "{what}");
+            assert_keyed_alike(client_keys, server_keys);
+        } else {
+            assert_eq!(refused(&pair.events[1]), Failure::NoSrtpProfile, "{what}");
+            assert_eq!(
+                refused(&pair.events[0]),
+                Failure::PeerAlert(AlertDescription::HANDSHAKE_FAILURE),
+                "{what}"
+            );
         }
     }
 }
