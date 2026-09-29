@@ -12,6 +12,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Digits, call-progress tones and answering machines are heard in the
+  audio itself.** `sipral_media::inband` works on 8 and 16 kHz PCM with no
+  new dependency and no platform-specific instructions. `dtmf::DtmfDetector`
+  finds the sixteen Q.23 digits to the limits of ITU-T Q.24 Annex A (±1.5 %
+  accepted and ±3.5 % refused, twist +4/−8 dB, 40 ms accepted and 23 ms
+  refused, a 10 ms interruption bridged), holds off talk-off with a
+  signal-to-noise and a second-harmonic test, and reports each digit's
+  start and end on the stream's sample clock; `KeyPress::is_same_press`
+  matches one against an RFC 4733 event for the same key.
+  `generate::DtmfGenerator` and `ToneGenerator` write digits and
+  call-progress tones; `progress` tables dial, ringback, busy, congestion
+  and call waiting for the CEPT countries, North America and the United
+  Kingdom from ITU-T E.180 Supplement 2, and `ProgressDetector` hears them
+  and E.180's special information tone on a call's inbound audio.
+  `amd::AnsweringMachineDetector` says whether a person or a machine
+  answered an outbound call, and why, and `beep::BeepDetector` says when a
+  machine's beep has ended. A minute of synthesised speech and of noise
+  per rate triggers none of them; all four together run about a thousand
+  times faster than real time per core at 8 kHz.
 - **A call's audio on Android survives what the platform does to it.**
   `SipralCallAudio` (in the `ConnectionService` helper) keeps one call's
   microphone and speaker through a cellular call answered over it — the

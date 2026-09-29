@@ -119,11 +119,12 @@ pub struct BeepDetector {
     /// The stride, in samples, that puts the top of the band at half the
     /// circle.
     stride: usize,
-    /// The last `2 × stride` samples, newest first.
+    /// The last `2 * stride` samples, newest first.
     history: [f64; 2 * MAX_STRIDE],
     filled: usize,
-    /// Σ x², then for adjacent samples and for the stride in turn
-    /// Σ x[n-s]², Σ x[n-s]·(x[n] + x[n-2s]), Σ (x[n] + x[n-2s])².
+    /// The sum over the block of x², then for adjacent samples and for the
+    /// stride in turn the sums of x[n-s]², x[n-s]·(x[n] + x[n-2s]) and
+    /// (x[n] + x[n-2s])².
     sums: [f64; 7],
     blocks_seen: u64,
     run: Option<Run>,
