@@ -612,7 +612,7 @@ mod tests {
         PresenceError, Tuple, format_qvalue, qvalue,
     };
 
-    /// RFC 3863 §6's example: two tuples, one with an extension inside its
+    /// RFC 3863 §4.3.1's example: two tuples, one with an extension inside its
     /// status, notes in two languages and a timestamp, and a note on the
     /// document itself. The carrier's domain is moved under `example.net`,
     /// the only change.

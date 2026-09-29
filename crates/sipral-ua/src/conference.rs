@@ -587,9 +587,9 @@ pub struct ConferenceInfo {
     /// The `version` attribute, which orders the documents of one
     /// subscription (§4.6).
     pub version: u32,
-    /// Whether it is the whole conference or what changed. Never
-    /// [`ElementState::Deleted`]: a conference that is over ends its
-    /// subscription instead.
+    /// Whether it is the whole conference, what changed, or (§4.6,
+    /// [`ElementState::Deleted`]) word that the conference has ceased to
+    /// exist.
     pub state: ElementState,
     /// `conference-description`.
     pub description: Option<ConferenceDescription>,
@@ -632,11 +632,6 @@ impl ConferenceInfo {
             .and_then(|text| text.parse::<u32>().ok())
             .ok_or(ConferenceInfoError::Malformed("no version"))?;
         let state = ElementState::read(root.attributes)?;
-        if state == ElementState::Deleted {
-            return Err(ConferenceInfoError::Malformed(
-                "a document is full or partial",
-            ));
-        }
         Ok(Self {
             entity,
             version,
@@ -1263,6 +1258,11 @@ pub enum ConferenceUpdate {
     /// It carries partial state while full state is already being asked
     /// for, so it was discarded without asking again.
     AwaitingFullState,
+    /// Its `conference-info` is `deleted`: the conference has ceased to
+    /// exist, everything held about it was dropped, and RFC 4575 §4.6 has
+    /// the subscriber end its subscription (`SUBSCRIBE` with `Expires: 0`,
+    /// [`UserAgent::unsubscribe`]).
+    Ended,
 }
 
 /// Everything one conference subscription has been told, merged (§4.6).
@@ -1344,12 +1344,19 @@ impl Conference {
         if self.version.is_some_and(|held| document.version <= held) {
             return ConferenceUpdate::Stale;
         }
-        if document.state == ElementState::Full {
+        // §4.6: "full" and "deleted" both replace the local information
+        // and take the document's version, whatever version came before
+        if document.state != ElementState::Partial {
             *self = Self {
                 entity: Some(document.entity.clone()),
                 version: Some(document.version),
                 ..Self::default()
             };
+            if document.state == ElementState::Deleted {
+                // "Any information provided for child elements of a
+                // "deleted" parent MUST be ignored" (§4.4)
+                return ConferenceUpdate::Ended;
+            }
             self.merge(document);
             return ConferenceUpdate::Applied;
         }
@@ -1466,8 +1473,8 @@ impl Conference {
 
 impl Subscribe {
     /// A subscription to the conference at `focus` (RFC 4575 §3): `Event:
-    /// conference`, with `Accept: application/conference-info+xml` (§3.5),
-    /// for [`crate::DEFAULT_EXPIRES`] — the hour §3.4 makes the default —
+    /// conference`, with `Accept: application/conference-info+xml` (§3.4),
+    /// for [`crate::DEFAULT_EXPIRES`] — the hour §3.3 makes the default —
     /// unless [`Subscribe::expires`] says otherwise.
     #[must_use]
     pub fn conference(focus: Uri) -> Self {
@@ -1881,6 +1888,24 @@ version=\"2\"><conference-state state=\"partial\"><user-count>34</user-count>\
     }
 
     #[test]
+    fn a_deleted_conference_info_ends_the_conference() {
+        // RFC 4575 §4.6: "deleted" state for <conference-info> "means that
+        // the conference has ceased to exist", and replaces the local
+        // information as "full" does, at whatever newer version
+        let mut conference = held();
+        let ended = "<conference-info entity=\"sips:conf233@example.com\" state=\"deleted\" \
+version=\"7\"><users><user entity=\"sip:ghost@example.com\"/></users></conference-info>";
+        let document = ConferenceInfo::parse(ended.as_bytes()).expect("a deleted document reads");
+        assert_eq!(document.state, ElementState::Deleted);
+        assert_eq!(conference.apply(&document), ConferenceUpdate::Ended);
+        assert_eq!(conference.version(), Some(7));
+        assert!(conference.users().is_empty(), "children of it are ignored");
+        assert!(conference.description().is_none());
+        // and a late copy of it is still just late
+        assert_eq!(conference.apply(&document), ConferenceUpdate::Stale);
+    }
+
+    #[test]
     fn a_deleted_users_element_empties_the_table() {
         let mut conference = held();
         let update = "<conference-info entity=\"sips:conf233@example.com\" state=\"partial\" \
@@ -2048,10 +2073,6 @@ version=\"2\"><users><user entity=\"sip:erin@example.com\"/></users></conference
             (
                 "<conference-info version=\"1\"/>",
                 ConferenceInfoError::Malformed("no entity"),
-            ),
-            (
-                "<conference-info entity=\"sip:c@example.com\" version=\"1\" state=\"deleted\"/>",
-                ConferenceInfoError::Malformed("a document is full or partial"),
             ),
             (
                 "<conference-info entity=\"sip:c@example.com\" version=\"1\" state=\"most\"/>",

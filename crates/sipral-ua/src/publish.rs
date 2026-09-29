@@ -54,9 +54,10 @@ use crate::presence::{PIDF_TYPE, Presence, PresenceError};
 use crate::registration::{min_expires, refresh_after};
 use crate::subscription::DEFAULT_EXPIRES;
 
-/// The entity tag a 2xx hands back (RFC 3903 §11).
+/// The entity tag a 2xx hands back (RFC 3903 §11.3.1).
 const SIP_ETAG: HeaderName<'static> = HeaderName::Extension("SIP-ETag");
-/// The entity tag a refresh, modification or removal names (RFC 3903 §11).
+/// The entity tag a refresh, modification or removal names (RFC 3903
+/// §11.3.2).
 const SIP_IF_MATCH: HeaderName<'static> = HeaderName::Extension("SIP-If-Match");
 /// The longest entity tag kept. The grammar makes it a token and sets no
 /// bound; a compositor's are short, and this is the bound on what one can
@@ -610,7 +611,7 @@ impl Publication {
     }
 }
 
-/// A `SIP-ETag` value: RFC 3903 §11's `entity-tag = token`, bounded.
+/// A `SIP-ETag` value: RFC 3903 §12's `entity-tag = token`, bounded.
 fn entity_tag(value: &[u8]) -> Option<Box<str>> {
     let value = value.trim_ascii();
     let token = |byte: u8| {
