@@ -26,6 +26,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `503` at a limit; `Endpoint::transaction_retransmissions` answers for one
   live transaction. A figure that climbs while calls still connect is a
   lossy path, seen before it drops a call.
+- **`scripts/bench.sh scale` holds thousands of calls with audio.** Two
+  processes of the lab harness on one machine, five and ten thousand calls
+  by default, each carrying G.711 both ways for a minute; it reports setup
+  rate and times, processor time, memory, packets a second and what each of
+  the engine's polls and sweeps costs. `docs/19-numbers.md` has the first
+  run.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when

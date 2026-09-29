@@ -6,6 +6,8 @@
 #
 #   scripts/bench.sh            everything below, printed as the document's
 #                               own table rows
+#   scripts/bench.sh scale      thousands of calls held with audio, two
+#                               processes on this machine (step_scale)
 #
 # What it measures, and what each number is worth knowing:
 #
@@ -52,6 +54,55 @@ CALLS="${SIPRAL_LOAD_CALLS:-200}"
 # which is past the default ceilings on dialogs and server transactions and
 # so also says what raising them costs.
 SIGNALLING="${SIPRAL_SIGNALLING_RUNS:-100 1000}"
+
+# scripts/bench.sh scale [calls...]: thousands of calls with audio between
+# two processes of the lab harness on this machine (interop/harness's
+# `scale` and `scale-answer` flows), five and ten thousand unless other
+# counts are named. Not part of the default run: each count takes a couple of
+# minutes, holds twice that many UDP sockets open, and belongs on a machine
+# with the cores for it rather than on a laptop. SIPRAL_HARNESS names a
+# harness already built (a container build, say) instead of building one
+# here; SIPRAL_SCALE_RATE, _HOLD_MS, _THREADS and _PATIENCE_MS pass through to
+# both ends.
+step_scale() {
+    local harness="${SIPRAL_HARNESS:-}"
+    if [ -z "$harness" ]; then
+        cargo build --release -q -p sipral-interop || {
+            printf 'scale: cargo build -p sipral-interop failed\n'
+            return 1
+        }
+        harness="$TARGET/release/sipral-interop"
+    fi
+    [ -x "$harness" ] || { printf 'scale: no harness at %s\n' "$harness"; return 1; }
+    # every call is a socket at each end, and both ends are here
+    ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
+    local port="${SIPRAL_SCALE_PORT:-5090}" status=0 calls answering said heard
+    [ "$#" -gt 0 ] || set -- 5000 10000
+    for calls in "$@"; do
+        printf '\nscale, %s calls\n' "$calls"
+        said="$(mktemp)"
+        heard="$(mktemp)"
+        SIPRAL_SCALE_CALLS="$calls" SIPRAL_FLOWS=scale-answer \
+            "$harness" 127.0.0.1 "$port" >"$heard" 2>&1 &
+        answering=$!
+        sleep 1
+        if ! SIPRAL_SCALE_CALLS="$calls" SIPRAL_FLOWS=scale \
+            "$harness" 127.0.0.1 "$port" >"$said" 2>&1; then
+            status=1
+        fi
+        wait "$answering" || status=1
+        grep -E '^  (pass|FAIL)  scale' "$said" | sed 's/^/  caller:   /'
+        grep -E '^  (pass|FAIL)  scale-answer' "$heard" | sed 's/^/  answerer: /'
+        rm -f "$said" "$heard"
+    done
+    return "$status"
+}
+
+if [ "${1:-}" = "scale" ]; then
+    shift
+    step_scale "$@"
+    exit $?
+fi
 
 printf 'sipral %s, %s, %s\n' \
     "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" \
