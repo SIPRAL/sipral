@@ -12,6 +12,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **RTCP feedback for audio: RTP/AVPF and reduced-size RTCP.**
+  `sipral_rtp::avpf` builds and reads the Generic NACK (RFC 4585 §6.2.1),
+  times feedback by RFC 4585 §3.5 (Early packets rationed by `allow_early`,
+  `T_dither_max`, Regular packets thinned by `trr-int` into full, minimal
+  or suppressed), sends and accepts reduced-size RTCP once `a=rtcp-rsize`
+  is in both offer and answer and a compound packet has gone first
+  (RFC 5506), and reads and writes `a=rtcp-fb` (`nack`, `trr-int`; the rest
+  ignored) and the `RTP/AVPF` and `RTP/SAVPF` profile names through the
+  `sipral_core::sdp` model. Nothing is wired into `RtpSession` yet. New
+  fuzz target `rtcp_fb`.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when
