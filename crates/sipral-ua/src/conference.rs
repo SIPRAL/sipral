@@ -35,7 +35,8 @@
 //!
 //! **What is held is bounded like what is read.** Every document is bounded,
 //! but partial ones only add up: a merge that would hold more than one
-//! full-state document can carry is not kept, and is answered like a gap.
+//! full-state document can carry, or more rows in a list than one may list,
+//! is not kept, and is answered like a gap.
 //!
 //! **What is keyed is merged; what is not is replaced.** Under §4.6 a partial
 //! element's children are matched to what is held by their key — a user and
@@ -869,7 +870,10 @@ trait Keyed: Clone {
     }
 }
 
-fn merge_rows<T: Keyed>(held: &mut Vec<T>, updates: &[T], cap: usize) {
+/// Merge `updates` into `held` by key. A row not held is added even past the
+/// list's bound: [`Conference::apply`] checks the bounds on the merged copy
+/// and keeps none of it when one is passed.
+fn merge_rows<T: Keyed>(held: &mut Vec<T>, updates: &[T]) {
     for update in updates {
         let at = held.iter().position(|row| row.key() == update.key());
         match (update.state(), at) {
@@ -887,11 +891,7 @@ fn merge_rows<T: Keyed>(held: &mut Vec<T>, updates: &[T], cap: usize) {
                     row.merge(update);
                 }
             }
-            (_, None) => {
-                if held.len() < cap {
-                    held.push(update.settled());
-                }
-            }
+            (_, None) => held.push(update.settled()),
         }
     }
 }
@@ -958,7 +958,7 @@ impl Keyed for Endpoint {
             &mut self.disconnection_info,
             update.disconnection_info.as_ref(),
         );
-        merge_rows(&mut self.media, &update.media, MAX_MEDIA);
+        merge_rows(&mut self.media, &update.media);
     }
     fn settled(&self) -> Self {
         Self {
@@ -982,7 +982,7 @@ impl Keyed for User {
         if !update.roles.is_empty() {
             self.roles.clone_from(&update.roles);
         }
-        merge_rows(&mut self.endpoints, &update.endpoints, MAX_ENDPOINTS);
+        merge_rows(&mut self.endpoints, &update.endpoints);
     }
     fn settled(&self) -> Self {
         Self {
@@ -1025,13 +1025,9 @@ impl Section for ConferenceDescription {
             &mut self.maximum_user_count,
             update.maximum_user_count.as_ref(),
         );
-        merge_rows(&mut self.conf_uris, &update.conf_uris, MAX_ENTRIES);
-        merge_rows(&mut self.service_uris, &update.service_uris, MAX_ENTRIES);
-        merge_rows(
-            &mut self.available_media,
-            &update.available_media,
-            MAX_ENTRIES,
-        );
+        merge_rows(&mut self.conf_uris, &update.conf_uris);
+        merge_rows(&mut self.service_uris, &update.service_uris);
+        merge_rows(&mut self.available_media, &update.available_media);
     }
     fn settled(&self) -> Self {
         Self {
@@ -1048,7 +1044,7 @@ impl Section for HostInfo {
     fn merge(&mut self, update: &Self) {
         take(&mut self.display_text, update.display_text.as_ref());
         take(&mut self.web_page, update.web_page.as_ref());
-        merge_rows(&mut self.uris, &update.uris, MAX_ENTRIES);
+        merge_rows(&mut self.uris, &update.uris);
     }
     fn settled(&self) -> Self {
         Self {
@@ -1369,11 +1365,13 @@ impl Conference {
         // merged on a copy, kept only while it holds no more than one
         // full-state document could carry: every partial document is bounded,
         // but what they add up to is not, and a picture larger than any full
-        // state this reads is not one the focus can ever confirm
+        // state this reads is not one the focus can ever confirm. Leaving out
+        // the rows past a bound instead would keep a picture the focus never
+        // had, with nothing to say so
         let mut merged = self.clone();
         merged.version = Some(document.version);
         merged.merge(document);
-        if merged.weigh() > MAX_BYTES {
+        if !merged.is_within_bounds() || merged.weigh() > MAX_BYTES {
             self.awaiting_full = true;
             return ConferenceUpdate::Resubscribe;
         }
@@ -1390,9 +1388,27 @@ impl Conference {
             match users.state {
                 ElementState::Deleted => self.users.clear(),
                 ElementState::Full => self.users = settled_rows(&users.users),
-                ElementState::Partial => merge_rows(&mut self.users, &users.users, MAX_USERS),
+                ElementState::Partial => merge_rows(&mut self.users, &users.users),
             }
         }
+    }
+
+    /// Whether every list holds no more than one document may carry.
+    fn is_within_bounds(&self) -> bool {
+        let entries = |list: &[UriEntry]| list.len() <= MAX_ENTRIES;
+        self.description.as_ref().is_none_or(|description| {
+            entries(&description.conf_uris)
+                && entries(&description.service_uris)
+                && description.available_media.len() <= MAX_ENTRIES
+        }) && self.host.as_ref().is_none_or(|host| entries(&host.uris))
+            && self.users.len() <= MAX_USERS
+            && self.users.iter().all(|user| {
+                user.endpoints.len() <= MAX_ENDPOINTS
+                    && user
+                        .endpoints
+                        .iter()
+                        .all(|endpoint| endpoint.media.len() <= MAX_MEDIA)
+            })
     }
 
     /// What everything held weighs.
@@ -1998,6 +2014,40 @@ version=\"2\"><users><user entity=\"sip:erin@example.com\"/></users></conference
         assert_eq!(
             ConferenceInfo::parse(body.as_bytes()),
             Err(ConferenceInfoError::TooLarge("users"))
+        );
+    }
+
+    #[test]
+    fn a_partial_notification_adding_past_a_bound_is_not_merged_short() {
+        let mut body = String::from(
+            "<conference-info entity=\"sip:c@example.com\" state=\"full\" version=\"1\"><users>",
+        );
+        for n in 0..MAX_USERS {
+            write!(body, "<user entity=\"sip:{n}@example.com\"/>").expect("a string");
+        }
+        body.push_str("</users></conference-info>");
+        let mut conference = Conference::new();
+        assert_eq!(
+            conference.apply(&document(&body)),
+            ConferenceUpdate::Applied
+        );
+        // a user the focus added, which there is no room to hold: merging
+        // the rest and leaving it out would be a picture the focus never had
+        let more = "<conference-info entity=\"sip:c@example.com\" state=\"partial\" version=\"2\">\
+<users state=\"partial\"><user entity=\"sip:0@example.com\"><display-text>Zero</display-text>\
+</user><user entity=\"sip:one-more@example.com\"/></users></conference-info>";
+        assert_eq!(
+            conference.apply(&document(more)),
+            ConferenceUpdate::Resubscribe
+        );
+        assert_eq!(conference.version(), Some(1));
+        assert_eq!(conference.users().len(), MAX_USERS);
+        assert_eq!(
+            conference
+                .user("sip:0@example.com")
+                .and_then(|user| user.display_text.as_deref()),
+            None,
+            "nothing of it is merged"
         );
     }
 
