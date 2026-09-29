@@ -1519,6 +1519,13 @@ fn a_configuration_no_handshake_can_come_of_is_refused() {
     c.srtp_profiles = vec![SrtpProtectionProfile::NULL_HMAC_SHA1_80];
     assert_eq!(make(c), Some(Error::IllegalValue));
     let mut c = base();
+    c.srtp_profiles = vec![
+        SrtpProtectionProfile::AEAD_AES_128_GCM,
+        SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80,
+        SrtpProtectionProfile::AEAD_AES_128_GCM,
+    ];
+    assert_eq!(make(c), Some(Error::IllegalValue));
+    let mut c = base();
     c.certificate = other.certificate.clone();
     assert_eq!(make(c), Some(Error::IllegalValue));
     let mut c = base();
