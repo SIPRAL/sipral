@@ -77,6 +77,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   Read back by `tshark` with every message decoded and its direction shown.
   Redaction now also pseudonymises the user name of an SDP `o=` line, and
   `sipral_diag::redact_text` applies the same rules to free text.
+- **A guide for moving off PJSIP** (`docs/21-migrating-from-pjsip.md`),
+  written from PJSIP's public documentation alone: the library's lifetime,
+  transports, the event pump, accounts, calls, media and the conference
+  bridge, the sound device, buddies and presence, messages, logging and
+  threads, each with its Sipral equivalent in C and in Python and what works
+  differently. Every sample in it was built and run.
+- **A TLS recipe per platform** (`docs/22-tls.md`): who checks a
+  certificate for SIP and for TURN over TLS, what RFC 5922 asks of a SIP
+  domain's certificate beyond an HTTPS check, the trust anchors each
+  platform uses by default, how to add a private CA and how to trust one
+  authority alone on Linux, Windows, macOS and iOS, and Android, and what an
+  application sees when TLS fails. Samples in C with OpenSSL, Python, C#,
+  Swift and Kotlin, run against the lab's TLS listener.
+
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when
