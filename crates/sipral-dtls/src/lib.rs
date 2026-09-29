@@ -75,9 +75,9 @@
 //! come from the caller.
 //!
 //! Written from RFC 6347, RFC 5246, RFC 5288, RFC 5289, RFC 5705, RFC 5746,
-//! RFC 5763, RFC 5764, RFC 4145, RFC 7627, RFC 8422, RFC 8827, RFC 5280, RFC
-//! 5480, RFC 5758, RFC 3279 and RFC 8122; see `docs/02-clean-room.md` for why
-//! that matters here.
+//! RFC 5763, RFC 5764, RFC 7714, RFC 4145, RFC 7627, RFC 8422, RFC 8827, RFC
+//! 5280, RFC 5480, RFC 5758, RFC 3279 and RFC 8122; see
+//! `docs/02-clean-room.md` for why that matters here.
 //!
 //! [`MasterSecret::export`]: prf::MasterSecret::export
 

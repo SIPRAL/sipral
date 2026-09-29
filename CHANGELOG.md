@@ -1382,6 +1382,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   port alone and sent every report from it, so neither end of such a call
   ever measured a round trip. The socket now binds that port once the
   call's plan names it, reads it, and sends reports and goodbyes from it.
+- **A DTLS-SRTP profile order names each profile once.** `sipral-dtls`'s
+  `Config::srtp_profiles` is the client's `use_srtp` list "in descending
+  order of preference" (RFC 5764 §4.1.1) and the server's own order of
+  choice; a list naming a profile twice is now refused by
+  `Connection::new` with `IllegalValue`, and `Config::new`'s documentation
+  names the four profiles it really defaults to, RFC 7714 §14.2's
+  `SRTP_AEAD_AES_256_GCM` and `_128_GCM` first. New tests negotiate from
+  both sides against a peer offering only AES-CM, only GCM, and nothing in
+  common; check each profile's exported key and salt widths against the
+  `sipral-rtp` suite that consumes them (twelve-octet salt for both GCM
+  profiles, RFC 7714 §12); carry one GCM-protected RTP packet each way
+  under the keys a full in-process handshake exported; and refuse
+  malformed `use_srtp` data and an unoffered server MKI in either hello
+  without panicking.
 - **A packet still on its way from where the far end was does not take a
   moved call back there.** After a re-INVITE moved the far end's media, the
   first packet read closed the stream's latch wherever it came from; one

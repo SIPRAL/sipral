@@ -222,7 +222,9 @@ pub struct Config {
     pub peer_fingerprints: Vec<Fingerprint>,
     /// The SRTP profiles this end accepts, most preferred first: the list a
     /// client offers, and the order a server chooses in from what the client
-    /// offered.
+    /// offered. Each at most once, and each one of the four there are keys
+    /// for: `SRTP_AEAD_AES_256_GCM`, `SRTP_AEAD_AES_128_GCM` (RFC 7714
+    /// §14.2), `SRTP_AES128_CM_HMAC_SHA1_80` and `_32` (RFC 5764 §4.1.2).
     pub srtp_profiles: Vec<SrtpProtectionProfile>,
     /// The largest UDP payload the path carries, the IP and UDP headers
     /// already taken off. Every datagram written fits it; a handshake message
@@ -240,7 +242,9 @@ pub struct Config {
 
 impl Config {
     /// A configuration with every setting but the four named at its default:
-    /// both AES-128 SRTP profiles with the 80-bit tag first, datagrams of
+    /// every SRTP profile there are keys for, strongest first
+    /// (`SRTP_AEAD_AES_256_GCM`, `SRTP_AEAD_AES_128_GCM`,
+    /// `SRTP_AES128_CM_HMAC_SHA1_80`, `SRTP_AES128_CM_HMAC_SHA1_32`), datagrams of
     /// [`DEFAULT_MAX_DATAGRAM`], the cookie exchange on, the timers of RFC
     /// 6347 §4.2.4.1, reassembly's default limits.
     #[must_use]
@@ -495,6 +499,14 @@ impl Settings {
                 .srtp_profiles
                 .iter()
                 .any(|profile| !KEYABLE.contains(profile))
+            // a preference order names each profile once; RFC 5764 §4.1.1's
+            // list is the client's "in descending order of preference", which
+            // a repeated entry makes two orders at once
+            || config
+                .srtp_profiles
+                .iter()
+                .enumerate()
+                .any(|(at, profile)| config.srtp_profiles.iter().take(at).any(|p| p == profile))
             || config.retransmission.initial.is_zero()
             || config.retransmission.max < config.retransmission.initial
         {
@@ -772,8 +784,8 @@ impl Connection {
     /// # Errors
     ///
     /// - [`Error::IllegalValue`] for a configuration no DTLS-SRTP handshake
-    ///   can come of: no fingerprint for the peer, no SRTP profile or one
-    ///   there are no keys for, a certificate that is not for `key`, a timer
+    ///   can come of: no fingerprint for the peer, no SRTP profile, one
+    ///   there are no keys for or one named twice, a certificate that is not for `key`, a timer
     ///   that starts at zero or is capped below its start;
     /// - [`Error::MtuTooSmall`] for a datagram that cannot carry one octet of
     ///   protected handshake data;

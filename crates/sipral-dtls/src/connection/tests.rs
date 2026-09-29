@@ -986,6 +986,118 @@ fn a_client_offering_only_aes_128_cm_still_completes_on_it() {
     );
 }
 
+/// The `use_srtp` profiles of every ClientHello `from` sent.
+fn offered_profiles(pair: &Pair, from: usize) -> Vec<Vec<SrtpProtectionProfile>> {
+    pair.sent
+        .iter()
+        .filter(|(sender, _)| *sender == from)
+        .flat_map(|(_, datagram)| plaintext_fragments(datagram))
+        .filter(|(_, header, _)| header.msg_type == HandshakeType::CLIENT_HELLO)
+        .map(|(_, _, body)| {
+            let hello = ClientHello::parse(&body).unwrap();
+            hello
+                .extensions
+                .unwrap()
+                .use_srtp()
+                .unwrap()
+                .profiles
+                .clone()
+        })
+        .collect()
+}
+
+/// RFC 5764 §4.1.1: the client offers its profiles "in descending order of
+/// preference", and the server answers with one of them, chosen here in the
+/// server's own configured order. A peer offering only the RFC 5764 AES-CM
+/// profiles, a peer offering only the RFC 7714 §14.2 GCM ones, and two ends
+/// with nothing in common are each met with the peer as client and as
+/// server.
+#[test]
+fn a_profile_is_agreed_in_the_servers_order_or_the_handshake_fails_for_want_of_one() {
+    use SrtpProtectionProfile as P;
+    let (one, other) = (identity(1), identity(2));
+    let cm = vec![P::AES128_CM_HMAC_SHA1_80, P::AES128_CM_HMAC_SHA1_32];
+    let gcm = vec![P::AEAD_AES_128_GCM, P::AEAD_AES_256_GCM];
+    let every = KEYABLE.to_vec();
+    // the client's list, the server's, what they agree on
+    let cases: [(&[P], &[P], Option<P>); 9] = [
+        (&cm, &every, Some(P::AES128_CM_HMAC_SHA1_80)),
+        (&every, &cm, Some(P::AES128_CM_HMAC_SHA1_80)),
+        (&gcm, &every, Some(P::AEAD_AES_256_GCM)),
+        (&every, &gcm, Some(P::AEAD_AES_128_GCM)),
+        (&gcm, &cm, None),
+        (&cm, &gcm, None),
+        (&[P::AEAD_AES_128_GCM], &[P::AEAD_AES_256_GCM], None),
+        (&every, &every, Some(P::AEAD_AES_256_GCM)),
+        (
+            &every,
+            &[P::AES128_CM_HMAC_SHA1_32, P::AEAD_AES_128_GCM],
+            Some(P::AES128_CM_HMAC_SHA1_32),
+        ),
+    ];
+    for (seed, (client, server, agreed)) in (31..).zip(cases) {
+        let what = format!("client {client:?}, server {server:?}");
+        let mut configs = pair_configs(Role::Client, &one, &other);
+        configs[0].srtp_profiles = client.to_vec();
+        configs[1].srtp_profiles = server.to_vec();
+        let mut pair = Pair::new(configs, Path::CLEAN, seed);
+        pair.run(Duration::from_secs(10));
+
+        // the client offered its own list, in its own order, every time
+        let offers = offered_profiles(&pair, 0);
+        assert!(!offers.is_empty(), "{what}");
+        assert!(offers.iter().all(|offer| offer == client), "{what}");
+
+        if let Some(profile) = agreed {
+            let (client_keys, server_keys) = (keyed(&pair.events[0]), keyed(&pair.events[1]));
+            assert_eq!(client_keys.profile(), profile, "{what}");
+            assert_keyed_alike(client_keys, server_keys);
+        } else {
+            assert_eq!(refused(&pair.events[1]), Failure::NoSrtpProfile, "{what}");
+            assert_eq!(
+                refused(&pair.events[0]),
+                Failure::PeerAlert(AlertDescription::HANDSHAKE_FAILURE),
+                "{what}"
+            );
+        }
+    }
+}
+
+/// RFC 5764 §4.2 exports `2 * (master_key_len + master_salt_len)` octets, the
+/// lengths being the negotiated profile's: RFC 7714 §12 gives both GCM
+/// profiles a 96-bit salt, and a 128- or 256-bit key.
+#[test]
+fn each_profile_keys_both_directions_at_its_own_widths() {
+    use SrtpProtectionProfile as P;
+    let (one, other) = (identity(1), identity(2));
+    let widths = [
+        (P::AEAD_AES_256_GCM, 32, 12),
+        (P::AEAD_AES_128_GCM, 16, 12),
+        (P::AES128_CM_HMAC_SHA1_80, 16, 14),
+        (P::AES128_CM_HMAC_SHA1_32, 16, 14),
+    ];
+    for (seed, (profile, key, salt)) in (41..).zip(widths) {
+        for first_role in [Role::Client, Role::Server] {
+            let mut configs = pair_configs(first_role, &one, &other);
+            for config in &mut configs {
+                config.srtp_profiles = vec![profile];
+            }
+            let mut pair = Pair::new(configs, Path::CLEAN, seed);
+            pair.run(Duration::from_secs(10));
+            let (first, second) = (keyed(&pair.events[0]), keyed(&pair.events[1]));
+            assert_eq!(first.profile(), profile);
+            assert_keyed_alike(first, second);
+            for keys in [first, second] {
+                assert_eq!(keys.local_master_key().len(), key, "{profile:?}");
+                assert_eq!(keys.remote_master_key().len(), key, "{profile:?}");
+                assert_eq!(keys.local_master_salt().len(), salt, "{profile:?}");
+                assert_eq!(keys.remote_master_salt().len(), salt, "{profile:?}");
+                assert_ne!(keys.local_master_salt(), keys.remote_master_salt());
+            }
+        }
+    }
+}
+
 /// The ClientHello body with `use_srtp` holding no profiles and no MKI: the
 /// octets `00 0e 00 03 00 00 00`, which `<2..2^16-1>` does not allow and no
 /// encoder here will write.
@@ -1056,6 +1168,201 @@ fn an_empty_use_srtp_is_a_hello_that_does_not_parse() {
         refused(&events(&mut hand.client)),
         Failure::Malformed(_)
     ));
+}
+
+/// A hello body with its `use_srtp` replaced by one whose `extension_data`
+/// is the raw `data`, which may be octets no encoder here will write.
+/// `extensions` are the body's own, read out of it.
+fn with_raw_use_srtp(body: &[u8], extensions: Option<&Extensions>, data: &[u8]) -> Vec<u8> {
+    let mut block = Vec::new();
+    extensions.unwrap().encode(&mut block).unwrap();
+    let mut out = body[..body.len() - block.len()].to_vec();
+    let mut kept = Vec::new();
+    without(extensions, ExtensionType::USE_SRTP)
+        .encode(&mut kept)
+        .unwrap();
+    let mut inner = kept[2..].to_vec();
+    inner.extend_from_slice(&ExtensionType::USE_SRTP.0.to_be_bytes());
+    inner.extend_from_slice(&u16::try_from(data.len()).unwrap().to_be_bytes());
+    inner.extend_from_slice(data);
+    out.extend_from_slice(&u16::try_from(inner.len()).unwrap().to_be_bytes());
+    out.extend_from_slice(&inner);
+    out
+}
+
+/// `UseSRTPData` bodies RFC 5764 §4.1.1's syntax does not allow:
+/// `SRTPProtectionProfiles<2..2^16-1>` of two-octet profiles, then
+/// `srtp_mki<0..255>`, and nothing after.
+const MALFORMED_USE_SRTP: [(&str, &[u8]); 6] = [
+    ("no data at all", &[]),
+    (
+        "profile list longer than the extension",
+        &[0, 6, 0, 7, 0, 8],
+    ),
+    ("profile list of odd length", &[0, 3, 0, 7, 0, 0]),
+    ("no MKI length", &[0, 2, 0, 7]),
+    ("MKI longer than the extension", &[0, 2, 0, 7, 4, 0xAA]),
+    ("octets after the MKI", &[0, 2, 0, 7, 0, 0]),
+];
+
+#[test]
+fn a_malformed_use_srtp_in_a_client_hello_is_discarded_without_an_answer() {
+    for (what, data) in MALFORMED_USE_SRTP {
+        let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
+        let hello = drain(&mut hand.client);
+        let broken: Vec<Vec<u8>> = hello
+            .iter()
+            .map(|datagram| {
+                rewrite(datagram, HandshakeType::CLIENT_HELLO, &|body| {
+                    let parsed = ClientHello::parse(body).unwrap();
+                    let out = with_raw_use_srtp(body, parsed.extensions.as_ref(), data);
+                    assert!(ClientHello::parse(&out).is_err(), "{what}");
+                    out
+                })
+            })
+            .collect();
+        deliver(&mut hand.server, &broken, hand.now);
+        assert!(drain(&mut hand.server).is_empty(), "{what}");
+        assert!(events(&mut hand.server).is_empty(), "{what}");
+        assert_eq!(hand.server.state(), State::Handshaking, "{what}");
+        // the genuine hello is still answered afterwards
+        deliver(&mut hand.server, &hello, hand.now);
+        assert!(!drain(&mut hand.server).is_empty(), "{what}");
+    }
+}
+
+#[test]
+fn a_malformed_use_srtp_in_a_server_hello_fails_the_clients_handshake() {
+    for (what, data) in MALFORMED_USE_SRTP {
+        let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
+        let flight4: Vec<Vec<u8>> = hand
+            .flight4()
+            .iter()
+            .map(|datagram| {
+                rewrite(datagram, HandshakeType::SERVER_HELLO, &|body| {
+                    let parsed = ServerHello::parse(body).unwrap();
+                    with_raw_use_srtp(body, parsed.extensions.as_ref(), data)
+                })
+            })
+            .collect();
+        deliver(&mut hand.client, &flight4, hand.now);
+        assert!(
+            matches!(refused(&events(&mut hand.client)), Failure::Malformed(_)),
+            "{what}"
+        );
+        assert_eq!(hand.client.state(), State::Failed, "{what}");
+    }
+}
+
+/// RFC 5764 §4.1.1: a server that "cannot make use of the MKI" the client
+/// offered returns "an empty "srtp_mki" value". This one never uses an MKI
+/// (RFC 8827 §6.5 forbids one), so a ClientHello carrying one is answered
+/// on its profiles alone.
+#[test]
+fn a_client_mki_is_answered_with_an_empty_one() {
+    let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
+    let hello: Vec<Vec<u8>> = drain(&mut hand.client)
+        .iter()
+        .map(|datagram| {
+            rewrite(datagram, HandshakeType::CLIENT_HELLO, &|body| {
+                edit_client_hello(body, &|h| {
+                    let mut extensions = without(h.extensions.as_ref(), ExtensionType::USE_SRTP);
+                    extensions
+                        .push(Extension::UseSrtp(UseSrtp {
+                            profiles: vec![SrtpProtectionProfile::AEAD_AES_128_GCM],
+                            mki: vec![1, 2, 3, 4],
+                        }))
+                        .unwrap();
+                    h.extensions = Some(extensions);
+                })
+            })
+        })
+        .collect();
+    deliver(&mut hand.server, &hello, hand.now);
+    let answers: Vec<UseSrtp> = drain(&mut hand.server)
+        .iter()
+        .flat_map(|datagram| plaintext_fragments(datagram))
+        .filter(|(_, header, _)| header.msg_type == HandshakeType::SERVER_HELLO)
+        .map(|(_, _, body)| {
+            let hello = ServerHello::parse(&body).unwrap();
+            hello.extensions.unwrap().use_srtp().unwrap().clone()
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        [UseSrtp {
+            profiles: vec![SrtpProtectionProfile::AEAD_AES_128_GCM],
+            mki: Vec::new(),
+        }]
+    );
+    assert!(events(&mut hand.server).is_empty());
+}
+
+/// RFC 5764 §4.1.1: the server's `use_srtp` carries "a single
+/// SRTPProtectionProfile value that the server has chosen" from the client's
+/// list, and §4.1.3 aborts a handshake whose server names an MKI the client
+/// did not offer. Each is refused with illegal_parameter, GCM profiles
+/// included.
+#[test]
+fn a_server_use_srtp_the_client_cannot_accept_is_refused() {
+    use SrtpProtectionProfile as P;
+    let cases = [
+        (
+            "an MKI the client did not offer",
+            KEYABLE.to_vec(),
+            vec![P::AEAD_AES_256_GCM],
+            vec![9],
+        ),
+        (
+            "two profiles",
+            KEYABLE.to_vec(),
+            vec![P::AEAD_AES_256_GCM, P::AEAD_AES_128_GCM],
+            Vec::new(),
+        ),
+        (
+            "a GCM profile to a client offering only AES-CM",
+            vec![P::AES128_CM_HMAC_SHA1_80, P::AES128_CM_HMAC_SHA1_32],
+            vec![P::AEAD_AES_128_GCM],
+            Vec::new(),
+        ),
+        (
+            "an AES-CM profile to a client offering only GCM",
+            vec![P::AEAD_AES_256_GCM, P::AEAD_AES_128_GCM],
+            vec![P::AES128_CM_HMAC_SHA1_80],
+            Vec::new(),
+        ),
+    ];
+    let (one, other) = (identity(1), identity(2));
+    for (seed, (what, client_profiles, answer, mki)) in (51..).zip(cases) {
+        let mut configs = pair_configs(Role::Client, &one, &other);
+        configs[0].srtp_profiles = client_profiles;
+        let mut pair = Pair::new(configs, Path::CLEAN, seed);
+        pair.tamper = Some(Box::new(move |_, datagram| {
+            rewrite(&datagram, HandshakeType::SERVER_HELLO, &|body| {
+                edit_server_hello(body, &|h| {
+                    let mut extensions = without(h.extensions.as_ref(), ExtensionType::USE_SRTP);
+                    extensions
+                        .push(Extension::UseSrtp(UseSrtp {
+                            profiles: answer.clone(),
+                            mki: mki.clone(),
+                        }))
+                        .unwrap();
+                    h.extensions = Some(extensions);
+                })
+            })
+        }));
+        pair.run(Duration::from_secs(10));
+        assert_eq!(
+            refused(&pair.events[0]),
+            Failure::IllegalParameter,
+            "{what}"
+        );
+        assert_eq!(
+            refused(&pair.events[1]),
+            Failure::PeerAlert(AlertDescription::ILLEGAL_PARAMETER),
+            "{what}"
+        );
+    }
 }
 
 #[test]
@@ -1517,6 +1824,13 @@ fn a_configuration_no_handshake_can_come_of_is_refused() {
     assert_eq!(make(c), Some(Error::IllegalValue));
     let mut c = base();
     c.srtp_profiles = vec![SrtpProtectionProfile::NULL_HMAC_SHA1_80];
+    assert_eq!(make(c), Some(Error::IllegalValue));
+    let mut c = base();
+    c.srtp_profiles = vec![
+        SrtpProtectionProfile::AEAD_AES_128_GCM,
+        SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80,
+        SrtpProtectionProfile::AEAD_AES_128_GCM,
+    ];
     assert_eq!(make(c), Some(Error::IllegalValue));
     let mut c = base();
     c.certificate = other.certificate.clone();
