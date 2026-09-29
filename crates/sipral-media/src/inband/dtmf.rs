@@ -36,8 +36,14 @@
 //! which a voiced sound always has and a generator conforming to Q.23 does
 //! not: that Recommendation holds unwanted components 20 dB under the
 //! fundamental, and the default here refuses anything within 15. And a tone
-//! has to hold still for the duration above, in frequency as well as level,
-//! because each window's frequency is measured afresh.
+//! has to hold still, in frequency as well as level. Each window's
+//! frequency is measured afresh, and a window that hears the same digit as
+//! the one a hop before it counts only if neither tone has moved further
+//! than a steady rate of crossing its whole acceptance band in the shortest
+//! digit would take it. Without that, a pair gliding through both bands
+//! together, inside them for 20 ms, was a digit: every 20 ms window that
+//! overlaps those 20 ms reads the tones inside the band, and the windows
+//! together cover more than the shortest digit.
 //!
 //! # How it listens
 //!
@@ -427,6 +433,9 @@ struct Limits {
     harmonic: f64,
     min_tone: f64,
     min_pause: f64,
+    /// The most either tone may move from one window to the next, as a
+    /// fraction of its nominal frequency.
+    drift: f64,
 }
 
 impl Limits {
@@ -441,8 +450,21 @@ impl Limits {
             harmonic: from_db(config.max_second_harmonic_db),
             min_tone: f64::from(config.min_tone_ms) * per_ms,
             min_pause: f64::from(config.min_pause_ms) * per_ms,
+            // a tone that could cross the whole band it is accepted in
+            // within the shortest digit is not holding still for one
+            drift: 2.0 * config.max_frequency_deviation * f64::from(HOP_MS)
+                / f64::from(config.min_tone_ms.max(1)),
         }
     }
+}
+
+/// What one window heard, when it heard a digit: the claim, and the two
+/// frequencies it measured.
+#[derive(Clone, Copy, Debug)]
+struct Heard {
+    claim: Claim<Digit>,
+    low_hz: f64,
+    high_hz: f64,
 }
 
 fn from_db(db: f64) -> f64 {
@@ -460,6 +482,8 @@ pub struct DtmfDetector {
     hop_len: f64,
     previous: Option<Hop<Digit>>,
     open: Option<Open>,
+    /// What the last window heard, if it heard a digit.
+    last: Option<Heard>,
 }
 
 impl DtmfDetector {
@@ -485,6 +509,7 @@ impl DtmfDetector {
             hop_len,
             previous: None,
             open: None,
+            last: None,
         }
     }
 
@@ -507,6 +532,7 @@ impl DtmfDetector {
         self.hops.reset();
         self.previous = None;
         self.open = None;
+        self.last = None;
     }
 
     /// Listen to `samples`, the next ones of the stream, and report every
@@ -514,7 +540,9 @@ impl DtmfDetector {
     pub fn process(&mut self, samples: &[i16], mut on_event: impl FnMut(DtmfEvent)) {
         for &sample in samples {
             if self.analyzer.push(sample) {
-                let claim = self.classify();
+                let heard = self.classify();
+                let claim = heard.and_then(|h| self.is_steady(&h).then_some(h.claim));
+                self.last = heard;
                 let hop =
                     self.hops
                         .push(self.analyzer.hop_index(), self.analyzer.hop_power(), claim);
@@ -539,8 +567,22 @@ impl DtmfDetector {
         self.reset();
     }
 
+    /// Whether `heard` holds still against the window before it: a window
+    /// that heard the same digit a hop earlier must have heard both tones
+    /// within the drift allowed of where this one hears them. The first
+    /// window of a digit has nothing to be compared with.
+    fn is_steady(&self, heard: &Heard) -> bool {
+        let (low, high) = heard.claim.class.frequencies();
+        let drift = self.limits.drift;
+        self.last.is_none_or(|last| {
+            last.claim.class != heard.claim.class
+                || ((heard.low_hz - last.low_hz).abs() <= drift * low
+                    && (heard.high_hz - last.high_hz).abs() <= drift * high)
+        })
+    }
+
     /// What the window just analysed holds, if it holds a digit.
-    fn classify(&self) -> Option<Claim<Digit>> {
+    fn classify(&self) -> Option<Heard> {
         let bank = &self.analyzer;
         let limits = &self.limits;
         let total = bank.total_power();
@@ -600,7 +642,11 @@ impl DtmfDetector {
             }
         }
 
-        Digit::at(row, column).map(|class| Claim { class, power: tone })
+        Digit::at(row, column).map(|class| Heard {
+            claim: Claim { class, power: tone },
+            low_hz: low_nominal + low_offset,
+            high_hz: high_nominal + high_offset,
+        })
     }
 
     fn hop_start(&self, index: u64) -> f64 {
@@ -1017,6 +1063,42 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Both of `digit`'s tones gliding up through their nominal frequencies
+    /// together, each inside ±2.5 % of it for `in_band_ms`, from 15 % below
+    /// to 15 % above, between stretches of silence.
+    fn glide(rate: SampleRate, digit: Digit, in_band_ms: f64) -> Vec<f64> {
+        let hz = rate.hz();
+        let fs = f64::from(hz);
+        // the band is 5 % of the frequency wide; crossing it in `in_band_ms`
+        // takes this fraction of the frequency per second
+        let speed = 0.05 / (in_band_ms / 1_000.0);
+        let len = span(hz, 0.3 / speed * 1_000.0);
+        let (low, high) = digit.frequencies();
+        let mut signal = silence(span(hz, 50.0));
+        let mut phases = (0.4, 1.3);
+        let amplitude = dbm0_to_peak(-10.0);
+        for n in 0..len {
+            let t = f64::from(u32::try_from(n).unwrap()) / f64::from(u32::try_from(len).unwrap());
+            let scale = 0.85 + 0.3 * t;
+            phases.0 += 2.0 * std::f64::consts::PI * low * scale / fs;
+            phases.1 += 2.0 * std::f64::consts::PI * high * scale / fs;
+            signal.push(amplitude * (phases.0.sin() + phases.1.sin()));
+        }
+        signal.extend(silence(span(hz, 100.0)));
+        signal
+    }
+
+    #[test]
+    fn a_pair_that_glides_through_its_band_faster_than_a_digit_lasts_is_not_one() {
+        for rate in RATES {
+            for digit in Digit::ALL {
+                // inside the band for 20 ms, under the 23 ms Q.24 refuses
+                let events = listen(rate, &glide(rate, digit, 20.0));
+                assert!(events.is_empty(), "{rate:?} {digit:?}: {events:?}");
             }
         }
     }
