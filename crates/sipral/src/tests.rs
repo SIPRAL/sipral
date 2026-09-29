@@ -12337,3 +12337,489 @@ fn a_call_that_keys_its_audio_offers_no_text() {
         "typed text is not sent in the clear beside encrypted audio"
     );
 }
+
+// -- recording to a recording server (RFC 7866) -------------------------------
+
+const TCP: TransportId = TransportId(2);
+
+fn server_sip() -> SocketAddr {
+    "192.0.2.3:5060".parse().expect("an address")
+}
+
+fn this_end_copy() -> SocketAddr {
+    "192.0.2.1:42000".parse().expect("an address")
+}
+
+fn far_end_copy() -> SocketAddr {
+    "192.0.2.1:42002".parse().expect("an address")
+}
+
+/// A recording server: a user agent over TCP that answers whatever
+/// recording session reaches it with two receive-only streams.
+struct Server {
+    agent: UserAgent,
+    call: Option<CallHandle>,
+    heard: Vec<UaEvent>,
+}
+
+impl Server {
+    fn new(now: Instant) -> Self {
+        let mut agent = UserAgent::new(EndpointConfig::default(), [33; 32]).expect("an agent");
+        agent.accept_recording_sessions(true);
+        agent
+            .receive(
+                Input::TransportBound {
+                    transport: TCP,
+                    protocol: TransportProtocol::Tcp,
+                    local: server_sip(),
+                    remote: Some(caller_sip()),
+                },
+                now,
+            )
+            .expect("binding TCP");
+        Self {
+            agent,
+            call: None,
+            heard: Vec::new(),
+        }
+    }
+
+    /// Take what the caller wrote to it, and answer a recording session that
+    /// is new. `true` when anything arrived.
+    fn take(&mut self, request: &[u8], now: Instant) {
+        self.agent
+            .receive(
+                Input::StreamData {
+                    transport: TCP,
+                    data: request,
+                },
+                now,
+            )
+            .expect("bytes on a stream");
+        while let Some(event) = self.agent.poll_event() {
+            if let UaEvent::IncomingCall { call, .. } = &event {
+                self.call = Some(*call);
+                let answer = "v=0\r\no=srs 7 7 IN IP4 192.0.2.3\r\ns=-\r\nc=IN IP4 192.0.2.3\r\n\
+t=0 0\r\nm=audio 30000 RTP/AVP 0\r\na=recvonly\r\nm=audio 30002 RTP/AVP 0\r\na=recvonly\r\n";
+                self.agent
+                    .answer(*call, Some(Arc::from(answer.as_bytes())), now)
+                    .expect("the server answers");
+            }
+            self.heard.push(event);
+        }
+    }
+}
+
+/// Move everything between the three until nothing more moves: the caller's
+/// messages to the server over TCP and to the callee over UDP, and back.
+/// Returns what reached the server.
+fn settle_with(pair: &mut Pair, server: &mut Server) -> Vec<Vec<u8>> {
+    let mut reached = Vec::new();
+    for _ in 0..16 {
+        let now = pair.now;
+        let mut moved = false;
+        while let Some(transmit) = pair.caller.agent.poll_transmit() {
+            moved = true;
+            if transmit.destination == server_sip() {
+                server.take(&transmit.payload, now);
+                reached.push(transmit.payload.to_vec());
+            } else {
+                pair.callee.deliver(&transmit.payload, caller_sip(), now);
+            }
+        }
+        for datagram in pair.callee.outbound() {
+            moved = true;
+            pair.caller.deliver(&datagram, callee_sip(), now);
+        }
+        while let Some(transmit) = server.agent.poll_transmit() {
+            moved = true;
+            pair.caller
+                .agent
+                .receive(
+                    Input::StreamData {
+                        transport: TCP,
+                        data: &transmit.payload,
+                    },
+                    now,
+                )
+                .expect("bytes on a stream");
+        }
+        pair.caller.drain(now, false);
+        pair.callee.drain(now, true);
+        if !moved {
+            break;
+        }
+    }
+    reached
+}
+
+/// A call up between the pair, recorded by `caller` to a server over TCP.
+fn recorded_call() -> (Pair, Server, CallHandle, CallHandle, CallHandle) {
+    recorded_call_on(&["PCMU"])
+}
+
+/// The same, on a call whose two ends offer `codecs`.
+fn recorded_call_on(codecs: &[&str]) -> (Pair, Server, CallHandle, CallHandle, CallHandle) {
+    let mut pair = Pair::new(CodecCatalog::with_order(codecs).expect("an order"));
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let now = pair.now;
+    pair.caller
+        .agent
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: caller_sip(),
+                remote: Some(server_sip()),
+            },
+            now,
+        )
+        .expect("binding TCP");
+    let mut server = Server::new(now);
+    let recording = pair
+        .caller
+        .engine
+        .record_to(
+            &mut pair.caller.agent,
+            call,
+            crate::RecordTo::new(uri("sip:srs@example.com"), this_end_copy(), far_end_copy())
+                .to_address(TCP, server_sip()),
+            now,
+        )
+        .expect("the recording session goes");
+    settle_with(&mut pair, &mut server);
+    (pair, server, call, remote, recording)
+}
+
+fn copies(pair: &mut Pair, call: CallHandle) -> Vec<(SocketAddr, SocketAddr, Vec<u8>)> {
+    let mut session = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media");
+    let mut out = Vec::new();
+    while let Some(copy) = session.poll_recording() {
+        out.push((copy.from, copy.destination, copy.payload.to_vec()));
+    }
+    out
+}
+
+#[test]
+fn a_recording_session_offers_one_labelled_stream_per_party_and_names_both() {
+    let (pair, server, call, _, recording) = recorded_call();
+    assert_eq!(pair.caller.engine.recording_of(call), Some(recording));
+    let request = server
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { request, .. } => Some(request.clone()),
+            _ => None,
+        })
+        .expect("the server heard the INVITE");
+    let raw = request.as_raw();
+    assert!(sipral_ua::siprec::requires_siprec(&raw));
+    assert!(sipral_ua::siprec::contact_has_feature_tag(
+        &raw,
+        sipral_ua::siprec::SRC_FEATURE_TAG
+    ));
+    let offer = sipral_ua::siprec::read_recording_offer(&raw).expect("a recording offer");
+    let sdp = parse(offer.sdp).expect("the offer");
+    assert_eq!(sdp.media.len(), 2);
+    for (stream, (socket, label)) in sdp
+        .media
+        .iter()
+        .zip([(this_end_copy(), "1"), (far_end_copy(), "2")])
+    {
+        assert_eq!(stream.port, socket.port());
+        assert_eq!(stream.formats, ["0"], "the codec the call runs on");
+        assert_eq!(stream.direction(), Some(Direction::SendOnly));
+        assert_eq!(
+            stream.attribute("label").and_then(|a| a.value.as_deref()),
+            Some(label)
+        );
+    }
+    let metadata = offer.metadata;
+    assert_eq!(metadata.participants.len(), 2);
+    assert_eq!(
+        metadata.participants[0].name_ids[0].aor,
+        "sip:alice@example.com"
+    );
+    assert_eq!(
+        metadata.participants[1].name_ids[0].aor,
+        "sip:bob@example.com"
+    );
+    assert_eq!(
+        metadata
+            .streams
+            .iter()
+            .map(|stream| stream.label.clone().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["1", "2"]
+    );
+    metadata
+        .check_labels(&sdp)
+        .expect("every label is in the offer");
+}
+
+#[test]
+fn both_directions_of_the_call_are_copied_to_the_server_as_they_went() {
+    let (mut pair, _server, call, remote, _) = recorded_call();
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    tone(&mut samples, 8_000, &mut phase);
+    let (sent, _) = pair.speak(call, remote, &samples);
+    let out = copies(&mut pair, call);
+    assert_eq!(out.len(), 1, "this end's frame, once");
+    let (from, destination, copy) = &out[0];
+    assert_eq!(*from, this_end_copy());
+    assert_eq!(*destination, "192.0.2.3:30000".parse().expect("an address"));
+    let original = rtp_parts(&sent);
+    let copied = rtp_parts(copy);
+    assert_eq!(copied.1, original.1, "the same payload");
+    assert_eq!(copied.0.payload_type, original.0.payload_type);
+    assert_ne!(copied.0.ssrc, original.0.ssrc, "a source of its own");
+
+    // and the far end's, as it arrived: two in a row, since RFC 3550 A.1
+    // believes a source on its second packet
+    let mut back = Vec::new();
+    for _ in 0..2 {
+        let frame = pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media")
+            .capture(&samples, pair.now)
+            .expect("it encodes")
+            .map(|datagram| datagram.payload.to_vec())
+            .expect("a frame");
+        let mut arriving = frame.clone();
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .receive(&mut arriving, callee_media(), pair.now);
+        back.push(frame);
+        pair.advance();
+    }
+    let out = copies(&mut pair, call);
+    let far: Vec<_> = out
+        .iter()
+        .filter(|(from, _, _)| *from == far_end_copy())
+        .collect();
+    assert_eq!(far.len(), 1, "the packet the caller took, copied: {out:?}");
+    assert_eq!(far[0].1, "192.0.2.3:30002".parse().expect("an address"));
+    assert_eq!(rtp_parts(&far[0].2).1, rtp_parts(&back[1]).1);
+}
+
+#[test]
+fn a_hold_tells_the_server_who_sends_and_the_end_of_the_call_ends_the_recording() {
+    let (mut pair, mut server, call, _, recording) = recorded_call();
+    pair.caller
+        .agent
+        .hold(call, pair.now)
+        .expect("the re-INVITE goes");
+    let requests = settle_with(&mut pair, &mut server);
+    let reinvite = requests
+        .iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("a re-offer to the server");
+    let metadata = {
+        let mut scratch = ParseScratch::new();
+        let message =
+            sipral_core::msg::parse(reinvite, &mut scratch, ParseMode::Lenient).expect("a message");
+        sipral_ua::siprec::read_recording_offer(&message)
+            .expect("the SDP and the metadata")
+            .metadata
+    };
+    let far_stream = metadata.streams[1].id.clone();
+    assert!(
+        metadata
+            .participant_streams
+            .iter()
+            .all(|association| !association.send.contains(&far_stream)
+                && !association.recv.contains(&far_stream)),
+        "the far end is on hold, and sends nothing to be recorded"
+    );
+
+    pair.caller.agent.hangup(call, pair.now).expect("the BYE");
+    pair.caller.drain(pair.now, false);
+    let requests = settle_with(&mut pair, &mut server);
+    assert!(
+        requests.iter().any(|bytes| bytes.starts_with(b"BYE ")),
+        "the recording session ends with the call"
+    );
+    assert_eq!(pair.caller.engine.recording_of(call), None);
+    assert!(
+        server.heard.iter().any(
+            |event| matches!(event, UaEvent::CallEnded { call, .. } if Some(*call) == server.call)
+        ),
+        "the server heard the recording end"
+    );
+    let _ = recording;
+}
+
+#[test]
+fn a_call_that_replaces_the_recorded_one_takes_the_recording_over() {
+    let (mut pair, mut server, call, _, recording) = recorded_call();
+    let invite = replacing_invite(&pair, call);
+    let now = pair.now;
+    pair.caller.deliver(invite.as_bytes(), callee_sip(), now);
+    pair.caller.drain(now, false);
+    let new = pair
+        .caller
+        .heard
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::IncomingCall { call: new, .. }) => Some(*new),
+            _ => None,
+        })
+        .expect("the replacing call arrived");
+    // answered, it replaces the recorded call (RFC 3891 §3)
+    pair.caller
+        .engine
+        .answer(&mut pair.caller.agent, new, caller_media(), now)
+        .expect("the answer goes");
+    acknowledge_replacing(&mut pair, &mut server);
+    let reached = settle_with(&mut pair, &mut server);
+    assert!(pair.caller.heard.iter().any(|event| matches!(
+        event,
+        Event::Signalling(UaEvent::CallReplaced { call: replacing, replaced })
+            if *replacing == new && *replaced == call
+    )));
+    assert_eq!(pair.caller.engine.recording_of(new), Some(recording));
+    assert!(
+        pair.caller
+            .engine
+            .session(new)
+            .is_some_and(|session| session.is_copied()),
+        "the copies move to the call that replaced it"
+    );
+    let reinvite = reached
+        .iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the server is told");
+    let metadata = {
+        let mut scratch = ParseScratch::new();
+        let message =
+            sipral_core::msg::parse(reinvite, &mut scratch, ParseMode::Lenient).expect("a message");
+        sipral_ua::siprec::read_recording_offer(&message)
+            .expect("the SDP and the metadata")
+            .metadata
+    };
+    assert_eq!(
+        metadata.participants[1].name_ids[0].aor, "sip:carol@example.com",
+        "the far end of the call that replaced it"
+    );
+}
+
+#[test]
+fn a_recorded_call_that_moves_codec_offers_the_server_the_new_one() {
+    let (mut pair, mut server, call, _, _) = recorded_call_on(&["PCMU", "PCMA"]);
+    let now = pair.now;
+    pair.caller
+        .engine
+        .change_codecs(&mut pair.caller.agent, call, &["PCMA"], now)
+        .expect("the re-INVITE goes");
+    let reached = settle_with(&mut pair, &mut server);
+    let reoffer = reached
+        .iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("a re-offer to the server");
+    let sdp = {
+        let mut scratch = ParseScratch::new();
+        let message =
+            sipral_core::msg::parse(reoffer, &mut scratch, ParseMode::Lenient).expect("a message");
+        let read = sipral_ua::siprec::read_recording_offer(&message).expect("SDP and metadata");
+        parse(read.sdp).expect("the offer")
+    };
+    assert!(
+        sdp.media.iter().all(|stream| stream.formats == ["8"]),
+        "both streams on the codec the call moved to"
+    );
+    assert_eq!(sdp.media.len(), 2);
+}
+
+/// An INVITE from a new far end that replaces `call` (RFC 3891 §3): it names
+/// the dialog by its Call-ID, the caller's tag as the to-tag and the far
+/// end's as the from-tag.
+fn replacing_invite(pair: &Pair, call: CallHandle) -> String {
+    let confirmed = pair
+        .caller
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::CallConfirmed {
+                call: confirmed,
+                response: Some(response),
+                ..
+            }) if *confirmed == call => Some(response.clone()),
+            _ => None,
+        })
+        .expect("the 200 that confirmed the call");
+    let (call_id, ours, theirs) = {
+        let raw = confirmed.as_raw();
+        let tag = |addr: Option<sipral_core::msg::NameAddrRef<'_>>| {
+            addr.and_then(|addr| addr.tag())
+                .map(|tag| String::from_utf8_lossy(&tag).into_owned())
+                .expect("a tag")
+        };
+        (
+            String::from_utf8_lossy(raw.call_id().expect("a Call-ID")).into_owned(),
+            tag(raw.from().ok()),
+            tag(raw.to().ok()),
+        )
+    };
+    let offer = "v=0\r\no=carol 1 1 IN IP4 192.0.2.7\r\ns=-\r\nc=IN IP4 192.0.2.7\r\n\
+t=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+    format!(
+        "INVITE sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bKreplacing\r\nMax-Forwards: 70\r\n\
+From: <sip:carol@example.com>;tag=carol1\r\nTo: <sip:alice@example.com>\r\n\
+Call-ID: replacing@example.com\r\nCSeq: 1 INVITE\r\nContact: <sip:carol@192.0.2.7>\r\n\
+Replaces: {call_id};to-tag={ours};from-tag={theirs}\r\n\
+Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{offer}",
+        offer.len()
+    )
+}
+
+/// The far end of the replacing call acknowledges the caller's 200, which the
+/// pair does not include; everything else the caller wrote goes where the
+/// pair and the server would have taken it.
+fn acknowledge_replacing(pair: &mut Pair, server: &mut Server) {
+    let now = pair.now;
+    let mut ok = None;
+    while let Some(transmit) = pair.caller.agent.poll_transmit() {
+        let text = String::from_utf8_lossy(&transmit.payload).into_owned();
+        if text.starts_with("SIP/2.0 200") && text.contains("replacing@example.com") {
+            ok = Some(text);
+        } else if transmit.destination == server_sip() {
+            server.take(&transmit.payload, now);
+        } else {
+            pair.callee.deliver(&transmit.payload, caller_sip(), now);
+        }
+    }
+    let ok = ok.expect("the 200 to the replacing INVITE");
+    let to = ok
+        .lines()
+        .find(|line| line.starts_with("To:"))
+        .expect("a To")
+        .trim_start_matches("To:")
+        .trim()
+        .to_owned();
+    let ack = format!(
+        "ACK sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bKreplacingack\r\nMax-Forwards: 70\r\n\
+From: <sip:carol@example.com>;tag=carol1\r\nTo: {to}\r\n\
+Call-ID: replacing@example.com\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n"
+    );
+    pair.caller.deliver(ack.as_bytes(), callee_sip(), now);
+    pair.caller.drain(now, false);
+}
+
+/// A packet's header and payload.
+fn rtp_parts(datagram: &[u8]) -> (sipral_rtp::RtpHeader, Vec<u8>) {
+    let packet = sipral_rtp::RtpPacket::parse(datagram).expect("an RTP packet");
+    (packet.header(), packet.payload().to_vec())
+}

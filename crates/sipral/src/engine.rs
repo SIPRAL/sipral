@@ -560,6 +560,32 @@ pub struct MediaEngine {
     /// decision is logged once.
     #[cfg(feature = "redaction")]
     logged: BTreeMap<Option<Vec<u8>>, u64>,
+    /// The recording sessions this engine placed (`crate::siprec`), by the
+    /// handle of the recording session itself.
+    recordings: BTreeMap<CallHandle, Recording>,
+}
+
+/// One recording session, and the call it records.
+#[derive(Debug)]
+struct Recording {
+    /// The call whose audio is copied: the one recorded, or the one that
+    /// replaced it.
+    recorded: CallHandle,
+    to: crate::siprec::RecordTo,
+    parties: crate::siprec::Parties,
+    /// The call's codec, which is what the two streams were offered.
+    payload_type: u8,
+    /// The `o=` session id the recording session's descriptions carry (RFC
+    /// 4566 §5.2 keeps it for the life of the session).
+    session_id: u64,
+    /// Where each stream's copies start their numbering.
+    numbers: [(u32, u16, u32); 2],
+    /// Where the server receives each stream, once it has answered.
+    destinations: Option<[Option<SocketAddr>; 2]>,
+    /// The direction the metadata last told the server about, and whether
+    /// new metadata is waiting for a change in the recording session to end.
+    told: Option<Direction>,
+    owed: bool,
 }
 
 /// The relay a description was handed, for as long as the description can
@@ -693,6 +719,7 @@ impl MediaEngine {
             log: None,
             #[cfg(feature = "redaction")]
             logged: BTreeMap::new(),
+            recordings: BTreeMap::new(),
         }
     }
 
@@ -3208,6 +3235,14 @@ impl MediaEngine {
 
     /// Act on what the user agent said.
     fn absorb(&mut self, event: &UaEvent, agent: &mut UserAgent, now: Instant) {
+        self.absorb_call(event, agent, now);
+        // after the call's own media has taken the event in, so that a
+        // recording reads the session as the event left it
+        self.absorb_recording(event, agent, now);
+    }
+
+    /// Act on what the user agent said about a call this engine describes.
+    fn absorb_call(&mut self, event: &UaEvent, agent: &mut UserAgent, now: Instant) {
         match event {
             UaEvent::IncomingCall { call, request, .. } => self.arrived(*call, request, agent),
             UaEvent::CallForked { call, sibling } => self.forked(*call, *sibling, agent, now),
@@ -3962,6 +3997,7 @@ impl MediaEngine {
                 }
                 session.set_text(text, now);
                 self.keep_session(call, session);
+                self.tap_new_session(call);
             }),
         };
         match outcome {
@@ -3991,6 +4027,356 @@ impl MediaEngine {
     fn fail(&mut self, call: CallHandle, error: MediaError) {
         self.events.push_back((call, MediaEvent::Failed(error)));
     }
+}
+
+// -- recording a call to a recording server (RFC 7866) -----------------------
+
+impl MediaEngine {
+    /// Record `call` to a recording server (SIPREC, RFC 7866): place a
+    /// recording session from the call's own account, and once the server
+    /// answers, copy the call's audio to it — this end's on one stream, the
+    /// far end's on the other (`crate::siprec` has the whole of it).
+    ///
+    /// The handle that comes back is the recording session's own, an
+    /// ordinary call to the user agent: its answer, its refusal and its end
+    /// are [`UaEvent`]s like any call's, and hanging it up
+    /// ([`MediaEngine::stop_recording_to`]) stops the recording. The copies
+    /// come out of [`MediaSession::poll_recording`] on the recorded call, or
+    /// [`MediaEngine::poll_recording`] for every call at once. The recording
+    /// session ends by itself when the recorded call does, and follows a call
+    /// that replaces it.
+    ///
+    /// # Errors
+    /// [`MediaError::NoDescription`] for a call whose audio is not running,
+    /// [`MediaError::AlreadyRecording`] for one already being recorded to a
+    /// server, [`MediaError::Signalling`] when the user agent refuses the
+    /// recording session or the call has no account to place it from.
+    pub fn record_to(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        to: crate::RecordTo,
+        now: Instant,
+    ) -> Result<CallHandle, MediaError> {
+        if self.recordings.values().any(|held| held.recorded == call) {
+            return Err(MediaError::AlreadyRecording);
+        }
+        let (codec, direction) = {
+            let held = self.sessions.get(&call).ok_or(MediaError::NoDescription)?;
+            let slot = share::lock(held);
+            let plan = slot.session.plan();
+            (plan.codec.clone(), plan.direction)
+        };
+        let account = agent
+            .call_account(call)
+            .ok_or(MediaError::Signalling(UaError::NoSuchAccount))?;
+        let ends = call_ends(agent, call).ok_or(MediaError::NoSuchCall)?;
+        let ids = [(); 5].map(|()| crate::siprec::draw_id(agent));
+        let [session, this_party, far_party, this_stream, far_stream] = ids;
+        let parties = crate::siprec::parties(
+            session,
+            [this_party, far_party, this_stream, far_stream],
+            ends,
+        );
+        let (identity, session_id) = draw(agent);
+        let (other, _) = draw(agent);
+        let offer = crate::siprec::offer(&codec, &to, session_id);
+        let mut outgoing = OutgoingCall::new(to.server.clone())
+            .offer(Arc::from(offer.to_bytes()))
+            .recording_session(&parties.metadata(direction))?;
+        if let Some((transport, remote)) = to.destination {
+            outgoing = outgoing.to_address(transport, remote);
+        }
+        let recording = agent.call(account, &outgoing, now)?;
+        self.recordings.insert(
+            recording,
+            Recording {
+                recorded: call,
+                to,
+                parties,
+                payload_type: codec.payload(),
+                session_id,
+                numbers: [
+                    (identity.ssrc, identity.sequence, identity.timestamp),
+                    (other.ssrc, other.sequence, other.timestamp),
+                ],
+                destinations: None,
+                told: Some(direction),
+                owed: false,
+            },
+        );
+        Ok(recording)
+    }
+
+    /// The recording session recording `call`, if one is.
+    #[must_use]
+    pub fn recording_of(&self, call: CallHandle) -> Option<CallHandle> {
+        self.recordings
+            .iter()
+            .find(|(_, held)| held.recorded == call)
+            .map(|(recording, _)| *recording)
+    }
+
+    /// Stop recording `call` to its recording server: the copies stop at
+    /// once, and the recording session is hung up (RFC 7866 §6.1: it is a
+    /// SIP session like any other, and it ends like one).
+    ///
+    /// # Errors
+    /// [`MediaError::NotRecording`] for a call nothing records, and
+    /// [`MediaError::Signalling`] for a BYE that could not be sent.
+    pub fn stop_recording_to(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let recording = self.recording_of(call).ok_or(MediaError::NotRecording)?;
+        self.untap(call);
+        self.recordings.remove(&recording);
+        agent.hangup(recording, now)?;
+        Ok(())
+    }
+
+    /// The next copy of any recorded call's audio, to send from the socket
+    /// it names: the recording session it is for, the socket, the recording
+    /// server's address for the stream, and the packet.
+    #[must_use]
+    pub fn poll_recording(&mut self) -> Option<(CallHandle, SocketAddr, SocketAddr, Vec<u8>)> {
+        self.recordings.iter().find_map(|(recording, held)| {
+            let session = self.sessions.get(&held.recorded)?;
+            let mut slot = share::lock(session);
+            slot.session.poll_recording().map(|datagram| {
+                (
+                    *recording,
+                    datagram.from,
+                    datagram.destination,
+                    datagram.payload.to_vec(),
+                )
+            })
+        })
+    }
+
+    /// What the user agent said about a recording session, or about a call
+    /// one records.
+    fn absorb_recording(&mut self, event: &UaEvent, agent: &mut UserAgent, now: Instant) {
+        match event {
+            UaEvent::CallConfirmed {
+                call,
+                response: Some(response),
+                ..
+            } if self.recordings.contains_key(call) => {
+                let answer = crate::siprec::answer_in(response);
+                self.server_answered(*call, answer.as_ref());
+            }
+            UaEvent::SessionChanged { call, remote, .. } if self.recordings.contains_key(call) => {
+                let answer = remote
+                    .as_deref()
+                    .and_then(|body| sipral_core::sdp::parse(body).ok());
+                self.server_answered(*call, answer.as_ref());
+                self.send_metadata(*call, agent, now);
+            }
+            UaEvent::SessionChangeFailed { call, .. } if self.recordings.contains_key(call) => {
+                self.send_metadata(*call, agent, now);
+            }
+            UaEvent::SessionChanged { call, hold, .. } => {
+                let direction = match (!hold.remote, !hold.local) {
+                    (true, true) => Direction::SendRecv,
+                    (true, false) => Direction::SendOnly,
+                    (false, true) => Direction::RecvOnly,
+                    (false, false) => Direction::Inactive,
+                };
+                self.recorded_codec(*call, agent, now);
+                self.recorded_moved(*call, Some(direction), agent, now);
+            }
+            UaEvent::CallReplaced { call, replaced } => {
+                self.recording_follows(*replaced, *call, agent, now);
+            }
+            UaEvent::CallEnded { call, .. } => {
+                if self.recordings.remove(call).is_some() {
+                    // the server hung up: nothing more is copied to it
+                    return;
+                }
+                if let Some(recording) = self.recording_of(*call) {
+                    self.recordings.remove(&recording);
+                    let _ = agent.hangup(recording, now);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The recording server answered the recording session, or answered a
+    /// change to it: point the copies where it said.
+    fn server_answered(&mut self, recording: CallHandle, answer: Option<&SessionDescription>) {
+        let Some(held) = self.recordings.get_mut(&recording) else {
+            return;
+        };
+        let Some(answer) = answer else {
+            return;
+        };
+        held.destinations = Some(crate::siprec::destinations(answer));
+        self.attach_tap(recording);
+    }
+
+    /// Copy the recorded call's audio to where the server receives it, on
+    /// the session running now; one already copying is pointed there.
+    fn attach_tap(&mut self, recording: CallHandle) {
+        let Some(held) = self.recordings.get(&recording) else {
+            return;
+        };
+        let Some(destinations) = held.destinations else {
+            return;
+        };
+        let Some(session) = self.sessions.get(&held.recorded) else {
+            return;
+        };
+        let mut slot = share::lock(session);
+        if let Some(tap) = slot.session.tap() {
+            tap.redirect(destinations);
+            return;
+        }
+        slot.session.tap_to(Some(crate::siprec::Tap::new(
+            &held.to,
+            destinations,
+            held.payload_type,
+            held.numbers,
+        )));
+    }
+
+    /// Stop copying `call`'s audio.
+    fn untap(&mut self, call: CallHandle) {
+        if let Some(session) = self.sessions.get(&call) {
+            share::lock(session).session.tap_to(None);
+        }
+    }
+
+    /// A recorded call moved to another codec: offer the server its two
+    /// streams on it (RFC 7866 §7.1.1.1 has an SRC change a recorded stream
+    /// with a new offer), and copy the new codec from here on.
+    fn recorded_codec(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
+        let Some(recording) = self.recording_of(call) else {
+            return;
+        };
+        let Some(codec) = self
+            .sessions
+            .get(&call)
+            .map(|session| share::lock(session).session.plan().codec.clone())
+        else {
+            return;
+        };
+        let Some(held) = self.recordings.get_mut(&recording) else {
+            return;
+        };
+        if held.payload_type == codec.payload() {
+            return;
+        }
+        let offer = crate::siprec::offer(&codec, &held.to, held.session_id);
+        // `reoffer` moves the `o=` version on (RFC 3264 §8)
+        if agent.reoffer(recording, &offer.to_bytes(), now).is_ok() {
+            held.payload_type = codec.payload();
+            if let Some(session) = self.sessions.get(&call)
+                && let Some(tap) = share::lock(session).session.tap()
+            {
+                tap.copy_payload_type(codec.payload());
+            }
+        }
+    }
+
+    /// A recorded call's media moved: tell the server who sends now.
+    fn recorded_moved(
+        &mut self,
+        call: CallHandle,
+        direction: Option<Direction>,
+        agent: &mut UserAgent,
+        now: Instant,
+    ) {
+        let Some(recording) = self.recording_of(call) else {
+            return;
+        };
+        let Some(held) = self.recordings.get_mut(&recording) else {
+            return;
+        };
+        if held.told == direction {
+            return;
+        }
+        held.told = direction;
+        held.owed = true;
+        self.send_metadata(recording, agent, now);
+    }
+
+    /// A call that replaced a recorded one takes the recording over (RFC
+    /// 3891): its far end is the recorded call's second party from here on,
+    /// the server is told, and the copies move to its audio once it runs.
+    fn recording_follows(
+        &mut self,
+        replaced: CallHandle,
+        call: CallHandle,
+        agent: &mut UserAgent,
+        now: Instant,
+    ) {
+        let Some(recording) = self.recording_of(replaced) else {
+            return;
+        };
+        let Some(((_, _), (far, name))) = call_ends(agent, call) else {
+            return;
+        };
+        let id = crate::siprec::draw_id(agent);
+        self.untap(replaced);
+        if let Some(held) = self.recordings.get_mut(&recording) {
+            held.recorded = call;
+            held.parties.replace_far_end(id, far, name);
+            held.owed = true;
+        }
+        self.attach_tap(recording);
+        self.send_metadata(recording, agent, now);
+    }
+
+    /// Send the server the metadata it is owed, now or once the change
+    /// running in the recording session is over.
+    fn send_metadata(&mut self, recording: CallHandle, agent: &mut UserAgent, now: Instant) {
+        let Some(held) = self.recordings.get_mut(&recording) else {
+            return;
+        };
+        if !held.owed {
+            return;
+        }
+        let metadata = held
+            .parties
+            .metadata(held.told.unwrap_or(Direction::SendRecv));
+        held.owed = matches!(
+            agent.update_recording_metadata(recording, &metadata, now),
+            Err(UaError::ChangeInProgress)
+        );
+    }
+
+    /// A session that has just opened for a call being recorded starts
+    /// copying at once: the call that replaced a recorded one, most often.
+    fn tap_new_session(&mut self, call: CallHandle) {
+        if let Some(recording) = self.recording_of(call) {
+            self.attach_tap(recording);
+        }
+    }
+}
+
+/// This end's address of record and display name on `call`, and the far
+/// end's: the `From` of a call placed here and the `To` of one answered here
+/// are this end's.
+fn call_ends(
+    agent: &UserAgent,
+    call: CallHandle,
+) -> Option<(crate::siprec::End, crate::siprec::End)> {
+    let identity = agent.call_identity(call)?;
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    let named = |bytes: &[u8]| (!bytes.is_empty()).then(|| text(bytes));
+    let from = (text(&identity.from_uri), named(&identity.from_display));
+    let to = (text(&identity.to_uri), None);
+    Some(
+        if agent.call_direction(call) == Some(sipral_ua::Direction::Outgoing) {
+            (from, to)
+        } else {
+            (to, from)
+        },
+    )
 }
 
 // -- a local conference of two calls -----------------------------------------

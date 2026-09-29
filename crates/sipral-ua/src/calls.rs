@@ -123,6 +123,7 @@ impl UserAgent {
         call.placed = Some(outgoing.clone());
         call.asked = asked;
         call.contact_context.features = outgoing.contact_features();
+        call.recording.clone_from(&outgoing.metadata);
         let limits = self.sdp_limits;
         if let Some(described) = outgoing
             .offer
@@ -698,6 +699,14 @@ impl UserAgent {
         self.calls.get(&call).and_then(|held| held.dialog)
     }
 
+    /// The account a call belongs to: the one it was placed from, or the
+    /// line it arrived on. `None` for a call that arrived on no account of
+    /// this agent's, and for one that has ended.
+    #[must_use]
+    pub fn call_account(&self, call: CallHandle) -> Option<AccountId> {
+        self.calls.get(&call)?.account
+    }
+
     /// Whether this end placed the call or answered it, which is what
     /// decides which of [`CallIdentity`]'s two URIs is this end's own and
     /// which is the far end's.
@@ -884,6 +893,18 @@ impl UserAgent {
         }
         *features = changed.into_boxed_slice();
         Ok(())
+    }
+
+    /// Take recording sessions (RFC 7866 §6.2): the `siprec` option tag an
+    /// SRC's INVITE requires is answered rather than refused 420, which is
+    /// what this agent does with a tag it does not implement (RFC 3261
+    /// §8.2.2.3). The recording session then arrives as an ordinary
+    /// [`UaEvent::IncomingCall`]; [`crate::siprec::read_recording_offer`]
+    /// reads its offer and metadata, and §6.2's other half — that its
+    /// `Contact` carries `+sip.src` — is
+    /// [`crate::siprec::contact_has_feature_tag`].
+    pub fn accept_recording_sessions(&mut self, accept: bool) {
+        self.recording_server = accept;
     }
 
     /// Whether this end says it is the focus of the call's conference
@@ -1499,10 +1520,16 @@ impl UserAgent {
         account_wants_gruu: bool,
         now: Instant,
     ) -> bool {
-        let missing = crate::reliable::unsupported(request, account_wants_gruu);
+        let missing =
+            crate::reliable::unsupported(request, account_wants_gruu, self.recording_server);
         if !missing.is_empty() {
             self.refuse_extension(transaction, &missing, now);
             return true;
+        }
+        // a recording session's offer and metadata, to an agent that takes
+        // them: both parts are understood, which is what §8.2.3 asks
+        if self.recording_server && crate::siprec::session_part(request).is_some() {
+            return false;
         }
         let Some(refusal) = crate::admission::content_refusal(request) else {
             return false;
@@ -1511,6 +1538,17 @@ impl UserAgent {
             .respond_invite(transaction, &refusal, now)
             .ok();
         true
+    }
+
+    /// The session description an INVITE offers: its body, or the SDP part
+    /// of a recording session's to an agent that takes them.
+    fn offer_in(&self, request: &RawMessage<'_>) -> Option<sdp::SessionDescription> {
+        let described = self
+            .recording_server
+            .then(|| crate::siprec::session_part(request))
+            .flatten()
+            .unwrap_or(request.body());
+        sdp::parse_with_limits(described, self.sdp_limits).ok()
     }
 
     /// The `Contact` a call that arrived for `account` answers with.
@@ -1596,8 +1634,7 @@ impl UserAgent {
                 }
                 self.by_server.insert(transaction, call);
                 self.note_far_end(call, &request.as_raw());
-                if let Some(offer) =
-                    sdp::parse_with_limits(request.as_raw().body(), self.sdp_limits).ok()
+                if let Some(offer) = self.offer_in(&request.as_raw())
                     && let Some(held) = self.calls.get_mut(&call)
                 {
                     held.session.set_remote(offer);

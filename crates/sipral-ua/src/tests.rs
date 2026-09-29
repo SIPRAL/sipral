@@ -15815,3 +15815,148 @@ t=0 0\r\nm=audio 8000 RTP/AVP 0\r\na=sendonly\r\na=label:1\r\n";
     .expect("an SRS reads it back");
     assert_eq!(read, (offer.to_vec(), 1, 1));
 }
+
+#[test]
+fn new_metadata_goes_in_a_re_offer_that_defines_the_labels_it_names() {
+    let t0 = Instant::now();
+    let (mut agent, id) = over_tcp(t0);
+    let mut call = crate::siprec::RecordedCall {
+        session_id: crate::siprec::metadata_id([1; 16]),
+        parties: vec![crate::siprec::RecordedParty {
+            id: crate::siprec::metadata_id([2; 16]),
+            aor: "sip:alice@example.com".to_owned(),
+            name: None,
+            sends: vec![crate::siprec::RecordedStream {
+                id: crate::siprec::metadata_id([3; 16]),
+                label: "1".to_owned(),
+            }],
+        }],
+        ..crate::siprec::RecordedCall::default()
+    };
+    let offer = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/AVP 0\r\na=sendonly\r\na=label:1\r\n";
+    let recording = agent
+        .call(
+            id,
+            &OutgoingCall::new(uri("sip:srs@example.com"))
+                .offer(Arc::from(&offer[..]))
+                .recording_session(&call.metadata())
+                .expect("writable"),
+            t0,
+        )
+        .expect("the INVITE goes");
+    let invite = only(&transmits(&mut agent), "INVITE ");
+    let answer = b"v=0\r\no=srs 5 5 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 0\r\na=recvonly\r\n";
+    stream(
+        &mut agent,
+        &answered(&invite, 200, "OK", "srs", Some(answer)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    call.parties[0].name = Some("Alice".to_owned());
+    agent
+        .update_recording_metadata(recording, &call.metadata(), t0)
+        .expect("the re-offer goes");
+    let reinvite = only(&transmits(&mut agent), "INVITE ");
+    assert!(text(&reinvite, HeaderName::ContentType).starts_with("multipart/mixed;"));
+    let (sdp, name) = with(&reinvite, |message| {
+        crate::siprec::read_recording_offer(message).map(|read| {
+            (
+                String::from_utf8_lossy(read.sdp).into_owned(),
+                read.metadata.participants[0].name_ids[0].names[0]
+                    .text
+                    .clone(),
+            )
+        })
+    })
+    .expect("the SRS reads the update");
+    assert!(sdp.contains("a=label:1"), "the labels it names: {sdp}");
+    assert!(sdp.contains("o=- 1 2 IN IP4"), "the next version: {sdp}");
+    assert_eq!(name, "Alice");
+}
+
+/// A recording session's INVITE, as an SRC sends it: `Require: siprec`,
+/// `+sip.src`, and the offer and metadata as one multipart body.
+fn recording_invite() -> Vec<u8> {
+    let call = crate::siprec::RecordedCall {
+        session_id: crate::siprec::metadata_id([4; 16]),
+        parties: vec![crate::siprec::RecordedParty {
+            id: crate::siprec::metadata_id([5; 16]),
+            aor: "sip:bob@example.com".to_owned(),
+            name: None,
+            sends: vec![crate::siprec::RecordedStream {
+                id: crate::siprec::metadata_id([6; 16]),
+                label: "1".to_owned(),
+            }],
+        }],
+        ..crate::siprec::RecordedCall::default()
+    };
+    let offer = b"v=0\r\no=- 1 1 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 0\r\na=sendonly\r\na=label:1\r\n";
+    let body = crate::siprec::recording_session_body(offer, &call.metadata()).expect("a body");
+    let mut out = format!(
+        "INVITE sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKsrc1;rport\r\nMax-Forwards: 70\r\n\
+From: <sip:bob@example.com>;tag=src\r\nTo: <sip:alice@example.com>\r\n\
+Call-ID: recording@example.com\r\nCSeq: 1 INVITE\r\n\
+Contact: <sip:bob@192.0.2.9>;+sip.src\r\nRequire: siprec\r\n\
+Content-Type: {}\r\nContent-Length: {}\r\n\r\n",
+        body.content_type(),
+        body.body().len()
+    )
+    .into_bytes();
+    out.extend_from_slice(body.body());
+    out
+}
+
+#[test]
+fn a_recording_session_is_refused_420_unless_the_agent_takes_them() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    deliver(&mut agent, &recording_invite(), t0);
+    let refusal = only(&transmits(&mut agent), "SIP/2.0 420");
+    assert_eq!(text(&refusal, HeaderName::Unsupported), "siprec");
+
+    let mut server = self::agent(t0);
+    server.add_account(account());
+    server.accept_recording_sessions(true);
+    deliver(&mut server, &recording_invite(), t0);
+    assert!(
+        transmits(&mut server)
+            .iter()
+            .all(|out| !out.starts_with(b"SIP/2.0 4")),
+        "taken, not refused"
+    );
+    let call = events(&mut server)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("the recording session arrived");
+    let answer = b"v=0\r\no=srs 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 30000 RTP/AVP 0\r\na=recvonly\r\n";
+    server
+        .answer(call, Some(Arc::from(&answer[..])), t0)
+        .expect("the recording session is answered");
+    let ok = only(&transmits(&mut server), "SIP/2.0 200");
+    assert!(body_of(&ok).contains("m=audio 30000"));
+}
+
+#[test]
+fn metadata_for_a_call_that_is_not_a_recording_session_is_refused() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _) = call_up(&mut agent, id, t0);
+    let metadata = crate::siprec::RecordingMetadata::new(crate::siprec::DataMode::Complete);
+    assert!(matches!(
+        agent.update_recording_metadata(call, &metadata, t0),
+        Err(UaError::WrongState(_))
+    ));
+    assert!(transmits(&mut agent).is_empty());
+}

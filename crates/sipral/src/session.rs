@@ -379,6 +379,9 @@ pub struct MediaSession {
     /// One text datagram, held rather than allocated, for the borrow
     /// [`MediaSession::poll_text`] hands back.
     text_out: Vec<u8>,
+    /// What this call's audio is copied to, while a recording server is
+    /// recording it: see [`crate::siprec`].
+    tap: Option<crate::siprec::Tap>,
 }
 
 /// Which of this session's own buffers a datagram was built in.
@@ -579,6 +582,7 @@ impl MediaSession {
             stream_in: Vec::new(),
             text: None,
             text_out: Vec::new(),
+            tap: None,
         })
     }
 
@@ -997,6 +1001,12 @@ impl MediaSession {
         match self.rtp.receive(datagram, from, elapsed) {
             Received::Queued => {
                 self.note_arrival(now);
+                // verified and opened in place: what is left in front of
+                // the tag SRTP carried is the packet the far end sent
+                if let Some(tap) = self.tap.as_mut() {
+                    let plain = datagram.len().saturating_sub(self.rtp.rtp_overhead());
+                    tap.received(datagram.get(..plain).unwrap_or_default());
+                }
                 Arrival::Queued
             }
             Received::Dropped(Discard::NotKeyed) => Arrival::NotKeyed,
@@ -1717,6 +1727,9 @@ impl MediaSession {
         self.octets_sent = self
             .octets_sent
             .saturating_add(u64::try_from(written).unwrap_or(0));
+        if let Some(tap) = self.tap.as_mut() {
+            tap.sent(self.rtp_out.get(..length).unwrap_or_default(), payload);
+        }
         Ok(Some(length))
     }
 
@@ -2276,6 +2289,38 @@ impl MediaSession {
                 missing: heard.missing,
             });
         }
+    }
+}
+
+// -- copies for a recording server (RFC 7866) ---------------------------------
+
+impl MediaSession {
+    /// The next copy of this call's audio for the recording server recording
+    /// it ([`crate::MediaEngine::record_to`]), to send from the socket it
+    /// names. `None` while there is none, which is always on a call nothing
+    /// records.
+    ///
+    /// Collect it with every frame: a copy nobody collects for a second is
+    /// dropped, the oldest first.
+    #[must_use]
+    pub fn poll_recording(&mut self) -> Option<crate::siprec::RecordingDatagram<'_>> {
+        self.tap.as_mut()?.poll()
+    }
+
+    /// Whether this call's audio is being copied to a recording server.
+    #[must_use]
+    pub const fn is_copied(&self) -> bool {
+        self.tap.is_some()
+    }
+
+    /// Start copying this call's audio as `tap` says, or stop.
+    pub(crate) fn tap_to(&mut self, tap: Option<crate::siprec::Tap>) {
+        self.tap = tap;
+    }
+
+    /// The copies running, to point them somewhere else.
+    pub(crate) const fn tap(&mut self) -> Option<&mut crate::siprec::Tap> {
+        self.tap.as_mut()
     }
 }
 

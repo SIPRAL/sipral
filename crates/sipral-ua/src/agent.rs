@@ -165,6 +165,10 @@ pub struct UserAgent {
     /// unanswered ([`UserAgent::hand_over_info`]) rather than being answered
     /// here.
     pub(crate) info_handed_over: bool,
+    /// Whether this agent takes recording sessions, which is what makes the
+    /// `siprec` option tag one it understands
+    /// ([`UserAgent::accept_recording_sessions`]).
+    pub(crate) recording_server: bool,
     /// The registrar flows kept open through a NAT ([`crate::keepalive`]).
     pub(crate) keepalives: crate::keepalive::Keepalives,
     /// 64·T1, read off the configuration once. RFC 6665 §4.1.2.4's Timer N is
@@ -280,6 +284,7 @@ impl UserAgent {
             guard: Guard::default(),
             referrals: Referrals::default(),
             info_handed_over: false,
+            recording_server: false,
             keepalives: crate::keepalive::Keepalives::default(),
             timer_n,
             sdp_limits,

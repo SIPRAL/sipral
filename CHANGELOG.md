@@ -160,7 +160,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   call by `RecordedCall`, and checked against the SDP's `a=label` lines;
   and the pieces of a recording session's INVITE: the SDP and metadata
   body with `Content-Disposition: recording-session`, the `+sip.src`
-  feature tag and the `siprec` option tag. Not yet wired into calls. A
+  feature tag and the `siprec` option tag. A
   `multipart` fuzz target reads any body and requires what it reads to be
   written back the same.
 - **Conferences, presence documents and publishing, in `sipral-ua`.**
@@ -1363,6 +1363,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `red/1000`, the red `fmtp` and `cps`, and reads the two `fmtp` values
   back. A new fuzz target, `rtt`, drives the receiver with arbitrary
   datagrams.
+- **Calls are recorded to a recording server (SIPREC).** `MediaEngine::record_to` places an RFC 7866 recording session for a running call, from its account, with two labelled sendonly streams on the call's codec and RFC 7865 metadata naming both parties; once the server answers, every packet the call sends and every packet it accepts is copied to its stream as an RTP translator would (`MediaSession::poll_recording`, `MediaEngine::poll_recording`), a hold or a codec change is offered to the server with fresh metadata (`UserAgent::update_recording_metadata`), a call that replaces the recorded one takes the recording over, and the recording session is hung up with the call (`stop_recording_to` sooner). `UserAgent::accept_recording_sessions` lets an agent act as the server: `siprec` is understood and the offer is read out of the multipart body.
 - **Real-time text in calls.** `CallMedia::text` gives a call a second socket for RFC 4103 text: the offer carries RFC 4103 §7's `m=text` (`red/1000` over `t140/1000`, two generations, `b=RS:0`/`b=RR:0`), an offered text stream is answered on it, each end sends with the other's payload numbers and the far end's `cps`, and `MediaSession::send_text`, `poll_text` (or `MediaEngine::poll_text`) and `receive_text` carry it; `MediaEvent::TextReceived` says what was typed, erasures as U+0008, new lines as U+2028 and a U+FFFD for each block no redundant copy recovered. A call that keys its audio or uses ICE neither offers nor takes text.
 
 ### Fixed

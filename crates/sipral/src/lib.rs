@@ -171,6 +171,7 @@ mod record;
 mod relay;
 mod session;
 mod share;
+mod siprec;
 #[cfg(feature = "redaction")]
 mod state;
 mod stats;
@@ -232,6 +233,7 @@ pub use sipral_nat::turn::Transport as TurnTransport;
 /// [`RelayEvent::Failed`] reports it.
 #[cfg(feature = "ice")]
 pub use sipral_nat::turn::TurnError as TurnFailure;
+pub use siprec::{RecordTo, RecordingDatagram};
 #[cfg(feature = "redaction")]
 pub use state::{AccountState, CallSnapshot, EngineState, LISTED, MediaState, StreamState};
 pub use stats::StreamStatistics;

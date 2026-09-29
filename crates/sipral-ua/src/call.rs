@@ -483,6 +483,10 @@ pub(crate) struct Call {
     /// conference, and that is its URI. Read again from every message that
     /// can move the remote target.
     pub(crate) remote_focus: Option<Uri>,
+    /// The recording metadata a recording session last sent (RFC 7866
+    /// §9.1), written: every offer the session makes carries it beside the
+    /// SDP whose labels it names. `None` on every other call.
+    pub(crate) recording: Option<Arc<str>>,
 }
 
 /// A session change this end has offered.
@@ -693,6 +697,7 @@ impl Call {
             ended_by: Box::default(),
             identity: None,
             remote_focus: None,
+            recording: None,
         }
     }
 
@@ -750,6 +755,7 @@ impl Call {
             ended_by: Box::default(),
             identity: None,
             remote_focus: None,
+            recording: None,
         }
     }
 
@@ -801,6 +807,7 @@ impl Call {
             ended_by: Box::default(),
             identity: None,
             remote_focus: None,
+            recording: None,
         }
     }
 }
