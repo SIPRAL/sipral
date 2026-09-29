@@ -46,7 +46,9 @@ const BLOCK_MS: u32 = 10;
 /// The widest stride used: four samples, at 16 kHz.
 const MAX_STRIDE: usize = 4;
 
-/// The limits of a [`BeepDetector`].
+/// The limits of a [`BeepDetector`]. No standard says what a machine's
+/// beep is, so every default here is a judgement from the beeps machines
+/// play.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BeepConfig {
     /// The lowest a beep may be, in hertz. Default 400.

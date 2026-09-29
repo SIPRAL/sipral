@@ -270,12 +270,14 @@ pub struct DtmfConfig {
     /// fraction: 0.025 is ±2.5 %, between the ±1.5 % Q.24 has a receiver
     /// accept and the ±3.5 % it has one refuse.
     pub max_frequency_deviation: f64,
-    /// How much louder the high-group tone may be than the low, in dB: what
-    /// Q.24 calls a positive level difference and the trade calls normal
-    /// twist, since a sender pre-emphasises the high group. Default 4 dB.
+    /// How much louder the high-group tone may be than the low, in dB, as a
+    /// sender that pre-emphasises the high group makes it: what Q.24 calls
+    /// a positive level difference. Default 4 dB. The trade names the two
+    /// directions of twist both ways round, so these fields say instead
+    /// which tone is the louder.
     pub max_high_over_low_db: f64,
-    /// How much louder the low-group tone may be than the high, in dB:
-    /// reverse twist, which a long line's loss at high frequency produces.
+    /// How much louder the low-group tone may be than the high, in dB: what
+    /// a long line's loss at high frequency produces.
     /// Default 8 dB.
     pub max_low_over_high_db: f64,
     /// The least level, in dBm0, either tone may have. Default −30 dBm0:
@@ -288,8 +290,10 @@ pub struct DtmfConfig {
     /// a judgement, and the module tests measure both sides of it.
     pub min_signal_to_noise_db: f64,
     /// The strongest second harmonic either tone may carry, in dB relative
-    /// to that tone. Q.23 has a sender keep unwanted components 20 dB down;
-    /// default −15 dB.
+    /// to that tone. Q.23 has a sender keep unwanted components 20 dB down,
+    /// and Q.24 sets no receiver limit; default −15 dB, a judgement. A
+    /// harmonic 58 to 71 Hz from the column tone, as twice 697, 770 or
+    /// 852 Hz is for the column beside it, reads up to 1.5 dB low.
     pub max_second_harmonic_db: f64,
     /// The shortest tone that is a digit, in milliseconds. Q.24 has a
     /// receiver accept 40 ms and refuse 23 ms; default 32.

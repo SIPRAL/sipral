@@ -64,7 +64,7 @@ pub enum ProgressTone {
     Ringback,
     /// The far end is busy.
     Busy,
-    /// The network is: congestion, or reorder in North America.
+    /// The network is congested: congestion, or reorder in North America.
     Congestion,
     /// A second call is waiting, played over the first.
     CallWaiting,
@@ -247,12 +247,13 @@ pub struct ProgressConfig {
     /// the idle noise of a line.
     pub min_level_dbm0: f64,
     /// How far a tone's frequencies together must stand above everything
-    /// else in the window, in dB. Default 6 dB, which a steady tone clears
-    /// easily and a voice rarely does.
+    /// else in the window, in dB. Default 6 dB, a judgement, which a steady
+    /// tone clears easily and a voice rarely does.
     pub min_signal_to_noise_db: f64,
     /// How much weaker than the strongest of a tone's frequencies any other
-    /// of them may be, in dB. Default 10 dB: a network sends them at one
-    /// level, and a tone with one of its pair missing is another tone.
+    /// of them may be, in dB. Default 10 dB, a judgement: a network sends
+    /// them at one level, and a tone with one of its pair missing is
+    /// another tone.
     pub max_imbalance_db: f64,
     /// How far a burst or a silence may be from its nominal length, as a
     /// fraction of it. Default 0.2, a judgement: wide enough for a
@@ -260,7 +261,8 @@ pub struct ProgressConfig {
     /// busy and congestion, 500 and 250 ms, stay apart.
     pub cadence_tolerance: f64,
     /// The same, as a floor in milliseconds, for the short bursts where a
-    /// fraction is less than the measurement's own error. Default 40.
+    /// fraction is less than the measurement's own error. Default 40, a
+    /// judgement.
     pub cadence_slack_ms: u32,
     /// How long a tone with a continuous cadence has to sound before it is
     /// reported, in milliseconds. Default 2500, longer than any burst of a

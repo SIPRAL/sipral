@@ -38,7 +38,7 @@ pub const DEFAULT_TONE_MS: u32 = 100;
 pub const DEFAULT_PAUSE_MS: u32 = 60;
 
 /// The level of each of a digit's two tones unless configured otherwise,
-/// in dBm0: the ten that RFC 4733 §2.3.3's volume field conventionally
+/// in dBm0: the ten that RFC 4733 §2.3.4's volume field conventionally
 /// carries for a generated digit, and what this stack sends.
 pub const DEFAULT_DIGIT_DBM0: f64 = -10.0;
 
