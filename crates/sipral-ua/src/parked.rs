@@ -304,7 +304,22 @@ impl UserAgent {
 
     /// End a dialog whose call this layer has already reported over.
     pub(crate) fn bye_by_itself(&mut self, dialog: DialogId, now: Instant) {
-        if let Err(error) = self.endpoint.bye(dialog, now)
+        self.bye_by_itself_for(dialog, None, now);
+    }
+
+    /// [`UserAgent::bye_by_itself`], with a `Reason` (RFC 3326) on the BYE
+    /// when this layer knows why it is sending it.
+    pub(crate) fn bye_by_itself_for(
+        &mut self,
+        dialog: DialogId,
+        reason: Option<&crate::Reason>,
+        now: Instant,
+    ) {
+        let mut bye = OutgoingInDialogRequest::new(Method::Bye);
+        if let Some(reason) = reason {
+            bye = bye.header(crate::reason::REASON, &reason.to_value());
+        }
+        if let Err(error) = self.endpoint.bye_with(dialog, &bye, now)
             && needs_a_stream(&error)
         {
             self.park(Parked::Bye { dialog });
@@ -313,7 +328,7 @@ impl UserAgent {
 
     /// Hang up a call this layer has decided to end.
     pub(crate) fn hang_up_by_itself(&mut self, call: CallHandle, now: Instant) {
-        if let Err(error) = self.end_call(call, &[], now)
+        if let Err(error) = self.end_call(call, &[], &[], now)
             && call_needs_a_stream(&error)
             && let Some(dialog) = self.calls.get(&call).and_then(|held| held.dialog)
         {

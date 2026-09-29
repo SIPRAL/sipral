@@ -315,6 +315,10 @@ pub enum Event {
     IncomingCancel {
         /// The INVITE that was cancelled.
         invite: TransactionId<InviteServer>,
+        /// The CANCEL, whole: a `Reason` in it (RFC 3326) says why, and a
+        /// forking proxy's "call completed elsewhere" is the one a phone
+        /// should not show as a missed call.
+        request: OwnedMessage,
     },
     /// The ACK for a 2xx we sent (§13.2.2.4). The call is up.
     IncomingAck {
@@ -347,6 +351,8 @@ pub enum Event {
         transaction: TransactionId<NonInviteServer>,
         /// The dialog that has ended.
         dialog: DialogId,
+        /// The BYE, whole: a `Reason` in it (RFC 3326) says why.
+        request: OwnedMessage,
     },
     /// A request inside a dialog that is none of the above: INFO, NOTIFY,
     /// UPDATE, REFER, MESSAGE.

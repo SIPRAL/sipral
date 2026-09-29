@@ -37,6 +37,30 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   that pumps its own frames, the four idiomatic layers included. The gate
   refuses a `target-cpu` or `target-feature` anywhere in the tree, so the
   packaged library needs no instruction beyond its target's baseline.
+- **Who is calling, how the call asks to be answered, why it ended, and
+  where to send it instead.** An incoming call's `IncomingCall` event and
+  `call_identity` carry a typed `CallerIdentity`: `P-Asserted-Identity`,
+  `Remote-Party-ID` and `verstat` behind a per-account trust gate
+  (`Account::trust`, RFC 3325 §8), `Privacy`, `Diversion` (RFC 5806) and
+  `History-Info` (RFC 7044, with RFC 4458's `cause` and the escaped
+  `Reason`); and `Answering`: `Answer-Mode`/`Priv-Answer-Mode` (RFC 5373,
+  `answermode` now understood in `Require`), `answer-after` and
+  `info=alert-autoanswer`, and `Alert-Info` with RFC 7462's source URNs.
+  `Account::privacy` places an account's calls anonymously (RFC 3323
+  §4.1.1.3), asserting its identity only toward a trusted peer; once an
+  account names a trust domain, identity fields stay inside it.
+  `CallEnded::causes` carries the `Reason` (RFC 3326) of the BYE, the
+  CANCEL or the refusal, `hangup_for` writes one on a BYE or a CANCEL
+  (held with a CANCEL that waits for a provisional), and the BYE to a
+  fork branch that answered too late says `cause=200` "Call completed
+  elsewhere". `redirect` answers a call 3xx with a `Contact` list and a
+  `Diversion`. Over the C ABI (0.29): the facts on every call event,
+  `sipral_call_identity_count`/`_text` for the lists,
+  `sipral_call_hangup_for`, `sipral_call_redirect`, `session_timer`,
+  `privacy` and `trusted_peers` on `sipral_account_config_t` (the
+  per-account session timer C lacked), and `SIPRAL_FEATURE_CALLER_IDENTITY`
+  (`1 << 12`).
+
 - **A call in progress moves with the network under it.** A change of
   address used to redo the registration and nothing else, so a call up at
   the time stayed up with the far end's audio going to an address that was

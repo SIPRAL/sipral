@@ -23,7 +23,7 @@
 //! here has storage.
 
 use std::ffi::c_char;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use sipral_core::auth::Credentials;
@@ -174,6 +174,31 @@ record! {
         pub quality_report_uri: *const c_char,
         /// How many bytes of it.
         pub quality_report_uri_len: usize,
+        /// A [`SipralSessionTimer`](crate::identity::SipralSessionTimer): how
+        /// this account's calls ask for a session timer (RFC 4028). Zero is
+        /// the stack's default, thirty minutes. ABI 0.29, appended at the
+        /// tail like every member after the pinned `MIN_SIZE`.
+        pub session_timer: u32,
+        /// The interval to ask for under `SIPRAL_SESSION_TIMER_INTERVAL`, in
+        /// seconds: at least 90, RFC 4028 §5's floor. Read for nothing else.
+        pub session_interval_seconds: u64,
+        /// `SIPRAL_PRIVACY_*` bits: place every call from this account
+        /// anonymously (RFC 3323), asking for these. `SIPRAL_PRIVACY_ID` is
+        /// "withhold my number". `From` becomes `"Anonymous"
+        /// <sip:anonymous@anonymous.invalid>`, `Privacy` carries the bits,
+        /// and the account's own identity goes in `P-Asserted-Identity` only
+        /// toward a peer in `trusted_peers`. Zero asks for none.
+        pub privacy: u32,
+        /// The peers this account trusts (RFC 3325's trust domain), as IP
+        /// addresses separated by commas: usually the registrar or the trunk.
+        /// A call arriving from one of them has its asserted identity read
+        /// (`sipral_call_event_t::asserted_uri`); from anywhere else it is
+        /// left out. And once any are named, a call placed toward any other
+        /// peer carries no `P-Asserted-Identity` or `P-Preferred-Identity`,
+        /// whoever wrote it. Null and zero trusts nobody.
+        pub trusted_peers: *const c_char,
+        /// How many bytes of it.
+        pub trusted_peers_len: usize,
     }
 }
 
@@ -218,6 +243,65 @@ fn expiry(seconds: u64) -> Result<Duration, Fail> {
         ));
     }
     Ok(Duration::from_secs(seconds))
+}
+
+/// What an account's calls ask for, from what crossed the boundary: the
+/// session timer (RFC 4028), the privacy (RFC 3323), and the peers whose
+/// asserted identities it believes (RFC 3325).
+///
+/// # Safety
+///
+/// `config.trusted_peers` must be readable for `config.trusted_peers_len`
+/// bytes or null with a length of zero.
+unsafe fn with_call_options(
+    mut account: Account,
+    config: &SipralAccountConfig,
+) -> Result<Account, Fail> {
+    account = match config.session_timer {
+        0 => account,
+        1 => account.session_interval(None),
+        2 if config.session_interval_seconds >= 90 => {
+            account.session_interval(Some(Duration::from_secs(config.session_interval_seconds)))
+        }
+        2 => {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!(
+                    "session_interval_seconds is {}, under RFC 4028 section 5's floor of 90",
+                    config.session_interval_seconds
+                ),
+            ));
+        }
+        other => {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!("session_timer is {other}, which is not a SIPRAL_SESSION_TIMER"),
+            ));
+        }
+    };
+    account = account.privacy(crate::identity::privacy_of(config.privacy)?);
+    let trusted = unsafe {
+        text(
+            config.trusted_peers,
+            config.trusted_peers_len,
+            "trusted_peers",
+        )
+    }?;
+    for peer in trusted
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|peer| !peer.is_empty())
+    {
+        let address = peer.parse::<IpAddr>().map_err(|_| {
+            fail(
+                SipralStatus::InvalidArgument,
+                format!("{peer:?} in trusted_peers is not an IP address"),
+            )
+        })?;
+        account = account.trust(address);
+    }
+    Ok(account)
 }
 
 fn address(supplied: &str, name: &'static str) -> Result<SocketAddr, Fail> {
@@ -376,6 +460,7 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
     if let Some(push) = unsafe { push_from(config) }? {
         account = account.push(push);
     }
+    account = unsafe { with_call_options(account, config) }?;
     if config.expires_seconds != 0 {
         account = account.expires(expiry(config.expires_seconds)?);
     }
@@ -587,6 +672,11 @@ pub(crate) mod tests {
             push_wakes_itself: 0,
             quality_report_uri: ptr::null(),
             quality_report_uri_len: 0,
+            session_timer: 0,
+            session_interval_seconds: 0,
+            privacy: 0,
+            trusted_peers: ptr::null(),
+            trusted_peers_len: 0,
         }
     }
 

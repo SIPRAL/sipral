@@ -135,6 +135,9 @@ impl StatusCode {
     /// message was accepted, but end to end delivery has not been
     /// guaranteed".
     pub const ACCEPTED: Self = Self(202);
+    /// 302 Moved Temporarily: the user is reachable at the `Contact` the
+    /// response names, for now (§21.3.3).
+    pub const MOVED_TEMPORARILY: Self = Self(302);
     /// 400, "the request could not be understood due to malformed syntax"
     /// (§21.4.1).
     pub const BAD_REQUEST: Self = Self(400);

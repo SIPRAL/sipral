@@ -41,7 +41,10 @@ pub(crate) enum CancelDisposition {
 /// # Errors
 /// [`BuildError::MissingField`] when the request is missing a field the CANCEL
 /// has to copy.
-pub(crate) fn cancel_for_request(request: &RawMessage<'_>) -> Result<OwnedMessage, BuildError> {
+pub(crate) fn cancel_for_request(
+    request: &RawMessage<'_>,
+    reason: Option<&[u8]>,
+) -> Result<OwnedMessage, BuildError> {
     let uri = request
         .request_uri_bytes()
         .ok_or(BuildError::MissingField("Request-URI"))?;
@@ -79,6 +82,11 @@ pub(crate) fn cancel_for_request(request: &RawMessage<'_>) -> Result<OwnedMessag
     for hop in request.field_values(HeaderName::Route) {
         builder = builder.route(hop);
     }
+    // RFC 3326 §2: "The Reason header field MAY appear ... in any CANCEL
+    // request"
+    if let Some(reason) = reason {
+        builder = builder.header(HeaderName::Extension("Reason"), reason);
+    }
 
     builder.build()
 }
@@ -107,7 +115,7 @@ v=0\n";
     fn the_cancel_is_the_invite_with_one_thing_changed() {
         let mut scratch = ParseScratch::new();
         let invite = parse(INVITE, &mut scratch, ParseMode::Strict).expect("the INVITE");
-        let built = cancel_for_request(&invite).expect("a CANCEL");
+        let built = cancel_for_request(&invite, None).expect("a CANCEL");
         assert_eq!(
             built.as_raw().as_bytes(),
             b"CANCEL sip:bob@example.com SIP/2.0\r\n\
@@ -127,7 +135,7 @@ Content-Length: 0\r\n\
     fn the_branch_is_the_same_so_the_two_can_be_paired() {
         let mut scratch = ParseScratch::new();
         let invite = parse(INVITE, &mut scratch, ParseMode::Strict).expect("the INVITE");
-        let built = cancel_for_request(&invite).expect("a CANCEL");
+        let built = cancel_for_request(&invite, None).expect("a CANCEL");
         let cancel = built.as_raw();
 
         assert_eq!(
@@ -145,12 +153,30 @@ Content-Length: 0\r\n\
         // 9.1: "MUST NOT contain any Require or Proxy-Require header fields"
         let mut scratch = ParseScratch::new();
         let invite = parse(INVITE, &mut scratch, ParseMode::Strict).expect("the INVITE");
-        let built = cancel_for_request(&invite).expect("a CANCEL");
+        let built = cancel_for_request(&invite, None).expect("a CANCEL");
         let cancel = built.as_raw();
 
         assert_eq!(cancel.require().count(), 0);
         assert_eq!(cancel.proxy_require().count(), 0);
         assert_eq!(cancel.body(), b"", "the offer is not repeated");
         assert_eq!(cancel.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_cancel_asked_for_with_a_reason_carries_it_and_one_without_carries_none() {
+        // RFC 3326 §2: "The Reason header field MAY appear ... in any CANCEL
+        // request"
+        let mut scratch = ParseScratch::new();
+        let invite = parse(INVITE, &mut scratch, ParseMode::Strict).expect("the INVITE");
+        let reason = b"SIP;cause=200;text=\"Call completed elsewhere\"";
+        let built = cancel_for_request(&invite, Some(reason)).expect("a CANCEL");
+        let cancel = built.as_raw();
+        assert_eq!(
+            cancel.header(HeaderName::Extension("Reason")),
+            Some(&reason[..])
+        );
+        assert_eq!(cancel.validate(), Ok(()));
+        let plain = cancel_for_request(&invite, None).expect("a CANCEL");
+        assert_eq!(plain.as_raw().header(HeaderName::Extension("Reason")), None);
     }
 }

@@ -47,7 +47,13 @@ whether it is met; *in part* is followed by what is missing.
 | 7315 | P-Associated-URI, reported from the 200 OK to REGISTER and not acted on (obsoletes RFC 3455) | sipral-ua | phase 2, built |
 | 8599 | Push notification bindings: `pn-provider`, `pn-prid`, `pn-param`, and the 555 refusal | sipral-ua | phase 4 |
 | 7118 | SIP over WebSocket | sipral-core | phase 1, in part |
-| 3323 / 3325 | Privacy, and asserted identity | sipral-ua | phase 2 |
+| 3323 / 3325 | Privacy, and asserted identity: `P-Asserted-Identity` read behind a per-account trust gate (§8), `Privacy` read and written, anonymous calls per account (§4.1.1.3) with the identity asserted only toward a trusted peer. No privacy service | sipral-ua | phase 2, built |
+| 3326 | The Reason header: read on the BYE, the CANCEL or the refusal that ends a call, written on a hangup and on the BYE to a fork branch that answered too late | sipral-ua | phase 2, built |
+| 6432 | Q.850 `Reason` values in responses: read on a refusal, written on this end's own | sipral-ua | phase 2, built |
+| 5373 | Answer-Mode and Priv-Answer-Mode: read and handed to the application's policy, `answermode` understood | sipral-ua | phase 2, built |
+| 7462 | Alert-Info URNs: `urn:alert:source:internal` and `external` read; the rest carried | sipral-ua | phase 2, built |
+| 5806 | Diversion (historic, and what trunks still send): read, and written on this end's own 3xx | sipral-ua | phase 2, built |
+| 7044 | History-Info: read, with RFC 4458's `cause` and the `Reason` escaped into each target | sipral-ua | phase 2, built |
 | 4475 | SIP torture test messages | test corpus | phase 1 |
 | 7616 | HTTP Digest: challenge, `qop`, nonce count restarted only for a new nonce (§3.4) | sipral-core | phase 1 |
 | 6086 | The INFO framework, for DTMF over SIP INFO | sipral-ua | phase 2 |

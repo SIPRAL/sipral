@@ -21,13 +21,15 @@
 //! and getting one is a conversation with a notification service that has
 //! nothing to do with SIP.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use sipral_core::auth::Credentials;
 use sipral_core::endpoint::{TransportId, TransportProtocol};
 use sipral_core::msg::{HeaderName, Uri};
+
+use crate::identity::{ANONYMOUS_FROM, Privacy};
 
 /// One hour, which is what most registrars grant anyway.
 pub(crate) const DEFAULT_EXPIRES: Duration = Duration::from_hours(1);
@@ -238,6 +240,12 @@ pub struct Account {
     /// Where this account's end-of-call voice quality reports go (RFC 6035,
     /// carried by a PUBLISH, RFC 3903), or `None` to send none.
     pub(crate) quality_report_uri: Option<Uri>,
+    /// What privacy every call this account places asks for (RFC 3323).
+    /// See [`Account::privacy`].
+    pub(crate) privacy: Privacy,
+    /// The peers inside this account's trust domain (RFC 3325 §2.3), by
+    /// address. See [`Account::trust`].
+    pub(crate) trusted: Vec<IpAddr>,
 }
 
 impl Account {
@@ -308,6 +316,8 @@ impl Account {
             message_types: Vec::new(),
             protocol: None,
             quality_report_uri: None,
+            privacy: Privacy::default(),
+            trusted: Vec::new(),
         }
     }
 
@@ -410,6 +420,66 @@ impl Account {
     #[must_use]
     pub const fn quality_report(&self) -> Option<&Uri> {
         self.quality_report_uri.as_ref()
+    }
+
+    /// Place every call from this account anonymously (RFC 3323), asking
+    /// for `privacy` — [`Privacy::withheld`] for the usual "withhold my
+    /// number".
+    ///
+    /// `From` becomes `"Anonymous" <sip:anonymous@anonymous.invalid>`
+    /// (§4.1.1.3), a `Privacy` field carries what was asked for, and the
+    /// call names a temporary GRUU where the account has one (RFC 5627
+    /// §3.3). The account's own identity goes in `P-Asserted-Identity` only
+    /// toward a peer it trusts ([`Account::trust`]), the one that can still
+    /// bill the call and has to strip the field before it leaves the trust
+    /// domain (RFC 3325 §7). A call whose own header fields already carry
+    /// `Privacy` keeps its own.
+    ///
+    /// Nothing is asked for by default.
+    #[must_use]
+    pub const fn privacy(mut self, privacy: Privacy) -> Self {
+        self.privacy = privacy;
+        self
+    }
+
+    /// Trust the peer at `address`: it is inside this account's trust domain
+    /// (RFC 3325 §2.3), usually the registrar or the trunk the account
+    /// reaches the network through.
+    ///
+    /// Two things turn on it, both RFC 3325's. A call arriving from a trusted
+    /// peer has its `P-Asserted-Identity`, its `Remote-Party-ID` and its
+    /// `verstat` read into [`CallerIdentity`](crate::CallerIdentity); from
+    /// anywhere else they are left out, because §8 has a UAS "MUST NOT use"
+    /// an identity asserted by an element it does not trust. And a call this
+    /// account places toward any other peer carries no
+    /// `P-Asserted-Identity` or `P-Preferred-Identity`, whoever wrote it
+    /// (§6: "user agents MUST NOT populate the P-Preferred-Identity header
+    /// field in a message that is not sent directly to a proxy that is
+    /// trusted").
+    ///
+    /// Called once per peer. Nobody is trusted by default.
+    #[must_use]
+    pub fn trust(mut self, address: IpAddr) -> Self {
+        if !self.trusted.contains(&address) {
+            self.trusted.push(address);
+        }
+        self
+    }
+
+    /// Whether a peer at `address` is one this account trusts.
+    #[must_use]
+    pub fn trusts(&self, address: IpAddr) -> bool {
+        self.trusted.contains(&address)
+    }
+
+    /// `From` for a call this account places: its own identity, or RFC 3323
+    /// §4.1.1.3's anonymous one when it asked for privacy.
+    pub(crate) fn caller_value(&self) -> Box<[u8]> {
+        if self.privacy.requested() {
+            Box::from(ANONYMOUS_FROM)
+        } else {
+            self.sender_value()
+        }
     }
 
     /// A header field on every REGISTER this account sends.

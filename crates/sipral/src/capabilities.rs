@@ -205,6 +205,12 @@ pub struct Capabilities {
     ///
     /// [`MediaEngine::readdress`]: crate::MediaEngine::readdress
     pub call_readdress: bool,
+    /// Whether an incoming call's typed identity (RFC 3325's asserted
+    /// identity behind a per-account trust gate, `Diversion`,
+    /// `History-Info`, `verstat`, `Privacy`), how it asked to be answered
+    /// (RFC 5373, `Alert-Info`), why a call ended (RFC 3326) and a 3xx
+    /// redirect are all read and written.
+    pub caller_identity: bool,
 }
 
 impl Capabilities {
@@ -231,6 +237,7 @@ impl Capabilities {
             stun: cfg!(feature = "stun"),
             turn_streams: cfg!(feature = "ice"),
             call_readdress: true,
+            caller_identity: true,
         }
     }
 }

@@ -14,15 +14,17 @@
 //! the first 2xx is the sibling's. `sipral::ForkPolicy::KeepFirst` has to keep
 //! it — the proxy has already forwarded it and is cancelling the desk — and
 //! the call has to go on, on the mobile's dialog, with audio both ways. The
-//! desk has to see the proxy's CANCEL, and the branch the caller placed has
-//! to end as `ForkLost`, which is how the application learns which branch
-//! won.
+//! desk has to see the proxy's CANCEL, saying the call was completed
+//! elsewhere (RFC 3326 §3.1) so that it is not a missed call, and the branch
+//! the caller placed has to end as `ForkLost`, which is how the application
+//! learns which branch won.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use sipral::{
-    AccountId, CallEndReason, CallHandle, CallMedia, Event, MediaConfig, OutgoingCall, UaEvent,
+    AccountId, CallEndReason, CallHandle, CallMedia, Event, MediaConfig, OutgoingCall, Reason,
+    UaEvent,
 };
 
 use crate::join::give_back;
@@ -85,6 +87,10 @@ struct Phone {
     stage: Stage,
     confirmed: bool,
     ended: Option<CallEndReason>,
+    /// Whether the CANCEL that ended its call said another phone answered
+    /// (RFC 3326 §3.1), which is what Kamailio's `tm` writes on the CANCEL
+    /// of every branch that lost.
+    answered_elsewhere: bool,
 }
 
 impl Phone {
@@ -125,10 +131,14 @@ impl Phone {
                 self.call = Some((call, now));
             }
             UaEvent::CallConfirmed { .. } => self.confirmed = true,
-            UaEvent::CallEnded { call, reason, .. }
-                if self.call.is_some_and(|(ours, _)| ours == call) =>
-            {
+            UaEvent::CallEnded {
+                call,
+                reason,
+                ref causes,
+                ..
+            } if self.call.is_some_and(|(ours, _)| ours == call) => {
                 self.ended = Some(reason);
+                self.answered_elsewhere = causes.iter().any(Reason::is_completed_elsewhere);
             }
             _ => {}
         }
@@ -283,6 +293,7 @@ pub(crate) fn run(server: &str, remote: SocketAddr) -> Result<String, String> {
                 stage: Stage::Waiting,
                 confirmed: false,
                 ended: None,
+                answered_elsewhere: false,
             })
         };
     // the desk registers first and the mobile second: "the second contact"
@@ -408,6 +419,13 @@ fn verdict(caller: &Caller, desk: &Phone, mobile: &Phone) -> Result<String, Stri
             desk.ended
         ));
     }
+    if !desk.answered_elsewhere {
+        return Err(
+            "the proxy's CANCEL reached the desk without a Reason saying the call was \
+             completed elsewhere (RFC 3326 §3.1)"
+                .to_owned(),
+        );
+    }
     if !mobile.confirmed {
         return Err("the mobile's answer was never acknowledged".to_owned());
     }
@@ -428,7 +446,7 @@ fn verdict(caller: &Caller, desk: &Phone, mobile: &Phone) -> Result<String, Stri
         ));
     }
     Ok(format!(
-        "   (the mobile kept, the desk cancelled; {to_caller} audible frames at \
-         the caller, {to_mobile} at the mobile)"
+        "   (the mobile kept, the desk cancelled as completed elsewhere; {to_caller} \
+         audible frames at the caller, {to_mobile} at the mobile)"
     ))
 }

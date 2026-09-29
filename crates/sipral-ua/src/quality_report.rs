@@ -724,6 +724,8 @@ mod tests {
             from_display: Box::from(&b"Alice"[..]),
             to_uri: Box::from(&b"sip:bill@example.net"[..]),
             call_id: Box::from(&b"6dg37f1890463"[..]),
+            caller: crate::CallerIdentity::default(),
+            answering: crate::Answering::default(),
         }
     }
 

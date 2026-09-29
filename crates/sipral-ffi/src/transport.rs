@@ -990,6 +990,11 @@ pub(crate) mod tests {
             push_wakes_itself: 0,
             quality_report_uri: ptr::null(),
             quality_report_uri_len: 0,
+            session_timer: 0,
+            session_interval_seconds: 0,
+            privacy: 0,
+            trusted_peers: ptr::null(),
+            trusted_peers_len: 0,
         }
     }
 

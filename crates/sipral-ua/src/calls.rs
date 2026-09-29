@@ -27,6 +27,7 @@
 //! get it wrong during the second it matters.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,11 +41,13 @@ use sipral_core::msg::{
 };
 use sipral_core::sdp;
 use sipral_core::transaction::{
-    AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TransactionId,
+    AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, NonInviteServer,
+    TransactionId,
 };
 
 use crate::account::{Account, AccountId, Extra};
 use crate::agent::UserAgent;
+use crate::answering::Answering;
 use crate::call::{
     Call, CallEndReason, CallHandle, CallIdentity, CallState, Direction, ForkPolicy, KeptBranch,
     OutgoingCall, Refusal, RequestRefusal,
@@ -52,7 +55,10 @@ use crate::call::{
 use crate::error::UaError;
 use crate::event::UaEvent;
 use crate::headers::{HeadersFor, onto_request, onto_response};
+use crate::identity::{ASSERTED, CallerIdentity, DIVERSION, PRIVACY};
 use crate::parked::needs_a_stream;
+use crate::reason::{Reason, ReasonProtocol, with_reason};
+use crate::redirect::Redirect;
 use crate::registration::{anonymous, dialog_contact};
 use crate::renegotiate::ALLOW;
 use crate::timers::FLOOR;
@@ -102,12 +108,12 @@ impl UserAgent {
         // behind and nothing on the wire
         HeadersFor::Call.check_each(&outgoing.extra)?;
         let asked = config.session_interval;
-        let from = config.sender_value();
+        let from = config.caller_value();
         let mut call = Call::outgoing(
             account,
             outgoing.forks,
             outgoing.destination,
-            anonymous(&outgoing.extra),
+            anonymous(&outgoing.extra) || config.privacy.requested(),
             from,
             config.contact_value(),
         );
@@ -145,7 +151,8 @@ impl UserAgent {
         let (transport, remote) = outgoing
             .destination
             .unwrap_or((config.transport, config.remote));
-        let from = config.sender_value();
+        let from = config.caller_value();
+        let identifying = identifying_fields(config, &outgoing.extra, remote);
         // read fresh rather than kept from when the call was placed (RFC 5627
         // §4.4 forbids naming a GRUU once the registration that issued it is
         // gone), which is why a 422 asked again on the same handle still comes
@@ -183,7 +190,13 @@ impl UserAgent {
         if let Some(ref offer) = outgoing.offer {
             request = request.body(b"application/sdp", Arc::clone(offer));
         }
+        for (name, value) in &identifying.added {
+            request = request.header(*name, value);
+        }
         for extra in &outgoing.extra {
+            if identifying.withheld(&extra.name) {
+                continue;
+            }
             if let Some(name) = HeaderName::from_bytes(&extra.name) {
                 request = request.header(name, &extra.value);
             }
@@ -371,6 +384,59 @@ impl UserAgent {
         self.refuse(call, status, &headers, now)
     }
 
+    /// Answer a call that came in with a 3xx: somewhere else to try
+    /// (RFC 3261 §21.3), and, when the [`Redirect`] says why, a `Diversion`
+    /// naming this end as the party that diverted the call (RFC 5806).
+    ///
+    /// The `Contact` lists every target the redirect names, each with its
+    /// `q` when one was given. The `Diversion` names the address the call
+    /// was made to — the INVITE's `To` — with the reason and `counter=1`,
+    /// and the `Diversion` values the INVITE already carried follow it,
+    /// most recent first, so the next phone sees the whole chain. The
+    /// application's own header fields ride along as they do on a refusal.
+    ///
+    /// # Errors
+    /// [`UaError::NotARedirection`] for a redirect that names nowhere to go
+    /// with any status but 380 (Alternative Service, whose alternative is in
+    /// the body rather than a `Contact`); otherwise as [`UserAgent::reject`].
+    pub fn redirect(
+        &mut self,
+        call: CallHandle,
+        redirect: &Redirect,
+        now: Instant,
+    ) -> Result<(), UaError> {
+        if redirect.targets.is_empty() && redirect.status.get() != 380 {
+            return Err(UaError::NotARedirection(redirect.status));
+        }
+        let transaction = self.answerable(call)?;
+        let invited = self.calls.get(&call).and_then(|held| held.invited.clone());
+        let mut response = OutgoingResponse::new(redirect.status);
+        if !redirect.targets.is_empty() {
+            response = response.contact(&redirect.contact_value());
+        }
+        if let Some(invited) = invited.as_ref() {
+            let raw = invited.as_raw();
+            let diverting = raw.to().ok().map(|to| to.uri_bytes().to_vec());
+            if let Some(ours) = diverting.and_then(|to| redirect.diversion_value(&to)) {
+                response = response.header(DIVERSION, &ours);
+                for earlier in raw.header_values(DIVERSION) {
+                    response = response.header(DIVERSION, earlier);
+                }
+            }
+        }
+        let response = onto_response(response, &self.application_headers(call));
+        self.endpoint.respond_invite(transaction, &response, now)?;
+        self.finish(
+            call,
+            CallEndReason::LocalHangup,
+            Some(redirect.status),
+            None,
+            now,
+        );
+        self.drain(now);
+        Ok(())
+    }
+
     /// [`UserAgent::reject`], carrying `headers`.
     fn refuse(
         &mut self,
@@ -490,7 +556,28 @@ impl UserAgent {
     /// [`UaError::NoSuchCall`], or the error of whatever it turned into.
     pub fn hangup(&mut self, call: CallHandle, now: Instant) -> Result<(), UaError> {
         let headers = self.application_headers(call);
-        self.end_call(call, &headers, now)
+        self.end_call(call, &headers, &[], now)
+    }
+
+    /// [`UserAgent::hangup`], saying why (RFC 3326).
+    ///
+    /// `reasons` go in a `Reason` field on the BYE or the CANCEL the hangup
+    /// turns into, one value per protocol — a later value of a protocol
+    /// already given is left out, since §2 allows one each. On the refusal
+    /// of a call that came in and was never answered, only the Q.850
+    /// values go: RFC 6432 lets those ride on any response, and a SIP one
+    /// would repeat the status the refusal already carries.
+    ///
+    /// # Errors
+    /// As [`UserAgent::hangup`].
+    pub fn hangup_for(
+        &mut self,
+        call: CallHandle,
+        reasons: &[Reason],
+        now: Instant,
+    ) -> Result<(), UaError> {
+        let headers = self.application_headers(call);
+        self.end_call(call, &headers, reasons, now)
     }
 
     /// [`UserAgent::hangup`], carrying `headers` on the refusal or the BYE it
@@ -500,6 +587,7 @@ impl UserAgent {
         &mut self,
         call: CallHandle,
         headers: &[Extra],
+        reasons: &[Reason],
         now: Instant,
     ) -> Result<(), UaError> {
         let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
@@ -517,13 +605,20 @@ impl UserAgent {
                 if direction == Direction::Incoming =>
             {
                 let _ = server;
-                self.refuse(call, NOT_NOW, headers, now)
+                let q850: Vec<Reason> = reasons
+                    .iter()
+                    .filter(|reason| reason.protocol == ReasonProtocol::Q850)
+                    .cloned()
+                    .collect();
+                let headers = with_reason(headers, &q850);
+                self.refuse(call, NOT_NOW, &headers, now)
             }
             CallState::Confirmed | CallState::Consulting => {
                 let dialog = dialog.ok_or(UaError::WrongState(state))?;
+                let headers = with_reason(headers, reasons);
                 let bye = self.endpoint.bye_with(
                     dialog,
-                    &onto_request(OutgoingInDialogRequest::new(Method::Bye), headers),
+                    &onto_request(OutgoingInDialogRequest::new(Method::Bye), &headers),
                     now,
                 )?;
                 self.remember_request(call, AnyTransactionId::NonInviteClient(bye), Method::Bye);
@@ -536,7 +631,10 @@ impl UserAgent {
                 // §9.1: a CANCEL may not go before a provisional response has
                 // arrived, and the endpoint holds it until one does. Asking
                 // too early is not a failure and needs no timer here
-                self.endpoint.cancel(invite, now).ok();
+                match Reason::field(reasons) {
+                    Some(value) => self.endpoint.cancel_with_reason(invite, &value, now).ok(),
+                    None => self.endpoint.cancel(invite, now).ok(),
+                };
                 if let Some(held) = self.calls.get_mut(&call) {
                     held.hangup_wanted = true;
                     held.state = CallState::Terminating;
@@ -596,7 +694,10 @@ impl UserAgent {
     pub fn call_identity(&self, call: CallHandle) -> Option<CallIdentity> {
         let held = self.calls.get(&call)?;
         match held.direction {
-            Direction::Incoming => CallIdentity::of_request(held.invited.as_ref()?),
+            Direction::Incoming => match held.identity.as_deref() {
+                Some(read) => Some(read.clone()),
+                None => CallIdentity::of_request(held.invited.as_ref()?),
+            },
             Direction::Outgoing => {
                 let from = NameAddrRef::parse(&held.from).ok()?;
                 let target = held.placed.as_ref()?.target.as_bytes();
@@ -606,6 +707,8 @@ impl UserAgent {
                     from_display: display_of(&from),
                     to_uri: Box::from(target),
                     call_id: Box::from(call_id),
+                    caller: CallerIdentity::default(),
+                    answering: Answering::default(),
                 })
             }
         }
@@ -780,11 +883,20 @@ impl UserAgent {
             return;
         };
         held.state = CallState::Terminated;
+        // the BYE's or the CANCEL's own, kept when it arrived; otherwise
+        // whatever the refusal carried (RFC 6432)
+        let mut causes = core::mem::take(&mut held.ended_by);
+        if causes.is_empty()
+            && let Some(refusal) = response.as_ref()
+        {
+            causes = Reason::all_in(&refusal.as_raw());
+        }
         self.events.push_back(UaEvent::CallEnded {
             call,
             reason,
             status,
             response,
+            causes,
         });
         // §2.4.7 makes the closing NOTIFY the last word on a transfer, and
         // that is owed whether the referred call was answered or not: a
@@ -897,6 +1009,30 @@ impl UserAgent {
         }
     }
 
+    /// Keep why the far end's BYE or CANCEL says it is ending `call` (RFC
+    /// 3326), for the end to be reported with.
+    fn ended_because(&mut self, call: CallHandle, request: &OwnedMessage) {
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.ended_by = Reason::all_in(&request.as_raw());
+        }
+    }
+
+    /// Who an incoming INVITE says is calling, behind the trust gate of the
+    /// account it arrived for: RFC 3325 §8 has what the network asserts
+    /// believed only from a peer that account trusts.
+    fn identity_of(
+        &self,
+        account: Option<AccountId>,
+        source: Option<SocketAddr>,
+        request: &OwnedMessage,
+    ) -> Option<Arc<CallIdentity>> {
+        let trusted = account
+            .and_then(|id| self.accounts.get(&id))
+            .zip(source)
+            .is_some_and(|(config, peer)| config.trusts(peer.ip()));
+        CallIdentity::of_invite(request, trusted).map(Arc::new)
+    }
+
     /// The account an incoming INVITE was addressed to, when it can be told.
     ///
     /// The Request-URI is where the registrar sent it, so it is this end's
@@ -929,6 +1065,53 @@ impl UserAgent {
     }
 }
 
+/// What an INVITE says about who placed it, beyond `From`: the fields this
+/// layer adds, and whether the application's own identity fields go.
+struct Identifying {
+    /// `Privacy` and `P-Asserted-Identity`, when the account asked for
+    /// anonymity and the application wrote neither itself.
+    added: Vec<(HeaderName<'static>, Box<[u8]>)>,
+    /// Whether the application's own `P-Asserted-Identity` and
+    /// `P-Preferred-Identity` are left off: the account names a trust
+    /// domain and the INVITE is going outside it.
+    untrusted: bool,
+}
+
+impl Identifying {
+    fn withheld(&self, name: &[u8]) -> bool {
+        self.untrusted
+            && (name.eq_ignore_ascii_case(b"P-Asserted-Identity")
+                || name.eq_ignore_ascii_case(b"P-Preferred-Identity"))
+    }
+}
+
+/// RFC 3323 and RFC 3325 for an INVITE from `config` to `remote`: the
+/// `Privacy` the account asked for, the account's own identity asserted
+/// only toward a peer it trusts (RFC 3325 §7 has that peer strip it before
+/// it leaves the trust domain), and an identity field of the application's
+/// own kept off a request going to a peer outside a trust domain the account
+/// named (§6). An account that names no trusted peer has made no claim about
+/// a trust domain, and the application's fields go as written.
+fn identifying_fields(config: &Account, extra: &[Extra], remote: SocketAddr) -> Identifying {
+    let trusted = config.trusts(remote.ip());
+    let wrote = |name: &[u8]| extra.iter().any(|one| one.name.eq_ignore_ascii_case(name));
+    let mut added = Vec::new();
+    if config.privacy.requested() {
+        if !wrote(b"Privacy")
+            && let Some(value) = config.privacy.to_value()
+        {
+            added.push((PRIVACY, value.into_boxed_slice()));
+        }
+        if trusted && !wrote(b"P-Asserted-Identity") && !wrote(b"P-Preferred-Identity") {
+            added.push((ASSERTED, config.sender_value()));
+        }
+    }
+    Identifying {
+        added,
+        untrusted: !config.trusted.is_empty() && !trusted,
+    }
+}
+
 /// `<uri>`, which is how a URI goes into `To` without its parameters being
 /// read as the header field's.
 fn bracketed(uri: &Uri) -> Box<[u8]> {
@@ -955,8 +1138,20 @@ impl CallIdentity {
     /// and a CANCEL that followed it before the event was taken out has
     /// already ended the call behind it. `None` when the `From`, the `To` or
     /// the `Call-ID` cannot be read.
+    ///
+    /// Read as though from a peer nobody trusts: [`CallIdentity::caller`]
+    /// carries no asserted identity. [`UaEvent::IncomingCall`]'s own
+    /// `identity` is the one read behind the account's trust gate.
     #[must_use]
     pub fn of_request(request: &OwnedMessage) -> Option<Self> {
+        Self::of_invite(request, false)
+    }
+
+    /// [`CallIdentity::of_request`], with `trusted` saying whether the
+    /// INVITE came from a peer the account it arrived for trusts (RFC 3325
+    /// §8).
+    #[must_use]
+    pub fn of_invite(request: &OwnedMessage, trusted: bool) -> Option<Self> {
         let raw = request.as_raw();
         let from = raw.from().ok()?;
         let to = raw.to().ok()?;
@@ -965,6 +1160,8 @@ impl CallIdentity {
             from_display: display_of(&from),
             to_uri: Box::from(to.uri_bytes()),
             call_id: Box::from(raw.call_id().ok()?),
+            caller: CallerIdentity::of_request(&raw, trusted),
+            answering: Answering::of_request(&raw),
         })
     }
 }
@@ -1269,12 +1466,14 @@ impl UserAgent {
                     .map_or_else(|| Box::from(&b""[..]), |uri| bracketed(&uri));
                 let plain = self.answering_contact(account);
                 let source = self.guard.source();
+                let identity = self.identity_of(account, source, request);
                 let call = self.keep(Call::incoming(account, transaction, from, plain));
                 if let Some(held) = self.calls.get_mut(&call) {
                     held.invited = Some(request.clone());
                     held.replaces = replaced;
-                    // and where this one's signalling came from
-                    held.peer = source;
+                    // and where this one's signalling came from, and who it
+                    // says is calling
+                    (held.peer, held.identity) = (source, identity.clone());
                 }
                 self.by_server.insert(transaction, call);
                 self.note_allow(call, &request.as_raw());
@@ -1288,11 +1487,16 @@ impl UserAgent {
                     call,
                     account,
                     request: request.clone(),
+                    identity,
                 });
                 None
             }
-            Event::IncomingCancel { invite } => {
+            Event::IncomingCancel {
+                invite,
+                ref request,
+            } => {
                 let call = self.by_server.get(&invite).copied()?;
+                self.ended_because(call, request);
                 // the endpoint has already sent the 200 and the 487; §9.2
                 // makes both unconditional, and what is left is to stop ringing
                 self.finish(call, CallEndReason::Cancelled, None, None, now);
@@ -1328,18 +1532,31 @@ impl UserAgent {
             Event::IncomingBye {
                 transaction,
                 dialog,
+                ref request,
             } => {
                 let call = self.by_dialog.get(&dialog).copied()?;
-                // §15.1.2: the dialog is over, and answering it 200 is the only
-                // thing left. There is nothing to decide, so nothing is asked
-                self.endpoint
-                    .respond(transaction, &OutgoingResponse::new(StatusCode::OK), now)
-                    .ok();
-                self.finish(call, CallEndReason::RemoteHangup, None, None, now);
+                self.on_bye(call, transaction, request, now);
                 None
             }
             other => Some(other),
         }
+    }
+
+    /// The far end hung up.
+    fn on_bye(
+        &mut self,
+        call: CallHandle,
+        transaction: TransactionId<NonInviteServer>,
+        request: &OwnedMessage,
+        now: Instant,
+    ) {
+        self.ended_because(call, request);
+        // §15.1.2: the dialog is over, and answering it 200 is the only
+        // thing left. There is nothing to decide, so nothing is asked
+        self.endpoint
+            .respond(transaction, &OutgoingResponse::new(StatusCode::OK), now)
+            .ok();
+        self.finish(call, CallEndReason::RemoteHangup, None, None, now);
     }
 
     /// The call a response on this INVITE belongs to, minting a sibling when
@@ -1794,8 +2011,11 @@ impl UserAgent {
         if self.ack_parked_in(dialog) {
             return true;
         }
+        // RFC 3326 §3.1: the phone that answered too late is told another
+        // branch of the call was answered, which it shows as answered
+        // elsewhere rather than as a call hung up on it
         if kept.offered && self.ack_by_itself(dialog, now) {
-            self.bye_by_itself(dialog, now);
+            self.bye_by_itself_for(dialog, Some(&Reason::completed_elsewhere()), now);
         }
         true
     }

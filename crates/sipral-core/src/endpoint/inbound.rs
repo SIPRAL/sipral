@@ -1150,7 +1150,10 @@ impl Endpoint {
         // NOT" go on being retransmitted, though a PRACK for it is still owed
         // an answer
         self.quiet_reliable(invite);
-        self.push(Event::IncomingCancel { invite });
+        self.push(Event::IncomingCancel {
+            invite,
+            request: owned,
+        });
         // after the CANCEL is reported, so that what the caller hears first is
         // why the call ended rather than that its dialog did
         self.admitted.remove(&invite);
@@ -1316,6 +1319,7 @@ impl Endpoint {
             self.push(Event::IncomingBye {
                 transaction: id,
                 dialog,
+                request: request.to_owned(),
             });
             self.forget_dialog(dialog, DialogEndReason::RemoteBye);
             return;
@@ -1869,7 +1873,8 @@ impl Endpoint {
         };
         let flow = entry.flow;
         let request = entry.machine.request().clone();
-        let message = cancel_for_request(&request.as_raw())?;
+        let reason = self.cancel_reasons.get(&invite).cloned();
+        let message = cancel_for_request(&request.as_raw(), reason.as_deref())?;
         // §9.1 has a CANCEL retransmitted by its own transaction. One that is
         // already running carries this branch and this method, and a second
         // under that key would take its responses and leave it retransmitting

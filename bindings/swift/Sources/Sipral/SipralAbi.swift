@@ -1453,6 +1453,86 @@ public enum SipralAudioOrigin: UInt32, Sendable {
     case engine = 2
 }
 
+/// The verdict a terminating network reached on the caller's number
+/// (3GPP TS 24.229's `verstat`, the mark STIR/SHAKEN leaves). Names for
+/// `sipral_call_event_t::verstat`.
+public enum SipralVerstat: UInt32, Sendable {
+    /// Nothing said, or said by a peer the account does not trust.
+    case none = 0
+    /// `TN-Validation-Passed`.
+    case passed = 1
+    /// `TN-Validation-Failed`.
+    case failed = 2
+    /// `No-TN-Validation`.
+    case notValidated = 3
+    /// Some other value.
+    case other = 4
+}
+
+/// `Answer-Mode` and `Priv-Answer-Mode` (RFC 5373 §3). Names for
+/// `sipral_call_event_t::answer_mode` and `priv_answer_mode`.
+public enum SipralAnswerMode: UInt32, Sendable {
+    /// The INVITE carried no such field.
+    case none = 0
+    /// `Manual`: wait for the user.
+    case manual = 1
+    /// `Auto`: answer without waiting for the user.
+    case auto = 2
+    /// Any other value, which RFC 5373 has ignored.
+    case other = 3
+}
+
+/// Where the ring says the caller is. Names for
+/// `sipral_call_event_t::ring_source`.
+public enum SipralRingSource: UInt32, Sendable {
+    /// Nothing said.
+    case unknown = 0
+    /// Another extension of the same switch.
+    case `internal` = 1
+    /// The outside world.
+    case external = 2
+}
+
+/// Which list, and which piece of each entry, sipral_call_identity_count
+/// and sipral_call_identity_text are asked about.
+public enum SipralIdentityText: UInt32, Sendable {
+    /// Never asked for.
+    case unknown = 0
+    /// `P-Asserted-Identity`: the URI of each asserted party.
+    case asserted = 1
+    /// And each one's display name.
+    case assertedDisplay = 2
+    /// `Remote-Party-ID`: the URI of each party named.
+    case remoteParty = 3
+    /// And each one's display name.
+    case remotePartyDisplay = 4
+    /// `Diversion`, most recent first: who the call was diverted from.
+    case diversion = 5
+    /// And the display name beside it.
+    case diversionDisplay = 6
+    /// And why: `no-answer`, `user-busy`, `unconditional` and the rest.
+    case diversionReason = 7
+    /// `History-Info`: the URI of each target the request was sent to.
+    case history = 8
+    /// And each entry's `index`.
+    case historyIndex = 9
+    /// Every `Alert-Info` URI.
+    case alertInfo = 10
+    /// Every `info=` value on `Alert-Info`.
+    case alertName = 11
+}
+
+/// How an account's calls ask for a session timer (RFC 4028). Names for
+/// `sipral_account_config_t::session_timer`.
+public enum SipralSessionTimer: UInt32, Sendable {
+    /// The stack's default: thirty minutes, RFC 4028 §4's recommendation.
+    case `default` = 0
+    /// Ask for none. A far end that insists on one is still honoured.
+    case off = 1
+    /// Ask for `session_interval_seconds`, at least 90 (§5's floor).
+    case interval = 2
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -1950,6 +2030,16 @@ public enum Sipral {
     /// offers it at the socket the application bound on the new network.
     public static let featureCallReaddress: UInt32 = 8192
 
+    /// See SIPRAL_FEATURE_DTMF. Who is calling and how the call asked to
+    /// be answered, on every call event: the asserted identity behind the
+    /// account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
+    /// `Diversion` and `History-Info`, `Answer-Mode` and `Alert-Info`;
+    /// why a call ended (`cause_sip`, `cause_q850`, RFC 3326) and
+    /// `sipral_call_hangup_for` to say why this end is ending one;
+    /// `sipral_call_redirect`; and an account's `privacy` and
+    /// `session_timer`.
+    public static let featureCallerIdentity: UInt32 = 4096
+
     /// The buffer a caller has to bring for one outgoing packet.
     ///
     /// Not a path MTU — RTP does not discover one — but the bound the session
@@ -2009,6 +2099,29 @@ public enum Sipral {
     /// caller who filled nothing in leaves behind, and neither of those may
     /// mean "let the stranger in".
     public static let screenAccept: UInt32 = 200
+
+    /// Bits of `sipral_call_event_t::privacy` and of
+    /// `sipral_account_config_t::privacy` (RFC 3323 §4.2): `header`, obscure
+    /// the fields that could identify the caller.
+    public static let privacyHeader: UInt32 = 1
+
+    /// `session`: hide the session description from the far end.
+    public static let privacySession: UInt32 = 2
+
+    /// `user`: user-level privacy.
+    public static let privacyUser: UInt32 = 4
+
+    /// `id` (RFC 3325 §9.3): keep the asserted identity inside the trust
+    /// domain. What "withhold my number" asks for.
+    public static let privacyId: UInt32 = 8
+
+    /// `critical`: fail the call rather than go without the privacy asked
+    /// for.
+    public static let privacyCritical: UInt32 = 16
+
+    /// `none`: no privacy, stated. Read only; an account asks for none by
+    /// leaving every bit clear.
+    public static let privacyNone: UInt32 = 32
 
     /// The calling thread's last error, or an empty string when it
     /// has none. Read the way C reads it: ask for the length, then
@@ -3178,6 +3291,110 @@ public enum Sipral {
                 }
             }
         try check(status)
+    }
+
+    /// End a call and say why (RFC 3326): what `sipral_call_hangup` does, with
+    /// a `Reason` on the BYE or the CANCEL it turns into.
+    ///
+    /// `sip_cause` is a SIP status and `q850_cause` a Q.850 cause, each zero
+    /// for none; both may be given, and neither is a plain hangup. `text`, when
+    /// given, goes on the first value written: the SIP one, or the Q.850 one
+    /// when there is no SIP one. On the refusal of a call that came in and was
+    /// never answered only the Q.850 value goes (RFC 6432): a SIP one would
+    /// repeat the status the refusal carries.
+    ///
+    /// Safety
+    ///
+    /// `text` must be readable for `text_len` bytes or null with a length of
+    /// zero.
+    public static func callHangupFor(stack: SipralHandle, call: SipralHandle, sipCause: UInt32, q850Cause: UInt32, text: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(text.utf8).withUnsafeBufferPointer { raw4 in
+                raw4.withMemoryRebound(to: CChar.self) { p4 in
+                    sipral_call_hangup_for(stack, call, sipCause, q850Cause, p4.baseAddress, p4.count, nowMs)
+                }
+            }
+        try check(status)
+    }
+
+    /// Answer a call that came in with a 3xx: somewhere else to try
+    /// (RFC 3261 §21.3), and why (RFC 5806).
+    ///
+    /// `status_code` is 300 to 399, 302 for call forwarding. `targets` is where to
+    /// try, as URIs separated by commas, in the order of preference; one is
+    /// required for every status but 380. `reason`, when given, is the
+    /// `Diversion` reason — `no-answer`, `user-busy`, `unconditional`,
+    /// `deflection`, `do-not-disturb` or any other token — and puts a
+    /// `Diversion` naming the address that was called on the answer, above
+    /// the ones the INVITE already carried.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for another status, a target that is
+    /// not a URI, or none where one is needed; `SIPRAL_STATUS_WRONG_STATE` for
+    /// a call that is not waiting to be answered.
+    ///
+    /// Safety
+    ///
+    /// `targets` must be readable for `targets_len` bytes and `reason` for
+    /// `reason_len` bytes, each or null with a length of zero.
+    public static func callRedirect(stack: SipralHandle, call: SipralHandle, statusCode: UInt32, targets: String, reason: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(targets.utf8).withUnsafeBufferPointer { raw3 in
+                raw3.withMemoryRebound(to: CChar.self) { p3 in
+                    Array(reason.utf8).withUnsafeBufferPointer { raw4 in
+                        raw4.withMemoryRebound(to: CChar.self) { p4 in
+                            sipral_call_redirect(stack, call, statusCode, p3.baseAddress, p3.count, p4.baseAddress, p4.count, nowMs)
+                        }
+                    }
+                }
+            }
+        try check(status)
+    }
+
+    /// How many entries one of a call's identity lists has:
+    /// `SIPRAL_IDENTITY_TEXT_DIVERSION` for the `Diversion` values,
+    /// `SIPRAL_IDENTITY_TEXT_HISTORY` for the `History-Info` entries, and so
+    /// on — each piece of an entry answers the same count as the entry.
+    ///
+    /// Read once, as the INVITE arrived, and the same for the rest of the
+    /// call. A call this end placed has none of them: zero.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    public static func callIdentityCount(stack: SipralHandle, call: SipralHandle, which: UInt32) throws -> Int {
+        try ensureAbi()
+        var count = Int()
+        let status = sipral_call_identity_count(stack, call, which, &count)
+        try check(status)
+        return count
+    }
+
+    /// One piece of one entry of a call's identity lists, copied into the
+    /// caller's buffer with a trailing NUL: the shape
+    /// `sipral_subscription_dialog_text` has, for the same reason — the text
+    /// is the library's, and a pointer to it is one a caller could outlive.
+    ///
+    /// `out_needed` always receives the bytes needed including the NUL, so a
+    /// caller that brought nothing can ask with `capacity` zero and ask again
+    /// with room; a buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with
+    /// nothing written. A piece the entry does not have — a display name
+    /// the field did not write — is one byte, the NUL. An index past the
+    /// end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or null with a capacity
+    /// of zero, and `out_needed` must point at one `size_t`.
+    public static func callIdentityText(stack: SipralHandle, call: SipralHandle, which: UInt32, index: Int, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var needed = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p4 in
+                sipral_call_identity_text(stack, call, which, index, p4.baseAddress, p4.count, &needed)
+            }
+        try check(status)
+        return needed
     }
 
     /// Join two active calls into a local conference of three: from here on,

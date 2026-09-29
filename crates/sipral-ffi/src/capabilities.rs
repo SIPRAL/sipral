@@ -144,6 +144,15 @@ constants! {
     /// call whose media address is gone, and `sipral_call_media_readdress`
     /// offers it at the socket the application bound on the new network.
     pub const SIPRAL_FEATURE_CALL_READDRESS: u32 = 1 << 13;
+    /// See [`SIPRAL_FEATURE_DTMF`]. Who is calling and how the call asked to
+    /// be answered, on every call event: the asserted identity behind the
+    /// account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
+    /// `Diversion` and `History-Info`, `Answer-Mode` and `Alert-Info`;
+    /// why a call ended (`cause_sip`, `cause_q850`, RFC 3326) and
+    /// `sipral_call_hangup_for` to say why this end is ending one;
+    /// `sipral_call_redirect`; and an account's `privacy` and
+    /// `session_timer`.
+    pub const SIPRAL_FEATURE_CALLER_IDENTITY: u32 = 1 << 12;
 }
 
 record! {
@@ -259,6 +268,9 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.call_readdress {
         features |= SIPRAL_FEATURE_CALL_READDRESS;
     }
+    if capabilities.caller_identity {
+        features |= SIPRAL_FEATURE_CALLER_IDENTITY;
+    }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -291,13 +303,13 @@ entry! {
 #[cfg(test)]
 mod tests {
     use super::{
-        SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_CALL_READDRESS, SIPRAL_FEATURE_DTMF,
-        SIPRAL_FEATURE_ICE,
-        SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING,
-        SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS,
-        SIPRAL_FEATURE_TURN_STREAM, SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS,
-        SIPRAL_TRANSPORT_BIT_UDP, SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS,
-        SipralCapabilities, sipral_capabilities,
+        SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_CALL_READDRESS,
+        SIPRAL_FEATURE_CALLER_IDENTITY, SIPRAL_FEATURE_DTMF,
+        SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS,
+        SIPRAL_FEATURE_RECORDING, SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP,
+        SIPRAL_FEATURE_SUBSCRIPTIONS, SIPRAL_FEATURE_TURN_STREAM, SIPRAL_TRANSPORT_BIT_TCP,
+        SIPRAL_TRANSPORT_BIT_TLS, SIPRAL_TRANSPORT_BIT_UDP, SIPRAL_TRANSPORT_BIT_WS,
+        SIPRAL_TRANSPORT_BIT_WSS, SipralCapabilities, sipral_capabilities,
     };
     use crate::error::last_error_text;
     use crate::status::SipralStatus;
@@ -443,6 +455,15 @@ mod tests {
             Capabilities::of_this_build().call_readdress
         );
         assert_eq!(SIPRAL_FEATURE_CALL_READDRESS, 1 << 13);
+    }
+
+    #[test]
+    fn caller_identity_reads_present_exactly_when_the_facade_says() {
+        assert_eq!(
+            read().features & SIPRAL_FEATURE_CALLER_IDENTITY != 0,
+            Capabilities::of_this_build().caller_identity
+        );
+        assert_eq!(SIPRAL_FEATURE_CALLER_IDENTITY, 1 << 12);
     }
 
     #[test]

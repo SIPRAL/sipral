@@ -421,6 +421,13 @@ pub(crate) struct Call {
     /// call, kept until it replaces them
     /// ([`UserAgent::respond_with_headers`](crate::UserAgent::respond_with_headers)).
     pub(crate) headers: Vec<Extra>,
+    /// The `Reason` values (RFC 3326) of the BYE or the CANCEL that ended
+    /// this call, kept from the moment it arrives until the call's end is
+    /// reported with them.
+    pub(crate) ended_by: Box<[crate::Reason]>,
+    /// Who the INVITE of a call this end answered said was calling, read
+    /// once, as it arrived, behind the account's trust gate.
+    pub(crate) identity: Option<Arc<CallIdentity>>,
 }
 
 /// A session change this end has offered.
@@ -531,6 +538,13 @@ pub struct CallIdentity {
     pub to_uri: Box<[u8]>,
     /// The `Call-ID`.
     pub call_id: Box<[u8]>,
+    /// What the INVITE that opened a call this end answered said about who
+    /// is calling beyond its `From`, behind the account's trust gate (RFC
+    /// 3325 §8). Empty for a call this end placed.
+    pub caller: crate::CallerIdentity,
+    /// How that INVITE asked to be answered and rung (RFC 5373, `Alert-Info`).
+    /// Empty for a call this end placed.
+    pub answering: crate::Answering,
 }
 
 impl Call {
@@ -615,6 +629,8 @@ impl Call {
             cseq: 1,
             asked: None,
             headers: Vec::new(),
+            ended_by: Box::default(),
+            identity: None,
         }
     }
 
@@ -668,6 +684,8 @@ impl Call {
             cseq: 1,
             asked: None,
             headers: Vec::new(),
+            ended_by: Box::default(),
+            identity: None,
         }
     }
 
@@ -716,6 +734,8 @@ impl Call {
             asked: other.asked,
             // the application labelled the call, and a branch of it is the call
             headers: other.headers.clone(),
+            ended_by: Box::default(),
+            identity: None,
         }
     }
 }

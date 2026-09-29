@@ -45,6 +45,7 @@ mod account;
 mod admission;
 mod agent;
 mod announce;
+mod answering;
 #[cfg(test)]
 mod audit_tests;
 mod call;
@@ -61,6 +62,7 @@ pub mod dtmf;
 mod error;
 mod event;
 mod headers;
+mod identity;
 /// Keeping a registration reachable through a NAT over UDP: what is sent to
 /// the registrar, when and how often, grouped under its own path for the
 /// bounds a binding checks its own setting against.
@@ -71,6 +73,8 @@ mod mwi;
 mod options;
 mod parked;
 mod quality_report;
+mod reason;
+mod redirect;
 pub mod referral;
 #[cfg(test)]
 mod referral_tests;
@@ -85,6 +89,8 @@ mod rfc4475_tests;
 mod runtime;
 mod screening;
 mod session;
+#[cfg(test)]
+mod signalling_tests;
 mod subscription;
 #[cfg(test)]
 mod tests;
@@ -94,6 +100,7 @@ mod transfer;
 pub use account::{Account, AccountId, Push};
 pub use agent::UserAgent;
 pub use announce::{Announced, Announcement, AnnouncementId};
+pub use answering::{AnswerMode, AnswerModeField, Answering, RingSource};
 pub use call::{
     CallEndReason, CallHandle, CallIdentity, CallState, Direction, ForkPolicy, OutgoingCall,
     OutgoingExtras,
@@ -106,12 +113,17 @@ pub use dtmf::{DtmfError, DtmfInfo, DtmfInfoForm, InfoRefusal};
 pub use error::UaError;
 pub use event::{RegistrationFailure, RegistrationState, UaEvent};
 pub use headers::{HeaderRefused, HeadersFor};
+pub use identity::{
+    CallerIdentity, Diversion, HistoryEntry, Party, Privacy, RemoteParty, Retarget, Verstat,
+};
 pub use lifecycle::{
     Idle, LifecycleState, Link, Network, Recovery, RecoveryFailure, Rung, Suspending,
 };
 pub use message::{MAX_UNSAFE_BODY_BYTES, MessageHandle};
 pub use mwi::{MessageClass, MessageSummary, MessageSummaryError};
 pub use quality_report::{QualityReportMetrics, RemoteQualityMetrics};
+pub use reason::{Reason, ReasonProtocol};
+pub use redirect::Redirect;
 pub use registration::{PushEcho, RegistrarInfo, SnapshotError};
 #[cfg(feature = "reference-loop")]
 pub use runtime::{Control, Handler, Runtime};

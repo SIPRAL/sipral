@@ -545,6 +545,52 @@ beside a record with no `size`, which only an array is made of. So does a call
 that answers with text and takes a list, directly or in a struct, because such
 a call is printed with its parameters handed through as they came.
 
+### Who is calling, why a call ended, and where to send it
+
+ABI 0.29 appends to `sipral_call_event_t`, after `digit`, what the INVITE of a
+call that came in said beyond its `From`, read once as it arrived and repeated
+on every event of the call, and why the far end ended it:
+
+| Member | What it carries |
+|---|---|
+| `cause_sip`, `cause_q850`, `cause_text` | on `SIPRAL_EVENT_KIND_CALL_ENDED`: the `Reason` (RFC 3326) of the BYE or the CANCEL that ended the call, or of the refusal (RFC 6432). `cause_sip` 200 on a CANCEL is a forking proxy saying another phone answered — not a missed call |
+| `identity_trusted` | whether the INVITE came from a peer in the account's `trusted_peers` |
+| `asserted_uri`, `asserted_display` | the first `P-Asserted-Identity`, or a calling `Remote-Party-ID` — only from a trusted peer (RFC 3325 §8) |
+| `verstat` | a `sipral_verstat_t`: what the network concluded about the caller's number, trusted peers only |
+| `privacy` | the `SIPRAL_PRIVACY_*` bits the caller's `Privacy` asked for |
+| `diverted_from`, `diversion_reason`, `diversion_count`, `history_count` | the top-most `Diversion` (RFC 5806) and how many there were; how many `History-Info` entries (RFC 7044) |
+| `answer_mode`, `answer_mode_required`, `priv_answer_mode`, `priv_answer_mode_required` | RFC 5373, as `sipral_answer_mode_t` and whether `;require` was said |
+| `has_answer_after`, `answer_after_ms` | whether, and after how long, the call asked to be answered without the user — `Answer-Mode: Auto`, `answer-after`, or `info=alert-autoanswer` |
+| `ring_source`, `alert_info` | a `sipral_ring_source_t` from RFC 7462's URNs or the `info=` word, and the first `Alert-Info` URI |
+
+Every pointer follows the rule every other one in the event does: valid for
+the callback, owned by the delivery. The lists behind the first entries —
+every asserted party, every `Diversion` with its reason, every `History-Info`
+target and index, every `Alert-Info` URI and `info=` word — are read with
+`sipral_call_identity_count(stack, call, which, &count)` and
+`sipral_call_identity_text(stack, call, which, index, buffer, capacity,
+&needed)`, `which` a `sipral_identity_text_t`, the text copied out with its NUL
+the way `sipral_subscription_dialog_text` copies. Whether to answer by itself
+is the application's policy: RFC 5373 §4.2 forbids a stack deciding it.
+
+`sipral_call_hangup_for(stack, call, sip_cause, q850_cause, text, text_len,
+now_ms)` ends a call with a `Reason` on the BYE or the CANCEL, and only the
+Q.850 value on the refusal of an unanswered call. `sipral_call_redirect(stack,
+call, status_code, targets, targets_len, reason, reason_len, now_ms)` answers
+an incoming call 3xx with the comma-separated `targets` in `Contact` and, when
+`reason` is given, a `Diversion` naming the address that was called.
+
+`sipral_account_config_t` grows at its tail too: `session_timer` (a
+`sipral_session_timer_t`: default, off, or `session_interval_seconds`, at
+least 90) — the per-account session timer the Rust `Account` always had and
+C did not; `privacy`, the `SIPRAL_PRIVACY_*` bits every call the account
+places asks for, anonymous in `From`; and `trusted_peers`, the comma-separated
+addresses whose asserted identities the account believes and toward which
+alone it asserts its own. SRTP and ICE are not per account in Rust — they are
+per stack and per call, which the C ABI already carries — so nothing was
+added for them. `SIPRAL_FEATURE_CALLER_IDENTITY` (`1 << 12`) says the build
+has all of this.
+
 ### A call that moves with the network
 
 `sipral_stack_network_changed` answering `SIPRAL_RECOVERY_REBUILD` also

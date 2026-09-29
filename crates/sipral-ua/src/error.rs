@@ -80,6 +80,9 @@ pub enum UaError {
     /// takes: under a second, or over the two minutes RFC 4787 REQ-5 has a
     /// NAT keep a UDP flow for.
     InvalidKeepalive(core::time::Duration),
+    /// A redirect was asked for with a status outside 300 to 399, or one
+    /// other than 380 with nowhere to redirect to (RFC 3261 §21.3).
+    NotARedirection(sipral_core::msg::StatusCode),
 }
 
 impl fmt::Display for UaError {
@@ -113,6 +116,11 @@ impl fmt::Display for UaError {
                 f,
                 "a registrar keep-alive every {} ms is outside 1 000 to 120 000 ms",
                 interval.as_millis()
+            ),
+            Self::NotARedirection(status) => write!(
+                f,
+                "a {} with no Contact to name is not a redirection",
+                status.get()
             ),
         }
     }

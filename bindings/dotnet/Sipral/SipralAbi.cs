@@ -2167,6 +2167,155 @@ public enum SipralAudioOrigin : uint
 }
 
 /// <summary>
+/// The verdict a terminating network reached on the caller's number
+/// (3GPP TS 24.229's `verstat`, the mark STIR/SHAKEN leaves). Names for
+/// `sipral_call_event_t::verstat`.
+/// </summary>
+public enum SipralVerstat : uint
+{
+    /// <summary>
+    /// Nothing said, or said by a peer the account does not trust.
+    /// </summary>
+    None = 0,
+    /// <summary>
+    /// `TN-Validation-Passed`.
+    /// </summary>
+    Passed = 1,
+    /// <summary>
+    /// `TN-Validation-Failed`.
+    /// </summary>
+    Failed = 2,
+    /// <summary>
+    /// `No-TN-Validation`.
+    /// </summary>
+    NotValidated = 3,
+    /// <summary>
+    /// Some other value.
+    /// </summary>
+    Other = 4,
+}
+
+/// <summary>
+/// `Answer-Mode` and `Priv-Answer-Mode` (RFC 5373 §3). Names for
+/// `sipral_call_event_t::answer_mode` and `priv_answer_mode`.
+/// </summary>
+public enum SipralAnswerMode : uint
+{
+    /// <summary>
+    /// The INVITE carried no such field.
+    /// </summary>
+    None = 0,
+    /// <summary>
+    /// `Manual`: wait for the user.
+    /// </summary>
+    Manual = 1,
+    /// <summary>
+    /// `Auto`: answer without waiting for the user.
+    /// </summary>
+    Auto = 2,
+    /// <summary>
+    /// Any other value, which RFC 5373 has ignored.
+    /// </summary>
+    Other = 3,
+}
+
+/// <summary>
+/// Where the ring says the caller is. Names for
+/// `sipral_call_event_t::ring_source`.
+/// </summary>
+public enum SipralRingSource : uint
+{
+    /// <summary>
+    /// Nothing said.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// Another extension of the same switch.
+    /// </summary>
+    Internal = 1,
+    /// <summary>
+    /// The outside world.
+    /// </summary>
+    External = 2,
+}
+
+/// <summary>
+/// Which list, and which piece of each entry, sipral_call_identity_count
+/// and sipral_call_identity_text are asked about.
+/// </summary>
+public enum SipralIdentityText : uint
+{
+    /// <summary>
+    /// Never asked for.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// `P-Asserted-Identity`: the URI of each asserted party.
+    /// </summary>
+    Asserted = 1,
+    /// <summary>
+    /// And each one's display name.
+    /// </summary>
+    AssertedDisplay = 2,
+    /// <summary>
+    /// `Remote-Party-ID`: the URI of each party named.
+    /// </summary>
+    RemoteParty = 3,
+    /// <summary>
+    /// And each one's display name.
+    /// </summary>
+    RemotePartyDisplay = 4,
+    /// <summary>
+    /// `Diversion`, most recent first: who the call was diverted from.
+    /// </summary>
+    Diversion = 5,
+    /// <summary>
+    /// And the display name beside it.
+    /// </summary>
+    DiversionDisplay = 6,
+    /// <summary>
+    /// And why: `no-answer`, `user-busy`, `unconditional` and the rest.
+    /// </summary>
+    DiversionReason = 7,
+    /// <summary>
+    /// `History-Info`: the URI of each target the request was sent to.
+    /// </summary>
+    History = 8,
+    /// <summary>
+    /// And each entry's `index`.
+    /// </summary>
+    HistoryIndex = 9,
+    /// <summary>
+    /// Every `Alert-Info` URI.
+    /// </summary>
+    AlertInfo = 10,
+    /// <summary>
+    /// Every `info=` value on `Alert-Info`.
+    /// </summary>
+    AlertName = 11,
+}
+
+/// <summary>
+/// How an account's calls ask for a session timer (RFC 4028). Names for
+/// `sipral_account_config_t::session_timer`.
+/// </summary>
+public enum SipralSessionTimer : uint
+{
+    /// <summary>
+    /// The stack's default: thirty minutes, RFC 4028 §4's recommendation.
+    /// </summary>
+    Default = 0,
+    /// <summary>
+    /// Ask for none. A far end that insists on one is still honoured.
+    /// </summary>
+    Off = 1,
+    /// <summary>
+    /// Ask for `session_interval_seconds`, at least 90 (§5's floor).
+    /// </summary>
+    Interval = 2,
+}
+
+/// <summary>
 /// The one callback a stack has.
 ///
 /// It is called from inside `sipral_stack_poll`, on the thread that called
@@ -3289,6 +3438,41 @@ public struct SipralAccountConfig
     /// How many bytes of it.
     /// </summary>
     public nuint QualityReportUriLen;
+    /// <summary>
+    /// A SipralSessionTimer: how
+    /// this account's calls ask for a session timer (RFC 4028). Zero is
+    /// the stack's default, thirty minutes. ABI 0.29, appended at the
+    /// tail like every member after the pinned `MIN_SIZE`.
+    /// </summary>
+    public uint SessionTimer;
+    /// <summary>
+    /// The interval to ask for under `SIPRAL_SESSION_TIMER_INTERVAL`, in
+    /// seconds: at least 90, RFC 4028 §5's floor. Read for nothing else.
+    /// </summary>
+    public ulong SessionIntervalSeconds;
+    /// <summary>
+    /// `SIPRAL_PRIVACY_*` bits: place every call from this account
+    /// anonymously (RFC 3323), asking for these. `SIPRAL_PRIVACY_ID` is
+    /// "withhold my number". `From` becomes `"Anonymous"
+    /// &lt;sip:anonymous@anonymous.invalid&gt;`, `Privacy` carries the bits,
+    /// and the account's own identity goes in `P-Asserted-Identity` only
+    /// toward a peer in `trusted_peers`. Zero asks for none.
+    /// </summary>
+    public uint Privacy;
+    /// <summary>
+    /// The peers this account trusts (RFC 3325's trust domain), as IP
+    /// addresses separated by commas: usually the registrar or the trunk.
+    /// A call arriving from one of them has its asserted identity read
+    /// (`sipral_call_event_t::asserted_uri`); from anywhere else it is
+    /// left out. And once any are named, a call placed toward any other
+    /// peer carries no `P-Asserted-Identity` or `P-Preferred-Identity`,
+    /// whoever wrote it. Null and zero trusts nobody.
+    /// </summary>
+    public IntPtr TrustedPeers;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TrustedPeersLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -4329,6 +4513,134 @@ public struct SipralCallEvent
     /// SipralEventKind.DtmfSent. Zero for every other kind.
     /// </summary>
     public uint Digit;
+    /// <summary>
+    /// For SipralEventKind.CallEnded: the SIP status the far end's
+    /// `Reason` (RFC 3326) named — on the BYE or the CANCEL that ended
+    /// the call, or on the refusal. 200 on a CANCEL is a forking proxy
+    /// saying another phone answered: not a missed call. Zero when no
+    /// SIP reason was given. ABI 0.29.
+    /// </summary>
+    public uint CauseSip;
+    /// <summary>
+    /// The same for a Q.850 cause, which a gateway to the telephone
+    /// network writes: 16 a normal clearing, 17 a busy line. Zero when
+    /// none was given.
+    /// </summary>
+    public uint CauseQ850;
+    /// <summary>
+    /// The `text` of the first `Reason` value, unquoted. Null and zero
+    /// when there was none.
+    /// </summary>
+    public IntPtr CauseText;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint CauseTextLen;
+    /// <summary>
+    /// Whether the INVITE of a call that came in arrived from a peer its
+    /// account trusts (`trusted_peers` on `sipral_account_config_t`).
+    /// When it did not, `asserted_uri`, `asserted_display` and
+    /// `verstat` say nothing, whatever it carried (RFC 3325 §8). The same
+    /// on every event of the call; zero for a call this end placed.
+    /// </summary>
+    public uint IdentityTrusted;
+    /// <summary>
+    /// Who the network says is calling: the first `P-Asserted-Identity`,
+    /// or a calling `Remote-Party-ID` when there is none, as written.
+    /// Null and zero when a trusted peer said nothing.
+    /// </summary>
+    public IntPtr AssertedUri;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint AssertedUriLen;
+    /// <summary>
+    /// That identity's display name. Null and zero when it named none.
+    /// </summary>
+    public IntPtr AssertedDisplay;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint AssertedDisplayLen;
+    /// <summary>
+    /// A SipralVerstat: what the
+    /// network concluded about the caller's number.
+    /// </summary>
+    public uint Verstat;
+    /// <summary>
+    /// The `SIPRAL_PRIVACY_*` bits the caller's `Privacy` asked for.
+    /// </summary>
+    public uint Privacy;
+    /// <summary>
+    /// Who the call was last diverted from: the top-most `Diversion`
+    /// (RFC 5806), as written. Null and zero when none.
+    /// `sipral_call_identity_text` reads the rest.
+    /// </summary>
+    public IntPtr DivertedFrom;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint DivertedFromLen;
+    /// <summary>
+    /// Why: its `reason`. Null and zero when none.
+    /// </summary>
+    public IntPtr DiversionReason;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint DiversionReasonLen;
+    /// <summary>
+    /// How many `Diversion` values the INVITE carried.
+    /// </summary>
+    public uint DiversionCount;
+    /// <summary>
+    /// How many `History-Info` entries it carried.
+    /// </summary>
+    public uint HistoryCount;
+    /// <summary>
+    /// A SipralAnswerMode: the
+    /// INVITE's `Answer-Mode` (RFC 5373).
+    /// </summary>
+    public uint AnswerMode;
+    /// <summary>
+    /// Whether that field said `;require`: the caller would rather the
+    /// call be refused, with a 403, than answered any other way.
+    /// </summary>
+    public uint AnswerModeRequired;
+    /// <summary>
+    /// The same for `Priv-Answer-Mode`, which RFC 5373 §4.2 holds to a
+    /// stricter policy.
+    /// </summary>
+    public uint PrivAnswerMode;
+    /// <summary>
+    /// Whether that field said `;require`.
+    /// </summary>
+    public uint PrivAnswerModeRequired;
+    /// <summary>
+    /// Whether the call asked to be answered without the user —
+    /// `Answer-Mode: Auto`, `answer-after` on `Call-Info` or
+    /// `Alert-Info`, or `info=alert-autoanswer` — after
+    /// `answer_after_ms`. Whether to is the application's policy.
+    /// </summary>
+    public uint HasAnswerAfter;
+    /// <summary>
+    /// After how long, when `has_answer_after` is set.
+    /// </summary>
+    public ulong AnswerAfterMs;
+    /// <summary>
+    /// A SipralRingSource: whether
+    /// the ring says the caller is internal or external.
+    /// </summary>
+    public uint RingSource;
+    /// <summary>
+    /// The first `Alert-Info` URI, without the angle brackets. Null and
+    /// zero when none. `sipral_call_identity_text` reads the rest.
+    /// </summary>
+    public IntPtr AlertInfo;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint AlertInfoLen;
 }
 
 /// <summary>
@@ -5805,6 +6117,18 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_media_readdress(ulong stack, ulong call, sbyte[] mediaAddress, nuint mediaAddressLen, sbyte[] publicAddress, nuint publicAddressLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_hangup_for(ulong stack, ulong call, uint sipCause, uint q850Cause, sbyte[] text, nuint textLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_redirect(ulong stack, ulong call, uint statusCode, sbyte[] targets, nuint targetsLen, sbyte[] reason, nuint reasonLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_identity_count(ulong stack, ulong call, uint which, out nuint count);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_identity_text(ulong stack, ulong call, uint which, nuint index, sbyte[] buffer, nuint capacity, out nuint needed);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_join(ulong stack, ulong callA, ulong callB);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -6281,6 +6605,18 @@ public static class Sipral
     public const uint FeatureCallReaddress = 8192;
 
     /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. Who is calling and how the call asked to
+    /// be answered, on every call event: the asserted identity behind the
+    /// account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
+    /// `Diversion` and `History-Info`, `Answer-Mode` and `Alert-Info`;
+    /// why a call ended (`cause_sip`, `cause_q850`, RFC 3326) and
+    /// `sipral_call_hangup_for` to say why this end is ending one;
+    /// `sipral_call_redirect`; and an account's `privacy` and
+    /// `session_timer`.
+    /// </summary>
+    public const uint FeatureCallerIdentity = 4096;
+
+    /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
     ///
     /// Not a path MTU — RTP does not discover one — but the bound the session
@@ -6351,6 +6687,41 @@ public static class Sipral
     /// mean "let the stranger in".
     /// </summary>
     public const uint ScreenAccept = 200;
+
+    /// <summary>
+    /// Bits of `sipral_call_event_t::privacy` and of
+    /// `sipral_account_config_t::privacy` (RFC 3323 §4.2): `header`, obscure
+    /// the fields that could identify the caller.
+    /// </summary>
+    public const uint PrivacyHeader = 1;
+
+    /// <summary>
+    /// `session`: hide the session description from the far end.
+    /// </summary>
+    public const uint PrivacySession = 2;
+
+    /// <summary>
+    /// `user`: user-level privacy.
+    /// </summary>
+    public const uint PrivacyUser = 4;
+
+    /// <summary>
+    /// `id` (RFC 3325 §9.3): keep the asserted identity inside the trust
+    /// domain. What "withhold my number" asks for.
+    /// </summary>
+    public const uint PrivacyId = 8;
+
+    /// <summary>
+    /// `critical`: fail the call rather than go without the privacy asked
+    /// for.
+    /// </summary>
+    public const uint PrivacyCritical = 16;
+
+    /// <summary>
+    /// `none`: no privacy, stated. Read only; an account asks for none by
+    /// leaving every bit clear.
+    /// </summary>
+    public const uint PrivacyNone = 32;
 
     /// <summary>The calling thread's last error, or an empty string
     /// when it has none. Read the way C reads it: ask for the
@@ -7486,6 +7857,104 @@ public static class Sipral
         var publicAddressSigned = new sbyte[publicAddressBytes.Length];
         Buffer.BlockCopy(publicAddressBytes, 0, publicAddressSigned, 0, publicAddressBytes.Length);
         Check(NativeMethods.sipral_call_media_readdress(stack, call, mediaAddressSigned, (nuint)mediaAddressSigned.Length, publicAddressSigned, (nuint)publicAddressSigned.Length, nowMs));
+    }
+
+    /// <summary>
+    /// End a call and say why (RFC 3326): what `sipral_call_hangup` does, with
+    /// a `Reason` on the BYE or the CANCEL it turns into.
+    ///
+    /// `sip_cause` is a SIP status and `q850_cause` a Q.850 cause, each zero
+    /// for none; both may be given, and neither is a plain hangup. `text`, when
+    /// given, goes on the first value written: the SIP one, or the Q.850 one
+    /// when there is no SIP one. On the refusal of a call that came in and was
+    /// never answered only the Q.850 value goes (RFC 6432): a SIP one would
+    /// repeat the status the refusal carries.
+    ///
+    /// Safety
+    ///
+    /// `text` must be readable for `text_len` bytes or null with a length of
+    /// zero.
+    /// </summary>
+    public static void CallHangupFor(ulong stack, ulong call, uint sipCause, uint q850Cause, string text, ulong nowMs)
+    {
+        var textBytes = Encoding.UTF8.GetBytes(text);
+        var textSigned = new sbyte[textBytes.Length];
+        Buffer.BlockCopy(textBytes, 0, textSigned, 0, textBytes.Length);
+        Check(NativeMethods.sipral_call_hangup_for(stack, call, sipCause, q850Cause, textSigned, (nuint)textSigned.Length, nowMs));
+    }
+
+    /// <summary>
+    /// Answer a call that came in with a 3xx: somewhere else to try
+    /// (RFC 3261 §21.3), and why (RFC 5806).
+    ///
+    /// `status_code` is 300 to 399, 302 for call forwarding. `targets` is where to
+    /// try, as URIs separated by commas, in the order of preference; one is
+    /// required for every status but 380. `reason`, when given, is the
+    /// `Diversion` reason — `no-answer`, `user-busy`, `unconditional`,
+    /// `deflection`, `do-not-disturb` or any other token — and puts a
+    /// `Diversion` naming the address that was called on the answer, above
+    /// the ones the INVITE already carried.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for another status, a target that is
+    /// not a URI, or none where one is needed; `SIPRAL_STATUS_WRONG_STATE` for
+    /// a call that is not waiting to be answered.
+    ///
+    /// Safety
+    ///
+    /// `targets` must be readable for `targets_len` bytes and `reason` for
+    /// `reason_len` bytes, each or null with a length of zero.
+    /// </summary>
+    public static void CallRedirect(ulong stack, ulong call, uint statusCode, string targets, string reason, ulong nowMs)
+    {
+        var targetsBytes = Encoding.UTF8.GetBytes(targets);
+        var targetsSigned = new sbyte[targetsBytes.Length];
+        Buffer.BlockCopy(targetsBytes, 0, targetsSigned, 0, targetsBytes.Length);
+        var reasonBytes = Encoding.UTF8.GetBytes(reason);
+        var reasonSigned = new sbyte[reasonBytes.Length];
+        Buffer.BlockCopy(reasonBytes, 0, reasonSigned, 0, reasonBytes.Length);
+        Check(NativeMethods.sipral_call_redirect(stack, call, statusCode, targetsSigned, (nuint)targetsSigned.Length, reasonSigned, (nuint)reasonSigned.Length, nowMs));
+    }
+
+    /// <summary>
+    /// How many entries one of a call's identity lists has:
+    /// `SIPRAL_IDENTITY_TEXT_DIVERSION` for the `Diversion` values,
+    /// `SIPRAL_IDENTITY_TEXT_HISTORY` for the `History-Info` entries, and so
+    /// on — each piece of an entry answers the same count as the entry.
+    ///
+    /// Read once, as the INVITE arrived, and the same for the rest of the
+    /// call. A call this end placed has none of them: zero.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    /// </summary>
+    public static nuint CallIdentityCount(ulong stack, ulong call, uint which)
+    {
+        Check(NativeMethods.sipral_call_identity_count(stack, call, which, out var count));
+        return count;
+    }
+
+    /// <summary>
+    /// One piece of one entry of a call's identity lists, copied into the
+    /// caller's buffer with a trailing NUL: the shape
+    /// `sipral_subscription_dialog_text` has, for the same reason — the text
+    /// is the library's, and a pointer to it is one a caller could outlive.
+    ///
+    /// `out_needed` always receives the bytes needed including the NUL, so a
+    /// caller that brought nothing can ask with `capacity` zero and ask again
+    /// with room; a buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with
+    /// nothing written. A piece the entry does not have — a display name
+    /// the field did not write — is one byte, the NUL. An index past the
+    /// end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or null with a capacity
+    /// of zero, and `out_needed` must point at one `size_t`.
+    /// </summary>
+    public static nuint CallIdentityText(ulong stack, ulong call, uint which, nuint index, sbyte[] buffer)
+    {
+        Check(NativeMethods.sipral_call_identity_text(stack, call, which, index, buffer, (nuint)buffer.Length, out var needed));
+        return needed;
     }
 
     /// <summary>

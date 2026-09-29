@@ -564,6 +564,7 @@ Content-Length: 0\r\n\r\n",
             reason: CallEndReason::Refused,
             status: None,
             response: None,
+            causes: Box::default(),
         });
         assert_eq!(counters.calls_ended.refused.get(), 1);
         assert_eq!(counters.calls_ended.total(), 1);

@@ -850,6 +850,8 @@ struct Delivery {
 
 impl Delivery {
     /// An event that points at nothing.
+    // the event is moved into the delivery that owns it from here on
+    #[allow(clippy::large_types_passed_by_value)]
     const fn bare(event: SipralEvent) -> Self {
         Self {
             event,
@@ -924,7 +926,7 @@ pub(crate) struct StackState {
     /// the request that opened it, fixed since. Read once, at that moment,
     /// because by the time a call has ended the layer below has already let
     /// it go and has nothing left to ask.
-    identities: HashMap<CallHandle, Arc<CallIdentity>>,
+    pub(crate) identities: HashMap<CallHandle, Arc<CallIdentity>>,
     /// Every transport this stack has bound: the table `transport` on
     /// `sipral_account_config_t` and `sipral_call_config_t` is read against,
     /// and the one [`crate::transport::sipral_stack_transport_bind`] grows.
@@ -1098,6 +1100,11 @@ impl StackState {
     /// Say who is on a call, once, when it is placed or arrives.
     pub(crate) fn record_identity(&mut self, call: CallHandle, identity: CallIdentity) {
         self.identities.insert(call, Arc::new(identity));
+    }
+
+    /// The same, for an identity the layer below has already read and shared.
+    fn record_shared_identity(&mut self, call: CallHandle, identity: Arc<CallIdentity>) {
+        self.identities.insert(call, identity);
     }
 }
 
@@ -1830,12 +1837,19 @@ fn drain(
                 // itself is translated, since it is the first to report who is
                 // on the line. Not asked of the layer below: a CANCEL that
                 // arrived before this poll has already made it forget the call
+                // The layer below read it behind the account's trust gate
+                // (RFC 3325 §8), which only it can apply
                 if let UaEvent::IncomingCall {
-                    call, ref request, ..
+                    call,
+                    ref request,
+                    ref identity,
+                    ..
                 } = said
-                    && let Some(identity) = CallIdentity::of_request(request)
+                    && let Some(identity) = identity
+                        .clone()
+                        .or_else(|| CallIdentity::of_request(request).map(Arc::new))
                 {
-                    state.record_identity(call, identity);
+                    state.record_shared_identity(call, identity);
                 }
                 if let UaEvent::CallForked { call, sibling } = said {
                     // one INVITE opened every early dialog among them, so a
@@ -2112,6 +2126,24 @@ pub(crate) mod tests {
         pub(crate) call_id: Vec<u8>,
         pub(crate) status_code: u32,
         pub(crate) digit: u32,
+        pub(crate) cause_sip: u32,
+        pub(crate) cause_q850: u32,
+        pub(crate) cause_text: Vec<u8>,
+        pub(crate) identity_trusted: u32,
+        pub(crate) asserted_uri: Vec<u8>,
+        pub(crate) asserted_display: Vec<u8>,
+        pub(crate) verstat: u32,
+        pub(crate) privacy: u32,
+        pub(crate) diverted_from: Vec<u8>,
+        pub(crate) diversion_reason: Vec<u8>,
+        pub(crate) diversion_count: u32,
+        pub(crate) history_count: u32,
+        pub(crate) answer_mode: u32,
+        pub(crate) answer_mode_required: u32,
+        pub(crate) has_answer_after: u32,
+        pub(crate) answer_after_ms: u64,
+        pub(crate) ring_source: u32,
+        pub(crate) alert_info: Vec<u8>,
     }
 
     /// What a caller of the C API would keep behind its user pointer.
@@ -2194,6 +2226,7 @@ pub(crate) mod tests {
                 | SipralEventKind::CallReplaced
                 | SipralEventKind::CallEnded
                 | SipralEventKind::DtmfSent
+                | SipralEventKind::CallAddressWanted
         )
     }
 
@@ -2254,6 +2287,24 @@ pub(crate) mod tests {
             call_id: owned(payload.call_id, payload.call_id_len),
             status_code: payload.status_code,
             digit: payload.digit,
+            cause_sip: payload.cause_sip,
+            cause_q850: payload.cause_q850,
+            cause_text: owned(payload.cause_text, payload.cause_text_len),
+            identity_trusted: payload.identity_trusted,
+            asserted_uri: owned(payload.asserted_uri, payload.asserted_uri_len),
+            asserted_display: owned(payload.asserted_display, payload.asserted_display_len),
+            verstat: payload.verstat,
+            privacy: payload.privacy,
+            diverted_from: owned(payload.diverted_from, payload.diverted_from_len),
+            diversion_reason: owned(payload.diversion_reason, payload.diversion_reason_len),
+            diversion_count: payload.diversion_count,
+            history_count: payload.history_count,
+            answer_mode: payload.answer_mode,
+            answer_mode_required: payload.answer_mode_required,
+            has_answer_after: payload.has_answer_after,
+            answer_after_ms: payload.answer_after_ms,
+            ring_source: payload.ring_source,
+            alert_info: owned(payload.alert_info, payload.alert_info_len),
         }
     }
 

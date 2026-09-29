@@ -194,6 +194,7 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         | UaError::Header(_)
         | UaError::InvalidDtmf(_)
         | UaError::InvalidKeepalive(_)
+        | UaError::NotARedirection(_)
         | UaError::MessageTooLarge { .. } => SipralStatus::InvalidArgument,
         // an out-of-dialog MESSAGE to this target is already in flight; the
         // object this call is about is busy with a request of its own, the
@@ -2016,6 +2017,11 @@ a=recvonly\r\n";
             push_wakes_itself: 0,
             quality_report_uri: ptr::null(),
             quality_report_uri_len: 0,
+            session_timer: 0,
+            session_interval_seconds: 0,
+            privacy: 0,
+            trusted_peers: ptr::null(),
+            trusted_peers_len: 0,
         }
     }
 
@@ -4530,6 +4536,337 @@ a=sendrecv\r\n";
             readdress(handle, described, "198.51.100.7:42000", 1_410),
             SipralStatus::WrongState,
             "a call whose description the application wrote is the application's to move"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    // -- who is calling, why a call ended, and where to send it -------------
+
+    /// What a carrier's INVITE says about the caller, besides its `From`.
+    const ASSERTING: &str = "P-Asserted-Identity: \"Bob Jones\" <tel:+15551234567;verstat=TN-Validation-Passed>\r\n\
+Diversion: <sip:desk@example.com>;reason=no-answer, <sip:front@example.com>;reason=unconditional\r\n\
+History-Info: <sip:front@example.com>;index=1\r\n\
+Privacy: id\r\n\
+Answer-Mode: Auto;require\r\n\
+Alert-Info: <urn:alert:source:external>\r\n";
+
+    /// A stack whose one account is tuned by `tune` before it is added.
+    fn tuned_line(
+        observed: &mut Observed,
+        tune: impl FnOnce(&mut SipralAccountConfig),
+    ) -> (SipralHandle, SipralHandle) {
+        let handle = stack(observed);
+        let mut config = account_config();
+        tune(&mut config);
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&config), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        (handle, account)
+    }
+
+    fn identity_text(stack: SipralHandle, call: SipralHandle, which: u32, index: usize) -> String {
+        let mut buffer = [0 as c_char; 128];
+        let mut needed = 0_usize;
+        let status = unsafe {
+            crate::identity::sipral_call_identity_text(
+                stack,
+                call,
+                which,
+                index,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &raw mut needed,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let bytes: Vec<u8> = buffer[..needed - 1]
+            .iter()
+            .map(|byte| byte.cast_unsigned())
+            .collect();
+        String::from_utf8(bytes).expect("UTF-8")
+    }
+
+    #[test]
+    fn an_incoming_call_from_a_trusted_peer_says_who_the_network_says_is_calling() {
+        let mut observed = Observed::default();
+        let (handle, _) = tuned_line(&mut observed, |config| {
+            (config.trusted_peers, config.trusted_peers_len) = as_text("198.51.100.1, 203.0.113.5");
+        });
+        deliver(handle, &insert_header(&invitation(), ASSERTING), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let seen = observed
+            .identities_of(call)
+            .into_iter()
+            .find(|seen| seen.kind == SipralEventKind::IncomingCall)
+            .expect("the incoming call was reported");
+        assert_eq!(seen.identity_trusted, 1);
+        assert_eq!(
+            seen.asserted_uri,
+            b"tel:+15551234567;verstat=TN-Validation-Passed"
+        );
+        assert_eq!(seen.asserted_display, b"Bob Jones");
+        assert_eq!(seen.verstat, crate::identity::SipralVerstat::Passed as u32);
+        assert_eq!(seen.privacy, crate::identity::SIPRAL_PRIVACY_ID);
+        assert_eq!(seen.diverted_from, b"sip:desk@example.com");
+        assert_eq!(seen.diversion_reason, b"no-answer");
+        assert_eq!((seen.diversion_count, seen.history_count), (2, 1));
+        assert_eq!(
+            (seen.answer_mode, seen.answer_mode_required),
+            (crate::identity::SipralAnswerMode::Auto as u32, 1)
+        );
+        assert_eq!((seen.has_answer_after, seen.answer_after_ms), (1, 0));
+        assert_eq!(
+            seen.ring_source,
+            crate::identity::SipralRingSource::External as u32
+        );
+        assert_eq!(seen.alert_info, b"urn:alert:source:external");
+
+        let mut count = 0_usize;
+        let diversion = crate::identity::SipralIdentityText::Diversion as u32;
+        assert_eq!(
+            unsafe {
+                crate::identity::sipral_call_identity_count(handle, call, diversion, &raw mut count)
+            },
+            SipralStatus::Ok
+        );
+        assert_eq!(count, 2);
+        assert_eq!(
+            identity_text(handle, call, diversion, 1),
+            "sip:front@example.com"
+        );
+        assert_eq!(
+            identity_text(
+                handle,
+                call,
+                crate::identity::SipralIdentityText::DiversionReason as u32,
+                1
+            ),
+            "unconditional"
+        );
+        let mut needed = 0_usize;
+        assert_eq!(
+            unsafe {
+                crate::identity::sipral_call_identity_text(
+                    handle,
+                    call,
+                    diversion,
+                    2,
+                    ptr::null_mut(),
+                    0,
+                    &raw mut needed,
+                )
+            },
+            SipralStatus::InvalidArgument,
+            "past the end"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// RFC 3325 §8, across the boundary: an account that trusts nobody is
+    /// told nothing the network asserted, and still told what was forwarded.
+    #[test]
+    fn an_incoming_call_from_a_peer_nobody_trusts_asserts_nothing() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        deliver(handle, &insert_header(&invitation(), ASSERTING), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let seen = observed
+            .identities_of(call)
+            .into_iter()
+            .find(|seen| seen.kind == SipralEventKind::IncomingCall)
+            .expect("the incoming call was reported");
+        assert_eq!(seen.identity_trusted, 0);
+        assert!(seen.asserted_uri.is_empty());
+        assert_eq!(seen.verstat, crate::identity::SipralVerstat::None as u32);
+        assert_eq!(seen.diverted_from, b"sip:desk@example.com");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_call_cancelled_because_another_phone_answered_says_so_on_its_end() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+        deliver(
+            handle,
+            &insert_header(
+                &cancellation(),
+                "Reason: SIP ;cause=200 ;text=\"Call completed elsewhere\"\r\n",
+            ),
+            1_100,
+        );
+        poll(handle, 1_100);
+        let ended = observed
+            .identities_of(call)
+            .into_iter()
+            .find(|seen| seen.kind == SipralEventKind::CallEnded)
+            .expect("the call ended");
+        assert_eq!((ended.cause_sip, ended.cause_q850), (200, 0));
+        assert_eq!(ended.cause_text, b"Call completed elsewhere");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_hangup_for_a_reason_writes_it_on_the_bye() {
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+        let (status, call) = place(handle, account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle);
+        let (said, said_len) = as_text("Normal call clearing");
+        assert_eq!(
+            unsafe {
+                crate::identity::sipral_call_hangup_for(handle, call, 0, 16, said, said_len, 1_200)
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let bye = one(handle);
+        assert!(start_line(&bye).starts_with("BYE "));
+        assert_eq!(
+            field(&bye, HeaderName::Extension("Reason")),
+            b"Q.850;cause=16;text=\"Normal call clearing\""
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_call_forwarded_from_c_is_answered_302_with_where_to_go_and_why() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+        let (targets, targets_len) = as_text("sip:carol@example.com, tel:+15550001111");
+        let (reason, reason_len) = as_text("no-answer");
+        assert_eq!(
+            unsafe {
+                crate::identity::sipral_call_redirect(
+                    handle,
+                    call,
+                    486,
+                    targets,
+                    targets_len,
+                    reason,
+                    reason_len,
+                    1_100,
+                )
+            },
+            SipralStatus::InvalidArgument,
+            "a 486 is not a redirection"
+        );
+        assert_eq!(
+            unsafe {
+                crate::identity::sipral_call_redirect(
+                    handle,
+                    call,
+                    302,
+                    targets,
+                    targets_len,
+                    reason,
+                    reason_len,
+                    1_100,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let answer = one(handle);
+        assert!(start_line(&answer).starts_with("SIP/2.0 302 "));
+        assert_eq!(
+            field(&answer, HeaderName::Contact),
+            b"<sip:carol@example.com>, <tel:+15550001111>"
+        );
+        assert_eq!(
+            field(&answer, HeaderName::Extension("Diversion")),
+            b"<sip:alice@example.com>;reason=no-answer;counter=1"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The per-account options the Rust account had and the C ABI did not:
+    /// the session timer, and placing calls anonymously.
+    #[test]
+    fn an_account_from_c_sets_its_session_timer_and_its_anonymity() {
+        let mut observed = Observed::default();
+        let (handle, account) = tuned_line(&mut observed, |config| {
+            config.session_timer = crate::identity::SipralSessionTimer::Interval as u32;
+            config.session_interval_seconds = 120;
+            config.privacy = crate::identity::SIPRAL_PRIVACY_ID;
+            (config.trusted_peers, config.trusted_peers_len) = as_text("203.0.113.5");
+        });
+        let (status, _) = place(handle, account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        assert_eq!(field(&invite, HeaderName::SessionExpires), b"120");
+        assert!(
+            field(&invite, HeaderName::From)
+                .starts_with(b"\"Anonymous\" <sip:anonymous@anonymous.invalid>")
+        );
+        assert_eq!(field(&invite, HeaderName::Extension("Privacy")), b"id");
+        assert_eq!(
+            field(&invite, HeaderName::Extension("P-Asserted-Identity")),
+            b"<sip:alice@example.com>",
+            "the trusted peer is still told"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let (handle, account) = tuned_line(&mut observed, |config| {
+            config.session_timer = crate::identity::SipralSessionTimer::Off as u32;
+        });
+        let (status, _) = place(handle, account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        assert_eq!(field(&invite, HeaderName::SessionExpires), b"");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn an_account_option_out_of_range_is_refused_before_anything_exists() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let refused = |tune: &dyn Fn(&mut SipralAccountConfig)| {
+            let mut config = account_config();
+            tune(&mut config);
+            let mut account = SIPRAL_HANDLE_NONE;
+            unsafe { sipral_account_add(handle, ptr::from_ref(&config), &raw mut account) }
+        };
+        assert_eq!(
+            refused(&|config| {
+                config.session_timer = 2;
+                config.session_interval_seconds = 30;
+            }),
+            SipralStatus::InvalidArgument,
+            "under RFC 4028's floor"
+        );
+        assert_eq!(
+            refused(&|config| config.session_timer = 9),
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(
+            refused(&|config| config.privacy = crate::identity::SIPRAL_PRIVACY_NONE),
+            SipralStatus::InvalidArgument,
+            "none is read, never asked for"
+        );
+        assert_eq!(
+            refused(&|config| {
+                (config.trusted_peers, config.trusted_peers_len) = as_text("proxy.example.com");
+            }),
+            SipralStatus::InvalidArgument,
+            "a trusted peer is an address"
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }

@@ -9,7 +9,7 @@
 # member at a time. A dash means the library fills that struct in
 # itself and no caller ever declares one.
 sipral_abi_version_t 24 24
-sipral_account_config_t 144 240
+sipral_account_config_t 144 280
 sipral_audio_device_t 32 32
 sipral_audio_info_t 48 48
 sipral_audio_transmit_t - 56
@@ -18,7 +18,7 @@ sipral_capabilities_t 24 24
 sipral_codec_candidate_t 24 24
 sipral_codec_info_t 32 32
 sipral_counters_t 152 200
-sipral_event_t - 200
+sipral_event_t - 368
 sipral_media_info_t 88 88
 sipral_media_packet_t 56 64
 sipral_path_candidate_t 88 88

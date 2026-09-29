@@ -901,6 +901,82 @@ record! {
         /// The digit an INFO this end sent named, for
         /// [`SipralEventKind::DtmfSent`]. Zero for every other kind.
         pub digit: u32,
+        /// For [`SipralEventKind::CallEnded`]: the SIP status the far end's
+        /// `Reason` (RFC 3326) named — on the BYE or the CANCEL that ended
+        /// the call, or on the refusal. 200 on a CANCEL is a forking proxy
+        /// saying another phone answered: not a missed call. Zero when no
+        /// SIP reason was given. ABI 0.29.
+        pub cause_sip: u32,
+        /// The same for a Q.850 cause, which a gateway to the telephone
+        /// network writes: 16 a normal clearing, 17 a busy line. Zero when
+        /// none was given.
+        pub cause_q850: u32,
+        /// The `text` of the first `Reason` value, unquoted. Null and zero
+        /// when there was none.
+        pub cause_text: *const u8,
+        /// How many bytes of it.
+        pub cause_text_len: usize,
+        /// Whether the INVITE of a call that came in arrived from a peer its
+        /// account trusts (`trusted_peers` on `sipral_account_config_t`).
+        /// When it did not, `asserted_uri`, `asserted_display` and
+        /// `verstat` say nothing, whatever it carried (RFC 3325 §8). The same
+        /// on every event of the call; zero for a call this end placed.
+        pub identity_trusted: u32,
+        /// Who the network says is calling: the first `P-Asserted-Identity`,
+        /// or a calling `Remote-Party-ID` when there is none, as written.
+        /// Null and zero when a trusted peer said nothing.
+        pub asserted_uri: *const u8,
+        /// How many bytes of it.
+        pub asserted_uri_len: usize,
+        /// That identity's display name. Null and zero when it named none.
+        pub asserted_display: *const u8,
+        /// How many bytes of it.
+        pub asserted_display_len: usize,
+        /// A [`SipralVerstat`](crate::identity::SipralVerstat): what the
+        /// network concluded about the caller's number.
+        pub verstat: u32,
+        /// The `SIPRAL_PRIVACY_*` bits the caller's `Privacy` asked for.
+        pub privacy: u32,
+        /// Who the call was last diverted from: the top-most `Diversion`
+        /// (RFC 5806), as written. Null and zero when none.
+        /// `sipral_call_identity_text` reads the rest.
+        pub diverted_from: *const u8,
+        /// How many bytes of it.
+        pub diverted_from_len: usize,
+        /// Why: its `reason`. Null and zero when none.
+        pub diversion_reason: *const u8,
+        /// How many bytes of it.
+        pub diversion_reason_len: usize,
+        /// How many `Diversion` values the INVITE carried.
+        pub diversion_count: u32,
+        /// How many `History-Info` entries it carried.
+        pub history_count: u32,
+        /// A [`SipralAnswerMode`](crate::identity::SipralAnswerMode): the
+        /// INVITE's `Answer-Mode` (RFC 5373).
+        pub answer_mode: u32,
+        /// Whether that field said `;require`: the caller would rather the
+        /// call be refused, with a 403, than answered any other way.
+        pub answer_mode_required: u32,
+        /// The same for `Priv-Answer-Mode`, which RFC 5373 §4.2 holds to a
+        /// stricter policy.
+        pub priv_answer_mode: u32,
+        /// Whether that field said `;require`.
+        pub priv_answer_mode_required: u32,
+        /// Whether the call asked to be answered without the user —
+        /// `Answer-Mode: Auto`, `answer-after` on `Call-Info` or
+        /// `Alert-Info`, or `info=alert-autoanswer` — after
+        /// `answer_after_ms`. Whether to is the application's policy.
+        pub has_answer_after: u32,
+        /// After how long, when `has_answer_after` is set.
+        pub answer_after_ms: u64,
+        /// A [`SipralRingSource`](crate::identity::SipralRingSource): whether
+        /// the ring says the caller is internal or external.
+        pub ring_source: u32,
+        /// The first `Alert-Info` URI, without the angle brackets. Null and
+        /// zero when none. `sipral_call_identity_text` reads the rest.
+        pub alert_info: *const u8,
+        /// How many bytes of it.
+        pub alert_info_len: usize,
     }
 }
 
@@ -1325,6 +1401,9 @@ impl SipralEvent {
     /// The payload is written whole, never a member at a time: a union member
     /// is a place the library has to know it owns before it writes through it,
     /// and one assignment of the arm the kind names is the way to be sure.
+    // moved in whole, for the reason above: the union is built at the call
+    // site and assigned here once, and a reference would only add a copy
+    #[allow(clippy::large_types_passed_by_value)]
     fn of(stack: SipralHandle, kind: SipralEventKind, payload: SipralEventPayload) -> Self {
         Self {
             size: size_of::<Self>(),
@@ -1385,6 +1464,32 @@ impl SipralCallEvent {
             call_id: std::ptr::null(),
             call_id_len: 0,
             digit: 0,
+            cause_sip: 0,
+            cause_q850: 0,
+            cause_text: std::ptr::null(),
+            cause_text_len: 0,
+            identity_trusted: 0,
+            asserted_uri: std::ptr::null(),
+            asserted_uri_len: 0,
+            asserted_display: std::ptr::null(),
+            asserted_display_len: 0,
+            verstat: 0,
+            privacy: 0,
+            diverted_from: std::ptr::null(),
+            diverted_from_len: 0,
+            diversion_reason: std::ptr::null(),
+            diversion_reason_len: 0,
+            diversion_count: 0,
+            history_count: 0,
+            answer_mode: 0,
+            answer_mode_required: 0,
+            priv_answer_mode: 0,
+            priv_answer_mode_required: 0,
+            has_answer_after: 0,
+            answer_after_ms: 0,
+            ring_source: 0,
+            alert_info: std::ptr::null(),
+            alert_info_len: 0,
         }
     }
 }
@@ -2081,6 +2186,7 @@ fn about_a_call_ending(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Si
             reason,
             status,
             ref response,
+            ref causes,
         } => {
             let mut payload = call_payload(known, call);
             // the layer below has already let the call go, so the state is
@@ -2088,11 +2194,30 @@ fn about_a_call_ending(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Si
             payload.state = SipralCallState::Terminated as u32;
             payload.end_reason = end_reason(reason) as u32;
             payload.status_code = status_of(status);
+            said_why(&mut payload, causes);
             let mut out = call_event(known, SipralEventKind::CallEnded, call, payload);
             attach(&mut out, response.as_ref());
             Some(out)
         }
         _ => None,
+    }
+}
+
+/// The `Reason` values a call's end carried, onto its event: the SIP and
+/// the Q.850 cause, and the first value's text. The text borrows from
+/// `causes`, which the queued delivery keeps alive with the event.
+fn said_why(payload: &mut SipralCallEvent, causes: &[sipral_ua::Reason]) {
+    for cause in causes {
+        let number = cause.cause.map_or(0, u32::from);
+        match cause.protocol {
+            sipral_ua::ReasonProtocol::Sip => payload.cause_sip = number,
+            sipral_ua::ReasonProtocol::Q850 => payload.cause_q850 = number,
+            _ => {}
+        }
+    }
+    if let Some(text) = causes.first().and_then(|cause| cause.text.as_deref()) {
+        payload.cause_text = text.as_ptr();
+        payload.cause_text_len = text.len();
     }
 }
 
@@ -2448,6 +2573,7 @@ fn call_payload(known: &mut Vocabulary<'_>, call: CallHandle) -> SipralCallEvent
         payload.to_uri_len = identity.to_uri.len();
         payload.call_id = identity.call_id.as_ptr();
         payload.call_id_len = identity.call_id.len();
+        who_and_how(&mut payload, &identity);
         // kept on the vocabulary rather than dropped here, so that whoever
         // queues this event can keep these bytes alive for as long as the
         // delivery takes: the map this came from may be missing the entry by
@@ -2457,6 +2583,52 @@ fn call_payload(known: &mut Vocabulary<'_>, call: CallHandle) -> SipralCallEvent
     payload
 }
 
+/// What the INVITE of a call said about who is calling and how to answer
+/// it, onto a call event. Every pointer borrows from `identity`, which the
+/// queued delivery keeps alive with the event.
+fn who_and_how(payload: &mut SipralCallEvent, identity: &CallIdentity) {
+    let caller = &identity.caller;
+    payload.identity_trusted = u32::from(caller.trusted);
+    if let Some(shown) = caller.shown() {
+        payload.asserted_uri = shown.uri.as_ptr();
+        payload.asserted_uri_len = shown.uri.len();
+        if !shown.display.is_empty() {
+            payload.asserted_display = shown.display.as_ptr();
+            payload.asserted_display_len = shown.display.len();
+        }
+    }
+    payload.verstat = crate::identity::verstat_code(caller.verstat.as_ref()) as u32;
+    payload.privacy = crate::identity::privacy_bits(caller.privacy);
+    if let Some(top) = caller.diversions.first() {
+        payload.diverted_from = top.party.uri.as_ptr();
+        payload.diverted_from_len = top.party.uri.len();
+        if let Some(reason) = top.reason.as_deref() {
+            payload.diversion_reason = reason.as_ptr();
+            payload.diversion_reason_len = reason.len();
+        }
+    }
+    payload.diversion_count = u32::try_from(caller.diversions.len()).unwrap_or(u32::MAX);
+    payload.history_count = u32::try_from(caller.history.len()).unwrap_or(u32::MAX);
+    let answering = &identity.answering;
+    let (mode, required) = crate::identity::answer_mode_code(answering.answer_mode.as_ref());
+    payload.answer_mode = mode as u32;
+    payload.answer_mode_required = required;
+    let (mode, required) = crate::identity::answer_mode_code(answering.priv_answer_mode.as_ref());
+    payload.priv_answer_mode = mode as u32;
+    payload.priv_answer_mode_required = required;
+    if let Some(after) = answering.answer_after {
+        payload.has_answer_after = 1;
+        payload.answer_after_ms = millis(after);
+    }
+    payload.ring_source = crate::identity::ring_source_code(answering.source) as u32;
+    if let Some(first) = answering.alert_info.first() {
+        payload.alert_info = first.as_ptr();
+        payload.alert_info_len = first.len();
+    }
+}
+
+// moved into the event whole, the way `SipralEvent::of` takes its union
+#[allow(clippy::large_types_passed_by_value)]
 fn call_event(
     known: &mut Vocabulary<'_>,
     kind: SipralEventKind,

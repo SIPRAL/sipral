@@ -259,6 +259,12 @@ pub enum UaEvent {
         account: Option<AccountId>,
         /// The INVITE, whole; the offer may be in it.
         request: OwnedMessage,
+        /// Who is calling, read out of the INVITE as it arrived: its `From`,
+        /// `To` and `Call-ID`, what the network asserted about the caller
+        /// behind the account's trust gate (RFC 3325 §8), and how the call
+        /// asked to be answered and rung. `None` only for an INVITE whose
+        /// `From`, `To` or `Call-ID` could not be read.
+        identity: Option<std::sync::Arc<crate::CallIdentity>>,
     },
     /// A response short of an answer: the far end is ringing, or is playing
     /// something before it answers.
@@ -596,6 +602,14 @@ pub enum UaEvent {
         /// The refusal, whole, when there was one. A 302 names where to try
         /// instead, and a 380 carries an alternative service.
         response: Option<OwnedMessage>,
+        /// Why the far end said it ended the call (RFC 3326): the `Reason`
+        /// of the BYE or the CANCEL that ended it, or of the refusal when a
+        /// gateway put one there (RFC 6432). One value per protocol, in the
+        /// order written, and empty when nothing said. A forking proxy's
+        /// CANCEL of a branch that lost carries a SIP 200,
+        /// [`Reason::is_completed_elsewhere`](crate::Reason::is_completed_elsewhere):
+        /// answered on another phone, not missed.
+        causes: Box<[crate::Reason]>,
     },
     /// An INFO sent for [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info)
     /// reached a final answer.

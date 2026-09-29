@@ -2344,6 +2344,175 @@ enum class SipralAudioOrigin(val value: Int) {
 }
 
 /**
+ * The verdict a terminating network reached on the caller's number
+ * (3GPP TS 24.229's `verstat`, the mark STIR/SHAKEN leaves). Names for
+ * `sipral_call_event_t::verstat`.
+ */
+enum class SipralVerstat(val value: Int) {
+    /**
+     * Nothing said, or said by a peer the account does not trust.
+     */
+    NONE(0),
+    /**
+     * `TN-Validation-Passed`.
+     */
+    PASSED(1),
+    /**
+     * `TN-Validation-Failed`.
+     */
+    FAILED(2),
+    /**
+     * `No-TN-Validation`.
+     */
+    NOT_VALIDATED(3),
+    /**
+     * Some other value.
+     */
+    OTHER(4),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralVerstat? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * `Answer-Mode` and `Priv-Answer-Mode` (RFC 5373 §3). Names for
+ * `sipral_call_event_t::answer_mode` and `priv_answer_mode`.
+ */
+enum class SipralAnswerMode(val value: Int) {
+    /**
+     * The INVITE carried no such field.
+     */
+    NONE(0),
+    /**
+     * `Manual`: wait for the user.
+     */
+    MANUAL(1),
+    /**
+     * `Auto`: answer without waiting for the user.
+     */
+    AUTO(2),
+    /**
+     * Any other value, which RFC 5373 has ignored.
+     */
+    OTHER(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAnswerMode? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Where the ring says the caller is. Names for
+ * `sipral_call_event_t::ring_source`.
+ */
+enum class SipralRingSource(val value: Int) {
+    /**
+     * Nothing said.
+     */
+    UNKNOWN(0),
+    /**
+     * Another extension of the same switch.
+     */
+    INTERNAL(1),
+    /**
+     * The outside world.
+     */
+    EXTERNAL(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralRingSource? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Which list, and which piece of each entry, sipral_call_identity_count
+ * and sipral_call_identity_text are asked about.
+ */
+enum class SipralIdentityText(val value: Int) {
+    /**
+     * Never asked for.
+     */
+    UNKNOWN(0),
+    /**
+     * `P-Asserted-Identity`: the URI of each asserted party.
+     */
+    ASSERTED(1),
+    /**
+     * And each one's display name.
+     */
+    ASSERTED_DISPLAY(2),
+    /**
+     * `Remote-Party-ID`: the URI of each party named.
+     */
+    REMOTE_PARTY(3),
+    /**
+     * And each one's display name.
+     */
+    REMOTE_PARTY_DISPLAY(4),
+    /**
+     * `Diversion`, most recent first: who the call was diverted from.
+     */
+    DIVERSION(5),
+    /**
+     * And the display name beside it.
+     */
+    DIVERSION_DISPLAY(6),
+    /**
+     * And why: `no-answer`, `user-busy`, `unconditional` and the rest.
+     */
+    DIVERSION_REASON(7),
+    /**
+     * `History-Info`: the URI of each target the request was sent to.
+     */
+    HISTORY(8),
+    /**
+     * And each entry's `index`.
+     */
+    HISTORY_INDEX(9),
+    /**
+     * Every `Alert-Info` URI.
+     */
+    ALERT_INFO(10),
+    /**
+     * Every `info=` value on `Alert-Info`.
+     */
+    ALERT_NAME(11),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralIdentityText? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * How an account's calls ask for a session timer (RFC 4028). Names for
+ * `sipral_account_config_t::session_timer`.
+ */
+enum class SipralSessionTimer(val value: Int) {
+    /**
+     * The stack's default: thirty minutes, RFC 4028 §4's recommendation.
+     */
+    DEFAULT(0),
+    /**
+     * Ask for none. A far end that insists on one is still honoured.
+     */
+    OFF(1),
+    /**
+     * Ask for `session_interval_seconds`, at least 90 (§5's floor).
+     */
+    INTERVAL(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralSessionTimer? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * The version of the ABI this library provides.
  *
  * Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -4050,6 +4219,37 @@ class SipralAccountConfig(
      * never sent reads as the null that already means "send none".
      */
     val qualityReportUri: String? = null,
+    /**
+     * A SipralSessionTimer: how
+     * this account's calls ask for a session timer (RFC 4028). Zero is
+     * the stack's default, thirty minutes. ABI 0.29, appended at the
+     * tail like every member after the pinned `MIN_SIZE`.
+     */
+    val sessionTimer: Long = 0,
+    /**
+     * The interval to ask for under `SIPRAL_SESSION_TIMER_INTERVAL`, in
+     * seconds: at least 90, RFC 4028 §5's floor. Read for nothing else.
+     */
+    val sessionIntervalSeconds: Long = 0,
+    /**
+     * `SIPRAL_PRIVACY_*` bits: place every call from this account
+     * anonymously (RFC 3323), asking for these. `SIPRAL_PRIVACY_ID` is
+     * "withhold my number". `From` becomes `"Anonymous"
+     * <sip:anonymous@anonymous.invalid>`, `Privacy` carries the bits,
+     * and the account's own identity goes in `P-Asserted-Identity` only
+     * toward a peer in `trusted_peers`. Zero asks for none.
+     */
+    val privacy: Long = 0,
+    /**
+     * The peers this account trusts (RFC 3325's trust domain), as IP
+     * addresses separated by commas: usually the registrar or the trunk.
+     * A call arriving from one of them has its asserted identity read
+     * (`sipral_call_event_t::asserted_uri`); from anywhere else it is
+     * left out. And once any are named, a call placed toward any other
+     * peer carries no `P-Asserted-Identity` or `P-Preferred-Identity`,
+     * whoever wrote it. Null and zero trusts nobody.
+     */
+    val trustedPeers: String? = null,
 )
 
 /**
@@ -4355,6 +4555,110 @@ data class SipralCallEvent(
      * SipralEventKind.DTMF_SENT. Zero for every other kind.
      */
     val digit: Long,
+    /**
+     * For SipralEventKind.CALL_ENDED: the SIP status the far end's
+     * `Reason` (RFC 3326) named — on the BYE or the CANCEL that ended
+     * the call, or on the refusal. 200 on a CANCEL is a forking proxy
+     * saying another phone answered: not a missed call. Zero when no
+     * SIP reason was given. ABI 0.29.
+     */
+    val causeSip: Long,
+    /**
+     * The same for a Q.850 cause, which a gateway to the telephone
+     * network writes: 16 a normal clearing, 17 a busy line. Zero when
+     * none was given.
+     */
+    val causeQ850: Long,
+    /**
+     * The `text` of the first `Reason` value, unquoted. Null and zero
+     * when there was none.
+     */
+    val causeText: ByteArray?,
+    /**
+     * Whether the INVITE of a call that came in arrived from a peer its
+     * account trusts (`trusted_peers` on `sipral_account_config_t`).
+     * When it did not, `asserted_uri`, `asserted_display` and
+     * `verstat` say nothing, whatever it carried (RFC 3325 §8). The same
+     * on every event of the call; zero for a call this end placed.
+     */
+    val identityTrusted: Long,
+    /**
+     * Who the network says is calling: the first `P-Asserted-Identity`,
+     * or a calling `Remote-Party-ID` when there is none, as written.
+     * Null and zero when a trusted peer said nothing.
+     */
+    val assertedUri: ByteArray?,
+    /**
+     * That identity's display name. Null and zero when it named none.
+     */
+    val assertedDisplay: ByteArray?,
+    /**
+     * A SipralVerstat: what the
+     * network concluded about the caller's number.
+     */
+    val verstat: Long,
+    /**
+     * The `SIPRAL_PRIVACY_*` bits the caller's `Privacy` asked for.
+     */
+    val privacy: Long,
+    /**
+     * Who the call was last diverted from: the top-most `Diversion`
+     * (RFC 5806), as written. Null and zero when none.
+     * `sipral_call_identity_text` reads the rest.
+     */
+    val divertedFrom: ByteArray?,
+    /**
+     * Why: its `reason`. Null and zero when none.
+     */
+    val diversionReason: ByteArray?,
+    /**
+     * How many `Diversion` values the INVITE carried.
+     */
+    val diversionCount: Long,
+    /**
+     * How many `History-Info` entries it carried.
+     */
+    val historyCount: Long,
+    /**
+     * A SipralAnswerMode: the
+     * INVITE's `Answer-Mode` (RFC 5373).
+     */
+    val answerMode: Long,
+    /**
+     * Whether that field said `;require`: the caller would rather the
+     * call be refused, with a 403, than answered any other way.
+     */
+    val answerModeRequired: Long,
+    /**
+     * The same for `Priv-Answer-Mode`, which RFC 5373 §4.2 holds to a
+     * stricter policy.
+     */
+    val privAnswerMode: Long,
+    /**
+     * Whether that field said `;require`.
+     */
+    val privAnswerModeRequired: Long,
+    /**
+     * Whether the call asked to be answered without the user —
+     * `Answer-Mode: Auto`, `answer-after` on `Call-Info` or
+     * `Alert-Info`, or `info=alert-autoanswer` — after
+     * `answer_after_ms`. Whether to is the application's policy.
+     */
+    val hasAnswerAfter: Long,
+    /**
+     * After how long, when `has_answer_after` is set.
+     */
+    val answerAfterMs: Long,
+    /**
+     * A SipralRingSource: whether
+     * the ring says the caller is internal or external.
+     */
+    val ringSource: Long,
+    /**
+     * The first `Alert-Info` URI, without the angle brackets. Null and
+     * zero when none. `sipral_call_identity_text` reads the rest.
+     */
+    val alertInfo: ByteArray?,
 )
 
 /**
@@ -5072,6 +5376,110 @@ class SipralEvent(
      */
     private val payloadCallDigit: Long = 0,
     /**
+     * For SipralEventKind.CALL_ENDED: the SIP status the far end's
+     * `Reason` (RFC 3326) named — on the BYE or the CANCEL that ended
+     * the call, or on the refusal. 200 on a CANCEL is a forking proxy
+     * saying another phone answered: not a missed call. Zero when no
+     * SIP reason was given. ABI 0.29.
+     */
+    private val payloadCallCauseSip: Long = 0,
+    /**
+     * The same for a Q.850 cause, which a gateway to the telephone
+     * network writes: 16 a normal clearing, 17 a busy line. Zero when
+     * none was given.
+     */
+    private val payloadCallCauseQ850: Long = 0,
+    /**
+     * The `text` of the first `Reason` value, unquoted. Null and zero
+     * when there was none.
+     */
+    private val payloadCallCauseText: ByteArray? = null,
+    /**
+     * Whether the INVITE of a call that came in arrived from a peer its
+     * account trusts (`trusted_peers` on `sipral_account_config_t`).
+     * When it did not, `asserted_uri`, `asserted_display` and
+     * `verstat` say nothing, whatever it carried (RFC 3325 §8). The same
+     * on every event of the call; zero for a call this end placed.
+     */
+    private val payloadCallIdentityTrusted: Long = 0,
+    /**
+     * Who the network says is calling: the first `P-Asserted-Identity`,
+     * or a calling `Remote-Party-ID` when there is none, as written.
+     * Null and zero when a trusted peer said nothing.
+     */
+    private val payloadCallAssertedUri: ByteArray? = null,
+    /**
+     * That identity's display name. Null and zero when it named none.
+     */
+    private val payloadCallAssertedDisplay: ByteArray? = null,
+    /**
+     * A SipralVerstat: what the
+     * network concluded about the caller's number.
+     */
+    private val payloadCallVerstat: Long = 0,
+    /**
+     * The `SIPRAL_PRIVACY_*` bits the caller's `Privacy` asked for.
+     */
+    private val payloadCallPrivacy: Long = 0,
+    /**
+     * Who the call was last diverted from: the top-most `Diversion`
+     * (RFC 5806), as written. Null and zero when none.
+     * `sipral_call_identity_text` reads the rest.
+     */
+    private val payloadCallDivertedFrom: ByteArray? = null,
+    /**
+     * Why: its `reason`. Null and zero when none.
+     */
+    private val payloadCallDiversionReason: ByteArray? = null,
+    /**
+     * How many `Diversion` values the INVITE carried.
+     */
+    private val payloadCallDiversionCount: Long = 0,
+    /**
+     * How many `History-Info` entries it carried.
+     */
+    private val payloadCallHistoryCount: Long = 0,
+    /**
+     * A SipralAnswerMode: the
+     * INVITE's `Answer-Mode` (RFC 5373).
+     */
+    private val payloadCallAnswerMode: Long = 0,
+    /**
+     * Whether that field said `;require`: the caller would rather the
+     * call be refused, with a 403, than answered any other way.
+     */
+    private val payloadCallAnswerModeRequired: Long = 0,
+    /**
+     * The same for `Priv-Answer-Mode`, which RFC 5373 §4.2 holds to a
+     * stricter policy.
+     */
+    private val payloadCallPrivAnswerMode: Long = 0,
+    /**
+     * Whether that field said `;require`.
+     */
+    private val payloadCallPrivAnswerModeRequired: Long = 0,
+    /**
+     * Whether the call asked to be answered without the user —
+     * `Answer-Mode: Auto`, `answer-after` on `Call-Info` or
+     * `Alert-Info`, or `info=alert-autoanswer` — after
+     * `answer_after_ms`. Whether to is the application's policy.
+     */
+    private val payloadCallHasAnswerAfter: Long = 0,
+    /**
+     * After how long, when `has_answer_after` is set.
+     */
+    private val payloadCallAnswerAfterMs: Long = 0,
+    /**
+     * A SipralRingSource: whether
+     * the ring says the caller is internal or external.
+     */
+    private val payloadCallRingSource: Long = 0,
+    /**
+     * The first `Alert-Info` URI, without the angle brackets. Null and
+     * zero when none. `sipral_call_identity_text` reads the rest.
+     */
+    private val payloadCallAlertInfo: ByteArray? = null,
+    /**
      * What the far end's own call is doing, or zero.
      */
     private val payloadTransferStatusCode: Long = 0,
@@ -5481,7 +5889,7 @@ class SipralEvent(
     val payload: SipralEventPayload
         get() = SipralEventPayload(
             SipralRegistrationEvent(payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs),
-            SipralCallEvent(payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit),
+            SipralCallEvent(payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo),
             SipralTransferEvent(payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget),
             SipralMediaEvent(payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason, payloadMediaStatistics?.let { SipralStreamStats.of(it) }, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent),
             SipralRecoveryEvent(payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified),
@@ -5566,10 +5974,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -6028,7 +6436,7 @@ internal object SipralNative {
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
@@ -6046,6 +6454,10 @@ internal object SipralNative {
     external fun sipral_call_change_codecs(stack: Long, call: Long, codecs: ByteArray, nowMs: Long): Int
     external fun sipral_call_restart_ice(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_media_readdress(stack: Long, call: Long, mediaAddress: ByteArray, publicAddress: ByteArray, nowMs: Long): Int
+    external fun sipral_call_hangup_for(stack: Long, call: Long, sipCause: Long, q850Cause: Long, text: ByteArray, nowMs: Long): Int
+    external fun sipral_call_redirect(stack: Long, call: Long, statusCode: Long, targets: ByteArray, reason: ByteArray, nowMs: Long): Int
+    external fun sipral_call_identity_count(stack: Long, call: Long, which: Long, count: LongArray): Int
+    external fun sipral_call_identity_text(stack: Long, call: Long, which: Long, index: Long, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_call_join(stack: Long, callA: Long, callB: Long): Int
     external fun sipral_call_leave(stack: Long, call: Long): Int
     external fun sipral_call_accept_session(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
@@ -6325,6 +6737,18 @@ object Sipral {
     const val FEATURE_CALL_READDRESS: Long = 8192
 
     /**
+     * See SIPRAL_FEATURE_DTMF. Who is calling and how the call asked to
+     * be answered, on every call event: the asserted identity behind the
+     * account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
+     * `Diversion` and `History-Info`, `Answer-Mode` and `Alert-Info`;
+     * why a call ended (`cause_sip`, `cause_q850`, RFC 3326) and
+     * `sipral_call_hangup_for` to say why this end is ending one;
+     * `sipral_call_redirect`; and an account's `privacy` and
+     * `session_timer`.
+     */
+    const val FEATURE_CALLER_IDENTITY: Long = 4096
+
+    /**
      * The buffer a caller has to bring for one outgoing packet.
      *
      * Not a path MTU — RTP does not discover one — but the bound the session
@@ -6395,6 +6819,41 @@ object Sipral {
      * mean "let the stranger in".
      */
     const val SCREEN_ACCEPT: Long = 200
+
+    /**
+     * Bits of `sipral_call_event_t::privacy` and of
+     * `sipral_account_config_t::privacy` (RFC 3323 §4.2): `header`, obscure
+     * the fields that could identify the caller.
+     */
+    const val PRIVACY_HEADER: Long = 1
+
+    /**
+     * `session`: hide the session description from the far end.
+     */
+    const val PRIVACY_SESSION: Long = 2
+
+    /**
+     * `user`: user-level privacy.
+     */
+    const val PRIVACY_USER: Long = 4
+
+    /**
+     * `id` (RFC 3325 §9.3): keep the asserted identity inside the trust
+     * domain. What "withhold my number" asks for.
+     */
+    const val PRIVACY_ID: Long = 8
+
+    /**
+     * `critical`: fail the call rather than go without the privacy asked
+     * for.
+     */
+    const val PRIVACY_CRITICAL: Long = 16
+
+    /**
+     * `none`: no privacy, stated. Read only; an account asks for none by
+     * leaving every bit clear.
+     */
+    const val PRIVACY_NONE: Long = 32
 
     /**
      * The calling thread's last error, or an empty string when it has
@@ -7095,8 +7554,9 @@ object Sipral {
         val configPushPrid = config.pushPrid?.toByteArray(Charsets.UTF_8)
         val configPushParam = config.pushParam?.toByteArray(Charsets.UTF_8)
         val configQualityReportUri = config.qualityReportUri?.toByteArray(Charsets.UTF_8)
+        val configTrustedPeers = config.trustedPeers?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, accountSlot))
         return accountSlot[0]
     }
 
@@ -7523,6 +7983,96 @@ object Sipral {
         val mediaAddressBytes = mediaAddress.toByteArray(Charsets.UTF_8)
         val publicAddressBytes = publicAddress.toByteArray(Charsets.UTF_8)
         check(SipralNative.sipral_call_media_readdress(stack, call, mediaAddressBytes, publicAddressBytes, nowMs))
+    }
+
+    /**
+     * End a call and say why (RFC 3326): what `sipral_call_hangup` does, with
+     * a `Reason` on the BYE or the CANCEL it turns into.
+     *
+     * `sip_cause` is a SIP status and `q850_cause` a Q.850 cause, each zero
+     * for none; both may be given, and neither is a plain hangup. `text`, when
+     * given, goes on the first value written: the SIP one, or the Q.850 one
+     * when there is no SIP one. On the refusal of a call that came in and was
+     * never answered only the Q.850 value goes (RFC 6432): a SIP one would
+     * repeat the status the refusal carries.
+     *
+     * Safety
+     *
+     * `text` must be readable for `text_len` bytes or null with a length of
+     * zero.
+     */
+    fun callHangupFor(stack: Long, call: Long, sipCause: Long, q850Cause: Long, text: String, nowMs: Long) {
+        val textBytes = text.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_call_hangup_for(stack, call, sipCause, q850Cause, textBytes, nowMs))
+    }
+
+    /**
+     * Answer a call that came in with a 3xx: somewhere else to try
+     * (RFC 3261 §21.3), and why (RFC 5806).
+     *
+     * `status_code` is 300 to 399, 302 for call forwarding. `targets` is where to
+     * try, as URIs separated by commas, in the order of preference; one is
+     * required for every status but 380. `reason`, when given, is the
+     * `Diversion` reason — `no-answer`, `user-busy`, `unconditional`,
+     * `deflection`, `do-not-disturb` or any other token — and puts a
+     * `Diversion` naming the address that was called on the answer, above
+     * the ones the INVITE already carried.
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for another status, a target that is
+     * not a URI, or none where one is needed; `SIPRAL_STATUS_WRONG_STATE` for
+     * a call that is not waiting to be answered.
+     *
+     * Safety
+     *
+     * `targets` must be readable for `targets_len` bytes and `reason` for
+     * `reason_len` bytes, each or null with a length of zero.
+     */
+    fun callRedirect(stack: Long, call: Long, statusCode: Long, targets: String, reason: String, nowMs: Long) {
+        val targetsBytes = targets.toByteArray(Charsets.UTF_8)
+        val reasonBytes = reason.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_call_redirect(stack, call, statusCode, targetsBytes, reasonBytes, nowMs))
+    }
+
+    /**
+     * How many entries one of a call's identity lists has:
+     * `SIPRAL_IDENTITY_TEXT_DIVERSION` for the `Diversion` values,
+     * `SIPRAL_IDENTITY_TEXT_HISTORY` for the `History-Info` entries, and so
+     * on — each piece of an entry answers the same count as the entry.
+     *
+     * Read once, as the INVITE arrived, and the same for the rest of the
+     * call. A call this end placed has none of them: zero.
+     *
+     * Safety
+     *
+     * `out_count` must point at one `size_t`.
+     */
+    fun callIdentityCount(stack: Long, call: Long, which: Long): Long {
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_call_identity_count(stack, call, which, countSlot))
+        return countSlot[0]
+    }
+
+    /**
+     * One piece of one entry of a call's identity lists, copied into the
+     * caller's buffer with a trailing NUL: the shape
+     * `sipral_subscription_dialog_text` has, for the same reason — the text
+     * is the library's, and a pointer to it is one a caller could outlive.
+     *
+     * `out_needed` always receives the bytes needed including the NUL, so a
+     * caller that brought nothing can ask with `capacity` zero and ask again
+     * with room; a buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with
+     * nothing written. A piece the entry does not have — a display name
+     * the field did not write — is one byte, the NUL. An index past the
+     * end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     *
+     * Safety
+     *
+     * `buffer` must be writable for `capacity` bytes or null with a capacity
+     * of zero, and `out_needed` must point at one `size_t`.
+     */
+    fun callIdentityText(stack: Long, call: Long, which: Long, index: Long, buffer: ByteArray): Long {
+        val neededSlot = LongArray(1)
+        check(SipralNative.sipral_call_identity_text(stack, call, which, index, buffer, neededSlot))
+        return neededSlot[0]
     }
 
     /**

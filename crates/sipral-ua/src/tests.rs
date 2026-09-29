@@ -31,15 +31,15 @@ use crate::{
     Screening, StatusCode, TransportId, TransportProtocol, UaError, Uri,
 };
 
-const UDP: TransportId = TransportId(1);
+pub(crate) const UDP: TransportId = TransportId(1);
 const TCP: TransportId = TransportId(2);
 const HOUR: Duration = Duration::from_hours(1);
 
-fn local() -> SocketAddr {
+pub(crate) fn local() -> SocketAddr {
     "192.0.2.1:5060".parse().expect("a local address")
 }
 
-fn registrar() -> SocketAddr {
+pub(crate) fn registrar() -> SocketAddr {
     "192.0.2.9:5060".parse().expect("the registrar's address")
 }
 
@@ -49,12 +49,12 @@ fn elsewhere() -> SocketAddr {
     "198.51.100.7:5060".parse().expect("another address")
 }
 
-fn uri(text: &str) -> Uri {
+pub(crate) fn uri(text: &str) -> Uri {
     Uri::parse_str(text).expect("a URI")
 }
 
 /// A user agent with one UDP transport bound.
-fn agent(now: Instant) -> UserAgent {
+pub(crate) fn agent(now: Instant) -> UserAgent {
     let mut agent = UserAgent::new(EndpointConfig::default(), [11; 32]).unwrap();
     agent
         .receive(
@@ -88,7 +88,7 @@ fn agent_with(config: EndpointConfig, now: Instant) -> UserAgent {
     agent
 }
 
-fn account() -> Account {
+pub(crate) fn account() -> Account {
     Account::new(
         uri("sip:alice@example.com"),
         uri("sip:example.com"),
@@ -99,7 +99,7 @@ fn account() -> Account {
 }
 
 /// Everything the agent wants written, drained.
-fn transmits(agent: &mut UserAgent) -> Vec<Vec<u8>> {
+pub(crate) fn transmits(agent: &mut UserAgent) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     while let Some(transmit) = agent.poll_transmit() {
         out.push(transmit.payload.to_vec());
@@ -108,13 +108,13 @@ fn transmits(agent: &mut UserAgent) -> Vec<Vec<u8>> {
 }
 
 /// The one message the agent wanted written.
-fn sent(agent: &mut UserAgent) -> Vec<u8> {
+pub(crate) fn sent(agent: &mut UserAgent) -> Vec<u8> {
     let mut all = transmits(agent);
     assert_eq!(all.len(), 1, "expected exactly one message out");
     all.pop().unwrap_or_default()
 }
 
-fn events(agent: &mut UserAgent) -> Vec<UaEvent> {
+pub(crate) fn events(agent: &mut UserAgent) -> Vec<UaEvent> {
     let mut out = Vec::new();
     while let Some(event) = agent.poll_event() {
         out.push(event);
@@ -122,19 +122,19 @@ fn events(agent: &mut UserAgent) -> Vec<UaEvent> {
     out
 }
 
-fn with<T>(bytes: &[u8], f: impl FnOnce(&RawMessage<'_>) -> T) -> T {
+pub(crate) fn with<T>(bytes: &[u8], f: impl FnOnce(&RawMessage<'_>) -> T) -> T {
     let mut scratch = ParseScratch::new();
     f(&parse(bytes, &mut scratch, ParseMode::Lenient).expect("a message"))
 }
 
-fn header(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
+pub(crate) fn header(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
     with(bytes, |message| {
         message.header(name).unwrap_or_default().to_vec()
     })
 }
 
 /// A response to a request the agent wrote, echoing what §8.2.6.2 requires.
-fn reply(request: &[u8], status: u16, reason: &str, extra: &str) -> Vec<u8> {
+pub(crate) fn reply(request: &[u8], status: u16, reason: &str, extra: &str) -> Vec<u8> {
     let mut out = format!("SIP/2.0 {status} {reason}\r\n").into_bytes();
     for (name, value) in [
         ("Via", header(request, HeaderName::Via)),
@@ -163,7 +163,7 @@ fn granted(request: &[u8], seconds: u32) -> Vec<u8> {
     )
 }
 
-fn deliver(agent: &mut UserAgent, bytes: &[u8], now: Instant) {
+pub(crate) fn deliver(agent: &mut UserAgent, bytes: &[u8], now: Instant) {
     agent
         .receive(
             Input::Datagram {
@@ -2506,18 +2506,25 @@ fn the_plumbing_of_a_registration_does_not_reach_the_application() {
 
 // -- calls -------------------------------------------------------------------
 
-const OFFER: &[u8] = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+pub(crate) const OFFER: &[u8] = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
 t=0 0\r\nm=audio 8000 RTP/AVP 0\r\n";
-const ANSWER: &[u8] = b"v=0\r\no=- 2 2 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+pub(crate) const ANSWER: &[u8] =
+    b"v=0\r\no=- 2 2 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
 t=0 0\r\nm=audio 9000 RTP/AVP 0\r\n";
 
-fn outgoing() -> OutgoingCall {
+pub(crate) fn outgoing() -> OutgoingCall {
     OutgoingCall::new(uri("sip:bob@example.com")).offer(Arc::from(OFFER))
 }
 
 /// A response to a request the agent wrote, with a `To` tag that names a
 /// dialog and a body when there is one.
-fn answered(request: &[u8], status: u16, reason: &str, tag: &str, body: Option<&[u8]>) -> Vec<u8> {
+pub(crate) fn answered(
+    request: &[u8],
+    status: u16,
+    reason: &str,
+    tag: &str,
+    body: Option<&[u8]>,
+) -> Vec<u8> {
     let to = String::from_utf8_lossy(&header(request, HeaderName::To)).into_owned();
     let to = if to.contains(";tag=") {
         to
@@ -2550,7 +2557,7 @@ fn answered(request: &[u8], status: u16, reason: &str, tag: &str, body: Option<&
 }
 
 /// An INVITE arriving from the far end.
-fn incoming_invite(branch: &str, body: Option<&[u8]>) -> Vec<u8> {
+pub(crate) fn incoming_invite(branch: &str, body: Option<&[u8]>) -> Vec<u8> {
     let mut out = format!(
         "INVITE sip:alice@192.0.2.1 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch};rport\r\n\
@@ -2573,12 +2580,12 @@ Contact: <sip:bob@192.0.2.9>\r\n"
     out
 }
 
-fn text(bytes: &[u8], name: HeaderName<'_>) -> String {
+pub(crate) fn text(bytes: &[u8], name: HeaderName<'_>) -> String {
     String::from_utf8_lossy(&header(bytes, name)).into_owned()
 }
 
 /// A request the far end sends inside a dialog.
-fn peer_request(
+pub(crate) fn peer_request(
     from: &str,
     to: &str,
     call_id: &str,
@@ -2611,7 +2618,7 @@ Contact: <sip:bob@192.0.2.9>\r\n"
 
 /// A request from the far end inside a dialog we answered, mirroring the
 /// tags of the 200 we sent.
-fn in_dialog(ours: &[u8], method: &str, branch: &str, cseq: u32) -> Vec<u8> {
+pub(crate) fn in_dialog(ours: &[u8], method: &str, branch: &str, cseq: u32) -> Vec<u8> {
     peer_request(
         &text(ours, HeaderName::From),
         &text(ours, HeaderName::To),
@@ -2625,7 +2632,13 @@ fn in_dialog(ours: &[u8], method: &str, branch: &str, cseq: u32) -> Vec<u8> {
 
 /// And one inside a dialog this end opened, where From and To are the other
 /// way round because they are written by whoever sends.
-fn reversed(ours: &[u8], method: &str, branch: &str, cseq: u32, body: Option<&[u8]>) -> Vec<u8> {
+pub(crate) fn reversed(
+    ours: &[u8],
+    method: &str,
+    branch: &str,
+    cseq: u32,
+    body: Option<&[u8]>,
+) -> Vec<u8> {
     peer_request(
         &text(ours, HeaderName::To),
         &text(ours, HeaderName::From),
@@ -2676,7 +2689,7 @@ fn body_of(bytes: &[u8]) -> String {
     })
 }
 
-fn ended(agent: &mut UserAgent) -> Option<(CallHandle, CallEndReason)> {
+pub(crate) fn ended(agent: &mut UserAgent) -> Option<(CallHandle, CallEndReason)> {
     events(agent).into_iter().find_map(|event| match event {
         UaEvent::CallEnded { call, reason, .. } => Some((call, reason)),
         _ => None,
@@ -2684,7 +2697,11 @@ fn ended(agent: &mut UserAgent) -> Option<(CallHandle, CallEndReason)> {
 }
 
 /// Place a call, take the 200, and be up.
-fn call_up(agent: &mut UserAgent, account: AccountId, now: Instant) -> (CallHandle, Vec<u8>) {
+pub(crate) fn call_up(
+    agent: &mut UserAgent,
+    account: AccountId,
+    now: Instant,
+) -> (CallHandle, Vec<u8>) {
     let call = agent
         .call(account, &outgoing(), now)
         .expect("the INVITE goes");
@@ -2873,6 +2890,7 @@ fn a_refused_call_says_what_it_was_refused_with() {
                 reason,
                 status,
                 response,
+                ..
             } => Some((call, reason, status, response.is_some())),
             _ => None,
         })
@@ -4290,6 +4308,7 @@ fn a_call_that_comes_in_is_matched_to_the_line_it_was_addressed_to() {
                 call,
                 account,
                 request,
+                ..
             } => Some((call, account, request)),
             _ => None,
         })
@@ -7141,7 +7160,7 @@ fn incoming_100rel(branch: &str, require: bool) -> Vec<u8> {
     )
 }
 
-fn call_arriving(agent: &mut UserAgent, bytes: &[u8], now: Instant) -> CallHandle {
+pub(crate) fn call_arriving(agent: &mut UserAgent, bytes: &[u8], now: Instant) -> CallHandle {
     deliver(agent, bytes, now);
     transmits(agent);
     events(agent)
@@ -8132,6 +8151,7 @@ fn a_policy_that_takes_the_call_changes_nothing() {
                 call,
                 account,
                 request,
+                ..
             } => Some((call, account, request)),
             _ => None,
         })

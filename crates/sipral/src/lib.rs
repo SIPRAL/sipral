@@ -252,6 +252,18 @@ pub use sipral_ua::{
     Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit, TransportId,
     TransportProtocol, UaError, UaEvent, Uri, UserAgent,
 };
+/// The whole user agent, so that a softphone depends on this crate and nothing
+/// else: accounts, registration, calls, hold, transfer, and the five calls
+/// that drive them.
+/// Who is on a call and how it asked to be answered, why it ended, and where
+/// to send it instead: RFC 3325's asserted identity behind a per-account
+/// trust gate, RFC 3323's privacy, RFC 5806's `Diversion`, RFC 7044's
+/// `History-Info`, `verstat`, RFC 5373's answer modes, `Alert-Info`, RFC
+/// 3326's `Reason`, and a 3xx redirect.
+pub use sipral_ua::{
+    AnswerMode, AnswerModeField, Answering, CallIdentity, CallerIdentity, Diversion, HistoryEntry,
+    Party, Privacy, Reason, ReasonProtocol, Redirect, RemoteParty, Retarget, RingSource, Verstat,
+};
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

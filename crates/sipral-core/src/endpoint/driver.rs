@@ -90,6 +90,10 @@ pub struct Endpoint {
     /// The INVITEs a CANCEL has gone out for, so that a 487 can be told from
     /// an ordinary refusal and a 2xx from a race that was lost.
     pub(super) cancelled: HashSet<TransactionId<InviteClient>>,
+    /// The `Reason` value (RFC 3326) the CANCEL of each INVITE is to carry,
+    /// when it was asked for with one: kept here because a CANCEL asked for
+    /// before any provisional response goes only once one arrives (§9.1).
+    pub(super) cancel_reasons: HashMap<TransactionId<InviteClient>, Box<[u8]>>,
     /// Reliable provisional responses in both directions (RFC 3262).
     pub(super) reliable: Reliables,
     /// The INVITEs and UPDATEs running inside dialogs (RFC 3261 §14), which
@@ -167,6 +171,7 @@ impl Endpoint {
             hit: Vec::new(),
             local_tags: HashMap::new(),
             cancelled: HashSet::new(),
+            cancel_reasons: HashMap::new(),
             reliable: Reliables::new(),
             reinvites: Reinvites::new(),
             challenges: Challenges::new(),
@@ -465,6 +470,7 @@ impl Endpoint {
 
     pub(super) fn forget_cancelled(&mut self, id: TransactionId<InviteClient>) {
         self.cancelled.remove(&id);
+        self.cancel_reasons.remove(&id);
     }
 
     /// Record that a client transaction is inside a dialog.
@@ -667,6 +673,27 @@ impl Endpoint {
             crate::transaction::CancelDisposition::Now => self.send_cancel(invite, now),
             crate::transaction::CancelDisposition::TooLate => Err(CancelError::AlreadyAnswered),
         }
+    }
+
+    /// [`Endpoint::cancel`], with a `Reason` (RFC 3326 §2) on the CANCEL:
+    /// `reason` is the field's value as it goes on the wire, one or several
+    /// comma-separated reason-values.
+    ///
+    /// # Errors
+    /// As [`Endpoint::cancel`].
+    pub fn cancel_with_reason(
+        &mut self,
+        invite: TransactionId<InviteClient>,
+        reason: &[u8],
+        now: Instant,
+    ) -> Result<(), CancelError> {
+        if self.transactions.invite_client(invite).is_none() {
+            return Err(CancelError::NoSuchTransaction);
+        }
+        self.cancel_reasons
+            .entry(invite)
+            .or_insert_with(|| Box::from(reason));
+        self.cancel(invite, now)
     }
 
     /// Acknowledge a 2xx (§13.2.2.4).
