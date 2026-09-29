@@ -7,7 +7,7 @@
 //! reading from an optimised build on a quiet machine:
 //!
 //! ```text
-//! cargo test -p sipral-media --release --lib nway::realtime -- --ignored --nocapture
+//! cargo test -p sipral-media --release --lib nway::realtime_tests -- --ignored --nocapture
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
