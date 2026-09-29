@@ -1436,6 +1436,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 - **The Kotlin binding loads with every 0.31 event arm.** Each payload arm's numbers now cross JNI in one `long[]`, so the event's `deliver` stays inside the JVM's 255 parameter slots; `SipralEvent.payload` reads the same.
 - **The Swift binding hands an empty list over as a null pointer.** `Sipral.callAnswerWith` with no header fields was refused `headers is not read here`, because an empty Swift array still carried a buffer; every printed wrapper that takes a list now passes null and zero for an empty one, as the .NET and Kotlin layers already did.
+- **Every result a lab run prints has a row in the interop matrix.**
+  `scripts/interop-matrix.py` knew section headers only from its own list, so
+  a step it was not told about was read as the tail of the step above it: the
+  field failures, the NAT pair with its first STUN server dead, the call whose
+  address moves and the call placed 330 s after registering all went
+  unreported, and a FAIL in any of them could have turned the TURN relay's
+  rows into failures. Every header lab.sh prints now ends a section, those
+  four steps have rows and features, and an `ok`/`FAIL` line in a step that
+  produced no row stops the generator, in both modes, naming the line.
+  `--self-test` runs the generator's own tests. In the same batch,
+  `scripts/bench.sh scale` counts each call it asks for once: a call never
+  answered is no longer counted again as never ended, and a call that fails
+  early no longer stops the placing short of the calls asked for.
 - **A 2xx lost on UDP is sent again until its ACK arrives.** RFC 3261
   §13.3.1.4 has the answering end repeat its 2xx, T1 doubling up to T2, and
   nothing did: the INVITE's retransmissions stop at the first provisional,
