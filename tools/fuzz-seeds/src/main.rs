@@ -46,8 +46,8 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use sipral_core::msg::{
-    HeaderName, Method, ParseMode, ParseScratch, RequestBuilder, ResponseBuilder, StatusCode,
-    StreamFramer, parse,
+    BuiltMultipart, HeaderName, MediaTypeRef, Method, Multipart, MultipartBuilder, ParseMode,
+    ParseScratch, Part, RequestBuilder, ResponseBuilder, StatusCode, StreamFramer, parse,
 };
 use sipral_core::replay::Recording;
 use sipral_core::sdp::{self, Crypto};
@@ -72,6 +72,7 @@ use sipral_rtp::{
     SourceDescriptionBuilder, UNAVAILABLE, VoipMetricsBlock, XrPacketBuilder,
 };
 use sipral_ua::dtmf::parse_info;
+use sipral_ua::siprec::{RecordedCall, RecordedParty, RecordedStream, RecordingMetadata};
 use sipral_ua::{DialogInfo, MessageSummary};
 
 /// Something this program will not write out, because it is not what it says
@@ -769,6 +770,97 @@ fn dialoginfo_seeds() -> Result<Vec<Seed>, Wrong> {
         out.push((name, document.as_bytes().to_vec()));
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------- multipart
+
+/// The `multipart` target reads its input's first line as the
+/// `Content-Type` and the rest as the body. A seed is a body the builder
+/// writes: a recording session's INVITE body (RFC 7866 §6.1, the SDP and the
+/// metadata), a body with a nested `multipart/alternative`, and one whose
+/// parts carry a disposition with `handling` and a `Content-ID`.
+fn multipart_seeds() -> Result<Vec<Seed>, Wrong> {
+    let call = RecordedCall {
+        session_id: "hVpd7YQgRW2nD22h7q60JQ==".to_owned(),
+        sip_session_id: Some("ab30317f1a784dc48ff824d0d3715d86".to_owned()),
+        group_id: None,
+        started: Some("2026-09-21T10:00:00Z".to_owned()),
+        parties: vec![
+            RecordedParty {
+                id: "srfBElmCRp2QB23b7Mpk0w==".to_owned(),
+                aor: "sip:alice@example.com".to_owned(),
+                name: Some("Alice".to_owned()),
+                sends: vec![RecordedStream {
+                    id: "i1Pz3to5hGk8fuXl+PbwCw==".to_owned(),
+                    label: "1".to_owned(),
+                }],
+            },
+            RecordedParty {
+                id: "zSfPoSvdSDCmU3A3TRDxAw==".to_owned(),
+                aor: "sip:bob@example.com".to_owned(),
+                name: None,
+                sends: vec![RecordedStream {
+                    id: "UAAMm5GRQKSCMVvLyl4rFw==".to_owned(),
+                    label: "2".to_owned(),
+                }],
+            },
+        ],
+    };
+    let wrong = |what: &str, why: &dyn std::fmt::Display| Wrong(format!("the {what} seed: {why}"));
+    let recording = sipral_ua::siprec::recording_session_body(&offer(), &call.metadata())
+        .map_err(|why| wrong("recording-session", &why))?;
+    let inner = MultipartBuilder::alternative()
+        .part(Part::new("text/plain", b"Call me back"))
+        .part(Part::new("text/html", b"<p>Call me <b>back</b></p>"))
+        .build()
+        .map_err(|why| wrong("nested", &why))?;
+    let nested = MultipartBuilder::mixed()
+        .part(Part::new("application/sdp", &offer()))
+        .part(Part::new(inner.content_type(), inner.body()))
+        .build()
+        .map_err(|why| wrong("nested", &why))?;
+    let handling = MultipartBuilder::mixed()
+        .part(Part::new("application/sdp", &offer()).content_id("sdp@example.com"))
+        .part(
+            Part::new("application/vnd.example.extra", b"\x00\x01opaque")
+                .disposition("signal;handling=optional")
+                .content_id("extra@example.com"),
+        )
+        .build()
+        .map_err(|why| wrong("handling-optional", &why))?;
+    let mut out = Vec::new();
+    for (name, built, parts) in [
+        ("recording-session", &recording, 2),
+        ("nested", &nested, 2),
+        ("handling-optional", &handling, 2),
+    ] {
+        read_multipart(name, built, parts)?;
+        let mut seed = built.content_type().as_bytes().to_vec();
+        seed.push(b'\n');
+        seed.extend_from_slice(built.body());
+        out.push((name, seed));
+    }
+    Ok(out)
+}
+
+/// A seed's body read back as the target reads it: the parts are all there,
+/// and a recording session's metadata reads as metadata.
+fn read_multipart(name: &str, built: &BuiltMultipart, parts: usize) -> Result<(), Wrong> {
+    let content_type = MediaTypeRef::parse(built.content_type().as_bytes())
+        .map_err(|why| Wrong(format!("the {name} seed's type does not parse: {why:?}")))?;
+    let multipart = Multipart::parse(&content_type, built.body())
+        .map_err(|why| Wrong(format!("the {name} seed does not read back: {why}")))?;
+    if multipart.parts().len() != parts {
+        return Err(Wrong(format!(
+            "the {name} seed reads as {} parts, not {parts}",
+            multipart.parts().len()
+        )));
+    }
+    if let Some(metadata) = multipart.find("application", "rs-metadata+xml") {
+        RecordingMetadata::parse(metadata.body())
+            .map_err(|why| Wrong(format!("the {name} seed's metadata does not read: {why}")))?;
+    }
+    Ok(())
 }
 
 // -------------------------------------------------------- message-summary (MWI)
@@ -2784,6 +2876,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("media_plc", media_plc_seeds()?),
         ("media_resample", media_resample_seeds()?),
         ("media_vad", media_vad_seeds()?),
+        ("multipart", multipart_seeds()?),
         ("mwi", mwi_seeds()?),
         ("parse", sip_seeds()?),
         ("replay", replay_seeds()?),

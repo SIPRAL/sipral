@@ -1,0 +1,30 @@
+multipart/mixed;boundary=sipral-d32c227caeb9b2dc
+--sipral-d32c227caeb9b2dc
+Content-Type: application/sdp
+
+v=0
+o=alice 2890844526 2890844526 IN IP4 192.0.2.1
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+m=audio 49170 RTP/AVP 0 8 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-15
+a=sendrecv
+
+--sipral-d32c227caeb9b2dc
+Content-Type: multipart/alternative;boundary=sipral-5e0117927ecce82c
+
+--sipral-5e0117927ecce82c
+Content-Type: text/plain
+
+Call me back
+--sipral-5e0117927ecce82c
+Content-Type: text/html
+
+<p>Call me <b>back</b></p>
+--sipral-5e0117927ecce82c--
+
+--sipral-d32c227caeb9b2dc--

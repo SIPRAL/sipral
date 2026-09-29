@@ -1,0 +1,61 @@
+multipart/mixed;boundary=sipral-ee53b67611b54400
+--sipral-ee53b67611b54400
+Content-Type: application/sdp
+
+v=0
+o=alice 2890844526 2890844526 IN IP4 192.0.2.1
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+m=audio 49170 RTP/AVP 0 8 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-15
+a=sendrecv
+
+--sipral-ee53b67611b54400
+Content-Type: application/rs-metadata+xml
+Content-Disposition: recording-session
+
+<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns="urn:ietf:params:xml:ns:recording:1">
+  <datamode>complete</datamode>
+  <session session_id="hVpd7YQgRW2nD22h7q60JQ==">
+    <sipSessionID>ab30317f1a784dc48ff824d0d3715d86</sipSessionID>
+  </session>
+  <participant participant_id="srfBElmCRp2QB23b7Mpk0w==">
+    <nameID aor="sip:alice@example.com">
+      <name>Alice</name>
+    </nameID>
+  </participant>
+  <participant participant_id="zSfPoSvdSDCmU3A3TRDxAw==">
+    <nameID aor="sip:bob@example.com">
+    </nameID>
+  </participant>
+  <stream stream_id="i1Pz3to5hGk8fuXl+PbwCw==" session_id="hVpd7YQgRW2nD22h7q60JQ==">
+    <label>1</label>
+  </stream>
+  <stream stream_id="UAAMm5GRQKSCMVvLyl4rFw==" session_id="hVpd7YQgRW2nD22h7q60JQ==">
+    <label>2</label>
+  </stream>
+  <sessionrecordingassoc session_id="hVpd7YQgRW2nD22h7q60JQ==">
+    <associate-time>2026-09-21T10:00:00Z</associate-time>
+  </sessionrecordingassoc>
+  <participantsessionassoc participant_id="srfBElmCRp2QB23b7Mpk0w==" session_id="hVpd7YQgRW2nD22h7q60JQ==">
+    <associate-time>2026-09-21T10:00:00Z</associate-time>
+  </participantsessionassoc>
+  <participantsessionassoc participant_id="zSfPoSvdSDCmU3A3TRDxAw==" session_id="hVpd7YQgRW2nD22h7q60JQ==">
+    <associate-time>2026-09-21T10:00:00Z</associate-time>
+  </participantsessionassoc>
+  <participantstreamassoc participant_id="srfBElmCRp2QB23b7Mpk0w==">
+    <send>i1Pz3to5hGk8fuXl+PbwCw==</send>
+    <recv>UAAMm5GRQKSCMVvLyl4rFw==</recv>
+  </participantstreamassoc>
+  <participantstreamassoc participant_id="zSfPoSvdSDCmU3A3TRDxAw==">
+    <send>UAAMm5GRQKSCMVvLyl4rFw==</send>
+    <recv>i1Pz3to5hGk8fuXl+PbwCw==</recv>
+  </participantstreamassoc>
+</recording>
+
+--sipral-ee53b67611b54400--
