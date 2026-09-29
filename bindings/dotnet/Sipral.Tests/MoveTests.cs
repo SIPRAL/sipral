@@ -85,8 +85,14 @@ public sealed class MoveTests
         }
     }
 
+    // a tone, not a constant: Opus rejects DC, so a constant comes out loud
+    // only for the few milliseconds of its onset, and a call whose buffer
+    // skipped those frames heard nothing loud at all. Forty samples a period
+    // is 200 Hz at 8 kHz and 1.2 kHz at 48 kHz
     private static void Speak(CallMedia media) =>
-        media.SendAudio(Enumerable.Repeat((short)0x2000, media.FrameSamples * 100).ToArray());
+        media.SendAudio(Enumerable.Range(0, media.FrameSamples * 100)
+            .Select(n => (short)(8000 * Math.Sin(2 * Math.PI * n / 40)))
+            .ToArray());
 
     [Fact]
     public async Task TheCallIsOfferedAtTheNewAddressAndHeardBothWaysAfter()

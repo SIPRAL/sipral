@@ -13,7 +13,9 @@ crosses both ways from that socket once the far end answers.
 
 from __future__ import annotations
 
+import array
 import asyncio
+import math
 import socket
 import sys
 import unittest
@@ -103,7 +105,15 @@ class ACallMovesWithTheNetwork(_Pair):
         return False
 
     def speak(self, media) -> None:
-        media.send_audio(bytes([0x00, 0x20]) * media.frame_samples * 100)
+        # a tone, not a constant: Opus rejects DC, so a constant comes out
+        # loud only for the few milliseconds of its onset, and a call whose
+        # buffer skipped those frames heard nothing loud at all. Forty
+        # samples a period is 200 Hz at 8 kHz and 1.2 kHz at 48 kHz
+        count = media.frame_samples * 100
+        tone = array.array(
+            "h", (int(8000 * math.sin(2 * math.pi * n / 40)) for n in range(count))
+        )
+        media.send_audio(tone.tobytes())
 
     async def test_the_call_is_offered_at_the_new_address_and_heard_both_ways_after(self) -> None:
         call, answered = await self.connect()
