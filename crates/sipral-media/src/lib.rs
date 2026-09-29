@@ -61,6 +61,7 @@ pub mod g711;
 pub mod g722;
 pub mod g729;
 pub mod mix;
+pub mod nway;
 #[cfg(feature = "opus")]
 pub mod opus;
 pub mod plc;
