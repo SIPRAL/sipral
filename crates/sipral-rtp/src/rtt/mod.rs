@@ -12,6 +12,10 @@
 //!
 //! - [`TextSender`] gathers typed text into blocks, paces them, wraps them
 //!   in redundancy and sets the marker bit after a silence (§4, §5).
+//! - [`TextReceiver`] puts the blocks back in order from whichever copy
+//!   arrives first, drops the rest, waits a bounded time for a late one and
+//!   marks what could not be recovered (§5), and hands out
+//!   [`TextEvent`]s.
 //! - [`RedPayload`] and [`write_red`] are the RFC 2198 payload itself.
 //!
 //! Sans-I/O, like the rest of the crate: time is a [`Duration`] the caller
@@ -19,16 +23,23 @@
 //!
 //! Written from RFC 4103, RFC 2198 and ITU-T T.140.
 
+mod receiver;
 mod red;
 mod sender;
+mod t140;
 
 use core::fmt;
 use core::time::Duration;
 
+pub use receiver::{
+    Arrival, DEFAULT_MAX_EVENTS, DEFAULT_MAX_PENDING, DEFAULT_REORDER_WAIT, ReceiverConfig,
+    TextReceiver,
+};
 pub use red::{
     MAX_BLOCK_LEN, MAX_TIMESTAMP_OFFSET, RedError, RedPayload, RedundantBlock, write_red,
 };
 pub use sender::{BufferFull, DEFAULT_MAX_BUFFERED, SenderConfig, TextPacket, TextSender};
+pub use t140::TextEvent;
 
 /// The RTP timestamp clock of `t140` and of `red` carrying it (RFC 4103
 /// §3): milliseconds.
