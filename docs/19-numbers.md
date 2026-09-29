@@ -808,6 +808,46 @@ and third agree to the frame, 1 255 each; exact verdicts give 1 125. At any
 skew a device runs at the hangover costs nothing: up to 10 000 ppm no
 frame ran dry either way.
 
+## 29 September 2026 — `0.0.1`, an hour on six calls, again
+
+`scripts/lab.sh drift` with nothing shortened, at `d85bcb9`, the wave
+that brings ABI 0.29: six calls to Asterisk's echo held for sixty minutes,
+a report every five, the earpieces 250 ppm slow, true and 250 ppm fast,
+each once taking one frame a callback and once two. The same Linux x86-64
+lab machine as the hour above (Intel Xeon E5-2698 v4 at 2.2 GHz, Debian
+13), the harness built with `rustc 1.95.0` in `rust:1.95-trixie`, release
+profile, against Asterisk 22.10.1; G.711, 20 ms frames, the lab's cadenced
+tone. The flow passed.
+
+| After an hour | Slow, one | Slow, two | Control, one and two | Fast, one | Fast, two |
+|---|---|---|---|---|---|
+| Frames played | 179 455 | 179 454 | 179 500 | 179 545 | 179 544 |
+| Skew measured | −250.7 ppm | −256.3 ppm | 0.0 ppm | +250.7 ppm | +245.1 ppm |
+| Frames of drift absorbed (44.9 due) | 45 | 46 | 0 | 45 | 44 |
+| Dropped from a pause (shrunk) | 44 | 44 | 0 | 0 | 0 |
+| Stretched into a pause | 0 | 0 | 0 | 45 | 45 |
+| Played as silence, the buffer run dry | 0 | 0 | 0 | 0 | 0 |
+| Concealed, discarded late, discarded for overflow | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| Buffer depth at every report, target 20 ms | 40 ms | 40–60 ms | 20 ms | 20 ms | 20–40 ms |
+| Jitter at every report | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms |
+| Score at every report | 92 | 88–92 | 96 | 96 | 92–96 |
+| R factor, MOS-LQ, at every report | 93, 4.4 | 93, 4.4 | 93, 4.4 | 93, 4.4 | 93, 4.4 |
+| Session changes, stalls | 0, 0 | 0, 0 | 0, 0 | 0, 0 | 0, 0 |
+
+Every report heard between 9 669 and 10 019 audible frames against 9 664
+to 10 003 due. The one-frame earpieces' measured skew settled as the frames
+added up: −275.9, −271.2, −269.7 and −252.1 ppm for the slow one at five,
+ten, fifteen and twenty minutes, +206.9, +237.3, +247.2 and +252.1 for the
+fast one, and within 9 ppm of the given skew from the twentieth minute on.
+
+Set beside the hour of 24 September, what changed is the fast earpiece:
+there, none of its 44 frames of drift was stretched into a pause and all
+of them ran dry; here, 45 were stretched and none ran dry, on either
+callback size: the changes of 25 and 27 September above, measured then on
+the reviews' runs of a few minutes, held for the full hour. The slow
+earpieces read one frame above the 20 ms target at every report, and the
+two-frame one at times two; nothing was discarded for overflow.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty
