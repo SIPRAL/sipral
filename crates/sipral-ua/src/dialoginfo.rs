@@ -875,14 +875,25 @@ fn push_character(name: &[u8], out: &mut Vec<u8>) -> Result<(), DialogInfoError>
     let Some(digits) = name.strip_prefix(b"#") else {
         return Err(DialogInfoError::Refused("an entity reference"));
     };
-    let (digits, radix) = match digits.strip_prefix(b"x").or(digits.strip_prefix(b"X")) {
+    // XML 1.0 §4.1: CharRef is '&#' [0-9]+ ';' or '&#x' [0-9a-fA-F]+ ';',
+    // the x in lower case and no sign, which from_str_radix would take
+    let (digits, radix) = match digits.strip_prefix(b"x") {
         Some(hex) => (hex, 16),
         None => (digits, 10),
     };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return Err(DialogInfoError::Refused("a character reference"));
+    }
     let text = as_str(digits)?;
+    // and what it names must be a Char (§2.2): no C0 control but tab, line
+    // feed and carriage return, no surrogate, neither U+FFFE nor U+FFFF
     let point = u32::from_str_radix(text, radix)
         .ok()
         .and_then(char::from_u32)
+        .filter(|c| {
+            matches!(*c, '\t' | '\n' | '\r' | ' '..='\u{d7ff}' | '\u{e000}'..='\u{fffd}')
+                || *c >= '\u{10000}'
+        })
         .ok_or(DialogInfoError::Refused("a character reference"))?;
     let mut buffer = [0_u8; 4];
     out.extend_from_slice(point.encode_utf8(&mut buffer).as_bytes());
@@ -1059,6 +1070,30 @@ mod tests {
         ));
         let long = vec![b'a'; MAX_VALUE + 1];
         assert_eq!(unescape(&long), Err(DialogInfoError::TooLarge("value")));
+    }
+
+    #[test]
+    fn a_character_reference_is_held_to_xml_s_own_grammar() {
+        // XML 1.0 §4.1: `&#x` in lower case, digits only, and a Char (§2.2)
+        assert_eq!(unescape(b"&#x41;&#65;&#9;").expect("resolved"), b"AA\t");
+        for refused in [
+            &b"&#X41;"[..],
+            b"&#+65;",
+            b"&#x+41;",
+            b"&#-1;",
+            b"&#0;",
+            b"&#x1F;",
+            b"&#xFFFE;",
+            b"&#xFFFF;",
+            b"&#;",
+            b"&#x;",
+        ] {
+            assert!(
+                matches!(unescape(refused), Err(DialogInfoError::Refused(_))),
+                "{}",
+                String::from_utf8_lossy(refused)
+            );
+        }
     }
 
     #[test]
