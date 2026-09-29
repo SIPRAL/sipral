@@ -67,6 +67,18 @@
 #                               the NAT pair's call with its first STUN
 #                               server dead, both ends moving to coturn.
 #                               About three minutes
+#   scripts/lab.sh security     only the SRTP policy per account, through the
+#                               C ABI -- SDES required, DTLS-SRTP required
+#                               and off, set on the account and read back
+#                               from the encryption report -- straight at
+#                               Asterisk and through the proxy to
+#                               FreeSWITCH; then STIR/SHAKEN between two C
+#                               ABI stacks, one signing and one verifying,
+#                               with a certificate authority made for the run
+#                               (interop/stir/run.sh): a signed call verified
+#                               and carried, an unsigned one refused 428, one
+#                               signed by an authority nobody trusts refused
+#                               437 (part of a run that names nothing too)
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -479,7 +491,7 @@ fi
 # Skipped rather than fatal, on the same reasoning as the C harness above: a
 # machine that cannot build one still runs the rest of the lab.
 step "the socket-framed agent"
-if [ "$WANT" = compare ]; then
+if [ "$WANT" = compare ] || [ "$WANT" = security ]; then
     HEADLESS_APP=""
     HEADLESS_CLIENT=""
     printf '  note  not used by the comparison\n'
@@ -516,6 +528,9 @@ if [ -n "${SIPRAL_SWIFT_AGENT:-}" ]; then
 elif [ -z "$HARNESS_C" ]; then
     SWIFT_AGENT=""
     printf '  note  no libsipral_ffi to link against; that step is skipped\n'
+elif [ "$WANT" = security ]; then
+    SWIFT_AGENT=""
+    printf '  note  not used by the security step\n'
 elif ! command -v docker >/dev/null 2>&1; then
     SWIFT_AGENT=""
 else
@@ -684,7 +699,7 @@ flows() {
 # beside it, and its capture is written under its own name so that neither run
 # overwrites the other's.
 flows_c() {
-    local server="$1" capture="$2" beside
+    local server="$1" capture="$2" named="${3:-}" beside
     [ -n "$HARNESS_C" ] || return 0
     # the library comes from wherever the binary did, not from this
     # checkout's own target directory: the machine that runs the lab need not
@@ -697,6 +712,7 @@ flows_c() {
         -e SIPRAL_REQUIRE_AUDIO=1 \
         -e LD_LIBRARY_PATH=/lib-sipral \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        ${named:+-e SIPRAL_FLOWS="$named"} \
         -v "$HARNESS_C:/harness-c:ro" \
         -v "$beside:/lib-sipral:ro" \
         -v "$ROOT/interop/pcap:/pcap" \
@@ -711,6 +727,23 @@ flows_c() {
             sleep 1
             kill %1 2>/dev/null
             exit \$status"
+}
+
+# STIR/SHAKEN between two stacks of the C ABI in one container: the
+# certificates made there by interop/stir/run.sh, which then runs
+# `harness-c stir` against them -- three calls, each its own two stacks.
+stir_flow() {
+    local beside
+    [ -n "$HARNESS_C" ] || return 0
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    lab_run "STIR/SHAKEN between two C ABI stacks" $((LAB_START_APT_S + 3 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/interop/stir:/stir:ro" \
+        debian:trixie-slim sh /stir/run.sh
 }
 
 # The Python binding's example agent, run exactly as its own docstring says to
@@ -2840,6 +2873,31 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = referral ]; then
         fail "a REFER from outside any call: there is no C harness to listen with"
     else
         printf '  note  no C harness, so the REFER from outside any call is skipped with the other C flows\n'
+    fi
+fi
+
+# 8.10: the SRTP policy per account and the encryption report, through the C
+# ABI, against both servers -- the account and not the call holds the policy,
+# and the report read back names what the far end answered -- then
+# STIR/SHAKEN between two stacks of the C ABI, one signing and one
+# verifying, with a certificate authority made for the run.
+if [ "$WANT" = all ] || [ "$WANT" = security ]; then
+    if [ -n "$HARNESS_C" ]; then
+        step "SRTP required, DTLS-SRTP required and off, on the account -- straight at Asterisk"
+        flows_c asterisk security-asterisk-c acctsdes,acctdtls,acctoff \
+            && pass "asterisk, the policy per account" \
+            || fail "asterisk, the policy per account"
+        step "SRTP required, DTLS-SRTP required and off, on the account -- through the proxy"
+        flows_c kamailio security-proxy-c acctsdes,acctdtls,acctoff \
+            && pass "kamailio to freeswitch, the policy per account" \
+            || fail "kamailio to freeswitch, the policy per account"
+        step "STIR/SHAKEN between two C ABI stacks -- one signs, one verifies"
+        stir_flow && pass "signed and verified, unsigned refused 428, untrusted refused 437" \
+            || fail "STIR/SHAKEN between two C ABI stacks"
+    elif [ "$WANT" = security ]; then
+        fail "the security step: there is no C harness to run it with"
+    else
+        printf '  note  no C harness, so the security step is skipped with the other C flows\n'
     fi
 fi
 
