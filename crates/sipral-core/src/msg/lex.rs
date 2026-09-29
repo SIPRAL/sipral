@@ -470,6 +470,16 @@ mod tests {
     }
 
     #[test]
+    fn a_run_of_empty_parameters_as_long_as_a_message_costs_no_stack() {
+        // a message may carry a value of hundreds of kilobytes, and one call
+        // per empty field would be a stack frame per semicolon
+        let mut value = vec![b';'; 1 << 20];
+        value.extend_from_slice(b"a=1");
+        let (_, params) = Params::split(&value);
+        assert_eq!(params.get("a").as_deref(), Some(&b"1"[..]));
+    }
+
+    #[test]
     fn nothing_makes_the_lexer_panic() {
         for len in 0..14_usize {
             for seed in 0..80_u8 {
