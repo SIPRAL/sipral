@@ -719,6 +719,10 @@ struct endpoint {
 
     int sip_fd;
     int rtp_fd;
+    /* `harness-c stir`: a TCP connection the stack's signalling also runs
+     * on, bound as transport STIR_TCP_TRANSPORT -- a signed INVITE is too
+     * large for a datagram (RFC 3261 §18.1.1) -- or -1 */
+    int sip_tcp_fd;
     /* `FLOW_ICE_NAT` over TCP: the RTP socket's connection to the TURN
      * server, opened when the stack asks and read on every turn of the loop
      * from then on, media handle or not */
@@ -903,7 +907,17 @@ static void flush_signalling(struct endpoint *end)
         if (message.len == 0) {
             return;
         }
-        if (address_of(destination, &to) == 0) {
+        if (message.transport != SIPRAL_TRANSPORT_MAIN && end->sip_tcp_fd >= 0) {
+            size_t written = 0;
+            while (written < message.len) {
+                ssize_t put = send(end->sip_tcp_fd, out + written, message.len - written,
+                                   NO_SIGNAL);
+                if (put <= 0) {
+                    break;
+                }
+                written += (size_t)put;
+            }
+        } else if (address_of(destination, &to) == 0) {
             (void)sendto(end->sip_fd, out, message.len, 0,
                          (const struct sockaddr *)&to, sizeof to);
         }
@@ -917,10 +931,21 @@ static void flush_signalling(struct endpoint *end)
     }
 }
 
-/* Everything that has arrived on the signalling socket. */
+/* The transport number `harness-c stir` binds its TCP connections as. */
+#define STIR_TCP_TRANSPORT 1u
+
+/* Everything that has arrived on the signalling socket, and on the TCP
+ * connection beside it when there is one. */
 static void read_signalling(struct endpoint *end, uint64_t now)
 {
     static uint8_t in[DATAGRAM];
+    if (end->sip_tcp_fd >= 0) {
+        ssize_t got = recv(end->sip_tcp_fd, in, sizeof in, 0);
+        if (got > 0) {
+            (void)sipral_stack_receive_stream(end->stack, STIR_TCP_TRANSPORT, in, (size_t)got,
+                                              now);
+        }
+    }
     for (;;) {
         struct sockaddr_in from;
         socklen_t length = sizeof from;
@@ -1626,6 +1651,10 @@ static void seeds_for(unsigned which, uint8_t signalling[32], uint8_t media[32])
 
 static void close_endpoint(struct endpoint *end)
 {
+    if (end->sip_tcp_fd >= 0) {
+        (void)close(end->sip_tcp_fd);
+        end->sip_tcp_fd = -1;
+    }
     if (end->stack != SIPRAL_HANDLE_NONE) {
         (void)sipral_stack_destroy(end->stack);
         end->stack = SIPRAL_HANDLE_NONE;
@@ -1665,6 +1694,7 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     memset(end, 0, sizeof *end);
     end->sip_fd = -1;
     end->rtp_fd = -1;
+    end->sip_tcp_fd = -1;
     end->turn_fd = -1;
     end->seen.marker = MARKER;
     end->server = *remote;
@@ -4302,6 +4332,103 @@ static int fetch(const char *url, uint8_t *out, size_t room, size_t *len)
     return pclose(pipe) == 0 && *len > 0 && *len < room ? 0 : -1;
 }
 
+/* A socket that does not wait: a signalling connection is read on every
+ * turn of the loop, whether or not anything arrived. */
+static int unblocked(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    return flags < 0 ? -1 : fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+/* The TCP connection a signed call goes out on, and comes in on: the callee
+ * listens on the address its UDP socket has, the caller connects to it, and
+ * each binds its end as STIR_TCP_TRANSPORT -- what an application does when
+ * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` says a request will not fit a
+ * datagram, done before the request rather than after, since a signed
+ * INVITE never does. */
+static int stir_connect(struct endpoint *caller, struct endpoint *callee)
+{
+    struct sockaddr_in at;
+    struct sockaddr_in local;
+    socklen_t length = sizeof local;
+    char caller_local[SIPRAL_ADDRESS_BYTES];
+    char callee_local[SIPRAL_ADDRESS_BYTES];
+    int listener;
+    int one = 1;
+    sipral_status_t status;
+    if (address_of(callee->sip_address, &at) != 0) {
+        wrong_text("the callee has no address");
+        return -1;
+    }
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener < 0
+        || setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0
+        || bind(listener, (const struct sockaddr *)&at, sizeof at) != 0
+        || listen(listener, 1) != 0) {
+        wrong_text("the callee cannot listen on TCP");
+        if (listener >= 0) {
+            (void)close(listener);
+        }
+        return -1;
+    }
+    caller->sip_tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (caller->sip_tcp_fd < 0
+        || connect(caller->sip_tcp_fd, (const struct sockaddr *)&at, sizeof at) != 0
+        || getsockname(caller->sip_tcp_fd, (struct sockaddr *)&local, &length) != 0
+        || address_text(&local, caller_local, sizeof caller_local) != 0) {
+        wrong_text("the caller cannot connect on TCP");
+        (void)close(listener);
+        return -1;
+    }
+    callee->sip_tcp_fd = accept(listener, NULL, NULL);
+    (void)close(listener);
+    if (callee->sip_tcp_fd < 0 || unblocked(callee->sip_tcp_fd) != 0
+        || unblocked(caller->sip_tcp_fd) != 0) {
+        wrong_text("the callee never took the TCP connection");
+        return -1;
+    }
+    (void)snprintf(callee_local, sizeof callee_local, "%s", callee->sip_address);
+    status = sipral_stack_transport_bind(caller->stack, STIR_TCP_TRANSPORT,
+                                         SIPRAL_TRANSPORT_TCP, caller_local,
+                                         strlen(caller_local), callee->sip_address,
+                                         strlen(callee->sip_address), now_ms(), NULL);
+    if (status == SIPRAL_STATUS_OK) {
+        status = sipral_stack_transport_bind(callee->stack, STIR_TCP_TRANSPORT,
+                                             SIPRAL_TRANSPORT_TCP, callee_local,
+                                             strlen(callee_local), caller_local,
+                                             strlen(caller_local), now_ms(), NULL);
+    }
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_stack_transport_bind", status);
+        return -1;
+    }
+    return 0;
+}
+
+/* Place the call at STIR_CALLED, on the TCP connection above. */
+static int stir_place(struct endpoint *caller, const struct endpoint *callee)
+{
+    sipral_call_config_t call;
+    char target[192];
+    sipral_status_t status;
+    (void)snprintf(target, sizeof target, "sip:%s@%s", STIR_CALLED, callee->sip_address);
+    memset(&call, 0, sizeof call);
+    call.size = sizeof call;
+    call.target = target;
+    call.target_len = strlen(target);
+    call.media_address = caller->rtp_address;
+    call.media_address_len = strlen(caller->rtp_address);
+    call.destination = callee->sip_address;
+    call.destination_len = strlen(callee->sip_address);
+    call.transport = STIR_TCP_TRANSPORT;
+    status = sipral_call_place(caller->stack, caller->account, &call, &caller->call, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_place", status);
+        return -1;
+    }
+    return 0;
+}
+
 /* One call from a signing stack to a verifying one, each on its own
  * sockets in this process: the caller signs as STIR_CALLER with the key at
  * `key_path` whose chain is at `url` (both NULL for a caller that signs
@@ -4373,7 +4500,7 @@ static int stir_call(const char *label, const char *key_path, const char *url,
     stir_key_for_this_flow = NULL;
     stir_url_for_this_flow = NULL;
 
-    if (place(&caller, callee.sip_address, STIR_CALLED, 0u, &caller.call) != 0) {
+    if (stir_connect(&caller, &callee) != 0 || stir_place(&caller, &callee) != 0) {
         printf("  FAIL  %s — %s\n", label, trouble);
         close_endpoint(&caller);
         close_endpoint(&callee);
