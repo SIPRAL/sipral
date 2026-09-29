@@ -12,6 +12,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Call audio as files, and L16 on RTP.** `sipral_media::formats`
+  (none of it needs the `opus` feature): `ogg` writes RFC 3533 pages
+  (lacing, continued/BOS/EOS flags, granule positions, the CRC with
+  generator 0x04c11db7) and reads them back with every checksum,
+  sequence and continuation checked; `ogg_opus` writes a `.opus` file
+  from packets that are already encoded, RFC 7845's `OpusHead` and
+  `OpusTags` (vendor `sipral`), granule positions at 48 kHz, the pre-skip,
+  end trimming on the last page, and a page written out at least once a
+  second (configurable); `wav` streams sixteen-bit PCM to any
+  `Write + Seek`, stereo with the local side left and the remote side
+  right, patches the sizes at `finish`, and finishes a file past 4 GiB as
+  RF64 (EBU Tech 3306) instead of stopping. `sipral_media::l16` is RFC 3551
+  §4.5.11 L16: big-endian samples at any rate and channel count, stereo
+  interleaved left first, the static payload types 10 and 11, and the
+  `L16/rate[/channels]` rtpmap encoding. Not yet wired into the call
+  recording, the codec negotiation or the C ABI.
 - **A call's audio on Android survives what the platform does to it.**
   `SipralCallAudio` (in the `ConnectionService` helper) keeps one call's
   microphone and speaker through a cellular call answered over it — the
