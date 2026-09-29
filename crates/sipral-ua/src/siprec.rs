@@ -816,6 +816,10 @@ impl Writer {
                 c if c.is_control() => {
                     return Err(SiprecError::IllegalValue("a control character"));
                 }
+                // §2.2's Char skips these two, and a Rust string can hold them
+                '\u{FFFE}' | '\u{FFFF}' => {
+                    return Err(SiprecError::IllegalValue("a character XML excludes"));
+                }
                 c => self.out.push(c),
             }
         }
@@ -1422,6 +1426,23 @@ mod tests {
             m.to_xml(),
             Err(SiprecError::IllegalValue("a control character"))
         );
+    }
+
+    #[test]
+    fn a_noncharacter_xml_excludes_is_refused() {
+        // XML 1.0 §2.2: Char stops at #xFFFD, so #xFFFE and #xFFFF are not
+        // characters a document may hold
+        for bad in ["a\u{FFFE}b", "a\u{FFFF}b"] {
+            let mut m = call().metadata();
+            m.participants[0].name_ids[0].names[0].text = bad.into();
+            assert_eq!(
+                m.to_xml(),
+                Err(SiprecError::IllegalValue("a character XML excludes"))
+            );
+        }
+        let mut m = call().metadata();
+        m.participants[0].name_ids[0].names[0].text = "a\u{FFFD}\u{10000}b".into();
+        assert!(m.to_xml().is_ok());
     }
 
     #[test]
