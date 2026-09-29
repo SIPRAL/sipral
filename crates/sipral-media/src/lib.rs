@@ -57,6 +57,7 @@ builds it this way and why.\n"
 
 pub mod comfort_noise;
 pub mod drift;
+pub mod formats;
 pub mod g711;
 pub mod g722;
 pub mod g729;
