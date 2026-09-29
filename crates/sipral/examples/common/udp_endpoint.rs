@@ -96,6 +96,62 @@ impl Endpoint {
         Ok(SocketAddr::new(self.local.ip(), port))
     }
 
+    /// Bind the SIP socket again at `ip`, on the port it had, and tell the
+    /// agent its transport is open there now: what an application does
+    /// first when the address it was reached at is gone. The answer is where
+    /// the socket is.
+    ///
+    /// # Errors
+    /// Binding the new socket, or the agent refusing the transport.
+    pub(crate) fn rebind_sip(
+        &mut self,
+        ip: std::net::IpAddr,
+        now: Instant,
+    ) -> Result<SocketAddr, String> {
+        let sip = UdpSocket::bind(SocketAddr::new(ip, self.local.port()))
+            .or_else(|_| UdpSocket::bind(SocketAddr::new(ip, 0)))
+            .map_err(|error| format!("cannot bind at {ip}: {error}"))?;
+        sip.set_nonblocking(true)
+            .map_err(|error| format!("cannot make the SIP socket non-blocking: {error}"))?;
+        let local = sip
+            .local_addr()
+            .map_err(|error| format!("the SIP socket has no address: {error}"))?;
+        self.agent
+            .receive(
+                Input::TransportBound {
+                    transport: self.transport,
+                    protocol: TransportProtocol::Udp,
+                    local,
+                    remote: None,
+                },
+                now,
+            )
+            .map_err(|error| format!("cannot bind the transport again: {error}"))?;
+        self.sip = sip;
+        self.local = local;
+        Ok(local)
+    }
+
+    /// Offer `call` again from this endpoint's own address, on the port its
+    /// RTP socket already has — the answer to `UaEvent::CallAddressWanted`
+    /// once [`Endpoint::rebind_sip`] moved the endpoint. Every example's RTP
+    /// socket is bound to the wildcard address, so it goes on receiving at
+    /// the new address unchanged, and only the description has to say so.
+    /// A call that cannot be offered again is said on standard error.
+    pub(crate) fn readdress(&mut self, call: CallHandle, now: Instant) {
+        let Some(port) = self.media.get(&call).and_then(|media| media.port().ok()) else {
+            eprintln!("{call:?} has no media socket to offer again");
+            return;
+        };
+        let local = SocketAddr::new(self.local.ip(), port);
+        if let Err(error) = self
+            .engine
+            .readdress(&mut self.agent, call, local, None, now)
+        {
+            eprintln!("cannot offer {call:?} again at {local}: {error}");
+        }
+    }
+
     /// Forget a call's RTP socket once the call itself has ended, closing the
     /// port along with it. A process that places or answers one call and
     /// exits, such as `call.rs`, never notices its absence; one that keeps
@@ -142,12 +198,12 @@ impl Endpoint {
         }
         while let Some((call, destination, payload)) = self.engine.poll_rtcp(now) {
             if let Some(media) = self.media.get(&call) {
-                media.send(destination, &payload);
+                media.send_rtcp(destination, &payload);
             }
         }
         while let Some((call, destination, payload)) = self.engine.poll_farewell() {
             if let Some(media) = self.media.get(&call) {
-                media.send(destination, &payload);
+                media.send_rtcp(destination, &payload);
             }
         }
         // A DTLS-SRTP handshake record, from whichever of `dtls` or `ice`

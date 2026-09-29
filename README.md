@@ -87,7 +87,10 @@ again with the signalling carried over TLS instead of plain UDP, using
 `rustls` as that one example's own dependency (`cargo run --example tls
 --features example-tls`); `headless-agent.rs` is an agent that answers
 whatever calls it and repeats back whatever it hears, with no device and no
-room abstraction anywhere near it — the shape a voice agent embeds;
+room abstraction anywhere near it — the shape a voice agent embeds — and,
+given a registrar, registers behind it, places a call, offers ICE and follows
+its own address when the network under it changes, which is how
+[`docs/23-compared-with-pjsip.md`](docs/23-compared-with-pjsip.md) runs it;
 `headless-socket-agent.rs` carries the same call over `sipral-headless`'s
 socket protocol to a separate agent process (`--features headless`).
 

@@ -620,6 +620,25 @@ else
     fail "python3 not found, and scripts/interop-matrix.py needs it"
 fi
 
+# What `scripts/lab.sh compare` reads its numbers with (interop/compare/
+# wire.py), against captures and logs its own tests write byte by byte: the
+# comparison with PJSIP runs only on a machine with Docker, and a reading of
+# the wire that drifted would otherwise show only as a wrong table.
+step "the comparison's wire reader"
+if command -v python3 >/dev/null 2>&1; then
+    wire_out=$(mktemp)
+    if PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s interop/compare \
+        >"$wire_out" 2>&1; then
+        pass "python3 -m unittest discover, interop/compare"
+    else
+        fail "python3 -m unittest discover, interop/compare:"
+        sed 's/^/        /' "$wire_out"
+    fi
+    rm -f "$wire_out"
+else
+    fail "python3 not found, and interop/compare/wire.py needs it"
+fi
+
 # THIRD-PARTY-LICENSES.txt against the normal dependency graph of the crates
 # Sipral ships a binary of. tools/license-gen regenerates it from
 # `cargo tree` and each dependency's own registry checkout; this only asks

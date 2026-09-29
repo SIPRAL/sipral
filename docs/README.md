@@ -40,6 +40,7 @@ tree object survived both unchanged, so the code history is untouched.
 | [18-replay.md](18-replay.md) | the recorded-session format, what it cannot hold, and what a replay reproduces |
 | [19-numbers.md](19-numbers.md) | measured size, per-frame cost, call set-up time and memory, and how `scripts/bench.sh` produces each |
 | [20-security-model.md](20-security-model.md) | the threat model: what a hostile peer can do, what refuses it, where the keys come from, what is not read yet |
+| [23-compared-with-pjsip.md](23-compared-with-pjsip.md) | the same scenarios run for Sipral's headless agent and for pjsua against one Asterisk: registration, call set-up, memory, CPU, bad links, a moved address, the INVITE with ICE |
 
 ## Conventions
 
