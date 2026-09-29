@@ -1270,9 +1270,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `SIPRAL_REGISTRATION_STATE_UNVERIFIED` across the C ABI — instead of
   changing state in silence until a refresh failed minutes later.
 - **The reference loop no longer drops a name its resolver cannot answer.**
-  `sipral_ua::Runtime` tells the agent names stopped resolving and hands the
-  `ResolveNeeded` event to the application, where it used to leave the
-  dialog's question unanswered without a word.
+  `sipral_ua::Runtime` hands the `ResolveNeeded` event to the application,
+  where it used to leave the dialog's question unanswered without a word,
+  and tells the agent names stopped resolving when a registrar's own name
+  fails too, so one `Contact` naming nowhere does not put every binding into
+  recovery.
 - **The C ABI's documentation of a request too large for a datagram says
   what happens.** The call that asked for it is refused with
   `SIPRAL_STATUS_NOT_SENT` beside `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, and

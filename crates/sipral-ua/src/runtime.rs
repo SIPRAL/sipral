@@ -19,11 +19,13 @@
 //! `ToSocketAddrs` gives back and the RFC 3263 ordering never happens. A
 //! deployment that reaches a carrier through SRV supplies its own resolver —
 //! every platform has one, and on a phone it is the only one allowed to answer
-//! while the radio is asleep. A lookup the resolver cannot answer at all is
-//! not dropped: the loop tells the agent
+//! while the radio is asleep. A lookup the resolver cannot answer is not
+//! dropped: the loop hands the event on to the application with the name that
+//! did not resolve, and when a registrar's own name no longer resolves either
+//! it tells the agent
 //! [`UserAgent::name_resolution_lost`](crate::UserAgent::name_resolution_lost),
-//! whose registrations then say so, and hands the event on to the
-//! application with the name that did not resolve.
+//! whose registrations then say so. One name a far end made up is not a
+//! resolver that has gone.
 //!
 //! **TLS.** No implementation is linked here and none will be.
 //! `TransportProtocol::Tls` describes a transport the caller has already
@@ -46,6 +48,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sipral_core::endpoint::{EndpointConfig, Event, Host, Input, TransportId, TransportProtocol};
+use sipral_core::msg::HostRef;
 
 use crate::agent::UserAgent;
 use crate::event::UaEvent;
@@ -321,12 +324,14 @@ impl Runtime {
                             self.agent.endpoint().resolved(dialog, &addresses, protocol);
                         }
                     } else {
-                        // the resolver itself failed, which is the one thing
-                        // this loop knows and the stack cannot: the bindings
-                        // whose registrar was a name stop being trusted, and
                         // the application hears the name that did not
-                        // resolve rather than nothing at all
-                        self.agent.name_resolution_lost(now);
+                        // resolve rather than nothing at all; the bindings
+                        // whose registrar was a name stop being trusted only
+                        // when it is the resolver that failed, not one name
+                        // a far end wrote
+                        if self.resolver_is_gone(&host) {
+                            self.agent.name_resolution_lost(now);
+                        }
                         handler.on_event(
                             &mut self.agent,
                             UaEvent::Unclaimed(Event::ResolveNeeded {
@@ -507,6 +512,41 @@ impl Runtime {
     }
 }
 
+impl Runtime {
+    /// Whether a lookup of `failed` failed because names stopped resolving,
+    /// rather than because this one name does not exist.
+    ///
+    /// `std::net` gives the same error for both, and a far end can write any
+    /// name it likes in a `Contact`, so one failure proves nothing about the
+    /// resolver. The names that matter are the registrars': a registrar's own
+    /// name failing is the loss itself, and any other name failing is asked
+    /// about again with a registrar's name, which only a gone resolver fails
+    /// too. An agent with no registrar written as a name has nothing a
+    /// resolver vouched for, and so nothing to stop trusting.
+    fn resolver_is_gone(&self, failed: &Host) -> bool {
+        let registrars: Vec<(Host, Option<u16>)> = self
+            .agent
+            .accounts()
+            .into_iter()
+            .filter_map(|id| {
+                let uri = self.agent.account(id)?.registrar()?.sip()?;
+                matches!(uri.host, HostRef::Name(_)).then(|| (Host::from_ref(uri.host), uri.port))
+            })
+            .collect();
+        if registrars.is_empty() {
+            return false;
+        }
+        let same = |host: &Host| match (host, failed) {
+            (Host::Name(a), Host::Name(b)) => a.eq_ignore_ascii_case(b),
+            _ => false,
+        };
+        registrars.iter().any(|(host, _)| same(host))
+            || registrars
+                .iter()
+                .all(|(host, port)| (self.resolver)(host, *port, None).is_err())
+    }
+}
+
 /// How a name becomes addresses: [`look_up`], unless a test says otherwise.
 type Resolver = fn(&Host, Option<u16>, Option<TransportProtocol>) -> io::Result<Vec<SocketAddr>>;
 
@@ -538,8 +578,8 @@ fn look_up(
 #[cfg(test)]
 mod tests {
     use super::{Control, Handler, IDLE, Link, Runtime, sleep_for};
-    use crate::UserAgent;
     use crate::event::UaEvent;
+    use crate::{Account, UserAgent};
     use sipral_core::endpoint::{EndpointConfig, Event, OutgoingRequest, TransportProtocol};
     use sipral_core::msg::{HeaderName, Method, Uri};
     use std::net::SocketAddr;
@@ -825,13 +865,26 @@ mod tests {
             .to_owned()
     }
 
-    /// Registered, then the resolver goes: the loop that asked for a name
-    /// and got nothing back used to drop the question, and the stack went on
-    /// believing every address it had learned from one. Now the agent is
-    /// told its names stopped resolving, and the application hears which
-    /// name it was.
-    #[test]
-    fn a_name_the_resolver_cannot_answer_is_reported_and_not_dropped() {
+    /// What a machine whose resolver works answers: the registrar's name, and
+    /// no other, since `callee.invalid` exists nowhere (RFC 2606).
+    fn knows_the_registrar(
+        host: &sipral_core::endpoint::Host,
+        _port: Option<u16>,
+        _protocol: Option<TransportProtocol>,
+    ) -> std::io::Result<Vec<SocketAddr>> {
+        match *host {
+            sipral_core::endpoint::Host::Name(ref name) if &**name == "registrar.example" => {
+                Ok(vec!["127.0.0.1:5060".parse().expect("an address")])
+            }
+            _ => Err(std::io::Error::other("no such name")),
+        }
+    }
+
+    /// A loop whose account registers with a registrar written as a name,
+    /// looking names up with `resolver`, after a call it placed was answered
+    /// with a `Contact` naming `callee.invalid`: turned until that name has
+    /// been asked for, with what the application heard.
+    fn answered_by_a_name(resolver: super::Resolver) -> (Runtime, Recorder) {
         let far = std::net::UdpSocket::bind("127.0.0.1:0").expect("a far end");
         far.set_read_timeout(Some(Duration::from_secs(2)))
             .expect("a read timeout");
@@ -839,8 +892,15 @@ mod tests {
         let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
         let mut runtime =
             Runtime::bind(EndpointConfig::default(), [17; 32], local).expect("a loopback socket");
-        runtime.resolver = no_resolver;
+        runtime.resolver = resolver;
         let transport = runtime.transport();
+        runtime.agent().add_account(Account::new(
+            Uri::parse_str("sip:alice@registrar.example").expect("a URI"),
+            Uri::parse_str("sip:registrar.example").expect("a URI"),
+            Uri::parse_str("sip:alice@127.0.0.1").expect("a URI"),
+            transport,
+            far_address,
+        ));
         let t0 = Instant::now();
         let invite = OutgoingRequest::new(
             Method::Invite,
@@ -900,6 +960,17 @@ mod tests {
             "the name that did not resolve never reached the application: {:?}",
             recorder.seen
         );
+        (runtime, recorder)
+    }
+
+    /// Registered, then the resolver goes: the loop that asked for a name
+    /// and got nothing back used to drop the question, and the stack went on
+    /// believing every address it had learned from one. Now the agent is
+    /// told its names stopped resolving, and the application hears which
+    /// name it was.
+    #[test]
+    fn a_name_the_resolver_cannot_answer_is_reported_and_not_dropped() {
+        let (mut runtime, recorder) = answered_by_a_name(no_resolver);
         assert_eq!(
             runtime.agent().lifecycle(),
             crate::LifecycleState::ResolutionLost,
@@ -913,6 +984,29 @@ mod tests {
                     ..
                 }
             )),
+            "{:?}",
+            recorder.seen
+        );
+    }
+
+    /// One name a far end wrote that exists nowhere is not the resolver
+    /// going away: the application still hears the name, and the bindings
+    /// the resolver vouched for stay trusted, where a single made-up
+    /// `Contact` used to put the whole agent into recovery.
+    #[test]
+    fn a_name_that_does_not_exist_leaves_the_registrations_trusted() {
+        let (mut runtime, recorder) = answered_by_a_name(knows_the_registrar);
+        assert_ne!(
+            runtime.agent().lifecycle(),
+            crate::LifecycleState::ResolutionLost,
+            "one unknown name was taken for a resolver that had gone: {:?}",
+            recorder.seen
+        );
+        assert!(
+            !recorder
+                .seen
+                .iter()
+                .any(|event| matches!(*event, UaEvent::Lifecycle { .. })),
             "{:?}",
             recorder.seen
         );
