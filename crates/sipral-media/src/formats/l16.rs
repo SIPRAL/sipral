@@ -28,8 +28,8 @@ use core::fmt;
 /// The encoding name on an `a=rtpmap` line, and the `audio/L16` subtype.
 pub const ENCODING_NAME: &str = "L16";
 
-/// The packetisation interval RFC 3551 §4.5 gives as the default for L16, in
-/// milliseconds.
+/// The packetisation interval RFC 3551 §4.2 gives as the default for a
+/// sample-based encoding such as L16, in milliseconds.
 pub const DEFAULT_PTIME_MS: u32 = 20;
 
 /// Octets in one sample.

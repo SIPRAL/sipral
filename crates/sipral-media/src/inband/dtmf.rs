@@ -8,8 +8,9 @@
 //! out. Finding one is easy; the work is in refusing everything that is not
 //! one, and ITU-T Q.24 Annex A says where the line sits. Its Table A-1
 //! collects the receiver limits of the networks it surveyed, and where they
-//! differ the defaults here take the North American column, which is the one
-//! RFC 4733 §2.5.2.1 and most equipment follow:
+//! differ the defaults here take the North American column, which most
+//! equipment follows (RFC 4733 §3.1 quotes the same table for the 40 ms of
+//! tone and of pause it expects):
 //!
 //! | limit | must accept | must refuse | default here |
 //! |---|---|---|---|

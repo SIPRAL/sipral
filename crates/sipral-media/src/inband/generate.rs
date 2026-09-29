@@ -11,7 +11,7 @@
 //!
 //! # How long a digit sounds
 //!
-//! RFC 4733 §2.5.2.1 takes its floor from ITU-T Q.24 Table A-1: the
+//! RFC 4733 §3.1 takes its floor from ITU-T Q.24 Table A-1: the legacy
 //! switching equipment surveyed there expects a digit of at least 40 ms and
 //! a pause between digits of at least 40 ms, so [`MIN_TONE_MS`] and
 //! [`MIN_PAUSE_MS`] are those. The defaults are longer, 100 ms of tone and
@@ -25,7 +25,7 @@ use super::progress::{Cadence, ToneSpec};
 use super::{SampleRate, dbm0_to_peak, to_sample};
 
 /// The shortest digit Q.24's surveyed equipment recognises, in
-/// milliseconds, as RFC 4733 §2.5.2.1 quotes it.
+/// milliseconds, as RFC 4733 §3.1 quotes it.
 pub const MIN_TONE_MS: u32 = 40;
 
 /// The shortest pause between digits the same equipment expects.
