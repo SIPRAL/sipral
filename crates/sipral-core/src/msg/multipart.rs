@@ -85,7 +85,7 @@ impl MultipartLimits {
     /// The byte bound is the one a whole message is read within
     /// ([`super::Limits::DEFAULT`]), so no body that arrived in a message is
     /// refused for its size alone. A recording session's INVITE carries two
-    /// parts at one level (RFC 7866 §6.1); the rest is room.
+    /// parts at one level (RFC 7866 §9.1); the rest is room.
     pub const DEFAULT: Self = Self {
         max_parts: 32,
         max_depth: 4,
@@ -443,7 +443,7 @@ impl<'a> Multipart<'a> {
     }
 
     /// Whether every part the sender requires is one this receiver
-    /// understands (RFC 3261 §8.2.3, RFC 5621 §8.2).
+    /// understands (RFC 5621 §8.2 and §8.3; answered with the 415 of §8.4).
     ///
     /// `understood` is asked about every part that is not itself multipart,
     /// and can judge its type, its disposition or both. A nested multipart
@@ -506,7 +506,7 @@ fn part_check<'a, F: Fn(&BodyPart<'a>) -> bool>(
 }
 
 /// A required part the receiver does not understand: the request is answered
-/// with 415 (RFC 3261 §8.2.3).
+/// with 415 (RFC 3261 §8.2.3, RFC 5621 §8.4).
 #[derive(Clone, Copy, Debug)]
 pub struct Unsupported<'a> {
     content_type: Option<MediaTypeRef<'a>>,

@@ -46,12 +46,14 @@ use sipral_core::sdp::SessionDescription;
 
 use crate::dialoginfo::{Attributes, DialogInfoError, Node, Reader, as_str, local_name, unescape};
 
-/// The media type of recording metadata (RFC 7865, RFC 7866).
+/// The media type of recording metadata, as RFC 7865 §5 names it and as
+/// this crate writes it. RFC 7866 §9 and its examples call the same body
+/// `application/rs-metadata`, which [`read_recording_offer`] accepts too.
 pub const METADATA_CONTENT_TYPE: &str = "application/rs-metadata+xml";
 /// The namespace of recording metadata (RFC 7865).
 pub const NAMESPACE: &str = "urn:ietf:params:xml:ns:recording:1";
 /// The disposition of the metadata part of a recording session's body
-/// (RFC 7866).
+/// (RFC 7866 §9).
 pub const RECORDING_SESSION_DISPOSITION: &str = "recording-session";
 /// The option tag of a recording session, in `Require` or `Supported`
 /// (RFC 7866 §6.1).
@@ -612,7 +614,7 @@ fn base64(bytes: &[u8]) -> String {
 
 /// The body of a recording session's INVITE: `multipart/mixed` with the SDP
 /// first and the metadata second, with `Content-Disposition:
-/// recording-session` (RFC 7866 §6.1).
+/// recording-session` (RFC 7866 §9.1).
 ///
 /// # Errors
 /// What [`RecordingMetadata::to_xml`] refuses, and a body the multipart
@@ -646,8 +648,12 @@ pub fn with_src_feature_tag(contact: &str) -> String {
     }
 }
 
-/// Whether a request is a recording session: its `Require` carries the
-/// `siprec` option tag (RFC 7866 §6.1).
+/// Whether a request's `Require` carries the `siprec` option tag, as an
+/// SRC's or an SRS's INVITE of a recording session must (RFC 7866 §6.1,
+/// §6.2). It is half of what makes one: RFC 7866 §6.2 has an SRS treat a
+/// new INVITE as a recording session only when its `Contact` also carries
+/// [`SRC_FEATURE_TAG`] ([`contact_has_feature_tag`]), and §6.1 has an SRC
+/// ask the same of [`SRS_FEATURE_TAG`].
 #[must_use]
 pub fn requires_siprec(message: &RawMessage<'_>) -> bool {
     message.require().has(OPTION_TAG)
@@ -700,11 +706,13 @@ pub struct RecordingOffer<'a> {
 }
 
 /// Read the body of a recording session's INVITE: the SDP part and the
-/// `recording-session` metadata part (RFC 7866 §6.1).
+/// `recording-session` metadata part (RFC 7866 §9.1).
 ///
 /// A metadata part is found by its disposition, and failing that by its
-/// type. Only `multipart` bodies are read; an INVITE with the SDP alone
-/// carries its metadata later, if at all (RFC 7866).
+/// type, `application/rs-metadata+xml` (RFC 7865 §5) or the
+/// `application/rs-metadata` RFC 7866 §9 writes. Only `multipart` bodies
+/// are read; an INVITE with the SDP alone carries its metadata later, if at
+/// all (RFC 7866 §9.1).
 ///
 /// # Errors
 /// [`SiprecError::MissingPart`] when either part is absent, and whatever the
@@ -727,6 +735,7 @@ pub fn read_recording_offer<'a>(
                 .is_some_and(|d| d.is(RECORDING_SESSION_DISPOSITION))
         })
         .or_else(|| body.find("application", "rs-metadata+xml"))
+        .or_else(|| body.find("application", "rs-metadata"))
         .ok_or(SiprecError::MissingPart(METADATA_CONTENT_TYPE))?;
     Ok(RecordingOffer {
         sdp: sdp.body(),
@@ -1199,9 +1208,101 @@ mod tests {
     use super::*;
     use sipral_core::msg::{MediaTypeRef, Multipart, ParseMode, ParseScratch, parse};
 
-    /// After the complete metadata example in RFC 7865, extension data and
-    /// comments included: a group, one session, two participants each sending one of two
-    /// labelled streams, and every association.
+    /// RFC 7865 §8.1's complete metadata example as the RFC prints it, less
+    /// the three columns of page indentation.
+    const RFC_7865_EXAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+  <recording xmlns='urn:ietf:params:xml:ns:recording:1'>
+  <datamode>complete</datamode>
+  <group group_id="7+OTCyoxTmqmqyA/1weDAg==">
+    <associate-time>2010-12-16T23:41:07Z</associate-time>
+    <!-- Standardized extension -->
+    <call-center xmlns='urn:ietf:params:xml:ns:callcenter'>
+          <supervisor>sip:alice@atlanta.com</supervisor>
+    </call-center>
+    <mydata xmlns='http://example.com/my'>
+          <structure>FOO!</structure>
+          <whatever>bar</whatever>
+    </mydata>
+  </group>
+  <session session_id="hVpd7YQgRW2nD22h7q60JQ==">
+        <sipSessionID>ab30317f1a784dc48ff824d0d3715d86;
+        remote=47755a9de7794ba387653f2099600ef2</sipSessionID>
+        <group-ref>7+OTCyoxTmqmqyA/1weDAg==</group-ref>
+        <!-- Standardized extension -->
+    <mydata xmlns='http://example.com/my'>
+          <structure>FOO!</structure>
+           <whatever>bar</whatever>
+        </mydata>
+  </session>
+  <participant participant_id="srfBElmCRp2QB23b7Mpk0w==">
+        <nameID aor="sip:bob@biloxi.com">
+           <name xml:lang="it">Bob</name>
+        </nameID>
+        <!-- Standardized extension -->
+        <mydata xmlns='http://example.com/my'>
+                <structure>FOO!</structure>
+                <whatever>bar</whatever>
+        </mydata>
+  </participant>
+  <participant participant_id="zSfPoSvdSDCmU3A3TRDxAw==">
+        <nameID aor="sip:Paul@biloxi.com">
+          <name xml:lang="it">Paul</name>
+        </nameID>
+        <!-- Standardized extension -->
+        <mydata xmlns='http://example.com/my'>
+           <structure>FOO!</structure>
+           <whatever>bar</whatever>
+        </mydata>
+  </participant>
+  <stream stream_id="UAAMm5GRQKSCMVvLyl4rFw=="
+          session_id="hVpd7YQgRW2nD22h7q60JQ==">
+        <label>96</label>
+  </stream>
+  <stream stream_id="i1Pz3to5hGk8fuXl+PbwCw=="
+           session_id="hVpd7YQgRW2nD22h7q60JQ==">
+         <label>97</label>
+  </stream>
+  <stream stream_id="8zc6e0lYTlWIINA6GR+3ag=="
+           session_id="hVpd7YQgRW2nD22h7q60JQ==">
+        <label>98</label>
+  </stream>
+  <stream stream_id="EiXGlc+4TruqqoDaNE76ag=="
+           session_id="hVpd7YQgRW2nD22h7q60JQ==">
+        <label>99</label>
+  </stream>
+  <sessionrecordingassoc session_id="hVpd7YQgRW2nD22h7q60JQ==">
+                <associate-time>2010-12-16T23:41:07Z</associate-time>
+  </sessionrecordingassoc>
+  <participantsessionassoc
+       participant_id="srfBElmCRp2QB23b7Mpk0w=="
+       session_id="hVpd7YQgRW2nD22h7q60JQ==">
+        <associate-time>2010-12-16T23:41:07Z</associate-time>
+  </participantsessionassoc>
+  <participantsessionassoc
+       participant_id="zSfPoSvdSDCmU3A3TRDxAw=="
+       session_id="hVpd7YQgRW2nD22h7q60JQ==">
+           <associate-time>2010-12-16T23:41:07Z</associate-time>
+  </participantsessionassoc>
+  <participantstreamassoc
+       participant_id="srfBElmCRp2QB23b7Mpk0w==">
+           <send>i1Pz3to5hGk8fuXl+PbwCw==</send>
+           <send>UAAMm5GRQKSCMVvLyl4rFw==</send>
+           <recv>8zc6e0lYTlWIINA6GR+3ag==</recv>
+           <recv>EiXGlc+4TruqqoDaNE76ag==</recv>
+  </participantstreamassoc>
+  <participantstreamassoc
+       participant_id="zSfPoSvdSDCmU3A3TRDxAw==">
+           <send>8zc6e0lYTlWIINA6GR+3ag==</send>
+           <send>EiXGlc+4TruqqoDaNE76ag==</send>
+           <recv>UAAMm5GRQKSCMVvLyl4rFw==</recv>
+           <recv>i1Pz3to5hGk8fuXl+PbwCw==</recv>
+  </participantstreamassoc>
+</recording>
+"#;
+
+    /// A two-stream variant of RFC 7865 §8.1's example, extension data and
+    /// comments included: a group, one session, two participants each
+    /// sending one of two labelled streams, and every association.
     const RFC_EXAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <recording xmlns='urn:ietf:params:xml:ns:recording:1'>
   <datamode>complete</datamode>
@@ -1360,6 +1461,44 @@ mod tests {
             .expect("alice");
         assert_eq!(alice.send, [STREAM_97]);
         assert_eq!(alice.recv, [STREAM_96]);
+        m.validate().expect("every reference resolves");
+    }
+
+    #[test]
+    fn rfc_7865s_own_example_reads_as_it_describes_it() {
+        let m = RecordingMetadata::parse(RFC_7865_EXAMPLE.as_bytes()).expect("the example");
+        assert_eq!(m.data_mode, DataMode::Complete);
+        assert_eq!(m.groups.len(), 1);
+        assert_eq!(m.sessions.len(), 1);
+        let names: Vec<(&str, &str)> = m
+            .participants
+            .iter()
+            .flat_map(|p| &p.name_ids)
+            .flat_map(|n| {
+                n.names
+                    .iter()
+                    .map(move |name| (n.aor.as_str(), name.text.as_str()))
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("sip:bob@biloxi.com", "Bob"),
+                ("sip:Paul@biloxi.com", "Paul")
+            ]
+        );
+        let labels: Vec<Option<&str>> = m.streams.iter().map(|s| s.label.as_deref()).collect();
+        assert_eq!(labels, [Some("96"), Some("97"), Some("98"), Some("99")]);
+        let bob = m
+            .participant_streams
+            .iter()
+            .find(|a| a.participant_id == ALICE)
+            .expect("the first participant");
+        assert_eq!(bob.send, [STREAM_97, STREAM_96]);
+        assert_eq!(
+            bob.recv,
+            ["8zc6e0lYTlWIINA6GR+3ag==", "EiXGlc+4TruqqoDaNE76ag=="]
+        );
         m.validate().expect("every reference resolves");
     }
 
@@ -1766,6 +1905,27 @@ Content-Length: {}\r\n\r\n",
         let offer = read_recording_offer(&message).expect("an offer");
         assert_eq!(offer.sdp, sdp);
         assert_eq!(offer.metadata, metadata);
+    }
+
+    #[test]
+    fn metadata_typed_as_rfc_7866_writes_it_is_found_without_a_disposition() {
+        // RFC 7866 §9 and its examples type the metadata
+        // application/rs-metadata, RFC 7865 §5 application/rs-metadata+xml
+        let sdp = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\n";
+        let metadata = call().metadata();
+        let xml = metadata.to_xml().expect("xml");
+        for media in ["application/rs-metadata", "application/rs-metadata+xml"] {
+            let built = MultipartBuilder::mixed()
+                .part(Part::new("application/sdp", sdp))
+                .part(Part::new(media, xml.as_bytes()))
+                .build()
+                .expect("built");
+            let bytes = invite("", built.content_type(), built.body());
+            let mut scratch = ParseScratch::default();
+            let message = parse(&bytes, &mut scratch, ParseMode::Strict).expect("parses");
+            let offer = read_recording_offer(&message).expect(media);
+            assert_eq!(offer.metadata, metadata, "{media}");
+        }
     }
 
     #[test]

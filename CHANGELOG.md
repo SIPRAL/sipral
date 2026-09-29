@@ -153,7 +153,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   nested multipart included, within bounds on parts, depth, size and
   fields per part; `Multipart::check` returns a required part the receiver
   does not understand as an `Unsupported`, whose status is the 415 of
-  RFC 5621 §9. `MultipartBuilder` writes one, with a boundary that occurs
+  RFC 5621 §8.4. `MultipartBuilder` writes one, with a boundary that occurs
   in no part. `sipral_ua::siprec` holds SIPREC recording metadata, the
   RFC 7865 model in RFC 7866's `application/rs-metadata+xml`: written,
   read through the same bounded reader dialog-info bodies use, built for a
