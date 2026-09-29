@@ -294,6 +294,24 @@ sender wrote, so taking one is the application's decision each time. One left
 unanswered comes back as a second `EventKind.REFERRAL` with
 `fields["status_code"]` set to the 408 the stack answered it with.
 
+## What a call carries in its audio, and recording it
+
+A digit the far end leaves in the audio arrives as `EventKind.IN_BAND_DIGIT`
+and on `call.dtmf` like any other: by default on a call that negotiated no
+telephone event, and on every call or none with
+`Stack(dtmf_detection=DtmfDetection.ALWAYS)` / `.OFF` or
+`call.set_dtmf_detection(...)`. `call.send_dtmf(digits)` writes the tones
+into the audio where the far end took no telephone event, and
+`via=DtmfVia.IN_BAND` does so on any call. `call.detect_progress(...)`,
+straight after `place_call`, reports the network's tones, who answered and
+the machine's beep as `EventKind.PROGRESS_DETECTED`, `fields["what"]` a
+`ProgressKind` and every limit a keyword. `call.set_consent_tone(...)` beeps
+while the call is recorded. `call.media.record(path, format=..., layout=...,
+sample_rate=..., bitrate=..., checkpoint_ms=...)` writes WAV or Ogg Opus,
+mixed or stereo with this end on the left, and `stop_recording()` /
+`recording` stop it and say how far it got. `tests/test_inband.py` proves
+each over two stacks on loopback.
+
 ## Test
 
 ```sh

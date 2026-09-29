@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
+using System.Collections.Generic;
+
 namespace Sipral;
 
 /// <summary>What every call-shaped event carries — the fields of
@@ -231,6 +233,68 @@ public sealed record SipralStunServerEventInfo(
     SipralStunServerState State,
     string? Server,
     string? Previous);
+
+/// <summary>What a <see cref="SipralEventKind.ProgressDetected"/> event
+/// carries — the fields of <c>sipral_progress_event_t</c>.
+/// <see cref="What"/> says which of the others mean anything: a tone of the
+/// network (<see cref="Tone"/>, <see cref="AtMs"/> from the first frame
+/// listened to), the special information tone (<see cref="SitHz"/> and
+/// <see cref="SitMs"/> measured), who answered (<see cref="Verdict"/>,
+/// <see cref="Reason"/>, <see cref="AtMs"/> after answer, and what it was
+/// decided from), or the machine's beep (<see cref="FrequencyHz"/>,
+/// <see cref="AtMs"/> when it ended after answer, <see cref="LengthMs"/>).
+/// </summary>
+public sealed record SipralProgressEventInfo(
+    SipralProgressKind What,
+    SipralProgressTone Tone,
+    SipralAmdVerdict Verdict,
+    SipralAmdReason Reason,
+    ulong AtMs,
+    ulong InitialSilenceMs,
+    ulong GreetingMs,
+    uint Words,
+    uint FrequencyHz,
+    ulong LengthMs,
+    IReadOnlyList<uint> SitHz,
+    IReadOnlyList<uint> SitMs);
+
+/// <summary>How <see cref="Call.DetectProgress"/> listens: the network's
+/// tones, whether to decide who answered and whether to listen for the
+/// machine's beep, and every limit of <c>sipral_progress_config_t</c>, each
+/// zero for the library's default.</summary>
+public sealed record SipralProgressOptions
+{
+    /// <summary>Whose tones to listen for.</summary>
+    public SipralToneRegion Region { get; init; } = SipralToneRegion.Europe;
+    /// <summary>Whether to decide who answered.</summary>
+    public bool AnsweringMachine { get; init; } = true;
+    /// <summary>Whether to listen for the beep after a verdict of a machine.</summary>
+    public bool Beep { get; init; } = true;
+    /// <summary>How long after the verdict to listen for the beep.</summary>
+    public uint BeepWindowMs { get; init; }
+    /// <summary>The longest silence after answer before the verdict is not sure.</summary>
+    public uint MaxInitialSilenceMs { get; init; }
+    /// <summary>The longest greeting a person gives.</summary>
+    public uint MaxGreetingMs { get; init; }
+    /// <summary>The silence after a greeting that says a person is waiting.</summary>
+    public uint SilenceAfterGreetingMs { get; init; }
+    /// <summary>The most words a person's greeting has.</summary>
+    public uint MaxWords { get; init; }
+    /// <summary>The shortest run of speech that is a word.</summary>
+    public uint MinWordMs { get; init; }
+    /// <summary>The shortest silence that separates two words.</summary>
+    public uint MinWordGapMs { get; init; }
+    /// <summary>The longest the decision may take, from answer.</summary>
+    public uint MaxDecisionMs { get; init; }
+    /// <summary>How far above the noise floor a frame must be to be speech, in dB.</summary>
+    public uint MinSpeechAboveFloorDb { get; init; }
+    /// <summary>The shortest beep.</summary>
+    public uint BeepMinMs { get; init; }
+    /// <summary>The longest beep.</summary>
+    public uint BeepMaxMs { get; init; }
+    /// <summary>Whole cycles of a repeating cadence heard before a tone is reported, one to four.</summary>
+    public uint ToneCycles { get; init; }
+}
 
 /// <summary>A snapshot of <c>sipral_stream_stats_t</c>, copied field by
 /// field — never the library's own pointer, which is valid only for the

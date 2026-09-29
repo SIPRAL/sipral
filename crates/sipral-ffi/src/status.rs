@@ -101,6 +101,12 @@ codes! {
         /// 488 Not Acceptable Here; a call being placed never left. The last
         /// error says which.
         SecurityPolicy = 18,
+        /// A recording's file would not take what was written to it: the disk
+        /// filled, the volume went away, the file was taken away underneath.
+        /// Not the path, which is `SIPRAL_STATUS_INVALID_ARGUMENT` before
+        /// anything is written. The recording has stopped; the file holds the
+        /// audio up to the last checkpoint it could write.
+        RecordingFailed = 19,
     }
 }
 
@@ -134,6 +140,7 @@ entry! {
             15 => c"device timed out".as_ptr(),
             16 => c"limit reached".as_ptr(),
             18 => c"refused by security policy".as_ptr(),
+            19 => c"recording failed".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -177,6 +184,7 @@ mod tests {
             SipralStatus::DeviceTimedOut,
             SipralStatus::LimitReached,
             SipralStatus::SecurityPolicy,
+            SipralStatus::RecordingFailed,
         ];
         for status in all {
             let code = status as i32;
@@ -187,7 +195,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in (0..=16).chain([18]) {
+        for code in (0..=16).chain([18, 19]) {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -199,7 +207,7 @@ mod tests {
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
         assert!(name(17).is_none());
-        assert!(name(19).is_none());
+        assert!(name(20).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -229,5 +237,6 @@ mod tests {
         assert_eq!(SipralStatus::DeviceTimedOut as i32, 15);
         assert_eq!(SipralStatus::LimitReached as i32, 16);
         assert_eq!(SipralStatus::SecurityPolicy as i32, 18);
+        assert_eq!(SipralStatus::RecordingFailed as i32, 19);
     }
 }

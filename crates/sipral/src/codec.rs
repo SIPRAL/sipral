@@ -47,7 +47,7 @@ use sipral_core::sdp::{
 };
 #[cfg(feature = "opus")]
 use sipral_media::opus;
-use sipral_media::{g711, g722, g729};
+use sipral_media::{g711, g722, g729, l16};
 use sipral_rtp::srtp::Suite;
 
 use crate::error::MediaError;
@@ -69,6 +69,17 @@ pub const DEFAULT_FRAME_MS: u32 = 20;
 /// carries. `named_events_get_a_dynamic_type_no_codec_took` asserts both
 /// halves.
 const FIRST_DYNAMIC: u8 = 96;
+
+/// The rate [`Codec::L16Narrowband`] is sampled and clocked at.
+const L16_NARROWBAND: u32 = 8_000;
+
+/// The rate [`Codec::L16Wideband`] is sampled and clocked at.
+const L16_WIDEBAND: u32 = 16_000;
+
+/// The largest payload one frame of any codec here may be: RFC 6716's
+/// longest Opus frame, and the bound the 1500-octet datagram a session
+/// builds is sized around.
+const LARGEST_PAYLOAD: usize = 1_275;
 
 /// G.729's `a=fmtp` parameters: whether Annex B is allowed (RFC 4856
 /// §2.1.9), written out either way rather than left to the default of
@@ -120,6 +131,15 @@ pub enum Codec {
     /// `docs/05-media.md`.
     #[cfg(feature = "opus")]
     Opus,
+    /// L16 at 8 kHz, one channel (RFC 3551 §4.5.11): the samples
+    /// themselves, 128 kbit/s of them, for a far end that wants audio no
+    /// codec has touched — a recorder, a speech engine, a bridge that
+    /// transcodes anyway. Never in the default offer, like G.729, and on a
+    /// dynamic payload type as `L16/8000`.
+    L16Narrowband,
+    /// L16 at 16 kHz, one channel: wideband with nothing lost, at 256
+    /// kbit/s, on a dynamic payload type as `L16/16000`.
+    L16Wideband,
 }
 
 impl Codec {
@@ -129,31 +149,60 @@ impl Codec {
     /// nobody has said otherwise; [`CodecCatalog::with_order`] is how a site
     /// says otherwise.
     ///
-    /// Its length is the build's own and not a number to be relied on: five
-    /// here, four where the `opus` feature is off. Anything that needs the
+    /// Its length is the build's own and not a number to be relied on: seven
+    /// here, six where the `opus` feature is off. Anything that needs the
     /// count reads it from this array.
     ///
-    /// G.729 is last, and it is the one member [`CodecCatalog::new`] leaves
-    /// out: see [`Codec::offered_by_default`].
+    /// G.729 and the two L16s are last, and they are the members
+    /// [`CodecCatalog::new`] leaves out: see [`Codec::offered_by_default`].
     #[cfg(feature = "opus")]
-    pub const ALL: [Self; 5] = [Self::Opus, Self::G722, Self::Pcmu, Self::Pcma, Self::G729];
-    /// Every codec this build contains, which is the four written ones: the
+    pub const ALL: [Self; 7] = [
+        Self::Opus,
+        Self::G722,
+        Self::Pcmu,
+        Self::Pcma,
+        Self::G729,
+        Self::L16Wideband,
+        Self::L16Narrowband,
+    ];
+    /// Every codec this build contains, which is the written ones: the
     /// `opus` feature is off, so there is no encoder for Opus to offer. See
     /// the other declaration of this constant for the rest.
     #[cfg(not(feature = "opus"))]
-    pub const ALL: [Self; 4] = [Self::G722, Self::Pcmu, Self::Pcma, Self::G729];
+    pub const ALL: [Self; 6] = [
+        Self::G722,
+        Self::Pcmu,
+        Self::Pcma,
+        Self::G729,
+        Self::L16Wideband,
+        Self::L16Narrowband,
+    ];
 
-    /// Whether [`CodecCatalog::new`] offers it: every codec but G.729.
+    /// Whether [`CodecCatalog::new`] offers it: every codec but G.729 and
+    /// the two L16s.
     ///
-    /// G.729 is offered only where an order names it. A peer's own
+    /// Those are offered only where an order names them. A peer's own
     /// preference decides among what both ends list (RFC 3264 §6.1), so a
     /// narrowband codec in every offer is a narrowband call with every peer
     /// that happens to prefer it — and the one reason to carry it at all is
     /// a carrier that accepts nothing else, which is a site's configuration
-    /// and not a default.
+    /// and not a default. L16 is the other way round: the best sound there
+    /// is, at eight to sixteen times G.711's bandwidth, which is also a
+    /// site's to choose.
     #[must_use]
     pub const fn offered_by_default(self) -> bool {
-        !matches!(self, Self::G729)
+        !matches!(self, Self::G729 | Self::L16Narrowband | Self::L16Wideband)
+    }
+
+    /// What a codec order calls it: the encoding name, and for L16, which is
+    /// one name at two rates, the rate after it — `L16/8000`, `L16/16000`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::L16Narrowband => "L16/8000",
+            Self::L16Wideband => "L16/16000",
+            other => other.encoding_name(),
+        }
     }
 
     /// The name that goes on an `a=rtpmap` line, spelled as IANA registered
@@ -167,6 +216,7 @@ impl Codec {
             Self::G729 => g729::ENCODING_NAME,
             #[cfg(feature = "opus")]
             Self::Opus => opus::ENCODING_NAME,
+            Self::L16Narrowband | Self::L16Wideband => l16::ENCODING_NAME,
         }
     }
 
@@ -183,7 +233,12 @@ impl Codec {
     #[must_use]
     pub const fn is_opus(self) -> bool {
         match self {
-            Self::Pcmu | Self::Pcma | Self::G722 | Self::G729 => false,
+            Self::Pcmu
+            | Self::Pcma
+            | Self::G722
+            | Self::G729
+            | Self::L16Narrowband
+            | Self::L16Wideband => false,
             #[cfg(feature = "opus")]
             Self::Opus => true,
         }
@@ -191,7 +246,8 @@ impl Codec {
 
     /// The payload type RFC 3551 table 4 assigns it, for the four that have
     /// one. Opus does not: it is newer than the static table and always
-    /// travels as a dynamic type.
+    /// travels as a dynamic type. Nor does L16 at these rates: the table's
+    /// two L16 types, 10 and 11, are 44.1 kHz.
     #[must_use]
     pub const fn static_payload(self) -> Option<u8> {
         match self {
@@ -201,6 +257,7 @@ impl Codec {
             Self::G729 => Some(g729::PAYLOAD_TYPE),
             #[cfg(feature = "opus")]
             Self::Opus => None,
+            Self::L16Narrowband | Self::L16Wideband => None,
         }
     }
 
@@ -231,7 +288,7 @@ impl Codec {
             Self::Pcmu | Self::Pcma => Some(sipral_rtp::codec_quality_model(
                 sipral_rtp::CodecFamily::G711,
             )),
-            Self::G722 | Self::G729 => None,
+            Self::G722 | Self::G729 | Self::L16Narrowband | Self::L16Wideband => None,
             #[cfg(feature = "opus")]
             Self::Opus => None,
         }
@@ -249,6 +306,8 @@ impl Codec {
             Self::G729 => g729::CLOCK_RATE,
             #[cfg(feature = "opus")]
             Self::Opus => opus::CLOCK_RATE,
+            Self::L16Narrowband => L16_NARROWBAND,
+            Self::L16Wideband => L16_WIDEBAND,
         }
     }
 
@@ -262,6 +321,8 @@ impl Codec {
             Self::G729 => g729::SAMPLE_RATE,
             #[cfg(feature = "opus")]
             Self::Opus => opus::CLOCK_RATE,
+            // a sample-based encoding: the clock counts samples
+            Self::L16Narrowband | Self::L16Wideband => self.clock_rate(),
         }
     }
 
@@ -296,7 +357,21 @@ impl Codec {
             Self::G729 => self.frame_samples(millis) / g729::FRAME_SAMPLES * g729::FRAME_OCTETS,
             #[cfg(feature = "opus")]
             Self::Opus => opus::MAX_FRAME_BYTES,
+            Self::L16Narrowband | Self::L16Wideband => self
+                .frame_samples(millis)
+                .saturating_mul(l16::SAMPLE_OCTETS),
         }
+    }
+
+    /// Whether a frame of `millis` milliseconds fits the one datagram an RTP
+    /// packet of this build is: every codec's does but L16's past a length,
+    /// since L16 is the one whose payload grows with the frame and is never
+    /// small. The ceiling is the largest payload any codec here writes,
+    /// the 1275 octets of RFC 6716's longest Opus frame, so that header, tag
+    /// and payload stay inside the 1500-octet datagram a session builds.
+    #[must_use]
+    pub fn fits(self, millis: u32) -> bool {
+        self.max_payload(millis) <= LARGEST_PAYLOAD
     }
 
     /// The `a=rtpmap` mapping this codec gets at the payload type given.
@@ -314,7 +389,13 @@ impl Codec {
             parameters: match self {
                 #[cfg(feature = "opus")]
                 Self::Opus => Some(opus::RTPMAP_CHANNELS.to_string()),
-                Self::Pcmu | Self::Pcma | Self::G722 | Self::G729 => None,
+                // one channel, which RFC 4566 §6 has a missing count mean
+                Self::Pcmu
+                | Self::Pcma
+                | Self::G722
+                | Self::G729
+                | Self::L16Narrowband
+                | Self::L16Wideband => None,
             },
         }
     }
@@ -338,7 +419,7 @@ impl Codec {
             #[cfg(feature = "opus")]
             Self::Opus => Some("useinbandfec=1"),
             Self::G729 => Some(annex_b_parameter(true)),
-            Self::Pcmu | Self::Pcma | Self::G722 => None,
+            Self::Pcmu | Self::Pcma | Self::G722 | Self::L16Narrowband | Self::L16Wideband => None,
         }
     }
 
@@ -348,12 +429,26 @@ impl Codec {
     /// The encoding name decides, not the payload type: a static type means
     /// what the table says it means, but a dynamic one means whatever the
     /// `a=rtpmap` called it, and reading the number alone is how a stack
-    /// decodes Opus as if it were somebody else's codec.
+    /// decodes Opus as if it were somebody else's codec. For L16 the rate
+    /// and the channel count decide too, because the name alone is every
+    /// rate and every count: `L16/44100/2` is not a stream either L16 here
+    /// can decode.
     #[must_use]
     pub fn of(negotiated: &NegotiatedCodec) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|codec| negotiated.is_encoding(codec.encoding_name()))
+        Self::ALL.into_iter().find(|codec| {
+            negotiated.is_encoding(codec.encoding_name())
+                && match codec {
+                    Self::L16Narrowband | Self::L16Wideband => {
+                        negotiated.clock_rate() == codec.clock_rate()
+                            && negotiated
+                                .rtpmap
+                                .parameters
+                                .as_deref()
+                                .is_none_or(|channels| channels.trim() == "1")
+                    }
+                    _ => true,
+                }
+        })
     }
 
     /// The codec a plan settled on.
@@ -391,7 +486,7 @@ impl Codec {
 
 impl core::fmt::Display for Codec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.encoding_name())
+        f.write_str(self.name())
     }
 }
 
@@ -511,7 +606,7 @@ impl CodecCatalog {
         for name in codecs {
             let codec = Codec::ALL
                 .into_iter()
-                .find(|codec| codec.encoding_name().eq_ignore_ascii_case(name))
+                .find(|codec| codec.name().eq_ignore_ascii_case(name))
                 .ok_or_else(|| MediaError::unsupported(name))?;
             if order.contains(&codec) {
                 return Err(MediaError::unsupported(name));
@@ -545,7 +640,8 @@ impl CodecCatalog {
             && !Codec::G729
                 .frame_samples(millis)
                 .is_multiple_of(g729::FRAME_SAMPLES);
-        if millis == 0 || opus_refuses || g729_refuses {
+        let too_long = self.order.iter().any(|codec| !codec.fits(millis));
+        if millis == 0 || opus_refuses || g729_refuses || too_long {
             return Err(MediaError::BadFrameLength { millis });
         }
         self.frame_ms = millis;
@@ -942,6 +1038,77 @@ pub(crate) mod tests {
         assert_eq!(Codec::Opus.static_payload(), None);
     }
 
+    /// L16 is named by its rate, offered only where an order names it, on a
+    /// dynamic type with the rate on its `a=rtpmap` line, and read back off a
+    /// description only at that rate and one channel.
+    #[test]
+    fn l16_is_named_and_recognised_by_its_rate() {
+        assert!(!CodecCatalog::new().codecs().contains(&Codec::L16Wideband));
+        assert!(!CodecCatalog::new().codecs().contains(&Codec::L16Narrowband));
+        let catalog = CodecCatalog::with_order(&["l16/16000", "L16/8000", "PCMU"]).unwrap();
+        assert_eq!(
+            catalog.codecs(),
+            [Codec::L16Wideband, Codec::L16Narrowband, Codec::Pcmu]
+        );
+        let offer = catalog
+            .capabilities()
+            .offer("audio", 40_000, Direction::SendRecv);
+        assert_eq!(offer.formats, ["96", "97", "0", "98"]);
+        assert_eq!(
+            offer.rtpmap(96).map(|map| map.to_value()).as_deref(),
+            Some("96 L16/16000")
+        );
+        assert_eq!(
+            offer.rtpmap(97).map(|map| map.to_value()).as_deref(),
+            Some("97 L16/8000")
+        );
+        assert_eq!(Codec::L16Wideband.to_string(), "L16/16000");
+        assert!(
+            CodecCatalog::with_order(&["L16"]).is_err(),
+            "a rate has to be named"
+        );
+
+        let read = |value: &str| {
+            let (payload, rest) = value.split_once(' ').unwrap();
+            let mut parts = rest.split('/');
+            Codec::of(&NegotiatedCodec::new(RtpMap {
+                payload: payload.parse().unwrap(),
+                encoding: parts.next().unwrap().to_owned(),
+                clock_rate: parts.next().unwrap().parse().unwrap(),
+                parameters: parts.next().map(str::to_owned),
+            }))
+        };
+        assert_eq!(read("100 L16/16000"), Some(Codec::L16Wideband));
+        assert_eq!(read("100 L16/8000/1"), Some(Codec::L16Narrowband));
+        assert_eq!(read("100 L16/44100"), None);
+        assert_eq!(
+            read("100 L16/16000/2"),
+            None,
+            "two channels is not this codec"
+        );
+        assert_eq!(read("11 L16/44100"), None);
+    }
+
+    /// L16 is the codec whose payload grows with the frame and is never
+    /// small, so a frame that would not fit a datagram is refused where it
+    /// is set rather than when the first packet is built.
+    #[test]
+    fn a_frame_l16_cannot_fit_in_a_datagram_is_refused() {
+        let wide = CodecCatalog::with_order(&["L16/16000"]).unwrap();
+        assert_eq!(Codec::L16Wideband.max_payload(20), 640);
+        assert!(wide.clone().with_frame_length(30).is_ok());
+        assert_eq!(
+            wide.with_frame_length(40).unwrap_err(),
+            MediaError::BadFrameLength { millis: 40 }
+        );
+        let narrow = CodecCatalog::with_order(&["L16/8000"]).unwrap();
+        assert!(narrow.clone().with_frame_length(60).is_ok());
+        assert_eq!(
+            narrow.with_frame_length(80).unwrap_err(),
+            MediaError::BadFrameLength { millis: 80 }
+        );
+    }
+
     /// G.729 is in the build and out of the default offer, and an order
     /// that names it offers it, on 18, saying whether it takes Annex B.
     #[test]
@@ -951,9 +1118,14 @@ pub(crate) mod tests {
         assert!(
             Codec::ALL
                 .into_iter()
-                .filter(|codec| *codec != Codec::G729)
+                .filter(|codec| {
+                    !matches!(
+                        codec,
+                        Codec::G729 | Codec::L16Narrowband | Codec::L16Wideband
+                    )
+                })
                 .all(|codec| CodecCatalog::new().codecs().contains(&codec)),
-            "every other codec is still offered"
+            "every other codec but L16 is still offered"
         );
 
         let offer = CodecCatalog::with_order(&["g729", "PCMA"])

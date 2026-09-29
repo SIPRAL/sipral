@@ -55,8 +55,9 @@ public final class Call: @unchecked Sendable {
     }
 
     /// A new reader of just the digits: `SipralEventKind.digitReceived`'s
-    /// own `mediaData.digit`, so a voice agent that only cares about DTMF
-    /// does not have to filter `events()` itself. The same rules as
+    /// and `SipralEventKind.inBandDigit`'s own `mediaData.digit`, so a voice
+    /// agent that only cares about DTMF does not have to filter `events()`
+    /// itself, nor care which way a key was sent. The same rules as
     /// `events()`: every reader gets every digit from the moment it asks,
     /// and every stream finishes when the call ends, with no digit replayed
     /// to a reader that starts after that.
@@ -150,7 +151,9 @@ public final class Call: @unchecked Sendable {
             return
         }
         eventBroadcast.send(event)
-        if event.kindRaw == SipralEventKind.digitReceived.rawValue, let digit = event.mediaData?.digit {
+        let isDigit = event.kindRaw == SipralEventKind.digitReceived.rawValue
+            || event.kindRaw == SipralEventKind.inBandDigit.rawValue
+        if isDigit, let digit = event.mediaData?.digit {
             dtmfBroadcast.send(digit)
         }
     }
@@ -292,6 +295,9 @@ public final class Call: @unchecked Sendable {
         }
     }
 
+    /// `sipral_call_send_dtmf`. `.rtp` sends named events, or the tones in
+    /// the audio on a call that negotiated none; `.inBand` sends the tones
+    /// on any call.
     public func sendDtmf(_ digits: String, via: SipralDtmf = .rtp, durationMs: UInt32 = 100) throws {
         try retryingBusy {
             try Sipral.callSendDtmf(
@@ -299,6 +305,77 @@ public final class Call: @unchecked Sendable {
                 durationMs: durationMs, nowMs: stack.nowMs()
             )
         }
+    }
+
+    /// `sipral_call_dtmf_detection`: when this call listens for digits in the
+    /// far end's audio. One heard there is a `SipralEventKind.inBandDigit`,
+    /// and reaches `dtmf()` like any other.
+    public func setDtmfDetection(_ mode: SipralDtmfDetection) throws {
+        try retryingBusy {
+            try Sipral.callDtmfDetection(stack: stack.handle, call: handle, mode: mode.rawValue)
+        }
+    }
+
+    /// `sipral_call_detect_progress`: listen for the network's tones, decide
+    /// who answered and listen for the machine's beep, as `options` say.
+    /// Call it straight after `SipralStack.placeCall`, before the far end
+    /// answers; each thing heard is a `SipralEventKind.progressDetected`
+    /// with `progressData` set.
+    public func detectProgress(_ options: ProgressOptions = ProgressOptions()) throws {
+        var config = sipral_progress_config_t()
+        config.size = MemoryLayout<sipral_progress_config_t>.size
+        config.listen = SipralToggle.on.rawValue
+        config.region = options.region.rawValue
+        config.answering_machine = (options.answeringMachine ? SipralToggle.on : SipralToggle.off).rawValue
+        config.beep = (options.beep ? SipralToggle.on : SipralToggle.off).rawValue
+        config.beep_window_ms = options.beepWindowMs
+        config.max_initial_silence_ms = options.maxInitialSilenceMs
+        config.max_greeting_ms = options.maxGreetingMs
+        config.silence_after_greeting_ms = options.silenceAfterGreetingMs
+        config.max_words = options.maxWords
+        config.min_word_ms = options.minWordMs
+        config.min_word_gap_ms = options.minWordGapMs
+        config.max_decision_ms = options.maxDecisionMs
+        config.min_speech_above_floor_db = options.minSpeechAboveFloorDb
+        config.beep_min_ms = options.beepMinMs
+        config.beep_max_ms = options.beepMaxMs
+        config.tone_cycles = options.toneCycles
+        try retryingBusy { try Sipral.callDetectProgress(stack: stack.handle, call: handle, config: config) }
+    }
+
+    /// `sipral_call_detect_progress` with listening off.
+    public func stopProgress() throws {
+        var config = sipral_progress_config_t()
+        config.size = MemoryLayout<sipral_progress_config_t>.size
+        config.listen = SipralToggle.off.rawValue
+        try retryingBusy { try Sipral.callDetectProgress(stack: stack.handle, call: handle, config: config) }
+    }
+
+    /// `sipral_call_consent_tone`: beep while this call is recorded, every
+    /// value left at zero the library's default (1400 Hz, 18 dB below
+    /// 0 dBm0, 200 ms every fifteen seconds); `local` has this end hear it
+    /// too.
+    public func setConsentTone(
+        frequencyHz: UInt32 = 0, attenuationDb: UInt32 = 0, lengthMs: UInt32 = 0,
+        intervalMs: UInt32 = 0, local: Bool = true
+    ) throws {
+        var tone = sipral_consent_tone_t()
+        tone.size = MemoryLayout<sipral_consent_tone_t>.size
+        tone.enabled = SipralToggle.on.rawValue
+        tone.frequency_hz = frequencyHz
+        tone.attenuation_db = attenuationDb
+        tone.length_ms = lengthMs
+        tone.interval_ms = intervalMs
+        tone.local = (local ? SipralToggle.on : SipralToggle.off).rawValue
+        try retryingBusy { try Sipral.callConsentTone(stack: stack.handle, call: handle, tone: tone) }
+    }
+
+    /// `sipral_call_consent_tone` with the tone off.
+    public func clearConsentTone() throws {
+        var tone = sipral_consent_tone_t()
+        tone.size = MemoryLayout<sipral_consent_tone_t>.size
+        tone.enabled = SipralToggle.off.rawValue
+        try retryingBusy { try Sipral.callConsentTone(stack: stack.handle, call: handle, tone: tone) }
     }
 
     /// Hang up if this call is still up, release its media, forget it.
@@ -331,4 +408,27 @@ public final class Call: @unchecked Sendable {
         eventBroadcast.finish()
         dtmfBroadcast.finish()
     }
+}
+
+/// How `Call.detectProgress` listens: the network's tones, whether to decide
+/// who answered and whether to listen for the machine's beep, and every
+/// limit of `sipral_progress_config_t`, each zero for the library's default.
+public struct ProgressOptions: Sendable {
+    public var region: SipralToneRegion = .europe
+    public var answeringMachine = true
+    public var beep = true
+    public var beepWindowMs: UInt32 = 0
+    public var maxInitialSilenceMs: UInt32 = 0
+    public var maxGreetingMs: UInt32 = 0
+    public var silenceAfterGreetingMs: UInt32 = 0
+    public var maxWords: UInt32 = 0
+    public var minWordMs: UInt32 = 0
+    public var minWordGapMs: UInt32 = 0
+    public var maxDecisionMs: UInt32 = 0
+    public var minSpeechAboveFloorDb: UInt32 = 0
+    public var beepMinMs: UInt32 = 0
+    public var beepMaxMs: UInt32 = 0
+    public var toneCycles: UInt32 = 0
+
+    public init() {}
 }

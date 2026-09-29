@@ -29,7 +29,7 @@ use crate::codec::tests::UNMATCHED;
 use crate::codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome};
 use crate::dtmf::{DEFAULT_DIGIT, Digit};
 use crate::error::MediaError;
-use crate::event::{Event, MediaEvent};
+use crate::event::{DigitSource, Event, MediaEvent};
 use crate::keying::SrtpPolicy;
 use crate::record::tests::Buffer;
 use crate::session::{Arrival, MediaConfig, MediaSession, Playback, Start, StreamIdentity};
@@ -970,6 +970,314 @@ fn a_tone_crosses_the_call() {
         "the tone came back at {} rather than crossing the call",
         loudness(&heard)
     );
+}
+
+/// Two ends that both offer L16 at 16 kHz settle on it, on a dynamic payload
+/// type named `L16/16000`, and what crosses the call is the samples
+/// themselves: a frame comes out exactly as it went in.
+#[test]
+fn l16_is_spoken_where_both_ends_offer_it_and_nothing_is_lost() {
+    let catalog = CodecCatalog::with_order(&["L16/16000", "PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::L16Wideband
+    );
+    assert_eq!(
+        pair.callee.engine.session(remote).expect("media").codec(),
+        Codec::L16Wideband
+    );
+    let offer = pair.callee.offer_received().expect("the offer arrived");
+    let stream = offer.media.first().expect("an audio stream");
+    let first: u8 = stream
+        .formats
+        .first()
+        .and_then(|format| format.parse().ok())
+        .expect("a payload type");
+    assert!(first >= 96, "L16 at 16 kHz has no static type");
+    assert_eq!(
+        stream.rtpmap(first).map(|map| map.to_value()).as_deref(),
+        Some(format!("{first} L16/16000").as_str())
+    );
+
+    let ramp: Vec<i16> = (0..320_i32)
+        .map(|n| i16::try_from((n * 97) % 30_000 - 15_000).expect("in range"))
+        .collect();
+    let mut heard = Vec::new();
+    for _ in 0..10 {
+        heard = pair.exchange(call, remote, &ramp);
+        pair.advance();
+    }
+    assert_eq!(heard, ramp, "a lossless codec lost something");
+}
+
+/// L16 is one name at many rates, and the rate is part of what was agreed:
+/// an end offering it at 8 kHz and one offering it at 16 have no L16 in
+/// common, and settle on what else they share.
+#[test]
+fn l16_at_one_rate_does_not_answer_l16_at_another() {
+    let mut pair = Pair::asymmetric(
+        CodecCatalog::with_order(&["L16/8000", "PCMU"]).expect("an order"),
+        CodecCatalog::with_order(&["L16/16000", "PCMU"]).expect("an order"),
+    );
+    let call = pair.connect();
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::Pcmu
+    );
+    let mut narrow = Pair::asymmetric(
+        CodecCatalog::with_order(&["L16/8000", "PCMU"]).expect("an order"),
+        CodecCatalog::with_order(&["PCMA", "L16/8000", "PCMU"]).expect("an order"),
+    );
+    let call = narrow.connect();
+    assert_eq!(
+        narrow.caller.engine.session(call).expect("media").codec(),
+        Codec::L16Narrowband,
+        "the offer's first choice both ends have"
+    );
+}
+
+/// A call placed to reach a person, told to listen: the far end answers with
+/// a greeting that runs on, and the caller hears that a machine answered —
+/// which only happens if the answer itself started the deciding.
+#[test]
+fn a_call_answered_by_a_long_greeting_is_reported_as_a_machine() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let call = pair
+        .caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller
+        .engine
+        .detect_progress(call, Some(crate::ProgressDetection::default()))
+        .expect("the call is this engine's");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    let remote = pair.callee.call().expect("the callee answered");
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_detecting_progress()
+    );
+
+    // half a second before anyone speaks, then four seconds of syllables:
+    // a recording, not a hello
+    let mut greeting = vec![0_i16; 4_000];
+    for n in 0..32_000_u32 {
+        let t = f64::from(n) / 8_000.0;
+        let syllable = (n / 1_600) % 2 == 0;
+        greeting.push(if syllable {
+            to_sample(
+                6_000.0
+                    * (2.0 * std::f64::consts::PI * 180.0 * t).sin()
+                    * (1.0 + 0.5 * (2.0 * std::f64::consts::PI * 700.0 * t).sin()),
+            )
+        } else {
+            0
+        });
+    }
+    greeting.extend(vec![0_i16; 8_000]);
+    for frame in greeting.chunks(160) {
+        let sent = pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media")
+            .capture(frame, pair.now)
+            .expect("the frame encodes")
+            .map(|datagram| datagram.payload.to_vec());
+        let mut session = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media");
+        if let Some(mut datagram) = sent {
+            session.receive(&mut datagram, callee_media(), pair.now);
+        }
+        let mut played = vec![0_i16; 160];
+        session.playback(&mut played);
+        drop(session);
+        pair.advance();
+    }
+    pair.caller.drain(pair.now, false);
+    let verdicts: Vec<crate::AmdVerdict> = pair
+        .caller
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::Progress(crate::CallProgress::AnsweredBy { verdict, .. }) => Some(*verdict),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(verdicts, [crate::AmdVerdict::Machine]);
+    // the callee placed nothing and listened for nothing
+    pair.callee.drain(pair.now, false);
+    assert!(
+        !pair
+            .callee
+            .media_events()
+            .into_iter()
+            .any(|event| matches!(event, MediaEvent::Progress(_)))
+    );
+}
+
+/// A float as a sample, clamped.
+fn to_sample(value: f64) -> i16 {
+    // clamped to the range first, so the conversion cannot overflow
+    #[allow(clippy::cast_possible_truncation)]
+    let sample = value.round().clamp(-32_768.0, 32_767.0) as i16;
+    sample
+}
+
+/// While a call is recorded with a consent tone set, the far end hears the
+/// beep at once and then at its interval, and the recording keeps it on
+/// this end's side; once the recording stops, so does the beep.
+#[test]
+fn the_consent_tone_beeps_to_the_far_end_while_the_call_is_recorded() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let silence = vec![0_i16; 160];
+    for _ in 0..4 {
+        pair.exchange(call, remote, &silence);
+        pair.advance();
+    }
+    pair.caller
+        .engine
+        .set_consent_tone(
+            call,
+            Some(crate::ConsentTone {
+                interval: Duration::from_millis(600),
+                ..crate::ConsentTone::default()
+            }),
+        )
+        .expect("a beep");
+    // nothing beeps before the recording starts
+    let before: Vec<i16> = (0..10)
+        .flat_map(|_| {
+            let heard = pair.exchange(call, remote, &silence);
+            pair.advance();
+            heard
+        })
+        .collect();
+    assert_eq!(loudness(&before), 0, "a beep with no recording");
+
+    let file = Buffer::new();
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .start_recording_with(
+            Box::new(file.clone()),
+            &crate::RecordingOptions {
+                layout: crate::RecordingLayout::Stereo,
+                ..crate::RecordingOptions::default()
+            },
+        )
+        .expect("the recording starts");
+    let during: Vec<i16> = (0..60)
+        .flat_map(|_| {
+            let heard = pair.exchange(call, remote, &silence);
+            pair.advance();
+            heard
+        })
+        .collect();
+    // two beeps of 200 ms in 1.2 s, a few frames late for the jitter buffer
+    let loud_frames = during
+        .chunks(160)
+        .filter(|frame| loudness(frame) > 500)
+        .count();
+    assert!(
+        (18..=22).contains(&loud_frames),
+        "{loud_frames} frames of beep"
+    );
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .stop_recording()
+        .expect("the file is finished");
+    let after: Vec<i16> = (0..60)
+        .flat_map(|_| {
+            let heard = pair.exchange(call, remote, &silence);
+            pair.advance();
+            heard
+        })
+        .collect();
+    assert!(
+        after.chunks(160).skip(10).all(|frame| loudness(frame) == 0),
+        "the beep went on after the recording stopped"
+    );
+    let wav = file.contents();
+    let samples: Vec<i16> = wav[sipral_media::formats::wav::HEADER_LEN..]
+        .chunks_exact(2)
+        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let left: Vec<i16> = samples.iter().step_by(2).copied().collect();
+    assert!(
+        loudness(&left[..1_600]) > 500,
+        "the recording has no beep on this end's side"
+    );
+}
+
+/// Each recording's Ogg stream gets a serial number of its own, drawn from
+/// the call's randomness rather than written in: two recordings on one call
+/// differ, and neither is the same fixed number.
+#[cfg(feature = "opus")]
+#[test]
+fn every_ogg_opus_recording_draws_a_serial_of_its_own() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let options = crate::RecordingOptions {
+        format: crate::RecordingFormat::OggOpus,
+        ..crate::RecordingOptions::default()
+    };
+    let mut serials = Vec::new();
+    for _ in 0..2 {
+        let file = Buffer::new();
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .start_recording_with(Box::new(file.clone()), &options)
+            .expect("the recording starts");
+        let mut samples = vec![0_i16; 160];
+        let mut phase = 0_u32;
+        for _ in 0..10 {
+            tone(&mut samples, 8_000, &mut phase);
+            pair.exchange(call, remote, &samples);
+            pair.advance();
+        }
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .stop_recording()
+            .expect("the file is finished");
+        let bytes = file.contents();
+        let (page, _) = sipral_media::formats::ogg::Page::parse(&bytes).expect("an Ogg page");
+        serials.push(page.serial());
+        let packets = sipral_media::formats::ogg::read_packets(&bytes).expect("a whole stream");
+        assert!(packets.last().is_some_and(|packet| packet.eos));
+    }
+    assert_ne!(serials[0], serials[1], "{serials:?}");
 }
 
 /// The lesson the interop harness's own media join used to encode by hand: a
@@ -2487,27 +2795,73 @@ fn every_form_a_digit_takes_refuses_the_same_tone_lengths() {
     }
 }
 
-/// A call whose far end offered no telephone event type is told so, rather
-/// than swallowing the digit. B2: applied, rejected with a reason, or not
-/// supported — never accepted and ignored.
+/// A call whose far end offered no telephone event type gets the digit the
+/// one way it can hear one: as the two tones, in the audio. B2 holds —
+/// applied, never accepted and dropped — and the far end, listening by
+/// default on exactly such a call, reports the key it heard.
 #[test]
-fn a_call_with_no_event_type_refuses_a_digit_instead_of_dropping_it() {
+fn a_call_with_no_event_type_sends_the_digit_in_the_audio_and_the_far_end_hears_it() {
     let catalog = CodecCatalog::with_order(&["PCMU"])
         .expect("an order")
         .with_dtmf(false);
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
-    let mut session = pair
-        .caller
-        .engine
-        .session(call)
-        .expect("the caller's media");
-
-    assert!(matches!(
-        session.send_dtmf(Digit::Hash, DEFAULT_DIGIT),
-        Err(MediaError::NoDtmf)
-    ));
-    assert!(!session.is_dialling());
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let microphone = vec![600_i16; 160];
+    // past the far end's probation first (RFC 3550 A.1), which would take
+    // the first frame of the first digit with it
+    for _ in 0..4 {
+        pair.one_way(call, remote, &microphone);
+    }
+    {
+        let mut session = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media");
+        session
+            .send_dtmf(Digit::Hash, DEFAULT_DIGIT)
+            .expect("the digit goes in the audio");
+        session.dial("12", DEFAULT_DIGIT).expect("and a string");
+        assert!(session.is_dialling());
+        assert_eq!(session.digits_waiting(), 3);
+    }
+    for _ in 0..60 {
+        pair.one_way(call, remote, &microphone);
+    }
+    assert!(
+        !pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .is_dialling()
+    );
+    pair.callee.drain(pair.now, false);
+    let heard: Vec<(Option<char>, DigitSource, Option<Duration>)> = pair
+        .callee
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::DigitReceived {
+                digit,
+                source,
+                held,
+                ..
+            } => Some((*digit, *source, *held)),
+            _ => None,
+        })
+        .collect();
+    let keys: String = heard.iter().filter_map(|(digit, _, _)| *digit).collect();
+    assert_eq!(keys, "#12", "{heard:?}");
+    for (_, source, held) in heard {
+        assert_eq!(source, DigitSource::InBand);
+        let held = held.expect("a digit heard in the audio has a length");
+        assert!(
+            held.abs_diff(DEFAULT_DIGIT) <= Duration::from_millis(10),
+            "{held:?}"
+        );
+    }
 }
 
 /// Half an extension is worse than none, because it reaches somebody.
@@ -3268,10 +3622,11 @@ fn a_recording_takes_both_directions_of_a_live_call() {
     let wav = file.contents();
     assert_eq!(&wav[0..4], b"RIFF");
     // ten frames of a hundred and sixty samples, two octets each, behind the
-    // forty-four octet header
-    assert_eq!(wav.len(), 44 + 10 * 160 * 2);
+    // header
+    let header = sipral_media::formats::wav::HEADER_LEN;
+    assert_eq!(wav.len(), header + 10 * 160 * 2);
 
-    let audio: Vec<i16> = wav[44..]
+    let audio: Vec<i16> = wav[header..]
         .chunks_exact(2)
         .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
         .collect();
@@ -3350,10 +3705,10 @@ fn a_call_that_ends_closes_the_recording_it_was_making() {
     pair.settle();
 
     let wav = file.contents();
-    let length = u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]);
+    let length = crate::record::tests::field(&wav, crate::record::tests::DATA_LENGTH_AT, 4);
     assert_eq!(
         usize::try_from(length).expect("a length"),
-        wav.len() - 44,
+        wav.len() - sipral_media::formats::wav::HEADER_LEN,
         "the data chunk length was never patched"
     );
     assert!(length > 0, "nothing was recorded at all");
@@ -3728,6 +4083,94 @@ fn a_telephone_event_on_the_other_laws_number_is_still_a_digit() {
         vec![Some('5')],
         "the key sent on the negotiated telephone-event number was not heard as one"
     );
+}
+
+/// A gateway that sends a key both ways — the two tones left in the audio
+/// and an RFC 4733 event beside them — pressed it once. A call listening in
+/// the audio as well reports it once, as the event, and the same audio with
+/// no event beside it is still heard as the key.
+#[test]
+fn a_key_a_gateway_sends_both_as_an_event_and_in_the_audio_is_reported_once() {
+    use sipral_media::inband::dtmf::Digit as Key;
+    use sipral_media::inband::generate::{DtmfGenerator, DtmfTone};
+
+    let now = Instant::now();
+    let (ours, theirs) = plan_pair(
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:101 telephone-event/8000\r\n",
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:101 telephone-event/8000\r\n",
+    );
+    let from: SocketAddr = "192.0.2.2:40002".parse().expect("an address");
+    let packet = |sequence: u16, timestamp: u32, payload_type: u8, payload: &[u8]| {
+        let mut datagram = vec![0x80, payload_type];
+        datagram.extend_from_slice(&sequence.to_be_bytes());
+        datagram.extend_from_slice(&timestamp.to_be_bytes());
+        datagram.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        datagram.extend_from_slice(payload);
+        datagram
+    };
+    let mut tone = vec![0_i16; 800];
+    let mut generator = DtmfGenerator::with_tone_at(
+        8_000,
+        DtmfTone {
+            tone_ms: 100,
+            pause_ms: 0,
+            ..DtmfTone::default()
+        },
+    );
+    generator.start(Key::Five);
+    generator.fill(&mut tone);
+    let audio = |frame: &[i16]| {
+        let mut octets = [0_u8; 160];
+        sipral_media::g711::Law::Mu.encode_into(frame, &mut octets);
+        octets
+    };
+    let silence = audio(&[0; 160]);
+
+    let heard = |with_event: bool| {
+        let mut receiver = session(&ours, &theirs, now);
+        receiver.set_dtmf_detection(crate::DtmfDetection::Always);
+        let mut sequence = 1_u16;
+        let mut timestamp = 0_u32;
+        let mut send = |receiver: &mut MediaSession, payload_type: u8, payload: &[u8], ticks| {
+            let mut datagram = packet(sequence, timestamp, payload_type, payload);
+            let _ = receiver.receive(&mut datagram, from, now);
+            sequence += 1;
+            timestamp += ticks;
+        };
+        // RFC 3550 A.1's probation, then the key in the audio
+        for _ in 0..6 {
+            send(&mut receiver, 0, &silence, 160);
+        }
+        for frame in tone.chunks(160) {
+            send(&mut receiver, 0, &audio(frame), 160);
+        }
+        // and the event of the same press, its closing packet three times
+        // (RFC 4733 §2.5.1.4): event 5, end bit, 800 ticks held
+        for index in 0..if with_event { 3 } else { 0 } {
+            let ticks = if index == 2 { 160 } else { 0 };
+            send(&mut receiver, 101, &[5, 0x8a, 0x03, 0x20], ticks);
+        }
+        for _ in 0..30 {
+            send(&mut receiver, 0, &silence, 160);
+        }
+        let mut played = vec![0_i16; receiver.frame_samples()];
+        let mut keys = Vec::new();
+        for _ in 0..60 {
+            let _ = receiver.playback(&mut played);
+            while let Some(event) = receiver.poll_event() {
+                if let MediaEvent::DigitReceived { digit, source, .. } = event {
+                    keys.push((digit, source));
+                }
+            }
+        }
+        keys
+    };
+    assert_eq!(heard(false), vec![(Some('5'), DigitSource::InBand)]);
+    assert_eq!(heard(true), vec![(Some('5'), DigitSource::Rtp)]);
 }
 
 /// An answer naming a codec this build has no decoder for is a reported
@@ -4502,12 +4945,11 @@ fn a_codec_change_at_the_same_rate_does_not_lose_the_recording_that_was_running(
     );
 }
 
-/// A codec change that moves the rate cannot keep it: a WAVE header names the
-/// playback rate once, at the front of the file. So the recording is closed
-/// properly rather than dropped, and the application is told, because it is
-/// the only one that can decide whether to open a second file.
+/// A codec change that moves the rate keeps the recording: the file has a
+/// rate of its own, fixed when it started, and what the new codec hears is
+/// converted to it. One call, one file, whatever the negotiation does.
 #[test]
-fn a_codec_change_that_moves_the_rate_closes_the_recording_and_says_so() {
+fn a_codec_change_that_moves_the_rate_carries_the_recording_on_at_its_own_rate() {
     let catalog = CodecCatalog::with_order(&["PCMU", "G722"]).expect("an order");
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
@@ -4528,36 +4970,43 @@ fn a_codec_change_that_moves_the_rate_closes_the_recording_and_says_so() {
         Codec::G722,
         "the re-offer never reached the media"
     );
-
-    let wav = file.contents();
-    let data_len = u32::from_le_bytes([
-        *wav.get(40).unwrap_or(&0),
-        *wav.get(41).unwrap_or(&0),
-        *wav.get(42).unwrap_or(&0),
-        *wav.get(43).unwrap_or(&0),
-    ]);
     assert!(
-        data_len > 0,
-        "the file was left with zeroes where its lengths should be"
-    );
-    assert!(
-        !pair
-            .caller
+        pair.caller
             .engine
             .session(call)
             .expect("media")
-            .is_recording()
+            .is_recording(),
+        "the codec change stopped the recording"
+    );
+    talk(&mut pair, call, 8);
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .stop_recording()
+        .expect("the file is finished");
+
+    let wav = file.contents();
+    assert_eq!(
+        crate::record::tests::field(&wav, crate::record::tests::RATE_AT, 4),
+        8_000,
+        "the file moved with the codec"
+    );
+    let audio = crate::record::tests::field(&wav, crate::record::tests::DATA_LENGTH_AT, 4);
+    // sixteen frames of twenty milliseconds at 8 kHz, both before and after,
+    // give or take the converter's own delay
+    assert!(
+        audio.abs_diff(16 * 160 * 2) <= 64,
+        "{audio} octets of audio in the file"
     );
     pair.caller.drain(pair.now, false);
     assert!(
-        pair.caller.media_events().into_iter().any(|event| matches!(
-            event,
-            MediaEvent::RecordingStopped {
-                reason: MediaError::CodecChanged,
-                ..
-            }
-        )),
-        "the recording ended and nobody was told"
+        !pair
+            .caller
+            .media_events()
+            .into_iter()
+            .any(|event| matches!(event, MediaEvent::RecordingStopped { .. })),
+        "the recording stopped by itself"
     );
 }
 

@@ -286,7 +286,12 @@ public sealed class SipralStack : IDisposable
     /// refused a port outside it. Both <c>0</c> — the default — leave the
     /// ports to the operating system. Every pair taken throws with
     /// <see cref="SipralStatus.Exhausted"/> rather than binding outside the
-    /// range.</summary>
+    /// range.
+    /// <paramref name="dtmfDetection"/> is when a call listens for keypad
+    /// digits in the far end's audio: <see cref="SipralDtmfDetection.Auto"/>
+    /// on the calls that negotiated no telephone event, <c>Always</c> or
+    /// <c>Off</c>; <see cref="Call.SetDtmfDetection"/> changes it for one
+    /// call.</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -318,7 +323,8 @@ public sealed class SipralStack : IDisposable
         uint diagnosticRecords = 0,
         IReadOnlyList<string>? stunFallbacks = null,
         ushort rtpPortMin = 0,
-        ushort rtpPortMax = 0)
+        ushort rtpPortMax = 0,
+        SipralDtmfDetection dtmfDetection = SipralDtmfDetection.Auto)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
         _nat = nat;
@@ -428,6 +434,7 @@ public sealed class SipralStack : IDisposable
             config.StunFallbacksLen = (nuint)(stunFallbacksBytes?.Length ?? 0);
             config.RtpPortMin = rtpPortMin;
             config.RtpPortMax = rtpPortMax;
+            config.DtmfDetection = (uint)dtmfDetection;
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }

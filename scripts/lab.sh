@@ -127,6 +127,14 @@
 #                               minutes unless told otherwise) --
 #                               interop/harness/src/latency.rs's own module
 #                               doc says what the three stages it reports are
+#   scripts/lab.sh inband       what a call carries in its audio, straight at
+#                               Asterisk with no telephone event: digits
+#                               dialled in the audio and heard back in it,
+#                               ringback then a recorded greeting and its
+#                               beep (a machine), and a call recorded to
+#                               stereo WAV and Ogg Opus, read back by the
+#                               harness and then by soxi and opusinfo --
+#                               interop/harness/src/inband.rs's module doc
 #   scripts/lab.sh volume       a hundred calls (SIPRAL_VOLUME_CALLS) at once
 #                               rather than one -- SIPRAL_VOLUME_STAGGER_MS
 #                               apart, held on the tone for
@@ -443,7 +451,11 @@ elif [ -n "${SIPRAL_HARNESS:-}" ]; then
     HARNESS="$SIPRAL_HARNESS"
     pass "taken as given: $HARNESS"
 else
-    cargo build --release -p sipral-interop >/dev/null 2>&1 \
+    # Opus only for the step that records to Ogg Opus: every other step's
+    # binary builds without libopus (interop/harness/Cargo.toml says why)
+    HARNESS_FEATURES=""
+    [ "$WANT" = inband ] && HARNESS_FEATURES=opus
+    cargo build --release -p sipral-interop ${HARNESS_FEATURES:+--features "$HARNESS_FEATURES"} >/dev/null 2>&1 \
         && pass "built" || { fail "cargo build -p sipral-interop"; exit 1; }
     HARNESS="$ROOT/target/release/sipral-interop"
 fi
@@ -2712,6 +2724,53 @@ latency_flow() {
 if [ "$WANT" = latency ]; then
     step "microphone to earpiece -- a marker's round trip to Asterisk's echo"
     latency_flow && pass "the markers came back" || fail "microphone to earpiece"
+fi
+
+# What a call carries in its audio, and a call recorded, on Asterisk's
+# labuser-inband (no telephone event): interop/harness/src/inband.rs's module
+# doc says what each of its three flows proves. The greeting the machine
+# flow's far end plays is written by the harness itself and copied into
+# Asterisk first; the recordings land in a directory of this run's own, which
+# the harness reads back and then soxi and opusinfo, readers that are not
+# this stack's own. Run as this user, so what the containers write here is
+# this user's to remove.
+inband_flow() {
+    local greetings recordings status
+    greetings=$(mktemp -d) && recordings=$(mktemp -d) || return 1
+    docker run --rm --user "$(id -u):$(id -g)" -v "$HARNESS:/harness:ro" -v "$greetings:/out" \
+        debian:trixie-slim /harness --write-greeting /out >/dev/null \
+        && ( cd interop && docker compose cp "$greetings/sipral-greeting.sln" asterisk:/tmp/ \
+            && docker compose cp "$greetings/sipral-beep.sln" asterisk:/tmp/ ) >/dev/null 2>&1 \
+        || { printf '  the greeting did not reach Asterisk\n'; rm -rf "$greetings" "$recordings"; return 1; }
+    lab_run "the in-band flows' calls" $((LAB_START_S + 3 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        --user "$(id -u):$(id -g)" \
+        -e SIPRAL_FLOWS=inband,amd,recording \
+        -e SIPRAL_USER=labuser-inband \
+        -e SIPRAL_RECORDINGS=/recordings \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        -v "$recordings:/recordings" \
+        debian:trixie-slim /harness asterisk 5060 9000
+    status=$?
+    if [ "$status" -eq 0 ]; then
+        lab_run "soxi and opusinfo on the recordings" $((LAB_START_APT_S + LAB_CALL_S)) \
+            -v "$recordings:/recordings:ro" \
+            debian:trixie-slim sh -c '
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get -qq update >/dev/null 2>&1
+                apt-get -qq install -y sox opus-tools >/dev/null 2>&1
+                soxi /recordings/sipral-call.wav && opusinfo /recordings/sipral-call.opus'
+        status=$?
+    fi
+    rm -rf "$greetings" "$recordings"
+    return "$status"
+}
+
+if [ "$WANT" = inband ]; then
+    step "digits, ringback, a machine and a recording -- in the audio, at Asterisk"
+    inband_flow && pass "heard in the audio, and both recordings read by other readers" \
+        || fail "what a call carries in its audio"
 fi
 
 # A hundred calls (or SIPRAL_VOLUME_CALLS) at once rather than one,

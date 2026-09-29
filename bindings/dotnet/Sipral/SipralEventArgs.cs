@@ -68,6 +68,8 @@ public sealed class SipralEventArgs : EventArgs
     public SipralStunServerEventInfo? StunServer { get; }
     /// <summary>Set for <see cref="SipralEventKind.CallerVerification"/>.</summary>
     public SipralVerificationEventInfo? Verification { get; }
+    /// <summary>Set for <see cref="SipralEventKind.ProgressDetected"/>.</summary>
+    public SipralProgressEventInfo? Progress { get; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
@@ -75,11 +77,13 @@ public sealed class SipralEventArgs : EventArgs
         SipralMediaEventInfo? media, SipralTransferEventInfo? transfer, SipralResolveEventInfo? resolve,
         SipralNatEventInfo? nat, SipralNatRelayEventInfo? relay, SipralReferralEventInfo? referral,
         SipralTurnStreamEventInfo? turnStream, SipralAudioEventInfo? audio,
-        SipralStunServerEventInfo? stunServer, SipralVerificationEventInfo? verification)
+        SipralStunServerEventInfo? stunServer, SipralVerificationEventInfo? verification,
+        SipralProgressEventInfo? progress)
     {
         Verification = verification;
         Audio = audio;
         StunServer = stunServer;
+        Progress = progress;
         Kind = kind;
         KindName = kindName;
         Stack = stack;
@@ -110,7 +114,7 @@ public sealed class SipralEventArgs : EventArgs
         SipralEventKind.MediaStatistics, SipralEventKind.MediaStalled, SipralEventKind.MediaStarted,
         SipralEventKind.MediaChanged, SipralEventKind.MediaResumed, SipralEventKind.MediaFailed,
         SipralEventKind.RecordingStopped, SipralEventKind.DigitReceived, SipralEventKind.MediaSecured,
-        SipralEventKind.MediaPathChosen,
+        SipralEventKind.MediaPathChosen, SipralEventKind.InBandDigit,
     };
 
     /// <summary>
@@ -141,6 +145,7 @@ public sealed class SipralEventArgs : EventArgs
         SipralAudioEventInfo? audio = null;
         SipralStunServerEventInfo? stunServer = null;
         SipralVerificationEventInfo? verification = null;
+        SipralProgressEventInfo? progress = null;
 
         if (kind == SipralEventKind.RegistrationChanged)
         {
@@ -245,10 +250,18 @@ public sealed class SipralEventArgs : EventArgs
                 v.ResponseCode, v.Refused != 0, ReadUtf8(v.CertificateUrl, v.CertificateUrlLen),
                 ReadUtf8(v.Orig, v.OrigLen), ReadUtf8(v.Origid, v.OrigidLen), ReadUtf8(v.Detail, v.DetailLen));
         }
+        else if (kind == SipralEventKind.ProgressDetected)
+        {
+            var p = evt.Payload.Progress;
+            progress = new SipralProgressEventInfo(
+                (SipralProgressKind)p.What, (SipralProgressTone)p.Tone, (SipralAmdVerdict)p.Verdict,
+                (SipralAmdReason)p.Reason, p.AtMs, p.InitialSilenceMs, p.GreetingMs, p.Words, p.FrequencyHz,
+                p.LengthMs, new[] { p.SitHz1, p.SitHz2, p.SitHz3 }, new[] { p.SitMs1, p.SitMs2, p.SitMs3 });
+        }
 
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
             registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio,
-            stunServer, verification);
+            stunServer, verification, progress);
     }
 
     internal static SipralStreamStatistics? ReadStatistics(IntPtr ptr)

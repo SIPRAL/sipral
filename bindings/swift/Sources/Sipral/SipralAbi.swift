@@ -103,6 +103,12 @@ public enum SipralStatus: Int32, Sendable {
     /// 488 Not Acceptable Here; a call being placed never left. The last
     /// error says which.
     case securityPolicy = 18
+    /// A recording's file would not take what was written to it: the disk
+    /// filled, the volume went away, the file was taken away underneath.
+    /// Not the path, which is `SIPRAL_STATUS_INVALID_ARGUMENT` before
+    /// anything is written. The recording has stopped; the file holds the
+    /// audio up to the last checkpoint it could write.
+    case recordingFailed = 19
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -300,6 +306,13 @@ public enum SipralCodec: UInt32, Sendable {
     /// answers with the offer's `annexb`, and uses Annex B's silence
     /// compression where both descriptions allow it.
     case g729 = 5
+    /// L16 at 8 kHz, one channel: the samples themselves, on a dynamic
+    /// payload type as `L16/8000`. In every build and in no default
+    /// offer: a call offers it only when a codec order names `L16/8000`.
+    case l16Narrowband = 6
+    /// L16 at 16 kHz, one channel, as `L16/16000`: wideband with nothing
+    /// lost, offered only when a codec order names `L16/16000`.
+    case l16Wideband = 7
 }
 
 /// What became of one codec this call's catalogue could have used. Names
@@ -577,6 +590,12 @@ public enum SipralDtmf: UInt32, Sendable {
     /// An INFO per digit carrying `application/dtmf`, whose whole body is the
     /// character. Some switches take only this one.
     case infoPlain = 3
+    /// In the media, as the two tones of each key written into the audio in
+    /// place of the microphone, whatever the negotiation settled on: for
+    /// the far end that negotiated a telephone event and then listens only
+    /// to the audio. `SIPRAL_DTMF_RTP` does this by itself on a call that
+    /// negotiated no telephone event.
+    case inBand = 4
 }
 
 /// What an event is about.
@@ -991,6 +1010,26 @@ public enum SipralEventKind: UInt32, Sendable {
     /// `SIPRAL_EVENT_KIND_CALL_ENDED` of a call its strict account
     /// refused with `response_code`. `message` is the INVITE.
     case callerVerification = 47
+    /// A keypad digit heard in the far end's audio, as the two tones
+    /// themselves, on a call listening for them:
+    /// `sipral_stack_config_t::dtmf_detection` and
+    /// `sipral_call_dtmf_detection` say when. One per press, reported as
+    /// it ends; on a call that also negotiated named events, a press the
+    /// far end sent both ways is reported once, as
+    /// `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`, and one heard only in the audio
+    /// waits a quarter of a second before it is reported here.
+    ///
+    /// `payload.media` carries it the way it carries every digit:
+    /// `digit` is the key's character, `event_code` its RFC 4733 code,
+    /// `held_ms` how long it sounded and `source`
+    /// `SIPRAL_DIGIT_SOURCE_IN_BAND`.
+    case inBandDigit = 48
+    /// What was heard on a call told to listen with
+    /// `sipral_call_detect_progress`: a call-progress tone of its network
+    /// on early media, the special information tone, who answered, or
+    /// the beep an answering machine plays before it records.
+    /// `payload.progress` says which, and what was measured.
+    case progressDetected = 49
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1092,15 +1131,18 @@ public enum SipralCallEndReason: UInt32, Sendable {
     case expired = 8
 }
 
-/// Which of the two ways this stack accepts a digit reported the one
-/// SipralEventKind.digitReceived carries. Names for
-/// `sipral_media_event_t::source`.
+/// Which of the ways this stack accepts a digit reported the one
+/// SipralEventKind.digitReceived or SipralEventKind.inBandDigit
+/// carries. Names for `sipral_media_event_t::source`.
 public enum SipralDigitSource: UInt32, Sendable {
     /// RFC 4733: a named telephone event in the RTP stream.
     case rtp = 0
     /// RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
     /// or `application/dtmf`.
     case info = 1
+    /// The two tones themselves, heard in the far end's audio, for
+    /// SipralEventKind.inBandDigit.
+    case inBand = 2
 }
 
 /// What a SipralEventKind.recovery reports happened, for
@@ -1775,6 +1817,121 @@ public enum SipralVerificationStage: UInt32, Sendable {
     case verified = 2
 }
 
+/// What a SipralEventKind.progressDetected heard. Names for
+/// `sipral_progress_event_t::what`.
+public enum SipralProgressKind: UInt32, Sendable {
+    /// Never written by this build.
+    case unknown = 0
+    /// A call-progress tone of the configured network: `tone` says which
+    /// and `at_ms` when its first burst began, from the first frame
+    /// listened to.
+    case tone = 1
+    /// The special information tone: the call failed, and an
+    /// announcement usually follows. `sit_hz_1` to `sit_hz_3` and
+    /// `sit_ms_1` to `sit_ms_3` are what was measured, `at_ms` when the
+    /// first of the three began.
+    case specialInformation = 2
+    /// Who answered: `verdict`, `reason`, `at_ms` after answer,
+    /// `initial_silence_ms`, `greeting_ms` and `words`.
+    case answeredBy = 3
+    /// The beep a machine plays before it records: `frequency_hz`,
+    /// `at_ms` when it ended after answer — when the machine starts
+    /// recording — and `length_ms`.
+    case beep = 4
+}
+
+/// A call-progress tone. Names for `sipral_progress_event_t::tone`.
+public enum SipralProgressTone: UInt32, Sendable {
+    /// Not a tone, or one this build has no name for.
+    case unknown = 0
+    /// The exchange is ready for digits.
+    case dial = 1
+    /// The far end is being alerted.
+    case ringback = 2
+    /// The far end is busy.
+    case busy = 3
+    /// The network is congested: congestion, or reorder.
+    case congestion = 4
+    /// A second call is waiting.
+    case callWaiting = 5
+    /// The special information tone.
+    case specialInformation = 6
+}
+
+/// Who answered. Names for `sipral_progress_event_t::verdict`.
+public enum SipralAmdVerdict: UInt32, Sendable {
+    /// Not a verdict.
+    case unknown = 0
+    /// A person.
+    case human = 1
+    /// An answering machine or a voice mailbox.
+    case machine = 2
+    /// The evidence does not say.
+    case notSure = 3
+}
+
+/// Which rule decided who answered. Names for
+/// `sipral_progress_event_t::reason`.
+public enum SipralAmdReason: UInt32, Sendable {
+    /// Not a verdict.
+    case none = 0
+    /// A short greeting, then silence: somebody said hello and waits.
+    case shortGreeting = 1
+    /// More words than a person answers with.
+    case tooManyWords = 2
+    /// A greeting longer than a person gives.
+    case longGreeting = 3
+    /// Nobody spoke.
+    case initialSilence = 4
+    /// No rule decided in the time allowed.
+    case timeout = 5
+}
+
+/// When a call listens for keypad digits in the far end's audio. Names
+/// for `sipral_stack_config_t::dtmf_detection` and
+/// sipral_call_dtmf_detection's `mode`.
+public enum SipralDtmfDetection: UInt32, Sendable {
+    /// On a call whose negotiation settled on no telephone event payload
+    /// type: the far end then has no other way to send a digit. Zero, so
+    /// that a stack that says nothing gets it.
+    case auto = 0
+    /// Never. Digits arrive only as RFC 4733 events or by INFO.
+    case off = 1
+    /// On every call. A press the far end sends both as an event and in
+    /// the audio is reported once, as the event.
+    case always = 2
+}
+
+/// Whose call-progress tones to listen for. Names for
+/// `sipral_progress_config_t::region`.
+public enum SipralToneRegion: UInt32, Sendable {
+    /// The 425 Hz tones common to the CEPT administrations.
+    case europe = 0
+    /// The United States and Canada.
+    case northAmerica = 1
+    /// The United Kingdom.
+    case unitedKingdom = 2
+}
+
+/// The file format of a recording. Names for
+/// `sipral_recording_options_t::format`.
+public enum SipralRecordingFormat: UInt32, Sendable {
+    /// Sixteen-bit PCM in RIFF/WAVE, becoming RF64 past four gibibytes.
+    case wav = 0
+    /// Opus in Ogg (RFC 7845), where `SIPRAL_FEATURE_OPUS` says the build
+    /// has the encoder; `SIPRAL_STATUS_NOT_SUPPORTED` where it does not.
+    case oggOpus = 1
+}
+
+/// How the two directions of a call share a recording. Names for
+/// `sipral_recording_options_t::layout`.
+public enum SipralRecordingLayout: UInt32, Sendable {
+    /// One channel: both directions, each at half level, summed.
+    case mixed = 0
+    /// Two channels: this end on the left, the far end on the right.
+    case stereo = 1
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -2069,6 +2226,36 @@ public extension sipral_stream_encryption_t {
     }
 }
 
+public extension sipral_progress_config_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_consent_tone_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_recording_options_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -2345,6 +2532,25 @@ public enum Sipral {
     /// encryption report of every call (`sipral_media_encryption_at`). ABI
     /// 0.31.
     public static let featureSrtpPolicy: UInt32 = 131072
+
+    /// See SIPRAL_FEATURE_DTMF. What a call carries inside its audio:
+    /// keypad digits heard in the far end's audio
+    /// (`sipral_stack_config_t::dtmf_detection`,
+    /// `sipral_call_dtmf_detection`, `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`) and
+    /// written into this end's (`SIPRAL_DTMF_IN_BAND`, and `SIPRAL_DTMF_RTP`
+    /// on a call with no telephone event), call-progress tones, who answered
+    /// and the machine's beep (`sipral_call_detect_progress`,
+    /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`), and the beep that says a call
+    /// is recorded (`sipral_call_consent_tone`).
+    public static let featureInBandSignals: UInt32 = 262144
+
+    /// See SIPRAL_FEATURE_DTMF. A recording written as
+    /// `sipral_recording_options_t` says (`sipral_media_record_start_with`):
+    /// mixed or stereo, WAV growing into RF64, at a rate of its own and
+    /// checkpointed against a crash, and Ogg Opus where
+    /// SIPRAL_FEATURE_OPUS is set too. And L16 as a codec, at 8 and 16
+    /// kHz, which `sipral_codec_at` lists.
+    public static let featureRecordingFormats: UInt32 = 524288
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -3828,10 +4034,12 @@ public enum Sipral {
     /// the same as one with a character no keypad has, and nothing of it is
     /// sent.
     ///
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
-    /// negotiation settled on no telephone event payload type: the key is a
-    /// real key and this call has nowhere in the media to put it. The INFO
-    /// forms need a dialog rather than a negotiation, and answer
+    /// `SIPRAL_DTMF_RTP` on a call whose negotiation settled on no telephone
+    /// event payload type writes the digits into the audio instead, as
+    /// `SIPRAL_DTMF_IN_BAND` does on any call: the one way such a far end can
+    /// hear a key. Both need the call's media, and answer
+    /// `SIPRAL_STATUS_WRONG_STATE` before there is any. The INFO forms need a
+    /// dialog rather than a negotiation, and answer
     /// `SIPRAL_STATUS_WRONG_STATE` before there is one.
     ///
     /// Safety
@@ -4019,8 +4227,10 @@ public enum Sipral {
     /// number this build has no codec for.
     ///
     /// It is spelled as IANA registered it, which is also how it goes on an
-    /// `a=rtpmap` line. The string belongs to the library and lives as long as
-    /// it is loaded.
+    /// `a=rtpmap` line — with the rate after it for L16, `L16/8000` and
+    /// `L16/16000`, which is one encoding name at two rates and is named that
+    /// way in a codec order. The string belongs to the library and lives as
+    /// long as it is loaded.
     ///
     /// Safety
     ///
@@ -6250,6 +6460,91 @@ public enum Sipral {
         let status = sipral_media_encryption_at(media, index, &stream)
         try check(status)
         return stream
+    }
+
+    /// Listen for keypad digits in this call's far-end audio as `mode` says:
+    /// a SipralDtmfDetection. Before the call has media as well as
+    /// after, for the rest of the call.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+    /// not run.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    public static func callDtmfDetection(stack: SipralHandle, call: SipralHandle, mode: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_call_dtmf_detection(stack, call, mode)
+        try check(status)
+    }
+
+    /// Listen for call progress on this call and decide who answers it, as
+    /// `config` says, or stop with `config.listen` off. Meant for a call this
+    /// stack placed, straight after `sipral_call_place`: the tones are
+    /// listened for from the first frame of early media, and who answered is
+    /// decided from the 2xx on. Each thing heard is a
+    /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+    /// not run; `SIPRAL_STATUS_INVALID_ARGUMENT` for a value no detector
+    /// takes, which changes nothing.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_progress_config_t` whose `size`
+    /// member says how long it is.
+    public static func callDetectProgress(stack: SipralHandle, call: SipralHandle, config: sipral_progress_config_t) throws {
+        try ensureAbi()
+        var config = config
+        let status = sipral_call_detect_progress(stack, call, &config)
+        try check(status)
+    }
+
+    /// Beep on this call while it is recorded, as `tone` says, or play no
+    /// tone with `tone.enabled` off. A recording already running starts
+    /// beeping at once; one started later beeps from its first frame.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+    /// not run; `SIPRAL_STATUS_INVALID_ARGUMENT`, naming the member, for a
+    /// tone that is not a beep, which changes nothing.
+    ///
+    /// Safety
+    ///
+    /// `tone` must point at a `sipral_consent_tone_t` whose `size` member
+    /// says how long it is.
+    public static func callConsentTone(stack: SipralHandle, call: SipralHandle, tone: sipral_consent_tone_t) throws {
+        try ensureAbi()
+        var tone = tone
+        let status = sipral_call_consent_tone(stack, call, &tone)
+        try check(status)
+    }
+
+    /// Start recording this call to `path`, written as `options` say: WAV or
+    /// Ogg Opus, mixed or stereo with this end on the left, at a rate of the
+    /// file's own. Everything else is sipral_media_record_start's,
+    /// which is this with every option zero.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for options no file can be written
+    /// with and for a path the file system refuses, and
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for Ogg Opus in a build with no Opus.
+    /// `SIPRAL_STATUS_RECORDING_FAILED` when the file was made and would not
+    /// take its header.
+    ///
+    /// Safety
+    ///
+    /// `path` must be readable for `path_len` bytes, and `options` must point
+    /// at a `sipral_recording_options_t` whose `size` member says how long
+    /// it is.
+    public static func mediaRecordStartWith(media: SipralHandle, path: String, options: sipral_recording_options_t) throws {
+        try ensureAbi()
+        var options = options
+        let status =
+            Array(path.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_media_record_start_with(media, p1.baseAddress, p1.count, &options)
+                }
+            }
+        try check(status)
     }
 
 }

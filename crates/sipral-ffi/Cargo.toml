@@ -103,6 +103,10 @@ sipral-nat = { path = "../sipral-nat", version = "0.0.1" }
 # the throwaway STIR PKI the tests of a signed call through this ABI verify
 # against, built in memory from fixed keys
 sipral-stir = { path = "../sipral-stir", version = "0.0.1", features = ["testing"] }
+# the far end's audio for the tests of what a call hears in it -- a digit's
+# two tones, a greeting -- written and companded with the same code the
+# facade already links, so nothing new enters the build either
+sipral-media = { path = "../sipral-media", version = "0.0.1", default-features = false }
 
 [lints.rust]
 unsafe_code = "allow"

@@ -168,6 +168,7 @@ class Stack:
         diagnostic_records: int = 0,
         rtp_port_min: int = 0,
         rtp_port_max: int = 0,
+        dtmf_detection: int = 0,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
 
@@ -266,6 +267,12 @@ class Stack:
         outside it. Both ``0`` -- the default -- leaves the ports to the
         operating system. Every pair taken raises
         ``SIPRAL_STATUS_EXHAUSTED`` rather than binding outside the range.
+
+        ``dtmf_detection`` (a :class:`sipral.enums.DtmfDetection`) is when a
+        call listens for keypad digits in the far end's audio: ``AUTO``
+        (``0``) on the calls that negotiated no telephone event, ``ALWAYS``
+        or ``OFF``; :meth:`sipral.call.Call.set_dtmf_detection` changes it
+        for one call.
         """
         self._loop = loop
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
@@ -423,6 +430,7 @@ class Stack:
         config.diagnostic_records = diagnostic_records
         config.rtp_port_min = rtp_port_min
         config.rtp_port_max = rtp_port_max
+        config.dtmf_detection = int(dtmf_detection)
         #: The RTP port range media sockets are bound in, or ``None``.
         self.rtp_ports = (rtp_port_min, rtp_port_max) if rtp_port_min or rtp_port_max else None
         #: Every callback `sipral_stack_log` was given, kept alive here for

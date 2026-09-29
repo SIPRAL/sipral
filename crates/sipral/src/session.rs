@@ -62,9 +62,10 @@ use crate::dtmf::{self, DIGIT_GAP, Dialling, Digit, Due, LONGEST_DIGIT, SHORTEST
 use crate::echo::{Echo, MAX_RENDER_DELAY};
 use crate::error::MediaError;
 use crate::event::MediaEvent;
+use crate::inband::{ConsentTone, DtmfDetection, ProgressDetection, Signals};
 use crate::keying::{self, Opening, Shape};
 use crate::pipeline::{Coder, Decoded};
-use crate::record::{Recorder, RecordingSink};
+use crate::record::{Recorder, RecordingOptions, RecordingSink};
 use crate::share::{Outbox, Ready};
 use crate::stats::StreamStatistics;
 
@@ -233,6 +234,19 @@ pub struct MediaConfig {
     /// headset. `None` is a call whose device has not been recorded, not a
     /// call known to be on the system default.
     pub device: Option<String>,
+    /// When to listen for keypad digits in the far end's audio, as well as
+    /// in its RFC 4733 events. [`DtmfDetection::Auto`] unless told
+    /// otherwise: on exactly the calls that negotiated no telephone event.
+    pub dtmf_detection: DtmfDetection,
+    /// Listen for call-progress tones on early media and decide who
+    /// answered. `None`, the default: it is for calls this end places to
+    /// reach a person, and costs a detector on every frame until it has
+    /// decided.
+    pub progress: Option<ProgressDetection>,
+    /// Beep while the call is being recorded. `None`, the default: whether
+    /// the parties have to be told is a matter of where they are, and the
+    /// application's to decide.
+    pub consent_tone: Option<ConsentTone>,
 }
 
 impl Default for MediaConfig {
@@ -244,6 +258,9 @@ impl Default for MediaConfig {
             silence_suppression: false,
             render_delay: Duration::ZERO,
             device: None,
+            dtmf_detection: DtmfDetection::Auto,
+            progress: None,
+            consent_tone: None,
         }
     }
 }
@@ -361,6 +378,11 @@ pub struct MediaSession {
     suppressing: bool,
     noise: Generator,
     recorder: Option<Recorder>,
+    /// Digits, tones and the consent beep carried in the audio itself.
+    signals: Signals,
+    /// A captured frame as it goes out when a digit or a beep has been
+    /// written into it, held rather than allocated.
+    shaped: Vec<i16>,
     /// Echo cancellation, gain control and noise suppression, when the
     /// application attached any. `None` is the whole of the cost of not
     /// having one: no history, no copy, no call.
@@ -585,6 +607,14 @@ impl MediaSession {
             suppressing: config.silence_suppression && !discontinuous,
             noise: Generator::new(),
             recorder: None,
+            signals: Signals::new(
+                agreed.sample_rate(),
+                plan.dtmf.is_some(),
+                config.dtmf_detection,
+                config.progress,
+                config.consent_tone,
+            ),
+            shaped: Vec::new(),
             echo: None,
             render_delay: config.render_delay,
             dialling: Dialling::new(ticks_of(DIGIT_GAP, plan.codec.clock_rate())),
@@ -1513,12 +1543,9 @@ impl MediaSession {
         let frame = self.frame_samples().min(out.len());
         let room = out.get_mut(..frame).unwrap_or_default();
         let played = self.fill(room);
-        // this is the frame the loudspeaker is about to have, so it is the
-        // one a canceller will be looking for in the microphone a device
-        // delay from now
-        if let Some(echo) = self.echo.as_mut() {
-            echo.rendered(room);
-        }
+        // digits, tones and who answered are listened for in what the far
+        // end sent, before anything of this end's is mixed into it
+        self.signals.heard(room, &mut self.events);
         // the buffer may only move its delay in a pause, and the pause it
         // cares about is the far end's — so the verdict handed to the next
         // pull is the one on the frame that has just been decoded
@@ -1533,6 +1560,15 @@ impl MediaSession {
         {
             self.recording_stopped(error);
         }
+        // the consent beep this end hears, which the recording already has
+        // on its own side
+        self.signals.beep_locally(room);
+        // this is the frame the loudspeaker is about to have, so it is the
+        // one a canceller will be looking for in the microphone a device
+        // delay from now
+        if let Some(echo) = self.echo.as_mut() {
+            echo.rendered(room);
+        }
         played
     }
 
@@ -1542,6 +1578,7 @@ impl MediaSession {
         let noise = &mut self.noise;
         let heard = &mut self.heard;
         let events = &mut self.events;
+        let signals = &mut self.signals;
         let payload_type = self.plan.codec.payload();
         let rate = self.plan.codec.clock_rate();
         // a peer that answered with one G.711 law and sends the other: real
@@ -1596,7 +1633,17 @@ impl MediaSession {
                 if let Some(receiver) = heard.as_mut()
                     && let Ok(Outcome::Reported(reported)) = receiver.receive(frame)
                 {
-                    events.push_back(digit_heard(&reported, rate));
+                    let event = digit_heard(&reported, rate);
+                    if let MediaEvent::DigitReceived {
+                        digit,
+                        held: Some(held),
+                        ..
+                    } = event
+                    {
+                        // the same press may be in the audio as well
+                        signals.received_event(digit, held);
+                    }
+                    events.push_back(event);
                 }
                 conceal(coder, room)
             }
@@ -1678,7 +1725,11 @@ impl MediaSession {
         // audio it produces can be borrowed from it while the rest of the
         // session is still being written to
         let mut echo = self.echo.take();
-        let sent = self.encode_frame(samples, echo.as_mut());
+        // and the buffer a digit or a beep is written into, for the same
+        // reason: what goes out is borrowed from it
+        let mut shaped = core::mem::take(&mut self.shaped);
+        let sent = self.encode_frame(samples, echo.as_mut(), &mut shaped);
+        self.shaped = shaped;
         self.echo = echo;
         let Some(length) = sent? else {
             return Ok(None);
@@ -1704,6 +1755,7 @@ impl MediaSession {
         &mut self,
         samples: &[i16],
         echo: Option<&mut Echo>,
+        shaped: &mut Vec<i16>,
     ) -> Result<Option<usize>, MediaError> {
         // everything below works on what the processor left, not on the raw
         // microphone: silence suppression measuring uncancelled echo would
@@ -1713,6 +1765,14 @@ impl MediaSession {
             Some(echo) => echo.process(samples),
             None => samples,
         };
+        // a digit being written in the audio, or the consent beep: what the
+        // far end is sent, and so what the recording keeps of this side
+        let tone = self.signals.shape(
+            samples,
+            shaped,
+            self.dialling.is_busy() && self.plan.dtmf.is_some(),
+        );
+        let samples = if tone { shaped.as_slice() } else { samples };
         if let Some(error) = self
             .recorder
             .as_mut()
@@ -1727,8 +1787,11 @@ impl MediaSession {
         if let Some(length) = self.dial_frame()? {
             return Ok(Some(length));
         }
-        let silent =
-            self.suppressing && self.outbound_voice.process(samples) == vad::Activity::Silence;
+        // a digit or a beep is never a pause, whatever the detector makes of
+        // a steady tone
+        let silent = self.suppressing
+            && !tone
+            && self.outbound_voice.process(samples) == vad::Activity::Silence;
         if silent {
             self.rtp.suppress(self.frame_ticks);
             return Ok(None);
@@ -2334,6 +2397,10 @@ impl MediaSession {
         let was_receiving = self.is_receiving();
         self.plan = plan.clone();
         self.codec_candidates = candidates;
+        // a re-offer can add or drop the named events, which is what
+        // listening for digits in the audio decides on by default
+        self.signals
+            .reformat(self.coder.codec().sample_rate(), plan.dtmf.is_some());
         // a stream that has just been told to stop receiving must not be
         // reported as stalled for having done so
         if !self.is_receiving() {
@@ -2440,7 +2507,8 @@ impl MediaSession {
         let rate = agreed.sample_rate();
         let samples = coder.frame_samples();
         let resized = rate != was_rate || samples != was_samples;
-        self.retain_recording(resized, was_rate);
+        self.retain_recording(rate);
+        self.signals.reformat(rate, plan.dtmf.is_some());
         self.retain_processor(resized, rate, samples);
         self.dialling.reformat(was_clock, plan.codec.clock_rate());
 
@@ -2467,32 +2535,21 @@ impl MediaSession {
         Ok(())
     }
 
-    /// Keep the recording running, or close it and say why.
+    /// Keep the recording running into the same file.
     ///
-    /// A recorder is pinned to the rate and the frame length it started at —
-    /// `Recorder::start` writes both into the header — so it survives every
-    /// codec change that moves neither, which is most of them: the three
-    /// eight-kilohertz codecs are interchangeable under one recording.
-    fn retain_recording(&mut self, resized: bool, was_rate: u32) {
-        if !resized {
-            return;
+    /// The file has a rate of its own, fixed when it started, and the two
+    /// directions are converted to it on the way in; a codec at another rate
+    /// only changes what they are converted from. A sink that refuses what
+    /// is left of the old rate stops the recording the way any other refusal
+    /// does.
+    fn retain_recording(&mut self, rate: u32) {
+        if let Some(error) = self
+            .recorder
+            .as_mut()
+            .and_then(|recorder| recorder.reformat(rate).err())
+        {
+            self.recording_stopped(error);
         }
-        let Some(recorder) = self.recorder.take() else {
-            return;
-        };
-        let samples = recorder.written();
-        // at the rate the audio was taken at, not the one about to replace it
-        let written = Duration::from_nanos(
-            samples.saturating_mul(1_000_000_000) / u64::from(was_rate.max(1)),
-        );
-        // the lengths are patched and the file is playable; this is a
-        // recording that ended, not one that broke
-        let reason = recorder
-            .finish()
-            .err()
-            .map_or(MediaError::CodecChanged, MediaError::from);
-        self.events
-            .push_back(MediaEvent::RecordingStopped { reason, written });
     }
 
     /// Keep the application's processor, with rings the new codec's size.
@@ -2615,16 +2672,18 @@ impl MediaSession {
     /// [`UserAgent`](crate::UserAgent); it exists for peers that will not take
     /// a digit in the media at all.
     ///
+    /// A call whose negotiation settled on no telephone event payload type
+    /// has no event to send, and gets the digit the way its far end can hear
+    /// one: written into the audio as the two tones, in place of the
+    /// microphone, as [`MediaSession::dial_in_band`] does.
+    ///
     /// # Errors
-    /// [`MediaError::NoDtmf`] when the negotiation settled on no telephone
-    /// event payload type, which is the honest answer for a call whose far end
-    /// never offered one; [`MediaError::DigitTooShort`] below the length legacy
-    /// equipment recognises; [`MediaError::DigitTooLong`] above the longest
-    /// any form of DTMF sends; and [`MediaError::TooManyDigits`] when the
-    /// queue is full.
+    /// [`MediaError::DigitTooShort`] below the length legacy equipment
+    /// recognises; [`MediaError::DigitTooLong`] above the longest any form of
+    /// DTMF sends; and [`MediaError::TooManyDigits`] when the queue is full.
     pub fn send_dtmf(&mut self, digit: Digit, length: Duration) -> Result<(), MediaError> {
         if self.plan.dtmf.is_none() {
-            return Err(MediaError::NoDtmf);
+            return self.dial_in_band(&digit.to_string(), length).map(drop);
         }
         digit_length(length)?;
         if self
@@ -2641,7 +2700,9 @@ impl MediaSession {
     ///
     /// Nothing is queued unless every character is a key, so a string with a
     /// typo in it is refused whole rather than half dialled — half of an
-    /// extension is worse than none, because it reaches somebody.
+    /// extension is worse than none, because it reaches somebody. On a call
+    /// with no telephone event the digits go in the audio, as
+    /// [`MediaSession::send_dtmf`] says.
     ///
     /// # Errors
     /// [`MediaError::UnknownDigit`] for a character no keypad has, plus
@@ -2652,7 +2713,7 @@ impl MediaSession {
             .map(|key| Digit::from_char(key).ok_or(MediaError::UnknownDigit { key }))
             .collect::<Result<Vec<_>, _>>()?;
         if self.plan.dtmf.is_none() {
-            return Err(MediaError::NoDtmf);
+            return self.dial_in_band(keys, length);
         }
         digit_length(length)?;
         if self.dialling.waiting() + digits.len() > crate::dtmf::WAITING {
@@ -2668,24 +2729,91 @@ impl MediaSession {
         Ok(sent)
     }
 
-    /// Whether a digit is going out or waiting to.
+    /// Send a dial string as the two tones of each key, written into the
+    /// outgoing audio in place of the microphone — each key for `length`,
+    /// with [`DIGIT_GAP`] of silence after it — whatever the negotiation
+    /// settled on.
+    ///
+    /// For the far end that negotiated a telephone event and then listens
+    /// only to the audio: an interactive voice system behind a gateway that
+    /// drops the events. A digit written this way goes through every codec
+    /// in this build and survives transcoding to G.711, which is where it is
+    /// usually going; G.729 carries it less reliably, as that codec does any
+    /// tone. Keys wait behind a digit going out as an event rather than sound
+    /// under it.
+    ///
+    /// # Errors
+    /// As [`MediaSession::dial`].
+    pub fn dial_in_band(&mut self, keys: &str, length: Duration) -> Result<usize, MediaError> {
+        let keys: Vec<char> = keys.chars().collect();
+        if let Some(&key) = keys.iter().find(|key| Digit::from_char(**key).is_none()) {
+            return Err(MediaError::UnknownDigit { key });
+        }
+        digit_length(length)?;
+        self.signals.dial(&keys, length)
+    }
+
+    /// Whether a digit is going out or waiting to, as an event or in the
+    /// audio.
     #[must_use]
     pub fn is_dialling(&self) -> bool {
-        self.dialling.is_busy()
+        self.dialling.is_busy() || self.signals.is_dialling()
     }
 
     /// How many digits have not started yet.
     #[must_use]
     pub fn digits_waiting(&self) -> usize {
-        self.dialling.waiting()
+        self.dialling.waiting() + self.signals.digits_waiting()
     }
 
     /// Drop everything queued and stop the digit going out.
     ///
     /// What a call being taken away wants: the digit in flight gets no closing
-    /// packet, because there is nowhere left to send one.
+    /// packet, because there is nowhere left to send one, and a digit
+    /// sounding in the audio stops where it is.
     pub fn stop_dialling(&mut self) {
         self.dialling.clear();
+        self.signals.stop_dialling();
+    }
+
+    /// When to listen for keypad digits in the far end's audio, from the
+    /// next frame on.
+    pub fn set_dtmf_detection(&mut self, detection: DtmfDetection) {
+        self.signals.set_detection(detection);
+    }
+
+    /// When digits are listened for in the far end's audio.
+    #[must_use]
+    pub const fn dtmf_detection(&self) -> DtmfDetection {
+        self.signals.detection()
+    }
+}
+
+// -- call progress, and who answered -----------------------------------------
+
+impl MediaSession {
+    /// Listen for call progress and decide who answered, from the next
+    /// frame on, or stop with `None`.
+    ///
+    /// A detection started afresh: tones already reported may be reported
+    /// again, and a call already answered starts deciding who answered from
+    /// the moment the engine next says it was.
+    pub fn detect_progress(&mut self, detection: Option<ProgressDetection>) {
+        self.signals.set_progress(detection);
+    }
+
+    /// Whether call progress is still being listened for: detection was
+    /// asked for and has not come to its end — the call answered with no
+    /// answering-machine detection, a verdict, a beep, or the time allowed
+    /// for one.
+    #[must_use]
+    pub fn is_detecting_progress(&self) -> bool {
+        self.signals.is_listening_for_progress()
+    }
+
+    /// The call was answered: who answered is decided from here.
+    pub(crate) fn answered(&mut self) {
+        self.signals.answered();
     }
 }
 
@@ -2829,33 +2957,57 @@ impl MediaSession {
 impl MediaSession {
     /// Start recording this call into `sink`.
     ///
-    /// Both directions, mixed, as WAVE at [`MediaSession::sample_rate`]. It
-    /// can be started and stopped as often as the person on the phone presses
-    /// the button; each recording is a file of its own, because a sink that
-    /// was written to twice would have two headers in it.
+    /// Both directions, mixed, as WAVE at [`MediaSession::sample_rate`]:
+    /// [`MediaSession::start_recording_with`] and the defaults of
+    /// [`RecordingOptions`].
     ///
     /// # Errors
-    /// [`MediaError::AlreadyRecording`] when one is already running, and
-    /// [`MediaError::Recording`] when the sink refused the header.
+    /// As [`MediaSession::start_recording_with`].
     pub fn start_recording(&mut self, sink: Box<dyn RecordingSink>) -> Result<(), MediaError> {
+        self.start_recording_with(sink, &RecordingOptions::default())
+    }
+
+    /// Start recording this call into `sink`, written as `options` say.
+    ///
+    /// It can be started and stopped as often as the person on the phone
+    /// presses the button; each recording is a file of its own, because a
+    /// sink that was written to twice would have two headers in it. It
+    /// carries on through a re-negotiation onto another codec, at the rate
+    /// the file started at, and it is finished whichever way it ends — see
+    /// `crate::record`'s documentation for what a crash leaves.
+    ///
+    /// A [`ConsentTone`] set on the call starts beeping now.
+    ///
+    /// # Errors
+    /// [`MediaError::AlreadyRecording`] when one is already running,
+    /// [`MediaError::RecordingRate`] and [`MediaError::RecordingBitrate`]
+    /// for options the format cannot be written with, and
+    /// [`MediaError::Recording`] when the sink refused the header.
+    pub fn start_recording_with(
+        &mut self,
+        sink: Box<dyn RecordingSink>,
+        options: &RecordingOptions,
+    ) -> Result<(), MediaError> {
         if self.recorder.is_some() {
             return Err(MediaError::AlreadyRecording);
         }
-        let recorder = Recorder::start(sink, self.sample_rate(), self.frame_samples())?;
+        let serial = self.draws.next_u32();
+        let recorder = Recorder::start(sink, options, self.sample_rate(), serial)?;
         self.recorder = Some(recorder);
+        self.signals.recording_started();
         Ok(())
     }
 
-    /// Stop the recording and close the file.
+    /// Stop the recording and finish the file.
     ///
     /// # Errors
     /// [`MediaError::NotRecording`], and [`MediaError::Recording`] when the
-    /// lengths in the header could not be patched — which leaves a file with
-    /// all of the audio in it and zeroes in two fields.
+    /// file could not be finished — which leaves the audio up to the last
+    /// checkpoint playable.
     pub fn stop_recording(&mut self) -> Result<(), MediaError> {
         let recorder = self.recorder.take().ok_or(MediaError::NotRecording)?;
-        recorder.finish()?;
-        Ok(())
+        self.signals.recording_stopped();
+        recorder.finish()
     }
 
     /// Whether a recording is running.
@@ -2867,32 +3019,43 @@ impl MediaSession {
     /// How much audio the current recording has taken.
     #[must_use]
     pub fn recorded(&self) -> Option<Duration> {
-        self.recorder
-            .as_ref()
-            .map(|recorder| self.span(recorder.written()))
+        self.recorder.as_ref().map(Recorder::recorded)
+    }
+
+    /// Beep while this call is being recorded, from now on, or stop with
+    /// `None`. A recording already running starts beeping at once.
+    ///
+    /// # Errors
+    /// [`MediaError::ConsentTone`] for a tone that is not a beep, which
+    /// changes nothing.
+    pub fn set_consent_tone(&mut self, tone: Option<ConsentTone>) -> Result<(), MediaError> {
+        if let Some(tone) = tone.as_ref() {
+            tone.check()?;
+        }
+        self.signals.set_consent(tone, self.recorder.is_some());
+        Ok(())
+    }
+
+    /// The consent tone this call beeps with while it is recorded.
+    #[must_use]
+    pub const fn consent_tone(&self) -> Option<ConsentTone> {
+        self.signals.consent()
     }
 
     /// A recording that failed part-way through: the file is let go, an event
     /// says so, and the call is untouched.
     ///
-    /// The sink is dropped without the header being patched, because the
-    /// header cannot be patched — whatever refused the audio will refuse that
-    /// too. The audio is in the file; two fields in front of it are zero.
-    fn recording_stopped(&mut self, error: std::io::Error) {
+    /// Letting it go finishes it as far as the sink allows — whatever
+    /// refused the audio may refuse the header too, which leaves it as it
+    /// stood at the last checkpoint.
+    fn recording_stopped(&mut self, reason: MediaError) {
+        self.signals.recording_stopped();
         let written = self
             .recorder
             .take()
-            .map_or(0, |recorder| recorder.written());
-        self.events.push_back(MediaEvent::RecordingStopped {
-            reason: MediaError::from(error),
-            written: self.span(written),
-        });
-    }
-
-    /// A count of samples as a length of time at this session's rate.
-    fn span(&self, samples: u64) -> Duration {
-        let rate = u64::from(self.sample_rate()).max(1);
-        Duration::from_nanos(samples.saturating_mul(1_000_000_000) / rate)
+            .map_or(Duration::ZERO, |recorder| recorder.recorded());
+        self.events
+            .push_back(MediaEvent::RecordingStopped { reason, written });
     }
 }
 
@@ -2921,13 +3084,13 @@ fn accepted(plan: &MediaPlan) -> PayloadTypes {
 }
 
 /// The other G.711 law's static payload type and the law itself, for a codec
-/// that has one. `None` for G.722, G.729 and Opus, whose frame shape a G.711
-/// payload does not fit.
+/// that has one. `None` for G.722, G.729, L16 and Opus, whose frame shape a
+/// G.711 payload does not fit.
 const fn sibling_law(codec: Codec) -> Option<(u8, Law)> {
     match codec {
         Codec::Pcmu => Some((Law::A.payload_type(), Law::A)),
         Codec::Pcma => Some((Law::Mu.payload_type(), Law::Mu)),
-        Codec::G722 | Codec::G729 => None,
+        Codec::G722 | Codec::G729 | Codec::L16Narrowband | Codec::L16Wideband => None,
         #[cfg(feature = "opus")]
         Codec::Opus => None,
     }
@@ -2979,13 +3142,25 @@ impl Draws {
         Self { state: seed }
     }
 
-    /// One draw, uniform on `[0, 1)`.
-    fn unit(&mut self) -> f64 {
+    /// One draw of thirty-two bits: an Ogg stream's serial number, which
+    /// RFC 3533 §4 has "created randomly", so that streams chained or
+    /// multiplexed into one file keep the unique numbers it requires.
+    fn next_u32(&mut self) -> u32 {
+        u32::try_from(self.next() >> 32).unwrap_or(0)
+    }
+
+    /// The generator's next sixty-four bits.
+    const fn next(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
+        z ^ (z >> 31)
+    }
+
+    /// One draw, uniform on `[0, 1)`.
+    fn unit(&mut self) -> f64 {
+        let z = self.next();
         // the top thirty-two bits over two to the thirty-two: exactly
         // representable, and short of one by construction
         f64::from(u32::try_from(z >> 32).unwrap_or(0)) / 4_294_967_296.0

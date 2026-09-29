@@ -59,8 +59,8 @@ struct Oscillator {
 }
 
 impl Oscillator {
-    fn new(frequency: f64, amplitude: f64, rate: SampleRate) -> Self {
-        let omega = 2.0 * PI * frequency / rate.as_f64();
+    fn new(frequency: f64, amplitude: f64, hz: u32) -> Self {
+        let omega = 2.0 * PI * frequency / f64::from(hz.max(1));
         Self {
             re: 1.0,
             im: 0.0,
@@ -93,6 +93,15 @@ impl Oscillator {
     }
 }
 
+/// Samples in `ms` milliseconds at `hz`, for the rates [`SampleRate`] does
+/// not name. Every rate a call runs at is a whole number of samples per
+/// millisecond, so the division comes first and loses nothing.
+fn samples_at(hz: u32, ms: u32) -> usize {
+    usize::try_from(hz / 1_000)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(usize::try_from(ms).unwrap_or(usize::MAX))
+}
+
 /// How a [`DtmfGenerator`] sounds a digit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DtmfTone {
@@ -120,7 +129,7 @@ impl Default for DtmfTone {
 /// Sounds one digit at a time: its two tones, then its pause.
 #[derive(Clone, Debug)]
 pub struct DtmfGenerator {
-    rate: SampleRate,
+    hz: u32,
     tone: DtmfTone,
     tone_samples: usize,
     total_samples: usize,
@@ -139,10 +148,19 @@ impl DtmfGenerator {
     /// A generator with explicit timing and levels.
     #[must_use]
     pub fn with_tone(rate: SampleRate, tone: DtmfTone) -> Self {
-        let tone_samples = rate.samples(tone.tone_ms);
-        let total_samples = tone_samples.saturating_add(rate.samples(tone.pause_ms));
+        Self::with_tone_at(rate.hz(), tone)
+    }
+
+    /// A generator at any rate, in hertz: a digit is two sines and needs
+    /// nothing a detector does, so it can be written straight into a
+    /// stream at the rate the codec hears at — Opus's 48 kHz included —
+    /// rather than written at one of [`SampleRate`]'s two and converted.
+    #[must_use]
+    pub fn with_tone_at(hz: u32, tone: DtmfTone) -> Self {
+        let tone_samples = samples_at(hz, tone.tone_ms);
+        let total_samples = tone_samples.saturating_add(samples_at(hz, tone.pause_ms));
         Self {
-            rate,
+            hz,
             tone,
             tone_samples,
             total_samples,
@@ -155,8 +173,8 @@ impl DtmfGenerator {
     /// Begin `digit`, abandoning whatever was still sounding.
     pub fn start(&mut self, digit: Digit) {
         let (low, high) = digit.frequencies();
-        self.low = Oscillator::new(low, dbm0_to_peak(self.tone.low_dbm0), self.rate);
-        self.high = Oscillator::new(high, dbm0_to_peak(self.tone.high_dbm0), self.rate);
+        self.low = Oscillator::new(low, dbm0_to_peak(self.tone.low_dbm0), self.hz);
+        self.high = Oscillator::new(high, dbm0_to_peak(self.tone.high_dbm0), self.hz);
         self.position = 0;
     }
 
@@ -205,7 +223,7 @@ struct Stretch {
 /// tone's three frequencies in turn.
 #[derive(Clone, Debug)]
 pub struct ToneGenerator {
-    rate: SampleRate,
+    hz: u32,
     amplitude: f64,
     stretches: Vec<Stretch>,
     index: usize,
@@ -235,7 +253,23 @@ impl ToneGenerator {
                 })
                 .collect(),
         };
-        Self::from_stretches(rate, stretches, dbm0)
+        Self::from_stretches(rate.hz(), stretches, dbm0)
+    }
+
+    /// One frequency for `on_ms`, then `off_ms` of silence, over and over,
+    /// at any rate in hertz: a beep that repeats, such as the one that tells
+    /// both parties a call is being recorded.
+    ///
+    /// It starts with the beep, so the first one sounds at once. A zero
+    /// `off_ms` is a continuous tone.
+    #[must_use]
+    pub fn beeps(hz: u32, frequency: f64, on_ms: u32, off_ms: u32, dbm0: f64) -> Self {
+        let stretches = vec![Stretch {
+            frequencies: vec![frequency],
+            on: samples_at(hz, on_ms),
+            off: samples_at(hz, off_ms),
+        }];
+        Self::from_stretches(hz, stretches, dbm0)
     }
 
     /// The special information tone: `frequencies[i]` for `durations_ms[i]`,
@@ -267,17 +301,17 @@ impl ToneGenerator {
                 },
             })
             .collect();
-        Self::from_stretches(rate, stretches, dbm0)
+        Self::from_stretches(rate.hz(), stretches, dbm0)
     }
 
-    fn from_stretches(rate: SampleRate, stretches: Vec<Stretch>, dbm0: f64) -> Self {
+    fn from_stretches(hz: u32, stretches: Vec<Stretch>, dbm0: f64) -> Self {
         let most = stretches
             .iter()
             .map(|s| s.frequencies.len())
             .max()
             .unwrap_or(0);
         let mut generator = Self {
-            rate,
+            hz,
             amplitude: dbm0_to_peak(dbm0),
             stretches,
             index: 0,
@@ -307,7 +341,7 @@ impl ToneGenerator {
         for (i, oscillator) in self.oscillators.iter_mut().enumerate() {
             match stretch.frequencies.get(i) {
                 Some(&f) => {
-                    let wanted = Oscillator::new(f, self.amplitude, self.rate);
+                    let wanted = Oscillator::new(f, self.amplitude, self.hz);
                     let same = (wanted.step_re - oscillator.step_re).abs() < 1e-12
                         && (wanted.step_im - oscillator.step_im).abs() < 1e-12
                         && oscillator.amplitude > 0.0;
@@ -359,7 +393,7 @@ mod tests {
 
     #[test]
     fn an_oscillator_holds_its_level_over_an_hour() {
-        let mut oscillator = Oscillator::new(425.0, 1.0, SampleRate::Hz8000);
+        let mut oscillator = Oscillator::new(425.0, 1.0, 8_000);
         for _ in 0..(8_000 * 3_600) {
             oscillator.next();
         }
@@ -369,7 +403,7 @@ mod tests {
 
     #[test]
     fn an_oscillator_knocked_off_its_circle_returns_to_it() {
-        let mut oscillator = Oscillator::new(1_336.0, 1.0, SampleRate::Hz8000);
+        let mut oscillator = Oscillator::new(1_336.0, 1.0, 8_000);
         oscillator.re = 1.01;
         for _ in 0..8 {
             oscillator.next();
@@ -614,6 +648,71 @@ mod tests {
         assert!(crossings(&out[..third]).abs_diff(2 * 950 * 330 / 1_000) <= 2);
         assert!(crossings(&out[third..2 * third]).abs_diff(2 * 1_400 * 330 / 1_000) <= 2);
         assert!(crossings(&out[2 * third..3 * third]).abs_diff(2 * 1_800 * 330 / 1_000) <= 2);
+    }
+
+    /// A digit written at 48 kHz, the rate an Opus call hears at, is the
+    /// same two sines: every third sample of it is the digit at 16 kHz, and
+    /// the detector hears it for as long as it sounded.
+    #[test]
+    fn a_digit_written_at_48_khz_is_heard_as_itself() {
+        let mut generator = DtmfGenerator::with_tone_at(48_000, DtmfTone::default());
+        generator.start(Digit::Seven);
+        assert_eq!(generator.remaining(), 160 * 48);
+        let mut out = vec![0_i16; generator.remaining()];
+        generator.fill(&mut out);
+        let at_16k: Vec<i16> = out.iter().step_by(3).copied().collect();
+        let mut detector = DtmfDetector::new(SampleRate::Hz16000);
+        let mut heard = Vec::new();
+        detector.process(&at_16k, |event| {
+            if let DtmfEvent::End { digit, start, end } = event {
+                heard.push((digit, end - start));
+            }
+        });
+        detector.finish(|event| {
+            if let DtmfEvent::End { digit, start, end } = event {
+                heard.push((digit, end - start));
+            }
+        });
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        assert_eq!(heard[0].0, Digit::Seven);
+        assert!(heard[0].1.abs_diff(100 * 16) <= 16, "{heard:?}");
+    }
+
+    /// A beep train at any rate: the tone for its length, then silence for
+    /// its interval, starting with the tone, at the frequency and level
+    /// asked.
+    #[test]
+    fn beeps_sound_for_their_length_then_wait_their_interval() {
+        use crate::inband::dbm0_to_peak;
+        let hz = 48_000;
+        let mut generator = ToneGenerator::beeps(hz, 1_400.0, 200, 1_800, -18.0);
+        let mut out = vec![0_i16; 48 * 5_000];
+        generator.fill(&mut out);
+        let per_ms = 48;
+        let mut seen: Vec<(bool, u32)> = Vec::new();
+        for chunk in out.chunks(per_ms) {
+            let on = chunk.iter().any(|&s| s != 0);
+            match seen.last_mut() {
+                Some((state, ms)) if *state == on => *ms += 1,
+                _ => seen.push((on, 1)),
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                (true, 200),
+                (false, 1_800),
+                (true, 200),
+                (false, 1_800),
+                (true, 200),
+                (false, 800)
+            ]
+        );
+        let beep = &out[..200 * per_ms];
+        let crossings = beep.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
+        assert!(crossings.abs_diff(2 * 1_400 / 5) <= 2, "{crossings}");
+        let peak = beep.iter().map(|&s| f64::from(s).abs()).fold(0.0, f64::max);
+        assert!((peak - dbm0_to_peak(-18.0)).abs() < 2.0, "{peak}");
     }
 
     #[test]

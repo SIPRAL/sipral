@@ -529,6 +529,18 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
         "SipralStreamEncryption",
         crate::versioned::min_size::STREAM_ENCRYPTION,
     ),
+    (
+        "SipralProgressConfig",
+        crate::versioned::min_size::PROGRESS_CONFIG,
+    ),
+    (
+        "SipralConsentTone",
+        crate::versioned::min_size::CONSENT_TONE,
+    ),
+    (
+        "SipralRecordingOptions",
+        crate::versioned::min_size::RECORDING_OPTIONS,
+    ),
     ("SipralTransmit", crate::versioned::min_size::TRANSMIT),
     // 32, the same literal `crate::lifecycle::SipralSuspending`'s own
     // `Versioned` impl pins its `MIN_SIZE` at — see the comment there for why
@@ -632,6 +644,14 @@ pub const SURFACE: Surface = Surface {
         crate::security::SipralVerificationOutcome::ABI,
         crate::security::SipralVerificationFailure::ABI,
         crate::security::SipralVerificationStage::ABI,
+        crate::event::SipralProgressKind::ABI,
+        crate::event::SipralProgressTone::ABI,
+        crate::event::SipralAmdVerdict::ABI,
+        crate::event::SipralAmdReason::ABI,
+        crate::inband::SipralDtmfDetection::ABI,
+        crate::inband::SipralToneRegion::ABI,
+        crate::record::SipralRecordingFormat::ABI,
+        crate::record::SipralRecordingLayout::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -668,6 +688,7 @@ pub const SURFACE: Surface = Surface {
         crate::audio::SipralAudioEvent::ABI,
         crate::nat::SipralStunServerEvent::ABI,
         crate::event::SipralVerificationEvent::ABI,
+        crate::event::SipralProgressEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -681,6 +702,9 @@ pub const SURFACE: Surface = Surface {
         crate::log::SipralLogRecord::ABI,
         crate::security::SipralStirConfig::ABI,
         crate::security::SipralStreamEncryption::ABI,
+        crate::inband::SipralProgressConfig::ABI,
+        crate::inband::SipralConsentTone::ABI,
+        crate::record::SipralRecordingOptions::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -838,6 +862,10 @@ pub const SURFACE: Surface = Surface {
         crate::security::sipral_call_stir_certificate::ABI,
         crate::security::sipral_media_encryption_count::ABI,
         crate::security::sipral_media_encryption_at::ABI,
+        crate::inband::sipral_call_dtmf_detection::ABI,
+        crate::inband::sipral_call_detect_progress::ABI,
+        crate::inband::sipral_call_consent_tone::ABI,
+        crate::record::sipral_media_record_start_with::ABI,
     ],
 };
 
@@ -1021,6 +1049,7 @@ mod tests {
             "SipralAudioEvent",
             "SipralStunServerEvent",
             "SipralVerificationEvent",
+            "SipralProgressEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

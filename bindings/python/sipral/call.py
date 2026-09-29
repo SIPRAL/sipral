@@ -48,9 +48,10 @@ class Call:
 
         #: Every event this call's handle names, decoded whole.
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
-        #: Just the digits: `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`'s own
-        #: `fields["digit"]`, so a voice agent that only cares about DTMF
-        #: does not have to filter `events` itself.
+        #: Just the digits: `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`'s and
+        #: `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`'s own `fields["digit"]`, so a
+        #: voice agent that only cares about DTMF does not have to filter
+        #: `events` itself, nor care which way the far end sent the key.
         self.dtmf: asyncio.Queue[str] = asyncio.Queue()
 
     def deliver(self, event: _events.Event) -> None:
@@ -96,7 +97,10 @@ class Call:
         else:
             self.events.put_nowait(event)
 
-        if event.kind == lib.SIPRAL_EVENT_KIND_DIGIT_RECEIVED:
+        if event.kind in (
+            lib.SIPRAL_EVENT_KIND_DIGIT_RECEIVED,
+            lib.SIPRAL_EVENT_KIND_IN_BAND_DIGIT,
+        ):
             digit = event.fields.get("digit")
             if digit:
                 if loop is not None and not loop.is_closed():
@@ -180,7 +184,9 @@ class Call:
         via: int = int(DtmfVia.RTP),
         duration_ms: int = 100,
     ) -> None:
-        """`sipral_call_send_dtmf`. ``via`` is a :class:`sipral.enums.DtmfVia`."""
+        """`sipral_call_send_dtmf`. ``via`` is a :class:`sipral.enums.DtmfVia`:
+        ``RTP`` sends named events, or the tones in the audio on a call that
+        negotiated none; ``IN_BAND`` sends the tones on any call."""
         encoded = digits.encode("ascii")
         _call(
             lambda: lib.sipral_call_send_dtmf(
@@ -193,6 +199,115 @@ class Call:
                 self.stack.now_ms(),
             ),
             "sipral_call_send_dtmf",
+        )
+
+    def set_dtmf_detection(self, mode: int) -> None:
+        """`sipral_call_dtmf_detection`: when this call listens for digits
+        in the far end's audio, a :class:`sipral.enums.DtmfDetection`. A
+        digit heard there is a `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`, and lands
+        in :attr:`dtmf` like any other."""
+        _call(
+            lambda: lib.sipral_call_dtmf_detection(self.stack.handle, self.handle, int(mode)),
+            "sipral_call_dtmf_detection",
+        )
+
+    def detect_progress(
+        self,
+        *,
+        region: int = 0,
+        answering_machine: bool = True,
+        beep: bool = True,
+        beep_window_ms: int = 0,
+        max_initial_silence_ms: int = 0,
+        max_greeting_ms: int = 0,
+        silence_after_greeting_ms: int = 0,
+        max_words: int = 0,
+        min_word_ms: int = 0,
+        min_word_gap_ms: int = 0,
+        max_decision_ms: int = 0,
+        min_speech_above_floor_db: int = 0,
+        beep_min_ms: int = 0,
+        beep_max_ms: int = 0,
+        tone_cycles: int = 0,
+    ) -> None:
+        """`sipral_call_detect_progress`: listen for the network's tones
+        (``region``, a :class:`sipral.enums.ToneRegion`), decide who answered
+        and listen for the machine's beep. Call it straight after
+        :meth:`sipral.stack.Stack.place_call`, before the far end answers.
+        Each thing heard is a `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`. Every
+        limit left at zero is the library's default."""
+        config = ffi.new("sipral_progress_config_t *")
+        config.size = ffi.sizeof("sipral_progress_config_t")
+        config.listen = lib.SIPRAL_TOGGLE_ON
+        config.region = int(region)
+        config.answering_machine = lib.SIPRAL_TOGGLE_ON if answering_machine else lib.SIPRAL_TOGGLE_OFF
+        config.beep = lib.SIPRAL_TOGGLE_ON if beep else lib.SIPRAL_TOGGLE_OFF
+        config.beep_window_ms = beep_window_ms
+        config.max_initial_silence_ms = max_initial_silence_ms
+        config.max_greeting_ms = max_greeting_ms
+        config.silence_after_greeting_ms = silence_after_greeting_ms
+        config.max_words = max_words
+        config.min_word_ms = min_word_ms
+        config.min_word_gap_ms = min_word_gap_ms
+        config.max_decision_ms = max_decision_ms
+        config.min_speech_above_floor_db = min_speech_above_floor_db
+        config.beep_min_ms = beep_min_ms
+        config.beep_max_ms = beep_max_ms
+        config.tone_cycles = tone_cycles
+        _call(
+            lambda: lib.sipral_call_detect_progress(self.stack.handle, self.handle, config),
+            "sipral_call_detect_progress",
+        )
+
+    def stop_progress(self) -> None:
+        """`sipral_call_detect_progress` with ``listen`` off: stop listening."""
+        config = ffi.new("sipral_progress_config_t *")
+        config.size = ffi.sizeof("sipral_progress_config_t")
+        config.listen = lib.SIPRAL_TOGGLE_OFF
+        _call(
+            lambda: lib.sipral_call_detect_progress(self.stack.handle, self.handle, config),
+            "sipral_call_detect_progress",
+        )
+
+    def set_consent_tone(
+        self,
+        *,
+        frequency_hz: int = 0,
+        attenuation_db: int = 0,
+        length_ms: int = 0,
+        interval_ms: int = 0,
+        local: bool = True,
+    ) -> None:
+        """`sipral_call_consent_tone`: beep while this call is recorded,
+        every value left at zero the library's default (1400 Hz, 18 dB below
+        0 dBm0, 200 ms every fifteen seconds); ``local`` has this end hear it
+        too."""
+        self._consent(lib.SIPRAL_TOGGLE_ON, frequency_hz, attenuation_db, length_ms, interval_ms, local)
+
+    def clear_consent_tone(self) -> None:
+        """`sipral_call_consent_tone` with ``enabled`` off: no tone."""
+        self._consent(lib.SIPRAL_TOGGLE_OFF, 0, 0, 0, 0, True)
+
+    def _consent(
+        self,
+        enabled: int,
+        frequency_hz: int,
+        attenuation_db: int,
+        length_ms: int,
+        interval_ms: int,
+        local: bool,
+    ) -> None:
+        tone = ffi.new("sipral_consent_tone_t *")
+        tone.size = ffi.sizeof("sipral_consent_tone_t")
+        tone.enabled = enabled
+        tone.frequency_hz = frequency_hz
+        tone.attenuation_db = attenuation_db
+        tone.length_ms = length_ms
+        tone.interval_ms = interval_ms
+        tone.local = lib.SIPRAL_TOGGLE_ON if local else lib.SIPRAL_TOGGLE_OFF
+        _call(
+            lambda: lib.sipral_call_consent_tone(self.stack.handle, self.handle, tone),
+            "sipral_call_consent_tone",
         )
 
     def hangup_for(

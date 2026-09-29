@@ -273,6 +273,13 @@ codes! {
         /// answers with the offer's `annexb`, and uses Annex B's silence
         /// compression where both descriptions allow it.
         G729 = 5,
+        /// L16 at 8 kHz, one channel: the samples themselves, on a dynamic
+        /// payload type as `L16/8000`. In every build and in no default
+        /// offer: a call offers it only when a codec order names `L16/8000`.
+        L16Narrowband = 6,
+        /// L16 at 16 kHz, one channel, as `L16/16000`: wideband with nothing
+        /// lost, offered only when a codec order names `L16/16000`.
+        L16Wideband = 7,
     }
 }
 
@@ -983,6 +990,8 @@ pub(crate) const fn named_codec(codec: Codec) -> SipralCodec {
         Codec::Pcma => SipralCodec::Pcma,
         Codec::G722 => SipralCodec::G722,
         Codec::G729 => SipralCodec::G729,
+        Codec::L16Narrowband => SipralCodec::L16Narrowband,
+        Codec::L16Wideband => SipralCodec::L16Wideband,
         // the layer below has grown a codec this ABI has no number for, and
         // saying so beats picking one that is wrong
         _ => SipralCodec::Unknown,
@@ -1026,13 +1035,13 @@ pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
         MediaError::StreamRefused => SipralMediaFault::StreamRefused,
         MediaError::NoDescription => SipralMediaFault::NoDescription,
         MediaError::Description(_) => SipralMediaFault::BadDescription,
-        // a recording that a codec change ended is reported as a recording
-        // that ended, not as "something this ABI has no word for": what the
-        // application does about it is what it does about any of the others
+        // everything a recording can refuse or stop over is reported as a
+        // recording's, not as "something this ABI has no word for"
         MediaError::Recording(_)
         | MediaError::NotRecording
         | MediaError::AlreadyRecording
-        | MediaError::CodecChanged => SipralMediaFault::Recording,
+        | MediaError::RecordingRate { .. }
+        | MediaError::RecordingBitrate { .. } => SipralMediaFault::Recording,
         #[cfg(feature = "ice")]
         MediaError::Ice(_)
         | MediaError::IceRequired
@@ -1056,18 +1065,21 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
     }
     let status = match *error {
         // the value is right and there is nothing in this build behind it,
-        // which is the one case SIPRAL_STATUS_NOT_SUPPORTED exists for. A call
-        // that negotiated no telephone event type is the same shape: the key
-        // is a real key and this call has nowhere to put it
-        MediaError::UnsupportedCodec { .. }
-        | MediaError::UnknownPayload { .. }
-        | MediaError::NoDtmf => SipralStatus::NotSupported,
-        // a value that would be taken if it were corrected, which for a
-        // recording means the path the file system refused
+        // which is the one case SIPRAL_STATUS_NOT_SUPPORTED exists for
+        MediaError::UnsupportedCodec { .. } | MediaError::UnknownPayload { .. } => {
+            SipralStatus::NotSupported
+        }
+        // the file exists and would not take what was written to it: a disk
+        // that filled, a volume that went away. Not the path, which was
+        // refused before anything was asked of the session
+        MediaError::Recording(_) => SipralStatus::RecordingFailed,
+        // a value that would be taken if it were corrected
         MediaError::NoCodecs
         | MediaError::BadFrameLength { .. }
         | MediaError::Description(_)
-        | MediaError::Recording(_)
+        | MediaError::RecordingRate { .. }
+        | MediaError::RecordingBitrate { .. }
+        | MediaError::ConsentTone(_)
         | MediaError::DigitTooShort { .. }
         | MediaError::DigitTooLong { .. }
         | MediaError::UnknownDigit { .. }
@@ -1081,7 +1093,6 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::NoDescription
         | MediaError::NotRecording
         | MediaError::AlreadyRecording
-        | MediaError::CodecChanged
         | MediaError::NoCommonCodec
         | MediaError::StreamRefused
         | MediaError::AlreadyJoined
@@ -1581,8 +1592,10 @@ entry! {
     /// number this build has no codec for.
     ///
     /// It is spelled as IANA registered it, which is also how it goes on an
-    /// `a=rtpmap` line. The string belongs to the library and lives as long as
-    /// it is loaded.
+    /// `a=rtpmap` line — with the rate after it for L16, `L16/8000` and
+    /// `L16/16000`, which is one encoding name at two rates and is named that
+    /// way in a codec order. The string belongs to the library and lives as
+    /// long as it is loaded.
     ///
     /// # Safety
     ///
@@ -1597,6 +1610,10 @@ entry! {
             // catalogue says and no feature of this crate's does
             4 if linked(SipralCodec::Opus) => c"opus".as_ptr(),
             5 => c"G729".as_ptr(),
+            // one encoding name at two rates, so the name a codec order
+            // uses, which carries the rate
+            6 => c"L16/8000".as_ptr(),
+            7 => c"L16/16000".as_ptr(),
             _ => std::ptr::null(),
         }
     }
@@ -2807,7 +2824,9 @@ pub(crate) unsafe fn address(
 
 // -- dialling ----------------------------------------------------------------
 
-/// Put a whole dial string in the media, as named telephone events.
+/// Put a whole dial string in the media: as named telephone events, or in
+/// the audio as the two tones of each key where the call negotiated no
+/// telephone event or `in_band` asks for it anyway.
 ///
 /// Reached from [`sipral_call_send_dtmf`](crate::call), which chooses between
 /// this and the two INFO bodies.
@@ -2816,6 +2835,7 @@ pub(crate) fn dial_in_media(
     call: sipral_ua::CallHandle,
     keys: &str,
     length: Duration,
+    in_band: bool,
 ) -> Result<(), Fail> {
     // the one media operation reached through the stack, because choosing
     // between the media and an INFO is a question about the call; it waits
@@ -2827,10 +2847,12 @@ pub(crate) fn dial_in_media(
              address of its own, or its negotiation has not settled yet",
         )
     })?;
-    session
-        .dial(keys, length)
-        .map(|_| ())
-        .map_err(|error| media_failed(&error))
+    let dialled = if in_band {
+        session.dial_in_band(keys, length)
+    } else {
+        session.dial(keys, length)
+    };
+    dialled.map(|_| ()).map_err(|error| media_failed(&error))
 }
 
 entry! {
@@ -3183,9 +3205,10 @@ a=sendrecv\r\n";
             let number = named_codec(codec) as u32;
             assert_eq!(
                 name(number).as_deref(),
-                Some(codec.encoding_name()),
-                "{codec:?} is named differently here and on the wire"
+                Some(codec.name()),
+                "{codec:?} is named differently here and in a codec order"
             );
+            assert!(codec.name().starts_with(codec.encoding_name()));
         }
     }
 
@@ -3212,8 +3235,12 @@ a=sendrecv\r\n";
             Some("G729"),
             "written in-tree, so in every build"
         );
+        assert_eq!(SipralCodec::L16Narrowband as u32, 6);
+        assert_eq!(SipralCodec::L16Wideband as u32, 7);
+        assert_eq!(name(6).as_deref(), Some("L16/8000"));
+        assert_eq!(name(7).as_deref(), Some("L16/16000"));
         assert_eq!(name(0), None, "no codec is zero");
-        assert_eq!(name(6), None);
+        assert_eq!(name(8), None);
         assert_eq!(name(u32::MAX), None);
     }
 
@@ -3542,6 +3569,28 @@ a=sendrecv\r\n";
             ),
             (
                 MediaError::BadFrameLength { millis: 7 },
+                SipralStatus::InvalidArgument,
+                SipralMediaFault::Other,
+            ),
+            // a file that stopped taking what was written is the disk's,
+            // and not a path a corrected argument would fix
+            (
+                MediaError::Recording(std::io::ErrorKind::StorageFull),
+                SipralStatus::RecordingFailed,
+                SipralMediaFault::Recording,
+            ),
+            (
+                MediaError::RecordingRate { hertz: 44_100 },
+                SipralStatus::InvalidArgument,
+                SipralMediaFault::Recording,
+            ),
+            (
+                MediaError::RecordingBitrate { bits_per_second: 1 },
+                SipralStatus::InvalidArgument,
+                SipralMediaFault::Recording,
+            ),
+            (
+                MediaError::ConsentTone("frequency_hz is outside 300 to 3400"),
                 SipralStatus::InvalidArgument,
                 SipralMediaFault::Other,
             ),
@@ -4542,8 +4591,11 @@ a=sendrecv\r\n";
     #[test]
     fn the_promised_buffers_hold_what_this_build_produces() {
         for codec in Codec::ALL {
-            // twelve octets of RTP header in front of the largest payload
-            let largest = codec.max_payload(60) + 12;
+            // twelve octets of RTP header in front of the largest payload, at
+            // the longest frame the codec is let cut: sixty milliseconds, or
+            // less for L16, whose longer frames a catalogue refuses
+            let millis = (1..=60).rev().find(|ms| codec.fits(*ms)).unwrap_or(0);
+            let largest = codec.max_payload(millis) + 12;
             assert!(
                 largest <= SIPRAL_MEDIA_PACKET_BYTES,
                 "{codec:?} can produce {largest} bytes"

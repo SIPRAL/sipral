@@ -317,6 +317,24 @@ refuses it. **Off by default, and then every one is refused 403**: a peer that
 can make a phone dial is a toll-fraud vector, so each one is the
 application's decision.
 
+### What a call carries in its audio, and recording it
+
+A digit the far end leaves in the audio arrives as
+`SipralEventKind.InBandDigit` and on `call.Dtmf` like any other: by default
+on a call that negotiated no telephone event, and on every call or none with
+`new SipralStack(dtmfDetection: SipralDtmfDetection.Always)` / `.Off` or
+`call.SetDtmfDetection(...)`. `call.SendDtmf(digits)` writes the tones into
+the audio where the far end took no telephone event, and
+`via: SipralDtmf.InBand` does so on any call. `call.DetectProgress(new
+SipralProgressOptions { ... })`, straight after `PlaceCall`, reports the
+network's tones, who answered and the machine's beep as
+`SipralEventKind.ProgressDetected` with `args.Progress` set.
+`call.SetConsentTone(...)` beeps while the call is recorded.
+`call.Media.Record(path, format, layout, sampleRate, bitrate, checkpointMs)`
+writes WAV or Ogg Opus, mixed or stereo with this end on the left, and
+`StopRecording()` / `Recording` stop it and say how far it got.
+`Sipral.Tests/InBandTests.cs` proves each over two stacks on loopback.
+
 ## Samples
 
 `samples/Sipral.Sample.Agent` — a headless voice agent (answers, echoes,

@@ -1823,6 +1823,79 @@ impl MediaEngine {
     pub fn active(&self) -> impl Iterator<Item = CallHandle> + '_ {
         self.sessions.keys().copied()
     }
+
+    /// Listen for call progress on `call` and decide who answers it, or stop
+    /// with `None` — before its media exists as well as after.
+    ///
+    /// Meant for a call this end placed, straight after placing it: the
+    /// tones are listened for from the first frame of early media, and the
+    /// decision about who answered starts from the 2xx. A call's
+    /// [`MediaConfig::progress`](crate::MediaConfig::progress) is the same
+    /// setting made when it is placed.
+    ///
+    /// # Errors
+    /// [`MediaError::NoSuchCall`] for a call this engine does not describe.
+    pub fn detect_progress(
+        &mut self,
+        call: CallHandle,
+        detection: Option<crate::ProgressDetection>,
+    ) -> Result<(), MediaError> {
+        let managed = self.calls.get_mut(&call).ok_or(MediaError::NoSuchCall)?;
+        managed.config.progress = detection;
+        if let Some(held) = self.sessions.get(&call) {
+            share::lock(held).session.detect_progress(detection);
+        }
+        Ok(())
+    }
+
+    /// When to listen for keypad digits in `call`'s far-end audio, before
+    /// its media exists as well as after.
+    ///
+    /// # Errors
+    /// [`MediaError::NoSuchCall`] for a call this engine does not describe.
+    pub fn set_dtmf_detection(
+        &mut self,
+        call: CallHandle,
+        detection: crate::DtmfDetection,
+    ) -> Result<(), MediaError> {
+        let managed = self.calls.get_mut(&call).ok_or(MediaError::NoSuchCall)?;
+        managed.config.dtmf_detection = detection;
+        if let Some(held) = self.sessions.get(&call) {
+            share::lock(held).session.set_dtmf_detection(detection);
+        }
+        Ok(())
+    }
+
+    /// Beep on `call` while it is recorded, or stop with `None`, before its
+    /// media exists as well as after.
+    ///
+    /// # Errors
+    /// [`MediaError::NoSuchCall`] for a call this engine does not describe,
+    /// and [`MediaError::ConsentTone`] for a tone that is not a beep, which
+    /// changes nothing.
+    pub fn set_consent_tone(
+        &mut self,
+        call: CallHandle,
+        tone: Option<crate::ConsentTone>,
+    ) -> Result<(), MediaError> {
+        if let Some(tone) = tone.as_ref() {
+            tone.check()?;
+        }
+        let managed = self.calls.get_mut(&call).ok_or(MediaError::NoSuchCall)?;
+        managed.config.consent_tone = tone;
+        if let Some(held) = self.sessions.get(&call) {
+            share::lock(held).session.set_consent_tone(tone)?;
+        }
+        Ok(())
+    }
+
+    /// A call this end placed was answered: its media, if it has any yet,
+    /// starts deciding who answered.
+    fn answered(&self, call: CallHandle) {
+        if let Some(held) = self.sessions.get(&call) {
+            share::lock(held).session.answered();
+        }
+    }
 }
 
 impl Drop for MediaEngine {
@@ -3263,6 +3336,12 @@ impl MediaEngine {
             UaEvent::CallConfirmed { call, response, .. } => {
                 self.take_body(*call, response.as_ref(), now);
                 self.hang_up_insecure(*call, agent, now);
+                // a 2xx is a call this end placed being answered, and who
+                // answered it is decided from here; a call this end answered
+                // confirms with an ACK and no response
+                if response.is_some() {
+                    self.answered(*call);
+                }
             }
             UaEvent::SessionChanged {
                 call,

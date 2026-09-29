@@ -650,6 +650,15 @@ record! {
         pub rtp_port_min: u32,
         /// The highest port of that range, or zero with `rtp_port_min`.
         pub rtp_port_max: u32,
+        /// When a call listens for keypad digits in the far end's audio, as a
+        /// [`SipralDtmfDetection`](crate::inband::SipralDtmfDetection): zero
+        /// on exactly the calls that negotiated no telephone event, which is
+        /// when such a far end has no other way to send one.
+        /// `sipral_call_dtmf_detection` changes it for one call.
+        ///
+        /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub dtmf_detection: u32,
     }
 }
 
@@ -1546,6 +1555,7 @@ fn media_for(config: &SipralStackConfig) -> Result<MediaConfig, Fail> {
     Ok(MediaConfig {
         stall_after,
         silence_suppression: toggled(config.silence_suppression, "silence_suppression", false)?,
+        dtmf_detection: crate::inband::detection_of(config.dtmf_detection, "dtmf_detection")?,
         ..default
     })
 }
@@ -2452,6 +2462,9 @@ pub(crate) mod tests {
         /// What every audio-devices event carried: change, origin, role and
         /// device, in the order they arrived.
         pub(crate) audio: Vec<(u32, u32, u32, u32)>,
+        /// What every progress event carried: what, tone, verdict, reason and
+        /// when, in the order they arrived.
+        pub(crate) progress: Vec<(u32, u32, u32, u32, u64)>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -2496,6 +2509,7 @@ pub(crate) mod tests {
                 | SipralEventKind::RecordingStopped
                 | SipralEventKind::DigitReceived
                 | SipralEventKind::MediaUnjoined
+                | SipralEventKind::InBandDigit
         )
     }
 
@@ -2739,6 +2753,16 @@ pub(crate) mod tests {
                 .audio
                 .push((audio.change, audio.origin, audio.role, audio.device));
         }
+        if event.kind == SipralEventKind::ProgressDetected {
+            let heard = unsafe { event.payload.progress };
+            observed.progress.push((
+                heard.what,
+                heard.tone,
+                heard.verdict,
+                heard.reason,
+                heard.at_ms,
+            ));
+        }
     }
 
     unsafe extern "C" fn poll_again(event: *const SipralEvent, user_data: *mut c_void) {
@@ -2835,6 +2859,7 @@ pub(crate) mod tests {
             diagnostic_records: 0,
             rtp_port_min: 0,
             rtp_port_max: 0,
+            dtmf_detection: 0,
         }
     }
 

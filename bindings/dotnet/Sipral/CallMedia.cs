@@ -134,6 +134,58 @@ public sealed class CallMedia : IDisposable
             info.Recording != 0, info.RecordedMs, info.Stalled != 0);
     }
 
+    // -- recording ----------------------------------------------------------
+
+    /// <summary><c>sipral_media_record_start_with</c>: record both
+    /// directions to <paramref name="path"/> — WAV, or Ogg Opus where the
+    /// build has Opus; one channel, or this end on the left and the far end
+    /// on the right; at <paramref name="sampleRate"/> (zero for the call's);
+    /// Ogg Opus at <paramref name="bitrate"/> (zero for libopus's choice);
+    /// made to survive a crash every <paramref name="checkpointMs"/> (zero
+    /// for five seconds). The file is finished by
+    /// <see cref="StopRecording"/>, by the call ending, or by the stack
+    /// going.</summary>
+    public void Record(
+        string path,
+        SipralRecordingFormat format = SipralRecordingFormat.Wav,
+        SipralRecordingLayout layout = SipralRecordingLayout.Mixed,
+        uint sampleRate = 0,
+        uint bitrate = 0,
+        uint checkpointMs = 0)
+    {
+        var encoded = ToSBytes(path);
+        var options = new SipralRecordingOptions
+        {
+            Size = (nuint)Marshal.SizeOf<SipralRecordingOptions>(),
+            Format = (uint)format,
+            Layout = (uint)layout,
+            SampleRate = sampleRate,
+            Bitrate = bitrate,
+            CheckpointMs = checkpointMs,
+        };
+        SipralErrors.Call(() => NativeMethods.sipral_media_record_start_with(Handle, encoded, (nuint)encoded.Length, options), "sipral_media_record_start_with");
+    }
+
+    /// <summary><c>sipral_media_record_stop</c>: stop, and finish the
+    /// file.</summary>
+    public void StopRecording()
+    {
+        SipralErrors.Call(() => NativeMethods.sipral_media_record_stop(Handle), "sipral_media_record_stop");
+    }
+
+    /// <summary><c>sipral_media_record_state</c>: whether a recording is
+    /// running, and how many milliseconds of audio it has taken.</summary>
+    public (bool Running, ulong RecordedMs) Recording
+    {
+        get
+        {
+            uint running = 0;
+            ulong taken = 0;
+            SipralErrors.Call(() => NativeMethods.sipral_media_record_state(Handle, out running, out taken), "sipral_media_record_state");
+            return (running != 0, taken);
+        }
+    }
+
     /// <summary><c>sipral_media_statistics</c>.</summary>
     public SipralStreamStatistics Statistics()
     {

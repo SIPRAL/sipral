@@ -613,8 +613,9 @@ are properties rather than details:
 
 A digit shorter than 40 ms is refused where it is asked for rather than sent
 and not heard, as is one longer than ten seconds, and a call whose
-negotiation settled on no telephone-event payload type says so instead of
-swallowing the key. Both bounds are read through `sipral_ua::dtmf`, the same
+negotiation settled on no telephone-event payload type gets the key in its
+audio instead of losing it ("Digits in the audio", below). Both bounds are
+read through `sipral_ua::dtmf`, the same
 validation a digit sent by INFO goes through, so neither sending form takes a
 length the other refuses; a digit *received* by INFO shares only the ceiling
 (`docs/04-ua.md`), because reading how long a peer already held a key needs
@@ -640,6 +641,79 @@ what a peer sending the other body actually said with its own `Duration=0`.
 An application that only ever watched `MediaEvent::DigitReceived`
 for RFC 4733 keeps working unchanged: the new member is additive, and nothing
 changes what was already there.
+
+### Digits in the audio
+
+Some far ends never offer `telephone-event`: a gateway in front of an old
+exchange, an interactive voice system behind a transcoding hop. For them the
+digit is what ITU-T Q.23 made it, two tones in the voice band, and the
+facade handles it both ways (`crates/sipral/src/inband.rs`, over
+`sipral_media::inband`).
+
+**Hearing one.** `MediaConfig::dtmf_detection` (`DtmfDetection`) says when
+the far end's audio is listened to: `Auto`, the default, on exactly the calls
+that negotiated no telephone event, which is when such a far end has no other
+way to send a key; `Always` on every call; `Off` never. The detector runs on
+the frame being played, before anything of this end's is mixed into it, at 8
+or 16 kHz — a call at another rate (Opus's 48 kHz) is converted down to 16 on
+the way, with the converter built the first time something listens. A digit
+is reported once, when it ends, as `MediaEvent::DigitReceived` with
+`source: DigitSource::InBand` and `held` the length it sounded. On a call that
+also negotiated named events, a far end may send one press both ways, so a
+digit heard in the audio is held back `IN_BAND_DIGIT_HOLD` (250 ms) and one
+that the RFC 4733 events also carried within sixty milliseconds of it is not
+reported a second time; the event wins, because its timing is the sender's
+own. `MediaEngine::set_dtmf_detection` changes the mode for one call, before
+its media exists as well as after.
+
+**Sending one.** `MediaSession::send_dtmf` and `dial` on a call with no
+telephone event write the digits into the outgoing audio in place of the
+microphone, each for its length and 60 ms of silence after it; what was a
+`NoDtmf` refusal before is now the digit the far end can hear.
+`MediaSession::dial_in_band` does the same on any call, for the far end that
+negotiated events and listens only to the audio. Digits are written at the
+codec's own rate, and a digit in the audio waits behind one going out as an
+event rather than sounding under it. Silence suppression never swallows a
+frame carrying a digit.
+
+### Call progress and who answered
+
+A call this end places can be told to listen (`MediaConfig::progress`, or
+`MediaEngine::detect_progress` straight after placing it), with a
+`ProgressDetection`: a network's tones (`ToneRegion`: the CEPT countries,
+North America, the United Kingdom — E.180 Supplement 2), whether to decide
+who answered (`AmdConfig`, every limit configurable) and whether to listen
+for the machine's beep (`BeepConfig`, for `beep_window` after the verdict,
+thirty seconds by default). Everything heard is a `MediaEvent::Progress`
+carrying a `CallProgress`:
+
+- `Tone` and `SpecialInformation`, from the first frame of early media on,
+  each tone once, timed from the first frame listened to. Tones are listened
+  for until answer, and after answer for as long as the answering-machine
+  detector is still deciding, which is what catches a gateway that answers
+  to play an intercept.
+- `AnsweredBy`, the verdict — `Human`, `Machine` or `NotSure` — with the rule
+  that decided and what it was decided from. The deciding starts at the 2xx:
+  the engine tells the session when a call it placed is answered.
+- `Beep`, after a verdict of `Machine`, with its frequency, its length and
+  when it ended after answer — when the machine starts recording, which is
+  when a message should start.
+
+Listening costs a few detectors a frame while it lasts, and nothing once
+it has come to its end (`MediaSession::is_detecting_progress`).
+
+### The consent tone
+
+`ConsentTone` is a beep repeated while a call is being recorded — 1400 Hz,
+200 ms, every fifteen seconds and at −18 dBm0 unless configured, each checked
+against what a codec here carries. It starts with the recording, its first
+beep at once, and stops with it. It is mixed into what goes to the far end
+before the recording's tap, so the recording's own side is the evidence that
+it was played, and — unless `local` is off — into what this end plays, after
+the tap, so the far end's side of the file is not beeped over. Whether the
+parties have to be told is a matter of where they are, so it is off unless
+set: `MediaConfig::consent_tone`, `MediaEngine::set_consent_tone` or
+`MediaSession::set_consent_tone`.
 
 ### SRTP
 
@@ -1306,13 +1380,12 @@ coming. The processor is kept and `reset`, which is the case
 `Processor::reset` names: the echo path it has learned describes a signal that
 no longer exists.
 
-The recording is the one thing that cannot always follow. A WAVE header names
-the playback rate once, at the front of the file, so a recording survives every
-codec change that keeps the rate and the frame length — the three
-eight-kilohertz codecs are interchangeable under one header — and is closed
-properly when one of them moves, with `MediaEvent::RecordingStopped` carrying
-`MediaError::CodecChanged` and the length written so far. The file is
-playable; whether to open a second one is the application's to decide.
+The recording follows too, into the same file. A file has a rate of its own,
+fixed when it started, and the two directions are converted to it on the way
+in, so a codec at another rate changes only what they are converted from: a
+call that moves from G.711 to G.722 mid-recording leaves one file at 8 kHz,
+with the frame one direction was holding at the change written at the old
+rate first.
 
 The timestamp continues in the new clock rate rather than being converted,
 which is RFC 7160's case. The source has not changed, so a receiver reads the
@@ -1791,7 +1864,74 @@ it can encode. The bit, the name `sipral_codec_name` gives 4 and the number a
 stream reports are all read from the codec catalogue and never from
 `sipral-ffi`'s own copy of the feature — that copy can be off over a facade
 that linked the codec, and an ABI that answered from it would deny a codec the
-build can negotiate.
+build can negotiate. (`Codec::ALL` is six long without Opus now that L16 is
+in it, and `sipral_codec_count` answers six.)
+
+### L16 in a call
+
+RFC 3551 §4.5.11's L16 — the samples, big-endian — is a codec here at two
+rates, one channel each: `Codec::L16Narrowband` (`L16/8000`) and
+`Codec::L16Wideband` (`L16/16000`). Neither is offered unless a codec order
+names it by that rate-qualified name, for the reason G.729 is not: a peer's
+preference decides among what both ends list, and 128 or 256 kbit/s is a
+site's choice, not a default. Both go on a dynamic payload type with the rate
+on the `a=rtpmap` line; the static 10 and 11 are 44.1 kHz and not taken. A
+description is read back as L16 only at the same rate and one channel, so an
+end offering `L16/8000` and one offering `L16/16000` share no L16 and settle
+on what else they share. The payload grows with the frame, so a frame length
+whose L16 payload would not fit the datagram a session builds (1275 octets of
+payload, as for the largest Opus frame) is refused where it is set: 39 ms is
+the longest at 16 kHz and 79 ms at 8, so the usual 20 and 30 ms are taken and
+40 is refused at 16 kHz. Concealment is the same waveform concealer G.711
+uses.
+
+## Recording a call
+
+`MediaSession::start_recording_with(sink, &RecordingOptions)` writes both
+directions of a call to a `RecordingSink` (anything `Write + Seek + Send`);
+`start_recording(sink)` is the same with the defaults, mixed WAV at the
+call's rate. Every option is independent of the codec the call is on:
+
+- `format`: `RecordingFormat::Wav`, sixteen-bit PCM in RIFF/WAVE that becomes
+  RF64 past four gibibytes (`sipral_media::formats::wav`), or
+  `RecordingFormat::OggOpus` where the `opus` feature is on
+  (`RecordingFormat::ogg_opus()` answers which): RFC 7845 through
+  `formats::ogg_opus`, twenty-millisecond packets, the pre-skip read off the
+  encoder's own lookahead (`opus::Encoder::pre_skip`), the stream's serial
+  number drawn from the call's own randomness (RFC 3533 §4 has it "created
+  randomly"), and the last page trimmed to exactly the audio recorded — the
+  encoder is run past its lookahead on silence first, so the file does not
+  end short of the last word.
+- `layout`: `RecordingLayout::Mixed`, one channel with each direction at
+  half level (the sum reaches full scale only where both did), or `Stereo`,
+  **this end on the left and the far end on the right**.
+- `sample_rate`: the file's own; the call's when it starts unless named. WAV
+  takes 8 to 48 kHz, Ogg Opus Opus's five rates. Both directions are
+  converted to it with `sipral_media::resample`, which is also why a
+  recording carries on through a codec change (above).
+- `bitrate`, for Ogg Opus.
+- `checkpoint`, five seconds by default: see below.
+
+What goes in is what went out and what was played: the captured frame after
+the application's processor, a digit and the consent beep, and the frame
+decoded for the earpiece. A direction that stops producing — a muted
+microphone, a stalled device — is written against silence, so the file
+stays on the call's timeline.
+
+**How a recording ends.** Stopped, the call ending, the engine dropped, or
+the recorder dropped for any other reason: each finishes the file the same
+way, the WAVE header written with the real lengths, the Ogg stream's last
+page marked as its end. A sink that fails part-way is let go with
+`MediaEvent::RecordingStopped`, and the call carries on.
+
+**What a crash leaves.** A process that dies finishes nothing. Every
+`checkpoint`, a WAVE file's header is rewritten with the lengths reached so
+far and an Ogg stream's page is written out, each flushed: a file abandoned
+mid-call plays up to its last checkpoint. The WAVE file holds the audio after
+that point too, past the length its header states, where a player does not
+look and an editor finds it; the Ogg stream ends at its last whole page
+without the page that marks its end, which players read as a stream that
+stops there.
 
 ## The processor seam, and the frame that is hard to produce
 

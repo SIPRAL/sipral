@@ -508,6 +508,26 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "referred_by": _text(referral.referred_by, referral.referred_by_len),
         }
 
+    # What a call told to listen heard: a network's tone, who answered, or
+    # the beep (`Call.detect_progress`). `what` says which members mean
+    # anything; the rest are zero.
+    if kind == lib.SIPRAL_EVENT_KIND_PROGRESS_DETECTED:
+        progress = payload.progress
+        return {
+            "what": int(progress.what),
+            "tone": int(progress.tone),
+            "verdict": int(progress.verdict),
+            "reason": int(progress.reason),
+            "at_ms": int(progress.at_ms),
+            "initial_silence_ms": int(progress.initial_silence_ms),
+            "greeting_ms": int(progress.greeting_ms),
+            "words": int(progress.words),
+            "frequency_hz": int(progress.frequency_hz),
+            "length_ms": int(progress.length_ms),
+            "sit_hz": (int(progress.sit_hz_1), int(progress.sit_hz_2), int(progress.sit_hz_3)),
+            "sit_ms": (int(progress.sit_ms_1), int(progress.sit_ms_2), int(progress.sit_ms_3)),
+        }
+
     # Unknown or not yet decoded here: the caller still has `message` and
     # the raw `kind`/`kind_name`, which is what a generic event is for.
     return {}
@@ -549,6 +569,7 @@ _MEDIA_KINDS = frozenset(
         lib.SIPRAL_EVENT_KIND_DIGIT_RECEIVED,
         lib.SIPRAL_EVENT_KIND_MEDIA_SECURED,
         lib.SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN,
+        lib.SIPRAL_EVENT_KIND_IN_BAND_DIGIT,
     }
 )
 

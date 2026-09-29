@@ -183,6 +183,23 @@ constants! {
     /// encryption report of every call (`sipral_media_encryption_at`). ABI
     /// 0.31.
     pub const SIPRAL_FEATURE_SRTP_POLICY: u32 = 1 << 17;
+    /// See [`SIPRAL_FEATURE_DTMF`]. What a call carries inside its audio:
+    /// keypad digits heard in the far end's audio
+    /// (`sipral_stack_config_t::dtmf_detection`,
+    /// `sipral_call_dtmf_detection`, `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`) and
+    /// written into this end's (`SIPRAL_DTMF_IN_BAND`, and `SIPRAL_DTMF_RTP`
+    /// on a call with no telephone event), call-progress tones, who answered
+    /// and the machine's beep (`sipral_call_detect_progress`,
+    /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`), and the beep that says a call
+    /// is recorded (`sipral_call_consent_tone`).
+    pub const SIPRAL_FEATURE_IN_BAND_SIGNALS: u32 = 1 << 18;
+    /// See [`SIPRAL_FEATURE_DTMF`]. A recording written as
+    /// `sipral_recording_options_t` says (`sipral_media_record_start_with`):
+    /// mixed or stereo, WAV growing into RF64, at a rate of its own and
+    /// checkpointed against a crash, and Ogg Opus where
+    /// [`SIPRAL_FEATURE_OPUS`] is set too. And L16 as a codec, at 8 and 16
+    /// kHz, which `sipral_codec_at` lists.
+    pub const SIPRAL_FEATURE_RECORDING_FORMATS: u32 = 1 << 19;
 }
 
 record! {
@@ -312,6 +329,12 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     }
     if capabilities.srtp_per_account {
         features |= SIPRAL_FEATURE_SRTP_POLICY;
+    }
+    if capabilities.in_band_signals {
+        features |= SIPRAL_FEATURE_IN_BAND_SIGNALS;
+    }
+    if capabilities.recording_formats {
+        features |= SIPRAL_FEATURE_RECORDING_FORMATS;
     }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
@@ -536,6 +559,23 @@ mod tests {
         assert_ne!(features & SIPRAL_FEATURE_SRTP_POLICY, 0);
         assert_eq!(SIPRAL_FEATURE_STIR, 1 << 16);
         assert_eq!(SIPRAL_FEATURE_SRTP_POLICY, 1 << 17);
+    }
+
+    /// Both bits of what the audio carries and how a recording is written
+    /// are the facade's answer, at the numbers the wave was given.
+    #[test]
+    fn in_band_signals_and_recording_formats_read_as_the_facade_says() {
+        let facade = Capabilities::of_this_build();
+        assert_eq!(
+            read().features & super::SIPRAL_FEATURE_IN_BAND_SIGNALS != 0,
+            facade.in_band_signals
+        );
+        assert_eq!(
+            read().features & super::SIPRAL_FEATURE_RECORDING_FORMATS != 0,
+            facade.recording_formats
+        );
+        assert_eq!(super::SIPRAL_FEATURE_IN_BAND_SIGNALS, 1 << 18);
+        assert_eq!(super::SIPRAL_FEATURE_RECORDING_FORMATS, 1 << 19);
     }
 
     #[test]

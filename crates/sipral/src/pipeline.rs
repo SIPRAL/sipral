@@ -44,7 +44,7 @@ use sipral_media::opus;
 #[cfg(feature = "opus")]
 use sipral_media::opus::{FrameDuration, SampleRate};
 use sipral_media::plc::Concealer;
-use sipral_media::{g722, g729};
+use sipral_media::{g722, g729, l16};
 
 use crate::codec::Codec;
 use crate::error::MediaError;
@@ -85,6 +85,9 @@ enum Kind {
     /// without it there is no codec here that libopus decodes.
     #[cfg(feature = "opus")]
     Opus(Box<(opus::Encoder, opus::Decoder)>),
+    /// L16: the samples, big-endian. Stateless like G.711, and concealed by
+    /// the same waveform concealer, at whichever of the two rates it runs.
+    Linear(l16::Format, Concealer),
 }
 
 /// What one payload came to.
@@ -161,6 +164,13 @@ impl Coder {
                 encoder.set_expected_loss(5)?;
                 Kind::Opus(Box::new((encoder, opus::Decoder::new(rate, frame)?)))
             }
+            Codec::L16Narrowband | Codec::L16Wideband => Kind::Linear(
+                // one channel at a rate that is not zero, which is every
+                // rate either variant names
+                l16::Format::new(codec.clock_rate(), 1)
+                    .map_err(|_| MediaError::unsupported(codec.name()))?,
+                Concealer::new(),
+            ),
         };
         Ok(Self {
             codec,
@@ -235,6 +245,11 @@ impl Coder {
             Kind::Celp(pair) => Ok(whole(pair.0.encode_into(samples, out))),
             #[cfg(feature = "opus")]
             Kind::Opus(pair) => Ok(whole(pair.0.encode(samples, out)?)),
+            Kind::Linear(format, _) => Ok(whole(
+                format
+                    .encode_into(samples, out)
+                    .saturating_mul(l16::SAMPLE_OCTETS),
+            )),
         }
     }
 
@@ -273,6 +288,11 @@ impl Coder {
             }
             Kind::Wideband(pair, concealer) => {
                 let count = pair.1.decode_into(payload, out);
+                concealer.received(out.get_mut(..count).unwrap_or_default());
+                Ok(Decoded::Audio(count))
+            }
+            Kind::Linear(format, concealer) => {
+                let count = format.decode_into(payload, out);
                 concealer.received(out.get_mut(..count).unwrap_or_default());
                 Ok(Decoded::Audio(count))
             }
@@ -316,7 +336,10 @@ impl Coder {
     /// G.729 and Opus keep their decoders' own state, which is theirs to
     /// carry across a pause.
     pub(crate) fn interrupted(&mut self) {
-        if let Kind::Companded(_, concealer) | Kind::Wideband(_, concealer) = &mut self.kind {
+        if let Kind::Companded(_, concealer)
+        | Kind::Wideband(_, concealer)
+        | Kind::Linear(_, concealer) = &mut self.kind
+        {
             concealer.reset();
         }
     }
@@ -331,7 +354,10 @@ impl Coder {
     /// decoder.
     pub(crate) fn stretch(&mut self, out: &mut [i16]) -> Result<usize, MediaError> {
         let frame = self.frame_samples.min(out.len());
-        if let Kind::Companded(_, concealer) | Kind::Wideband(_, concealer) = &mut self.kind {
+        if let Kind::Companded(_, concealer)
+        | Kind::Wideband(_, concealer)
+        | Kind::Linear(_, concealer) = &mut self.kind
+        {
             concealer.stretch(out.get_mut(..frame).unwrap_or_default());
             return Ok(frame);
         }
@@ -381,7 +407,9 @@ impl Coder {
     pub(crate) fn conceal(&mut self, out: &mut [i16]) -> Result<usize, MediaError> {
         let frame = self.frame_samples.min(out.len());
         match &mut self.kind {
-            Kind::Companded(_, concealer) | Kind::Wideband(_, concealer) => {
+            Kind::Companded(_, concealer)
+            | Kind::Wideband(_, concealer)
+            | Kind::Linear(_, concealer) => {
                 concealer.conceal(out.get_mut(..frame).unwrap_or_default());
                 Ok(frame)
             }

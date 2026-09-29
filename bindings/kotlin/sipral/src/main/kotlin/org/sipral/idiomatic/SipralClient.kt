@@ -40,6 +40,7 @@ import org.sipral.SipralAudioTransmitListener
 import org.sipral.SipralCallConfig
 import org.sipral.SipralCallEvent
 import org.sipral.SipralCounters
+import org.sipral.SipralDtmfDetection
 import org.sipral.SipralEvent
 import org.sipral.SipralEventListener
 import org.sipral.SipralException
@@ -260,6 +261,11 @@ class SipralClient private constructor(
          * Both `0` -- the default -- leave the ports to the operating system.
          * Every pair taken throws `SipralStatus.EXHAUSTED` rather than binding
          * outside the range.
+         *
+         * [dtmfDetection] is when a call listens for keypad digits in the far
+         * end's audio: `AUTO` on the calls that negotiated no telephone
+         * event, `ALWAYS` or `OFF`; [SipralCall.setDtmfDetection] changes it
+         * for one call.
          */
         fun open(
             bindHost: String = "127.0.0.1",
@@ -285,6 +291,7 @@ class SipralClient private constructor(
             stunFallbacks: List<String> = emptyList(),
             rtpPortMin: Int = 0,
             rtpPortMax: Int = 0,
+            dtmfDetection: SipralDtmfDetection = SipralDtmfDetection.AUTO,
         ): SipralClient {
             val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost))
             socket.soTimeout = 20
@@ -299,7 +306,7 @@ class SipralClient private constructor(
                     userAgent, codecs, ice, turn, g729AnnexB, referrals,
                     registrarKeepalive, registrarKeepaliveMs, audioProbeMs, audioDeviceRateHz, srtp,
                     maxDialogs, maxServerTransactions, diagnosticDecisions, diagnosticRecords,
-                    stunFallbacks,
+                    stunFallbacks, dtmfDetection,
                 )
             } catch (refused: Exception) {
                 socket.close()
@@ -332,6 +339,7 @@ class SipralClient private constructor(
         diagnosticDecisions: Long,
         diagnosticRecords: Long,
         stunFallbacks: List<String>,
+        dtmfDetection: SipralDtmfDetection,
     ) {
         val random = SecureRandom()
         val entropy = ByteArray(32).also { random.nextBytes(it) }
@@ -371,6 +379,7 @@ class SipralClient private constructor(
             stunFallbacks = stunFallbacks.takeIf { it.isNotEmpty() }?.joinToString(","),
             rtpPortMin = (rtpPorts?.first ?: 0).toLong(),
             rtpPortMax = (rtpPorts?.second ?: 0).toLong(),
+            dtmfDetection = dtmfDetection.value.toLong(),
         )
         handle = Sipral.stackCreate(config)
         if (device) {

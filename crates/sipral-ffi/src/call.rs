@@ -1381,6 +1381,12 @@ codes! {
         /// An INFO per digit carrying `application/dtmf`, whose whole body is the
         /// character. Some switches take only this one.
         InfoPlain = 3,
+        /// In the media, as the two tones of each key written into the audio in
+        /// place of the microphone, whatever the negotiation settled on: for
+        /// the far end that negotiated a telephone event and then listens only
+        /// to the audio. `SIPRAL_DTMF_RTP` does this by itself on a call that
+        /// negotiated no telephone event.
+        InBand = 4,
     }
 }
 
@@ -1416,10 +1422,12 @@ entry! {
     /// the same as one with a character no keypad has, and nothing of it is
     /// sent.
     ///
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
-    /// negotiation settled on no telephone event payload type: the key is a
-    /// real key and this call has nowhere in the media to put it. The INFO
-    /// forms need a dialog rather than a negotiation, and answer
+    /// `SIPRAL_DTMF_RTP` on a call whose negotiation settled on no telephone
+    /// event payload type writes the digits into the audio instead, as
+    /// `SIPRAL_DTMF_IN_BAND` does on any call: the one way such a far end can
+    /// hear a key. Both need the call's media, and answer
+    /// `SIPRAL_STATUS_WRONG_STATE` before there is any. The INFO forms need a
+    /// dialog rather than a negotiation, and answer
     /// `SIPRAL_STATUS_WRONG_STATE` before there is one.
     ///
     /// # Safety
@@ -1440,9 +1448,10 @@ entry! {
             let pressed = unsafe { required_text(digits, digits_len, "digits") }?;
             keypad(pressed)?;
             let held = tone_length(duration_ms)?;
-            if form == SipralDtmf::Rtp {
+            if matches!(form, SipralDtmf::Rtp | SipralDtmf::InBand) {
                 let length = Duration::from_millis(u64::from(held));
-                return crate::media::dial_in_media(state, id, pressed, length);
+                let in_band = form == SipralDtmf::InBand;
+                return crate::media::dial_in_media(state, id, pressed, length, in_band);
             }
             let info_form = match form {
                 SipralDtmf::InfoPlain => sipral_ua::DtmfInfoForm::Plain,
@@ -1462,11 +1471,13 @@ fn dtmf_form(via: u32) -> Result<SipralDtmf, Fail> {
         1 => Ok(SipralDtmf::Rtp),
         2 => Ok(SipralDtmf::InfoRelay),
         3 => Ok(SipralDtmf::InfoPlain),
+        4 => Ok(SipralDtmf::InBand),
         _ => Err(fail(
             SipralStatus::InvalidArgument,
             format!(
                 "{via} is not a way to send a digit; they are 1 for the media, 2 for INFO with \
-                 application/dtmf-relay and 3 for INFO with application/dtmf"
+                 application/dtmf-relay, 3 for INFO with application/dtmf and 4 for the tones in \
+                 the audio"
             ),
         )),
     }
@@ -3507,7 +3518,8 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(dtmf_form(1).ok(), Some(SipralDtmf::Rtp));
         assert_eq!(dtmf_form(2).ok(), Some(SipralDtmf::InfoRelay));
         assert_eq!(dtmf_form(3).ok(), Some(SipralDtmf::InfoPlain));
-        for wrong in [0, 4, 5, u32::MAX] {
+        assert_eq!(dtmf_form(4).ok(), Some(SipralDtmf::InBand));
+        for wrong in [0, 5, 6, u32::MAX] {
             assert!(dtmf_form(wrong).is_err(), "{wrong} was taken as a form");
         }
     }
@@ -3571,12 +3583,55 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.3.11(c): a tone length refused by one form is refused by all three,
+    /// A call whose far end negotiated no telephone event takes a digit in
+    /// its audio, from the media form as well as the in-band one: the digits
+    /// queue, sound over the frames that follow, and are done.
+    #[test]
+    fn a_call_with_no_named_events_takes_a_digit_in_its_audio() {
+        let mut observed = Observed::default();
+        let (handle, call) = media_call(&mut observed);
+        let media = crate::media::tests::media_of(handle, call);
+        let (digits, digits_len) = as_text("12#");
+        for via in [SipralDtmf::Rtp, SipralDtmf::InBand] {
+            assert_eq!(
+                unsafe {
+                    sipral_call_send_dtmf(handle, call, digits, digits_len, via as u32, 0, 2_000)
+                },
+                SipralStatus::Ok,
+                "{via:?}: {}",
+                last_error_text()
+            );
+        }
+        let mut dialling = u32::MAX;
+        let mut waiting = usize::MAX;
+        let status = unsafe {
+            crate::media::sipral_media_dialling(media, &raw mut dialling, &raw mut waiting)
+        };
+        assert_eq!(status, SipralStatus::Ok);
+        assert_eq!(
+            (dialling, waiting),
+            (1, 6),
+            "six digits queued in the audio"
+        );
+        // six digits of a hundred milliseconds and their pauses, in frames
+        for _ in 0..(6 * 160 / 20 + 2) {
+            crate::media::tests::capture_one(media, &[0; crate::media::tests::FRAME]);
+        }
+        let status = unsafe {
+            crate::media::sipral_media_dialling(media, &raw mut dialling, &raw mut waiting)
+        };
+        assert_eq!(status, SipralStatus::Ok);
+        assert_eq!((dialling, waiting), (0, 0), "the digits never finished");
+        crate::media::tests::release(media);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.3.11(c): a tone length refused by one form is refused by every one,
     /// with the same status and the same words, and nothing goes out. RFC
     /// 4733 used to take a floor from the media that the two INFO forms did
     /// not have, so 20 ms went out as an INFO and never as an event.
     #[test]
-    fn a_tone_length_one_form_refuses_is_refused_by_all_three_alike() {
+    fn a_tone_length_one_form_refuses_is_refused_by_every_form_alike() {
         let mut observed = Observed::default();
         let (handle, call) = media_call(&mut observed);
         let _ = sent(handle);
@@ -3585,6 +3640,7 @@ Content-Length: 0\r\n\r\n";
             SipralDtmf::Rtp,
             SipralDtmf::InfoRelay,
             SipralDtmf::InfoPlain,
+            SipralDtmf::InBand,
         ]
         .into_iter()
         .map(|via| {

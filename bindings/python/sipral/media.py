@@ -261,6 +261,56 @@ class Media:
             )
         self._to_send.put(bytes(pcm))
 
+    def record(
+        self,
+        path: str,
+        *,
+        format: int = 0,
+        layout: int = 0,
+        sample_rate: int = 0,
+        bitrate: int = 0,
+        checkpoint_ms: int = 0,
+    ) -> None:
+        """`sipral_media_record_start_with`: record both directions to
+        ``path``. ``format`` is a :class:`sipral.enums.RecordingFormat`
+        (WAV, or Ogg Opus where the build has Opus), ``layout`` a
+        :class:`sipral.enums.RecordingLayout` (one channel, or this end on
+        the left and the far end on the right), ``sample_rate`` the file's
+        own (zero for the call's), ``bitrate`` Ogg Opus's, and
+        ``checkpoint_ms`` how often the file is made to survive a crash
+        (zero for every five seconds). The file is finished by
+        :meth:`stop_recording`, by the call ending, or by the stack going."""
+        encoded = path.encode("utf-8")
+        options = ffi.new("sipral_recording_options_t *")
+        options.size = ffi.sizeof("sipral_recording_options_t")
+        options.format = int(format)
+        options.layout = int(layout)
+        options.sample_rate = sample_rate
+        options.bitrate = bitrate
+        options.checkpoint_ms = checkpoint_ms
+        _call(
+            lambda: lib.sipral_media_record_start_with(
+                self.handle, encoded, len(encoded), options
+            ),
+            "sipral_media_record_start_with",
+        )
+
+    def stop_recording(self) -> None:
+        """`sipral_media_record_stop`: stop, and finish the file."""
+        _call(lambda: lib.sipral_media_record_stop(self.handle), "sipral_media_record_stop")
+
+    @property
+    def recording(self) -> tuple[bool, int]:
+        """`sipral_media_record_state`: whether a recording is running, and
+        how many milliseconds of audio it has taken."""
+        running = ffi.new("uint32_t *")
+        taken = ffi.new("uint64_t *")
+        _call(
+            lambda: lib.sipral_media_record_state(self.handle, running, taken),
+            "sipral_media_record_state",
+        )
+        return bool(running[0]), int(taken[0])
+
     def rebind(self, sock: socket_module.socket) -> None:
         """Carry this call's media on ``sock`` from now on, and close the
         socket it had: what :meth:`sipral.call.Call.readdress` does once the

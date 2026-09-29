@@ -162,13 +162,34 @@ fn doc(out: &mut String, indent: &str, lines: &[String]) {
 }
 
 /// Whether a record can be handed back a member at a time, which it can when
-/// nothing in it is a buffer of the caller's.
-fn is_given(record: &Record) -> bool {
+/// nothing in it is a buffer of the caller's — and is, unless it is one an
+/// entry point takes going in: that is a class a caller builds, whatever it
+/// holds, and printing it as a data class to read back as well would give
+/// one name two shapes.
+fn is_given(surface: &Surface, record: &Record) -> bool {
+    holds_numbers(record) && !goes_in(surface, record)
+}
+
+/// Whether a record is versioned and holds nothing but numbers: the shape a
+/// struct handed back a member at a time has.
+fn holds_numbers(record: &Record) -> bool {
     record.is_versioned()
         && record
             .fields
             .iter()
             .all(|field| Type::read(field.rust_type).is_ok_and(|ty| ty.pointer.is_none()))
+}
+
+/// Whether some entry point takes `record` behind a `const` pointer, which is
+/// what makes it a struct a Kotlin caller builds (`Role::Config`).
+fn goes_in(surface: &Surface, record: &Record) -> bool {
+    surface.functions.iter().any(|function| {
+        function.parameters.iter().any(|parameter| {
+            Type::read(parameter.rust_type).is_ok_and(|ty| {
+                ty.pointer == Some(Writable::No) && ty.base == Base::Named(record.name.to_owned())
+            })
+        })
+    })
 }
 
 /// The Kotlin type one member of such a record reads back as.
@@ -475,14 +496,6 @@ fn built(surface: &Surface) -> Result<Vec<&'static Record>, Refused> {
             return Err(Refused::about(&format!(
                 "{} goes in behind a const pointer and has no size member for the shim to fill \
                  in",
-                record.name
-            )));
-        }
-        if is_given(record) {
-            return Err(Refused::about(&format!(
-                "{} goes in behind a const pointer and holds nothing but numbers, so it would be \
-                 printed twice: as a class to build and as a data class to read back. Give it one \
-                 shape in tools/abi-gen/src/kotlin.rs",
                 record.name
             )));
         }
@@ -831,7 +844,7 @@ fn arm_fields<'a>(
                     ));
                 };
                 match surface.records.iter().find(|inner| inner.name == *name) {
-                    Some(inner) if inner.shape == Shape::Struct && is_given(inner) => {
+                    Some(inner) if inner.shape == Shape::Struct && is_given(surface, inner) => {
                         out.push(ArmField::Given {
                             data: field,
                             record: inner,
@@ -1637,7 +1650,7 @@ fn symbol(name: &str) -> String {
 fn data_classes(surface: &Surface) -> Result<String, Refused> {
     let mut out = String::new();
     for record in surface.records {
-        if !is_given(record) {
+        if !is_given(surface, record) {
             continue;
         }
         doc(&mut out, "", &lines(surface, record.doc));
@@ -3837,7 +3850,7 @@ impl Spelling for Names {
             out.push((enumeration.name.to_owned(), enumeration.name.to_owned()));
         }
         for record in surface.records {
-            if is_given(record) {
+            if is_given(surface, record) {
                 out.push((record.name.to_owned(), record.name.to_owned()));
             }
         }
@@ -3848,8 +3861,11 @@ impl Spelling for Names {
         // only the records that come back a member at a time are printed
         // member for member; a struct going in and a struct a listener is
         // handed are classes whose fields depend on how the surface uses
-        // them, and `own` answers for those
-        if !is_given(record) {
+        // them, and `own` answers for those. Asked without the surface this
+        // trait does not hand over, so a struct going in that holds nothing
+        // but numbers has its members claimed here as well; they are its
+        // own names either way
+        if !holds_numbers(record) {
             return Ok(Vec::new());
         }
         Ok(read_all(record.name, record.fields)?

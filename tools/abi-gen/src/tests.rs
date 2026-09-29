@@ -973,8 +973,9 @@ fn a_payload_buffer_is_guarded_by_the_kinds_that_actually_write_its_arm() {
          SIPRAL_EVENT_KIND_DIGIT_RECEIVED || event->kind == SIPRAL_EVENT_KIND_MEDIA_SECURED || \
          event->kind == SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN || event->kind == \
          SIPRAL_EVENT_KIND_QUALITY_REPORT_SENT || event->kind == \
-         SIPRAL_EVENT_KIND_MEDIA_UNJOINED) && JNI_REACHES(event, sipral_event_t, \
-         payload.media.statistics) && event->payload.media.statistics != NULL) {",
+         SIPRAL_EVENT_KIND_MEDIA_UNJOINED || event->kind == SIPRAL_EVENT_KIND_IN_BAND_DIGIT) \
+         && JNI_REACHES(event, sipral_event_t, payload.media.statistics) && \
+         event->payload.media.statistics != NULL) {",
     ] {
         assert!(shim.contains(line), "no `{line}` in:\n{shim}");
     }
@@ -2350,7 +2351,7 @@ const UNVERSIONED_CONFIG: Surface = Surface {
 };
 
 /// A struct going in that holds nothing but numbers and is versioned: the
-/// shape a struct handed back reads, printed as a data class already.
+/// shape a struct handed back reads, which going in makes a class to build.
 const NUMERIC_CONFIG: Surface = Surface {
     records: &[Record {
         name: "SipralNumericConfig",
@@ -2376,12 +2377,23 @@ fn a_struct_going_in_with_no_shape_of_its_own_is_refused() {
         why.contains("SipralPlainConfig") && why.contains("no size member"),
         "{why}"
     );
-    // all-numeric and versioned is the one shape a struct handed back reads;
-    // building it as a class too would print the same record twice
-    let why = refusal(&NUMERIC_CONFIG, &kotlin::Names);
+}
+
+/// All-numeric and versioned is the shape a struct handed back reads, and
+/// one going in is a class a caller builds instead: printed once, as that,
+/// and never as a data class beside it.
+#[test]
+fn a_numeric_struct_going_in_is_built_and_not_read_back() {
+    let printed = kotlin::binding(&NUMERIC_CONFIG).unwrap_or_else(|why| panic!("{why}"));
+    assert!(printed.contains("class SipralNumericConfig("), "{printed}");
     assert!(
-        why.contains("SipralNumericConfig") && why.contains("printed twice"),
-        "{why}"
+        !printed.contains("data class SipralNumericConfig"),
+        "printed twice:\n{printed}"
+    );
+    let shim = kotlin::shim(&NUMERIC_CONFIG).unwrap_or_else(|why| panic!("{why}"));
+    assert!(
+        shim.contains("sipral_numeric_config_t config_value;"),
+        "{shim}"
     );
 }
 

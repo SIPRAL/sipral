@@ -1561,6 +1561,45 @@ the recording stops, so every way a recording can end closes it properly —
 including from inside its own event callback. Destroying a stack mid-recording
 leaves a playable file, not a repair job.
 
+`sipral_media_record_start_with` (ABI 0.31) takes a
+`sipral_recording_options_t`, every member zero for the plain recording:
+`format` (`SIPRAL_RECORDING_FORMAT_WAV`, or `_OGG_OPUS` where
+`SIPRAL_FEATURE_OPUS` is set and `SIPRAL_STATUS_NOT_SUPPORTED` where it is
+not), `layout` (`_MIXED`, or `_STEREO` with this end on the left and the far
+end on the right), `sample_rate` (the file's own, which a codec change no
+longer ends the recording over), `bitrate` for Ogg Opus, and
+`checkpoint_ms`, how often the file is made to survive a crash — five
+seconds unless set; `docs/05-media.md` says what a crash leaves. Options no
+file can be written with are refused before the file is made. A file that
+stops taking what is written — a full disk — is
+`SIPRAL_STATUS_RECORDING_FAILED` (19) from `sipral_media_record_stop` and at
+start, and `SIPRAL_EVENT_KIND_RECORDING_STOPPED` part-way; a path the file
+system refuses stays `SIPRAL_STATUS_INVALID_ARGUMENT`.
+`SIPRAL_FEATURE_RECORDING_FORMATS` (`1 << 19`) says the build has all of
+this, and L16 among its codecs (`SIPRAL_CODEC_L16_NARROWBAND` 6,
+`_L16_WIDEBAND` 7, named `L16/8000` and `L16/16000` in a codec order).
+
+**What a call carries in its audio (ABI 0.31).** Three per-call settings,
+each reachable from `sipral_call_place` on — before the call has media — and
+each `SIPRAL_STATUS_WRONG_STATE` on a call whose media is not this stack's:
+`sipral_call_dtmf_detection` (a `sipral_dtmf_detection_t`, whose default,
+`AUTO`, is also `sipral_stack_config_t::dtmf_detection`'s zero: listen on the
+calls that negotiated no telephone event), `sipral_call_detect_progress`
+(a `sipral_progress_config_t`: the network's tones, the answering-machine
+limits and the beep, every member zero for its default and `listen` off to
+stop) and `sipral_call_consent_tone` (a `sipral_consent_tone_t`, `enabled`
+off for none). A digit heard in the audio is
+`SIPRAL_EVENT_KIND_IN_BAND_DIGIT` (48) in `payload.media`, with `source`
+`SIPRAL_DIGIT_SOURCE_IN_BAND`; what the progress detection heard is
+`SIPRAL_EVENT_KIND_PROGRESS_DETECTED` (49) in `payload.progress`, a
+`sipral_progress_event_t` whose `what` says which members mean anything.
+`SIPRAL_DTMF_IN_BAND` (4) sends digits as tones on any call, and
+`SIPRAL_DTMF_RTP` does so by itself on a call that negotiated no telephone
+event, where it used to be `SIPRAL_STATUS_NOT_SUPPORTED`.
+`SIPRAL_FEATURE_IN_BAND_SIGNALS` (`1 << 18`) says the build has all three.
+Event 47 is reserved in this minor for the caller-identity verdict that
+arrives with it.
+
 **Configuration is answered, never absorbed.** A codec name this build has no
 encoder for is `SIPRAL_STATUS_NOT_SUPPORTED` where the order is set, with the
 names it does have in the last error; a stall threshold set while the watchdog
