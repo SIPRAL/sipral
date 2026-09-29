@@ -10,7 +10,7 @@ use super::convert::Converter;
 use super::limiter::Limiter;
 use super::ring::Ring;
 use super::talker::Talker;
-use super::{MAX_FRAME_TICKS, MAX_PARTICIPANTS, MIX_RATE, MIX_TICK};
+use super::{MAX_FRAME_TICKS, MAX_PARTICIPANTS, MIX_RATE, MIX_TICK, RECORDING_TICKS};
 use crate::mix::Gain;
 use crate::resample::RateError;
 
@@ -363,6 +363,37 @@ impl Participant {
     }
 }
 
+/// The whole mix, on its way to a recorder.
+struct Recording {
+    rate: Rate,
+    limiter: Limiter,
+    downstream: Converter,
+    queue: Ring,
+    dropped: u64,
+}
+
+impl Recording {
+    fn new(rate: Rate) -> Result<Self, RateError> {
+        Ok(Self {
+            rate,
+            limiter: Limiter::new(MIX_RATE),
+            downstream: Converter::new(MIX_RATE, rate.hz(), MIX_TICK)?,
+            queue: Ring::new(RECORDING_TICKS * rate.tick_samples()),
+            dropped: 0,
+        })
+    }
+
+    /// Queues one tick of the whole of `sum`.
+    fn take(&mut self, sum: &[i32], wide: &mut [i16], native: &mut [i16]) {
+        let Some(frame) = native.get_mut(..self.rate.tick_samples()) else {
+            return;
+        };
+        self.limiter.process_into(sum, wide);
+        self.downstream.run(wide, frame);
+        self.dropped += count(self.queue.push(frame));
+    }
+}
+
 /// A place in the conference, and how many participants have held it.
 struct Slot {
     generation: u32,
@@ -385,6 +416,7 @@ pub struct Mixer {
     native: Vec<i16>,
     /// Who is talking, loudest first, as of the last tick.
     talkers: Vec<ParticipantId>,
+    recording: Option<Recording>,
     ticks: u64,
 }
 
@@ -413,6 +445,7 @@ impl Mixer {
             wide: vec![0; MIX_TICK],
             native: vec![0; MIX_TICK],
             talkers: Vec::with_capacity(requested),
+            recording: None,
             ticks: 0,
         })
     }
@@ -659,6 +692,60 @@ impl Mixer {
         Ok(self.participant(id)?.talker.level())
     }
 
+    /// Starts recording the whole mix at `rate`, from the next tick, or
+    /// starts again at a new rate.
+    ///
+    /// The recording is everybody the conference hears — every participant
+    /// that is neither muted nor listen-only, at its input gain — through a
+    /// limiter of its own. Each tick queues a tick of it, and up to
+    /// [`RECORDING_TICKS`] ticks wait to be read; past that the oldest are
+    /// dropped and counted. This allocates the recording's filter and queue.
+    ///
+    /// # Errors
+    ///
+    /// [`MixError::Rate`] if no resampler could be built for `rate`, which
+    /// does not happen for any [`Rate`].
+    pub fn start_recording(&mut self, rate: Rate) -> Result<(), MixError> {
+        self.recording = Some(Recording::new(rate)?);
+        Ok(())
+    }
+
+    /// Stops recording, dropping whatever was not read.
+    pub fn stop_recording(&mut self) {
+        self.recording = None;
+    }
+
+    /// The rate the mix is being recorded at, if it is.
+    #[must_use]
+    pub fn recording_rate(&self) -> Option<Rate> {
+        self.recording.as_ref().map(|recording| recording.rate)
+    }
+
+    /// Moves recorded audio into `output` and returns how many samples that
+    /// was: none when nothing is being recorded.
+    pub fn read_recording(&mut self, output: &mut [i16]) -> usize {
+        self.recording
+            .as_mut()
+            .map_or(0, |recording| recording.queue.pop(output))
+    }
+
+    /// Recorded samples waiting to be read.
+    #[must_use]
+    pub fn recording_available(&self) -> usize {
+        self.recording
+            .as_ref()
+            .map_or(0, |recording| recording.queue.len())
+    }
+
+    /// Recorded samples dropped because they were not read in time, since
+    /// recording started.
+    #[must_use]
+    pub fn recording_dropped(&self) -> u64 {
+        self.recording
+            .as_ref()
+            .map_or(0, |recording| recording.dropped)
+    }
+
     /// Mixes one tick, 20 ms.
     ///
     /// Takes a tick of input from every participant — silence for whatever
@@ -672,6 +759,7 @@ impl Mixer {
             wide,
             native,
             talkers,
+            recording,
             ticks,
             ..
         } = self;
@@ -683,6 +771,9 @@ impl Mixer {
             participant.take_input(*ticks, native, wide, sum);
         }
         rank(slots, talkers);
+        if let Some(recording) = recording {
+            recording.take(sum, wide, native);
+        }
         for participant in slots
             .iter_mut()
             .filter_map(|slot| slot.participant.as_mut())

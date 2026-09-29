@@ -370,7 +370,24 @@ fn eight_loud_participants_are_limited_without_touching_the_rail() {
             Leg::join(&mut mixer, rate, Some((hz, 30_000.0)))
         })
         .collect();
-    run(&mut mixer, &mut legs, 25);
+    mixer.start_recording(Rate::Hz48000).unwrap();
+    let mut recorded = Vec::new();
+    for _ in 0..25 {
+        run(&mut mixer, &mut legs, 1);
+        let mut tick = vec![0; 960];
+        assert_eq!(mixer.read_recording(&mut tick), 960);
+        recorded.extend_from_slice(&tick);
+    }
+    // all eight at once, through the recording's own limiter: the onset is
+    // bent short of the rail, and once the attack has acted the peaks settle
+    let magnitude = |samples: &[i16]| samples.iter().map(|s| i32::from(*s).abs()).max().unwrap();
+    let onset = magnitude(&recorded);
+    assert!(
+        onset < i32::from(i16::MAX),
+        "the recording reached the rail"
+    );
+    let settled = magnitude(&recorded[960..]);
+    assert!(settled <= 30_000, "the recording peaks at {settled}");
 
     for leg in &legs {
         let rail = leg
@@ -753,4 +770,53 @@ fn talking_is_measured_after_the_input_gain() {
     mixer.set_gain_in(a, Gain::UNITY).unwrap();
     run(&mut mixer, &mut legs, 2);
     assert_eq!(mixer.talkers(), [a]);
+}
+
+#[test]
+fn the_recording_is_the_whole_mix_at_the_rate_asked_for() {
+    let mut mixer = mixer(4);
+    let mut legs = vec![
+        Leg::join(&mut mixer, Rate::Hz8000, Some((500.0, 3_000.0))),
+        Leg::join(&mut mixer, Rate::Hz48000, Some((2_500.0, 3_000.0))),
+        Leg::join(&mut mixer, Rate::Hz32000, Some((6_500.0, 3_000.0))),
+        Leg::join(&mut mixer, Rate::Hz16000, Some((1_300.0, 3_000.0))),
+    ];
+    let (muted, gained) = (legs[3].id, legs[1].id);
+    mixer.set_mute_in(muted, true).unwrap();
+    mixer.set_gain_in(gained, Gain::ratio(1, 2)).unwrap();
+    // gain out is what each one hears, not what the conference says
+    mixer.set_gain_out(legs[0].id, Gain::ratio(1, 4)).unwrap();
+    assert_eq!(mixer.recording_rate(), None);
+    assert_eq!(mixer.read_recording(&mut [0; 16]), 0);
+
+    for rate in [Rate::Hz16000, Rate::Hz8000] {
+        mixer.start_recording(rate).unwrap();
+        assert_eq!(mixer.recording_rate(), Some(rate));
+        let mut recorded = Vec::new();
+        for _ in 0..15 {
+            run(&mut mixer, &mut legs, 1);
+            let mut tick = vec![0; rate.tick_samples()];
+            assert_eq!(mixer.read_recording(&mut tick), rate.tick_samples());
+            recorded.extend_from_slice(&tick);
+        }
+        let window = &recorded[recorded.len() - 10 * rate.tick_samples()..];
+        let level = |hz: f64| goertzel(window, hz, rate);
+        assert_near(level(500.0), 3_000.0, 0.02, "500 Hz recorded");
+        assert_near(level(2_500.0), 1_500.0, 0.02, "2.5 kHz at half");
+        assert!(level(1_300.0) < 1.0, "the muted one was recorded");
+        if rate == Rate::Hz16000 {
+            assert_near(level(6_500.0), 3_000.0, 0.03, "6.5 kHz recorded");
+        } else {
+            // out of band at 8 kHz, and not folded to 1.5 kHz
+            assert!(level(1_500.0) < 30.0, "6.5 kHz folded");
+        }
+    }
+
+    // a recorder that falls behind loses the oldest, not its place
+    run(&mut mixer, &mut legs, 8);
+    assert_eq!(mixer.recording_available(), 5 * 160);
+    assert_eq!(mixer.recording_dropped(), 3 * 160);
+    mixer.stop_recording();
+    assert_eq!(mixer.recording_rate(), None);
+    assert_eq!(mixer.recording_available(), 0);
 }

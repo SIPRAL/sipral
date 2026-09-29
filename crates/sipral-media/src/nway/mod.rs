@@ -48,6 +48,13 @@
 //! the list does not flicker with every syllable; [`talker`] has the
 //! thresholds and the spans.
 //!
+//! # Recording
+//!
+//! [`start_recording`](Mixer::start_recording) taps the whole mix —
+//! everybody the conference hears — through a limiter of its own, at a rate
+//! of the caller's choosing, into a queue that
+//! [`read_recording`](Mixer::read_recording) drains.
+//!
 //! # Latency
 //!
 //! A tick consumes one tick of queued input from every participant and queues
@@ -66,9 +73,9 @@
 //!
 //! # Allocation
 //!
-//! [`Mixer::new`] allocates the places and the shared scratch, and
-//! [`Mixer::join`] allocates the participant's queues and filters. Nothing
-//! else allocates: pushing, pulling, mixing and changing controls are
+//! [`Mixer::new`] allocates the places and the shared scratch,
+//! [`Mixer::join`] the participant's queues and filters, and
+//! [`Mixer::start_recording`] the recording's. Nothing else allocates: pushing, pulling, mixing and changing controls are
 //! allocation-free, and every per-tick cost is bounded by the number of
 //! participants. Leaving frees what joining allocated.
 //!
@@ -99,6 +106,10 @@ const MIX_TICK: usize = 960;
 
 /// The longest frame a participant may have, in ticks.
 pub const MAX_FRAME_TICKS: usize = 3;
+
+/// Ticks of recorded mix that wait to be read before the oldest are dropped:
+/// 100 ms.
+pub const RECORDING_TICKS: usize = 5;
 
 /// The most places a [`Mixer`] may have.
 ///
