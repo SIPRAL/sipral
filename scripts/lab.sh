@@ -130,6 +130,24 @@
 #                               channel count is read over its console the
 #                               way the other steps already read it, and
 #                               printed beside it
+#   scripts/lab.sh compare      the same scenarios for Sipral's headless
+#                               agent and for pjsua, PJSIP's own client from
+#                               Alpine's package, against Asterisk:
+#                               registering, a call each way, memory and CPU
+#                               idle and at 1, 4, 10 and 100 calls, a call over
+#                               each netem profile rated from both ends, a
+#                               move to another address mid-call, and the
+#                               INVITE with ICE -- interop/compare/compare.sh
+#                               says how, docs/23-compared-with-pjsip.md
+#                               reports a run. Not part of a run that names
+#                               nothing: about thirteen minutes, and a
+#                               comparison rather than a check.
+#                               SIPRAL_HEADLESS_AGENT names the agent binary
+#                               built elsewhere (a Linux build of
+#                               `cargo build --release -p sipral --example
+#                               headless-agent`); SIPRAL_COMPARE_CLIENTS,
+#                               _CALLS, _PROFILES, _HOLD_S and _WINDOW_S
+#                               narrow it
 #   scripts/lab.sh wasapi up    bring the lab up reachable from the LAN, for
 #                               a call carried on a Windows machine's real
 #                               WASAPI devices (interop/harness/src/wasapi.rs,
@@ -405,6 +423,9 @@ step "the harness"
 if [ "$WANT" = pipewire ]; then
     HARNESS=""
     printf '  note  built inside interop/pipewire'"'"'s image by its own step\n'
+elif [ "$WANT" = compare ]; then
+    HARNESS=""
+    printf '  note  not used by the comparison, which runs the headless agent\n'
 elif [ -n "${SIPRAL_HARNESS:-}" ]; then
     [ -x "$SIPRAL_HARNESS" ] || { fail "SIPRAL_HARNESS is not an executable file"; exit 1; }
     HARNESS="$SIPRAL_HARNESS"
@@ -426,9 +447,9 @@ fi
 # links the shared library, and a machine that built the Rust harness for a
 # different target has one and not the other. A skip says so.
 step "the harness, in C"
-if [ "$WANT" = pipewire ]; then
+if [ "$WANT" = pipewire ] || [ "$WANT" = compare ]; then
     HARNESS_C=""
-    printf '  note  not used by the PipeWire step\n'
+    printf '  note  not used by the %s step\n' "$WANT"
 elif [ -n "${SIPRAL_HARNESS_C:-}" ]; then
     [ -x "$SIPRAL_HARNESS_C" ] || { fail "SIPRAL_HARNESS_C is not an executable file"; exit 1; }
     HARNESS_C="$SIPRAL_HARNESS_C"
@@ -458,7 +479,11 @@ fi
 # Skipped rather than fatal, on the same reasoning as the C harness above: a
 # machine that cannot build one still runs the rest of the lab.
 step "the socket-framed agent"
-if [ -n "${SIPRAL_HEADLESS_APP:-}" ] && [ -n "${SIPRAL_HEADLESS_CLIENT:-}" ]; then
+if [ "$WANT" = compare ]; then
+    HEADLESS_APP=""
+    HEADLESS_CLIENT=""
+    printf '  note  not used by the comparison\n'
+elif [ -n "${SIPRAL_HEADLESS_APP:-}" ] && [ -n "${SIPRAL_HEADLESS_CLIENT:-}" ]; then
     HEADLESS_APP="$SIPRAL_HEADLESS_APP"
     HEADLESS_CLIENT="$SIPRAL_HEADLESS_CLIENT"
     pass "taken as given: $HEADLESS_APP, $HEADLESS_CLIENT"
@@ -506,6 +531,27 @@ else
     else
         SWIFT_AGENT=""
         printf '  note  could not build the Swift lab agent; that step is skipped\n'
+    fi
+fi
+
+# The comparison's own client: the headless agent (crates/sipral/examples/
+# headless-agent.rs), a binary with no library beside it to find, since the
+# stack is linked into it. Fatal rather than skipped when it cannot be had:
+# `compare` is asked for by name, and a comparison with one side missing
+# would read as a result.
+if [ "$WANT" = compare ]; then
+    step "the headless agent"
+    if [ -n "${SIPRAL_HEADLESS_AGENT:-}" ]; then
+        [ -x "$SIPRAL_HEADLESS_AGENT" ] \
+            || { fail "SIPRAL_HEADLESS_AGENT is not an executable file"; exit 1; }
+        HEADLESS_AGENT="$SIPRAL_HEADLESS_AGENT"
+        pass "taken as given: $HEADLESS_AGENT"
+    elif cargo build --release -p sipral --example headless-agent >/dev/null 2>&1; then
+        HEADLESS_AGENT="$ROOT/target/release/examples/headless-agent"
+        pass "built"
+    else
+        fail "cargo build -p sipral --example headless-agent; set SIPRAL_HEADLESS_AGENT"
+        exit 1
     fi
 fi
 
@@ -3164,6 +3210,15 @@ if [ "$WANT" = pipewire ]; then
         sipral-pipewire bash interop/pipewire/run.sh call \
         && pass "sipral-io-pipewire, and a call carried on it" \
         || fail "interop/pipewire/run.sh call"
+fi
+
+# Sipral's headless agent and pjsua, one after the other, through the same
+# scenarios against the same Asterisk: interop/compare/compare.sh says what
+# and how, and docs/23-compared-with-pjsip.md reports a run of it.
+if [ "$WANT" = compare ]; then
+    # shellcheck source=interop/compare/compare.sh
+    . "$ROOT/interop/compare/compare.sh"
+    compare_run "$HEADLESS_AGENT" || fail "the comparison with PJSIP"
 fi
 
 step "the capture"

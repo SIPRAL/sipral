@@ -499,12 +499,12 @@ impl Endpoint {
         }
         while let Some((call, destination, payload)) = self.engine.poll_rtcp(now) {
             if let Some(media) = self.media.get(&call) {
-                media.send(destination, &payload);
+                media.send_rtcp(destination, &payload);
             }
         }
         while let Some((call, destination, payload)) = self.engine.poll_farewell() {
             if let Some(media) = self.media.get(&call) {
-                media.send(destination, &payload);
+                media.send_rtcp(destination, &payload);
             }
         }
         #[cfg(any(feature = "dtls", feature = "ice"))]

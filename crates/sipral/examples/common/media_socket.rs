@@ -23,10 +23,10 @@
 #![allow(dead_code)]
 
 use std::io::ErrorKind;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-use sipral::MediaSession;
+use sipral::{MediaSession, RtcpPlan};
 
 /// The largest frame any codec in this crate's default build produces, in
 /// samples: Opus's own, at its default twenty-millisecond packetisation and
@@ -42,9 +42,17 @@ pub(crate) const MAX_SAMPLES: usize = 960;
 /// twenty-millisecond packetisation.
 pub(crate) const PACE: Duration = Duration::from_millis(20);
 
-/// One call's RTP socket.
+/// One call's RTP socket, and its RTCP one when the call keeps RTCP on a
+/// port of its own.
 pub(crate) struct MediaSocket {
     socket: UdpSocket,
+    /// The port after the RTP one, bound once the call's plan says RTCP
+    /// runs there (RFC 3550 §11): a peer that did not agree to multiplex
+    /// the two (RFC 5761) sends its reports to it, and expects ours from it.
+    rtcp: Option<UdpSocket>,
+    /// Whether binding it was tried and failed, so it is not tried again
+    /// every frame.
+    rtcp_refused: bool,
     running: bool,
     started: Instant,
     /// When the next frame is captured and sent.
@@ -61,6 +69,8 @@ impl MediaSocket {
         socket.set_nonblocking(true)?;
         Ok(Self {
             socket,
+            rtcp: None,
+            rtcp_refused: false,
             running: false,
             started: now,
             next: now,
@@ -74,10 +84,49 @@ impl MediaSocket {
         Ok(self.socket.local_addr()?.port())
     }
 
-    /// Send a datagram the engine handed back — a periodic RTCP report, or a
-    /// DTLS handshake record — from this call's own socket.
+    /// The port RTCP is received on when it has one of its own; `None`
+    /// while RTP and RTCP share one, or before the call's plan said.
+    pub(crate) fn rtcp_port(&self) -> Option<u16> {
+        self.rtcp
+            .as_ref()
+            .and_then(|socket| socket.local_addr().ok())
+            .map(|address| address.port())
+    }
+
+    /// Send a datagram the engine handed back for the RTP port — a DTLS
+    /// handshake record, an ICE check — from this call's own socket.
     pub(crate) fn send(&self, destination: SocketAddr, payload: &[u8]) {
         let _ = self.socket.send_to(payload, destination);
+    }
+
+    /// Send an RTCP report or goodbye the engine handed back: from the RTCP
+    /// port when the call has one of its own, since that is where the peer
+    /// reads the report as coming from, and from the RTP socket when the two
+    /// are multiplexed.
+    pub(crate) fn send_rtcp(&self, destination: SocketAddr, payload: &[u8]) {
+        let socket = self.rtcp.as_ref().unwrap_or(&self.socket);
+        let _ = socket.send_to(payload, destination);
+    }
+
+    /// Bind the RTCP port the call's plan names, the first time it names one.
+    /// A port somebody else holds is said on standard error; the call then
+    /// runs with its reports going out from the RTP port and none coming in.
+    fn follow_rtcp_plan(&mut self, session: &MediaSession) {
+        if self.rtcp.is_some() || self.rtcp_refused {
+            return;
+        }
+        let RtcpPlan::SeparatePort { local, .. } = session.plan().rtcp else {
+            return;
+        };
+        match UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), local.port()))
+            .and_then(|socket| socket.set_nonblocking(true).map(|()| socket))
+        {
+            Ok(socket) => self.rtcp = Some(socket),
+            Err(error) => {
+                eprintln!("cannot bind RTCP at port {}: {error}", local.port());
+                self.rtcp_refused = true;
+            }
+        }
     }
 
     /// Drive this call's session for one tick: capture a frame from `source`
@@ -109,6 +158,7 @@ impl MediaSocket {
             self.next = now;
             self.next_play = now;
         }
+        self.follow_rtcp_plan(session);
         let frame = session.frame_samples().min(MAX_SAMPLES);
         let mut samples = [0_i16; MAX_SAMPLES];
 
@@ -133,6 +183,15 @@ impl MediaSocket {
                     let _ = session.receive(datagram, from, now);
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+        while let Some(rtcp) = &self.rtcp {
+            match rtcp.recv_from(&mut self.inbox) {
+                Ok((length, from)) => {
+                    let datagram = self.inbox.get_mut(..length).unwrap_or_default();
+                    let _ = session.receive(datagram, from, now);
+                }
                 Err(_) => break,
             }
         }

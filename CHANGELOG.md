@@ -91,6 +91,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   application sees when TLS fails. Samples in C with OpenSSL, Python, C#,
   Swift and Kotlin, run against the lab's TLS listener.
 
+- **A public comparison with PJSIP, and the lab flow that makes it.**
+  `scripts/lab.sh compare` runs the same scenarios for the headless agent and
+  for pjsua from Alpine's own package against the lab's Asterisk --
+  registering, a call each way, memory and CPU idle and at 1, 4, 10 and 100
+  calls, a call over each netem profile rated from both ends, a move to
+  another address mid-call, and the INVITE with ICE -- reading every time off
+  a capture; `docs/23-compared-with-pjsip.md` reports a run with its commands
+  and raw numbers. The headless agent example gains `--register`,
+  `--registrar`, `--pass`, `--call`, `--ice`, `--codecs` and
+  `--invite-burst`, follows its own
+  address when the route to its registrar changes, says when a request is too
+  large for a datagram, and prints what each call measured when it ends.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when
@@ -1255,6 +1267,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `SIPRAL_STATUS_NOT_SENT` beside `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, and
   asking again once the stream is bound sends it; it said the stack sent it
   again by itself, which it never did.
+- **The examples keep RTCP on its own port when the call says so.** A peer
+  that does not multiplex RTCP with RTP (RFC 5761), Asterisk among them,
+  sends its reports to the port after the RTP one and reads ours as coming
+  from there (RFC 3550 §11); the examples' media socket listened on the RTP
+  port alone and sent every report from it, so neither end of such a call
+  ever measured a round trip. The socket now binds that port once the
+  call's plan names it, reads it, and sends reports and goodbyes from it.
 - **A packet still on its way from where the far end was does not take a
   moved call back there.** After a re-INVITE moved the far end's media, the
   first packet read closed the stream's latch wherever it came from; one
