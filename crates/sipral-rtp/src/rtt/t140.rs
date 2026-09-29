@@ -235,6 +235,23 @@ mod tests {
     }
 
     #[test]
+    fn an_octet_that_can_only_start_an_overlong_encoding_starts_nothing() {
+        // C0 and C1 would only ever encode what one octet already does, so
+        // they are not lead octets and the continuation after them is a
+        // stray of its own: two replacements, not one two-octet character
+        assert_eq!(
+            decode(&[b"\xC0\xAF\xC1\x81x"]),
+            vec![
+                TextEvent::Char('\u{FFFD}'),
+                TextEvent::Char('\u{FFFD}'),
+                TextEvent::Char('\u{FFFD}'),
+                TextEvent::Char('\u{FFFD}'),
+                TextEvent::Char('x'),
+            ]
+        );
+    }
+
+    #[test]
     fn reset_drops_half_a_character() {
         let mut decoder = Decoder::new();
         let mut out = Vec::new();
