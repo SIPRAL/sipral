@@ -1306,7 +1306,7 @@ fn a_client_mki_is_answered_with_an_empty_one() {
 #[test]
 fn a_server_use_srtp_the_client_cannot_accept_is_refused() {
     use SrtpProtectionProfile as P;
-    let cases: [(&str, Vec<P>, Vec<P>, Vec<u8>); 4] = [
+    let cases = [
         (
             "an MKI the client did not offer",
             KEYABLE.to_vec(),
