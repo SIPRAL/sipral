@@ -1108,3 +1108,354 @@ fn mangled_chains_never_panic() {
         }
     }
 }
+
+/// A PASSporT of these JSON texts carrying `signature`, whatever it is, as
+/// its third segment.
+fn with_signature(header: &str, claims: &str, signature: &str) -> String {
+    let header = base64::encode_url(header.as_bytes());
+    let claims = base64::encode_url(claims.as_bytes());
+    format!("{header}.{claims}.{signature};info=<{X5U}>")
+}
+
+fn start(identity: &str) -> Pending {
+    Verifier::default().start(identity, None).unwrap()
+}
+
+#[test]
+fn no_algorithm_but_es256_is_verified() {
+    for alg in [
+        "none", "HS256", "es256", "Es256", "ES256 ", "ES384", "RS256", "",
+    ] {
+        let header = HEADER.replace(r#""alg":"ES256""#, &format!(r#""alg":"{alg}""#));
+        // no signature at all is not even the grammar of the header field
+        assert_eq!(
+            start_failure(&with_signature(&header, CLAIMS, ""), None),
+            Failure::Malformed(Malformed::Syntax),
+            "{alg}"
+        );
+        // and a good ES256 signature does not make up for another alg
+        assert_eq!(
+            start_failure(&hand_made(&header, CLAIMS, ""), None),
+            Failure::UnsupportedAlgorithm,
+            "{alg}"
+        );
+    }
+    for header in [
+        HEADER.replace(r#""alg":"ES256","#, ""),
+        HEADER.replace(r#""alg":"ES256""#, r#""alg":null"#),
+        HEADER.replace(r#""alg":"ES256""#, r#""alg":["ES256"]"#),
+        HEADER.replace(r#""typ":"passport""#, r#""typ":"PASSporT""#),
+        HEADER.replace(r#""typ":"passport""#, r#""typ":"JWT""#),
+        HEADER.replace(r#""typ":"passport","#, ""),
+    ] {
+        assert_eq!(
+            start_failure(&hand_made(&header, CLAIMS, ""), None),
+            Failure::Malformed(Malformed::Header),
+            "{header}"
+        );
+    }
+}
+
+#[test]
+fn a_header_parameter_twice_is_refused_whichever_comes_last() {
+    for header in [
+        HEADER.replace(r#""alg":"ES256","#, r#""alg":"ES256","alg":"none","#),
+        HEADER.replace(r#""alg":"ES256","#, r#""alg":"none","alg":"ES256","#),
+        HEADER.replace(r#""alg":"ES256","#, r#""alg":"ES256","al\u0067":"none","#),
+        HEADER.replace(r#""ppt":"shaken","#, r#""ppt":"shaken","ppt":"div","#),
+        HEADER.replace(r#""typ":"passport","#, r#""typ":"passport","typ":"JWT","#),
+    ] {
+        assert_eq!(
+            start_failure(&hand_made(&header, CLAIMS, ""), None),
+            Failure::Malformed(Malformed::Json),
+            "{header}"
+        );
+    }
+    let claims = CLAIMS.replace(r#""iat":1790000000,"#, r#""iat":1790000000,"iat":0,"#);
+    assert_eq!(
+        start_failure(&hand_made(HEADER, &claims, ""), None),
+        Failure::Malformed(Malformed::Json)
+    );
+}
+
+#[test]
+fn a_critical_header_parameter_is_refused() {
+    for crit in ["[]", r#"["ppt"]"#, r#"["x"]"#, "null"] {
+        let header = HEADER.replace(
+            r#""alg":"ES256","#,
+            &format!(r#""alg":"ES256","crit":{crit},"#),
+        );
+        assert_eq!(
+            start_failure(&hand_made(&header, CLAIMS, ""), None),
+            Failure::Malformed(Malformed::Critical),
+            "{crit}"
+        );
+    }
+}
+
+/// `a - b` for 32-octet big-endian integers, `a` the larger.
+fn minus(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; 32];
+    let mut borrow = 0i16;
+    for i in (0..32).rev() {
+        let mut digit = i16::from(a[i]) - i16::from(b[i]) - borrow;
+        borrow = i16::from(digit < 0);
+        if digit < 0 {
+            digit += 256;
+        }
+        out[i] = u8::try_from(digit).unwrap();
+    }
+    out
+}
+
+/// The order of the P-256 group.
+const ORDER: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
+];
+
+#[test]
+fn es256_signatures_are_r_and_s_in_range_and_nothing_else() {
+    let pki = Pki::new();
+    let identity = signer().identity(&claims(NOW)).unwrap();
+    let (token, params) = identity.split_once(';').unwrap();
+    let (signed, signature) = token.rsplit_once('.').unwrap();
+    let bytes = base64::decode_url(signature.as_bytes()).unwrap();
+    let (r, s) = bytes.split_at(32);
+    let with = |signature: &[u8]| format!("{signed}.{};{params}", base64::encode_url(signature));
+
+    // the wrong length, whatever it holds
+    let long = [&bytes[..], &[0]].concat();
+    let padded = [&[0][..], &bytes[..]].concat();
+    let der = Signature::from_slice(&bytes).unwrap().to_der();
+    for wrong in [
+        &bytes[..63],
+        &long[..],
+        &padded[..],
+        &bytes[..32],
+        der.as_bytes(),
+        &[0],
+    ] {
+        assert_eq!(
+            start_failure(&with(wrong), None),
+            Failure::Malformed(Malformed::Signature),
+            "{}",
+            wrong.len()
+        );
+    }
+    // zero, or not below the group order
+    let zero = [0u8; 32];
+    for (r, s) in [
+        (&zero[..], s),
+        (r, &zero[..]),
+        (&ORDER[..], s),
+        (r, &ORDER[..]),
+        (&[0xff; 32][..], s),
+        (r, &[0xff; 32][..]),
+    ] {
+        assert_eq!(
+            start_failure(&with(&[r, s].concat()), None),
+            Failure::BadSignature
+        );
+    }
+    // r and s swapped
+    let swapped = start(&with(&[s, r].concat()));
+    assert_eq!(
+        swapped.verify(&pki.chain(), &anchors(&pki), NOW),
+        Verdict::Invalid(Failure::BadSignature)
+    );
+    // RFC 7518 §3.4 does not ask for a low s: n - s verifies as s does
+    let other_s = minus(&ORDER, s);
+    let flipped = start(&with(&[r, &other_s[..]].concat()));
+    assert!(matches!(
+        flipped.verify(&pki.chain(), &anchors(&pki), NOW),
+        Verdict::Valid(_)
+    ));
+    // a stray bit after the last octet is not another spelling of it
+    let stray = match signature.chars().last().unwrap() {
+        'A' => 'B',
+        'Q' => 'R',
+        'g' => 'h',
+        'w' => 'x',
+        other => panic!("{other} carries data in its low bits"),
+    };
+    let respelled = format!(
+        "{signed}.{}{stray};{params}",
+        &signature[..signature.len() - 1]
+    );
+    assert_eq!(
+        start_failure(&respelled, None),
+        Failure::Malformed(Malformed::Encoding)
+    );
+}
+
+#[test]
+fn a_signature_is_only_good_for_the_octets_it_was_made_over() {
+    let pki = Pki::new();
+    let identity = signer().identity(&claims(NOW)).unwrap();
+    let (token, params) = identity.split_once(';').unwrap();
+    let mut segments = token.split('.');
+    let (header, payload, signature) = (
+        segments.next().unwrap(),
+        segments.next().unwrap(),
+        segments.next().unwrap(),
+    );
+    // the same JSON in other whitespace, or with an escape, is other octets
+    let decoded = String::from_utf8(base64::decode_url(payload.as_bytes()).unwrap()).unwrap();
+    for respelled in [
+        decoded.replace(',', ", "),
+        format!(" {decoded}"),
+        decoded.replace("\"A\"", "\"\\u0041\""),
+    ] {
+        let respelled = base64::encode_url(respelled.as_bytes());
+        let pending = start(&format!("{header}.{respelled}.{signature};{params}"));
+        assert_eq!(
+            pending.verify(&pki.chain(), &anchors(&pki), NOW),
+            Verdict::Invalid(Failure::BadSignature)
+        );
+    }
+    // the full form's signature is no compact form's for other claims
+    let compact = format!("..{signature};{params}");
+    let mut other = claims(NOW);
+    other.orig = tn("12155551213");
+    let pending = Verifier::default().start(&compact, Some(&other)).unwrap();
+    assert_eq!(
+        pending.verify(&pki.chain(), &anchors(&pki), NOW),
+        Verdict::Invalid(Failure::BadSignature)
+    );
+    // and for the same claims it is: the compact form is rebuilt in the
+    // deterministic form the full one was signed in
+    let pending = Verifier::default()
+        .start(&compact, Some(&claims(NOW)))
+        .unwrap();
+    assert!(matches!(
+        pending.verify(&pki.chain(), &anchors(&pki), NOW),
+        Verdict::Valid(_)
+    ));
+}
+
+#[test]
+fn iat_values_that_are_not_seconds_are_refused() {
+    let huge = "9".repeat(4000);
+    for iat in [
+        "18446744073709551616",
+        huge.as_str(),
+        "-1",
+        "-0",
+        "1790000000.0",
+        "1.79e9",
+        "1790000000e0",
+        "1E9",
+        r#""1790000000""#,
+        "null",
+        "true",
+        "[1790000000]",
+        "{}",
+    ] {
+        let claims = CLAIMS.replace("1790000000", iat);
+        assert_eq!(
+            start_failure(&hand_made(HEADER, &claims, ""), None),
+            Failure::Malformed(Malformed::Claims),
+            "{iat}"
+        );
+    }
+    for iat in ["01790000000", "+1790000000", "0x6AB0B680", "1790000000."] {
+        let claims = CLAIMS.replace("1790000000", iat);
+        assert_eq!(
+            start_failure(&hand_made(HEADER, &claims, ""), None),
+            Failure::Malformed(Malformed::Json),
+            "{iat}"
+        );
+    }
+}
+
+#[test]
+fn iat_at_the_ends_of_the_clock() {
+    let pki = Pki::new();
+    let max = CLAIMS.replace("1790000000", &u64::MAX.to_string());
+    let pending = start(&hand_made(HEADER, &max, ""));
+    for now in [NOW, 0] {
+        assert_eq!(
+            pending.verify(&pki.chain(), &anchors(&pki), now),
+            Verdict::Invalid(Failure::Stale { iat: u64::MAX, now })
+        );
+    }
+    let zero = CLAIMS.replace("1790000000", "0");
+    let pending = start(&hand_made(HEADER, &zero, ""));
+    assert_eq!(
+        pending.verify(&pki.chain(), &anchors(&pki), u64::MAX),
+        Verdict::Invalid(Failure::Stale {
+            iat: 0,
+            now: u64::MAX
+        })
+    );
+    // a window as wide as the clock lets anything through the freshness
+    // check, and nothing through the others it would not otherwise pass
+    let open = Verifier::new(Config {
+        freshness: u64::MAX,
+        ..Config::default()
+    });
+    let pending = open.start(&hand_made(HEADER, &zero, ""), None).unwrap();
+    assert!(matches!(
+        pending.verify(&pki.chain(), &anchors(&pki), NOW),
+        Verdict::Valid(_)
+    ));
+    assert_eq!(
+        pending.verify(&pki.chain(), &anchors(&pki), u64::MAX),
+        Verdict::Invalid(Failure::Expired { depth: 0 })
+    );
+}
+
+#[test]
+fn certificates_that_issue_each_other_lead_nowhere() {
+    let pki = Pki::new();
+    let pending = start(&signer().identity(&claims(NOW)).unwrap());
+    // the intermediate issued by "Loop", and "Loop" by the intermediate
+    let loop_key = testpki::key(0x77);
+    let mut intermediate = pki.intermediate_spec();
+    intermediate.issuer = "Loop";
+    let intermediate = intermediate.build(&loop_key);
+    let mut looping = pki.root_spec();
+    looping.subject = "Loop";
+    looping.issuer = testpki::INTERMEDIATE;
+    looping.public_key = testpki::point(&loop_key);
+    let looping = looping.build(&pki.intermediate_key);
+    let chain = [pki.leaf.clone(), intermediate.clone(), looping.clone()].concat();
+    assert_eq!(
+        pending.verify(&chain, &anchors(&pki), NOW),
+        Verdict::Invalid(Failure::Untrusted)
+    );
+    // as many copies as a chain may hold change nothing
+    let mut copies = pki.leaf.clone();
+    for _ in 0..(MAX_CHAIN_CERTIFICATES - 1) / 2 {
+        copies.extend(&intermediate);
+        copies.extend(&looping);
+    }
+    assert_eq!(
+        pending.verify(&copies, &anchors(&pki), NOW),
+        Verdict::Invalid(Failure::Untrusted)
+    );
+    // and a real intermediate twice is still a good chain
+    let twice = [pki.chain(), pki.intermediate.clone()].concat();
+    assert!(matches!(
+        pending.verify(&twice, &anchors(&pki), NOW),
+        Verdict::Valid(_)
+    ));
+}
+
+#[test]
+fn a_root_of_the_anchors_name_and_another_key_is_not_the_anchor() {
+    let pki = Pki::new();
+    let pending = start(&signer().identity(&claims(NOW)).unwrap());
+    // an attacker's root, named as the real one is, and its own intermediate
+    let rogue_key = testpki::key(0x55);
+    let mut rogue = pki.root_spec();
+    rogue.public_key = testpki::point(&rogue_key);
+    let rogue = rogue.build(&rogue_key);
+    let intermediate = pki.intermediate_spec().build(&rogue_key);
+    let chain = [pki.leaf.clone(), intermediate, rogue].concat();
+    assert!(matches!(
+        pending.verify(&chain, &anchors(&pki), NOW),
+        Verdict::Invalid(Failure::InvalidChain(ChainProblem::Signature { .. }))
+    ));
+}
