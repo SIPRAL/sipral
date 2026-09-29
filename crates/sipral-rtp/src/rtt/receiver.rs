@@ -14,8 +14,10 @@
 //!
 //! A place nothing fills — every copy of it lost — holds up the text behind
 //! it for a bounded time, in case the packet is only late (§5.4), and after
-//! that is given up: the reader sees one missing-text marker for the whole
-//! run of places lost (§5.3) and the text resumes.
+//! that is given up: the reader sees a missing-text marker for each place
+//! lost, as §5.3 has it ("for each missing T140block"), and the text
+//! resumes. A sender that started over, whose places cannot be counted, is
+//! marked once.
 
 use core::time::Duration;
 use std::collections::{BTreeMap, VecDeque};
@@ -273,13 +275,19 @@ impl TextReceiver {
         self.expected = Some(expected);
     }
 
-    /// Give the first gap up: mark it and carry on from the block after it.
+    /// Give the first gap up: mark each place in it and carry on from the
+    /// block after it.
     fn skip_gap(&mut self) {
         let Some((&first, _)) = self.pending.first_key_value() else {
             return;
         };
-        if self.expected.is_some_and(|expected| first > expected) {
-            self.push_event(TextEvent::Missing);
+        if let Some(expected) = self.expected.filter(|&expected| first > expected) {
+            // RFC 4103 §5.3: a marker "for each missing T140block"; a gap
+            // is never wider than MAX_DISTANCE, and the event queue is
+            // bounded besides
+            for _ in expected..first {
+                self.push_event(TextEvent::Missing);
+            }
             self.decoder.reset();
         }
         self.expected = Some(first);
@@ -497,8 +505,12 @@ mod tests {
         rx.receive(bare(10, b"d"), ms(50));
         rx.poll(ms(100));
         // the blocks that have waited their time come out, a marker for
-        // each gap in front of them; the one that arrived later still waits
-        assert_eq!(transcript(&mut rx), "a\u{FFFD}b\u{FFFD}c");
+        // each block lost in front of them (RFC 4103 §5.3); the one that
+        // arrived later still waits
+        assert_eq!(
+            transcript(&mut rx),
+            "a\u{FFFD}\u{FFFD}b\u{FFFD}\u{FFFD}\u{FFFD}c"
+        );
         assert_eq!(rx.deadline(), Some(ms(150)));
         rx.poll(ms(150));
         assert_eq!(transcript(&mut rx), "\u{FFFD}d");

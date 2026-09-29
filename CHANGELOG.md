@@ -1352,9 +1352,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   silence, opens with the byte order mark, sends new lines as LINE
   SEPARATOR and holds characters back to the peer's `cps`. `TextReceiver`
   places every block by sequence number, takes whichever copy arrives
-  first, waits a bounded time for a late packet, marks each span no copy
-  could recover with one U+FFFD, reassembles UTF-8 split across blocks,
-  bounds what it holds, and hands out erase, new-line, alert and character
+  first, waits a bounded time for a late packet, marks what no copy could
+  recover with a U+FFFD per block lost (RFC 4103 §5.3), reassembles UTF-8
+  split across blocks, bounds what it holds, and hands out erase, new-line, alert and character
   events. `TextFormat` writes the `m=text` section with `t140/1000`,
   `red/1000`, the red `fmtp` and `cps`, and reads the two `fmtp` values
   back. A new fuzz target, `rtt`, drives the receiver with arbitrary

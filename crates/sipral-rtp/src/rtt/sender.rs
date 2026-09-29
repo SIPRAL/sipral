@@ -289,7 +289,6 @@ impl TextSender {
         if block.is_empty() && self.owed == 0 {
             // held back by the rate limit with every copy already sent:
             // silence, and the next packet opens a new burst
-            self.history.clear();
             return None;
         }
         let timestamp = self
@@ -326,10 +325,6 @@ impl TextSender {
             while self.history.len() > usize::from(generations) {
                 self.history.pop_front();
             }
-        }
-        if self.owed == 0 && self.buffer.is_empty() {
-            // every block kept has gone out once per generation already
-            self.history.clear();
         }
         Some(TextPacket { header, payload })
     }
@@ -405,31 +400,29 @@ impl TextSender {
         let Some(red) = self.config.redundancy else {
             return block.to_vec();
         };
-        let generations = usize::from(red.generations);
-        let mut redundant = Vec::with_capacity(generations);
-        // RFC 4103 §4: the same number of generations in every packet, the
-        // oldest first, an empty block standing in for one never sent
-        for _ in self.history.len()..generations {
-            redundant.push(RedundantBlock {
-                payload_type: self.config.t140_payload_type,
-                timestamp_offset: 0,
-                data: &[],
-            });
-        }
+        let mut redundant = Vec::with_capacity(usize::from(red.generations));
+        // RFC 4103 §4.2: every block sent as primary within the generations,
+        // oldest first, and nothing else: "Each redundant data block MUST
+        // contain the same data as a T140block previously transmitted as
+        // primary data", so the first packets of a session carry fewer
+        // generations rather than blocks that were never sent, which §5.3
+        // has a receiver read as empty ones
+        // the empty blocks that closed the last burst go too, as §5.2 asks
+        // ("Any empty T140block sent as primary data MUST be included as
+        // redundant T140blocks in subsequent packets"), unless they are too
+        // old for the fourteen-bit offset, which §4.1 forbids sending; the
+        // history is in age order, so what is left out is always the oldest
         for sent in &self.history {
-            let offset = u16::try_from(timestamp.wrapping_sub(sent.timestamp))
+            let Some(timestamp_offset) = u16::try_from(timestamp.wrapping_sub(sent.timestamp))
                 .ok()
-                .filter(|offset| *offset <= MAX_TIMESTAMP_OFFSET);
-            // a copy too old for the offset field, which only a caller that
-            // polled seconds late can produce, goes as an empty block
-            let (timestamp_offset, data) = match offset {
-                Some(offset) => (offset, sent.data.as_slice()),
-                None => (0, &[][..]),
+                .filter(|offset| *offset <= MAX_TIMESTAMP_OFFSET)
+            else {
+                continue;
             };
             redundant.push(RedundantBlock {
                 payload_type: self.config.t140_payload_type,
                 timestamp_offset,
-                data,
+                data: &sent.data,
             });
         }
         let mut out = Vec::new();
@@ -489,8 +482,9 @@ mod tests {
         // the 1000 Hz clock: the base plus the time in milliseconds
         assert_eq!(packet.header.timestamp, 5020);
         let (redundant, primary) = blocks(&packet);
-        // two generations from the start, empty until there is history
-        assert_eq!(redundant, [(0, vec![]), (0, vec![])]);
+        // nothing was sent before it, and a redundant block is only ever a
+        // copy of one that was (RFC 4103 §4.2)
+        assert!(redundant.is_empty());
         assert_eq!(primary, "\u{FEFF}hi".as_bytes());
     }
 
@@ -511,10 +505,7 @@ mod tests {
         let a = "\u{FEFF}a".as_bytes().to_vec();
         let b = b"b".to_vec();
         assert_eq!(blocks(&p1).1, a);
-        assert_eq!(
-            blocks(&p2),
-            (vec![(0, vec![]), (300, a.clone())], b.clone())
-        );
+        assert_eq!(blocks(&p2), (vec![(300, a.clone())], b.clone()));
         // no new text: an empty primary, the copies still owed
         assert_eq!(blocks(&p3), (vec![(600, a), (300, b.clone())], vec![]));
         assert_eq!(blocks(&p4), (vec![(600, b), (300, vec![])], vec![]));
@@ -545,10 +536,12 @@ mod tests {
             resumed.header.sequence,
             last.header.sequence.wrapping_add(1)
         );
-        // the copies were all sent before the silence: none go again
+        // the empty blocks that closed the burst, 5300 and 5000 ms back, are
+        // still within reach of the offset field, and RFC 4103 §5.2 has
+        // them go as copies like any other primary
         assert_eq!(
             blocks(&resumed),
-            (vec![(0, vec![]), (0, vec![])], b"b".to_vec())
+            (vec![(5300, vec![]), (5000, vec![])], b"b".to_vec())
         );
         // and only the first opens the burst
         tx.push("c").unwrap();
@@ -785,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_too_old_for_the_offset_field_goes_as_an_empty_block() {
+    fn a_copy_too_old_for_the_offset_field_is_left_out() {
         let config = SenderConfig {
             send_bom: false,
             ..SenderConfig::new(T140, RED)
@@ -794,12 +787,14 @@ mod tests {
         tx.push("a").unwrap();
         tx.poll(ms(0)).unwrap();
         tx.push("b").unwrap();
-        // polled far later than asked: "a" is 20 s back, past 16383 ms
+        // polled far later than asked: "a" is 20 s back, past the 16383 ms
+        // RFC 4103 §4.1 forbids, so it is not sent at all
         let late = tx.poll(ms(20_000)).unwrap();
-        assert_eq!(
-            blocks(&late),
-            (vec![(0, vec![]), (0, vec![])], b"b".to_vec())
-        );
+        assert_eq!(blocks(&late), (vec![], b"b".to_vec()));
+        // and the next packet carries the one generation that exists
+        tx.push("c").unwrap();
+        let next = tx.poll(ms(20_300)).unwrap();
+        assert_eq!(blocks(&next), (vec![(300, b"b".to_vec())], b"c".to_vec()));
     }
 
     #[test]

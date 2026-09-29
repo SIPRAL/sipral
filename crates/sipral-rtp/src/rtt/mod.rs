@@ -52,7 +52,9 @@ pub const CLOCK_RATE: u32 = 1000;
 /// The transmission interval RFC 4103 §5.1 recommends.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(300);
 
-/// The shortest transmission interval RFC 4103 §5.1 allows.
+/// The shortest transmission interval this sender takes. RFC 4103 sets no
+/// floor of its own; §5.1 bounds the buffering from above, at T.140's
+/// 500 ms, and §9 lets a congested sender stretch it up to five seconds.
 pub const MIN_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Redundant generations RFC 4103 §4 recommends: each block is sent three
