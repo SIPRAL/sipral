@@ -328,6 +328,7 @@ fn each_account_holds_its_calls_to_its_own_policy() {
             AccountSrtp {
                 policy: Some(SrtpPolicy::Required),
                 suites: None,
+                recording_in_clear: false,
             },
         )
         .expect("a policy");
@@ -393,6 +394,7 @@ fn a_call_an_account_places_offers_under_its_own_policy() {
             AccountSrtp {
                 policy: Some(SrtpPolicy::Offered),
                 suites: Some(vec![Suite::AesCm80]),
+                recording_in_clear: false,
             },
         )
         .expect("a policy");
@@ -427,6 +429,7 @@ fn a_call_an_account_places_offers_under_its_own_policy() {
             AccountSrtp {
                 policy: None,
                 suites: Some(Vec::new()),
+                recording_in_clear: false,
             }
         ),
         Err(MediaError::NoSrtpSuite)

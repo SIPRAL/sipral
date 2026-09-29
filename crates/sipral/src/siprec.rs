@@ -29,6 +29,16 @@
 //! RFC 3891) takes the recording over, with the new far end as the second
 //! party. When the recorded call ends the recording session is hung up, and
 //! when the server hangs up the copies stop.
+//!
+//! **An encrypted call is recorded encrypted** (RFC 7866 §12.2). Its two
+//! streams are offered as `RTP/SAVP` with SDES keys of their own (RFC 4568),
+//! different from the call's, and each copy goes out under this end's key
+//! for the line the server took; a stream the server will not take as SRTP
+//! gets nothing, unless the account allows its encrypted calls to be recorded
+//! in the clear ([`crate::AccountSrtp::recording_in_clear`]). Copies that move
+//! — to a call that replaced the recorded one, or to a stream the server took
+//! back — carry their numbering on, so no SRTP index goes out twice under one
+//! key.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -36,9 +46,13 @@ use std::net::SocketAddr;
 use sipral_core::endpoint::TransportId;
 use sipral_core::msg::{OwnedMessage, Uri};
 use sipral_core::sdp::{
-    Attribute, Connection, Direction, MediaDescription, NegotiatedCodec, Origin, SessionDescription,
+    Attribute, Connection, Crypto, CryptoPolicy, CryptoSuite, Direction, KeySalt, MediaDescription,
+    NegotiatedCodec, Origin, SessionDescription,
 };
+use sipral_rtp::srtp::Protector;
 use sipral_rtp::{PacketBuilder, RtpHeader, RtpPacket};
+
+use crate::keying;
 use sipral_ua::siprec::{RecordedCall, RecordedParty, RecordedStream, RecordingMetadata};
 
 /// The label of the stream that carries this end's audio.
@@ -101,18 +115,36 @@ pub struct RecordingDatagram<'a> {
     pub payload: &'a [u8],
 }
 
+/// The SDES keys a recording session's two streams are offered with, this
+/// end's stream first: one per suite, in the order they are offered.
+pub(crate) type StreamKeys = [Vec<(CryptoSuite, KeySalt)>; 2];
+
 /// The offer of a recording session: two sendonly streams on `codec`, one per
-/// party, labelled for the metadata (RFC 7866 §7.1.1).
-pub(crate) fn offer(codec: &NegotiatedCodec, to: &RecordTo, session_id: u64) -> SessionDescription {
+/// party, labelled for the metadata (RFC 7866 §7.1.1). With `keys`, each
+/// stream is offered as SRTP (`RTP/SAVP`) with an RFC 4568 line per key.
+pub(crate) fn offer(
+    codec: &NegotiatedCodec,
+    to: &RecordTo,
+    session_id: u64,
+    keys: Option<&StreamKeys>,
+) -> SessionDescription {
     let mut description = SessionDescription::new(
         Origin::new(session_id, 1, to.this_end.ip()),
         Connection::new(to.this_end.ip()),
     );
-    for (socket, label) in [(to.this_end, THIS_END), (to.far_end, FAR_END)] {
+    for (index, (socket, label)) in [(to.this_end, THIS_END), (to.far_end, FAR_END)]
+        .into_iter()
+        .enumerate()
+    {
+        let proto = if keys.is_some() {
+            "RTP/SAVP"
+        } else {
+            "RTP/AVP"
+        };
         let mut stream = MediaDescription::new(
             "audio",
             socket.port(),
-            "RTP/AVP",
+            proto,
             vec![codec.payload().to_string()],
         );
         if socket.ip() != to.this_end.ip() {
@@ -133,9 +165,50 @@ pub(crate) fn offer(codec: &NegotiatedCodec, to: &RecordTo, session_id: u64) -> 
         stream
             .attributes
             .push(Attribute::with_value("label", label));
+        if let Some(offered) = keys.and_then(|keys| keys.get(index)) {
+            stream.attributes.extend(
+                keying::offer_lines(offered.clone())
+                    .iter()
+                    .map(Crypto::attribute),
+            );
+        }
         description.media.push(stream);
     }
     description
+}
+
+/// What protects each stream's copies, read off the server's answer to an
+/// offer of `offered`: the transform and this end's key under the line the
+/// server took (RFC 4568 §5.1.2), with the tag of that line. `None` for a
+/// stream the server refused, answered off SRTP, or answered with a line
+/// this end did not offer or cannot be held to.
+pub(crate) fn protection(
+    answer: &SessionDescription,
+    offered: &StreamKeys,
+) -> [Option<(u32, Protector)>; 2] {
+    let one = |index: usize| {
+        let stream = answer.media.get(index)?;
+        if stream.is_rejected() || !keying::is_secure(&stream.proto) {
+            return None;
+        }
+        let keys = offered.get(index)?;
+        stream
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.name == "crypto")
+            .filter_map(|attribute| Crypto::parse(attribute.value.as_deref()?))
+            .find_map(|line| {
+                let (suite, key) = keys.get(usize::try_from(line.tag).ok()?.checked_sub(1)?)?;
+                let answered = line.policy()?;
+                if answered.suite != *suite || !keying::peer_line_holds(stream, line.tag) {
+                    return None;
+                }
+                let ours = CryptoPolicy::new(line.tag, *suite, key.clone());
+                let (policy, master) = keying::context(&ours).ok()?;
+                Some((line.tag, Protector::new(policy, master)))
+            })
+    };
+    [one(0), one(1)]
 }
 
 /// Where the recording server receives each of the two streams, read off its
@@ -291,7 +364,13 @@ struct Copy {
 impl Copy {
     /// The copy of a packet with `header` and `payload`, carrying
     /// `payload_type`: the number the server was offered the codec under.
-    fn packet(&mut self, header: RtpHeader, payload: &[u8], payload_type: u8) -> Option<Vec<u8>> {
+    /// With it, the sequence number and timestamp it went out with.
+    fn packet(
+        &mut self,
+        header: RtpHeader,
+        payload: &[u8],
+        payload_type: u8,
+    ) -> Option<(Vec<u8>, (u16, u32))> {
         let sequence = *self
             .sequence
             .get_or_insert(self.base.0.wrapping_sub(header.sequence));
@@ -309,7 +388,37 @@ impl Copy {
         let mut out = vec![0; builder.encoded_len()];
         let written = builder.write(&mut out).ok()?;
         out.truncate(written);
-        Some(out)
+        Some((out, (header.sequence, header.timestamp)))
+    }
+
+    /// Carry on from `next` with whatever audio comes next, rather than with
+    /// the numbering the audio copied so far fixed.
+    const fn resume(&mut self, next: (u16, u32)) {
+        self.sequence = None;
+        self.timestamp = None;
+        self.base = next;
+    }
+}
+
+/// How the copies are protected: whether they have to be, and each stream's
+/// protector with the tag of the line it keys.
+#[derive(Default)]
+struct Protection {
+    required: bool,
+    streams: [Option<(u32, Protector)>; 2],
+}
+
+impl std::fmt::Debug for Protection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tags = self
+            .streams
+            .iter()
+            .map(|stream| stream.as_ref().map(|(tag, _)| *tag))
+            .collect::<Vec<_>>();
+        f.debug_struct("Protection")
+            .field("required", &self.required)
+            .field("tags", &tags)
+            .finish()
     }
 }
 
@@ -329,8 +438,18 @@ pub(crate) struct Tap {
     received_payload_type: u8,
     /// The sockets the copies go from, this end's first.
     sockets: [SocketAddr; 2],
+    /// What each stream's copies are protected with, when the recording
+    /// session is SRTP, and under which of the offered lines.
+    protection: Protection,
     /// The source, sequence number and timestamp each stream starts from.
     numbers: [(u32, u16, u32); 2],
+    /// The sequence number and timestamp each stream carries on from once
+    /// anything was copied on it: a stream the server took back, or one
+    /// that moved to a call that replaced the recorded one, starts there
+    /// rather than over — which on an SRTP recording session would send a
+    /// second packet under an index the key has already covered (RFC 3711
+    /// §9.1).
+    next: [Option<(u16, u32)>; 2],
     queue: VecDeque<(usize, SocketAddr, SocketAddr, Vec<u8>)>,
     out: Vec<u8>,
 }
@@ -352,7 +471,9 @@ impl Tap {
             payload_type: payload_types.0,
             received_payload_type: payload_types.1,
             sockets: [to.this_end, to.far_end],
+            protection: Protection::default(),
             numbers,
+            next: [None, None],
             queue: VecDeque::new(),
             out: Vec::new(),
         };
@@ -364,10 +485,11 @@ impl Tap {
     /// been taken back. One that carries on keeps its numbering.
     pub(crate) fn redirect(&mut self, destinations: [Option<SocketAddr>; 2]) {
         for (stream, destination) in destinations.into_iter().enumerate() {
-            let (Some(slot), Some(&from), Some(&(ssrc, sequence, timestamp))) = (
+            let (Some(slot), Some(&from), Some(&(ssrc, sequence, timestamp)), Some(next)) = (
                 self.copies.get_mut(stream),
                 self.sockets.get(stream),
                 self.numbers.get(stream),
+                self.next.get(stream),
             ) else {
                 continue;
             };
@@ -381,9 +503,34 @@ impl Tap {
                         ssrc,
                         sequence: None,
                         timestamp: None,
-                        base: (sequence, timestamp),
+                        base: next.unwrap_or((sequence, timestamp)),
                     });
                 }
+            }
+        }
+    }
+
+    /// Copy another session's audio from here on — a call that replaced the
+    /// recorded one — carrying each stream on from where its copies got to.
+    pub(crate) fn follow(&mut self) {
+        for (copy, next) in self.copies.iter_mut().zip(self.next) {
+            if let (Some(copy), Some(next)) = (copy.as_mut(), next) {
+                copy.resume(next);
+            }
+        }
+    }
+
+    /// Protect the copies as the server's answer said ([`protection`]), for
+    /// a recording session offered as SRTP: from here on a stream is copied
+    /// only while it has a protector, and never in the clear. A stream that
+    /// carries on under the line it had keeps its protector, and with it its
+    /// place in the keystream.
+    pub(crate) fn protect(&mut self, answered: [Option<(u32, Protector)>; 2]) {
+        self.protection.required = true;
+        for (slot, answered) in self.protection.streams.iter_mut().zip(answered) {
+            match (slot.as_ref(), answered) {
+                (Some((kept, _)), Some((tag, _))) if *kept == tag => {}
+                (_, answered) => *slot = answered,
             }
         }
     }
@@ -426,9 +573,33 @@ impl Tap {
         let Some(copy) = self.copies.get_mut(stream).and_then(Option::as_mut) else {
             return;
         };
-        let Some(packet) = copy.packet(header, payload, self.payload_type) else {
+        let Some((mut packet, (sequence, timestamp))) =
+            copy.packet(header, payload, self.payload_type)
+        else {
             return;
         };
+        if self.protection.required {
+            let Some((_, protector)) = self
+                .protection
+                .streams
+                .get_mut(stream)
+                .and_then(Option::as_mut)
+            else {
+                return;
+            };
+            let length = packet.len();
+            packet.resize(length + protector.rtp_overhead(), 0);
+            let Ok(written) = protector.protect_rtp(&mut packet, length) else {
+                return;
+            };
+            packet.truncate(written);
+        }
+        // a packet the original stream reordered moves nothing back
+        if let Some(next) = self.next.get_mut(stream)
+            && next.is_none_or(|(after, _)| sequence.wrapping_sub(after) < 0x8000)
+        {
+            *next = Some((sequence.wrapping_add(1), timestamp.wrapping_add(1)));
+        }
         let (from, destination) = (copy.from, copy.destination);
         // the oldest goes first: a copy nobody collected for a second is
         // audio the server would play late, and the newest is what it wants
@@ -520,5 +691,58 @@ mod tests {
         // the send number arriving from the far end is not this call's codec
         tap.received(&packet(99, 2));
         assert_eq!(drained(&mut tap), []);
+    }
+
+    /// The sequence numbers of this end's copies, as they went.
+    fn sequences(tap: &mut Tap) -> Vec<u16> {
+        let mut sent = Vec::new();
+        while let Some(copy) = tap.poll() {
+            sent.push(
+                RtpPacket::parse(copy.payload)
+                    .expect("RTP")
+                    .header()
+                    .sequence,
+            );
+        }
+        sent
+    }
+
+    /// Under one SRTP key a sequence number goes out once (RFC 3711 §9.1):
+    /// copies that move to a call that replaced the recorded one, or to a
+    /// stream the server took back, carry on from where they got to rather
+    /// than starting their numbering over.
+    #[test]
+    fn copies_that_move_carry_their_numbering_on_under_the_same_key() {
+        use sipral_rtp::srtp::{Master, Policy, Protector, Suite};
+        let mut tap = Tap::new(
+            &record_to(),
+            destinations(),
+            (0, 0),
+            [(1, 10, 100), (2, 20, 200)],
+        );
+        let key = || Protector::new(Policy::new(Suite::AesCm80), Master::new(&[1; 16], &[2; 14]));
+        tap.protect([Some((2, key())), Some((2, key()))]);
+        for sequence in [1_000, 1_001] {
+            tap.sent(&packet(0, sequence), &[7; 40]);
+        }
+        assert_eq!(sequences(&mut tap), [10, 11]);
+
+        // the call that replaced the recorded one numbers its own packets
+        tap.follow();
+        tap.sent(&packet(0, 5_000), &[7; 40]);
+        assert_eq!(sequences(&mut tap), [12]);
+
+        // refused, then taken back
+        tap.redirect([None, None]);
+        tap.sent(&packet(0, 5_001), &[7; 40]);
+        assert_eq!(sequences(&mut tap), []);
+        tap.redirect(destinations());
+        tap.sent(&packet(0, 9_000), &[7; 40]);
+        assert_eq!(sequences(&mut tap), [13]);
+
+        // and a stream the server's answer left without a key gets nothing
+        tap.protect([None, Some((2, key()))]);
+        tap.sent(&packet(0, 9_001), &[7; 40]);
+        assert_eq!(sequences(&mut tap), []);
     }
 }

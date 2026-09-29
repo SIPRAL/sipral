@@ -19,6 +19,10 @@ codes! {
     ///
     /// The numbers are part of the ABI. A value keeps its meaning for the life of
     /// the ABI's major version, and a new one is only ever added at the end.
+    ///
+    /// 17 is a permanent hole: reserved, never used, and never to be given
+    /// to a status. `sipral_status_name` has no name for it, and a caller
+    /// that meets it holds a number no build of this library returns.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum SipralStatus: i32 {
         /// The call did what it was asked to.
@@ -152,6 +156,7 @@ entry! {
             14 => c"device unusable".as_ptr(),
             15 => c"device timed out".as_ptr(),
             16 => c"limit reached".as_ptr(),
+            // 17 is reserved and never used: a permanent hole, with no name
             18 => c"refused by security policy".as_ptr(),
             19 => c"recording failed".as_ptr(),
             20 => c"not negotiated".as_ptr(),

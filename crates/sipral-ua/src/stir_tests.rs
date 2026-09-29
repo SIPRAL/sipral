@@ -481,10 +481,14 @@ fn signed_claims(invite: &[u8]) -> String {
 fn a_call_to_a_name_is_signed_for_its_canonical_uri() {
     let t0 = Instant::now();
     let credentials = credentials(&[CALLER]);
-    let invite = signed_invite_to(&credentials, "sip:Alice@Example.COM:5070;transport=udp", t0);
+    let invite = signed_invite_to(
+        &credentials,
+        "sip:Alice@Biloxi.example.com:5070;transport=udp",
+        t0,
+    );
     let claims = signed_claims(&invite);
     assert!(
-        claims.contains(r#""dest":{"uri":["sip:alice@example.com"]}"#),
+        claims.contains(r#""dest":{"uri":["sip:alice@biloxi.example.com"]}"#),
         "{claims}"
     );
 }

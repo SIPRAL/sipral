@@ -297,6 +297,11 @@ struct Outbound {
     packets_sent: u32,
     octets_sent: u32,
     sent_since_report: bool,
+    /// Where the media clock stood the last time the caller said
+    /// ([`RtpSession::clock_at`]): the session's time then, and the RTP
+    /// timestamp the next packet was to carry. What a sender report's RTP
+    /// timestamp is worked out from.
+    clock_at: Option<(Duration, u32)>,
 }
 
 /// How many packets from the address a re-INVITE moved the far end away
@@ -418,6 +423,7 @@ impl RtpSession {
                 packets_sent: 0,
                 octets_sent: 0,
                 sent_since_report: false,
+                clock_at: None,
             },
             inbound: Inbound {
                 accepted: config.accepted,
@@ -956,6 +962,39 @@ impl RtpSession {
         self.outbound.spurt_start = true;
     }
 
+    /// Say that the timestamp the next packet carries stands for `now`, the
+    /// time [`RtpSession::build_report`] is given: the instant its first
+    /// sample was taken, as near as the caller knows it.
+    ///
+    /// RFC 3550 §6.4.1 has a sender report's RTP timestamp stand for "the
+    /// same time as the NTP timestamp", "calculated from the corresponding
+    /// NTP timestamp using the relationship between the RTP timestamp counter
+    /// and real time as maintained by periodically checking the wallclock
+    /// time at a sampling instant". This is that check, and a caller that
+    /// sends a frame a tick makes it once a frame. A stream that never makes
+    /// it reports the timestamp its next packet will carry.
+    pub const fn clock_at(&mut self, now: Duration) {
+        self.outbound.clock_at = Some((now, self.outbound.timestamp));
+    }
+
+    /// The RTP timestamp that stands for `now`: the last
+    /// [`RtpSession::clock_at`] carried on at the clock rate, or the next
+    /// packet's timestamp when there has been none.
+    fn media_clock(&self, now: Duration) -> u32 {
+        let Some((at, timestamp)) = self.outbound.clock_at else {
+            return self.outbound.timestamp;
+        };
+        let ticks = |span: Duration| {
+            let ticks = span.as_nanos() * u128::from(self.outbound.clock_rate) / 1_000_000_000;
+            // the timestamp is modulo 2^32 (RFC 3550 §5.1), and so is this
+            u32::try_from(ticks % (1_u128 << 32)).unwrap_or(0)
+        };
+        match now.checked_sub(at) {
+            Some(after) => timestamp.wrapping_add(ticks(after)),
+            None => timestamp.wrapping_sub(ticks(at.saturating_sub(now))),
+        }
+    }
+
     /// Whether this stream stops sending during silence from now on, which
     /// is what lets the marker bit say a talk spurt starts (RFC 3551 §4.1):
     /// a stream that began with every frame sent and was then renegotiated
@@ -1112,6 +1151,9 @@ impl RtpSession {
         self.outbound.payload_type = format.payload_type;
         self.outbound.clock_rate = format.clock_rate;
         self.outbound.silence_suppression = format.silence_suppression;
+        // a reading taken at the old rate carries on at the old rate, and
+        // the next frame takes a new one
+        self.outbound.clock_at = None;
         // the first packet of the new format starts a talkspurt: §4.1's
         // marker bit says "the first packet after a silence", and a decoder
         // that has just been replaced is exactly that
@@ -1337,7 +1379,7 @@ impl RtpSession {
                 ssrc: self.outbound.ssrc,
                 info: SenderInfo {
                     ntp,
-                    rtp_timestamp: self.outbound.timestamp,
+                    rtp_timestamp: self.media_clock(now),
                     packet_count: self.outbound.packets_sent,
                     octet_count: self.outbound.octets_sent,
                 },
@@ -2814,6 +2856,45 @@ mod tests {
         assert_eq!(sr.info().octet_count, 320);
         assert_eq!(sr.info().ntp, 0x0102_0304_0506_0708);
         assert_eq!(sr.info().rtp_timestamp, 500_320);
+    }
+
+    /// RFC 3550 §6.4.1: a sender report's RTP timestamp stands for the
+    /// instant its NTP timestamp does, carried on at the clock rate from the
+    /// last sampling instant, not whatever the next packet happens to carry.
+    #[test]
+    fn a_sender_reports_rtp_timestamp_stands_for_the_instant_of_its_ntp_timestamp() {
+        let rtp_timestamp = |session: &mut RtpSession, now: Duration| {
+            let mut out = [0_u8; 256];
+            let (n, _) = session
+                .build_report(&mut out, now, 0x0102_0304_0506_0708, 0.5, None)
+                .expect("room");
+            let compound = CompoundPacket::parse(&out[..n]).expect("a compound packet");
+            let Some(RtcpPacket::SenderReport(sr)) = compound.packets().next() else {
+                panic!("an SR: this session has sent");
+            };
+            sr.info().rtp_timestamp
+        };
+        let mut session = session();
+        // the first frame's first sample, 500 000 on the RTP clock, was
+        // taken a second into the session
+        session.clock_at(Duration::from_secs(1));
+        session
+            .send(&[0_u8; 160], 160, &mut [0_u8; 256])
+            .expect("room");
+        // 150 ms later at 8 kHz is 1 200 ticks on, though the next packet
+        // would carry 500 160
+        assert_eq!(
+            rtp_timestamp(&mut session, Duration::from_millis(1_150)),
+            501_200
+        );
+        // and a report dated before the sampling instant goes back as far
+        session
+            .send(&[0_u8; 160], 160, &mut [0_u8; 256])
+            .expect("room");
+        assert_eq!(
+            rtp_timestamp(&mut session, Duration::from_millis(990)),
+            499_920
+        );
     }
 
     #[test]

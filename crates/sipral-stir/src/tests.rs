@@ -212,8 +212,8 @@ fn sip_uris_are_canonicalised_as_rfc_8224_section_8_5_says() {
     for (written, canonical) in [
         ("sip:alice@example.com", "sip:alice@example.com"),
         (
-            "SIP:Alice:secret@Example.COM:5061;transport=tcp?Subject=hi",
-            "sip:alice@example.com",
+            "SIP:Alice:secret@Biloxi.example.com:5061;transport=tcp?Subject=hi",
+            "sip:alice@biloxi.example.com",
         ),
         (
             "sips:bob@biloxi.example.com;lr",
@@ -229,10 +229,10 @@ fn sip_uris_are_canonicalised_as_rfc_8224_section_8_5_says() {
     ] {
         assert_eq!(canonical_uri(written), canonical, "{written}");
     }
-    let dest = Dest::uri("sip:Alice@Example.com:5060;transport=udp");
-    assert_eq!(dest.uri, ["sip:alice@example.com"]);
-    assert!(dest.names_uri("sip:alice@example.com;user=phone"));
-    assert!(dest.names_uri("SIP:ALICE@EXAMPLE.COM"));
+    let dest = Dest::uri("sip:Alice@Biloxi.example.com:5060;transport=udp");
+    assert_eq!(dest.uri, ["sip:alice@biloxi.example.com"]);
+    assert!(dest.names_uri("sip:alice@biloxi.example.com;user=phone"));
+    assert!(dest.names_uri("SIP:ALICE@BILOXI.example.com"));
     assert!(!dest.names_uri("sip:mallory@example.com"));
     assert!(!dest.names_number(&tn("12125551213")));
     let numbers = Dest::tn(tn("12125551213"));
@@ -249,25 +249,25 @@ fn the_signer_writes_dest_uri_canonical() {
     let mut to_a_name = claims(NOW);
     to_a_name.dest = Dest {
         tn: Vec::new(),
-        uri: vec!["sip:Alice:pw@Example.COM:5070;transport=tcp".to_owned()],
+        uri: vec!["sip:Alice:pw@Biloxi.example.com:5070;transport=tcp".to_owned()],
     };
     let identity = signer().identity(&to_a_name).unwrap();
     let claims_segment = identity.split('.').nth(1).unwrap();
     let json = String::from_utf8(base64::decode_url(claims_segment.as_bytes()).unwrap()).unwrap();
     assert!(
-        json.contains(r#""dest":{"uri":["sip:alice@example.com"]}"#),
+        json.contains(r#""dest":{"uri":["sip:alice@biloxi.example.com"]}"#),
         "{json}"
     );
     let Verdict::Valid(verified) = verdict(&identity, &pki.chain(), &pki) else {
         panic!("not valid");
     };
-    assert_eq!(verified.dest.uri, ["sip:alice@example.com"]);
+    assert_eq!(verified.dest.uri, ["sip:alice@biloxi.example.com"]);
 
     // the compact form verifies against claims rebuilt from the request's
     // own To, written however that To was written
     let compact = signer().identity_compact(&to_a_name).unwrap();
     let mut rebuilt = to_a_name.clone();
-    rebuilt.dest = Dest::uri("sip:alice@example.com;user=ip");
+    rebuilt.dest = Dest::uri("sip:alice@biloxi.example.com;user=ip");
     let pending = Verifier::default().start(&compact, Some(&rebuilt)).unwrap();
     assert!(matches!(
         pending.verify(&pki.chain(), &anchors(&pki), NOW),

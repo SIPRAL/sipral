@@ -2605,9 +2605,27 @@ session's own answer, refusal and end are `UaEvent`s on the handle
 
 A codec change in the recorded call is offered to the server on both streams
 (§7.1.1.1 changes a recorded stream with a new offer) and the copies follow
-it. The streams are plain `RTP/AVP`: a call keyed with SRTP is copied in the
-clear, to a server the application chose to trust with it, over whatever path
-it put between the two.
+it.
+
+**An encrypted call is recorded encrypted** (RFC 7866 §12.2). When the recorded
+call is keyed with SRTP, SDES or DTLS-SRTP alike, both streams are offered as
+`RTP/SAVP` with an RFC 4568 `a=crypto` line per suite the account's calls
+offer, each stream with keys of its own drawn from the engine's media seed.
+Each stream's copies are protected under this end's key for the line the
+server's answer took, and a stream the server refused, answered as plain RTP,
+or answered with a line that was not offered or cannot be held to gets
+nothing: the copies never leave the encryption behind. A re-offer for a codec
+change carries the same keys, and a stream that carries on under the same
+line keeps its place in the keystream. Copies that move to a call that
+replaced the recorded one, or to a stream the server took back, carry their
+numbering on rather than starting it over, so no SRTP index goes out twice
+under one key (RFC 3711 §9.1). An unencrypted call is recorded as plain
+`RTP/AVP`, and so is an encrypted one on an account that says it may be
+(`AccountSrtp::recording_in_clear`, `recording_in_clear` in
+`sipral_account_config_t`). The keys travel in the recording session's
+signalling, which is why a recorder listens on TLS. This end offers SDES
+only: the SRC is the offerer of a recording session (§7.1), and a DTLS-SRTP
+handshake on the copies' sockets, which only send, is not offered.
 
 ## A local conference of two calls
 

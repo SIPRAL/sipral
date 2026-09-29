@@ -32,7 +32,9 @@ import org.sipral.SipralVerstat
  * [stirOrig] or the number in the AOR, claiming [stirAttestation] (null is A)
  * and [stirOrigid] (one drawn for the account when null). A PASSporT carries
  * the time, which [SipralClient.stir] gives the stack: call it first, with
- * no anchors on a client that only signs.
+ * no anchors on a client that only signs. [recordingInClear] lets the
+ * account's encrypted calls be recorded to a recording server as plain RTP;
+ * otherwise their copies go as SRTP or not at all (RFC 7866 §12.2).
  */
 class SipralAccountSecurity(
     val srtp: SipralSrtp? = null,
@@ -43,6 +45,7 @@ class SipralAccountSecurity(
     val stirOrig: String? = null,
     val stirOrigid: String? = null,
     val stirAttestation: SipralAttestation? = null,
+    val recordingInClear: Boolean = false,
 )
 
 /** How one stream of a call is protected: a `sipral_stream_encryption_t`

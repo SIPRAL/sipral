@@ -73,6 +73,8 @@ mod entropy;
 mod media_socket;
 #[path = "common/udp_endpoint.rs"]
 mod udp_endpoint;
+#[path = "common/wall_clock.rs"]
+mod wall_clock;
 
 use std::collections::HashMap;
 use std::env;
@@ -83,7 +85,7 @@ use std::time::{Duration, Instant};
 use sipral::{
     Account, AccountId, CallHandle, CodecCatalog, Credentials, EndpointConfig, Event, Link,
     MediaConfig, MediaEngine, MediaEvent, Network, OutgoingCall, Quality, Rate, Recovery,
-    StreamStatistics, UaEvent, Uri, UserAgent, WallClock,
+    StreamStatistics, UaEvent, Uri, UserAgent,
 };
 
 use sipral_core::endpoint::Event as CoreEvent;
@@ -549,7 +551,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let engine = MediaEngine::new(
         catalog(args.codecs.as_deref(), args.ice),
         MediaConfig::default(),
-        WallClock::from_unix(now, 0, 0),
+        wall_clock::at(now),
         entropy::seed()?,
     );
     // A real address, not a wildcard: `Endpoint::bind`'s own documentation
@@ -622,6 +624,7 @@ mod tests {
     use sipral::{Account, OutgoingCall, Uri};
 
     use super::*;
+    use sipral::WallClock;
 
     /// Two stacks on loopback: this crate's own agent answers, and a second
     /// endpoint places a call at it, says something, and hears it again.

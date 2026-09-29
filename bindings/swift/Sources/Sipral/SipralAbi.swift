@@ -22,6 +22,10 @@ public typealias SipralHandle = sipral_handle_t
 ///
 /// The numbers are part of the ABI. A value keeps its meaning for the life of
 /// the ABI's major version, and a new one is only ever added at the end.
+///
+/// 17 is a permanent hole: reserved, never used, and never to be given
+/// to a status. `sipral_status_name` has no name for it, and a caller
+/// that meets it holds a number no build of this library returns.
 public enum SipralStatus: Int32, Sendable {
     /// The call did what it was asked to.
     case ok = 0
@@ -2648,7 +2652,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 31
+    public static let abiVersionMinor: UInt32 = 32
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0

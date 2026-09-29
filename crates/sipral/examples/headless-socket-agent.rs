@@ -63,6 +63,8 @@ mod entropy;
 mod media_socket;
 #[path = "common/udp_endpoint.rs"]
 mod udp_endpoint;
+#[path = "common/wall_clock.rs"]
+mod wall_clock;
 
 use std::collections::VecDeque;
 use std::env;
@@ -78,7 +80,6 @@ use std::time::{Duration, Instant};
 use sipral::{
     Account, CallHandle, CallMedia, CodecCatalog, Credentials, EndpointConfig, Event, IcePolicy,
     MediaConfig, MediaEngine, MediaError, MediaEvent, StatusCode, UaEvent, Uri, UserAgent,
-    WallClock,
 };
 use sipral_core::msg::HeaderName;
 use sipral_headless::{
@@ -401,7 +402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = MediaEngine::new(
         codecs(),
         MediaConfig::default(),
-        WallClock::from_unix(now, 0, 0),
+        wall_clock::at(now),
         entropy::seed()?,
     );
     let mut endpoint = Endpoint::bind(SocketAddr::new(host, port), agent, engine, now)?;

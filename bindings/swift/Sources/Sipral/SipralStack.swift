@@ -890,11 +890,15 @@ public final class SipralStack: @unchecked Sendable {
     /// anchors, before adding them. The certificate a call names is asked for
     /// by `SipralEventKind.callerVerification` (`SipralEvent.verificationData`)
     /// and handed over with `stirCertificate(call:chain:)`.
+    /// `acceptServiceProviderCodes` lets a certificate that names a service
+    /// provider code rather than numbers vouch for any caller, as a SHAKEN
+    /// deployment's do; off, a certificate covers only the numbers it names.
     public func stir(
         anchors: [UInt8]?,
         freshnessSeconds: UInt64 = 0,
         certificateWaitMs: UInt64 = 0,
-        unixSeconds: UInt64? = nil
+        unixSeconds: UInt64? = nil,
+        acceptServiceProviderCodes: Bool = false
     ) throws {
         let now = unixSeconds ?? UInt64(time(nil))
         let given = anchors ?? []
@@ -907,6 +911,8 @@ public final class SipralStack: @unchecked Sendable {
             config.freshness_seconds = freshnessSeconds
             config.certificate_wait_ms = certificateWaitMs
             config.unix_seconds = now
+            config.accept_service_provider_codes = acceptServiceProviderCodes
+                ? SipralToggle.on.rawValue : 0
             try retryingBusy { try Sipral.stackStir(stack: handle, config: config, nowMs: nowMs()) }
         }
     }

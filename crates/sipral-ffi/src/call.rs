@@ -2292,6 +2292,7 @@ a=recvonly\r\n";
             stir_origid: ptr::null(),
             stir_origid_len: 0,
             stir_attestation: 0,
+            recording_in_clear: 0,
         }
     }
 

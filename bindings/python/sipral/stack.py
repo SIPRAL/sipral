@@ -614,6 +614,7 @@ class Stack:
         stir_orig: str | None = None,
         stir_origid: str | None = None,
         stir_attestation: int = 0,
+        recording_in_clear: bool = False,
     ) -> Account:
         """`sipral_account_add`. See :class:`sipral.account.Account`.
 
@@ -630,7 +631,9 @@ class Stack:
         :class:`sipral.enums.Attestation`, ``NONE`` for A) and
         ``stir_origid``. A PASSporT carries the time, which :meth:`stir`
         gives the stack: call it first, with ``None`` for anchors on a stack
-        that only signs.
+        that only signs. ``recording_in_clear`` lets the account's encrypted
+        calls be recorded to a recording server as plain RTP; left off, their
+        copies go as SRTP or not at all (RFC 7866 §12.2).
 
         ``session_timer`` is an :class:`sipral.enums.SessionTimer`: ``0`` for
         the stack's default, ``OFF``, or ``INTERVAL`` with
@@ -673,6 +676,7 @@ class Stack:
             stir_orig=stir_orig,
             stir_origid=stir_origid,
             stir_attestation=stir_attestation,
+            recording_in_clear=recording_in_clear,
         )
         with self._lock:
             self._accounts.append(account)
@@ -685,6 +689,7 @@ class Stack:
         freshness_seconds: int = 0,
         certificate_wait_ms: int = 0,
         unix_seconds: int | None = None,
+        accept_service_provider_codes: bool = False,
     ) -> None:
         """`sipral_stack_stir`: verify the callers of the calls this stack's
         accounts receive against ``anchors`` (PEM or DER certificates, the
@@ -696,7 +701,10 @@ class Stack:
         before adding them. The certificate a call names
         is wanted through `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`
         (:attr:`sipral.events.Event.verification`) and handed over with
-        :meth:`stir_certificate`.
+        :meth:`stir_certificate`. ``accept_service_provider_codes`` lets a
+        certificate that names a service provider code rather than numbers
+        vouch for any caller, as a SHAKEN deployment's do; left off, a
+        certificate covers only the numbers it names.
         """
         raw = anchors.encode("utf-8") if isinstance(anchors, str) else anchors
         anchors_buf = ffi.new("uint8_t[]", raw) if raw else None
@@ -708,6 +716,7 @@ class Stack:
         config.freshness_seconds = freshness_seconds
         config.certificate_wait_ms = certificate_wait_ms
         config.unix_seconds = int(time.time()) if unix_seconds is None else unix_seconds
+        config.accept_service_provider_codes = 1 if accept_service_provider_codes else 0
         _retry(
             lambda: lib.sipral_stack_stir(self.handle, config, self.now_ms()),
             "sipral_stack_stir",

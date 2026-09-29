@@ -12,6 +12,10 @@ package org.sipral
  *
  * The numbers are part of the ABI. A value keeps its meaning for the life of
  * the ABI's major version, and a new one is only ever added at the end.
+ *
+ * 17 is a permanent hole: reserved, never used, and never to be given
+ * to a status. `sipral_status_name` has no name for it, and a caller
+ * that meets it holds a number no build of this library returns.
  */
 enum class SipralStatus(val value: Int) {
     /**
@@ -5267,10 +5271,11 @@ class SipralStackConfig(
      * The one number a stack that reads no clock cannot work out: RFC 3550
      * §6.4.1 has a sender report carry "the wall clock time when this report
      * was sent", and a monotonic instant is not one. Zero means the reports
-     * count from the Unix epoch, which costs nothing a caller is likely to
-     * miss — the round trip the far end computes is a difference, not an
-     * absolute — and costs the correlation of this call's media with anything
-     * else's.
+     * take the wall clock `sipral_stack_stir` gives in `unix_seconds`, from
+     * the moment it is given, and count from the Unix epoch until then:
+     * the round trip the far end computes is a difference, not an
+     * absolute, but the correlation of this call's media with anything
+     * else's is not.
      */
     val mediaClockUnixSeconds: Long = 0,
     /**
@@ -5808,6 +5813,16 @@ class SipralAccountConfig(
      * full attestation, `A`.
      */
     val stirAttestation: Long = 0,
+    /**
+     * A `SipralToggle`: whether an encrypted call of this account may be
+     * recorded to a recording server (`sipral_call_record_to`) in the
+     * clear. Off by default: the copies of an encrypted call are offered
+     * to the server as SRTP, with SDES keys in the recording session's
+     * offer (RFC 4568), and a stream the server will not take that way
+     * gets nothing (RFC 7866 §12.2). On, they go as plain RTP, as an
+     * unencrypted call's always do. ABI 0.32.
+     */
+    val recordingInClear: Long = 0,
 )
 
 /**
@@ -6104,9 +6119,21 @@ class SipralStirConfig(
      * the time, and only the caller can say which `now_ms` a time goes
      * with, so the first call must give it.
      * (`sipral_stack_config_t::media_clock_unix_seconds` goes with no
-     * `now_ms` at all, and is not taken for it.)
+     * `now_ms` at all, and is not taken for it.) A stack created with no
+     * media clock dates its RTCP sender reports by this one too.
      */
     val unixSeconds: Long = 0,
+    /**
+     * A `SipralToggle`: whether a certificate whose TNAuthList names a
+     * service provider code (RFC 8226 §9) has authority over every
+     * calling number. Off by default, when only the numbers and ranges a
+     * certificate names are its own: a code names a provider, not
+     * numbers, and taking it as covering any number is a decision about
+     * the providers the anchors certify — the one a SHAKEN deployment,
+     * whose certificates carry codes and no numbers, makes by turning
+     * this on. ABI 0.32.
+     */
+    val acceptServiceProviderCodes: Long = 0,
 )
 
 /**
@@ -8493,7 +8520,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 31)
+        agree(0, 32)
     }
 
     /**
@@ -8536,7 +8563,7 @@ internal object SipralNative {
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, configRecordingInClear: Long, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
@@ -8667,7 +8694,7 @@ internal object SipralNative {
     external fun sipral_stack_state(stack: Long, buffer: ByteArray, len: LongArray): Int
     external fun sipral_stack_rtp_port_reserve(stack: Long, port: LongArray): Int
     external fun sipral_stack_rtp_port_release(stack: Long, port: Long): Int
-    external fun sipral_stack_stir(stack: Long, configAnchors: ByteArray?, configFreshnessSeconds: Long, configCertificateWaitMs: Long, configUnixSeconds: Long, nowMs: Long): Int
+    external fun sipral_stack_stir(stack: Long, configAnchors: ByteArray?, configFreshnessSeconds: Long, configCertificateWaitMs: Long, configUnixSeconds: Long, configAcceptServiceProviderCodes: Long, nowMs: Long): Int
     external fun sipral_call_stir_certificate(stack: Long, call: Long, chain: ByteArray, nowMs: Long): Int
     external fun sipral_media_encryption_count(media: Long, count: LongArray): Int
     external fun sipral_media_encryption_at(media: Long, index: Long, stream: LongArray): Int
@@ -8698,7 +8725,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 31
+    const val ABI_VERSION_MINOR: Long = 32
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9837,7 +9864,7 @@ object Sipral {
         val configStirOrig = config.stirOrig?.toByteArray(Charsets.UTF_8)
         val configStirOrigid = config.stirOrigid?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, config.recordingInClear, accountSlot))
         return accountSlot[0]
     }
 
@@ -13045,7 +13072,7 @@ object Sipral {
      * says how long it is, with `anchors` readable for `anchors_len` bytes.
      */
     fun stackStir(stack: Long, config: SipralStirConfig, nowMs: Long) {
-        check(SipralNative.sipral_stack_stir(stack, config.anchors, config.freshnessSeconds, config.certificateWaitMs, config.unixSeconds, nowMs))
+        check(SipralNative.sipral_stack_stir(stack, config.anchors, config.freshnessSeconds, config.certificateWaitMs, config.unixSeconds, config.acceptServiceProviderCodes, nowMs))
     }
 
     /**

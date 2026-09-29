@@ -251,6 +251,14 @@ record! {
         /// A `SipralAttestation`: the level it claims (RFC 8588 §4), zero for
         /// full attestation, `A`.
         pub stir_attestation: u32,
+        /// A `SipralToggle`: whether an encrypted call of this account may be
+        /// recorded to a recording server (`sipral_call_record_to`) in the
+        /// clear. Off by default: the copies of an encrypted call are offered
+        /// to the server as SRTP, with SDES keys in the recording session's
+        /// offer (RFC 4568), and a stream the server will not take that way
+        /// gets nothing (RFC 7866 §12.2). On, they go as plain RTP, as an
+        /// unencrypted call's always do. ABI 0.32.
+        pub recording_in_clear: u32,
     }
 }
 
@@ -553,6 +561,11 @@ entry! {
             suites: crate::security::srtp_suites(unsafe {
                 text(config.srtp_suites, config.srtp_suites_len, "srtp_suites")
             }?)?,
+            recording_in_clear: crate::media::toggled(
+                config.recording_in_clear,
+                "recording_in_clear",
+                false,
+            )?,
         };
         let handle = with_stack(stack, |state| {
             let account = unsafe { account_from(state, &config) }?;
@@ -758,6 +771,7 @@ pub(crate) mod tests {
             stir_origid: ptr::null(),
             stir_origid_len: 0,
             stir_attestation: 0,
+            recording_in_clear: 0,
         }
     }
 

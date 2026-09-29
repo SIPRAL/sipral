@@ -12,6 +12,7 @@ import org.sipral.SipralPresence
 import org.sipral.SipralRegistrationState
 import org.sipral.SipralStatus
 import org.sipral.SipralSubscribeConfig
+import org.sipral.SipralToggle
 
 /**
  * `sipral_account_add`, and the entry points that take its handle.
@@ -82,6 +83,7 @@ class SipralAccount internal constructor(
                 stirOrig = security.stirOrig,
                 stirOrigid = security.stirOrigid,
                 stirAttestation = (security.stirAttestation?.value ?: 0).toLong(),
+                recordingInClear = if (security.recordingInClear) SipralToggle.ON.value.toLong() else 0,
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
             return SipralAccount(client, accountHandle, aor, registrarAddress, written, contact)

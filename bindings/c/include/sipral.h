@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)31)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)32)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -558,6 +558,10 @@ typedef struct sipral_record_config sipral_record_config_t;
  *
  * The numbers are part of the ABI. A value keeps its meaning for the life of
  * the ABI's major version, and a new one is only ever added at the end.
+ *
+ * 17 is a permanent hole: reserved, never used, and never to be given
+ * to a status. `sipral_status_name` has no name for it, and a caller
+ * that meets it holds a number no build of this library returns.
  */
 typedef int32_t sipral_status_t;
 enum {
@@ -4339,10 +4343,11 @@ struct sipral_stack_config {
      * The one number a stack that reads no clock cannot work out: RFC 3550
      * §6.4.1 has a sender report carry "the wall clock time when this report
      * was sent", and a monotonic instant is not one. Zero means the reports
-     * count from the Unix epoch, which costs nothing a caller is likely to
-     * miss — the round trip the far end computes is a difference, not an
-     * absolute — and costs the correlation of this call's media with anything
-     * else's.
+     * take the wall clock `sipral_stack_stir` gives in `unix_seconds`, from
+     * the moment it is given, and count from the Unix epoch until then:
+     * the round trip the far end computes is a difference, not an
+     * absolute, but the correlation of this call's media with anything
+     * else's is not.
      */
     uint64_t media_clock_unix_seconds;
     /**
@@ -5188,6 +5193,16 @@ struct sipral_account_config {
      * full attestation, `A`.
      */
     uint32_t stir_attestation;
+    /**
+     * A `SipralToggle`: whether an encrypted call of this account may be
+     * recorded to a recording server (`sipral_call_record_to`) in the
+     * clear. Off by default: the copies of an encrypted call are offered
+     * to the server as SRTP, with SDES keys in the recording session's
+     * offer (RFC 4568), and a stream the server will not take that way
+     * gets nothing (RFC 7866 §12.2). On, they go as plain RTP, as an
+     * unencrypted call's always do. ABI 0.32.
+     */
+    uint32_t recording_in_clear;
 };
 
 /**
@@ -7959,9 +7974,21 @@ struct sipral_stir_config {
      * the time, and only the caller can say which `now_ms` a time goes
      * with, so the first call must give it.
      * (`sipral_stack_config_t::media_clock_unix_seconds` goes with no
-     * `now_ms` at all, and is not taken for it.)
+     * `now_ms` at all, and is not taken for it.) A stack created with no
+     * media clock dates its RTCP sender reports by this one too.
      */
     uint64_t unix_seconds;
+    /**
+     * A `SipralToggle`: whether a certificate whose TNAuthList names a
+     * service provider code (RFC 8226 §9) has authority over every
+     * calling number. Off by default, when only the numbers and ranges a
+     * certificate names are its own: a code names a provider, not
+     * numbers, and taking it as covering any number is a decision about
+     * the providers the anchors certify — the one a SHAKEN deployment,
+     * whose certificates carry codes and no numbers, makes by turning
+     * this on. ABI 0.32.
+     */
+    uint32_t accept_service_provider_codes;
 };
 
 /**

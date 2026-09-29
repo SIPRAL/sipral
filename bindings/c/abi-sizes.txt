@@ -36,7 +36,7 @@ sipral_recording_options_t 32 32
 sipral_screen_request_t - 48
 sipral_stack_config_t 176 376
 sipral_stack_settings_t 72 112
-sipral_stir_config_t 48 48
+sipral_stir_config_t 48 56
 sipral_stream_encryption_t 32 32
 sipral_stream_stats_t 152 328
 sipral_subscribe_config_t 88 88

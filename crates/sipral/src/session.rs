@@ -1750,6 +1750,10 @@ impl MediaSession {
         // and the buffer a digit or a beep is written into, for the same
         // reason: what goes out is borrowed from it
         let mut shaped = core::mem::take(&mut self.shaped);
+        // the frame about to be stamped stands for now on the media clock,
+        // which is what a sender report pairs with the wall clock (RFC 3550
+        // §6.4.1)
+        self.rtp.clock_at(self.elapsed(now));
         let sent = self.encode_frame(samples, echo.as_mut(), &mut shaped);
         self.shaped = shaped;
         self.echo = echo;
@@ -2442,9 +2446,13 @@ impl MediaSession {
         self.tap.is_some()
     }
 
-    /// Start copying this call's audio as `tap` says, or stop.
-    pub(crate) fn tap_to(&mut self, tap: Option<crate::siprec::Tap>) {
-        self.tap = tap;
+    /// Start copying this call's audio as `tap` says, or stop, and hand back
+    /// the copies that were running.
+    pub(crate) const fn tap_to(
+        &mut self,
+        tap: Option<crate::siprec::Tap>,
+    ) -> Option<crate::siprec::Tap> {
+        core::mem::replace(&mut self.tap, tap)
     }
 
     /// The copies running, to point them somewhere else.
@@ -2814,6 +2822,11 @@ impl MediaSession {
     #[must_use]
     pub const fn plan(&self) -> &MediaPlan {
         &self.plan
+    }
+
+    /// Date this session's sender reports by `clock` from here on.
+    pub(crate) const fn set_wall_clock(&mut self, clock: WallClock) {
+        self.clock = clock;
     }
 
     /// How long a frame is, in milliseconds.

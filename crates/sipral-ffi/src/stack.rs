@@ -387,10 +387,11 @@ record! {
         /// The one number a stack that reads no clock cannot work out: RFC 3550
         /// §6.4.1 has a sender report carry "the wall clock time when this report
         /// was sent", and a monotonic instant is not one. Zero means the reports
-        /// count from the Unix epoch, which costs nothing a caller is likely to
-        /// miss — the round trip the far end computes is a difference, not an
-        /// absolute — and costs the correlation of this call's media with anything
-        /// else's.
+        /// take the wall clock `sipral_stack_stir` gives in `unix_seconds`, from
+        /// the moment it is given, and count from the Unix epoch until then:
+        /// the round trip the far end computes is a difference, not an
+        /// absolute, but the correlation of this call's media with anything
+        /// else's is not.
         pub media_clock_unix_seconds: u64,
         /// Thirty-two more bytes of entropy, for the media keys, and **not
         /// the same bytes as `entropy`**.
@@ -1128,6 +1129,10 @@ pub(crate) struct StackState {
     /// The caller's clock as the engine's pump reads it: what
     /// `StackState::advance` writes on every poll.
     clock: Arc<crate::audio::Clock>,
+    /// Whether `media_clock_unix_seconds` gave the engine a wall clock. A
+    /// stack created without one dates its sender reports by the first that
+    /// `sipral_stack_stir` pairs with a `now_ms`.
+    pub(crate) media_clock: bool,
     /// This stack's log, shared with the engine and the entry: lines are
     /// queued while the stack is held and delivered once it is not.
     pub(crate) log: sipral::Log,
@@ -1733,6 +1738,7 @@ pub(crate) unsafe fn create_on(
         nat: crate::nat::Nat::default(),
         audio: audio.clone(),
         clock,
+        media_clock: config.media_clock_unix_seconds != 0,
         log: log.clone(),
         pseudonyms: pseudonyms.into_boxed_slice(),
         lost: Vec::new(),

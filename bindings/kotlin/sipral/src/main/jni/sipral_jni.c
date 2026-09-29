@@ -2168,7 +2168,7 @@ Java_org_sipral_SipralNative_sipral_1account_1push_1echo(JNIEnv *env, jobject se
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jbyteArray configQualityReportUri, jlong configSessionTimer, jlong configSessionIntervalSeconds, jlong configPrivacy, jbyteArray configTrustedPeers, jlong configSrtp, jbyteArray configSrtpSuites, jlong configStirVerification, jbyteArray configStirKey, jbyteArray configStirCertificateUrl, jbyteArray configStirOrig, jbyteArray configStirOrigid, jlong configStirAttestation, jlongArray account)
+Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jbyteArray configQualityReportUri, jlong configSessionTimer, jlong configSessionIntervalSeconds, jlong configPrivacy, jbyteArray configTrustedPeers, jlong configSrtp, jbyteArray configSrtpSuites, jlong configStirVerification, jbyteArray configStirKey, jbyteArray configStirCertificateUrl, jbyteArray configStirOrig, jbyteArray configStirOrigid, jlong configStirAttestation, jlong configRecordingInClear, jlongArray account)
 {
     (void)env;
     (void)self;
@@ -2256,6 +2256,7 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     config_value.stir_origid = (const char *)configStirOrigid_data;
     config_value.stir_origid_len = (size_t)configStirOrigid_size;
     config_value.stir_attestation = (uint32_t)configStirAttestation;
+    config_value.recording_in_clear = (uint32_t)configRecordingInClear;
     sipral_handle_t account_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -4693,7 +4694,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1rtp_1port_1release(JNIEnv *env, jobj
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1stir(JNIEnv *env, jobject self, jlong stack, jbyteArray configAnchors, jlong configFreshnessSeconds, jlong configCertificateWaitMs, jlong configUnixSeconds, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1stack_1stir(JNIEnv *env, jobject self, jlong stack, jbyteArray configAnchors, jlong configFreshnessSeconds, jlong configCertificateWaitMs, jlong configUnixSeconds, jlong configAcceptServiceProviderCodes, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -4707,6 +4708,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1stir(JNIEnv *env, jobject self, jlon
     config_value.freshness_seconds = (uint64_t)configFreshnessSeconds;
     config_value.certificate_wait_ms = (uint64_t)configCertificateWaitMs;
     config_value.unix_seconds = (uint64_t)configUnixSeconds;
+    config_value.accept_service_provider_codes = (uint32_t)configAcceptServiceProviderCodes;
     sipral_status_t status = sipral_stack_stir((sipral_handle_t)stack, &config_value, (uint64_t)nowMs);
     if (configAnchors) {
         (*env)->ReleaseByteArrayElements(env, configAnchors, configAnchors_data, JNI_ABORT);

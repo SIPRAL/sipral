@@ -1280,6 +1280,85 @@ fn every_ogg_opus_recording_draws_a_serial_of_its_own() {
     assert_ne!(serials[0], serials[1], "{serials:?}");
 }
 
+/// RFC 3550 §6.4.1: a sender report carries the wall clock at the moment it
+/// is sent, in NTP form, and the RTP timestamp that stands for that same
+/// moment — the media clock read at the last frame and carried on at the
+/// clock rate, not the timestamp of the packet that happens to be next.
+#[test]
+fn a_sender_report_pairs_the_wall_clock_with_the_media_clock() {
+    let now = Instant::now();
+    let (ours, theirs) = plan_pair(
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 0\r\n",
+        "v=0\r\no=- 2 2 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 0\r\n",
+    );
+    // the wall clock read 1 700 000 000 seconds past 1970 at `now`
+    let mut session = session(&ours, &theirs, now);
+    let frame = vec![0_i16; session.frame_samples()];
+    let mut report = None;
+    for index in 0..1_000_u32 {
+        let at = now + Duration::from_millis(20) * index;
+        let _ = session.capture(&frame, at).expect("the frame encodes");
+        let late = at + Duration::from_millis(5);
+        if let Some(datagram) = session.poll_rtcp(late) {
+            report = Some((index, late, datagram.payload.to_vec()));
+            break;
+        }
+    }
+    let (index, late, bytes) = report.expect("a report within twenty seconds");
+    let compound = sipral_rtp::CompoundPacket::parse(&bytes).expect("RTCP");
+    let Some(sipral_rtp::RtcpPacket::SenderReport(sr)) = compound.packets().next() else {
+        panic!("an SR: this end has sent");
+    };
+    let info = sr.info();
+    let elapsed = late.duration_since(now);
+    let ntp_seconds = 1_700_000_000 + 2_208_988_800 + elapsed.as_secs();
+    assert_eq!(info.ntp >> 32, ntp_seconds, "the wall clock, in NTP form");
+    let fraction = (u64::from(elapsed.subsec_nanos()) << 32) / 1_000_000_000;
+    assert_eq!(info.ntp & 0xffff_ffff, fraction);
+    // the frame captured at `index` began at 160 × index on the RTP clock,
+    // and the report went five milliseconds — forty ticks — after it
+    assert_eq!(info.rtp_timestamp, 160 * index + 40);
+}
+
+/// An application that learns the time after the engine was made says so,
+/// and the calls already running date their sender reports by it.
+#[test]
+fn a_wall_clock_given_later_dates_the_reports_of_calls_already_running() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let set_at = pair.now;
+    pair.caller
+        .engine
+        .set_wall_clock(WallClock::from_unix(set_at, 1_800_000_000, 0));
+    assert_eq!(
+        pair.caller.engine.wall_clock().unix_at(set_at),
+        1_800_000_000
+    );
+    let samples = vec![0_i16; 160];
+    let mut report = None;
+    for _ in 0..1_000 {
+        pair.exchange(call, remote, &samples);
+        pair.advance();
+        if let Some((_, _, payload)) = pair.caller.engine.poll_rtcp(pair.now) {
+            report = Some((pair.now, payload));
+            break;
+        }
+    }
+    let (at, bytes) = report.expect("a report within twenty seconds");
+    let compound = sipral_rtp::CompoundPacket::parse(&bytes).expect("RTCP");
+    let Some(sipral_rtp::RtcpPacket::SenderReport(sr)) = compound.packets().next() else {
+        panic!("an SR: the caller has sent");
+    };
+    assert_eq!(
+        sr.info().ntp >> 32,
+        1_800_000_000 + 2_208_988_800 + at.duration_since(set_at).as_secs()
+    );
+}
+
 /// RFC 3264 §6.1 lets an answer renumber a dynamic payload type, and §5.1
 /// has each end send with the numbers the other listed: Alice offers L16 as
 /// 97 and named events as 101, Bob answers them as 99 and 100. Each sends on
@@ -12894,11 +12973,13 @@ fn far_end_copy() -> SocketAddr {
 }
 
 /// A recording server: a user agent over TCP that answers whatever
-/// recording session reaches it with two receive-only streams.
+/// recording session reaches it with two receive-only streams — as SRTP
+/// under `crypto`'s lines, one a stream, when it has any.
 struct Server {
     agent: UserAgent,
     call: Option<CallHandle>,
     heard: Vec<UaEvent>,
+    crypto: Option<[&'static str; 2]>,
 }
 
 impl Server {
@@ -12920,7 +13001,30 @@ impl Server {
             agent,
             call: None,
             heard: Vec::new(),
+            crypto: None,
         }
+    }
+
+    /// Answer as SRTP, each stream taking the offered line `lines` names
+    /// with a key of the server's own.
+    const fn keyed(mut self, lines: [&'static str; 2]) -> Self {
+        self.crypto = Some(lines);
+        self
+    }
+
+    fn answer(&self) -> String {
+        let stream = |port: u16, index: usize| match self.crypto {
+            Some(lines) => format!(
+                "m=audio {port} RTP/SAVP 0\r\na=recvonly\r\na=crypto:{}\r\n",
+                lines[index]
+            ),
+            None => format!("m=audio {port} RTP/AVP 0\r\na=recvonly\r\n"),
+        };
+        format!(
+            "v=0\r\no=srs 7 7 IN IP4 192.0.2.3\r\ns=-\r\nc=IN IP4 192.0.2.3\r\nt=0 0\r\n{}{}",
+            stream(30000, 0),
+            stream(30002, 1)
+        )
     }
 
     /// Take what the caller wrote to it, and answer a recording session that
@@ -12938,8 +13042,7 @@ impl Server {
         while let Some(event) = self.agent.poll_event() {
             if let UaEvent::IncomingCall { call, .. } = &event {
                 self.call = Some(*call);
-                let answer = "v=0\r\no=srs 7 7 IN IP4 192.0.2.3\r\ns=-\r\nc=IN IP4 192.0.2.3\r\n\
-t=0 0\r\nm=audio 30000 RTP/AVP 0\r\na=recvonly\r\nm=audio 30002 RTP/AVP 0\r\na=recvonly\r\n";
+                let answer = self.answer();
                 self.agent
                     .answer(*call, Some(Arc::from(answer.as_bytes())), now)
                     .expect("the server answers");
@@ -12999,8 +13102,23 @@ fn recorded_call() -> (Pair, Server, CallHandle, CallHandle, CallHandle) {
 
 /// The same, on a call whose two ends offer `codecs`.
 fn recorded_call_on(codecs: &[&str]) -> (Pair, Server, CallHandle, CallHandle, CallHandle) {
-    let mut pair = Pair::new(CodecCatalog::with_order(codecs).expect("an order"));
+    recorded_call_with(
+        CodecCatalog::with_order(codecs).expect("an order"),
+        Server::new,
+        |_, _| {},
+    )
+}
+
+/// The same, between two ends on `catalog`, to the server `server` makes,
+/// with `prepare` done to the pair before the recording session goes.
+fn recorded_call_with(
+    catalog: CodecCatalog,
+    server: impl FnOnce(Instant) -> Server,
+    prepare: impl FnOnce(&mut Pair, CallHandle),
+) -> (Pair, Server, CallHandle, CallHandle, CallHandle) {
+    let mut pair = Pair::new(catalog);
     let call = pair.connect();
+    prepare(&mut pair, call);
     let remote = pair.callee.call().expect("the callee knows the call");
     let now = pair.now;
     pair.caller
@@ -13015,7 +13133,7 @@ fn recorded_call_on(codecs: &[&str]) -> (Pair, Server, CallHandle, CallHandle, C
             now,
         )
         .expect("binding TCP");
-    let mut server = Server::new(now);
+    let mut server = server(now);
     let recording = pair
         .caller
         .engine
@@ -13153,6 +13271,177 @@ fn both_directions_of_the_call_are_copied_to_the_server_as_they_went() {
     assert_eq!(far.len(), 1, "the packet the caller took, copied: {out:?}");
     assert_eq!(far[0].1, "192.0.2.3:30002".parse().expect("an address"));
     assert_eq!(rtp_parts(&far[0].2).1, rtp_parts(&back[1]).1);
+}
+
+/// A server that takes each stream under the offered AES_CM_128_HMAC_SHA1_80
+/// line — tag 2, after AEAD_AES_256_GCM — with keys of its own.
+fn srtp_server(now: Instant) -> Server {
+    Server::new(now).keyed([
+        "2 AES_CM_128_HMAC_SHA1_80 inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR",
+        "2 AES_CM_128_HMAC_SHA1_80 inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz",
+    ])
+}
+
+fn encrypted_catalog() -> CodecCatalog {
+    CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Required)
+}
+
+/// The recording session's offer, as the server read it.
+fn recording_offer(server: &Server) -> SessionDescription {
+    let request = server
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { request, .. } => Some(request.clone()),
+            _ => None,
+        })
+        .expect("the server heard the INVITE");
+    let raw = request.as_raw();
+    let offer = sipral_ua::siprec::read_recording_offer(&raw).expect("a recording offer");
+    parse(offer.sdp).expect("the offer")
+}
+
+/// What opens the copies of `stream`: the key this end offered on it under
+/// the line the server took, tag 2.
+fn copy_opener(offer: &SessionDescription, stream: usize) -> sipral_rtp::srtp::Unprotector {
+    let line = offer.media[stream]
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == "crypto")
+        .filter_map(|attribute| Crypto::parse(attribute.value.as_deref()?))
+        .find(|line| line.tag == 2)
+        .expect("an AES_CM_128_HMAC_SHA1_80 line");
+    let policy = line.policy().expect("a line this end wrote");
+    let key = &policy.keys[0].keys;
+    sipral_rtp::srtp::Unprotector::new(
+        sipral_rtp::srtp::Policy::new(sipral_rtp::srtp::Suite::AesCm80),
+        sipral_rtp::srtp::Master::new(key.key(), key.salt()),
+    )
+}
+
+/// RFC 7866 §12.2: the copies of an encrypted call reach the recording server
+/// encrypted too — offered as SRTP with SDES keys in the recording session's
+/// own offer, sent under the key of the line the server took, each stream
+/// under its own.
+#[test]
+fn an_encrypted_call_is_recorded_to_the_server_as_srtp() {
+    let (mut pair, server, call, remote, _) =
+        recorded_call_with(encrypted_catalog(), srtp_server, |_, _| {});
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .is_encrypted()
+    );
+    let offer = recording_offer(&server);
+    for stream in &offer.media {
+        assert_eq!(stream.proto, "RTP/SAVP");
+        assert!(
+            stream.attribute("crypto").is_some(),
+            "keys in the offer: {stream:?}"
+        );
+    }
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    tone(&mut samples, 8_000, &mut phase);
+    let _ = pair.speak(call, remote, &samples);
+    let out = copies(&mut pair, call);
+    assert_eq!(out.len(), 1, "this end's frame, once");
+    let mut copy = out[0].2.clone();
+    let clear = rtp_parts(&copy).1;
+    let opened = copy_opener(&offer, 0)
+        .unprotect_rtp(&mut copy)
+        .expect("SRTP under the key offered for the stream labelled 1");
+    let plain = rtp_parts(&copy[..opened]).1;
+    assert_eq!(plain.len(), 160, "one frame of PCMU");
+    assert_ne!(clear, plain, "the payload went encrypted");
+
+    // and the far end's, under the other stream's key
+    for _ in 0..2 {
+        let mut frame = pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media")
+            .capture(&samples, pair.now)
+            .expect("it encodes")
+            .map(|datagram| datagram.payload.to_vec())
+            .expect("a frame");
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .receive(&mut frame, callee_media(), pair.now);
+        pair.advance();
+    }
+    let far: Vec<_> = copies(&mut pair, call)
+        .into_iter()
+        .filter(|(from, _, _)| *from == far_end_copy())
+        .collect();
+    assert_eq!(far.len(), 1, "the packet the caller took, copied");
+    let mut copy = far[0].2.clone();
+    copy_opener(&offer, 1)
+        .unprotect_rtp(&mut copy)
+        .expect("SRTP under the key offered for the stream labelled 2");
+}
+
+/// A server that answers an encrypted call's recording session in the clear
+/// is sent nothing: the copies never leave encryption behind unless the
+/// account said they may.
+#[test]
+fn an_encrypted_call_whose_server_will_not_take_srtp_is_not_copied() {
+    let (mut pair, _server, call, remote, _) =
+        recorded_call_with(encrypted_catalog(), Server::new, |_, _| {});
+    let samples = vec![1_000_i16; 160];
+    for _ in 0..3 {
+        let _ = pair.speak(call, remote, &samples);
+        pair.advance();
+    }
+    assert_eq!(copies(&mut pair, call), [], "nothing in the clear");
+}
+
+/// An account that allows it has an encrypted call recorded in the clear,
+/// as an unencrypted call always is.
+#[test]
+fn an_account_that_allows_it_records_an_encrypted_call_in_the_clear() {
+    let (mut pair, server, call, remote, _) =
+        recorded_call_with(encrypted_catalog(), Server::new, |pair, call| {
+            let account = pair
+                .caller
+                .agent
+                .call_account(call)
+                .expect("the call's account");
+            let mut srtp = pair
+                .caller
+                .engine
+                .account_srtp(account)
+                .cloned()
+                .unwrap_or_default();
+            srtp.recording_in_clear = true;
+            pair.caller
+                .engine
+                .set_account_srtp(account, srtp)
+                .expect("the account's policy");
+        });
+    let offer = recording_offer(&server);
+    assert!(
+        offer
+            .media
+            .iter()
+            .all(|stream| stream.proto == "RTP/AVP" && stream.attribute("crypto").is_none())
+    );
+    let samples = vec![1_000_i16; 160];
+    let (sent, _) = pair.speak(call, remote, &samples);
+    let out = copies(&mut pair, call);
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        rtp_parts(&out[0].2).0.payload_type,
+        rtp_parts(&sent).0.payload_type
+    );
 }
 
 #[test]
