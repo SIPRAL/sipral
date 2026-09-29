@@ -168,7 +168,7 @@ public final class Account: @unchecked Sendable {
                 config.stir_origid_len = parts[11].count
             }
             config.stir_attestation = security.stirAttestation.rawValue
-            config.recording_in_clear = security.recordingInClear ? SipralToggle.on.rawValue : 0
+            config.recording_in_clear = security.recordingInClear ? UInt64(SipralToggle.on.rawValue) : 0
             return try key.withUnsafeBufferPointer { keyBytes in
                 if !keyBytes.isEmpty {
                     config.stir_key = keyBytes.baseAddress

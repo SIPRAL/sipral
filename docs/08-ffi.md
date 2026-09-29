@@ -1303,7 +1303,12 @@ in the recording session's INVITE (RFC 7866 §12.2), and a stream the server
 will not take that way gets nothing. `sipral_account_config_t` appends
 `recording_in_clear`, a `SipralToggle` off by default: on, the account's
 encrypted calls are recorded as plain RTP, as an unencrypted call always is.
-The keys ride in the recording session's signalling, which is one more reason
+It is 64 bits wide, unlike every other toggle, because the struct's 0.31
+length of 384 bytes ended in four bytes of padding after `stir_attestation`:
+a 32-bit member would have sat in them, read from bytes a 0.31 caller may
+never have written, and declared the same length. A member appended to a
+released struct starts at or past the struct's released length, never in its
+tail padding. The keys ride in the recording session's signalling, which is one more reason
 to send it over TLS.
 
 `sipral_call_answer_with` is the answer `sipral_call_ring_media` always had

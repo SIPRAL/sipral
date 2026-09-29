@@ -246,7 +246,7 @@ fn an_account_says_whether_its_encrypted_calls_may_be_recorded_in_the_clear() {
     let (status, quiet) = account(stack, &config);
     assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
     assert!(!in_clear(quiet), "off unless said");
-    config.recording_in_clear = crate::media::SipralToggle::On as u32;
+    config.recording_in_clear = u64::from(crate::media::SipralToggle::On as u32);
     (config.aor, config.aor_len) = text("sip:open@example.com");
     let (status, open) = account(stack, &config);
     assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
@@ -259,6 +259,52 @@ fn an_account_says_whether_its_encrypted_calls_may_be_recorded_in_the_clear() {
         "{}",
         last_error_text()
     );
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+/// A caller built against ABI 0.31 declares the 384 bytes that header gave
+/// `sipral_account_config_t`, whose last four were padding then and may be
+/// left unwritten. Whatever they hold is not read as `recording_in_clear`:
+/// the account is added, and its encrypted calls are recorded encrypted.
+#[test]
+fn padding_a_0_31_caller_left_unwritten_is_not_read_as_recording_in_clear() {
+    const LENGTH_0_31: usize = 384;
+    let credentials = credentials(&[CALLER]);
+    let mut heard = Heard::default();
+    let stack = stack_hearing(&mut heard, &credentials, false);
+    let mut config = crate::account::tests::account_config();
+    config.size = LENGTH_0_31;
+    for garbage in [0xA5_u8, 0x01] {
+        let bytes = ptr::from_mut(&mut config).cast::<u8>();
+        for offset in LENGTH_0_31 - 4..LENGTH_0_31 {
+            // the padding a 0.31 caller never wrote, whatever its stack held
+            let byte = if offset == LENGTH_0_31 - 4 {
+                garbage
+            } else {
+                0
+            };
+            unsafe { bytes.add(offset).write(byte) };
+        }
+        (config.aor, config.aor_len) = text(if garbage == 1 {
+            "sip:one@example.com"
+        } else {
+            "sip:noise@example.com"
+        });
+        let (status, added) = account(stack, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let in_clear = crate::stack::with_stack(stack, |state| {
+            let id = state.accounts.get(added).expect("the account");
+            Ok(state
+                .engine
+                .account_srtp(id)
+                .is_some_and(|srtp| srtp.recording_in_clear))
+        })
+        .expect("the stack");
+        assert!(
+            !in_clear,
+            "padding holding {garbage:#x} was read as a toggle"
+        );
+    }
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 

@@ -5201,8 +5201,13 @@ struct sipral_account_config {
      * offer (RFC 4568), and a stream the server will not take that way
      * gets nothing (RFC 7866 §12.2). On, they go as plain RTP, as an
      * unencrypted call's always do. ABI 0.32.
+     *
+     * Sixty-four bits wide, where every other toggle takes thirty-two,
+     * so that it starts past the 384 bytes of ABI 0.31: the last four
+     * of those were padding, which a caller built against that header
+     * may have left unwritten, and are never read.
      */
-    uint32_t recording_in_clear;
+    uint64_t recording_in_clear;
 };
 
 /**

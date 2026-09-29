@@ -2256,7 +2256,7 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     config_value.stir_origid = (const char *)configStirOrigid_data;
     config_value.stir_origid_len = (size_t)configStirOrigid_size;
     config_value.stir_attestation = (uint32_t)configStirAttestation;
-    config_value.recording_in_clear = (uint32_t)configRecordingInClear;
+    config_value.recording_in_clear = (uint64_t)configRecordingInClear;
     sipral_handle_t account_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;

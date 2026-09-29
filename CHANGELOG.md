@@ -12,7 +12,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
-- **ABI 0.32, security:** `accept_service_provider_codes` in `sipral_stir_config_t` and `recording_in_clear` in `sipral_account_config_t`, both `SipralToggle`s off by default, with `acceptServiceProviderCodes`/`accept_service_provider_codes` on the four layers' `stir` and `recordingInClear`/`recording_in_clear` on their account security; status 17 is documented as a permanent hole, reserved and never used.
+- **ABI 0.32, security:** `accept_service_provider_codes` in `sipral_stir_config_t` and `recording_in_clear` in `sipral_account_config_t` (64 bits wide, so that it starts past the struct's 0.31 length rather than in its tail padding), both `SipralToggle`s off by default, with `acceptServiceProviderCodes`/`accept_service_provider_codes` on the four layers' `stir` and `recordingInClear`/`recording_in_clear` on their account security; status 17 is documented as a permanent hole, reserved and never used.
 - **Conferences, presence, real-time text, RTCP feedback and SIPREC in the .NET and Python layers:** subscriptions (`Account.Subscribe`/`subscribe`) with the conference picture read whole, presence watched and published, a call's text stream sent and read, AVPF asked for, a focus named and a call recorded to a recording server, with L16 proved as a codec.
 - **STIR/SHAKEN in calls.** An account given a P-256 key and the URL of its
   certificate signs every call it places (RFC 8224 §6.1, full-form PASSporT
