@@ -669,6 +669,33 @@ mod tests {
     }
 
     #[test]
+    fn a_redundant_block_of_another_format_still_counts_as_a_generation() {
+        // the oldest generation is not text, the one after it is: that one
+        // still belongs to the packet just before, not two before
+        let mut payload = Vec::new();
+        let blocks = [
+            RedundantBlock {
+                payload_type: 0,
+                timestamp_offset: 600,
+                data: b"xx",
+            },
+            RedundantBlock {
+                payload_type: T140,
+                timestamp_offset: 300,
+                data: b"b",
+            },
+        ];
+        write_red(&blocks, T140, b"c", &mut payload).unwrap();
+        let mut rx = receiver();
+        rx.receive(bare(1, b"a"), ms(0));
+        let mut red = bare(3, &payload);
+        red.payload_type = RED;
+        assert_eq!(rx.receive(red, ms(0)), Arrival::Accepted);
+        assert_eq!(transcript(&mut rx), "abc");
+        assert_eq!(rx.deadline(), None);
+    }
+
+    #[test]
     fn the_payload_types_are_checked() {
         assert!(TextReceiver::new(ReceiverConfig::new(T140, Some(T140))).is_err());
         assert!(TextReceiver::new(ReceiverConfig::new(128, None)).is_err());
