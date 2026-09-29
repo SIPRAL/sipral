@@ -83,6 +83,18 @@ pub enum UaError {
     /// A redirect was asked for with a status outside 300 to 399, or one
     /// other than 380 with nowhere to redirect to (RFC 3261 §21.3).
     NotARedirection(sipral_core::msg::StatusCode),
+    /// The handle names a publication whose state was removed, or never
+    /// existed.
+    NoSuchPublication,
+    /// A publication cannot do this as it stands: see
+    /// [`PublishError`](crate::PublishError).
+    Publish(crate::PublishError),
+    /// The call's far end has not said it is a conference focus (RFC 4579
+    /// §4.2): its `Contact` carried no `isfocus`.
+    NotAFocus,
+    /// A recording session could not be written: see
+    /// [`SiprecError`](crate::siprec::SiprecError).
+    Recording(crate::siprec::SiprecError),
 }
 
 impl fmt::Display for UaError {
@@ -127,6 +139,12 @@ impl fmt::Display for UaError {
                 "a {} is not a redirection: those are 300 to 399",
                 status.get()
             ),
+            Self::NoSuchPublication => f.write_str("no such publication"),
+            Self::Publish(ref error) => write!(f, "cannot publish it: {error}"),
+            Self::NotAFocus => {
+                f.write_str("the far end of the call did not say it is a conference focus")
+            }
+            Self::Recording(ref error) => write!(f, "cannot record the call: {error}"),
         }
     }
 }

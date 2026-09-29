@@ -15325,3 +15325,493 @@ fn message_summary_says_nothing_once_the_subscription_stops() {
         "a subscription that is not live is not evidence about the mailbox"
     );
 }
+
+// -- presence (RFC 3856) and publication (RFC 3903) --------------------------
+
+/// A presence document about `entity`, open or closed, with the RPID
+/// activity `activity` when there is one.
+fn pidf(entity: &str, open: bool, activity: Option<&str>) -> String {
+    let person = activity.map_or_else(String::new, |activity| {
+        format!(
+            "<dm:person id=\"p1\"><rpid:activities><rpid:{activity}/></rpid:activities>\
+</dm:person>"
+        )
+    });
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<presence xmlns=\"urn:ietf:params:xml:ns:pidf\" \
+xmlns:dm=\"urn:ietf:params:xml:ns:pidf:data-model\" \
+xmlns:rpid=\"urn:ietf:params:xml:ns:pidf:rpid\" entity=\"{entity}\">\
+<tuple id=\"t1\"><status><basic>{}</basic></status></tuple>{person}</presence>",
+        if open { "open" } else { "closed" }
+    )
+}
+
+/// The presence publications' news, in order.
+fn published(agent: &mut UserAgent) -> Vec<crate::PublishEvent> {
+    events(agent)
+        .into_iter()
+        .filter_map(|event| match event {
+            UaEvent::Publication { event, .. } => Some(event),
+            _ => None,
+        })
+        .collect()
+}
+
+fn presence_of(activity: crate::presence::Activity) -> crate::presence::Presence {
+    let mut presence = crate::presence::Presence::new("sip:alice@example.com");
+    presence.tuples.push(crate::presence::Tuple::new(
+        "t1",
+        crate::presence::Basic::Open,
+    ));
+    presence.person = Some(crate::presence::Person {
+        id: Box::from("p1"),
+        activities: vec![activity],
+    });
+    presence
+}
+
+#[test]
+fn a_presence_notify_is_read_into_the_presentitys_document() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(
+            id,
+            &Subscribe::new(uri("sip:bob@example.com"), crate::PRESENCE_EVENT),
+            t0,
+        )
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    let body = pidf("sip:bob@example.com", true, Some("on-the-phone"));
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            1,
+            "notifier",
+            "presence",
+            "active;expires=3600",
+            Some(("application/pidf+xml", &body)),
+            "",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    let told: Vec<_> = events(&mut agent)
+        .into_iter()
+        .filter_map(|event| match event {
+            UaEvent::PresenceChanged {
+                subscription,
+                presence,
+            } => Some((subscription, presence)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told.len(), 1, "one document, one piece of news");
+    assert_eq!(told[0].0, handle);
+    assert!(told[0].1.is_open());
+    assert_eq!(
+        told[0].1.activities(),
+        &[crate::presence::Activity::OnThePhone]
+    );
+    assert_eq!(
+        agent.presence(handle).map(|held| &*held.entity),
+        Some("sip:bob@example.com")
+    );
+
+    // a body that will not read leaves the last good one standing
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            2,
+            "notifier",
+            "presence",
+            "active;expires=3600",
+            Some(("application/pidf+xml", "<presence")),
+            "",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(*event, UaEvent::PresenceChanged { .. }))
+    );
+    assert!(
+        agent
+            .presence(handle)
+            .is_some_and(crate::presence::Presence::is_open)
+    );
+}
+
+#[test]
+fn a_dialog_subscription_is_never_read_as_presence() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    let body = pidf("sip:201@example.com", true, None);
+    deliver(
+        &mut agent,
+        &notification(
+            &subscribe,
+            1,
+            "notifier",
+            "active;expires=3600",
+            Some(("application/pidf+xml", &body)),
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(*event, UaEvent::PresenceChanged { .. }))
+    );
+    assert!(agent.presence(handle).is_none());
+}
+
+#[test]
+fn presence_is_published_for_the_account_and_refreshed_under_its_entity_tag() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .publish_presence(id, &presence_of(crate::presence::Activity::Away), t0)
+        .expect("the PUBLISH goes");
+    let publish = only(&transmits(&mut agent), "PUBLISH ");
+    assert!(publish.starts_with(b"PUBLISH sip:alice@example.com SIP/2.0\r\n"));
+    assert_eq!(text(&publish, HeaderName::Event), "presence");
+    assert_eq!(text(&publish, HeaderName::Expires), "3600");
+    assert_eq!(
+        text(&publish, HeaderName::ContentType),
+        "application/pidf+xml"
+    );
+    assert!(text(&publish, HeaderName::To).contains("sip:alice@example.com"));
+    assert!(body_of(&publish).contains("<rpid:away/>"));
+    assert!(header(&publish, HeaderName::Extension("SIP-If-Match")).is_empty());
+
+    deliver(
+        &mut agent,
+        &reply(
+            &publish,
+            200,
+            "OK",
+            "SIP-ETag: dx200xyz\r\nExpires: 1800\r\n",
+        ),
+        t0,
+    );
+    assert!(matches!(
+        published(&mut agent).as_slice(),
+        [crate::PublishEvent::Published { etag, .. }] if &**etag == "dx200xyz"
+    ));
+    assert_eq!(agent.publication_etag(handle), Some("dx200xyz"));
+
+    let due = agent
+        .publication_deadline()
+        .expect("a refresh is scheduled");
+    assert!(due <= t0 + Duration::from_secs(1_800));
+    assert!(agent.poll_timeout().is_some_and(|wake| wake <= due));
+    agent.handle_timeout(due);
+    let refresh = only(&transmits(&mut agent), "PUBLISH ");
+    assert_eq!(
+        text(&refresh, HeaderName::Extension("SIP-If-Match")),
+        "dx200xyz"
+    );
+    assert!(body_of(&refresh).is_empty(), "a refresh carries no body");
+}
+
+#[test]
+fn a_publish_challenged_is_answered_with_the_accounts_credentials() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    agent
+        .publish_presence(id, &presence_of(crate::presence::Activity::Busy), t0)
+        .expect("the PUBLISH goes");
+    let publish = only(&transmits(&mut agent), "PUBLISH ");
+    deliver(&mut agent, &unauthorized(&publish), t0);
+    let retried = only(&transmits(&mut agent), "PUBLISH ");
+    credentials_of(&retried, HeaderName::Authorization);
+    assert!(
+        published(&mut agent).is_empty(),
+        "a challenge answered is nobody's news"
+    );
+    deliver(
+        &mut agent,
+        &reply(&retried, 200, "OK", "SIP-ETag: e1\r\nExpires: 3600\r\n"),
+        t0,
+    );
+    assert!(matches!(
+        published(&mut agent).as_slice(),
+        [crate::PublishEvent::Published { .. }]
+    ));
+}
+
+#[test]
+fn a_publish_challenged_with_nothing_to_answer_it_is_refused() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .publish_presence(id, &presence_of(crate::presence::Activity::Busy), t0)
+        .expect("the PUBLISH goes");
+    let publish = only(&transmits(&mut agent), "PUBLISH ");
+    deliver(&mut agent, &unauthorized(&publish), t0);
+    assert!(
+        transmits(&mut agent)
+            .iter()
+            .all(|out| !out.starts_with(b"PUBLISH "))
+    );
+    assert_eq!(
+        published(&mut agent),
+        vec![crate::PublishEvent::Failed {
+            reason: crate::PublishFailure::Refused,
+            status: Some(StatusCode::UNAUTHORIZED),
+        }]
+    );
+}
+
+#[test]
+fn a_second_presence_modifies_the_publication_the_first_made() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let first = agent
+        .publish_presence(id, &presence_of(crate::presence::Activity::Away), t0)
+        .expect("the PUBLISH goes");
+    let publish = only(&transmits(&mut agent), "PUBLISH ");
+    deliver(
+        &mut agent,
+        &reply(&publish, 200, "OK", "SIP-ETag: e1\r\nExpires: 3600\r\n"),
+        t0,
+    );
+    published(&mut agent);
+    let second = agent
+        .publish_presence(id, &presence_of(crate::presence::Activity::Meeting), t0)
+        .expect("the modification goes");
+    assert_eq!(first, second, "one presence per account");
+    assert_eq!(agent.presence_publication(id), Some(first));
+    let modify = only(&transmits(&mut agent), "PUBLISH ");
+    assert_eq!(text(&modify, HeaderName::Extension("SIP-If-Match")), "e1");
+    assert!(body_of(&modify).contains("<rpid:meeting/>"));
+}
+
+#[test]
+fn unpublishing_removes_the_state_and_lets_the_handle_go() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .publish(
+            id,
+            &crate::Publish::new("presence"),
+            "application/pidf+xml",
+            Arc::from(pidf("sip:alice@example.com", true, None).as_bytes()),
+            t0,
+        )
+        .expect("the PUBLISH goes");
+    let publish = only(&transmits(&mut agent), "PUBLISH ");
+    deliver(
+        &mut agent,
+        &reply(&publish, 200, "OK", "SIP-ETag: e9\r\nExpires: 3600\r\n"),
+        t0,
+    );
+    published(&mut agent);
+    agent.unpublish(handle, t0).expect("the removal goes");
+    let removal = only(&transmits(&mut agent), "PUBLISH ");
+    assert_eq!(text(&removal, HeaderName::Expires), "0");
+    assert_eq!(text(&removal, HeaderName::Extension("SIP-If-Match")), "e9");
+    deliver(&mut agent, &reply(&removal, 200, "OK", ""), t0);
+    assert_eq!(published(&mut agent), vec![crate::PublishEvent::Removed]);
+    assert_eq!(agent.unpublish(handle, t0), Err(UaError::NoSuchPublication));
+    assert_eq!(
+        agent.publication_deadline(),
+        None,
+        "nothing left to refresh"
+    );
+}
+
+#[test]
+fn a_publication_that_never_reached_the_compositor_is_let_go_at_once() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .publish_presence(id, &presence_of(crate::presence::Activity::Away), t0)
+        .expect("the PUBLISH goes");
+    let publish = only(&transmits(&mut agent), "PUBLISH ");
+    deliver(&mut agent, &reply(&publish, 489, "Bad Event", ""), t0);
+    published(&mut agent);
+    agent.unpublish(handle, t0).expect("nothing to remove");
+    assert!(transmits(&mut agent).is_empty());
+    assert_eq!(published(&mut agent), vec![crate::PublishEvent::Removed]);
+    assert_eq!(agent.presence_publication(id), None);
+}
+
+// -- conference focus (RFC 4579) ----------------------------------------------
+
+/// A response whose `Contact` says the far end is the focus of `conference`.
+fn answered_by_focus(invite: &[u8], conference: &str) -> Vec<u8> {
+    String::from_utf8(answered(invite, 200, "OK", "focus", Some(ANSWER)))
+        .expect("text")
+        .replace(
+            "Contact: <sip:bob@192.0.2.9>\r\n",
+            &format!("Contact: <{conference}>;isfocus\r\n"),
+        )
+        .into_bytes()
+}
+
+#[test]
+fn a_call_placed_as_the_focus_says_isfocus_in_every_contact_it_sends() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent
+        .call(id, &outgoing().focus(), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert_eq!(
+        text(&invite, HeaderName::Contact),
+        "<sip:alice@192.0.2.1>;isfocus"
+    );
+    assert!(agent.is_focus(call));
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    agent.hold(call, t0).expect("the re-INVITE goes");
+    let reinvite = only(&transmits(&mut agent), "INVITE ");
+    assert!(text(&reinvite, HeaderName::Contact).ends_with(";isfocus"));
+
+    agent.set_focus(call, false).expect("the call is there");
+    assert!(!agent.is_focus(call));
+}
+
+#[test]
+fn an_incoming_call_answered_as_the_focus_says_so_in_its_answer() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    deliver(&mut agent, &incoming_invite("focus1", Some(OFFER)), t0);
+    transmits(&mut agent);
+    let call = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("the call arrived");
+    agent.set_focus(call, true).expect("the call is there");
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("the 200 goes");
+    let ok = only(&transmits(&mut agent), "SIP/2.0 200");
+    assert!(text(&ok, HeaderName::Contact).ends_with(";isfocus"));
+}
+
+#[test]
+fn a_far_end_that_is_a_focus_names_its_conference_and_can_be_subscribed_to() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered_by_focus(&invite, "sip:conf42@192.0.2.9"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    assert_eq!(
+        agent
+            .call_conference(call)
+            .map(|conference| conference.to_string()),
+        Some("sip:conf42@192.0.2.9".to_owned())
+    );
+    agent
+        .subscribe_call_conference(call, t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    assert!(subscribe.starts_with(b"SUBSCRIBE sip:conf42@192.0.2.9 SIP/2.0\r\n"));
+    assert_eq!(text(&subscribe, HeaderName::Event), "conference");
+    assert_ne!(
+        text(&subscribe, HeaderName::CallId),
+        text(&invite, HeaderName::CallId),
+        "outside the INVITE's dialog, as RFC 4579 §3.4 asks"
+    );
+}
+
+#[test]
+fn a_far_end_that_is_not_a_focus_has_no_conference_to_subscribe_to() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _) = call_up(&mut agent, id, t0);
+    assert!(agent.call_conference(call).is_none());
+    assert_eq!(
+        agent.subscribe_call_conference(call, t0),
+        Err(UaError::NotAFocus)
+    );
+}
+
+// -- recording sessions (RFC 7866) --------------------------------------------
+
+#[test]
+fn a_recording_session_requires_siprec_and_carries_the_offer_and_the_metadata() {
+    let t0 = Instant::now();
+    // over a stream: an offer and its metadata outgrow what RFC 3261
+    // §18.1.1 lets go as one datagram, which is why recorders listen on TCP
+    let (mut agent, id) = over_tcp(t0);
+    let call = crate::siprec::RecordedCall {
+        session_id: crate::siprec::metadata_id([7; 16]),
+        parties: vec![crate::siprec::RecordedParty {
+            id: crate::siprec::metadata_id([8; 16]),
+            aor: "sip:alice@example.com".to_owned(),
+            name: None,
+            sends: vec![crate::siprec::RecordedStream {
+                id: crate::siprec::metadata_id([9; 16]),
+                label: "1".to_owned(),
+            }],
+        }],
+        ..crate::siprec::RecordedCall::default()
+    };
+    let offer = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/AVP 0\r\na=sendonly\r\na=label:1\r\n";
+    let outgoing = OutgoingCall::new(uri("sip:srs@example.com"))
+        .offer(Arc::from(&offer[..]))
+        .recording_session(&call.metadata())
+        .expect("the metadata is writable");
+    agent.call(id, &outgoing, t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert_eq!(text(&invite, HeaderName::Require), "siprec");
+    assert_eq!(
+        text(&invite, HeaderName::Contact),
+        "<sip:alice@192.0.2.1>;+sip.src"
+    );
+    assert!(text(&invite, HeaderName::ContentType).starts_with("multipart/mixed;"));
+    let read = with(&invite, |message| {
+        crate::siprec::read_recording_offer(message).map(|offer| {
+            (
+                offer.sdp.to_vec(),
+                offer.metadata.participants.len(),
+                offer.metadata.streams.len(),
+            )
+        })
+    })
+    .expect("an SRS reads it back");
+    assert_eq!(read, (offer.to_vec(), 1, 1));
+}

@@ -426,6 +426,18 @@ impl Publication {
         self.after_answer();
     }
 
+    /// The 401 or 407 that answered the PUBLISH in flight could not be
+    /// answered: there were no credentials, or the retry could not be sent.
+    /// It is a refusal like any other ([`PublishFailure::Refused`]), and
+    /// whatever was asked for while it was in flight goes next.
+    pub fn challenge_unanswered(&mut self, status: StatusCode) {
+        if self.in_flight.take().is_none() {
+            return;
+        }
+        self.fail(PublishFailure::Refused, Some(status));
+        self.after_answer();
+    }
+
     fn answer(
         &mut self,
         status: StatusCode,

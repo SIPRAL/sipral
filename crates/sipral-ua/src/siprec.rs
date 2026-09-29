@@ -624,6 +624,11 @@ pub fn recording_session_body(
     metadata: &RecordingMetadata,
 ) -> Result<BuiltMultipart, SiprecError> {
     let xml = metadata.to_xml()?;
+    written_session_body(sdp, &xml)
+}
+
+/// [`recording_session_body`] for metadata already written.
+pub(crate) fn written_session_body(sdp: &[u8], xml: &str) -> Result<BuiltMultipart, SiprecError> {
     Ok(MultipartBuilder::mixed()
         .part(Part::new("application/sdp", sdp))
         .part(

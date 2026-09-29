@@ -49,7 +49,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sipral_core::endpoint::{Event, OutgoingInDialogRequest, OutgoingResponse};
-use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode};
+use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode, Uri};
 use sipral_core::sdp::{self, SessionDescription};
 use sipral_core::transaction::{
     AnyTransactionId, DialogId, NonInviteServerState, ProvisionalResponseId,
@@ -694,6 +694,36 @@ impl UserAgent {
         }
     }
 
+    /// What a message that can set or move the dialog's remote target says
+    /// about the far end: whether it takes UPDATE, and whether it is a
+    /// conference focus.
+    pub(crate) fn note_far_end(&mut self, call: CallHandle, message: &RawMessage<'_>) {
+        self.note_allow(call, message);
+        self.note_focus(call, message);
+    }
+
+    /// Whether the far end's `Contact` says it is a conference focus (RFC
+    /// 4579 §4.2), and the conference's URI when it does: "the resulting
+    /// dialog belongs to a conference, identified by the URI in the Contact
+    /// header field". A message with no `Contact` moves nothing, and leaves
+    /// what was known.
+    fn note_focus(&mut self, call: CallHandle, message: &RawMessage<'_>) {
+        let Ok(sipral_core::msg::Contacts::Addrs(addrs)) = message.contact() else {
+            return;
+        };
+        let Some(Ok(first)) = addrs.into_iter().next() else {
+            return;
+        };
+        let conference = first
+            .params()
+            .has("isfocus")
+            .then(|| Uri::parse(first.uri_bytes()).ok())
+            .flatten();
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.remote_focus = conference;
+        }
+    }
+
     pub(crate) fn report_session(&mut self, call: CallHandle) {
         let Some(current) = self.calls.get(&call) else {
             return;
@@ -1107,7 +1137,7 @@ impl UserAgent {
             self.answer_with(call, transaction, &refusal, now).ok();
             return;
         }
-        self.note_allow(call, &raw);
+        self.note_far_end(call, &raw);
         // RFC 4028 §7.4: any request inside the dialog that carries a
         // Session-Expires is a refresh, whatever else it is doing
         self.on_refresh_in(call, &raw, now);

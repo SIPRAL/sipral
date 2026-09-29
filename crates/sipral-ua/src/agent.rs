@@ -149,6 +149,8 @@ pub struct UserAgent {
     pub(crate) messages: HashMap<MessageHandle, SentMessage>,
     /// The MESSAGE transaction each one has in flight.
     pub(crate) by_message: HashMap<AnyTransactionId, MessageHandle>,
+    /// The event state this agent keeps at a compositor (RFC 3903).
+    pub(crate) publications: crate::publishing::Publications,
     /// What this layer sends inside a dialog by itself and RFC 3261 §18.1.1
     /// would not let out over a datagram, waiting for a stream.
     pub(crate) parked: Vec<Parked>,
@@ -272,6 +274,7 @@ impl UserAgent {
             by_subscribe: HashMap::new(),
             messages: HashMap::new(),
             by_message: HashMap::new(),
+            publications: crate::publishing::Publications::default(),
             parked: Vec::new(),
             events: VecDeque::new(),
             guard: Guard::default(),
@@ -330,6 +333,7 @@ impl UserAgent {
         self.fire_lifecycle_timers(now);
         self.fire_announce_timers(now);
         self.fire_keepalives(now);
+        self.fire_publication_timers(now);
         self.drain(now);
     }
 
@@ -428,6 +432,7 @@ impl UserAgent {
             .chain(self.lifecycle_deadline())
             .chain(self.announce_deadline())
             .chain(self.keepalive_deadline())
+            .chain(self.publication_deadline())
             .min();
         match (self.endpoint.poll_timeout(), mine) {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -517,6 +522,7 @@ impl UserAgent {
         self.registrations.remove(&account);
         self.owners.retain(|_, owner| *owner != account);
         self.forget_keepalive(account);
+        self.forget_publications(account);
     }
 
     /// What was configured, read back.
@@ -827,6 +833,7 @@ impl UserAgent {
         self.settle_offer_challenges();
         self.settle_subscription_challenges(now);
         self.settle_message_challenges();
+        self.settle_publication_challenges(now);
         self.settle_announcements(now);
         self.settle_unanswered_changes(now);
         // last, so that every change this round finished — answered, refused,
@@ -883,6 +890,9 @@ impl UserAgent {
         // in or out of any dialog, and everything above has already taken
         // what is its own
         let event = self.on_message_event(event, now)?;
+        // a PUBLISH of ours is claimed by its transaction, like a MESSAGE's
+        // answer, and nothing else sends one that is kept
+        let event = self.on_publication_event(event, now)?;
         let event = self.on_session_event(event, now)?;
         // last: a request outside a dialog that every handler above passed
         // over is one this agent does not implement there, and §8.2.1 says

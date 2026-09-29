@@ -176,7 +176,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   sans-I/O machine here: initial publish, `SIP-ETag` refreshes at the
   registration margin, modify, remove, 412 republished afresh, 423 retried
   with `Min-Expires`, 489 surfaced. Both XML formats go through the
-  dialog-info reader and inherit its refusals. No C ABI yet.
+  dialog-info reader and inherit its refusals.
+- **The user agent keeps conferences, presence and publications itself.** A `conference` subscription merges every NOTIFY into its own `Conference` (`UserAgent::conference`), raises `UaEvent::ConferenceChanged`, refreshes by itself on a gap and unsubscribes when the conference is deleted; a `presence` subscription reads each PIDF into `UserAgent::presence` and `UaEvent::PresenceChanged`; `UserAgent::publish`, `publish_presence` (one per account), `republish`, `refresh_publication` and `unpublish` drive RFC 3903 over the endpoint, answering challenges with the account's credentials and reporting `UaEvent::Publication`. RFC 4579's `isfocus` is read from the far end's `Contact` (`call_conference`, `subscribe_call_conference`) and written by `OutgoingCall::focus` and `set_focus`; `OutgoingCall::recording_session` places an RFC 7866 recording session (`Require: siprec`, `+sip.src`, the offer and metadata as one `multipart/mixed` body).
 - **Call audio as files, and L16 on RTP.** `sipral_media::formats`
   (none of it needs the `opus` feature): `ogg` writes RFC 3533 pages
   (lacing, continued/BOS/EOS flags, granule positions, the CRC with

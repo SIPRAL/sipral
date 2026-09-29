@@ -122,6 +122,7 @@ impl UserAgent {
         call.id = Some(CallId::new(&self.endpoint.token()));
         call.placed = Some(outgoing.clone());
         call.asked = asked;
+        call.contact_context.features = outgoing.contact_features();
         let limits = self.sdp_limits;
         if let Some(described) = outgoing
             .offer
@@ -187,8 +188,22 @@ impl UserAgent {
         for (name, value) in &asked_for {
             request = request.header(*name, value);
         }
-        if let Some(ref offer) = outgoing.offer {
-            request = request.body(b"application/sdp", Arc::clone(offer));
+        match (outgoing.offer.as_ref(), outgoing.metadata.as_deref()) {
+            (Some(offer), Some(metadata)) => {
+                // RFC 7866 §6.1: "An SRC MUST include the "siprec" option tag
+                // in the Require header when initiating an RS", and §9.1 the
+                // offer and the metadata as one multipart/mixed body
+                let body = crate::siprec::written_session_body(offer, metadata)
+                    .map_err(UaError::Recording)?;
+                let content_type = body.content_type().to_owned();
+                request = request
+                    .header(HeaderName::Require, crate::siprec::OPTION_TAG.as_bytes())
+                    .body(content_type.as_bytes(), Arc::from(body.into_body()));
+            }
+            (Some(offer), None) => {
+                request = request.body(b"application/sdp", Arc::clone(offer));
+            }
+            (None, _) => {}
         }
         for (name, value) in &identifying.added {
             request = request.header(*name, value);
@@ -814,18 +829,105 @@ impl UserAgent {
     /// NOTIFY sent long into a call would otherwise do by repeating the
     /// `Contact` the INVITE opened with. Subscriptions already read theirs
     /// this way; this is the same read for a call.
+    ///
+    /// The call's feature parameters (`isfocus`, `+sip.src`) follow whichever
+    /// address it is: they say what the dialog is, which does not change with
+    /// the registration.
     pub(crate) fn current_contact(&self, call: CallHandle, now: Instant) -> Box<[u8]> {
         let Some(held) = self.calls.get(&call) else {
             return Box::from(&b""[..]);
         };
-        let Some((account, config)) = held
+        let address = match held
             .account
             .and_then(|id| Some((id, self.accounts.get(&id)?)))
-        else {
-            return held.contact_context.plain.clone();
+        {
+            Some((account, config)) => {
+                let learned = self.learned_for(account, held.contact_context.destination, now);
+                dialog_contact(config, learned, held.contact_context.anonymous)
+            }
+            None => held.contact_context.plain.clone(),
         };
-        let learned = self.learned_for(account, held.contact_context.destination, now);
-        dialog_contact(config, learned, held.contact_context.anonymous)
+        let features = &held.contact_context.features;
+        if features.is_empty() {
+            return address;
+        }
+        let mut out = Vec::with_capacity(address.len() + features.len());
+        out.extend_from_slice(&address);
+        out.extend_from_slice(features);
+        out.into_boxed_slice()
+    }
+
+    /// Say, or stop saying, that this end is the focus of a conference the
+    /// call belongs to (RFC 4579 §4.2): `isfocus` in the `Contact` of every
+    /// request and response the call sends from here on — the answer to an
+    /// INVITE not yet answered, and the next re-INVITE or UPDATE, which is
+    /// how a far end already talking to this end learns it (a target
+    /// refresh, RFC 3261 §12.2).
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchCall`].
+    pub fn set_focus(&mut self, call: CallHandle, focus: bool) -> Result<(), UaError> {
+        let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
+        let features = &mut held.contact_context.features;
+        let already = contains_feature(features, b";isfocus");
+        if focus == already {
+            return Ok(());
+        }
+        let mut changed = features.to_vec();
+        if focus {
+            changed.extend_from_slice(b";isfocus");
+        } else if let Some(at) = changed
+            .windows(b";isfocus".len())
+            .position(|window| window == b";isfocus")
+        {
+            changed.drain(at..at + b";isfocus".len());
+        }
+        *features = changed.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Whether this end says it is the focus of the call's conference
+    /// ([`OutgoingCall::focus`], [`UserAgent::set_focus`]).
+    #[must_use]
+    pub fn is_focus(&self, call: CallHandle) -> bool {
+        self.calls
+            .get(&call)
+            .is_some_and(|held| contains_feature(&held.contact_context.features, b";isfocus"))
+    }
+
+    /// The conference the call belongs to, when its far end is a focus: the
+    /// URI of the far end's `Contact`, which carried `isfocus` (RFC 4579
+    /// §4.2: "the resulting dialog belongs to a conference, identified by the
+    /// URI in the Contact header field"). `None` for every other call.
+    #[must_use]
+    pub fn call_conference(&self, call: CallHandle) -> Option<Uri> {
+        self.calls.get(&call)?.remote_focus.clone()
+    }
+
+    /// Subscribe to the conference package of the call's focus (RFC 4579
+    /// §3.4: a conference-aware UA "SHOULD subscribe to the conference
+    /// package if the 'isfocus' parameter is in the remote target URI of a
+    /// dialog"), outside the call's dialog as §3.4 asks, from the call's own
+    /// account. The subscription outlives the call; it is kept like any
+    /// other, and [`UaEvent::ConferenceChanged`] says what it learns.
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchCall`], [`UaError::NotAFocus`] for a call whose far
+    /// end did not say it is a focus, and [`UaError::NoSuchAccount`] for a
+    /// call that arrived on no account of this agent's.
+    pub fn subscribe_call_conference(
+        &mut self,
+        call: CallHandle,
+        now: Instant,
+    ) -> Result<crate::SubscriptionHandle, UaError> {
+        let account = self
+            .calls
+            .get(&call)
+            .ok_or(UaError::NoSuchCall)?
+            .account
+            .ok_or(UaError::NoSuchAccount)?;
+        let conference = self.call_conference(call).ok_or(UaError::NotAFocus)?;
+        self.subscribe_conference(account, conference, now)
     }
 
     /// The headers `asking_for` wrote for an INVITE or a re-INVITE, with
@@ -1129,6 +1231,14 @@ fn bracketed(uri: &Uri) -> Box<[u8]> {
     out.extend_from_slice(uri.as_bytes());
     out.push(b'>');
     out.into_boxed_slice()
+}
+
+/// Whether a list of `Contact` feature parameters written by this crate names
+/// `feature` (`;isfocus`, say), whole.
+fn contains_feature(features: &[u8], feature: &[u8]) -> bool {
+    features
+        .split(|byte| *byte == b';')
+        .any(|one| !one.is_empty() && feature.strip_prefix(b";") == Some(one))
 }
 
 /// A `From` or `To`'s display name, resolved (RFC 3261 §25.1), or empty when
@@ -1485,7 +1595,7 @@ impl UserAgent {
                     (held.peer, held.identity) = (source, identity.clone());
                 }
                 self.by_server.insert(transaction, call);
-                self.note_allow(call, &request.as_raw());
+                self.note_far_end(call, &request.as_raw());
                 if let Some(offer) =
                     sdp::parse_with_limits(request.as_raw().body(), self.sdp_limits).ok()
                     && let Some(held) = self.calls.get_mut(&call)
@@ -1623,7 +1733,7 @@ impl UserAgent {
     /// the far end can be asked to do.
     fn note_session(&mut self, call: CallHandle, response: &OwnedMessage) {
         let raw = response.as_raw();
-        self.note_allow(call, &raw);
+        self.note_far_end(call, &raw);
         if let Ok(described) = sdp::parse_with_limits(raw.body(), self.sdp_limits)
             && let Some(held) = self.calls.get_mut(&call)
         {

@@ -82,6 +82,7 @@ mod parked;
 /// are PIDF's vocabulary, not this crate's.
 pub mod presence;
 mod publish;
+mod publishing;
 mod quality_report;
 mod reason;
 mod redirect;
@@ -140,6 +141,7 @@ pub use presence::{Presence, PresenceError};
 pub use publish::{
     Publication, PublishError, PublishEvent, PublishFailure, PublishKind, PublishRequest,
 };
+pub use publishing::{PRESENCE_EVENT, PublicationHandle, Publish};
 pub use quality_report::{QualityReportMetrics, RemoteQualityMetrics};
 pub use reason::{Reason, ReasonProtocol};
 pub use redirect::Redirect;
