@@ -17,8 +17,9 @@
 //! end of the same call, on the same thread — so calling back into the
 //! library from inside it, this stack included, is an ordinary call, as it is
 //! from the event callback. One delivery runs at a time: a thread that
-//! finishes an entry point while another is delivering leaves its lines to
-//! that one, so they arrive in order and never on two threads at once.
+//! finishes an entry point while another is delivering leaves its lines
+//! queued, and the next entry point or poll to finish delivers them, so they
+//! arrive in order and never on two threads at once.
 //!
 //! **A flood cannot stall the stack.** Lines pass a token bucket —
 //! `sipral::BURST` at once, `sipral::PER_SECOND` a second after that, on the

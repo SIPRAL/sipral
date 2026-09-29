@@ -372,7 +372,8 @@ impl Log {
     /// from inside anything that holds the engine. Only what was queued when
     /// this began is delivered, so a sink that logs through this same log
     /// cannot keep a thread in here; a flush that finds another delivering
-    /// returns zero at once and leaves its lines to that one.
+    /// returns zero at once, and what was queued after that one began waits
+    /// in the queue for the next flush.
     #[must_use = "the count is what a caller that wants to know whether anything went reads"]
     pub fn flush(&self) -> usize {
         let (sink, mut batch) = {
