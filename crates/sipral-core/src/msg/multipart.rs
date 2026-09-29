@@ -81,7 +81,7 @@ impl MultipartLimits {
     /// The byte bound is the one a whole message is read within
     /// ([`super::Limits::DEFAULT`]), so no body that arrived in a message is
     /// refused for its size alone. A recording session's INVITE carries two
-    /// parts at one level (RFC 7866 §6.1.1); the rest is room.
+    /// parts at one level (RFC 7866 §6.1); the rest is room.
     pub const DEFAULT: Self = Self {
         max_parts: 32,
         max_depth: 4,
