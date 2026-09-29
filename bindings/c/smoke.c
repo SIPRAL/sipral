@@ -43,7 +43,10 @@
     X(sipral_processor_frame)                                                 \
     X(sipral_audio_device) X(sipral_audio_info) X(sipral_audio_transmit)    \
     X(sipral_log_record) X(sipral_conference) X(sipral_conference_user)     \
-    X(sipral_presence) X(sipral_record_config)
+    X(sipral_presence) X(sipral_record_config)                                \
+    X(sipral_stir_config) X(sipral_stream_encryption)                         \
+    X(sipral_progress_config) X(sipral_consent_tone)                          \
+    X(sipral_recording_options) X(sipral_transport_failure)
 
 static int failures;
 
@@ -899,6 +902,103 @@ static sipral_status_t record_config_at(struct fixture *fixture, size_t declared
     return sipral_call_record_to(fixture->stack, fixture->call, &config, &recording, 0);
 }
 
+static sipral_handle_t media_handle_of(struct fixture *fixture);
+
+/* The stack's verification service, with no trust anchors: what a stack
+ * whose accounts only sign hands over, and the wall clock it signs by. */
+static sipral_status_t stir_config_at(struct fixture *fixture, size_t declared)
+{
+    sipral_stir_config_t config = { 0 };
+    config.size = declared;
+    config.unix_seconds = 1790000000;
+    return sipral_stack_stir(fixture->stack, &config, 0);
+}
+
+/* The fixture's call listened to for the network's tones, every limit left
+ * at its default. */
+static sipral_status_t progress_config_at(struct fixture *fixture, size_t declared)
+{
+    sipral_progress_config_t config = { 0 };
+    config.size = declared;
+    config.listen = 1;
+    return sipral_call_detect_progress(fixture->stack, fixture->call, &config);
+}
+
+/* The beep that says the fixture's call is recorded, at its defaults. */
+static sipral_status_t consent_tone_at(struct fixture *fixture, size_t declared)
+{
+    sipral_consent_tone_t tone = { 0 };
+    tone.size = declared;
+    tone.enabled = 1;
+    return sipral_call_consent_tone(fixture->stack, fixture->call, &tone);
+}
+
+/* The fixture's call recorded to a WAV file in the temporary directory,
+ * stopped and removed again at once: the one byte short is refused before
+ * any file is opened. */
+static sipral_status_t recording_options_at(struct fixture *fixture, size_t declared)
+{
+    const char *directory = getenv("TMPDIR");
+    char path[512];
+    snprintf(path, sizeof path, "%s/sipral-smoke-recording.wav",
+             directory != NULL && directory[0] != '\0' ? directory : "/tmp");
+    sipral_recording_options_t options = { 0 };
+    options.size = declared;
+    options.format = SIPRAL_RECORDING_FORMAT_WAV;
+    options.layout = SIPRAL_RECORDING_LAYOUT_STEREO;
+    sipral_handle_t media = media_handle_of(fixture);
+    if (media == SIPRAL_HANDLE_NONE) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_status_t status = sipral_media_record_start_with(media, path, strlen(path), &options);
+    if (status == SIPRAL_STATUS_OK && sipral_media_record_stop(media) != SIPRAL_STATUS_OK) {
+        status = SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_media_release(media);
+    remove(path);
+    return status;
+}
+
+/* How the fixture's call's audio is protected, which for a call in the clear
+ * is one stream, not encrypted. */
+static sipral_status_t stream_encryption_at(struct fixture *fixture, size_t declared)
+{
+    sipral_stream_encryption_t stream = { 0 };
+    stream.size = declared;
+    sipral_handle_t media = media_handle_of(fixture);
+    if (media == SIPRAL_HANDLE_NONE) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_status_t status = sipral_media_encryption_at(media, 0, &stream);
+    sipral_media_release(media);
+    return status;
+}
+
+/* A transport of its own, bound for the purpose and then said to have
+ * failed, so that the fixture's own transports stay up for everything
+ * tried after it. Bound again before each try: a transport already down is
+ * not retired twice, and the failure would still be raised. */
+static sipral_status_t transport_failure_at(struct fixture *fixture, size_t declared)
+{
+    static const uint32_t spare = 2;
+    static const char local[] = "192.0.2.30:5062";
+    static const char remote[] = "203.0.113.10:5060";
+    static const char detail[] = "the connection was reset";
+    if (sipral_stack_transport_bind(fixture->stack, spare, SIPRAL_TRANSPORT_TCP, local,
+                                    strlen(local), remote, strlen(remote), 0,
+                                    NULL) != SIPRAL_STATUS_OK) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_transport_failure_t failure = { 0 };
+    failure.size = declared;
+    failure.transport = spare;
+    failure.error = SIPRAL_TRANSPORT_ERROR_CLOSED;
+    failure.tls = SIPRAL_TLS_FAILURE_NONE;
+    failure.detail = detail;
+    failure.detail_len = strlen(detail);
+    return sipral_stack_transport_failure(fixture->stack, &failure, 0);
+}
+
 static sipral_status_t subscribe_config_at(struct fixture *fixture, size_t declared)
 {
     sipral_subscribe_config_t config = fixture_subscribe_config(declared);
@@ -1066,6 +1166,12 @@ static const struct {
     { "sipral_conference_user_t", conference_user_at },
     { "sipral_presence_t", presence_at },
     { "sipral_record_config_t", record_config_at },
+    { "sipral_stir_config_t", stir_config_at },
+    { "sipral_stream_encryption_t", stream_encryption_at },
+    { "sipral_progress_config_t", progress_config_at },
+    { "sipral_consent_tone_t", consent_tone_at },
+    { "sipral_recording_options_t", recording_options_at },
+    { "sipral_transport_failure_t", transport_failure_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])
@@ -2578,7 +2684,7 @@ int main(void)
     stranded.media_address_len = strlen(media);
     expect("a call was placed over a transport that is gone",
            sipral_call_place(stack, account, &stranded, &unsent, 0)
-               == SIPRAL_STATUS_NOT_SENT);
+               == SIPRAL_STATUS_TRANSPORT_DOWN);
     expect("the call that went nowhere handed back a handle anyway",
            unsent == SIPRAL_HANDLE_NONE);
 
