@@ -45,6 +45,8 @@ public struct SipralEvent: Sendable {
     public let verificationData: VerificationEventData?
     /// `payload.progress`, for `SipralEventKind.progressDetected` only.
     public internal(set) var progressData: ProgressEventData? = nil
+    /// `payload.transport_failed`, for `SipralEventKind.transportFailed` only.
+    public var transportFailedData: TransportFailedEventData? = nil
 }
 
 /// What a `SipralEventKind.callerVerification` carries
@@ -571,6 +573,16 @@ enum SipralEventDecoder {
         )
         if kindRaw == SipralEventKind.progressDetected.rawValue {
             event.progressData = progressData(raw.payload.progress)
+        }
+        if kindRaw == SipralEventKind.transportFailed.rawValue {
+            let lost = raw.payload.transport_failed
+            event.transportFailedData = TransportFailedEventData(
+                transport: lost.transport,
+                protocolRaw: lost.protocol,
+                error: SipralTransportError(rawValue: lost.error),
+                tls: SipralTlsFailure(rawValue: lost.tls),
+                detail: textC(lost.detail, lost.detail_len)
+            )
         }
         return event
     }

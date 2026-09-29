@@ -1134,6 +1134,9 @@ pub(crate) struct StackState {
     /// What the log's and the state snapshot's pseudonyms are keyed with
     /// (`crate::log::pseudonym_key`).
     pseudonyms: Box<[u8]>,
+    /// Transports retired since the last poll, each raised by it as
+    /// `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` before anything else it has.
+    pub(crate) lost: Vec<crate::transport::Lost>,
 }
 
 // Safety: the user pointer is the caller's and is only ever handed back to
@@ -1732,6 +1735,7 @@ pub(crate) unsafe fn create_on(
         clock,
         log: log.clone(),
         pseudonyms: pseudonyms.into_boxed_slice(),
+        lost: Vec::new(),
     };
     // the main transport is the first signalling socket kept mapped; its
     // first request is waiting in `sipral_stack_poll_transmit` from here on
@@ -2048,6 +2052,18 @@ fn run(
     if !state.started {
         state.started = true;
         raised.push(Delivery::bare(crate::event::started(stack)));
+    }
+    // the cause before its effects: a transport lost is said before the
+    // registrations and calls that failed with it
+    for lost in std::mem::take(&mut state.lost) {
+        let (event, text) = lost.raised(stack);
+        raised.push(Delivery {
+            event,
+            _raised: None,
+            _reason: Some(text),
+            _record: None,
+            _identity: None,
+        });
     }
     drain(stack, state, now, raised, &mut unclaimed);
     // after the engine's, so that a REGISTER an answer moved the accounts to
@@ -2468,6 +2484,9 @@ pub(crate) mod tests {
         /// What every conference, text and presence event carried, in the
         /// order they arrived.
         pub(crate) protocols: Vec<Told>,
+        /// What every transport-failed event carried: transport, protocol,
+        /// error, TLS reason and detail, in the order they arrived.
+        pub(crate) transports_lost: Vec<(u32, u32, u32, u32, String)>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -2848,6 +2867,24 @@ pub(crate) mod tests {
                 heard.verdict,
                 heard.reason,
                 heard.at_ms,
+            ));
+        }
+        if event.kind == SipralEventKind::TransportFailed {
+            let lost = unsafe { event.payload.transport_failed };
+            let detail = if lost.detail.is_null() {
+                String::new()
+            } else {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(lost.detail.cast::<u8>(), lost.detail_len)
+                };
+                String::from_utf8_lossy(bytes).into_owned()
+            };
+            observed.transports_lost.push((
+                lost.transport,
+                lost.protocol,
+                lost.error,
+                lost.tls,
+                detail,
             ));
         }
     }

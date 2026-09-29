@@ -416,6 +416,47 @@ writes WAV or Ogg Opus, mixed or stereo with this end on the left, and
 `stopRecording()` / `recording` stop it and say how far it got.
 `InBandCheck.kt`, run with `IdiomaticCheck.kt`, proves each on loopback.
 
+### SIP over TCP or TLS
+
+```kotlin
+val client = SipralClient.open(
+    bindHost = "192.0.2.20",
+    signalling = SipralTransport.TLS,
+    signallingServer = "198.51.100.10:5061",
+    tlsServerName = "pbx.example.com",
+    tlsTrust = SipralTlsTrust.OnlyAuthority(pbxAuthority),
+)
+val account = client.addAccount(
+    aor = "sip:alice@example.com", registrarAddress = "198.51.100.10:5061", registrar = "sip:example.com",
+)
+account.register()
+client.events.collect { event ->
+    transportFailedOf(event)?.let { println("${SipralTlsFailure.of(it.tls.toInt())}: ${it.detail}") }
+}
+```
+
+`signalling` is `SipralTransport.UDP` (the default), `TCP` or `TLS`. Over
+either of the last two the client keeps one connection to `signallingServer`,
+the registrar or the outbound proxy, and every account and call rides on
+it; a `Contact` this layer writes names the transport. Over TLS the chain is
+checked by the platform's trust managers — `SipralTlsTrust.Platform` (the
+default), `PrivateAuthority(cert)` beside them, or `OnlyAuthority(cert)`
+alone, on the JVM and on Android alike — and the name, `tlsServerName` or
+the server's host, by the HTTPS rules. The first connection is made in
+`open`. One that fails, or breaks later, arrives as
+`SIPRAL_EVENT_KIND_TRANSPORT_FAILED`, read with `transportFailedOf(event)`:
+`tls` untrusted, name mismatch, expired or handshake refused, the `error`,
+and `SSLSocket`'s own `detail`. The client connects again, one second later
+and up to thirty seconds apart, registering every account again once it is
+back; `client.connected` says whether it is up, and `account.register()`
+asked meanwhile is kept for then. `docs/22-tls.md` has the whole mapping.
+
+`inviteLimit` is how fast one address may ring the client: every client
+starts at `SipralInviteLimit.DEFAULT`, ten INVITEs at once and one every
+two seconds, past which a call is answered 480. A voice agent behind a
+trunk takes `SipralInviteLimit.VOICE_AGENT`, a hundred and twenty-eight at
+once and twenty a second.
+
 ## The ConnectionService helper
 
 Split in two, so that the part worth testing needs no Android:

@@ -22,6 +22,16 @@ devices instead -- see ``softphone.py``, which has no audio code at all.
     SIPRAL_REGISTRAR_ADDRESS=203.0.113.10:5060 \\
     SIPRAL_AUTH_USER=agent SIPRAL_AUTH_PASSWORD=secret \\
     python3 agent.py
+
+``SIPRAL_SIGNALLING`` is ``udp`` (the default), ``tcp`` or ``tls``: over
+either of the last two the agent keeps one connection to
+``SIPRAL_REGISTRAR_ADDRESS`` and signals on it, and over TLS checks the
+server's certificate against ``SIPRAL_TLS_SERVER_NAME`` (the address's host
+when unset) with ``SIPRAL_TLS_CA`` as the only authority it trusts (the
+platform's when unset). A connection that fails is printed as
+``transport failed error=<...> tls=<...>`` with the TLS library's words, and
+tried again. ``SIPRAL_INVITE_LIMIT=voice-agent`` takes a trunk's rush of
+calls the default rate floor would answer 480.
 """
 
 from __future__ import annotations
@@ -31,8 +41,8 @@ import os
 import socket
 import ssl
 
-from sipral import Call, Stack
-from sipral.enums import AudioMode, EventKind, Ice, Nat, Transport
+from sipral import Call, InviteLimit, Stack, TlsTrust
+from sipral.enums import AudioMode, EventKind, Ice, Nat, TlsFailure, Transport, TransportError
 from sipral.errors import SipralError
 
 
@@ -299,7 +309,21 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     registrar_address = os.environ["SIPRAL_REGISTRAR_ADDRESS"]
     host = route_to(registrar_address)
-    stack = Stack(loop=loop, bind_host=host, audio=AudioMode.APPLICATION)
+    over = os.environ.get("SIPRAL_SIGNALLING", "udp")
+    signalling = {"udp": 0, "tcp": Transport.TCP, "tls": Transport.TLS}[over]
+    trusted = os.environ.get("SIPRAL_TLS_CA")
+    stack = Stack(
+        loop=loop,
+        bind_host=host,
+        audio=AudioMode.APPLICATION,
+        signalling=signalling,
+        signalling_server=registrar_address if signalling else None,
+        tls_server_name=os.environ.get("SIPRAL_TLS_SERVER_NAME"),
+        tls_trust=TlsTrust.only_authority(trusted) if trusted else None,
+        invite_limit=InviteLimit.VOICE_AGENT
+        if os.environ.get("SIPRAL_INVITE_LIMIT") == "voice-agent"
+        else None,
+    )
     account = stack.add_account(
         os.environ.get("SIPRAL_AOR", "sip:agent@example.invalid"),
         registrar=os.environ.get("SIPRAL_REGISTRAR"),
@@ -315,6 +339,14 @@ async def main() -> None:
     try:
         while True:
             event = await stack.events.get()
+            if event.kind == EventKind.TRANSPORT_FAILED:
+                fields = event.fields
+                print(
+                    f"transport failed error={TransportError(fields['error']).name.lower()} "
+                    f"tls={TlsFailure(fields['tls']).name.lower()}: {fields['detail'] or ''}"
+                )
+            if event.kind == EventKind.REGISTRATION_CHANGED:
+                print(f"registration {event.fields.get('state')}")
             if event.kind == EventKind.INCOMING_CALL:
                 call = stack.answer_call(event, media_host=host)
                 task = asyncio.create_task(run_call(call))

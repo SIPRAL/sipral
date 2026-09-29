@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# Gives the lab's Asterisk SIP over TCP and TLS, for scripts/lab.sh's `tls`
+# step alone: the four idiomatic layers registering and called over a
+# connection, and the reasons they give for a certificate that names another
+# server or has expired. Applied with `-f`, on top of ../compose.yaml, and
+# taken off again as soon as that step is over, so every other flow meets
+# Asterisk exactly as compose.yaml describes it. pjsip.conf's own last line
+# includes the path pjsip_local.conf is mounted at, empty by default.
+#
+# The certificates are made for each run by lab.sh's own tls_certificates,
+# into the directory SIPRAL_TLS_CERTS names: a lab authority, a certificate
+# it signed for asterisk.lab.sipral.test, one for wrong.lab.sipral.test and
+# one for the right name that expired in 2020.
+services:
+  asterisk:
+    volumes:
+      - ./tls/pjsip_local.conf:/etc/asterisk/pjsip_local.conf:ro
+      - ${SIPRAL_TLS_CERTS:?the tls step makes the certificates}:/etc/asterisk/lab-tls:ro

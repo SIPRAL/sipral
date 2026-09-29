@@ -395,6 +395,15 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_MESSAGE_BYTES ((size_t)65535)
 
 /**
+ * The longest `sipral_transport_failure_t::detail` this library takes.
+ *
+ * A platform's sentence about a refused certificate is a line, not a
+ * document; one longer than this is refused rather than cut, since a
+ * sentence cut short can say something else.
+ */
+#define SIPRAL_TRANSPORT_DETAIL_BYTES ((size_t)1024)
+
+/**
  * The answer that lets an INVITE through, and the reason it is a status
  * code rather than a flag.
  *
@@ -406,6 +415,39 @@ typedef uint64_t sipral_handle_t;
  * mean "let the stranger in".
  */
 #define SIPRAL_SCREEN_ACCEPT ((uint32_t)200)
+
+/**
+ * The burst a stack starts with: ten INVITEs from one address at once.
+ *
+ * With SIPRAL_INVITE_LIMIT_EVERY_MS, the floor every stack has from
+ * `sipral_stack_create` on. An INVITE past it is answered 480 and
+ * counted in `sipral_counters_t::screened_refused_by_rate`; nothing is
+ * raised for it.
+ */
+#define SIPRAL_INVITE_LIMIT_BURST ((uint32_t)10)
+
+/**
+ * The interval a stack starts with: one more INVITE every two seconds.
+ */
+#define SIPRAL_INVITE_LIMIT_EVERY_MS ((uint64_t)2000)
+
+/**
+ * The voice-agent preset's burst: a hundred and twenty-eight at once.
+ *
+ * For a headless service that takes every call from one trunk or proxy,
+ * where the default's ten-then-one-every-two-seconds answers a
+ * campaign's twelfth caller 480. Handed to `sipral_stack_invite_limit`
+ * with SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS. The burst is the
+ * default `max_dialogs`, so that a rush is turned away by the ceiling on
+ * calls held, with a 503, before it is by the rate.
+ */
+#define SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST ((uint32_t)128)
+
+/**
+ * The voice-agent preset's interval: one more INVITE every fifty
+ * milliseconds, twenty a second.
+ */
+#define SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS ((uint64_t)50)
 
 /**
  * Bits of `sipral_call_event_t::privacy` and of
@@ -467,6 +509,7 @@ typedef struct sipral_stream_stats sipral_stream_stats_t;
 typedef struct sipral_media_packet sipral_media_packet_t;
 typedef struct sipral_processor_frame sipral_processor_frame_t;
 typedef struct sipral_transmit sipral_transmit_t;
+typedef struct sipral_transport_failure sipral_transport_failure_t;
 typedef struct sipral_registration_event sipral_registration_event_t;
 typedef struct sipral_call_event sipral_call_event_t;
 typedef struct sipral_transfer_event sipral_transfer_event_t;
@@ -488,6 +531,7 @@ typedef struct sipral_progress_event sipral_progress_event_t;
 typedef struct sipral_conference_event sipral_conference_event_t;
 typedef struct sipral_text_event sipral_text_event_t;
 typedef struct sipral_presence_event sipral_presence_event_t;
+typedef struct sipral_transport_failed_event sipral_transport_failed_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -653,6 +697,13 @@ enum {
      * conference to name or subscribe to.
      */
     SIPRAL_STATUS_NOT_AFOCUS = 21,
+    /**
+     * The transport the request would leave on has failed or closed and
+     * has not been bound again. Nothing went out. The failure was
+     * reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
+     * the stack with `sipral_stack_transport_bind`, and ask again.
+     */
+    SIPRAL_STATUS_TRANSPORT_DOWN = 22,
 };
 
 /**
@@ -721,6 +772,46 @@ enum {
      * The connection was closed and cannot be written to again.
      */
     SIPRAL_TRANSPORT_ERROR_CLOSED = 5,
+};
+
+/**
+ * Why a TLS connection was refused, as the platform's TLS library said
+ * it. Names for `sipral_transport_failure_t::tls` and
+ * `sipral_transport_failed_event_t::tls`.
+ *
+ * Sipral links no TLS library (`docs/22-tls.md`), so these are the
+ * application's words, mapped from its own library's error: the stack
+ * only carries them to whoever reads the event, so that a user can be
+ * told which of the four it was rather than "the connection closed".
+ * A connection that was never answered is not one of them: that is
+ * `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
+ */
+typedef uint32_t sipral_tls_failure_t;
+enum {
+    /**
+     * Not a TLS failure, or one the application could not classify.
+     */
+    SIPRAL_TLS_FAILURE_NONE = 0,
+    /**
+     * No trusted authority stands behind the server's certificate: a
+     * self-signed one, a private authority not handed over, or an
+     * authority other than the one pinned.
+     */
+    SIPRAL_TLS_FAILURE_UNTRUSTED = 1,
+    /**
+     * The certificate is trusted and names another server.
+     */
+    SIPRAL_TLS_FAILURE_NAME_MISMATCH = 2,
+    /**
+     * The certificate has expired, or is not valid yet.
+     */
+    SIPRAL_TLS_FAILURE_EXPIRED = 3,
+    /**
+     * The handshake itself failed: no protocol version or cipher in
+     * common, an alert from the server, or a server that does not speak
+     * TLS on that port.
+     */
+    SIPRAL_TLS_FAILURE_HANDSHAKE_REFUSED = 4,
 };
 
 /**
@@ -1411,7 +1502,6 @@ enum {
  * Numbers already spent on features this build does not have:
  * - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
  * - 44: held for a second audio device event, which the audio engine did not need; spent all the same
- * - 53: held for a transport that failed, with the TLS reason when there is one (wave C, tls-layers)
  */
 typedef uint32_t sipral_event_kind_t;
 enum {
@@ -1976,6 +2066,25 @@ enum {
      * stack refreshes it.
      */
     SIPRAL_EVENT_KIND_PRESENCE_CHANGED = 52,
+    /**
+     * A transport this stack signals on stopped carrying traffic: the
+     * application said it failed (`sipral_stack_transport_failed`,
+     * `sipral_stack_transport_failure`) or closed
+     * (`sipral_stack_stream_closed`), or a stream carried bytes no
+     * message starts with (`sipral_stack_receive_stream`).
+     *
+     * Raised by the next poll, before what the loss did to the
+     * registrations and calls on it. `payload.transport_failed` says
+     * which transport, what it spoke, what went wrong and — when TLS
+     * refused the connection — why, as the application's TLS library
+     * said it: untrusted, a name that does not match, expired, or a
+     * handshake refused, with the library's own sentence beside it.
+     * Nothing is sent on the transport until
+     * `sipral_stack_transport_bind` brings it back; a request asked for
+     * meanwhile is `SIPRAL_STATUS_TRANSPORT_DOWN`. `account` and `call`
+     * are `SIPRAL_HANDLE_NONE`: a transport is neither.
+     */
+    SIPRAL_EVENT_KIND_TRANSPORT_FAILED = 53,
 };
 
 /**
@@ -5984,6 +6093,46 @@ struct sipral_transmit {
 };
 
 /**
+ * A transport that failed, and why, for
+ * sipral_stack_transport_failure.
+ *
+ * The caller fills in all of it. `detail` is the platform's own sentence
+ * — OpenSSL's, `SslStream`'s, `SSLSocket`'s, Network.framework's — and
+ * is optional; it travels to the event unread and unparsed, so a user's
+ * report can quote it.
+ */
+struct sipral_transport_failure {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * Which transport: SIPRAL_TRANSPORT_MAIN, or a number
+     * sipral_stack_transport_bind added.
+     */
+    uint32_t transport;
+    /**
+     * A sipral_transport_error_t.
+     */
+    uint32_t error;
+    /**
+     * A sipral_tls_failure_t; `SIPRAL_TLS_FAILURE_NONE` for anything
+     * that was not TLS refusing, and only that on a transport that does
+     * not speak TLS.
+     */
+    uint32_t tls;
+    /**
+     * The platform's own words for it, not NUL-terminated. Null with a
+     * length of zero for none.
+     */
+    const char *detail;
+    /**
+     * How many bytes of it; at most SIPRAL_TRANSPORT_DETAIL_BYTES.
+     */
+    size_t detail_len;
+};
+
+/**
  * What a SIPRAL_EVENT_KIND_REGISTRATION_CHANGED carries.
  */
 struct sipral_registration_event {
@@ -7173,6 +7322,42 @@ struct sipral_presence_event {
 };
 
 /**
+ * The payload of `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: a transport this
+ * stack signals on stopped carrying traffic.
+ *
+ * The text is the library's, valid for as long as the callback runs.
+ */
+struct sipral_transport_failed_event {
+    /**
+     * Which transport: SIPRAL_TRANSPORT_MAIN, or a number
+     * sipral_stack_transport_bind added.
+     */
+    uint32_t transport;
+    /**
+     * What it spoke, as a `SipralTransport`.
+     */
+    uint32_t protocol;
+    /**
+     * A sipral_transport_error_t: what the application said went wrong,
+     * `SIPRAL_TRANSPORT_ERROR_CLOSED` for a connection that closed.
+     */
+    uint32_t error;
+    /**
+     * A sipral_tls_failure_t: why TLS refused, when that is what it was.
+     */
+    uint32_t tls;
+    /**
+     * The platform's own sentence, as the application handed it over.
+     * Null with a length of zero when it gave none.
+     */
+    const char *detail;
+    /**
+     * How many bytes of it.
+     */
+    size_t detail_len;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -7269,6 +7454,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_PRESENCE_CHANGED.
      */
     sipral_presence_event_t presence;
+    /**
+     * For SIPRAL_EVENT_KIND_TRANSPORT_FAILED.
+     */
+    sipral_transport_failed_event_t transport_failed;
 };
 
 /**
@@ -10091,11 +10280,44 @@ sipral_status_t sipral_stack_transport_bind(sipral_handle_t stack, uint32_t tran
  * socket over it would drop the calls that were fine. This is for the
  * socket that is over.
  *
+ * The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
+ * of what the failure did to the registrations and calls on it.
+ * sipral_stack_transport_failure is the same call with the TLS
+ * library's reason carried along.
+ *
  * Safety
  *
  * Safe to call with any handle value. Reads no memory the caller owns.
  */
 sipral_status_t sipral_stack_transport_failed(sipral_handle_t stack, uint32_t transport, uint32_t error, uint64_t now_ms);
+
+/**
+ * Say that a transport failed, and why, in the words of the TLS library
+ * that refused it.
+ *
+ * Everything sipral_stack_transport_failed does — the transport is
+ * retired, the transactions on it fail, nothing is sent on it until
+ * sipral_stack_transport_bind brings it back — and the reason is
+ * carried to `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: `failure->tls` for a
+ * machine to switch on, `failure->detail` for a person to read. A
+ * connection that never got as far as a handshake is told here too, so
+ * that the application hears about it in the one place it hears about
+ * every other loss; retiring a transport that carried nothing yet costs
+ * nothing, and the bind that follows the reconnect undoes it. A
+ * transport already down is not retired twice, and the failure is still
+ * raised: that is how each attempt to connect again that fails is told.
+ *
+ * A TLS reason on a transport that does not speak TLS or WSS is
+ * `SIPRAL_STATUS_INVALID_ARGUMENT`, and so is a detail longer than
+ * SIPRAL_TRANSPORT_DETAIL_BYTES or not UTF-8; nothing is retired.
+ *
+ * Safety
+ *
+ * `failure` must point at a `sipral_transport_failure_t` whose `size`
+ * member says how long it is, and its `detail` must be readable for
+ * `detail_len` bytes.
+ */
+sipral_status_t sipral_stack_transport_failure(sipral_handle_t stack, const sipral_transport_failure_t *failure, uint64_t now_ms);
 
 /**
  * Say that a connection closed: the far end went away, or a read returned
@@ -10104,7 +10326,8 @@ sipral_status_t sipral_stack_transport_failed(sipral_handle_t stack, uint32_t tr
  * The same retirement as sipral_stack_transport_failed, and a separate
  * call because it is a separate thing to have happened. An orderly close is
  * not an error the caller has to invent a kind for, and a stack that made it
- * one would have the two indistinguishable in a log for ever after.
+ * one would have the two indistinguishable in a log for ever after. The
+ * event the next poll raises says `SIPRAL_TRANSPORT_ERROR_CLOSED`.
  *
  * Safety
  *

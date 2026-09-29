@@ -70,6 +70,8 @@ public sealed class SipralEventArgs : EventArgs
     public SipralVerificationEventInfo? Verification { get; }
     /// <summary>Set for <see cref="SipralEventKind.ProgressDetected"/>.</summary>
     public SipralProgressEventInfo? Progress { get; }
+    /// <summary>Set for <see cref="SipralEventKind.TransportFailed"/>.</summary>
+    public SipralTransportFailedEventInfo? TransportFailed { get; private init; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
@@ -258,10 +260,17 @@ public sealed class SipralEventArgs : EventArgs
                 (SipralAmdReason)p.Reason, p.AtMs, p.InitialSilenceMs, p.GreetingMs, p.Words, p.FrequencyHz,
                 p.LengthMs, new[] { p.SitHz1, p.SitHz2, p.SitHz3 }, new[] { p.SitMs1, p.SitMs2, p.SitMs3 });
         }
+        SipralTransportFailedEventInfo? transportFailed = null;
+        if (kind == SipralEventKind.TransportFailed)
+        {
+            var t = evt.Payload.TransportFailed;
+            transportFailed = new SipralTransportFailedEventInfo(t.Transport, (SipralTransport)t.Protocol,
+                (SipralTransportError)t.Error, (SipralTlsFailure)t.Tls, ReadUtf8(t.Detail, t.DetailLen));
+        }
 
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
             registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio,
-            stunServer, verification, progress);
+            stunServer, verification, progress) { TransportFailed = transportFailed };
     }
 
     internal static SipralStreamStatistics? ReadStatistics(IntPtr ptr)

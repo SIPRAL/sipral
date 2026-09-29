@@ -52,6 +52,7 @@ from .events import (
     Verification,
 )
 from .media import Media
+from .signalling import InviteLimit, TlsTrust
 from .stack import TRACE, Stack, features
 
 __version__ = "0.0.1"
@@ -68,11 +69,13 @@ __all__ = [
     "Counters",
     "EndCause",
     "Event",
+    "InviteLimit",
     "Media",
     "Protection",
     "SipralError",
     "Stack",
     "TRACE",
+    "TlsTrust",
     "Verification",
     "__version__",
     "features",

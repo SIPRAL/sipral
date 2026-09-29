@@ -36,7 +36,7 @@ namespace Sipral;
 /// socket is a port nothing else can use until the collector gets around
 /// to it, so <see cref="Dispose"/> is still the path to prefer.
 /// </summary>
-public sealed class SipralStack : IDisposable
+public sealed partial class SipralStack : IDisposable
 {
     private const int TransmitBytes = 1 << 16;
     private const int AddressBytes = 128;
@@ -44,7 +44,7 @@ public sealed class SipralStack : IDisposable
     private readonly StackSafeHandle _handle;
     /// <summary>The signalling socket: replaced by <see cref="MoveTo"/>, read
     /// by the poll thread, which takes it afresh on every pass.</summary>
-    private volatile Socket _socket;
+    private volatile Socket? _socket;
     private readonly Stopwatch _origin = Stopwatch.StartNew();
     private readonly SipralEventCallback _callback;
     /// <summary>Kept alive for as long as the stack, like
@@ -291,7 +291,42 @@ public sealed class SipralStack : IDisposable
     /// digits in the far end's audio: <see cref="SipralDtmfDetection.Auto"/>
     /// on the calls that negotiated no telephone event, <c>Always</c> or
     /// <c>Off</c>; <see cref="Call.SetDtmfDetection"/> changes it for one
-    /// call.</summary>
+    /// call.
+    ///
+    /// <paramref name="signalling"/> is what SIP travels over:
+    /// <see cref="SipralTransport.Udp"/> (<c>0</c>, the default) on a socket
+    /// bound at <paramref name="bindHost"/>, or <see cref="SipralTransport.Tcp"/>
+    /// or <see cref="SipralTransport.Tls"/> on one connection to
+    /// <paramref name="signallingServer"/> (<c>host:port</c> — the registrar
+    /// or the outbound proxy, 5061 for TLS by convention), which every
+    /// account and every call on this stack then shares, and on which the
+    /// server's own requests arrive. Over TLS the server's certificate is
+    /// checked by <see cref="SslStream"/> against
+    /// <paramref name="tlsServerName"/> (the host part of
+    /// <paramref name="signallingServer"/> when <c>null</c>) with
+    /// <paramref name="tlsTrust"/>: the platform's authorities when
+    /// <c>null</c>, a private authority beside them, or only one authority
+    /// (<c>docs/22-tls.md</c>). Nothing here turns the check off.
+    ///
+    /// The first connection is made here, before this returns. When it
+    /// fails, or later breaks, the stack is told why and raises
+    /// <see cref="SipralEventKind.TransportFailed"/>, whose
+    /// <see cref="SipralEventArgs.TransportFailed"/> says untrusted, a name
+    /// that does not match, expired, a handshake refused or a server that
+    /// refused the connection, with <see cref="SslStream"/>'s own words; and
+    /// this class connects again, one second after the loss and twice as long
+    /// after each attempt that fails, up to thirty seconds. Once connected
+    /// again every account is pointed at the new connection and registered
+    /// again if it was registering. <see cref="Account.Register"/> asked
+    /// while it is down is kept for then; a call placed meanwhile throws
+    /// with <see cref="SipralStatus.TransportDown"/>.
+    ///
+    /// <paramref name="inviteLimit"/> is how fast one address may ring this
+    /// stack: <see cref="SipralInviteLimit.Default"/> (what every stack
+    /// starts with, ten INVITEs at once then one every two seconds, past
+    /// which a call is answered 480) or
+    /// <see cref="SipralInviteLimit.VoiceAgent"/> for a service taking a
+    /// trunk's calls.</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -324,7 +359,12 @@ public sealed class SipralStack : IDisposable
         IReadOnlyList<string>? stunFallbacks = null,
         ushort rtpPortMin = 0,
         ushort rtpPortMax = 0,
-        SipralDtmfDetection dtmfDetection = SipralDtmfDetection.Auto)
+        SipralDtmfDetection dtmfDetection = SipralDtmfDetection.Auto,
+        SipralTransport signalling = 0,
+        string? signallingServer = null,
+        string? tlsServerName = null,
+        SipralTlsTrust? tlsTrust = null,
+        SipralInviteLimit? inviteLimit = null)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
         _nat = nat;
@@ -334,10 +374,18 @@ public sealed class SipralStack : IDisposable
         _turnTrustedCertificates = turnTrustedCertificates;
         NativeLibraryLoader.EnsureRegistered();
 
-        _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        _socket.Bind(new IPEndPoint(IPAddress.Parse(bindHost), bindPort));
-        _socket.Blocking = false;
-        BindAddress = FormatAddress((IPEndPoint)_socket.LocalEndPoint!);
+        var (firstLink, firstRefusal) = PrepareSignalling(signalling, bindHost, signallingServer, tlsServerName, tlsTrust);
+        if (Streamed)
+        {
+            BindAddress = firstLink?.Local ?? $"{bindHost}:{bindPort}";
+        }
+        else
+        {
+            _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            _socket.Bind(new IPEndPoint(IPAddress.Parse(bindHost), bindPort));
+            _socket.Blocking = false;
+            BindAddress = FormatAddress((IPEndPoint)_socket.LocalEndPoint!);
+        }
 
         // Kept alive on this instance for as long as the stack lives: the
         // native library calls through the function pointer derived from
@@ -388,7 +436,7 @@ public sealed class SipralStack : IDisposable
             var config = SipralStackConfig.Sized();
             config.EventCallback = Marshal.GetFunctionPointerForDelegate(_callback);
             config.EventUserData = IntPtr.Zero;
-            config.Transport = (uint)SipralTransport.Udp;
+            config.Transport = (uint)_signalling;
             config.BindAddress = bindPin.Pointer;
             config.BindAddressLen = (nuint)bindAddressBytes.Length;
             config.UserAgent = uaPin.Pointer;
@@ -442,12 +490,20 @@ public sealed class SipralStack : IDisposable
         {
             // refused -- device mode on a build with no backend for this
             // platform, say -- so the socket bound above serves nothing
-            _socket.Dispose();
+            _socket?.Dispose();
+            firstLink?.Stream.Dispose();
+            firstLink?.Client.Dispose();
         }
         SipralErrors.Check(status, "sipral_stack_create");
 
         _handle = new StackSafeHandle();
         _handle.SetValue(stackHandle);
+        if (inviteLimit is { } limit)
+        {
+            SipralErrors.Check(NativeMethods.sipral_stack_invite_limit(stackHandle, limit.EveryMs, limit.Burst),
+                "sipral_stack_invite_limit");
+        }
+        StartSignalling(firstLink, firstRefusal);
 
         _pollThread = new Thread(Run) { IsBackground = true, Name = "sipral-stack" };
         _pollThread.Start();
@@ -992,6 +1048,39 @@ public sealed class SipralStack : IDisposable
     public SipralRecovery MoveTo(string host, SipralLink link = SipralLink.Wired)
     {
         var previous = ParseAddress(BindAddress).Host;
+        if (Streamed)
+        {
+            MoveLink(host);
+        }
+        else
+        {
+            MoveSocket(host);
+        }
+
+        var before = ToSBytes(previous);
+        var after = ToSBytes(host);
+        uint recovery = 0;
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_network_changed(
+                Handle, (uint)link, before, (nuint)before.Length, null!, 0, 1,
+                (uint)link, after, (nuint)after.Length, null!, 0, 1, NowMs, out recovery),
+            "sipral_stack_network_changed");
+        List<Account> accounts;
+        lock (_accounts)
+        {
+            accounts = _accounts.ToList();
+        }
+        foreach (var account in accounts.Where(a => !a.ContactGiven))
+        {
+            account.Rebind();
+        }
+        return (SipralRecovery)recovery;
+    }
+
+    /// <summary>The UDP signalling socket bound again at
+    /// <paramref name="host"/>, and the main transport told.</summary>
+    private void MoveSocket(string host)
+    {
         var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         socket.Bind(new IPEndPoint(IPAddress.Parse(host), 0));
         socket.Blocking = false;
@@ -1013,26 +1102,7 @@ public sealed class SipralStack : IDisposable
         var old = _socket;
         _socket = socket;
         BindAddress = bound;
-        old.Dispose();
-
-        var before = ToSBytes(previous);
-        var after = ToSBytes(host);
-        uint recovery = 0;
-        SipralErrors.Call(
-            () => NativeMethods.sipral_stack_network_changed(
-                Handle, (uint)link, before, (nuint)before.Length, null!, 0, 1,
-                (uint)link, after, (nuint)after.Length, null!, 0, 1, NowMs, out recovery),
-            "sipral_stack_network_changed");
-        List<Account> accounts;
-        lock (_accounts)
-        {
-            accounts = _accounts.ToList();
-        }
-        foreach (var account in accounts.Where(a => !a.ContactGiven))
-        {
-            account.Rebind();
-        }
-        return (SipralRecovery)recovery;
+        old?.Dispose();
     }
 
     internal Call? CallFor(ulong handle) => _calls.TryGetValue(handle, out var call) ? call : null;
@@ -1186,11 +1256,19 @@ public sealed class SipralStack : IDisposable
             }
             var payload = new byte[(int)transmit.Len];
             Marshal.Copy(_transmitData, payload, 0, payload.Length);
+            var socket = _socket;
+            if (socket is null)
+            {
+                // one connection carries everything, whatever it names: the
+                // server it reaches is the outbound proxy
+                WriteLink(payload);
+                continue;
+            }
             var destination = Marshal.PtrToStringUTF8(_transmitDestination, (int)transmit.DestinationLen) ?? string.Empty;
             var (host, port) = ParseAddress(destination);
             try
             {
-                _socket.SendTo(payload, new IPEndPoint(IPAddress.Parse(host), port));
+                socket.SendTo(payload, new IPEndPoint(IPAddress.Parse(host), port));
             }
             catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
             {
@@ -1443,13 +1521,26 @@ public sealed class SipralStack : IDisposable
             {
                 stunSnapshot = _stunSockets.Values.ToList();
             }
-            // this pass's signalling socket: `MoveTo` may replace it meanwhile
+            // this pass's signalling socket: `MoveTo` may replace it meanwhile,
+            // and over TCP or TLS there is none, the connection having a
+            // reader of its own
             var signalling = _socket;
-            var checkRead = new List<Socket>(stunSnapshot.Count + 1) { signalling };
+            var checkRead = new List<Socket>(stunSnapshot.Count + 1);
+            if (signalling is not null)
+            {
+                checkRead.Add(signalling);
+            }
             checkRead.AddRange(stunSnapshot);
             try
             {
-                Socket.Select(checkRead, null, null, 50_000);
+                if (checkRead.Count == 0)
+                {
+                    _closed.Wait(50);
+                }
+                else
+                {
+                    Socket.Select(checkRead, null, null, 50_000);
+                }
             }
             catch (SocketException)
             {
@@ -1470,7 +1561,7 @@ public sealed class SipralStack : IDisposable
 
             foreach (var sock in checkRead)
             {
-                if (ReferenceEquals(sock, signalling))
+                if (signalling is not null && ReferenceEquals(sock, signalling))
                 {
                     try
                     {
@@ -1661,7 +1752,14 @@ public sealed class SipralStack : IDisposable
                 var options = new SslClientAuthenticationOptions { TargetHost = _turnServerName };
                 if (_turnTrustedCertificates is { Count: > 0 } roots)
                 {
-                    var policy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust };
+                    // revocation unchecked, as SslStream's own default: a
+                    // policy of one's own starts from Online, and a
+                    // private authority publishes no revocation list
+                    var policy = new X509ChainPolicy
+                    {
+                        TrustMode = X509ChainTrustMode.CustomRootTrust,
+                        RevocationMode = X509RevocationMode.NoCheck,
+                    };
                     policy.CustomTrustStore.AddRange(roots);
                     options.CertificateChainPolicy = policy;
                 }
@@ -1843,8 +1941,9 @@ public sealed class SipralStack : IDisposable
         }
         _events.Writer.TryComplete();
 
+        CloseLink();
         _handle.Dispose();
-        _socket.Dispose();
+        _socket?.Dispose();
         Marshal.FreeHGlobal(_transmitData);
         Marshal.FreeHGlobal(_transmitDestination);
         Marshal.FreeHGlobal(_transmitSource);

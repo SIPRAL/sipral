@@ -20,7 +20,11 @@ library, and by whoever drives it:
 
 | Connection | Opened by | Certificate checked by | Checked against | Where |
 |---|---|---|---|---|
-| SIP over TLS | the application, through the C ABI: `transport` `SIPRAL_TRANSPORT_TLS`, `sipral_stack_transport_bind`, bytes in with `sipral_stack_receive_stream`, out with `sipral_stack_poll_transmit` | the application's TLS library, and the application's own RFC 5922 check | the SIP domain the user configured | `crates/sipral-ffi/src/transport.rs`; the stack only frames the bytes (`crates/sipral-core/src/msg/framer.rs`) |
+| SIP over TLS, C | the application, through the C ABI: `transport` `SIPRAL_TRANSPORT_TLS`, `sipral_stack_transport_bind`, bytes in with `sipral_stack_receive_stream`, out with `sipral_stack_poll_transmit` | the application's TLS library, and the application's own RFC 5922 check | the SIP domain the user configured | `crates/sipral-ffi/src/transport.rs`; the stack only frames the bytes (`crates/sipral-core/src/msg/framer.rs`) |
+| SIP over TLS, Python | the binding, `Stack(signalling=Transport.TLS)` | Python's `ssl` (OpenSSL) | `tls_server_name`, or the host part of `signalling_server` | `bindings/python/sipral/signalling.py`, `bindings/python/sipral/stack.py` |
+| SIP over TLS, .NET | the binding, `new SipralStack(signalling: SipralTransport.Tls)` | `SslStream` | `tlsServerName`, or the host part of `signallingServer` | `bindings/dotnet/Sipral/SipralSignalling.cs` |
+| SIP over TLS, Kotlin | the binding, `SipralClient.open(signalling = SipralTransport.TLS)` | `SSLSocket`'s trust managers; the name by the HTTPS rules, in the binding | `tlsServerName`, or the host part of `signallingServer` | `bindings/kotlin/.../idiomatic/SipralSignalling.kt` |
+| SIP over TLS, Swift | the binding, on Apple platforms only, `SipralStack(signalling: .tls)` | Network.framework and `SecTrust` with the SSL policy | `tlsServerName`, or the host part of `signallingServer` | `bindings/swift/Sources/Sipral/Signalling.swift` |
 | TURN over TLS, Python | the binding, on `SIPRAL_EVENT_KIND_TURN_STREAM` | Python's `ssl` (OpenSSL) | `turn_server_name`, or the host part of `turn_server` | `bindings/python/sipral/stack.py`, `_open_turn_stream` |
 | TURN over TLS, .NET | the binding | `SslStream` | `turnServerName`, or the host part of `turnServer` | `bindings/dotnet/Sipral/SipralStack.cs`, `OpenTurnStream` |
 | TURN over TLS, Kotlin | the binding | `SSLSocket`, endpoint identification `HTTPS` | `SipralTurnServer.serverName`, or the host part of `address` | `bindings/kotlin/sipral/src/main/kotlin/org/sipral/idiomatic/SipralClient.kt`, `openTurnStream` |
@@ -29,14 +33,13 @@ library, and by whoever drives it:
 
 Two things follow from the table that are easy to miss:
 
-- **SIP over TLS is a C ABI feature.** The four idiomatic layers signal over
-  one UDP socket (`bindings/python/sipral/stack.py`,
-  `bindings/swift/Sources/Sipral/SipralStack.swift`,
-  `bindings/kotlin/.../idiomatic/SipralClient.kt`,
-  `bindings/dotnet/Sipral/SipralStack.cs`: each sets `SIPRAL_TRANSPORT_UDP`).
-  A Swift, .NET, Kotlin or Python application that needs SIP over TLS drives
-  the stream through its binding's generated layer, the way the C sample
-  below does.
+- **Each idiomatic layer signals over UDP, TCP or TLS.** Over the last two
+  a stack keeps one connection to the server it was given, carries every
+  account and call on it, reads the server's own requests off it, and
+  connects again when it is lost (see "SIP over TLS in the four layers"
+  below). The name those layers check is the one HTTPS checks, as the
+  platform applies it; an application that wants RFC 5922's reading, below,
+  drives the stream itself through the C ABI, the way the C sample does.
 - **Nothing in any binding turns checking off.** None of them takes a
   "verify: false"; a certificate that fails is a relay that is not made.
   With roots handed over, those roots replace the platform's rather than
@@ -78,7 +81,9 @@ took the `sip:` URI one when they were run.
 
 ## The lab's TLS endpoint
 
-The lab has one TLS listener: coturn's, on 5349, in `scripts/lab.sh turn`
+The lab has two kinds of TLS listener. Asterisk's, for SIP, are described
+under "SIP over TLS in the four layers" below (`scripts/lab.sh tls`). The
+other is coturn's, on 5349, in `scripts/lab.sh turn`
 (`interop/turn/compose.override.yaml`). Its certificate is made for each run
 by `turn_certificate` in `scripts/lab.sh`: self-signed, P-256, for
 `turn.lab.sipral.test` as both CN and `subjectAltName`, with `serverAuth`.
@@ -959,22 +964,107 @@ These ran on a desktop JVM, which uses the same `javax.net.ssl` classes
 Android does; the Android build itself needs the Android SDK
 (`scripts/package/android.sh`) and was not part of these runs.
 
+## SIP over TLS in the four layers
+
+A stack created with `signalling` set to TCP or TLS makes one connection to
+`signalling_server` (`signallingServer`) — the registrar or the outbound
+proxy — before its constructor returns, binds it as the main transport
+with both ends named (`sipral_stack_transport_bind`), and from then on
+writes every message the stack produces on it and hands everything read off
+it to `sipral_stack_receive_stream`. Every account and every call on the
+stack share it, whatever address they name: the server it reaches is the
+outbound proxy. A `Contact` the layer writes carries `;transport=tls` or
+`;transport=tcp`, so that the server's INVITE comes back on the same
+connection. The trust is one of three, the same three this document gives
+for every platform:
+
+| | Python | .NET | Kotlin | Swift |
+|---|---|---|---|---|
+| The platform's authorities | `TlsTrust.platform()` (the default) | `SipralTlsTrust.Platform` (the default) | `SipralTlsTrust.Platform` (the default) | `.platform` (the default) |
+| A private CA beside them | `TlsTrust.private_authority(cafile)` | `SipralTlsTrust.PrivateAuthority(cert)` | `SipralTlsTrust.PrivateAuthority(cert)` | `.privateAuthority(der)` |
+| One authority and no other | `TlsTrust.only_authority(cafile)` | `SipralTlsTrust.OnlyAuthority(cert)` | `SipralTlsTrust.OnlyAuthority(cert)` | `.onlyAuthority(der)` |
+
+None of them turns the check off, and Python's `TlsTrust.from_context`
+refuses a context that does not verify the server. The name checked is
+`tls_server_name` (`tlsServerName`), the host part of the server's address
+when it is left out.
+
+**When the connection fails.** The first attempt is made before the
+constructor returns and every later one on a thread of the layer's own;
+each one that fails is told to the stack with
+`sipral_stack_transport_failure`, carrying the TLS library's reason and its
+own sentence, and arrives as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`. The
+layer tries again one second after a loss, twice as long after each attempt
+that fails, up to thirty seconds. Once connected again it points every
+account without a `Contact` of its own at the new connection's address
+(`sipral_account_rebind`) and registers again every account that was
+registering, rather than leave it to the next back-off. A registration asked
+for while the connection is down is kept for then; a call placed meanwhile
+is refused with `SIPRAL_STATUS_TRANSPORT_DOWN`. A connection the server
+closes is told with `sipral_stack_stream_closed` and is raised with
+`SIPRAL_TRANSPORT_ERROR_CLOSED`.
+
+How each platform's error becomes a `SipralTlsFailure`:
+
+| | Python (`ssl`) | .NET (`SslStream`) | Kotlin (`SSLSocket`) | Swift (Network.framework) |
+|---|---|---|---|---|
+| `UNTRUSTED` | `SSLCertVerificationError` with any other verification code (self-signed, unknown issuer) | `RemoteCertificateChainErrors` with `UntrustedRoot`, `PartialChain` or a bad signature in the chain | the trust managers refuse the chain (PKIX path building or validation) | `SecTrustEvaluateWithError` fails with any other code |
+| `NAME_MISMATCH` | verification code 62 or 64 (`X509_V_ERR_HOSTNAME_MISMATCH`, `..._IP_ADDRESS_MISMATCH`) | `RemoteCertificateNameMismatch` | the chain is trusted and no `subjectAltName` names the server | `errSecHostNameMismatch` |
+| `EXPIRED` | verification code 10 or 9 (expired, not yet valid) | `NotTimeValid` or `NotTimeNested` in the chain status | `CertificateExpiredException`, `CertificateNotYetValidException` | `errSecCertificateExpired`, `errSecCertificateNotValidYet` |
+| `HANDSHAKE_REFUSED` | any other `SSLError` during the handshake | any other `AuthenticationException` or `IOException` during it | any other `SSLException` during it | `NWError.tls` with no certificate verdict |
+| `NONE`, refused | `ConnectionRefusedError` | `SocketError.ConnectionRefused` | `ConnectException` | `ECONNREFUSED`, or a reset before the connection was ready |
+
+Swift has TLS only where Network.framework is: on Linux a stack asked for
+`.tls` throws `.notSupported`, and `.tcp` works there on a plain socket.
+
+**In the lab.** `scripts/lab.sh tls` gives Asterisk three TLS listeners for
+the step alone (`interop/tls/`), each with a certificate a lab authority
+made for the run signed: 5061 for `asterisk.lab.sipral.test`, 5062 for
+`wrong.lab.sipral.test`, 5063 for the right name, expired in 2020. The
+Python, Kotlin and .NET agents are each run against 5061 trusting the
+platform's authorities alone, then against 5062 and 5063 trusting only the
+lab's, and then against 5061 trusting only the lab's, where they register
+and Asterisk calls them on that connection. What they printed, one run on
+the lab VM:
+
+```text
+probe 5061: transport failed error=connection_reset tls=untrusted: CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate
+probe 5062: transport failed error=connection_reset tls=name_mismatch: CERTIFICATE_VERIFY_FAILED: Hostname mismatch, certificate is not valid for 'asterisk.lab.sipral.test'.
+probe 5063: transport failed error=connection_reset tls=expired: CERTIFICATE_VERIFY_FAILED: certificate has expired
+```
+
+(Python). Kotlin said `unable to find valid certification path to
+requested target`, `no subjectAltName of the certificate names
+asterisk.lab.sipral.test` and `NotAfter: Thu Jan 02 00:00:00 UTC 2020`;
+.NET said `RemoteCertificateChainErrors; unable to get local issuer
+certificate`, `RemoteCertificateNameMismatch` and
+`RemoteCertificateChainErrors; certificate has expired`. Each then registered over TLS, Asterisk's
+contact for it read `;transport=tls`, and the call Asterisk placed to it
+was answered and carried the dialplan's `#` and audio both ways. The Swift
+agent did the same over TCP.
+
 ## What the application sees when TLS fails
 
-| What went wrong | SIP over TLS (the C sample) | TURN over TLS (every binding) |
-|---|---|---|
-| No trusted authority behind the certificate | the TLS library's reason (OpenSSL: `self-signed certificate`, `unable to get local issuer certificate`); no stack is bound to the connection | `SIPRAL_EVENT_KIND_NAT_RELAY`, outcome failed, code 0, reason `the connection to the server closed`; the call goes on without a relay |
-| The name does not match | the RFC 5922 check's reason | the same event, the same reason |
-| A wildcard certificate for a SIP domain | refused by the RFC 5922 check | accepted: HTTPS rules apply to a TURN server |
-| Trusting only another authority | as "no trusted authority" | as "no trusted authority" |
-| The TURN credential is wrong | — | outcome failed, code 401, reason `the server refused the credentials` |
-| The connection drops later | `sipral_stack_transport_failed` or `sipral_stack_stream_closed`; a registration goes to retrying, failure unreachable | a relay still being made fails as above; a call that had one keeps the paths that need none (`sipral_stack_turn_closed`) |
-| The server never answers | the transaction times out after 64·T1 (32 seconds); retrying, unreachable | outcome failed, code 0 |
+| What went wrong | SIP over TLS (the C sample) | SIP over TLS (every binding) | TURN over TLS (every binding) |
+|---|---|---|---|
+| No trusted authority behind the certificate | the TLS library's reason (OpenSSL: `self-signed certificate`, `unable to get local issuer certificate`); no stack is bound to the connection | `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`, `tls` `SIPRAL_TLS_FAILURE_UNTRUSTED`, `detail` the library's sentence; tried again | `SIPRAL_EVENT_KIND_NAT_RELAY`, outcome failed, code 0, reason `the connection to the server closed`; the call goes on without a relay |
+| The name does not match | the RFC 5922 check's reason | the same event, `SIPRAL_TLS_FAILURE_NAME_MISMATCH` | the same event, the same reason |
+| The certificate has expired | the TLS library's reason | the same event, `SIPRAL_TLS_FAILURE_EXPIRED` | the same event, the same reason |
+| The server does not speak TLS there | the TLS library's reason | the same event, `SIPRAL_TLS_FAILURE_HANDSHAKE_REFUSED` | the same event, the same reason |
+| Nothing listens there | `connect` refused | the same event, `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` and no TLS reason | outcome failed, code 0 |
+| A wildcard certificate for a SIP domain | refused by the RFC 5922 check | accepted: the HTTPS rules | accepted: HTTPS rules apply to a TURN server |
+| Trusting only another authority | as "no trusted authority" | as "no trusted authority" | as "no trusted authority" |
+| The TURN credential is wrong | — | — | outcome failed, code 401, reason `the server refused the credentials` |
+| The connection drops later | `sipral_stack_transport_failed` or `sipral_stack_stream_closed`; a registration goes to retrying, failure unreachable | the same, told by the binding and raised as the event with `SIPRAL_TRANSPORT_ERROR_CLOSED` or the reset; connected again and registered again | a relay still being made fails as above; a call that had one keeps the paths that need none (`sipral_stack_turn_closed`) |
+| The server never answers | the transaction times out after 64·T1 (32 seconds); retrying, unreachable | the connection times out after five seconds: `SIPRAL_TRANSPORT_ERROR_TIMED_OUT`, tried again | outcome failed, code 0 |
 
+The SIP reasons are the TLS library's, mapped as the table in "SIP over TLS
+in the four layers" says and carried in
+`sipral_transport_failed_event_t` (`crates/sipral-ffi/src/transport.rs`).
 The TURN reasons are the stack's (`crates/sipral-nat/src/turn/client.rs`,
 `TurnError`'s `Display`), carried in `sipral_nat_relay_event_t::reason`
-(`crates/sipral-ffi/src/nat.rs`). No binding passes the TLS library's own
-reason on: an untrusted certificate, a wrong name and a refused port all
-arrive as "the connection to the server closed". An application that has to
-tell a user which of the three it was checks the server itself, with the
-same trust settings, before or after the stack does.
+(`crates/sipral-ffi/src/nat.rs`), and for TURN no binding passes the TLS
+library's reason on yet: an untrusted certificate, a wrong name and a
+refused port all arrive as "the connection to the server closed". An
+application that has to tell a user which it was checks the TURN server
+itself, with the same trust settings, before or after the stack does.

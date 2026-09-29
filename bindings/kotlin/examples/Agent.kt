@@ -12,6 +12,15 @@
 //   SIPRAL_REGISTRAR_ADDRESS=203.0.113.10:5060 \
 //   SIPRAL_AUTH_USER=labuser-agent-kotlin SIPRAL_AUTH_PASSWORD=labpass \
 //   java -cp ... org.sipral.examples.AgentKt
+//
+// SIPRAL_SIGNALLING is udp (the default), tcp or tls: over either of the
+// last two the agent keeps one connection to SIPRAL_REGISTRAR_ADDRESS and
+// signals on it, and over TLS checks the server's certificate against
+// SIPRAL_TLS_SERVER_NAME (the address's host when unset) with SIPRAL_TLS_CA
+// as the only authority it trusts (the platform's when unset). A connection
+// that fails is printed as "transport failed error=<...> tls=<...>" with
+// SSLSocket's own words, and tried again. SIPRAL_INVITE_LIMIT=voice-agent
+// takes a trunk's rush of calls the default rate floor would answer 480.
 
 package org.sipral.examples
 
@@ -20,6 +29,7 @@ import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.security.KeyStore
 import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManagerFactory
@@ -37,12 +47,17 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralIce
 import org.sipral.SipralStreamStats
+import org.sipral.SipralTlsFailure
 import org.sipral.SipralTransport
+import org.sipral.SipralTransportError
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.SipralInviteLimit
+import org.sipral.idiomatic.SipralTlsTrust
 import org.sipral.idiomatic.SipralTurnServer
 import org.sipral.idiomatic.digitOf
+import org.sipral.idiomatic.transportFailedOf
 
 /** Which of this host's addresses a datagram to `address` leaves from.
  * `bindings/python/examples/agent.py`'s own `route_to`: connecting a UDP
@@ -305,6 +320,12 @@ private suspend fun runDirectCall(): Boolean {
     return ok
 }
 
+/** The authority in the PEM file at `path`. */
+private fun authority(path: String): X509Certificate =
+    File(path).inputStream().use { input ->
+        CertificateFactory.getInstance("X.509").generateCertificate(input) as X509Certificate
+    }
+
 /** A socket factory that trusts the certificates in the PEM file at `path`
  * and nothing else: how the lab's coturn, whose certificate is made for the
  * run, is trusted over TLS. */
@@ -333,7 +354,23 @@ fun main() = runBlocking {
     val registrarAddress = System.getenv("SIPRAL_REGISTRAR_ADDRESS")
         ?: error("SIPRAL_REGISTRAR_ADDRESS is required")
     val host = routeTo(registrarAddress)
-    val client = SipralClient.open(audio = SipralAudioMode.Application, bindHost = host)
+    val signalling = when (val over = System.getenv("SIPRAL_SIGNALLING") ?: "udp") {
+        "udp" -> SipralTransport.UDP
+        "tcp" -> SipralTransport.TCP
+        "tls" -> SipralTransport.TLS
+        else -> error("SIPRAL_SIGNALLING is udp, tcp or tls, not $over")
+    }
+    val streamed = signalling != SipralTransport.UDP
+    val client = SipralClient.open(
+        audio = SipralAudioMode.Application,
+        bindHost = host,
+        signalling = signalling,
+        signallingServer = if (streamed) registrarAddress else null,
+        tlsServerName = System.getenv("SIPRAL_TLS_SERVER_NAME"),
+        tlsTrust = System.getenv("SIPRAL_TLS_CA")?.let { SipralTlsTrust.OnlyAuthority(authority(it)) }
+            ?: SipralTlsTrust.Platform,
+        inviteLimit = if (System.getenv("SIPRAL_INVITE_LIMIT") == "voice-agent") SipralInviteLimit.VOICE_AGENT else null,
+    )
     val account = client.addAccount(
         aor = System.getenv("SIPRAL_AOR") ?: "sip:agent@example.invalid",
         registrarAddress = registrarAddress,
@@ -341,7 +378,23 @@ fun main() = runBlocking {
         authUser = System.getenv("SIPRAL_AUTH_USER"),
         authPassword = System.getenv("SIPRAL_AUTH_PASSWORD"),
     )
-    if (System.getenv("SIPRAL_REGISTRAR") != null) {
+    if (streamed) {
+        // over a connection the first attempt may already have failed, and
+        // every one after it says so: printed as it happens, and the
+        // registration left to go whenever the connection is made
+        launch {
+            client.events.collect { event ->
+                transportFailedOf(event)?.let { failed ->
+                    val error = SipralTransportError.of(failed.error.toInt())?.name?.lowercase()
+                    val tls = SipralTlsFailure.of(failed.tls.toInt())?.name?.lowercase()
+                    println("transport failed error=$error tls=$tls: ${failed.detail ?: ""}")
+                }
+            }
+        }
+        if (System.getenv("SIPRAL_REGISTRAR") != null) {
+            account.register()
+        }
+    } else if (System.getenv("SIPRAL_REGISTRAR") != null) {
         account.registerAndWait()
     }
     println("listening on ${client.bindAddress}")

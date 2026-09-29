@@ -245,6 +245,10 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         // same reading `SipralStatus::Busy` already has elsewhere
         UaError::MessagePending => SipralStatus::Busy,
         UaError::Send(SendError::LimitReached { .. }) => SipralStatus::LimitReached,
+        // every number an account or a call can name was checked against
+        // the table when it was given, so a transport the layer below does
+        // not know is one that was retired since and not bound again
+        UaError::Send(SendError::UnknownTransport) => SipralStatus::TransportDown,
         _ => SipralStatus::NotSent,
     };
     fail(status, error.to_string())

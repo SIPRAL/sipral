@@ -7,7 +7,9 @@ import org.sipral.Sipral
 import org.sipral.SipralAccountConfig
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralException
 import org.sipral.SipralRegistrationState
+import org.sipral.SipralStatus
 
 /**
  * `sipral_account_add`, and the entry points that take its handle.
@@ -112,13 +114,34 @@ class SipralAccount internal constructor(
             retryBusy { Sipral.accountRegistrationState(client.handle, handle) }.toInt(),
         ) ?: SipralRegistrationState.UNKNOWN
 
-    /** `sipral_account_register`. A no-op account refuses this. */
+    /** Whether it was asked to register and not to unregister since: the
+     * accounts a client signalling over TCP or TLS registers again once its
+     * connection is made again. */
+    @Volatile
+    var wantsRegistration: Boolean = false
+        private set
+
+    /**
+     * `sipral_account_register`. A no-op account refuses this. On a client
+     * signalling over TCP or TLS whose connection is down
+     * (`SipralStatus.TRANSPORT_DOWN`, already raised as
+     * `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`) it is kept, and the REGISTER goes
+     * the moment the connection is made again.
+     */
     fun register() {
-        retryBusy { Sipral.accountRegister(client.handle, handle, client.nowMs()) }
+        wantsRegistration = true
+        try {
+            retryBusy { Sipral.accountRegister(client.handle, handle, client.nowMs()) }
+        } catch (refused: SipralException) {
+            if (refused.status != SipralStatus.TRANSPORT_DOWN) {
+                throw refused
+            }
+        }
     }
 
     /** `sipral_account_unregister`. */
     fun unregister() {
+        wantsRegistration = false
         retryBusy { Sipral.accountUnregister(client.handle, handle, client.nowMs()) }
     }
 

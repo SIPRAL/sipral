@@ -117,6 +117,11 @@ public enum SipralStatus: Int32, Sendable {
     /// never carried `isfocus` (RFC 4579 §4.1), so there is no
     /// conference to name or subscribe to.
     case notAfocus = 21
+    /// The transport the request would leave on has failed or closed and
+    /// has not been bound again. Nothing went out. The failure was
+    /// reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
+    /// the stack with `sipral_stack_transport_bind`, and ask again.
+    case transportDown = 22
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -157,6 +162,33 @@ public enum SipralTransportError: UInt32, Sendable {
     case timedOut = 4
     /// The connection was closed and cannot be written to again.
     case closed = 5
+}
+
+/// Why a TLS connection was refused, as the platform's TLS library said
+/// it. Names for `sipral_transport_failure_t::tls` and
+/// `sipral_transport_failed_event_t::tls`.
+///
+/// Sipral links no TLS library (`docs/22-tls.md`), so these are the
+/// application's words, mapped from its own library's error: the stack
+/// only carries them to whoever reads the event, so that a user can be
+/// told which of the four it was rather than "the connection closed".
+/// A connection that was never answered is not one of them: that is
+/// `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
+public enum SipralTlsFailure: UInt32, Sendable {
+    /// Not a TLS failure, or one the application could not classify.
+    case none = 0
+    /// No trusted authority stands behind the server's certificate: a
+    /// self-signed one, a private authority not handed over, or an
+    /// authority other than the one pinned.
+    case untrusted = 1
+    /// The certificate is trusted and names another server.
+    case nameMismatch = 2
+    /// The certificate has expired, or is not valid yet.
+    case expired = 3
+    /// The handshake itself failed: no protocol version or cipher in
+    /// common, an alert from the server, or a server that does not speak
+    /// TLS on that port.
+    case handshakeRefused = 4
 }
 
 /// The three answers a setting can give in a struct that starts out zeroed.
@@ -615,7 +647,6 @@ public enum SipralDtmf: UInt32, Sendable {
 /// Numbers already spent on features this build does not have:
 /// - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
 /// - 44: held for a second audio device event, which the audio engine did not need; spent all the same
-/// - 53: held for a transport that failed, with the TLS reason when there is one (wave C, tls-layers)
 public enum SipralEventKind: UInt32, Sendable {
     /// The stack is running on this thread.
     ///
@@ -1078,6 +1109,23 @@ public enum SipralEventKind: UInt32, Sendable {
     /// the SIP status, the lifetime the compositor granted and when the
     /// stack refreshes it.
     case presenceChanged = 52
+    /// A transport this stack signals on stopped carrying traffic: the
+    /// application said it failed (`sipral_stack_transport_failed`,
+    /// `sipral_stack_transport_failure`) or closed
+    /// (`sipral_stack_stream_closed`), or a stream carried bytes no
+    /// message starts with (`sipral_stack_receive_stream`).
+    ///
+    /// Raised by the next poll, before what the loss did to the
+    /// registrations and calls on it. `payload.transport_failed` says
+    /// which transport, what it spoke, what went wrong and — when TLS
+    /// refused the connection — why, as the application's TLS library
+    /// said it: untrusted, a name that does not match, expired, or a
+    /// handshake refused, with the library's own sentence beside it.
+    /// Nothing is sent on the transport until
+    /// `sipral_stack_transport_bind` brings it back; a request asked for
+    /// meanwhile is `SIPRAL_STATUS_TRANSPORT_DOWN`. `account` and `call`
+    /// are `SIPRAL_HANDLE_NONE`: a transport is neither.
+    case transportFailed = 53
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -2292,6 +2340,16 @@ public extension sipral_transmit_t {
     }
 }
 
+public extension sipral_transport_failure_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 public extension sipral_event_t {
     /// A zeroed one with its size filled in, which is what every
     /// struct here has to be handed over as.
@@ -2852,6 +2910,13 @@ public enum Sipral {
     /// socket, where anything larger was fragmented on the way.
     public static let messageBytes: Int = 65535
 
+    /// The longest `sipral_transport_failure_t::detail` this library takes.
+    ///
+    /// A platform's sentence about a refused certificate is a line, not a
+    /// document; one longer than this is refused rather than cut, since a
+    /// sentence cut short can say something else.
+    public static let transportDetailBytes: Int = 1024
+
     /// The answer that lets an INVITE through, and the reason it is a status
     /// code rather than a flag.
     ///
@@ -2862,6 +2927,31 @@ public enum Sipral {
     /// caller who filled nothing in leaves behind, and neither of those may
     /// mean "let the stranger in".
     public static let screenAccept: UInt32 = 200
+
+    /// The burst a stack starts with: ten INVITEs from one address at once.
+    ///
+    /// With SIPRAL_INVITE_LIMIT_EVERY_MS, the floor every stack has from
+    /// `sipral_stack_create` on. An INVITE past it is answered 480 and
+    /// counted in `sipral_counters_t::screened_refused_by_rate`; nothing is
+    /// raised for it.
+    public static let inviteLimitBurst: UInt32 = 10
+
+    /// The interval a stack starts with: one more INVITE every two seconds.
+    public static let inviteLimitEveryMs: UInt64 = 2000
+
+    /// The voice-agent preset's burst: a hundred and twenty-eight at once.
+    ///
+    /// For a headless service that takes every call from one trunk or proxy,
+    /// where the default's ten-then-one-every-two-seconds answers a
+    /// campaign's twelfth caller 480. Handed to `sipral_stack_invite_limit`
+    /// with SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS. The burst is the
+    /// default `max_dialogs`, so that a rush is turned away by the ceiling on
+    /// calls held, with a 503, before it is by the rate.
+    public static let inviteLimitVoiceAgentBurst: UInt32 = 128
+
+    /// The voice-agent preset's interval: one more INVITE every fifty
+    /// milliseconds, twenty a second.
+    public static let inviteLimitVoiceAgentEveryMs: UInt64 = 50
 
     /// Bits of `sipral_call_event_t::privacy` and of
     /// `sipral_account_config_t::privacy` (RFC 3323 §4.2): `header`, obscure
@@ -5328,6 +5418,11 @@ public enum Sipral {
     /// socket over it would drop the calls that were fine. This is for the
     /// socket that is over.
     ///
+    /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
+    /// of what the failure did to the registrations and calls on it.
+    /// sipral_stack_transport_failure is the same call with the TLS
+    /// library's reason carried along.
+    ///
     /// Safety
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.
@@ -5337,13 +5432,45 @@ public enum Sipral {
         try check(status)
     }
 
+    /// Say that a transport failed, and why, in the words of the TLS library
+    /// that refused it.
+    ///
+    /// Everything sipral_stack_transport_failed does — the transport is
+    /// retired, the transactions on it fail, nothing is sent on it until
+    /// sipral_stack_transport_bind brings it back — and the reason is
+    /// carried to `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: `failure->tls` for a
+    /// machine to switch on, `failure->detail` for a person to read. A
+    /// connection that never got as far as a handshake is told here too, so
+    /// that the application hears about it in the one place it hears about
+    /// every other loss; retiring a transport that carried nothing yet costs
+    /// nothing, and the bind that follows the reconnect undoes it. A
+    /// transport already down is not retired twice, and the failure is still
+    /// raised: that is how each attempt to connect again that fails is told.
+    ///
+    /// A TLS reason on a transport that does not speak TLS or WSS is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and so is a detail longer than
+    /// SIPRAL_TRANSPORT_DETAIL_BYTES or not UTF-8; nothing is retired.
+    ///
+    /// Safety
+    ///
+    /// `failure` must point at a `sipral_transport_failure_t` whose `size`
+    /// member says how long it is, and its `detail` must be readable for
+    /// `detail_len` bytes.
+    public static func stackTransportFailure(stack: SipralHandle, failure: sipral_transport_failure_t, nowMs: UInt64) throws {
+        try ensureAbi()
+        var failure = failure
+        let status = sipral_stack_transport_failure(stack, &failure, nowMs)
+        try check(status)
+    }
+
     /// Say that a connection closed: the far end went away, or a read returned
     /// zero.
     ///
     /// The same retirement as sipral_stack_transport_failed, and a separate
     /// call because it is a separate thing to have happened. An orderly close is
     /// not an error the caller has to invent a kind for, and a stack that made it
-    /// one would have the two indistinguishable in a log for ever after.
+    /// one would have the two indistinguishable in a log for ever after. The
+    /// event the next poll raises says `SIPRAL_TRANSPORT_ERROR_CLOSED`.
     ///
     /// Safety
     ///

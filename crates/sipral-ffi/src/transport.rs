@@ -149,6 +149,13 @@ constants! {
     /// message and the start of another, and 1500 bytes or so on a datagram
     /// socket, where anything larger was fragmented on the way.
     pub const SIPRAL_MESSAGE_BYTES: usize = 65_535;
+
+    /// The longest `sipral_transport_failure_t::detail` this library takes.
+    ///
+    /// A platform's sentence about a refused certificate is a line, not a
+    /// document; one longer than this is refused rather than cut, since a
+    /// sentence cut short can say something else.
+    pub const SIPRAL_TRANSPORT_DETAIL_BYTES: usize = 1_024;
 }
 
 codes! {
@@ -173,6 +180,36 @@ codes! {
         TimedOut = 4,
         /// The connection was closed and cannot be written to again.
         Closed = 5,
+    }
+}
+
+codes! {
+    /// Why a TLS connection was refused, as the platform's TLS library said
+    /// it. Names for `sipral_transport_failure_t::tls` and
+    /// `sipral_transport_failed_event_t::tls`.
+    ///
+    /// Sipral links no TLS library (`docs/22-tls.md`), so these are the
+    /// application's words, mapped from its own library's error: the stack
+    /// only carries them to whoever reads the event, so that a user can be
+    /// told which of the four it was rather than "the connection closed".
+    /// A connection that was never answered is not one of them: that is
+    /// `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralTlsFailure: u32 {
+        /// Not a TLS failure, or one the application could not classify.
+        None = 0,
+        /// No trusted authority stands behind the server's certificate: a
+        /// self-signed one, a private authority not handed over, or an
+        /// authority other than the one pinned.
+        Untrusted = 1,
+        /// The certificate is trusted and names another server.
+        NameMismatch = 2,
+        /// The certificate has expired, or is not valid yet.
+        Expired = 3,
+        /// The handshake itself failed: no protocol version or cipher in
+        /// common, an alert from the server, or a server that does not speak
+        /// TLS on that port.
+        HandshakeRefused = 4,
     }
 }
 
@@ -246,6 +283,104 @@ unsafe impl Versioned for SipralTransmit {
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
+    }
+}
+
+record! {
+    /// A transport that failed, and why, for
+    /// [`sipral_stack_transport_failure`].
+    ///
+    /// The caller fills in all of it. `detail` is the platform's own sentence
+    /// — OpenSSL's, `SslStream`'s, `SSLSocket`'s, Network.framework's — and
+    /// is optional; it travels to the event unread and unparsed, so a user's
+    /// report can quote it.
+    #[derive(Clone, Copy)]
+    pub struct SipralTransportFailure {
+        /// `sizeof` this struct, as the caller's header declares it.
+        pub size: usize,
+        /// Which transport: [`SIPRAL_TRANSPORT_MAIN`], or a number
+        /// [`sipral_stack_transport_bind`] added.
+        pub transport: u32,
+        /// A [`SipralTransportError`].
+        pub error: u32,
+        /// A [`SipralTlsFailure`]; `SIPRAL_TLS_FAILURE_NONE` for anything
+        /// that was not TLS refusing, and only that on a transport that does
+        /// not speak TLS.
+        pub tls: u32,
+        /// The platform's own words for it, not NUL-terminated. Null with a
+        /// length of zero for none.
+        pub detail: *const c_char,
+        /// How many bytes of it; at most [`SIPRAL_TRANSPORT_DETAIL_BYTES`].
+        pub detail_len: usize,
+    }
+}
+
+// Safety: plain data with no invariant between the members; the one pointer
+// is the caller's and is read for as long as the call runs and no longer.
+unsafe impl Versioned for SipralTransportFailure {
+    const NAME: &'static str = "sipral_transport_failure";
+    const MIN_SIZE: usize = crate::versioned::min_size::TRANSPORT_FAILURE;
+
+    fn set_declared_size(&mut self, bytes: usize) {
+        self.size = bytes;
+    }
+}
+
+record! {
+    /// The payload of `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: a transport this
+    /// stack signals on stopped carrying traffic.
+    ///
+    /// The text is the library's, valid for as long as the callback runs.
+    #[derive(Clone, Copy)]
+    pub struct SipralTransportFailedEvent {
+        /// Which transport: [`SIPRAL_TRANSPORT_MAIN`], or a number
+        /// [`sipral_stack_transport_bind`] added.
+        pub transport: u32,
+        /// What it spoke, as a `SipralTransport`.
+        pub protocol: u32,
+        /// A [`SipralTransportError`]: what the application said went wrong,
+        /// `SIPRAL_TRANSPORT_ERROR_CLOSED` for a connection that closed.
+        pub error: u32,
+        /// A [`SipralTlsFailure`]: why TLS refused, when that is what it was.
+        pub tls: u32,
+        /// The platform's own sentence, as the application handed it over.
+        /// Null with a length of zero when it gave none.
+        pub detail: *const c_char,
+        /// How many bytes of it.
+        pub detail_len: usize,
+    }
+}
+
+/// One transport lost, waiting for the next poll to say so.
+///
+/// Queued by the entry point that retired it and raised by the poll, before
+/// anything the layers below have to say about the transactions that failed
+/// with it: the cause comes before its effects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Lost {
+    pub(crate) transport: u32,
+    pub(crate) protocol: u32,
+    pub(crate) error: SipralTransportError,
+    pub(crate) tls: SipralTlsFailure,
+    pub(crate) detail: String,
+}
+
+impl Lost {
+    /// The event, and the text it points into.
+    pub(crate) fn raised(self, stack: SipralHandle) -> (crate::event::SipralEvent, String) {
+        let payload = SipralTransportFailedEvent {
+            transport: self.transport,
+            protocol: self.protocol,
+            error: self.error as u32,
+            tls: self.tls as u32,
+            detail: if self.detail.is_empty() {
+                ptr::null()
+            } else {
+                self.detail.as_ptr().cast::<c_char>()
+            },
+            detail_len: self.detail.len(),
+        };
+        (crate::event::transport_failed(stack, payload), self.detail)
     }
 }
 
@@ -525,10 +660,22 @@ entry! {
                     transport.0
                 )
             });
-            state
+            let received = state
                 .agent
-                .receive(Input::StreamData { transport, data: read }, now)
-                .map_err(|error| received_badly(&error))
+                .receive(Input::StreamData { transport, data: read }, now);
+            if let Err(ReceiveError::Malformed(ref broken)) = received {
+                // the framing is lost with it and the endpoint has already
+                // forgotten the transport: a loss like any other, said the
+                // same way
+                state.lost.push(Lost {
+                    transport: transport.0,
+                    protocol: protocol_number(state, transport.0),
+                    error: SipralTransportError::Other,
+                    tls: SipralTlsFailure::None,
+                    detail: format!("the stream carried something no message starts with: {broken}"),
+                });
+            }
+            received.map_err(|error| received_badly(&error))
         })
     }
 }
@@ -667,6 +814,11 @@ entry! {
     /// socket over it would drop the calls that were fine. This is for the
     /// socket that is over.
     ///
+    /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
+    /// of what the failure did to the registrations and calls on it.
+    /// [`sipral_stack_transport_failure`] is the same call with the TLS
+    /// library's reason carried along.
+    ///
     /// # Safety
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.
@@ -676,13 +828,70 @@ entry! {
         error: u32,
         now_ms: u64,
     ) {
-        let error = failure(error)?;
+        let error = error_named(error)?;
         with_stack_at(stack, now_ms, |state, now| {
-            let transport = named(state, transport)?;
-            state
-                .agent
-                .receive(Input::TransportFailed { transport, error }, now)
-                .map_err(|error| received_badly(&error))
+            lose(
+                state,
+                transport,
+                error,
+                SipralTlsFailure::None,
+                String::new(),
+                now,
+            )
+        })
+    }
+}
+
+entry! {
+    /// Say that a transport failed, and why, in the words of the TLS library
+    /// that refused it.
+    ///
+    /// Everything [`sipral_stack_transport_failed`] does — the transport is
+    /// retired, the transactions on it fail, nothing is sent on it until
+    /// [`sipral_stack_transport_bind`] brings it back — and the reason is
+    /// carried to `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: `failure->tls` for a
+    /// machine to switch on, `failure->detail` for a person to read. A
+    /// connection that never got as far as a handshake is told here too, so
+    /// that the application hears about it in the one place it hears about
+    /// every other loss; retiring a transport that carried nothing yet costs
+    /// nothing, and the bind that follows the reconnect undoes it. A
+    /// transport already down is not retired twice, and the failure is still
+    /// raised: that is how each attempt to connect again that fails is told.
+    ///
+    /// A TLS reason on a transport that does not speak TLS or WSS is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and so is a detail longer than
+    /// [`SIPRAL_TRANSPORT_DETAIL_BYTES`] or not UTF-8; nothing is retired.
+    ///
+    /// # Safety
+    ///
+    /// `failure` must point at a `sipral_transport_failure_t` whose `size`
+    /// member says how long it is, and its `detail` must be readable for
+    /// `detail_len` bytes.
+    fn sipral_stack_transport_failure(
+        stack: SipralHandle,
+        failure: *const SipralTransportFailure,
+        now_ms: u64,
+    ) {
+        let failure = unsafe { read_versioned(failure) }?;
+        let error = error_named(failure.error)?;
+        let tls = tls_named(failure.tls)?;
+        let detail = unsafe { detail_of(failure.detail, failure.detail_len) }?;
+        with_stack_at(stack, now_ms, |state, now| {
+            if tls != SipralTlsFailure::None {
+                let speaks = state.transports.protocol_of(failure.transport);
+                if speaks.is_some_and(|protocol| !protocol.is_secure()) {
+                    return Err(fail(
+                        SipralStatus::InvalidArgument,
+                        format!(
+                            "transport {} speaks {}, and a TLS reason is for one that speaks \
+                             TLS",
+                            failure.transport,
+                            speaks.map_or_else(String::new, |protocol| protocol.to_string())
+                        ),
+                    ));
+                }
+            }
+            lose(state, failure.transport, error, tls, detail, now)
         })
     }
 }
@@ -694,20 +903,89 @@ entry! {
     /// The same retirement as [`sipral_stack_transport_failed`], and a separate
     /// call because it is a separate thing to have happened. An orderly close is
     /// not an error the caller has to invent a kind for, and a stack that made it
-    /// one would have the two indistinguishable in a log for ever after.
+    /// one would have the two indistinguishable in a log for ever after. The
+    /// event the next poll raises says `SIPRAL_TRANSPORT_ERROR_CLOSED`.
     ///
     /// # Safety
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.
     fn sipral_stack_stream_closed(stack: SipralHandle, transport: u32, now_ms: u64) {
         with_stack_at(stack, now_ms, |state, now| {
-            let transport = named(state, transport)?;
+            let id = named(state, transport)?;
             state
                 .agent
-                .receive(Input::StreamClosed { transport }, now)
-                .map_err(|error| received_badly(&error))
+                .receive(Input::StreamClosed { transport: id }, now)
+                .map_err(|error| received_badly(&error))?;
+            state.lost.push(Lost {
+                transport,
+                protocol: protocol_number(state, transport),
+                error: SipralTransportError::Closed,
+                tls: SipralTlsFailure::None,
+                detail: String::new(),
+            });
+            Ok(())
         })
     }
+}
+
+/// Retire a transport, and queue the event that says so.
+fn lose(
+    state: &mut StackState,
+    transport: u32,
+    error: SipralTransportError,
+    tls: SipralTlsFailure,
+    detail: String,
+    now: std::time::Instant,
+) -> Result<(), Fail> {
+    let id = named(state, transport)?;
+    // a transport already down is not retired twice, and the failure is
+    // still raised: an attempt to connect again that failed
+    state
+        .agent
+        .receive(
+            Input::TransportFailed {
+                transport: id,
+                error: kind_of(error),
+            },
+            now,
+        )
+        .map_err(|error| received_badly(&error))?;
+    state.lost.push(Lost {
+        transport,
+        protocol: protocol_number(state, transport),
+        error,
+        tls,
+        detail,
+    });
+    Ok(())
+}
+
+/// What a transport in the table speaks, as a `SipralTransport`.
+fn protocol_number(state: &StackState, transport: u32) -> u32 {
+    state
+        .transports
+        .protocol_of(transport)
+        .map_or(0, SipralTransport::named)
+}
+
+/// The platform's sentence, as text this library keeps.
+///
+/// # Safety
+///
+/// `detail`, when it is not null, must be readable for `len` bytes.
+unsafe fn detail_of(detail: *const c_char, len: usize) -> Result<String, Fail> {
+    if len > SIPRAL_TRANSPORT_DETAIL_BYTES {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "detail is {len} bytes, and a transport failure's is at most \
+                 {SIPRAL_TRANSPORT_DETAIL_BYTES}"
+            ),
+        ));
+    }
+    Ok(unsafe { crate::text::text(detail, len, "detail") }?
+        .unwrap_or_default()
+        .to_owned())
 }
 
 /// An address a caller may leave out, as one.
@@ -767,17 +1045,44 @@ pub(crate) unsafe fn arrived<'a>(
 }
 
 /// What kind of failure a number names.
-fn failure(error: u32) -> Result<TransportErrorKind, Fail> {
+fn error_named(error: u32) -> Result<SipralTransportError, Fail> {
     match error {
-        0 => Ok(TransportErrorKind::Other),
-        1 => Ok(TransportErrorKind::ConnectionRefused),
-        2 => Ok(TransportErrorKind::ConnectionReset),
-        3 => Ok(TransportErrorKind::Unreachable),
-        4 => Ok(TransportErrorKind::TimedOut),
-        5 => Ok(TransportErrorKind::Closed),
+        0 => Ok(SipralTransportError::Other),
+        1 => Ok(SipralTransportError::ConnectionRefused),
+        2 => Ok(SipralTransportError::ConnectionReset),
+        3 => Ok(SipralTransportError::Unreachable),
+        4 => Ok(SipralTransportError::TimedOut),
+        5 => Ok(SipralTransportError::Closed),
         other => Err(fail(
             SipralStatus::InvalidArgument,
             format!("{other} is not a transport error this library names"),
+        )),
+    }
+}
+
+/// What the layer below calls a failure.
+const fn kind_of(error: SipralTransportError) -> TransportErrorKind {
+    match error {
+        SipralTransportError::Other => TransportErrorKind::Other,
+        SipralTransportError::ConnectionRefused => TransportErrorKind::ConnectionRefused,
+        SipralTransportError::ConnectionReset => TransportErrorKind::ConnectionReset,
+        SipralTransportError::Unreachable => TransportErrorKind::Unreachable,
+        SipralTransportError::TimedOut => TransportErrorKind::TimedOut,
+        SipralTransportError::Closed => TransportErrorKind::Closed,
+    }
+}
+
+/// What TLS failure a number names.
+fn tls_named(tls: u32) -> Result<SipralTlsFailure, Fail> {
+    match tls {
+        0 => Ok(SipralTlsFailure::None),
+        1 => Ok(SipralTlsFailure::Untrusted),
+        2 => Ok(SipralTlsFailure::NameMismatch),
+        3 => Ok(SipralTlsFailure::Expired),
+        4 => Ok(SipralTlsFailure::HandshakeRefused),
+        other => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!("{other} is not a TLS failure this library names"),
         )),
     }
 }
@@ -806,9 +1111,11 @@ fn received_badly(error: &ReceiveError) -> Fail {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        SIPRAL_MESSAGE_BYTES, SIPRAL_TRANSPORT_MAIN, SipralTransmit, SipralTransportError,
+        SIPRAL_MESSAGE_BYTES, SIPRAL_TRANSPORT_DETAIL_BYTES, SIPRAL_TRANSPORT_MAIN,
+        SipralTlsFailure, SipralTransmit, SipralTransportError, SipralTransportFailure,
         sipral_stack_poll_transmit, sipral_stack_receive_datagram, sipral_stack_receive_stream,
         sipral_stack_stream_closed, sipral_stack_transport_bind, sipral_stack_transport_failed,
+        sipral_stack_transport_failure,
     };
     use crate::account::{SipralAccountConfig, sipral_account_add, sipral_account_register};
     use crate::error::last_error_text;
@@ -2324,6 +2631,282 @@ pub(crate) mod tests {
         assert!(
             String::from_utf8_lossy(&out).contains("X-Padding"),
             "the same oversized request went out, not a smaller one"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// What a TLS library refused, as the application hands it over.
+    fn refused(transport: u32, tls: SipralTlsFailure, detail: &str) -> SipralTransportFailure {
+        SipralTransportFailure {
+            size: size_of::<SipralTransportFailure>(),
+            transport,
+            error: SipralTransportError::ConnectionReset as u32,
+            tls: tls as u32,
+            detail: detail.as_ptr().cast::<c_char>(),
+            detail_len: detail.len(),
+        }
+    }
+
+    fn rebind(handle: SipralHandle, now_ms: u64) -> SipralStatus {
+        unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                SIPRAL_TRANSPORT_MAIN,
+                0,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                REGISTRAR.as_ptr().cast::<c_char>(),
+                REGISTRAR.len(),
+                now_ms,
+                ptr::null_mut(),
+            )
+        }
+    }
+
+    /// The TLS library's reason reaches the event whole, and the event comes
+    /// before the registration that failed with the connection.
+    #[test]
+    fn a_tls_refusal_is_raised_with_its_reason_before_what_it_did() {
+        let mut observed = Observed::default();
+        let handle = speaking(&mut observed, SipralTransport::Tls);
+        assert_eq!(
+            rebind(handle, 900),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let account = line(handle);
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::Ok
+        );
+        poll(handle, 1_000);
+        drain(handle);
+        let seen = observed.events.len();
+
+        let said = "certificate verify failed: certificate has expired";
+        let failure = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::Expired, said);
+        assert_eq!(
+            unsafe { sipral_stack_transport_failure(handle, &raw const failure, 1_100) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert!(
+            observed.transports_lost.is_empty(),
+            "nothing is said inside the call"
+        );
+        poll(handle, 1_100);
+        assert_eq!(
+            observed.transports_lost,
+            [(
+                SIPRAL_TRANSPORT_MAIN,
+                SipralTransport::Tls as u32,
+                SipralTransportError::ConnectionReset as u32,
+                SipralTlsFailure::Expired as u32,
+                said.to_owned(),
+            )]
+        );
+        let after: Vec<SipralEventKind> = observed.kinds()[seen..].to_vec();
+        assert_eq!(
+            after.first(),
+            Some(&SipralEventKind::TransportFailed),
+            "{after:?}"
+        );
+        assert!(
+            after.contains(&SipralEventKind::RegistrationChanged),
+            "the registration on it failed with it: {after:?}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A request asked for while the transport is down is refused as that,
+    /// not as a request that could not be built, and goes once it is back.
+    #[test]
+    fn a_request_on_a_transport_that_is_down_is_refused_until_it_is_bound_again() {
+        let mut observed = Observed::default();
+        let handle = speaking(&mut observed, SipralTransport::Tls);
+        assert_eq!(rebind(handle, 900), SipralStatus::Ok);
+        let account = line(handle);
+        let failure = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::Untrusted, "");
+        assert_eq!(
+            unsafe { sipral_stack_transport_failure(handle, &raw const failure, 1_000) },
+            SipralStatus::Ok
+        );
+        poll(handle, 1_000);
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_100) },
+            SipralStatus::TransportDown,
+            "{}",
+            last_error_text()
+        );
+        assert!(drain(handle).is_empty(), "nothing went out");
+        assert_eq!(
+            observed.transports_lost.first().map(|lost| lost.4.clone()),
+            Some(String::new()),
+            "no detail was given and none is invented"
+        );
+
+        assert_eq!(rebind(handle, 1_200), SipralStatus::Ok);
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_200) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let (out, to, _) = take_one(handle);
+        assert!(out.starts_with(b"REGISTER "));
+        assert_eq!(to, REGISTRAR);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The two older calls raise the same event, with no TLS reason, and an
+    /// orderly close says closed.
+    #[test]
+    fn a_failure_and_a_close_told_the_old_way_are_raised_too() {
+        let mut observed = Observed::default();
+        let handle = speaking(&mut observed, SipralTransport::Tcp);
+        assert_eq!(
+            unsafe {
+                sipral_stack_transport_failed(
+                    handle,
+                    SIPRAL_TRANSPORT_MAIN,
+                    SipralTransportError::ConnectionRefused as u32,
+                    1_000,
+                )
+            },
+            SipralStatus::Ok
+        );
+        poll(handle, 1_000);
+        assert_eq!(rebind(handle, 1_100), SipralStatus::Ok);
+        assert_eq!(
+            unsafe { sipral_stack_stream_closed(handle, SIPRAL_TRANSPORT_MAIN, 1_200) },
+            SipralStatus::Ok
+        );
+        poll(handle, 1_200);
+        let tcp = SipralTransport::Tcp as u32;
+        let refused_code = SipralTransportError::ConnectionRefused as u32;
+        let closed_code = SipralTransportError::Closed as u32;
+        assert_eq!(
+            observed.transports_lost,
+            [
+                (0, tcp, refused_code, 0, String::new()),
+                (0, tcp, closed_code, 0, String::new()),
+            ]
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// Every attempt to connect again that fails is raised, the transport
+    /// down since the first, whichever of the two calls tells it.
+    #[test]
+    fn each_attempt_to_connect_again_that_fails_is_raised() {
+        let mut observed = Observed::default();
+        let handle = speaking(&mut observed, SipralTransport::Tls);
+        let untrusted = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::Untrusted, "first");
+        let expired = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::Expired, "second");
+        for (failure, at) in [(&untrusted, 1_000), (&expired, 2_000)] {
+            assert_eq!(
+                unsafe { sipral_stack_transport_failure(handle, failure, at) },
+                SipralStatus::Ok,
+                "{}",
+                last_error_text()
+            );
+            poll(handle, at);
+        }
+        let reasons: Vec<(u32, String)> = observed
+            .transports_lost
+            .iter()
+            .map(|lost| (lost.3, lost.4.clone()))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                (SipralTlsFailure::Untrusted as u32, "first".to_owned()),
+                (SipralTlsFailure::Expired as u32, "second".to_owned()),
+            ]
+        );
+        assert_eq!(
+            unsafe { sipral_stack_transport_failed(handle, SIPRAL_TRANSPORT_MAIN, 0, 3_000) },
+            SipralStatus::Ok
+        );
+        poll(handle, 3_000);
+        assert_eq!(observed.transports_lost.len(), 3);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A stream that loses its framing is a transport lost like any other,
+    /// and said the same way.
+    #[test]
+    fn a_stream_that_carried_garbage_is_raised_as_lost() {
+        let mut observed = Observed::default();
+        let handle = speaking(&mut observed, SipralTransport::Tls);
+        let garbage = b"\x16\x03\x01 this is a TLS record read as SIP\r\n\r\n";
+        let status = unsafe {
+            sipral_stack_receive_stream(
+                handle,
+                SIPRAL_TRANSPORT_MAIN,
+                garbage.as_ptr(),
+                garbage.len(),
+                1_000,
+            )
+        };
+        assert_ne!(status, SipralStatus::Ok);
+        poll(handle, 1_000);
+        assert_eq!(
+            observed.transports_lost.len(),
+            1,
+            "{:?}",
+            observed.transports_lost
+        );
+        let (transport, protocol, error, tls, detail) = observed.transports_lost[0].clone();
+        assert_eq!(transport, SIPRAL_TRANSPORT_MAIN);
+        assert_eq!(protocol, SipralTransport::Tls as u32);
+        assert_eq!(error, SipralTransportError::Other as u32);
+        assert_eq!(tls, SipralTlsFailure::None as u32);
+        assert!(detail.contains("no message starts with"), "{detail}");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A TLS reason is refused on a transport that has no TLS in it, and so
+    /// is a detail too long, a reason with no name and a transport this
+    /// stack does not have; none of them retires anything.
+    #[test]
+    fn a_failure_that_cannot_be_what_it_says_retires_nothing() {
+        let mut observed = Observed::default();
+        let handle = speaking(&mut observed, SipralTransport::Tcp);
+        let mismatched = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::NameMismatch, "");
+        assert_eq!(
+            unsafe { sipral_stack_transport_failure(handle, &raw const mismatched, 1_000) },
+            SipralStatus::InvalidArgument
+        );
+        assert!(last_error_text().contains("TLS"), "{}", last_error_text());
+
+        let long = "x".repeat(SIPRAL_TRANSPORT_DETAIL_BYTES + 1);
+        let too_long = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::None, &long);
+        assert_eq!(
+            unsafe { sipral_stack_transport_failure(handle, &raw const too_long, 1_000) },
+            SipralStatus::InvalidArgument
+        );
+        let mut unknown = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::None, "");
+        unknown.tls = 9;
+        assert_eq!(
+            unsafe { sipral_stack_transport_failure(handle, &raw const unknown, 1_000) },
+            SipralStatus::InvalidArgument
+        );
+        let elsewhere = refused(7, SipralTlsFailure::None, "");
+        assert_eq!(
+            unsafe { sipral_stack_transport_failure(handle, &raw const elsewhere, 1_000) },
+            SipralStatus::InvalidArgument
+        );
+        poll(handle, 1_000);
+        assert!(observed.transports_lost.is_empty());
+        let account = line(handle);
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_100) },
+            SipralStatus::Ok,
+            "the transport is still up: {}",
+            last_error_text()
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }

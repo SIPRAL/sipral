@@ -486,6 +486,18 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "previous": _text(server.previous, server.previous_len),
         }
 
+    # The signalling connection failed or closed, with the TLS library's
+    # reason when TLS refused it (`Stack(signalling=Transport.TLS)`).
+    if kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED:
+        lost = payload.transport_failed
+        return {
+            "transport": int(lost.transport),
+            "protocol": int(lost.protocol),
+            "error": int(lost.error),
+            "tls": int(lost.tls),
+            "detail": _text(lost.detail, lost.detail_len),
+        }
+
     # A media socket's connection to a TURN server reached over TCP or TLS:
     # open it, or close it (`Stack` does both itself).
     if kind == lib.SIPRAL_EVENT_KIND_TURN_STREAM:

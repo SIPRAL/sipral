@@ -96,6 +96,31 @@ constants! {
     /// caller who filled nothing in leaves behind, and neither of those may
     /// mean "let the stranger in".
     pub const SIPRAL_SCREEN_ACCEPT: u32 = 200;
+
+    /// The burst a stack starts with: ten INVITEs from one address at once.
+    ///
+    /// With [`SIPRAL_INVITE_LIMIT_EVERY_MS`], the floor every stack has from
+    /// `sipral_stack_create` on. An INVITE past it is answered 480 and
+    /// counted in `sipral_counters_t::screened_refused_by_rate`; nothing is
+    /// raised for it.
+    pub const SIPRAL_INVITE_LIMIT_BURST: u32 = 10;
+
+    /// The interval a stack starts with: one more INVITE every two seconds.
+    pub const SIPRAL_INVITE_LIMIT_EVERY_MS: u64 = 2_000;
+
+    /// The voice-agent preset's burst: a hundred and twenty-eight at once.
+    ///
+    /// For a headless service that takes every call from one trunk or proxy,
+    /// where the default's ten-then-one-every-two-seconds answers a
+    /// campaign's twelfth caller 480. Handed to `sipral_stack_invite_limit`
+    /// with [`SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS`]. The burst is the
+    /// default `max_dialogs`, so that a rush is turned away by the ceiling on
+    /// calls held, with a 503, before it is by the rate.
+    pub const SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST: u32 = 128;
+
+    /// The voice-agent preset's interval: one more INVITE every fifty
+    /// milliseconds, twenty a second.
+    pub const SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS: u64 = 50;
 }
 
 alias! {
@@ -729,6 +754,51 @@ Content-Length: 0\r\n\r\n"
                 sipral_stack_screen(SIPRAL_HANDLE_NONE, Some(accept_all), std::ptr::null_mut())
             },
             SipralStatus::InvalidHandle
+        );
+    }
+
+    /// The numbers the header publishes are the ones the stack runs with,
+    /// and the preset is one `sipral_stack_invite_limit` takes.
+    #[test]
+    fn the_published_rates_are_the_ones_the_stack_applies() {
+        use super::{
+            SIPRAL_INVITE_LIMIT_BURST, SIPRAL_INVITE_LIMIT_EVERY_MS,
+            SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST, SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS,
+        };
+        use sipral_ua::Rate;
+        use std::time::Duration;
+
+        let default = Rate::default();
+        assert_eq!(default.burst(), SIPRAL_INVITE_LIMIT_BURST);
+        assert_eq!(
+            default.every(),
+            Some(Duration::from_millis(SIPRAL_INVITE_LIMIT_EVERY_MS))
+        );
+        let preset = Rate::voice_agent();
+        assert_eq!(preset.burst(), SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST);
+        assert_eq!(
+            preset.every(),
+            Some(Duration::from_millis(
+                SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS
+            ))
+        );
+        let mut observed = Observed::default();
+        let handle = line(&mut observed);
+        assert_eq!(
+            unsafe {
+                sipral_stack_invite_limit(
+                    handle,
+                    SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS,
+                    SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
         );
     }
 }

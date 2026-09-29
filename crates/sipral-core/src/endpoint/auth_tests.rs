@@ -1071,3 +1071,52 @@ fn the_password_the_allowance_ran_out_on_is_not_offered_ahead_of_the_next_reques
         authorization(&fresh)
     );
 }
+
+#[test]
+fn a_challenged_call_retried_after_another_took_its_room_is_held_to_the_ceiling() {
+    // the refusal gives the call's room back, so another call can take it
+    // before the retry goes; the retry is a call as far as the ceiling is
+    // concerned, and one past max_dialogs is refused like any other
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint.config.max_dialogs = 1;
+    let invite = endpoint
+        .invite(&super::tests::invite_request(), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &challenge(&bytes, 407, "Proxy-Authenticate", &digest(NONCE, None)),
+        t0,
+    );
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+    endpoint
+        .invite(&super::tests::invite_request(), t0)
+        .expect("the refused call's room is free for another");
+    let other = sent(&mut endpoint);
+
+    let failed = AnyTransactionId::InviteClient(invite);
+    assert_eq!(
+        endpoint.retry_with_credentials(failed, &credentials(), t0),
+        Err(AuthRetryError::Unsendable(SendError::LimitReached {
+            limit: 1
+        }))
+    );
+    assert!(transmits(&mut endpoint).is_empty(), "nothing went out");
+    assert_eq!(endpoint.dialogs_held(), 1, "no second call is held");
+
+    // the challenge was kept: once the other call is over, the same handle
+    // answers it
+    deliver(
+        &mut endpoint,
+        &super::tests::respond_to(&other, 486, "Busy Here", Some("desk")),
+        t0,
+    );
+    events(&mut endpoint);
+    transmits(&mut endpoint);
+    endpoint
+        .retry_with_credentials(failed, &credentials(), t0)
+        .expect("the retry goes once there is room");
+    assert!(sent(&mut endpoint).starts_with(b"INVITE "));
+}

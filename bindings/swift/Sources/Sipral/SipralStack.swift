@@ -37,9 +37,21 @@ public final class SipralStack: @unchecked Sendable {
     public let handle: SipralHandle
 
     /// The signalling socket's address, `host:port`: where it was bound, and
-    /// after `networkChanged(to:)` where it is bound now.
+    /// after `networkChanged(to:)` where it is bound now. Over TCP or TLS,
+    /// the address the connection to the server was made from, which moves
+    /// with every connection made again.
     public var bindAddress: String {
-        signallingQueue.sync { socket.localAddress }
+        signallingQueue.sync { socket?.localAddress ?? linkLocal }
+    }
+
+    /// What SIP travels over: UDP, or one TCP or TLS connection to the
+    /// server.
+    public let signalling: SipralTransport
+
+    /// Whether SIP can go out now: always over UDP, and over TCP or TLS
+    /// while the connection to the server stands.
+    public var connected: Bool {
+        signalling == .udp || signallingQueue.sync { link != nil }
     }
 
     /// Who runs this stack's audio, as it was created.
@@ -76,8 +88,19 @@ public final class SipralStack: @unchecked Sendable {
     /// The signalling socket, guarded by `signallingQueue`: the poll thread
     /// reads and writes it, and `networkChanged(to:)` puts another in its
     /// place.
-    private var socket: UDPSocket
+    private var socket: UDPSocket?
     private let signallingQueue = DispatchQueue(label: "org.sipral.stack.signalling")
+    /// The connection SIP travels on over TCP or TLS, and the address it was
+    /// made from, guarded by `signallingQueue`; `nil` while it is down.
+    private var link: SignallingConnection?
+    private var linkLocal = ""
+    /// Where the connection goes, what name its certificate must carry, what
+    /// it trusts, and the address it is made from.
+    private let signallingServer: String?
+    private let tlsServerName: String
+    private let tlsTrust: TLSTrust
+    private var linkHost: String
+    private var reconnecting = false
     private let origin: DispatchTime
 
     /// Every account this stack added and has not removed, for
@@ -248,6 +271,35 @@ public final class SipralStack: @unchecked Sendable {
     /// `dtmfDetection` is when a call listens for keypad digits in the far
     /// end's audio: `.auto` on the calls that negotiated no telephone event,
     /// `.always` or `.off`; `Call.setDtmfDetection` changes it for one call.
+    ///
+    /// `signalling` is what SIP travels over: `.udp` (the default) on a
+    /// socket bound at `bindHost`, or `.tcp` or `.tls` on one connection to
+    /// `signallingServer` (`host:port` -- the registrar or the outbound
+    /// proxy, 5061 for TLS by convention), which every account and every
+    /// call on this stack then shares, and on which the server's own requests
+    /// arrive. Over TLS -- on Apple platforms, where Network.framework is;
+    /// elsewhere it throws `.notSupported` -- the server's certificate is
+    /// checked against `tlsServerName` (the host part of `signallingServer`
+    /// when `nil`) with `tlsTrust`: the system's authorities, a private
+    /// authority beside them, or only one authority (`docs/22-tls.md`).
+    /// Nothing here turns the check off.
+    ///
+    /// The first connection is made here, before this returns. When it
+    /// fails, or later breaks, the stack is told why and raises
+    /// `SipralEventKind.transportFailed`, whose `transportFailedData` says
+    /// untrusted, a name that does not match, expired, a handshake refused
+    /// or a server that refused the connection, with Security's own words;
+    /// and this stack connects again, one second after the loss and twice as
+    /// long after each attempt that fails, up to thirty seconds. Once
+    /// connected again every account is pointed at the new connection and
+    /// registered again if it was registering. `Account.register()` asked
+    /// while it is down is kept for then; a call placed meanwhile throws
+    /// `.transportDown`.
+    ///
+    /// `inviteLimit` is how fast one address may ring this stack:
+    /// `InviteLimit.standard` (what every stack starts with, ten INVITEs at
+    /// once then one every two seconds, past which a call is answered 480)
+    /// or `.voiceAgent` for a service taking a trunk's calls.
     public init(
         audio: AudioMode = .platformDefault,
         bindHost: String = "127.0.0.1",
@@ -274,11 +326,50 @@ public final class SipralStack: @unchecked Sendable {
         rtpPortMax: UInt16 = 0,
         network: Network? = nil,
         stunFallbacks: [String] = [],
-        dtmfDetection: SipralDtmfDetection = .auto
+        dtmfDetection: SipralDtmfDetection = .auto,
+        signalling: SipralTransport = .udp,
+        signallingServer: String? = nil,
+        tlsServerName: String? = nil,
+        tlsTrust: TLSTrust = .platform,
+        inviteLimit: InviteLimit? = nil
     ) throws {
         self.rtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? nil : (rtpPortMin, rtpPortMax)
-        let socket = try UDPSocket(host: bindHost, port: bindPort)
+        guard signalling == .udp || signalling == .tcp || signalling == .tls else {
+            throw SipralError(status: .invalidArgument, message: "signalling is .udp, .tcp or .tls")
+        }
+        let streamed = signalling != .udp
+        if streamed && signallingServer == nil {
+            throw SipralError(status: .invalidArgument, message: "SIP over TCP or TLS needs signallingServer, host:port")
+        }
+        self.signalling = signalling
+        self.signallingServer = signallingServer
+        self.tlsServerName = tlsServerName ?? signallingServer.map { UDPSocket.parse($0).host } ?? bindHost
+        self.tlsTrust = tlsTrust
+        self.linkHost = bindHost
+        var firstLink: SignallingConnection?
+        var firstRefusal: SignallingRefusal?
+        let socket: UDPSocket?
+        let bound: String
+        if streamed {
+            socket = nil
+            do {
+                let made = try SignallingConnection(
+                    server: signallingServer!, bindHost: bindHost, transport: signalling,
+                    serverName: self.tlsServerName, trust: tlsTrust, patienceMs: Self.patienceMs
+                )
+                firstLink = made
+                bound = made.local
+            } catch let refusal as SignallingRefusal {
+                firstRefusal = refusal
+                bound = "\(bindHost):\(bindPort)"
+            }
+        } else {
+            let made = try UDPSocket(host: bindHost, port: bindPort)
+            socket = made
+            bound = made.localAddress
+        }
         self.socket = socket
+        self.linkLocal = bound
         self.audioMode = audio
         self.network = network ?? Network(link: .wired, address: bindHost)
         self.currentStunServer = stunServer
@@ -299,14 +390,14 @@ public final class SipralStack: @unchecked Sendable {
             try mediaSeed.withUnsafeBufferPointer { seedBuf in
                 try CStrings.with(
                     [
-                        socket.localAddress, userAgent, codecs, stunServer, turn?.address, turn?.username,
+                        bound, userAgent, codecs, stunServer, turn?.address, turn?.username,
                         turn?.password, stunFallbacks.isEmpty ? nil : stunFallbacks.joined(separator: ","),
                     ]
                 ) { parts in
                     var config = sipral_stack_config_t.sized()
                     config.event_callback = sipralStackEventTrampoline
                     config.event_user_data = boxPointer
-                    config.transport = SipralTransport.udp.rawValue
+                    config.transport = signalling.rawValue
                     config.bind_address = parts[0].pointer
                     config.bind_address_len = parts[0].count
                     config.user_agent = parts[1].pointer
@@ -369,7 +460,166 @@ public final class SipralStack: @unchecked Sendable {
         if audio.isDevice {
             self.audio = AudioDevices(stack: self)
         }
+        if let inviteLimit {
+            try Sipral.stackInviteLimit(stack: handle, everyMs: inviteLimit.everyMs, burst: inviteLimit.burst)
+        }
+        if let firstLink {
+            try install(firstLink)
+        } else if let firstRefusal {
+            report(firstRefusal)
+            reconnectLater()
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.run() }
+    }
+
+    // MARK: - SIP over TCP or TLS
+
+    /// How long one attempt at the signalling connection may take, the TLS
+    /// handshake included.
+    private static let patienceMs = 5000
+
+    /// What goes after the address in a `Contact` this layer writes:
+    /// `;transport=tcp` or `;transport=tls` for a stack signalling over a
+    /// connection (RFC 3261 §19.1.1), nothing over UDP.
+    var contactParameters: String {
+        switch signalling {
+        case .tls: return ";transport=tls"
+        case .tcp: return ";transport=tcp"
+        default: return ""
+        }
+    }
+
+    /// Tell the stack a connection is open, naming both ends, and start
+    /// reading it.
+    private func install(_ made: SignallingConnection) throws {
+        do {
+            _ = try retryingBusy {
+                try Sipral.stackTransportBind(
+                    stack: handle, transport: Sipral.transportMain, protocol: signalling.rawValue,
+                    local: made.local, remote: made.remote, nowMs: nowMs()
+                )
+            }
+        } catch {
+            made.close()
+            throw error
+        }
+        signallingQueue.sync {
+            link = made
+            linkLocal = made.local
+        }
+        made.start(
+            bytes: { [weak self] bytes in self?.linkReceived(made, bytes) },
+            lost: { [weak self] refusal in self?.lose(made, refusal, tell: true) }
+        )
+    }
+
+    /// `sipral_stack_transport_failure`, never throwing on the way out.
+    private func report(_ refusal: SignallingRefusal) {
+        let detail = refusal.detail
+        detail.withCString { text in
+            var failure = sipral_transport_failure_t.sized()
+            failure.transport = Sipral.transportMain
+            failure.error = refusal.error.rawValue
+            failure.tls = signalling == .tls ? refusal.tls.rawValue : SipralTlsFailure.none.rawValue
+            failure.detail = detail.isEmpty ? nil : text
+            failure.detail_len = detail.utf8.count
+            _ = try? retryingBusy { try Sipral.stackTransportFailure(stack: handle, failure: failure, nowMs: nowMs()) }
+        }
+    }
+
+    /// What the connection carried, to `sipral_stack_receive_stream`, every
+    /// byte in order: a busy stack is waited for rather than skipped.
+    private func linkReceived(_ made: SignallingConnection, _ bytes: [UInt8]) {
+        while !isClosed {
+            do {
+                try Sipral.stackReceiveStream(stack: handle, transport: Sipral.transportMain, data: bytes, nowMs: nowMs())
+                return
+            } catch let error as SipralError where error.status == .busy {
+                usleep(1000)
+            } catch {
+                // the framing is lost: the stack retired the transport and
+                // said so itself
+                lose(made, nil, tell: false)
+                return
+            }
+        }
+    }
+
+    /// Close `made` if it is still the connection, tell the stack how it
+    /// ended -- `sipral_stack_stream_closed` for an orderly close (`refusal`
+    /// nil), `sipral_stack_transport_failure` otherwise, nothing when not
+    /// `tell` -- and connect again.
+    private func lose(_ made: SignallingConnection, _ refusal: SignallingRefusal?, tell: Bool) {
+        let current = signallingQueue.sync { () -> Bool in
+            guard link === made else { return false }
+            link = nil
+            return true
+        }
+        guard current else { return }
+        made.close()
+        guard !isClosed else { return }
+        if tell, let refusal {
+            report(refusal)
+        } else if tell {
+            _ = try? retryingBusy {
+                try Sipral.stackStreamClosed(stack: handle, transport: Sipral.transportMain, nowMs: nowMs())
+            }
+        }
+        reconnectLater()
+    }
+
+    /// Start connecting again, unless that is already under way.
+    private func reconnectLater() {
+        let start = stateQueue.sync { () -> Bool in
+            guard !closed, !reconnecting else { return false }
+            reconnecting = true
+            return true
+        }
+        guard start else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.reconnect() }
+    }
+
+    private func reconnect() {
+        var delayMs = 1000
+        defer { stateQueue.sync { reconnecting = false } }
+        while !isClosed {
+            usleep(useconds_t(delayMs) * 1000)
+            delayMs = min(delayMs * 2, 30000)
+            guard !isClosed, let server = signallingServer else { return }
+            let made: SignallingConnection
+            do {
+                made = try SignallingConnection(
+                    server: server, bindHost: signallingQueue.sync { linkHost }, transport: signalling,
+                    serverName: tlsServerName, trust: tlsTrust, patienceMs: Self.patienceMs
+                )
+            } catch let refusal as SignallingRefusal {
+                report(refusal)
+                continue
+            } catch {
+                return
+            }
+            guard !isClosed else {
+                made.close()
+                return
+            }
+            guard (try? install(made)) != nil else { continue }
+            afterReconnect()
+            return
+        }
+    }
+
+    /// Every account moves to the new connection's address -- one added with
+    /// a `Contact` of its own keeps it -- and every one that was registering
+    /// registers again now rather than at its next back-off.
+    private func afterReconnect() {
+        let all = movingQueue.sync { Array(accounts.values) }
+        let local = bindAddress
+        for account in all {
+            try? account.rebind(local: local, previous: nil)
+            if account.wantsRegistration {
+                try? account.register()
+            }
+        }
     }
 
     deinit {
@@ -1152,8 +1402,27 @@ public final class SipralStack: @unchecked Sendable {
         try movingQueue.sync {
             let previous = stateQueue.sync { network }
             let moves = next.link != .down && (next.address != previous.address || next.interface != previous.interface)
-            var rebound: UDPSocket?
-            if moves {
+            var rebound: String?
+            if moves, signalling != .udp {
+                let host = next.address ?? UDPSocket.parse(bindAddress).host
+                signallingQueue.sync { linkHost = host }
+                let old = signallingQueue.sync { () -> SignallingConnection? in
+                    defer { link = nil }
+                    return link
+                }
+                old?.close()
+                do {
+                    let made = try SignallingConnection(
+                        server: signallingServer!, bindHost: host, transport: signalling,
+                        serverName: tlsServerName, trust: tlsTrust, patienceMs: Self.patienceMs
+                    )
+                    try install(made)
+                    rebound = made.local
+                } catch let refusal as SignallingRefusal {
+                    report(refusal)
+                    reconnectLater()
+                }
+            } else if moves {
                 let host = next.address ?? UDPSocket.parse(bindAddress).host
                 let fresh = try UDPSocket(host: host, port: 0)
                 do {
@@ -1174,13 +1443,13 @@ public final class SipralStack: @unchecked Sendable {
                     fresh.close()
                     throw error
                 }
-                let old = signallingQueue.sync { () -> UDPSocket in
+                let old = signallingQueue.sync { () -> UDPSocket? in
                     let old = socket
                     socket = fresh
                     return old
                 }
-                signallingQueue.sync { old.close() }
-                rebound = fresh
+                signallingQueue.sync { old?.close() }
+                rebound = fresh.localAddress
             }
             let raw = try retryingBusy {
                 try Sipral.stackNetworkChanged(
@@ -1201,7 +1470,7 @@ public final class SipralStack: @unchecked Sendable {
             let recovery = SipralRecovery(rawValue: raw) ?? .unknown
             if let rebound {
                 for account in accounts.values {
-                    try account.rebind(from: rebound, previous: previous.address)
+                    try account.rebind(local: rebound, previous: previous.address)
                 }
             }
             return recovery
@@ -1266,10 +1535,16 @@ public final class SipralStack: @unchecked Sendable {
             guard (try? Sipral.stackPollTransmit(stack: handle, transmit: &transmit)) != nil else { return }
             guard transmit.len > 0 else { return }
             let payload = Array(UnsafeBufferPointer(start: transmitData, count: transmit.len))
+            if signalling != .udp {
+                // one connection carries everything, whatever it names: the
+                // server it reaches is the outbound proxy
+                signallingQueue.sync { link }?.send(payload)
+                continue
+            }
             let destination = transmitDestination.withMemoryRebound(to: UInt8.self, capacity: transmit.destination_len) {
                 String(decoding: UnsafeBufferPointer(start: $0, count: transmit.destination_len), as: UTF8.self)
             }
-            signallingQueue.sync { _ = socket.send(payload, to: destination) }
+            signallingQueue.sync { _ = socket?.send(payload, to: destination) }
         }
     }
 
@@ -1319,14 +1594,17 @@ public final class SipralStack: @unchecked Sendable {
         while !isClosed {
             // The signalling socket first, then every media socket still
             // waiting for its call's media handle.
+            // over TCP or TLS there is no signalling socket: the connection
+            // has a reader of its own, and a descriptor of -1 is one poll
+            // leaves alone
             let signalling = signallingQueue.sync { socket }
-            var pfds = [pollfd(fd: signalling.fd, events: Int16(POLLIN), revents: 0)]
+            var pfds = [pollfd(fd: signalling?.fd ?? -1, events: Int16(POLLIN), revents: 0)]
             pfds += stunDescriptors.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
             _ = pfds.withUnsafeMutableBufferPointer { poll($0.baseAddress, nfds_t($0.count), 50) }
             if pfds.dropFirst().contains(where: { $0.revents & Int16(POLLIN) != 0 }) {
                 receiveStun()
             }
-            if pfds[0].revents & Int16(POLLIN) != 0 {
+            if let signalling, pfds[0].revents & Int16(POLLIN) != 0 {
                 let local = signalling.localAddress
                 while let (data, from) = signallingQueue.sync(execute: {
                     socket === signalling ? signalling.receive() : nil
@@ -1407,9 +1685,14 @@ public final class SipralStack: @unchecked Sendable {
         for connection in connections {
             connection.close()
         }
+        let open = signallingQueue.sync { () -> SignallingConnection? in
+            defer { link = nil }
+            return link
+        }
+        open?.close()
         try? Sipral.stackDestroy(stack: handle)
         eventBroadcast.finish()
-        signallingQueue.sync { socket.close() }
+        signallingQueue.sync { socket?.close() }
     }
 }
 

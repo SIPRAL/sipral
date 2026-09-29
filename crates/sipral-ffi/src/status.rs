@@ -115,6 +115,11 @@ codes! {
         /// never carried `isfocus` (RFC 4579 §4.1), so there is no
         /// conference to name or subscribe to.
         NotAFocus = 21,
+        /// The transport the request would leave on has failed or closed and
+        /// has not been bound again. Nothing went out. The failure was
+        /// reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
+        /// the stack with `sipral_stack_transport_bind`, and ask again.
+        TransportDown = 22,
     }
 }
 
@@ -151,6 +156,7 @@ entry! {
             19 => c"recording failed".as_ptr(),
             20 => c"not negotiated".as_ptr(),
             21 => c"not a focus".as_ptr(),
+            22 => c"transport down".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -197,6 +203,7 @@ mod tests {
             SipralStatus::RecordingFailed,
             SipralStatus::NotNegotiated,
             SipralStatus::NotAFocus,
+            SipralStatus::TransportDown,
         ];
         for status in all {
             let code = status as i32;
@@ -207,7 +214,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in (0..=16).chain(18..=21) {
+        for code in (0..=16).chain(18..=22) {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -219,7 +226,7 @@ mod tests {
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
         assert!(name(17).is_none());
-        assert!(name(22).is_none());
+        assert!(name(23).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -252,5 +259,6 @@ mod tests {
         assert_eq!(SipralStatus::RecordingFailed as i32, 19);
         assert_eq!(SipralStatus::NotNegotiated as i32, 20);
         assert_eq!(SipralStatus::NotAFocus as i32, 21);
+        assert_eq!(SipralStatus::TransportDown as i32, 22);
     }
 }

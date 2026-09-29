@@ -57,6 +57,15 @@
 #                               coturn, the relay reached over TCP from the
 #                               C ABI, over TLS from Python, over TCP and TLS
 #                               from Kotlin and .NET, and over TCP from Swift
+#   scripts/lab.sh tls          only SIP over a connection through the four
+#                               idiomatic layers: the Python, Kotlin and
+#                               .NET agents over TLS to Asterisk, each first
+#                               refusing a certificate no trusted authority
+#                               signed, one for another name and one that
+#                               expired, and saying which; then registered
+#                               and called; the Swift agent over TCP, since
+#                               the lab runs it on Linux, where Swift has no
+#                               TLS (interop/tls/pjsip_local.conf)
 #   scripts/lab.sh robust       only the field failures that need a network
 #                               to show (docs/11-testing.md's table): a
 #                               link that drops IP fragments, with INVITEs
@@ -3269,6 +3278,243 @@ robust_stun_failover() {
     nat_pair_down -f compose.yaml
     return "$status"
 }
+
+# SIP over TCP and TLS through the four idiomatic layers (docs/22-tls.md,
+# "SIP over TLS in the four layers"): each layer's own lab agent, told to
+# signal over one connection, registered at Asterisk and called by it the
+# way the agents above are over UDP. Before its call, every TLS agent is
+# pointed at three listeners it has to refuse, and says why: 5061 with the
+# platform's authorities only (the lab authority is not among them, so
+# untrusted), 5062 presenting a certificate for another name, 5063 one that
+# expired in 2020. interop/tls/pjsip_local.conf is the listeners and the
+# accounts; tls_certificates makes the certificates for the run. The Swift
+# agent runs on Linux, where Swift has no TLS, so it signals over TCP and is
+# given no refusals to report.
+TLS_NAME=asterisk.lab.sipral.test
+tls_certificate() {
+    local file="$1" name="$2"
+    shift 2
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=$name" \
+        -keyout "$SIPRAL_TLS_CERTS/$file.key" -out "$SIPRAL_TLS_CERTS/$file.csr" >/dev/null 2>&1 \
+        && printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\n' "$name" \
+            > "$SIPRAL_TLS_CERTS/$file.ext" \
+        && openssl x509 -req -in "$SIPRAL_TLS_CERTS/$file.csr" \
+            -CA "$SIPRAL_TLS_CERTS/ca.pem" -CAkey "$SIPRAL_TLS_CERTS/ca.key" -CAcreateserial \
+            -extfile "$SIPRAL_TLS_CERTS/$file.ext" "$@" -out "$SIPRAL_TLS_CERTS/$file.pem" >/dev/null 2>&1
+}
+tls_certificates() {
+    SIPRAL_TLS_CERTS=$(mktemp -d)
+    export SIPRAL_TLS_CERTS
+    if ! openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+            -subj "/CN=Sipral lab authority" \
+            -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign \
+            -keyout "$SIPRAL_TLS_CERTS/ca.key" -out "$SIPRAL_TLS_CERTS/ca.pem" >/dev/null 2>&1 \
+        || ! tls_certificate asterisk "$TLS_NAME" -days 1 \
+        || ! tls_certificate wrong wrong.lab.sipral.test -days 1 \
+        || ! tls_certificate expired "$TLS_NAME" -not_before 20200101000000Z -not_after 20200102000000Z; then
+        printf '  could not make the certificates for the TLS listeners (openssl)\n'
+        rm -rf "$SIPRAL_TLS_CERTS"
+        return 1
+    fi
+    chmod 755 "$SIPRAL_TLS_CERTS"
+    chmod 644 "$SIPRAL_TLS_CERTS"/*
+}
+
+# One layer's agent in a container of its own: `$1` the layer, `$2` the
+# account, `$3` tls or tcp, then the `docker run` arguments up to `--`, the
+# image, a shell line that prepares the agent, and the command that runs it.
+# Over TLS the agent is run three times with a ten-second limit first, once
+# against each listener it must refuse, and what it said about each is kept
+# as a "probe" line in its log; then once against 5061, trusting the lab
+# authority alone, and left to answer the call. `TLS_AGENT_NAME` is the
+# container.
+tls_agent_start() {
+    local layer="$1" user="$2" over="$3" port=5061 run_args=() image prepare agent
+    shift 3
+    while [ "$1" != "--" ]; do
+        run_args+=("$1")
+        shift
+    done
+    shift
+    image="$1" prepare="$2" agent="$3"
+    [ "$over" = tcp ] && port=5060
+    TLS_AGENT_NAME="sipral-lab-tls-$layer-${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    docker rm -f "$TLS_AGENT_NAME" >/dev/null 2>&1
+    docker run -d --name "$TLS_AGENT_NAME" --network "$LAB_NETWORK" \
+        -v "$SIPRAL_TLS_CERTS:/lab-tls:ro" \
+        -e SIPRAL_AOR="sip:$user@asterisk" \
+        -e SIPRAL_REGISTRAR=sip:asterisk \
+        -e SIPRAL_AUTH_USER="$user" -e SIPRAL_AUTH_PASSWORD=labpass \
+        -e SIPRAL_SIGNALLING="$over" \
+        -e SIPRAL_TLS_SERVER_NAME="$TLS_NAME" \
+        ${run_args[@]+"${run_args[@]}"} \
+        "$image" sh -c "
+            $prepare
+            address=\$(getent hosts asterisk | cut -d' ' -f1)
+            probe() {
+                env SIPRAL_REGISTRAR_ADDRESS=\"\$address:\$1\" \${2:+SIPRAL_TLS_CA=\$2} \
+                    timeout 20 $agent 2>&1 | grep -m1 '^transport failed' | sed \"s/^/probe \$1: /\"
+            }
+            if [ '$over' = tls ]; then
+                probe 5061 ''
+                probe 5062 /lab-tls/ca.pem
+                probe 5063 /lab-tls/ca.pem
+            fi
+            SIPRAL_REGISTRAR_ADDRESS=\"\$address:$port\" SIPRAL_TLS_CA=/lab-tls/ca.pem exec $agent" \
+        >/dev/null || { printf '  could not start the %s agent container\n' "$layer"; return 1; }
+}
+
+# Registered, called, and what it said checked: over TLS, each refusal for
+# its own reason first; then the call answered, the "#" heard, audio both
+# ways, and Asterisk's contact for it naming the transport it came over --
+# read from the registrar's own store, since `pjsip show contacts` cuts a
+# URI that long short of its parameters.
+tls_agent_call() {
+    local layer="$1" user="$2" over="$3" limit="$4" log tries contact
+    tries=0
+    until contact=$( ( cd interop && docker compose exec -T asterisk \
+            asterisk -rx "database show registrar/contact" 2>/dev/null ) | grep "/$user;@" ) \
+            && [ -n "$contact" ]; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$TLS_AGENT_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge "$limit" ]; then
+            printf '  the %s agent never registered\n' "$layer"
+            docker logs "$TLS_AGENT_NAME" 2>&1 | tail -30
+            docker rm -f "$TLS_AGENT_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 2
+    done
+    printf '%s\n' "$contact" | grep -o '"uri":"[^"]*"' | sed 's/^/    contact /'
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/$user extension s@agent-call" ) >/dev/null 2>&1
+    tries=0
+    until docker logs "$TLS_AGENT_NAME" 2>&1 | grep -q '^ended '; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 30 ] && break
+        sleep 1
+    done
+    log=$(docker logs "$TLS_AGENT_NAME" 2>&1)
+    docker rm -f "$TLS_AGENT_NAME" >/dev/null 2>&1
+    printf '%s\n' "$log" | grep -E '^(probe|listening|answered|dtmf|ended|transport failed|call failed)' \
+        | sed 's/^/    /'
+    printf '%s\n' "$contact" | grep -q "transport=$over" \
+        || { printf '  Asterisk holds its contact over another transport\n'; return 1; }
+    if [ "$over" = tls ]; then
+        printf '%s\n' "$log" | grep -q '^probe 5061: transport failed .*tls=untrusted' \
+            || { printf '  the platform'"'"'s authorities alone did not refuse the lab'"'"'s certificate as untrusted\n'; return 1; }
+        printf '%s\n' "$log" | grep -q '^probe 5062: transport failed .*tls=name_mismatch' \
+            || { printf '  the certificate for another name was not refused as a name mismatch\n'; return 1; }
+        printf '%s\n' "$log" | grep -q '^probe 5063: transport failed .*tls=expired' \
+            || { printf '  the expired certificate was not refused as expired\n'; return 1; }
+    fi
+    printf '%s\n' "$log" | grep -q '^answered ' \
+        || { printf '  it never answered\n'; return 1; }
+    printf '%s\n' "$log" | grep -q '^dtmf #' \
+        || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
+    printf '%s\n' "$log" | grep '^ended ' | grep -Eq "packets_received'?[:=] ?[1-9]" \
+        || { printf '  it heard no audio\n'; return 1; }
+    printf '%s\n' "$log" | grep '^ended ' | grep -Eq "packets_sent'?[:=] ?[1-9]" \
+        || { printf '  it sent no audio back\n'; return 1; }
+}
+
+tls_python_agent() {
+    local beside
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    tls_agent_start python labuser-agent-tls tls \
+        -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
+        -v "$beside:/lib-sipral:ro" -v "$ROOT/bindings/python:/python:ro" -- \
+        debian:trixie-slim \
+        'export DEBIAN_FRONTEND=noninteractive
+         apt-get -qq update >/dev/null 2>&1
+         apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1' \
+        'python3 -u /python/examples/agent.py' || return 1
+    tls_agent_call python labuser-agent-tls tls 60
+}
+
+tls_kotlin_agent() {
+    local beside
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    docker build -q -t sipral-lab-kotlin interop/kotlin >/dev/null 2>&1 \
+        || { printf '  could not build interop/kotlin\n'; return 1; }
+    tls_agent_start kotlin labuser-agent-kotlin-tls tls \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/c/include:/sipral-include:ro" \
+        -v "$ROOT/bindings/kotlin/sipral/src/main/jni:/sipral-jni:ro" \
+        -v "$KOTLIN_AGENT_JAR:/kotlin/sipral-kotlin.jar:ro" \
+        -v "$KOTLIN_STDLIB_JAR:/kotlin/kotlin-stdlib.jar:ro" \
+        -v "$KOTLIN_COROUTINES_JAR:/kotlin/kotlinx-coroutines.jar:ro" -- \
+        sipral-lab-kotlin \
+        'cc -std=c11 -Wall -shared -fPIC \
+             -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" -I/sipral-include \
+             -o /tmp/libsipral_jni.so /sipral-jni/sipral_jni.c /sipral-jni/idiomatic_media.c \
+             -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral || exit 1' \
+        'java -Djava.library.path=/tmp -cp /kotlin/sipral-kotlin.jar:/kotlin/kotlin-stdlib.jar:/kotlin/kotlinx-coroutines.jar org.sipral.examples.AgentKt' \
+        || return 1
+    tls_agent_call kotlin labuser-agent-kotlin-tls tls 90
+}
+
+tls_csharp_agent() {
+    local beside
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    tls_agent_start csharp labuser-agent-csharp-tls tls \
+        -e SIPRAL_LIBRARY=/lib-sipral/libsipral_ffi.so \
+        -v "$beside:/lib-sipral:ro" -v "$ROOT/bindings/dotnet:/src-dotnet:ro" -- \
+        mcr.microsoft.com/dotnet/sdk:8.0 \
+        'cp -r /src-dotnet /dotnet
+         dotnet build -c Release -o /agent /dotnet/samples/Sipral.Sample.Agent >/dev/null 2>&1 || exit 1' \
+        'dotnet /agent/Sipral.Sample.Agent.dll' || return 1
+    tls_agent_call csharp labuser-agent-csharp-tls tls 150
+}
+
+tls_swift_agent() {
+    tls_agent_start swift labuser-agent-swift-tcp tcp \
+        -v "$ROOT:/work:ro" -v "${SWIFT_LIB_DIR:-$ROOT/target/release}:/work/target/release:ro" -- \
+        swift:6.1 ':' '/work/bindings/.build/release/SipralLabAgent' || return 1
+    tls_agent_call swift labuser-agent-swift-tcp tcp 60
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = tls ]; then
+    step "SIP over TCP and TLS through the four idiomatic layers, called by Asterisk"
+    if [ -z "$HARNESS_C" ]; then
+        if [ "$WANT" = tls ]; then
+            fail "SIP over TLS: there is no libsipral_ffi for the agents to load"
+        else
+            printf '  note  no libsipral_ffi, so the TLS agents are skipped with the other C flows\n'
+        fi
+    elif ! tls_certificates; then
+        fail "SIP over TLS: the certificates"
+    else
+        ( cd interop && docker compose -f compose.yaml -f tls/compose.override.yaml up -d asterisk ) \
+            >/dev/null 2>&1 || fail "could not restart Asterisk with the TLS listeners"
+        if wait_for asterisk "Asterisk Ready"; then
+            tls_python_agent \
+                && pass "agent.py over TLS: refused untrusted, a name mismatch and expired, then registered, answered, echoed and hung up" \
+                || fail "agent.py over TLS"
+            if [ -n "${KOTLIN_AGENT_JAR:-}" ]; then
+                tls_kotlin_agent \
+                    && pass "Agent.kt over TLS: refused untrusted, a name mismatch and expired, then registered, answered and echoed" \
+                    || fail "Agent.kt over TLS"
+            else
+                printf '  note  KOTLIN_AGENT_JAR not set; the Kotlin agent is skipped\n'
+            fi
+            tls_csharp_agent \
+                && pass "Sipral.Sample.Agent over TLS: refused untrusted, a name mismatch and expired, then registered, answered and echoed" \
+                || fail "Sipral.Sample.Agent over TLS"
+            if [ -n "$SWIFT_AGENT" ]; then
+                tls_swift_agent \
+                    && pass "SipralLabAgent over TCP: registered, answered and echoed on its connection" \
+                    || fail "SipralLabAgent over TCP"
+            else
+                printf '  note  no Swift lab agent was built; see its build step above\n'
+            fi
+        fi
+        ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
+        wait_for asterisk "Asterisk Ready" >/dev/null || true
+        rm -rf "$SIPRAL_TLS_CERTS"
+        unset SIPRAL_TLS_CERTS
+    fi
+fi
 
 if [ "$WANT" = all ] || [ "$WANT" = robust ]; then
     step "the field failures -- a link that drops fragments, and connections nobody answers on, in C"
