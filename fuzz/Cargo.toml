@@ -136,6 +136,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "rtt"
+path = "fuzz_targets/rtt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dtmf_info"
 path = "fuzz_targets/dtmf_info.rs"
 test = false
