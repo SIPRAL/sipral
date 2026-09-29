@@ -1132,6 +1132,7 @@ pub(crate) struct StackState {
     /// Whether `media_clock_unix_seconds` gave the engine a wall clock. A
     /// stack created without one dates its sender reports by the first that
     /// `sipral_stack_stir` pairs with a `now_ms`.
+    #[cfg(feature = "stir")]
     pub(crate) media_clock: bool,
     /// This stack's log, shared with the engine and the entry: lines are
     /// queued while the stack is held and delivered once it is not.
@@ -1738,6 +1739,7 @@ pub(crate) unsafe fn create_on(
         nat: crate::nat::Nat::default(),
         audio: audio.clone(),
         clock,
+        #[cfg(feature = "stir")]
         media_clock: config.media_clock_unix_seconds != 0,
         log: log.clone(),
         pseudonyms: pseudonyms.into_boxed_slice(),
