@@ -94,6 +94,9 @@ struct FarEnd {
     phase: usize,
     sending: bool,
     heard: Vec<i16>,
+    /// Samples at its rate the far end owes the wire and its speaker: a
+    /// tick adds one, each frame sent and played takes one frame.
+    due: usize,
 }
 
 impl FarEnd {
@@ -123,8 +126,25 @@ impl Quartet {
     /// The same, bob's own stack offering `bob_codecs`: his call still
     /// settles on PCMU, which this end offers first.
     fn with_bob_on(bob_codecs: &[&str], config: LocalConferenceConfig) -> Self {
+        Self::cut_at(20, bob_codecs, DAVE_CODEC, config)
+    }
+
+    /// The same, every stack cutting frames of `frame_ms` and dave's call on
+    /// `dave_codec`.
+    fn cut_at(
+        frame_ms: u32,
+        bob_codecs: &[&str],
+        dave_codec: &str,
+        config: LocalConferenceConfig,
+    ) -> Self {
         let now = Instant::now();
-        let mine = CodecCatalog::with_order(&["PCMU", "G722", DAVE_CODEC]).expect("an order");
+        let catalog = |codecs: &[&str]| {
+            CodecCatalog::with_order(codecs)
+                .expect("an order")
+                .with_frame_length(frame_ms)
+                .expect("a frame length")
+        };
+        let mine = catalog(&["PCMU", "G722", dave_codec]);
         let mut me = Stack::new(61, caller_sip(), caller_media(), mine, now);
         let mut ends = Vec::new();
         for (seed, sip, media, codecs, hz, user) in [
@@ -141,13 +161,12 @@ impl Quartet {
                 64,
                 dave_sip(),
                 dave_media(),
-                &[DAVE_CODEC][..],
+                &[dave_codec][..],
                 DAVE_HZ,
                 "dave",
             ),
         ] {
-            let catalog = CodecCatalog::with_order(codecs).expect("an order");
-            let mut stack = Stack::new(seed, sip, media, catalog, now);
+            let mut stack = Stack::new(seed, sip, media, catalog(codecs), now);
             let (near, call) = connect_two(&mut me, &mut stack, user, now);
             ends.push(FarEnd {
                 stack,
@@ -158,6 +177,7 @@ impl Quartet {
                 phase: 0,
                 sending: true,
                 heard: Vec::new(),
+                due: 0,
             });
         }
         let conference = me.engine.local_conference(config).expect("a conference");
@@ -190,8 +210,9 @@ impl Quartet {
         &self.ends[index]
     }
 
-    /// One tick: every far end sends a frame of its tone, the conference
-    /// mixes, and every far end plays what it was sent.
+    /// One tick: every far end sends the frames of its tone a tick is owed,
+    /// the conference mixes, and every far end plays what it was sent, as
+    /// many frames.
     fn tick(&mut self, local_tone: bool) {
         for end in &mut self.ends {
             if end.stack.engine.session(end.call).is_none() {
@@ -204,23 +225,26 @@ impl Quartet {
                 .session(end.call)
                 .expect("media")
                 .frame_samples();
-            let tone = if end.sending {
-                sine(frame, rate, end.hz, &mut end.phase)
-            } else {
-                vec![0; frame]
-            };
-            let sent = end
-                .stack
-                .engine
-                .session(end.call)
-                .expect("media")
-                .capture(&tone, self.now)
-                .expect("the frame encodes")
-                .map(|datagram| datagram.payload.to_vec());
-            if let Some(mut payload) = sent
-                && let Some(mut session) = self.me.engine.session(end.near)
-            {
-                session.receive(&mut payload, end.media, self.now);
+            end.due += usize::try_from(rate / 50).expect("a tick fits");
+            for _ in 0..end.due / frame {
+                let tone = if end.sending {
+                    sine(frame, rate, end.hz, &mut end.phase)
+                } else {
+                    vec![0; frame]
+                };
+                let sent = end
+                    .stack
+                    .engine
+                    .session(end.call)
+                    .expect("media")
+                    .capture(&tone, self.now)
+                    .expect("the frame encodes")
+                    .map(|datagram| datagram.payload.to_vec());
+                if let Some(mut payload) = sent
+                    && let Some(mut session) = self.me.engine.session(end.near)
+                {
+                    session.receive(&mut payload, end.media, self.now);
+                }
             }
         }
 
@@ -246,9 +270,13 @@ impl Quartet {
         }
         for end in &mut self.ends {
             if let Some(mut session) = end.stack.engine.session(end.call) {
-                let mut played = vec![0_i16; session.frame_samples()];
-                session.playback(&mut played);
-                end.heard.extend_from_slice(&played);
+                let frame = session.frame_samples();
+                let mut played = vec![0_i16; frame];
+                while end.due >= frame {
+                    session.playback(&mut played);
+                    end.heard.extend_from_slice(&played);
+                    end.due -= frame;
+                }
             }
         }
         self.now += TICK;
@@ -331,6 +359,82 @@ fn every_member_hears_every_other_member_and_not_itself() {
     assert_hears("dave", quartet.heard_by(2), [true, true, false, true]);
     assert_hears("this end", quartet.heard_here(), [true, true, true, false]);
 }
+
+/// Calls that cut frames other than a tick's keep their own packetisation:
+/// 10 ms read twice a tick, 40 and 60 ms every second and third, and 30 ms
+/// every tick and a half. Every member hears every other and not itself at
+/// each length.
+#[test]
+fn calls_cut_in_frames_of_any_length_hear_each_other() {
+    for frame_ms in [10, 30, 40, 60] {
+        // L16 at 16 kHz carries more than a packet holds past 40 ms
+        let dave_codec = if frame_ms < 40 {
+            "L16/16000"
+        } else {
+            "L16/8000"
+        };
+        let mut quartet = Quartet::cut_at(
+            frame_ms,
+            &["PCMU"],
+            dave_codec,
+            LocalConferenceConfig {
+                max_members: 4,
+                local: Some(LOCAL_RATE),
+            },
+        )
+        .all_added();
+        let frames: Vec<usize> = quartet
+            .ends
+            .iter()
+            .map(|end| {
+                quartet
+                    .me
+                    .engine
+                    .session(end.near)
+                    .expect("media")
+                    .frame_samples()
+            })
+            .collect();
+        let rates: Vec<u32> = (0..3).map(|index| quartet.ends[index].rate()).collect();
+        let expected: Vec<usize> = rates
+            .iter()
+            .map(|rate| usize::try_from(rate / 1_000 * frame_ms).expect("a frame"))
+            .collect();
+        assert_eq!(frames, expected, "{frame_ms} ms at {rates:?}");
+        quartet.run(30, true);
+        quartet.forget();
+        quartet.run(30, true);
+
+        let who = |name: &str| format!("{name} at {frame_ms} ms");
+        assert_hears(&who("bob"), quartet.heard_by(0), [false, true, true, true]);
+        assert_hears(
+            &who("carol"),
+            quartet.heard_by(1),
+            [true, false, true, true],
+        );
+        assert_hears(&who("dave"), quartet.heard_by(2), [true, true, false, true]);
+        assert_hears(
+            &who("this end"),
+            quartet.heard_here(),
+            [true, true, true, false],
+        );
+        // and steadily: a call read a frame short each tick is heard in
+        // halves, at half the level an unbroken tone gives
+        for (index, name) in ["bob", "carol", "dave"].into_iter().enumerate() {
+            let levels = quartet.heard_by(index);
+            for (other, level) in levels.iter().enumerate() {
+                assert!(
+                    other == index || *level > STEADY,
+                    "{}: {levels:?}",
+                    who(name)
+                );
+            }
+        }
+    }
+}
+
+/// Heard without a break: four fifths of the level a whole tone gives.
+const STEADY: f64 = 4_000.0;
 
 /// A call that hangs up leaves on the next tick, says so, and the others go
 /// on hearing each other.
