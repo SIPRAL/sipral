@@ -11,6 +11,15 @@
 //! "Refused" means what it means for the RFC 4475 corpus: the parser refuses
 //! the bytes, or they parse and [`RawMessage::validate`] refuses a field. Both
 //! are the stack answering 400.
+//!
+//! The files are the RFC's archive as it is, and the archive is not quite a
+//! set of messages as they travel: its lines end in a bare LF, two messages
+//! stop without the empty line that ends a header section, and two of the
+//! three bodies are not the length their `Content-Length` says. [`wire`]
+//! turns each file into the message it describes — CRLF line ends, the
+//! header section closed, `Content-Length` counted from the body — and
+//! changes nothing else, so every test below is about IPv6 and none about
+//! how the archive was made.
 
 // a test says what it means; the no-panic discipline is for the library
 #![allow(
@@ -86,8 +95,39 @@ fn manifest() -> Vec<Entry> {
     entries
 }
 
-fn bytes_of(name: &str) -> Vec<u8> {
+/// A message from the archive, as it would arrive: every line ended with
+/// CRLF as RFC 3261 §7 has it, the header section closed by an empty line,
+/// and `Content-Length` the length of the body.
+fn wire(archived: &[u8]) -> Vec<u8> {
+    let text = std::str::from_utf8(archived).expect("the archive is text");
+    let lines: Vec<&str> = text.split('\n').collect();
+    let (head, body) = match lines.iter().position(|line| line.is_empty()) {
+        Some(blank) => (&lines[..blank], &lines[blank + 1..]),
+        None => (&lines[..], &[][..]),
+    };
+    // the last element after a final LF is empty, not a line
+    let body = body.strip_suffix(&[""]).unwrap_or(body);
+    let body: String = body.iter().map(|line| format!("{line}\r\n")).collect();
+    let mut out = String::new();
+    for line in head.iter().filter(|line| !line.is_empty()) {
+        if line.to_ascii_lowercase().starts_with("content-length:") {
+            out.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        } else {
+            out.push_str(line);
+            out.push_str("\r\n");
+        }
+    }
+    out.push_str("\r\n");
+    out.push_str(&body);
+    out.into_bytes()
+}
+
+fn archived(name: &str) -> Vec<u8> {
     fs::read(fixtures().join(format!("{name}.dat"))).expect("a fixture")
+}
+
+fn bytes_of(name: &str) -> Vec<u8> {
+    wire(&archived(name))
 }
 
 /// What the stack would do with this message: `Ok` for accepted, the reason
@@ -135,8 +175,10 @@ fn the_corpus_behaves_as_the_manifest_says() {
 
     let mut failures = Vec::new();
     for entry in &entries {
-        let bytes = fs::read(fixtures().join(&entry.file))
-            .unwrap_or_else(|e| panic!("reading {}: {e}", entry.file));
+        let bytes = wire(
+            &fs::read(fixtures().join(&entry.file))
+                .unwrap_or_else(|e| panic!("reading {}: {e}", entry.file)),
+        );
         let where_ = format!("{} (§{}, {})", entry.name, entry.section, entry.outcome);
         match (entry.outcome.as_str(), judge(&bytes)) {
             ("accept", Err(why)) => failures.push(format!("{where_}: refused, {why}")),
@@ -150,8 +192,8 @@ fn the_corpus_behaves_as_the_manifest_says() {
 
 #[test]
 fn every_file_is_the_one_the_manifest_hashed() {
-    // the corpus is CRLF on purpose; an editor that converts it turns
-    // messages into different messages without anybody noticing
+    // the archive's bytes, LF line ends and all; a checkout that converts
+    // them fails here rather than quietly testing other messages
     for entry in manifest() {
         let bytes = fs::read(fixtures().join(&entry.file)).expect("a fixture");
         assert_eq!(
@@ -160,21 +202,50 @@ fn every_file_is_the_one_the_manifest_hashed() {
             "{} has changed",
             entry.file
         );
-        assert!(
-            bytes.first() != Some(&b'\n')
-                && !bytes.windows(2).any(|w| w[1] == b'\n' && w[0] != b'\r'),
-            "{} has a bare LF",
-            entry.file
-        );
+        assert!(!bytes.contains(&b'\r'), "{} has a CR", entry.file);
     }
 }
 
 #[test]
 fn the_groups_are_the_sizes_the_rfc_has() {
+    // RFC 5118 has one message to refuse, §4.2's; §4.10's three colons are
+    // to be tolerated
     let entries = manifest();
     let count = |outcome: &str| entries.iter().filter(|e| e.outcome == outcome).count();
-    assert_eq!(count("accept"), 10);
-    assert_eq!(count("reject"), 2);
+    assert_eq!(count("accept"), 11);
+    assert_eq!(count("reject"), 1);
+}
+
+#[test]
+fn the_archive_disagrees_with_itself_where_wire_says() {
+    // the printed Content-Length, and the body as archived, of the three
+    // messages with a body: §4.9 agrees, §4.6 and §4.8 do not
+    for (name, printed, body) in [
+        ("ipv6-in-sdp", 268, 242),
+        ("mult-ip-in-sdp", 181, 180),
+        ("ipv4-mapped-ipv6", 236, 236),
+    ] {
+        let text = String::from_utf8(archived(name)).expect("text");
+        let (head, archived_body) = text.split_once("\n\n").expect("a body");
+        assert!(
+            head.contains(&format!("Content-Length: {printed}")),
+            "{name}"
+        );
+        assert_eq!(archived_body.len(), body, "{name}");
+        // on the wire, with CRLF, the body is one octet a line longer, and
+        // Content-Length says so
+        let lines = archived_body.matches('\n').count();
+        let sent = String::from_utf8(wire(&archived(name))).expect("text");
+        assert!(
+            sent.contains(&format!("Content-Length: {}\r\n", body + lines)),
+            "{name}"
+        );
+    }
+    // two messages end without the empty line that closes a header section
+    for name in ["ipv6-bug-abnf-3-colons", "ipv6-correct-abnf-2-colons"] {
+        assert!(!archived(name).ends_with(b"\n\n"), "{name}");
+        assert!(wire(&archived(name)).ends_with(b"\r\n\r\n"), "{name}");
+    }
 }
 
 /// §4.1: an IPv6 reference in the Request-URI and in Contact.
@@ -347,16 +418,20 @@ fn ipv4_mapped_ipv6() {
 }
 
 /// §4.10: RFC 3261's `IPv6address` production admits `2001:db8:::192.0.2.1`,
-/// which is not an IPv6 address (RFC 4291 §2.2 allows "::" once and nothing
-/// else to stand for zeros). The stack follows RFC 4291.
+/// which RFC 4291 does not. "Following the Robustness Principle [RFC1122],
+/// an implementation must tolerate both of the above constructs", reading
+/// the address as if the extra colon were not there.
 #[test]
 fn ipv6_bug_abnf_3_colons() {
-    let bytes = bytes_of("ipv6-bug-abnf-3-colons");
-    let why = judge(&bytes).expect_err("refused");
-    assert!(why.contains("Request-URI"), "refused for {why}");
+    let owned = accepted("ipv6-bug-abnf-3-colons");
+    let message = owned.as_raw();
+    let address = HostRef::Ipv6(v6("2001:db8::192.0.2.1"));
+    let uri = request_uri(&message);
+    assert_eq!(uri.user, Some("user"));
+    assert_eq!(uri.host, address);
     assert_eq!(
-        SipUriRef::parse_str("sip:[2001:db8:::192.0.2.1]").map(|u| u.host),
-        Err(UriError::BadHost)
+        message.to().expect("To").uri().sip().expect("SIP").host,
+        address
     );
 }
 
@@ -373,6 +448,6 @@ fn ipv6_correct_abnf_2_colons() {
     );
     assert_eq!(
         message.from().expect("From").uri().sip().expect("SIP").host,
-        address
+        HostRef::Name("example.com")
     );
 }

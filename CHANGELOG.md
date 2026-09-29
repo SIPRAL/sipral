@@ -194,11 +194,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `L16/rate[/channels]` rtpmap encoding. Not yet wired into the call
   recording, the codec negotiation or the C ABI.
 - **Conformance fixtures for RFC 5118 and RFC 4317.** The twelve IPv6
-  torture messages of RFC 5118 and the offer/answer exchanges of RFC 4317
-  sections 2.1, 2.2, 2.4, 3.1, 4.1 and 4.3 live under `fixtures/rfc5118/`
-  and `fixtures/rfc4317/` with SHA-256 manifests, and `sipral-core` tests
-  hold the message parser, the answer builder and the media planner to
-  each one.
+  torture messages of RFC 5118, unpacked from its Appendix A archive, and
+  every offer/answer exchange of RFC 4317, taken from its text, live under
+  `fixtures/rfc5118/` and `fixtures/rfc4317/` with SHA-256 manifests, and
+  `sipral-core` tests hold the message parser, the answer builder and the
+  media planner to each one. The IPv6 reference RFC 3261's grammar allows
+  and RFC 4291 does not, `[2001:db8:::192.0.2.1]`, is now read as
+  `2001:db8::192.0.2.1`, as RFC 5118 §4.10 asks implementations to
+  tolerate it.
 - **RTCP feedback for audio: RTP/AVPF and reduced-size RTCP.**
   `sipral_rtp::avpf` builds and reads the Generic NACK (RFC 4585 §6.2.1),
   times feedback by RFC 4585 §3.5 (Early packets rationed by `allow_early`,

@@ -161,7 +161,7 @@ hits=$(others '*.rs' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
 # A whitelist rather than a pattern, because the mistake this catches is somebody
 # adding a directory of vectors while implementing a codec, and no pattern
 # predicts what they would call it.
-stray=$(git ls-files fixtures | cut -d/ -f2 | sort -u | grep -vxE 'rfc4475|replay' || true)
+stray=$(git ls-files fixtures | cut -d/ -f2 | sort -u | grep -vxE 'rfc4475|rfc5118|rfc4317|replay' || true)
 [ -z "$stray" ] && pass "no unvetted fixtures" || {
     fail "fixtures/ holds something nobody vetted for a licence:"
     printf '        fixtures/%s\n' $stray

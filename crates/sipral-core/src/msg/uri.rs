@@ -1008,11 +1008,12 @@ pub(super) fn parse_hostport(s: &str) -> Result<(HostRef<'_>, Option<u16>), UriE
     }
     if let Some(inner) = s.strip_prefix('[') {
         let close = inner.find(']').ok_or(UriError::UnclosedIpv6)?;
-        let addr: Ipv6Addr = inner
-            .get(..close)
-            .ok_or(UriError::BadHost)?
-            .parse()
-            .map_err(|_| UriError::BadHost)?;
+        let literal = inner.get(..close).ok_or(UriError::BadHost)?;
+        let addr = literal
+            .parse::<Ipv6Addr>()
+            .ok()
+            .or_else(|| rfc3261_three_colons(literal))
+            .ok_or(UriError::BadHost)?;
         let tail = inner.get(close + 1..).unwrap_or_default();
         return Ok((HostRef::Ipv6(addr), parse_port(tail)?));
     }
@@ -1036,6 +1037,34 @@ pub(super) fn parse_hostport(s: &str) -> Result<(HostRef<'_>, Option<u16>), UriE
         return Err(UriError::BadHost);
     };
     Ok((host, parse_port(tail)?))
+}
+
+/// The IPv6 reference RFC 3261's own grammar produces and RFC 4291 does not
+/// allow: `hexpart ":" IPv4address` with a `hexpart` ending in `::`, as in
+/// `2001:db8:::192.0.2.1`. RFC 5118 §4.10 has an implementation tolerate it
+/// and read it as the address without the extra colon.
+fn rfc3261_three_colons(literal: &str) -> Option<Ipv6Addr> {
+    let (head, tail) = literal.split_once(":::")?;
+    let v4: Ipv4Addr = tail.parse().ok()?;
+    let mut groups = [0_u16; 8];
+    let mut count = 0;
+    if !head.is_empty() {
+        for group in head.split(':') {
+            if group.is_empty() || group.len() > 4 {
+                return None;
+            }
+            // "::" stands for at least one group, and the IPv4 tail is two
+            if count == 5 {
+                return None;
+            }
+            *groups.get_mut(count)? = u16::from_str_radix(group, 16).ok()?;
+            count += 1;
+        }
+    }
+    let [a, b, c, d] = v4.octets();
+    groups[6] = u16::from_be_bytes([a, b]);
+    groups[7] = u16::from_be_bytes([c, d]);
+    Some(Ipv6Addr::from(groups))
 }
 
 fn parse_port(tail: &str) -> Result<Option<u16>, UriError> {
@@ -1160,6 +1189,35 @@ mod tests {
         let u = uri("sip:alice:secret@example.com");
         assert_eq!(u.user, Some("alice"));
         assert_eq!(u.password, Some("secret"));
+    }
+
+    #[test]
+    fn the_three_colon_form_rfc_3261s_grammar_allows_is_tolerated() {
+        // RFC 5118 §4.10: "an implementation must tolerate both of the above
+        // constructs", reading the address without the extra colon
+        assert_eq!(
+            uri("sip:user@[2001:db8:::192.0.2.1]").host,
+            HostRef::Ipv6("2001:db8::192.0.2.1".parse::<Ipv6Addr>().expect("v6"))
+        );
+        assert_eq!(
+            uri("sip:[:::192.0.2.1]:5060").host,
+            HostRef::Ipv6("::192.0.2.1".parse::<Ipv6Addr>().expect("v6"))
+        );
+        // and nothing else that is not an IPv6 address comes in with it
+        for bad in [
+            "sip:[2001:db8:::1]",
+            "sip:[1:2:3:4:5:6:::192.0.2.1]",
+            "sip:[::::192.0.2.1]",
+            "sip:[2001::db8:::192.0.2.1]",
+            "sip:[20011:db8:::192.0.2.1]",
+            "sip:[2001:db8:::192.0.2]",
+        ] {
+            assert_eq!(
+                SipUriRef::parse_str(bad).map(|u| u.host),
+                Err(UriError::BadHost),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

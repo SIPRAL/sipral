@@ -3,11 +3,13 @@
 # outcome: accept = well formed; must parse and pass validation
 #          reject = must be refused, by the parser or by validation
 #
-# The files were written from the message text of RFC 5118 §4, not extracted
-# from a published archive; README.md says how and what that means.
+# Every file is the message of that name from the archive in RFC 5118
+# Appendix A, decoded and unpacked, not a byte changed. README.md says how
+# the test puts each on the wire.
 
 [source]
 rfc = "https://www.rfc-editor.org/rfc/rfc5118.txt"
+archive_sha256 = "5a4dbe78d80216b46b5c64b14d7dcefe2d563c61418cc597302b4bec13fa9067"
 messages = 12
 
 [[message]]
@@ -16,7 +18,7 @@ section = "4.1"
 title = "Valid SIP Message with an IPv6 Reference"
 file = "ipv6-good.dat"
 outcome = "accept"
-sha256 = "ed7c9f32cc37be8b94369de52514b8e2be7421c5f6f312253af92503383dbae4"
+sha256 = "80654d05559d5bda7d584b39e0f4dbf69b23189cb140754ef889a4996a3505ed"
 
 [[message]]
 name = "ipv6-bad"
@@ -24,7 +26,7 @@ section = "4.2"
 title = "Invalid SIP Message with an IPv6 Reference"
 file = "ipv6-bad.dat"
 outcome = "reject"
-sha256 = "2d8a4e92b01c5164bba5e295a40442959b8ab67b977c91160f604546054bbdd7"
+sha256 = "f6ffa0b2e664d05dbecde6bd7eb6fd71a9f01d43a3a0d3e084766c6240be4972"
 
 [[message]]
 name = "port-ambiguous"
@@ -32,7 +34,7 @@ section = "4.3"
 title = "Port Ambiguous in a SIP URI"
 file = "port-ambiguous.dat"
 outcome = "accept"
-sha256 = "4d165997683527be94062d98c91a05cd064961657463cf85e1b67431c6a61812"
+sha256 = "e1925cfd89436c36025fd21d144b7788cb988bfd752498cf767e3303426f2e7d"
 
 [[message]]
 name = "port-unambiguous"
@@ -40,7 +42,7 @@ section = "4.4"
 title = "Port Unambiguous in a SIP URI"
 file = "port-unambiguous.dat"
 outcome = "accept"
-sha256 = "801c39f9fc2b9049310bd05c17ff854f95693015eb340f5fa0b7221cfe067688"
+sha256 = "be3a4dbac87b1cdabde97595d117773e3864ffd2ff7ab645bfd5773e280bcd4e"
 
 [[message]]
 name = "via-received-param-with-delim"
@@ -48,7 +50,7 @@ section = "4.5"
 title = "IPv6 Reference Delimiters in Via Header"
 file = "via-received-param-with-delim.dat"
 outcome = "accept"
-sha256 = "a0053013e73180030114fd5f7d9b681643eb4d2e0372d4921e749c74f392a74e"
+sha256 = "568255f70f186f7d09fe437a662bb32a7b14285c5243222a1a401004b7e6ba80"
 
 [[message]]
 name = "via-received-param-no-delim"
@@ -56,7 +58,7 @@ section = "4.5"
 title = "IPv6 Reference Delimiters in Via Header"
 file = "via-received-param-no-delim.dat"
 outcome = "accept"
-sha256 = "0fa6dfa5c400a8f069b97b8592bf19da8e149551d21e6206edb771223a23fe56"
+sha256 = "45f233fd536e7d4d9f47be5098992cd912394a80460dd6b16979f61a713b9dd9"
 
 [[message]]
 name = "ipv6-in-sdp"
@@ -64,7 +66,7 @@ section = "4.6"
 title = "SIP Request with IPv6 Addresses in Session Description Protocol (SDP) Body"
 file = "ipv6-in-sdp.dat"
 outcome = "accept"
-sha256 = "3f6b9b77bc2c3af56d352e99fe80571e701488c388de12c48483d9ef31275ea6"
+sha256 = "c09ab30a92e790ecd261aadbb3876f8043307bffec3103f5add052d64a125532"
 
 [[message]]
 name = "mult-ip-in-header"
@@ -72,7 +74,7 @@ section = "4.7"
 title = "Multiple IP Addresses in SIP Headers"
 file = "mult-ip-in-header.dat"
 outcome = "accept"
-sha256 = "8002917ae4f54f8149fb8fe0c6ee61058efd523af67e5ba46adb5f521946fbc3"
+sha256 = "ace698f6827e940812cfe26c48960f9069b02291b0022b0777cf00f37405f83a"
 
 [[message]]
 name = "mult-ip-in-sdp"
@@ -80,7 +82,7 @@ section = "4.8"
 title = "Multiple IP Addresses in SDP"
 file = "mult-ip-in-sdp.dat"
 outcome = "accept"
-sha256 = "80416b7a51c97d81ea491f1911c26ebe0fd113f408d4e7e768fbae271f864db0"
+sha256 = "c50fb1a29fdf4f0c3c12cf9cf5b490df1bb86d6dfacf7bc807e2c3e7e8660013"
 
 [[message]]
 name = "ipv4-mapped-ipv6"
@@ -88,15 +90,15 @@ section = "4.9"
 title = "IPv4-Mapped IPv6 Addresses"
 file = "ipv4-mapped-ipv6.dat"
 outcome = "accept"
-sha256 = "e137f8be57f359f126b89207abed0f221cecf2ea6fb8bcd66eb5f15f05b458aa"
+sha256 = "b3d7df025b6465461741c3788fa3b48af25b08d6a2fdb59ded815cc0afc04a68"
 
 [[message]]
 name = "ipv6-bug-abnf-3-colons"
 section = "4.10"
 title = "IPv6 Reference Bug in RFC 3261 ABNF"
 file = "ipv6-bug-abnf-3-colons.dat"
-outcome = "reject"
-sha256 = "7341bea78c5146c07ad3217fa6799c676070ef8a6611afc02808397e75e67c0a"
+outcome = "accept"
+sha256 = "e542604dca3aed5c346a549c1f692aecf98a12353b38283be3e199664abeb43e"
 
 [[message]]
 name = "ipv6-correct-abnf-2-colons"
@@ -104,4 +106,4 @@ section = "4.10"
 title = "IPv6 Reference Bug in RFC 3261 ABNF"
 file = "ipv6-correct-abnf-2-colons.dat"
 outcome = "accept"
-sha256 = "97415f2268a78e7082e1d322691aa9bca8f3763406d1bfc403887f57e37bb906"
+sha256 = "6a8c09976009aab0159cf1b8cc3e2964b3853557102b5b86bf2b6b2c48c0779e"

@@ -7,7 +7,7 @@ Contact: "Caller" <sip:caller@[2001:db8::9:1]>
 Max-Forwards: 70
 CSeq: 8912 INVITE
 Content-Type: application/sdp
-Content-Length: 189
+Content-Length: 181
 
 v=0
 o=bob 280744730 28977631 IN IP4 host.example.com
