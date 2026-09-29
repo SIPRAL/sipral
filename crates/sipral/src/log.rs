@@ -387,6 +387,10 @@ impl Log {
             inner.delivering = true;
             (sink, std::mem::take(&mut inner.queue))
         };
+        // a sink that panics unwinds through here, and the flag has to come
+        // down with it: left up, every later flush would find somebody
+        // "delivering" and the log would go quiet for the rest of its life
+        let _done = Delivering(self);
         let mut delivered = 0;
         while let Some(line) = batch.pop_front() {
             sink(&LogRecord {
@@ -397,7 +401,6 @@ impl Log {
             });
             delivered += 1;
         }
-        self.inner().delivering = false;
         delivered
     }
 
@@ -405,6 +408,16 @@ impl Log {
         // a panic in a producer leaves a queue and a few counters, whole
         // between statements
         self.0.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A flush in progress on one log, which ends when this is dropped: at the
+/// end of the batch, or while a panicking sink unwinds.
+struct Delivering<'a>(&'a Log);
+
+impl Drop for Delivering<'_> {
+    fn drop(&mut self) {
+        self.0.inner().delivering = false;
     }
 }
 
@@ -606,6 +619,38 @@ v=0\r\nc=IN IP4 198.51.100.4\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:QUJD\r
         assert!(
             lines.iter().all(|line| line.2 == lines[0].2),
             "stable across a fresh redactor"
+        );
+    }
+
+    #[test]
+    fn a_sink_that_panics_once_does_not_silence_the_log() {
+        let log = Log::new(b"key");
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let into = Arc::clone(&calls);
+        log.enable(
+            LogLevel::Info,
+            Arc::new(move |record: &LogRecord<'_>| {
+                let mut seen = into
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                seen.push(record.message.to_owned());
+                let first = seen.len() == 1;
+                drop(seen);
+                assert!(!first, "the sink fails on its first line");
+            }),
+        );
+        let now = Instant::now();
+        log.line(LogLevel::Info, "t", now, || "first".to_owned());
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| log.flush()));
+        assert!(unwound.is_err(), "the sink's panic reached the flush");
+
+        log.line(LogLevel::Info, "t", now, || "second".to_owned());
+        assert_eq!(log.flush(), 1, "the next flush delivers");
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["first", "second"]
         );
     }
 }
