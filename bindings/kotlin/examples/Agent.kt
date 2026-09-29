@@ -21,6 +21,8 @@
 // that fails is printed as "transport failed error=<...> tls=<...>" with
 // SSLSocket's own words, and tried again. SIPRAL_INVITE_LIMIT=voice-agent
 // takes a trunk's rush of calls the default rate floor would answer 480.
+// SIPRAL_TEXT=echo takes the real-time text a call offers, prints each
+// piece as "text <...>" and types it back.
 
 package org.sipral.examples
 
@@ -59,6 +61,10 @@ import org.sipral.idiomatic.SipralTurnServer
 import org.sipral.idiomatic.digitOf
 import org.sipral.idiomatic.transportFailedOf
 
+/** With SIPRAL_TEXT=echo, what the caller types in real-time text (RFC
+ * 4103) is printed and typed back to it. */
+private val echoesText = System.getenv("SIPRAL_TEXT") == "echo"
+
 /** Which of this host's addresses a datagram to `address` leaves from.
  * `bindings/python/examples/agent.py`'s own `route_to`: connecting a UDP
  * socket sends nothing, it only asks the system which route it would take,
@@ -84,6 +90,17 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
 
     val talking = launch {
         media.frames.collect { frame -> media.sendAudio(frame) }
+    }
+    val texting = launch {
+        call.text.collect { typed ->
+            val text = typed.text.orEmpty()
+            println("text \"$text\"")
+            try {
+                media.sendText(text)
+            } catch (_: Exception) {
+                // a stream gone with its call
+            }
+        }
     }
 
     // Kept fresh at a steady interval rather than read once when the call
@@ -148,6 +165,7 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
         ending.onJoin { }
     }
     talking.cancel()
+    texting.cancel()
     polling.cancel()
     hangingUp.cancel()
     ending.cancel()
@@ -411,7 +429,7 @@ fun main() = runBlocking {
         client.events
             .filter { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() }
             .collect { event ->
-                val call = client.answerCall(event, mediaHost = host)
+                val call = client.answerCall(event, mediaHost = host, text = echoesText)
                 launch {
                     try {
                         handleCall(call)

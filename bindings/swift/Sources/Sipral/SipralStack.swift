@@ -102,6 +102,13 @@ public final class SipralStack: @unchecked Sendable {
     private var linkHost: String
     private var reconnecting = false
     private let origin: DispatchTime
+    /// The TCP connections to recording servers, by the transport id each
+    /// was bound under, guarded by `signallingQueue`; and the next id.
+    private var recordingLinks: [UInt32: SignallingConnection] = [:]
+    private var nextRecordingLink: UInt32 = SipralStack.firstRecordingLink
+    /// The recording sessions running, by handle: the call each records and
+    /// the connection it went over, guarded by `callsQueue`.
+    private var recordings: [SipralHandle: (call: Call, link: UInt32?)] = [:]
 
     /// Every account this stack added and has not removed, for
     /// `networkChanged(to:)` to point at the new address.
@@ -608,6 +615,112 @@ public final class SipralStack: @unchecked Sendable {
         }
     }
 
+    // MARK: - connections to recording servers
+
+    /// The first transport id a connection to a recording server is bound
+    /// under. The number is the caller's to choose, and this layer binds no
+    /// other transport but `Sipral.transportMain`.
+    private static let firstRecordingLink: UInt32 = 64
+
+    /// Connect over TCP to a recording server at `destination` (`host:port`)
+    /// and bind the connection as a transport of its own, for
+    /// `Call.record(toServer:destination:host:)`: its INVITE is larger than
+    /// RFC 3261 §18.1.1 lets over UDP. `.transportDown` when the server
+    /// refused the connection.
+    func openRecordingLink(to destination: String) throws -> UInt32 {
+        let made: SignallingConnection
+        do {
+            made = try SignallingConnection(
+                server: destination, bindHost: signallingQueue.sync { linkHost }, transport: .tcp,
+                serverName: UDPSocket.parse(destination).host, trust: .platform, patienceMs: Self.patienceMs
+            )
+        } catch let refusal as SignallingRefusal {
+            throw SipralError(status: .transportDown, message: "the recording server \(destination): \(refusal.detail)")
+        }
+        let id = signallingQueue.sync { () -> UInt32 in
+            defer { nextRecordingLink += 1 }
+            return nextRecordingLink
+        }
+        do {
+            _ = try retryingBusy {
+                try Sipral.stackTransportBind(
+                    stack: handle, transport: id, protocol: SipralTransport.tcp.rawValue,
+                    local: made.local, remote: made.remote, nowMs: nowMs()
+                )
+            }
+        } catch {
+            made.close()
+            throw error
+        }
+        signallingQueue.sync { recordingLinks[id] = made }
+        made.start(
+            bytes: { [weak self] bytes in self?.recordingReceived(id, bytes) },
+            lost: { [weak self] refusal in self?.recordingLinkLost(id, refusal) }
+        )
+        return id
+    }
+
+    /// Close a connection to a recording server and unbind it, saying
+    /// nothing more to the stack than that it closed.
+    func closeRecordingLink(_ id: UInt32) {
+        let open = signallingQueue.sync { recordingLinks.removeValue(forKey: id) }
+        guard let open else { return }
+        open.close()
+        _ = try? retryingBusy { try Sipral.stackStreamClosed(stack: handle, transport: id, nowMs: nowMs()) }
+    }
+
+    private func recordingReceived(_ id: UInt32, _ bytes: [UInt8]) {
+        while !isClosed {
+            do {
+                try Sipral.stackReceiveStream(stack: handle, transport: id, data: bytes, nowMs: nowMs())
+                return
+            } catch let error as SipralError where error.status == .busy {
+                usleep(1000)
+            } catch {
+                closeRecordingLink(id)
+                return
+            }
+        }
+    }
+
+    private func recordingLinkLost(_ id: UInt32, _ refusal: SignallingRefusal?) {
+        let open = signallingQueue.sync { recordingLinks.removeValue(forKey: id) }
+        guard open != nil, !isClosed else { return }
+        if let refusal {
+            let detail = refusal.detail
+            detail.withCString { text in
+                var failure = sipral_transport_failure_t.sized()
+                failure.transport = id
+                failure.error = refusal.error.rawValue
+                failure.detail = detail.isEmpty ? nil : text
+                failure.detail_len = detail.utf8.count
+                _ = try? retryingBusy { try Sipral.stackTransportFailure(stack: handle, failure: failure, nowMs: nowMs()) }
+            }
+        } else {
+            _ = try? retryingBusy { try Sipral.stackStreamClosed(stack: handle, transport: id, nowMs: nowMs()) }
+        }
+    }
+
+    /// A recording session is running for `call`, over `link` when it has a
+    /// connection of its own.
+    func recordingStarted(_ recording: SipralHandle, of call: Call, link: UInt32?) {
+        callsQueue.sync { recordings[recording] = (call, link) }
+    }
+
+    /// A recording session ended: its call stops copying, and its
+    /// connection closes a second later, once what the end still owes the
+    /// server -- the answer to its BYE -- has left on it.
+    private func recordingEnded(_ recording: SipralHandle) {
+        let ended = callsQueue.sync { recordings.removeValue(forKey: recording) }
+        guard let ended else { return }
+        ended.call.recordingEnded()
+        if let link = ended.link {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.closeRecordingLink(link)
+            }
+        }
+    }
+
     /// Every account moves to the new connection's address -- one added with
     /// a `Contact` of its own keeps it -- and every one that was registering
     /// registers again now rather than at its next back-off.
@@ -888,6 +1001,17 @@ public final class SipralStack: @unchecked Sendable {
     /// `ice` overrides the stack's own ICE policy for this call. `headers`
     /// go on the INVITE as written -- an `Alert-Info` asking for a
     /// distinctive ring, an `Answer-Mode` asking an intercom to pick up.
+    ///
+    /// `codecs` offers this call's audio in that order instead of the
+    /// stack's (`sipral_codec_info_t` names, comma-separated): `L16/16000`
+    /// or `L16/8000` is how linear audio is offered at all. `text` binds a
+    /// second socket at `mediaHost` and offers real-time text on it (RFC
+    /// 4103): `Media.sendText(_:)` and `Call.text()` carry it once the far
+    /// end agrees; it is not offered on a call keyed by SRTP or gathering
+    /// ICE, which the text stream would leave in the clear. `feedback`
+    /// offers RTP/AVPF with Generic NACKs and reduced-size RTCP (RFC 4585,
+    /// RFC 5506), which a far end knowing only RTP/AVP refuses; `focus`
+    /// says this end is a conference's focus (`isfocus`, RFC 4579).
     public func placeCall(
         account: Account,
         target: String,
@@ -896,16 +1020,29 @@ public final class SipralStack: @unchecked Sendable {
         destination: String? = nil,
         srtp: SipralSrtp? = nil,
         ice: SipralIce? = nil,
-        headers: [SipralHeader] = []
+        headers: [SipralHeader] = [],
+        codecs: String? = nil,
+        text: Bool = false,
+        feedback: Bool = false,
+        focus: Bool = false
     ) throws -> Call {
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
+        let textSocket: UDPSocket?
+        do {
+            textSocket = text ? try UDPSocket(host: mediaHost, port: 0) : nil
+        } catch {
+            giveBackMediaSocket(mediaSocket)
+            throw error
+        }
         let stackHandle = handle
 
         let callHandle: SipralHandle
         do {
             try mapMediaSocket(mediaSocket)
             let now = nowMs()
-            callHandle = try CStrings.with([target, mediaSocket.localAddress, destination]) { parts in
+            callHandle = try CStrings.with(
+                [target, mediaSocket.localAddress, destination, codecs, textSocket?.localAddress]
+            ) { parts in
                 var config = sipral_call_config_t.sized()
                 config.target = parts[0].pointer
                 config.target_len = parts[0].count
@@ -917,6 +1054,12 @@ public final class SipralStack: @unchecked Sendable {
                     config.destination = destinationPointer
                     config.destination_len = parts[2].count
                 }
+                config.codecs = parts[3].pointer
+                config.codecs_len = parts[3].count
+                config.text_address = parts[4].pointer
+                config.text_address_len = parts[4].count
+                config.feedback = feedback ? SipralToggle.on.rawValue : 0
+                config.focus = focus ? 1 : 0
                 return try retryingBusy {
                     try Sipral.callPlace(
                         stack: stackHandle, account: account.handle, config: config, configHeaders: headers, nowMs: now
@@ -925,10 +1068,11 @@ public final class SipralStack: @unchecked Sendable {
             }
         } catch {
             giveBackMediaSocket(mediaSocket)
+            textSocket?.close()
             throw error
         }
 
-        let call = Call(stack: self, handle: callHandle, mediaSocket: mediaSocket)
+        let call = Call(stack: self, handle: callHandle, mediaSocket: mediaSocket, textSocket: textSocket)
         registerCall(call)
         return call
     }
@@ -939,13 +1083,21 @@ public final class SipralStack: @unchecked Sendable {
     /// want it. The call's first events can arrive before the caller has
     /// taken `Call.events()`; `takeIncomingCall`, a stream, then
     /// `Call.answer()` is the order that misses none of them.
+    ///
+    /// `text` takes the real-time text the offer carries on a socket of its
+    /// own; `codecs`, `focus` and `feedback` are
+    /// `Call.answer(codecs:focus:feedback:)`'s.
     public func answerCall(
         _ event: SipralEvent,
         mediaHost: String = "127.0.0.1",
-        mediaPort: UInt16 = 0
+        mediaPort: UInt16 = 0,
+        text: Bool = false,
+        codecs: String? = nil,
+        focus: Bool = false,
+        feedback: Bool = false
     ) throws -> Call {
-        let call = try takeIncomingCall(event, mediaHost: mediaHost, mediaPort: mediaPort)
-        try call.answer()
+        let call = try takeIncomingCall(event, mediaHost: mediaHost, mediaPort: mediaPort, text: text)
+        try call.answer(codecs: codecs, focus: focus, feedback: feedback)
         return call
     }
 
@@ -958,19 +1110,27 @@ public final class SipralStack: @unchecked Sendable {
     /// touches Answer, so that the `CXAnswerCallAction` CallKit then
     /// delivers is the one answer this call gets. `answerCall` is this
     /// plus the answer, for an agent that picks up at once.
+    ///
+    /// `text` binds a second socket at `mediaHost` for the real-time text
+    /// the offer carries, which `Call.answer()` then takes.
     public func takeIncomingCall(
         _ event: SipralEvent,
         mediaHost: String = "127.0.0.1",
-        mediaPort: UInt16 = 0
+        mediaPort: UInt16 = 0,
+        text: Bool = false
     ) throws -> Call {
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
+        let textSocket: UDPSocket?
         do {
             try mapMediaSocket(mediaSocket)
+            textSocket = text ? try UDPSocket(host: mediaHost, port: 0) : nil
         } catch {
             giveBackMediaSocket(mediaSocket)
             throw error
         }
-        let call = Call(stack: self, handle: event.call, mediaSocket: mediaSocket, incoming: event.callData)
+        let call = Call(
+            stack: self, handle: event.call, mediaSocket: mediaSocket, incoming: event.callData, textSocket: textSocket
+        )
         registerCall(call)
 
         // The caller can have given up (CANCEL) between the poll thread
@@ -1520,6 +1680,9 @@ public final class SipralStack: @unchecked Sendable {
         if let call = callFor(event.call) {
             call.deliver(event)
         }
+        if event.kindRaw == SipralEventKind.callEnded.rawValue {
+            recordingEnded(event.call)
+        }
         eventBroadcast.send(event)
     }
 
@@ -1535,6 +1698,11 @@ public final class SipralStack: @unchecked Sendable {
             guard (try? Sipral.stackPollTransmit(stack: handle, transmit: &transmit)) != nil else { return }
             guard transmit.len > 0 else { return }
             let payload = Array(UnsafeBufferPointer(start: transmitData, count: transmit.len))
+            if transmit.transport != Sipral.transportMain {
+                // a recording session's own connection
+                signallingQueue.sync { recordingLinks[transmit.transport] }?.send(payload)
+                continue
+            }
             if signalling != .udp {
                 // one connection carries everything, whatever it names: the
                 // server it reaches is the outbound proxy
@@ -1690,6 +1858,11 @@ public final class SipralStack: @unchecked Sendable {
             return link
         }
         open?.close()
+        let toRecorders = signallingQueue.sync { () -> [SignallingConnection] in
+            defer { recordingLinks = [:] }
+            return Array(recordingLinks.values)
+        }
+        toRecorders.forEach { $0.close() }
         try? Sipral.stackDestroy(stack: handle)
         eventBroadcast.finish()
         signallingQueue.sync { socket?.close() }

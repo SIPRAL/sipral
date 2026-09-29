@@ -39,7 +39,7 @@ fun main() {
         runBlocking {
             everything() + "; " + natChecks() + "; " + referralChecks() + "; " + signallingChecks() + "; " +
                 audioChecks() + "; " + loggingChecks() + "; " + securityChecks() + "; " + inBandChecks() + "; " +
-                tlsSignallingChecks()
+                tlsSignallingChecks() + "; " + protocolsChecks()
         }
     } catch (failure: Throwable) {
         failure.printStackTrace()

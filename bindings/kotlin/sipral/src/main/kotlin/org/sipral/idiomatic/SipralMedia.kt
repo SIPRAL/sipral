@@ -87,7 +87,14 @@ class SipralMedia internal constructor(
      * [sendAudio] -- [SipralAudioMode.Application] -- or the library's
      * engine does. */
     val pumpsFrames: Boolean = true,
+    /** The call's real-time text socket, when it has one: read and written
+     * on this thread beside the audio, and closed with it. */
+    private val textSocket: DatagramSocket? = null,
 ) : AutoCloseable {
+    /** The two sockets the copies for a recording server leave from, while
+     * a recording session runs, guarded by [ioLock]. */
+    private var recordingSockets: Pair<DatagramSocket, DatagramSocket>? = null
+
     /** The call's socket, guarded by [ioLock] -- as is every send and
      * receive on it -- since [SipralCall.moveMedia] puts another in its
      * place and the engine's thread sends on it in device mode. */
@@ -141,7 +148,57 @@ class SipralMedia internal constructor(
 
     init {
         socket.soTimeout = 5
+        textSocket?.soTimeout = 1
         thread.start()
+    }
+
+    /**
+     * What the call agreed about RTCP feedback (RFC 4585, RFC 5506), read
+     * fresh from `sipral_media_info_t`: whether the stream runs RTP/AVPF,
+     * with Generic NACKs, and with reduced-size RTCP. A call asks for it
+     * with `SipralClient.placeCall(feedback = true)`; an offer that asks is
+     * answered on the profile, and with the NACKs and reduced size when
+     * answered with `feedback = true`. [statistics] counts what it did.
+     */
+    fun rtcpFeedback(): SipralRtcpFeedback {
+        val now = Sipral.mediaInfo(handle)
+        return SipralRtcpFeedback(now.feedback != 0L, now.genericNack != 0L, now.reducedSize != 0L)
+    }
+
+    /** Whether the call agreed a real-time text stream (RFC 4103), which
+     * [sendText] writes to. */
+    val hasText: Boolean
+        get() = Sipral.mediaInfo(handle).hasText != 0L
+
+    /**
+     * `sipral_media_send_text`: queue what the user typed for the far end
+     * (RFC 4103, T.140), UTF-8. It leaves in the next 300 ms interval, each
+     * block sent twice more as redundancy where both ends agreed `red`; a
+     * new line goes as one, and BACKSPACE (U+0008) erases the far end's last
+     * character. `NOT_NEGOTIATED` on a call that agreed no text stream,
+     * `EXHAUSTED` when more is waiting unsent than a stream holds.
+     */
+    fun sendText(text: String) {
+        retryBusy { Sipral.mediaSendText(handle, text) }
+    }
+
+    /** The recorded call's copies leave from these two sockets from now on
+     * ([SipralCall.recordTo]). */
+    internal fun copyRecording(thisEnd: DatagramSocket, farEnd: DatagramSocket) {
+        thisEnd.soTimeout = 1
+        farEnd.soTimeout = 1
+        val old = synchronized(ioLock) {
+            recordingSockets.also { recordingSockets = thisEnd to farEnd }
+        }
+        old?.first?.close()
+        old?.second?.close()
+    }
+
+    /** No more copies: the recording session ended. Its sockets close. */
+    internal fun stopCopyingRecording() {
+        val old = synchronized(ioLock) { recordingSockets.also { recordingSockets = null } }
+        old?.first?.close()
+        old?.second?.close()
     }
 
     /** `sipral_media_info`, read fresh. */
@@ -290,7 +347,13 @@ class SipralMedia internal constructor(
             thread.join(5000)
         }
         Sipral.mediaRelease(handle)
-        synchronized(ioLock) { socket.close() }
+        val copies = synchronized(ioLock) {
+            socket.close()
+            recordingSockets.also { recordingSockets = null }
+        }
+        textSocket?.close()
+        copies?.first?.close()
+        copies?.second?.close()
     }
 
     // -- the frame-rate thread --------------------------------------------
@@ -360,6 +423,80 @@ class SipralMedia internal constructor(
         sendTo(payload, parseAddress(destinationText))
     }
 
+    /** What arrived on the text socket, to `sipral_media_receive_text`, and
+     * what is due on it, out of it. */
+    private fun pumpText() {
+        val text = textSocket ?: return
+        val buffer = ByteArray(2048)
+        while (true) {
+            val packet = DatagramPacket(buffer, buffer.size)
+            try {
+                text.receive(packet)
+            } catch (_: Exception) {
+                break
+            }
+            Sipral.mediaReceiveText(
+                handle,
+                packet.data.copyOfRange(0, packet.length),
+                "${packet.address.hostAddress}:${packet.port}",
+                client.nowMs(),
+            )
+        }
+        val data = ByteArray(PACKET_BYTES)
+        val destination = ByteArray(ADDRESS_BYTES)
+        val lens = LongArray(3)
+        while (true) {
+            val status = SipralMediaNative.mediaPollText(handle, client.nowMs(), data, destination, lens)
+            val len = lens[0].toInt()
+            if (status != 0 || len == 0) {
+                return
+            }
+            val to = parseAddress(String(destination, 0, lens[1].toInt(), Charsets.UTF_8))
+            try {
+                text.send(DatagramPacket(data, len, to))
+            } catch (_: Exception) {
+                // best effort, as every datagram of a call's
+            }
+        }
+    }
+
+    /** Every copy waiting for the recording server, out of the socket its
+     * party's stream is offered from. What the server sends back on them
+     * (its RTCP) is read and let go. */
+    private fun pumpRecording() {
+        val sockets = synchronized(ioLock) { recordingSockets } ?: return
+        val buffer = ByteArray(2048)
+        for (socket in listOf(sockets.first, sockets.second)) {
+            while (true) {
+                try {
+                    socket.receive(DatagramPacket(buffer, buffer.size))
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }
+        val data = ByteArray(PACKET_BYTES)
+        val destination = ByteArray(ADDRESS_BYTES)
+        val lens = LongArray(3)
+        val farEnd = LongArray(1)
+        while (true) {
+            val status = SipralMediaNative.mediaPollRecording(handle, data, destination, lens, farEnd)
+            val len = lens[0].toInt()
+            if (status != 0 || len == 0) {
+                return
+            }
+            val to = parseAddress(String(destination, 0, lens[1].toInt(), Charsets.UTF_8))
+            synchronized(ioLock) {
+                val open = recordingSockets ?: return
+                try {
+                    (if (farEnd[0] != 0L) open.second else open.first).send(DatagramPacket(data, len, to))
+                } catch (_: Exception) {
+                    // best effort, as every datagram of a call's
+                }
+            }
+        }
+    }
+
     private fun drainRtcp() = drainQueued { data, destination, lens ->
         SipralMediaNative.mediaPollRtcp(handle, client.nowMs(), data, destination, lens)
     }
@@ -389,6 +526,8 @@ class SipralMedia internal constructor(
                     }
                     drainRtcp()
                     drainTransmit()
+                    pumpText()
+                    pumpRecording()
                 } catch (stale: SipralException) {
                     // "A media handle outlives its call, and says so. Once
                     // the call has ended, or its stack has been destroyed,

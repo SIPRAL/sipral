@@ -8,8 +8,10 @@ import org.sipral.SipralAccountConfig
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
+import org.sipral.SipralPresence
 import org.sipral.SipralRegistrationState
 import org.sipral.SipralStatus
+import org.sipral.SipralSubscribeConfig
 
 /**
  * `sipral_account_add`, and the entry points that take its handle.
@@ -214,6 +216,68 @@ class SipralAccount internal constructor(
     fun remove() {
         retryBusy { Sipral.accountRemove(client.handle, handle) }
         client.forgetAccount(handle)
+    }
+
+    // -- subscriptions and presence ------------------------------------------
+
+    /**
+     * `sipral_account_subscribe` (RFC 6665): watch [target], a SIP URI, for
+     * the event [package] -- `presence` (RFC 3856), `conference` (RFC 4575),
+     * `dialog` for a busy lamp field, `message-summary` -- from this account.
+     * [accept] is the `Accept` value when the package's default body type is
+     * not the one wanted, [expiresSeconds] how long to ask for (zero for an
+     * hour), and [destination] (`host:port`) where to send the SUBSCRIBE when
+     * not where the account registers.
+     */
+    fun subscribe(
+        target: String,
+        `package`: String,
+        accept: String? = null,
+        expiresSeconds: Long = 0,
+        destination: String? = null,
+    ): SipralSubscription {
+        val config = SipralSubscribeConfig(
+            target = target,
+            `package` = `package`,
+            accept = accept,
+            expiresSeconds = expiresSeconds,
+            destination = destination,
+        )
+        val made = retryBusy { Sipral.accountSubscribe(client.handle, handle, config, client.nowMs()) }
+        return SipralSubscription(client, made, `package`)
+    }
+
+    /**
+     * Watch [target]'s presence (RFC 3856): a `presence` subscription asking
+     * for PIDF, whose every notification arrives as
+     * `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with [presenceOf]'s `kind`
+     * `WATCHED`: open or closed, the activity, the presentity and its note.
+     */
+    fun watchPresence(target: String, expiresSeconds: Long = 0, destination: String? = null): SipralSubscription =
+        subscribe(target, "presence", "application/pidf+xml", expiresSeconds, destination)
+
+    /**
+     * `sipral_account_publish_presence` (RFC 3903): publish this account's
+     * presence to its registrar as the presence compositor; the first call
+     * publishes and every later one modifies the same publication, which the
+     * stack keeps refreshed until [unpublishPresence]. What the compositor
+     * did with it arrives as `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with
+     * [presenceOf]'s `kind` `PUBLICATION`, naming this account.
+     */
+    fun publishPresence(presence: SipralPublishedPresence) {
+        val document = SipralPresence(
+            basic = presence.basic.value.toLong(),
+            activity = presence.activity.value.toLong(),
+            note = presence.note,
+        )
+        retryBusy { Sipral.accountPublishPresence(client.handle, handle, document, client.nowMs()) }
+    }
+
+    /** `sipral_account_unpublish_presence`: take the published presence
+     * away; `REMOVED` says when it is gone. `WRONG_STATE` when nothing is
+     * published. */
+    fun unpublishPresence() {
+        retryBusy { Sipral.accountUnpublishPresence(client.handle, handle, client.nowMs()) }
     }
 }
 

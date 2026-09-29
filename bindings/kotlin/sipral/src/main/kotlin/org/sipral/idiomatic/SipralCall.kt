@@ -15,9 +15,13 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.withTimeout
 import org.sipral.Sipral
+import org.sipral.SipralCallConfig
 import org.sipral.SipralCallEvent
+import org.sipral.SipralRecordConfig
+import org.sipral.SipralTextEvent
 import org.sipral.SipralCallState
 import org.sipral.SipralConsentTone
 import org.sipral.SipralDtmfDetection
@@ -50,7 +54,20 @@ class SipralCall internal constructor(
     /** The `SIPRAL_EVENT_KIND_INCOMING_CALL` payload this call was answered
      * from, for [identity] and [answering]; null for a call this end placed. */
     private val incoming: SipralCallEvent? = null,
+    /** The socket this call's real-time text travels on, when it was placed
+     * or answered with `text = true`: the call's until [media] exists, and
+     * the media's from then on. */
+    private val textSocket: DatagramSocket? = null,
 ) : AutoCloseable {
+    /** The call's real-time text socket, as `host:port`, when it has one. */
+    val textAddress: String? = textSocket?.let { formatAddress(it.localAddress.hostAddress, it.localPort) }
+
+    /** The recording session copying this call to a recording server,
+     * while one does. */
+    @Volatile
+    var recordingSession: SipralRecordingSession? = null
+        private set
+
     /** The call's media socket, as `host:port`: the name
      * `sipral_stack_nat_map` gave it, and so of its connection to a TURN
      * server; after [moveMedia], the new one. */
@@ -119,6 +136,14 @@ class SipralCall internal constructor(
      */
     val digits: Flow<SipralEvent> = events.filter { it.kind == SipralEventKind.DIGIT_RECEIVED.value.toLong() }
 
+    /**
+     * The real-time text the far end types (RFC 4103): each
+     * `SIPRAL_EVENT_KIND_TEXT_RECEIVED`'s [textOf], in order, for a call
+     * placed or answered with `text = true` whose far end agreed a text
+     * stream. The same rules as [events].
+     */
+    val text: Flow<SipralTextEvent> = events.mapNotNull { textOf(it) }
+
     /** `sipral_call_state`, read fresh -- not cached from the last event,
      * which a status query between events would otherwise miss. */
     val state: SipralCallState
@@ -169,7 +194,10 @@ class SipralCall internal constructor(
      * rather than a throw.
      */
     private fun mintMedia(): SipralMedia? = try {
-        SipralMedia(client, handle, mediaSocket, pumpsFrames = client.audioMode is SipralAudioMode.Application)
+        SipralMedia(
+            client, handle, mediaSocket, pumpsFrames = client.audioMode is SipralAudioMode.Application,
+            textSocket = textSocket,
+        )
     } catch (gone: SipralException) {
         if (gone.status == SipralStatus.WRONG_STATE || gone.status == SipralStatus.STALE_HANDLE) {
             null
@@ -184,6 +212,122 @@ class SipralCall internal constructor(
      * audio through the media socket this call already opened. */
     internal fun answer(address: String) {
         retryBusy { Sipral.callAnswerMedia(client.handle, handle, address, client.nowMs()) }
+    }
+
+    /** `sipral_call_answer_with`: accept as [answer] does, with the real-time
+     * text socket this call holds, [codecs] in that order, `isfocus` when
+     * [focus], and Generic NACKs and reduced-size RTCP when [feedback]. */
+    internal fun answerWith(address: String, codecs: String?, focus: Boolean, feedback: Boolean) {
+        val config = SipralCallConfig(
+            mediaAddress = address,
+            codecs = codecs,
+            textAddress = textAddress,
+            feedback = if (feedback) SipralToggle.ON.value.toLong() else 0L,
+            focus = if (focus) 1L else 0L,
+        )
+        retryBusy { Sipral.callAnswerWith(client.handle, handle, config, client.nowMs()) }
+    }
+
+    // -- conferences ---------------------------------------------------------
+
+    /**
+     * `sipral_call_set_focus`: say (true) or stop saying that this end is
+     * the focus of a conference the call belongs to (RFC 4579 §4.2):
+     * `isfocus` on the `Contact` of every message the call sends from here
+     * on -- the answer, for a call not answered yet, and the next re-INVITE
+     * or UPDATE for one that is up.
+     */
+    fun setFocus(focus: Boolean) {
+        retryBusy { Sipral.callSetFocus(client.handle, handle, if (focus) 1L else 0L) }
+    }
+
+    /** `sipral_call_conference_uri`: the conference this call belongs to,
+     * when its far end said it is a focus (`isfocus` on its `Contact`), and
+     * null when it said nothing of the kind. */
+    fun conferenceUri(): String? = try {
+        protocolText { buffer -> retryBusy { Sipral.callConferenceUri(client.handle, handle, buffer) } }
+    } catch (none: SipralException) {
+        if (none.status != SipralStatus.NOT_AFOCUS) {
+            throw none
+        }
+        null
+    }
+
+    /**
+     * `sipral_call_subscribe_conference`: subscribe to the conference
+     * package of this call's focus (RFC 4579 §3.4), from the call's own
+     * account. The subscription outlives the call; each notification is a
+     * `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`, and
+     * [SipralSubscription.conference] reads the picture. `NOT_AFOCUS` for a
+     * call whose far end is not one.
+     */
+    fun subscribeConference(): SipralSubscription {
+        val made = retryBusy { Sipral.callSubscribeConference(client.handle, handle, client.nowMs()) }
+        return SipralSubscription(client, made, "conference")
+    }
+
+    // -- a recording server --------------------------------------------------
+
+    /**
+     * `sipral_call_record_to`: record this call to the recording server
+     * [server] (SIPREC, RFC 7866). The recording session -- an INVITE with
+     * `Require: siprec`, the metadata (RFC 7865) and one send-only stream per
+     * party -- goes from the call's account: to [destination] (`host:port`)
+     * over a TCP connection this client opens for it, or, with no
+     * [destination], where the account sends -- which RFC 3261 does not let
+     * an INVITE this large reach over UDP, so the client must then signal
+     * over TCP or TLS. Two sockets are bound at [host] for the copies of the
+     * audio. `WRONG_STATE` before `SIPRAL_EVENT_KIND_MEDIA_STARTED`, and for
+     * a call already recorded.
+     */
+    fun recordTo(server: String, destination: String? = null, host: String = "127.0.0.1"): SipralRecordingSession {
+        val current = synchronized(mediaLock) { media }
+            ?: throw SipralException(SipralStatus.WRONG_STATE, "the call's media has not started")
+        val thisEnd = DatagramSocket(InetSocketAddress(host, 0))
+        val farEnd = try {
+            DatagramSocket(InetSocketAddress(host, 0))
+        } catch (refused: Exception) {
+            thisEnd.close()
+            throw refused
+        }
+        val thisEndAddress = formatAddress(thisEnd.localAddress.hostAddress, thisEnd.localPort)
+        val farEndAddress = formatAddress(farEnd.localAddress.hostAddress, farEnd.localPort)
+        var link: Long? = null
+        val recording = try {
+            link = destination?.let { client.openRecordingLink(it) }
+            val config = SipralRecordConfig(
+                server = server,
+                destination = destination,
+                transport = link ?: 0L,
+                thisEnd = thisEndAddress,
+                farEnd = farEndAddress,
+            )
+            retryBusy { Sipral.callRecordTo(client.handle, handle, config, client.nowMs()) }
+        } catch (refused: Exception) {
+            link?.let { client.closeRecordingLink(it) }
+            thisEnd.close()
+            farEnd.close()
+            throw refused
+        }
+        current.copyRecording(thisEnd, farEnd)
+        val session = SipralRecordingSession(recording, thisEndAddress, farEndAddress, this)
+        recordingSession = session
+        client.recordingStarted(recording, this, link)
+        return session
+    }
+
+    /** `sipral_call_stop_recording_to`: stop recording this call to its
+     * recording server; the recording session is hung up. */
+    fun stopRecordingToServer() {
+        retryBusy { Sipral.callStopRecordingTo(client.handle, handle, client.nowMs()) }
+        recordingEnded()
+    }
+
+    /** The recording session is over, whoever ended it: the copies stop and
+     * their sockets close. */
+    internal fun recordingEnded() {
+        recordingSession = null
+        media?.stopCopyingRecording()
     }
 
     /** `sipral_call_reject`. */
@@ -446,6 +590,7 @@ class SipralCall internal constructor(
             current.close()
         } else {
             client.giveBackMediaSocket(mediaSocket, mediaAddress)
+            textSocket?.close()
         }
         client.forgetCall(handle)
     }

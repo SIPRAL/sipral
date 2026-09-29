@@ -15,7 +15,9 @@
  * load-bearing now"). This file is that construction, exposed as plain
  * byte arrays so org.sipral.idiomatic can stay pure Kotlin above it.
  *
- * Four entry points, each building one sipral_media_packet_t on the C stack,
+ * Six entry points -- the four above, and sipral_media_poll_text and
+ * sipral_media_poll_recording beside them -- each building one
+ * sipral_media_packet_t on the C stack,
  * filling it from Java arrays the caller owns, and copying what came back
  * into two more the caller also owns -- nothing here keeps a pointer past
  * its own call, the same rule sipral_jni.c follows throughout. Below them,
@@ -195,6 +197,59 @@ Java_org_sipral_idiomatic_SipralMediaNative_stackPollFarewell(JNIEnv *env, jclas
     return status;
 }
 
+static sipral_status_t
+poll_text_fetch(sipral_media_packet_t *packet, void *raw)
+{
+    struct media_now_args *args = (struct media_now_args *)raw;
+    return sipral_media_poll_text(args->media, args->now_ms, packet);
+}
+
+/* sipral_media_poll_text: the next datagram due on the call's real-time text
+ * socket, filled the same way. */
+JNIEXPORT jint JNICALL
+Java_org_sipral_idiomatic_SipralMediaNative_mediaPollText(JNIEnv *env, jclass cls,
+    jlong media, jlong nowMs, jbyteArray outData, jbyteArray outDestination, jlongArray outLen)
+{
+    struct media_now_args args;
+
+    (void)cls;
+    args.media = (sipral_handle_t)media;
+    args.now_ms = (uint64_t)nowMs;
+    return run_packet_call(env, outData, outDestination, outLen, poll_text_fetch, &args);
+}
+
+struct recording_args {
+    sipral_handle_t media;
+    uint32_t far_end;
+};
+
+static sipral_status_t
+poll_recording_fetch(sipral_media_packet_t *packet, void *raw)
+{
+    struct recording_args *args = (struct recording_args *)raw;
+    return sipral_media_poll_recording(args->media, packet, &args->far_end);
+}
+
+/* sipral_media_poll_recording: the next copy for the recording server,
+ * filled the same way, with which socket it leaves from -- 0 this end's, 1
+ * the far end's -- in `outFarEnd`. */
+JNIEXPORT jint JNICALL
+Java_org_sipral_idiomatic_SipralMediaNative_mediaPollRecording(JNIEnv *env, jclass cls,
+    jlong media, jbyteArray outData, jbyteArray outDestination, jlongArray outLen, jlongArray outFarEnd)
+{
+    struct recording_args args;
+    jint status;
+    jlong far_end;
+
+    (void)cls;
+    args.media = (sipral_handle_t)media;
+    args.far_end = 0;
+    status = run_packet_call(env, outData, outDestination, outLen, poll_recording_fetch, &args);
+    far_end = (jlong)args.far_end;
+    (*env)->SetLongArrayRegion(env, outFarEnd, 0, 1, &far_end);
+    return status;
+}
+
 /* sipral_media_path_candidate_at's sipral_path_candidate_t is a third struct
  * a caller part-fills with buffers: two addresses, the path's own and the far
  * one. Both buffers are the caller's, and `outNumbers` comes back as
@@ -260,7 +315,8 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollTransmit(JNIEnv *env, jcla
     jbyte *dest_buf;
     jsize dest_cap;
     sipral_status_t status;
-    jlong lens[3];
+    jlong lens[4];
+    jsize room;
 
     (void)cls;
     memset(&transmit, 0, sizeof transmit);
@@ -291,10 +347,14 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollTransmit(JNIEnv *env, jcla
     (*env)->ReleaseByteArrayElements(env, outData, data_buf, 0);
     (*env)->ReleaseByteArrayElements(env, outDestination, dest_buf, 0);
 
+    /* the transport it goes out on fourth, for a caller that brings room:
+     * a recording session's own connection is not the main one */
     lens[0] = (jlong)transmit.len;
     lens[1] = (jlong)transmit.destination_len;
     lens[2] = (jlong)transmit.protocol;
-    (*env)->SetLongArrayRegion(env, outLen, 0, 3, lens);
+    lens[3] = (jlong)transmit.transport;
+    room = (*env)->GetArrayLength(env, outLen);
+    (*env)->SetLongArrayRegion(env, outLen, 0, room < 4 ? room : 4, lens);
     return (jint)status;
 }
 

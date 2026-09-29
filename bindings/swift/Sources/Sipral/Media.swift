@@ -21,6 +21,15 @@ public struct StreamProtection: Sendable, Equatable {
     public let awaitingKeys: Bool
 }
 
+/// What a call's audio stream agreed about RTCP feedback
+/// (`Media.rtcpFeedback()`): RTP/AVPF (RFC 4585), Generic NACKs, and
+/// reduced-size RTCP (RFC 5506).
+public struct RtcpFeedback: Sendable, Equatable {
+    public let feedback: Bool
+    public let genericNack: Bool
+    public let reducedSize: Bool
+}
+
 /// One path a call's ICE agent tried, and what became of it: a
 /// `sipral_path_candidate_t` with its two addresses read out.
 public struct PathCandidate: Sendable, Equatable {
@@ -114,10 +123,18 @@ public final class Media: @unchecked Sendable {
     private var closed = false
     private let closeQueue = DispatchQueue(label: "org.sipral.media.close")
 
-    init(stack: SipralStack, callHandle: SipralHandle, socket: UDPSocket, pumpsFrames: Bool) throws {
+    /// The call's real-time text socket, when it has one: read and written
+    /// on this thread beside the audio, and closed with it.
+    private let textSocket: UDPSocket?
+    /// The two sockets the copies for a recording server leave from, while
+    /// a recording session runs, guarded by `ioQueue`.
+    private var recordingSockets: (thisEnd: UDPSocket, farEnd: UDPSocket)?
+
+    init(stack: SipralStack, callHandle: SipralHandle, socket: UDPSocket, pumpsFrames: Bool, textSocket: UDPSocket? = nil) throws {
         self.stack = stack
         self.socket = socket
         self.pumpsFrames = pumpsFrames
+        self.textSocket = textSocket
         self.handle = try retryingBusy { try Sipral.callMedia(stack: stack.handle, call: callHandle) }
 
         let info = try Sipral.mediaInfo(media: handle)
@@ -134,6 +151,55 @@ public final class Media: @unchecked Sendable {
 
     public func statistics() throws -> sipral_stream_stats_t {
         try Sipral.mediaStatistics(media: handle, nowMs: stack.nowMs())
+    }
+
+    /// What the call agreed about RTCP feedback (RFC 4585, RFC 5506), read
+    /// fresh from `sipral_media_info_t`: whether the stream runs RTP/AVPF,
+    /// with Generic NACKs, and with reduced-size RTCP. A call asks for it
+    /// with `SipralStack.placeCall(feedback: true)`; an offer that asks is
+    /// answered in kind. `statistics()` counts what it did.
+    public func rtcpFeedback() throws -> RtcpFeedback {
+        let now = try Sipral.mediaInfo(media: handle)
+        return RtcpFeedback(
+            feedback: now.feedback != 0, genericNack: now.generic_nack != 0, reducedSize: now.reduced_size != 0
+        )
+    }
+
+    /// Whether the call agreed a real-time text stream (RFC 4103), which
+    /// `sendText(_:)` writes to.
+    public var hasText: Bool {
+        get throws { try Sipral.mediaInfo(media: handle).has_text != 0 }
+    }
+
+    /// `sipral_media_send_text`: queue what the user typed for the far end
+    /// (RFC 4103, T.140), UTF-8. It leaves in the next 300 ms interval, each
+    /// block sent twice more as redundancy where both ends agreed `red`; a
+    /// new line goes as one, and BACKSPACE (U+0008) erases the far end's
+    /// last character. `.notNegotiated` on a call that agreed no text
+    /// stream, `.exhausted` when more is waiting unsent than a stream holds.
+    public func sendText(_ text: String) throws {
+        try retryingBusy { try Sipral.mediaSendText(media: handle, text: text) }
+    }
+
+    /// The recorded call's copies leave from these two sockets from now on
+    /// (`Call.record(toServer:destination:host:)`).
+    func copyRecording(thisEnd: UDPSocket, farEnd: UDPSocket) {
+        let old = ioQueue.sync { () -> (thisEnd: UDPSocket, farEnd: UDPSocket)? in
+            defer { recordingSockets = (thisEnd, farEnd) }
+            return recordingSockets
+        }
+        old?.thisEnd.close()
+        old?.farEnd.close()
+    }
+
+    /// No more copies: the recording session ended. Its sockets close.
+    func stopCopyingRecording() {
+        let old = ioQueue.sync { () -> (thisEnd: UDPSocket, farEnd: UDPSocket)? in
+            defer { recordingSockets = nil }
+            return recordingSockets
+        }
+        old?.thisEnd.close()
+        old?.farEnd.close()
     }
 
     /// The call's encryption report, now (`sipral_media_encryption_count`
@@ -290,7 +356,66 @@ public final class Media: @unchecked Sendable {
         }
     }
 
+    /// What arrived on the text socket, to `sipral_media_receive_text`, and
+    /// what is due on it, out of it.
+    private func pumpText() {
+        guard let textSocket else { return }
+        while let (data, from) = ioQueue.sync(execute: { socketClosed ? nil : textSocket.receive(capacity: 2048) }) {
+            _ = try? Sipral.mediaReceiveText(media: handle, data: data, from: from, nowMs: stack.nowMs())
+        }
+        drainQueued({ payload, destination, _ in textSocket.send(payload, to: destination) }) { packet in
+            try Sipral.mediaPollText(media: self.handle, nowMs: self.stack.nowMs(), packet: &packet)
+        }
+    }
+
+    /// Every copy waiting for the recording server, out of the socket its
+    /// party's stream is offered from. What the server sends back on them
+    /// (its RTCP) is read and let go.
+    private func pumpRecording() {
+        guard ioQueue.sync(execute: { recordingSockets != nil }) else { return }
+        for farEnd in [false, true] {
+            // read through the pair held now, never a socket already closed
+            while ioQueue.sync(execute: { () -> (data: [UInt8], from: String)? in
+                guard let open = recordingSockets else { return nil }
+                return (farEnd ? open.farEnd : open.thisEnd).receive(capacity: 2048)
+            }) != nil {}
+        }
+        while true {
+            var packet = sipral_media_packet_t.sized()
+            var data = [UInt8](repeating: 0, count: 1500)
+            var destination = [CChar](repeating: 0, count: 128)
+            let copied: (payload: [UInt8], destination: String, farEnd: Bool)? = data.withUnsafeMutableBufferPointer { dataBuf in
+                destination.withUnsafeMutableBufferPointer { destBuf in
+                    packet.data = dataBuf.baseAddress
+                    packet.capacity = 1500
+                    packet.destination = destBuf.baseAddress
+                    packet.destination_capacity = 128
+                    guard let farEnd = try? Sipral.mediaPollRecording(media: handle, packet: &packet),
+                          packet.len > 0 else { return nil }
+                    let payload = Array(UnsafeBufferPointer(start: dataBuf.baseAddress, count: packet.len))
+                    let text = destBuf.withMemoryRebound(to: UInt8.self) {
+                        String(decoding: UnsafeBufferPointer(start: $0.baseAddress, count: packet.destination_len), as: UTF8.self)
+                    }
+                    return (payload, text, farEnd != 0)
+                }
+            }
+            guard let copied else { return }
+            ioQueue.sync {
+                guard let open = recordingSockets else { return }
+                (copied.farEnd ? open.farEnd : open.thisEnd).send(copied.payload, to: copied.destination)
+            }
+        }
+    }
+
     private func drainPacket(_ poll: (inout sipral_media_packet_t) throws -> Void) {
+        drainQueued({ payload, destination, protocolRaw in self.send(payload, to: destination, over: protocolRaw) }, poll)
+    }
+
+    /// Every packet `poll` hands out, each to `out` with its destination and
+    /// what it goes over, until it hands out none.
+    private func drainQueued(
+        _ out: ([UInt8], String, UInt32) -> Void, _ poll: (inout sipral_media_packet_t) throws -> Void
+    ) {
         while true {
             var packet = sipral_media_packet_t.sized()
             var data = [UInt8](repeating: 0, count: 1500)
@@ -306,7 +431,7 @@ public final class Media: @unchecked Sendable {
                     let destinationText = destBuf.withMemoryRebound(to: UInt8.self) {
                         String(decoding: UnsafeBufferPointer(start: $0.baseAddress, count: packet.destination_len), as: UTF8.self)
                     }
-                    send(payload, to: destinationText, over: packet.protocol)
+                    out(payload, destinationText, packet.protocol)
                     return true
                 }
             }
@@ -369,6 +494,8 @@ public final class Media: @unchecked Sendable {
                 drainPacket { packet in
                     try Sipral.mediaPollTransmit(media: self.handle, nowMs: self.stack.nowMs(), packet: &packet)
                 }
+                pumpText()
+                pumpRecording()
             } else if active {
                 var samples = [Int16](repeating: 0, count: frameSamples)
                 do {
@@ -397,6 +524,8 @@ public final class Media: @unchecked Sendable {
                 drainPacket { packet in
                     try Sipral.mediaPollTransmit(media: self.handle, nowMs: self.stack.nowMs(), packet: &packet)
                 }
+                pumpText()
+                pumpRecording()
             }
 
             let elapsedNs = DispatchTime.now().uptimeNanoseconds &- started.uptimeNanoseconds
@@ -421,10 +550,15 @@ public final class Media: @unchecked Sendable {
         guard !wasClosed else { return }
         _ = closedSemaphore.wait(timeout: .now() + 5)
         try? Sipral.mediaRelease(media: handle)
-        ioQueue.sync {
+        let copies = ioQueue.sync { () -> (thisEnd: UDPSocket, farEnd: UDPSocket)? in
             socketClosed = true
             socket.close()
+            textSocket?.close()
+            defer { recordingSockets = nil }
+            return recordingSockets
         }
+        copies?.thisEnd.close()
+        copies?.farEnd.close()
         frameBroadcast.finish()
     }
 

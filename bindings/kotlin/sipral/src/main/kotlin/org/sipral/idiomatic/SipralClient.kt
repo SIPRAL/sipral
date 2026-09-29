@@ -42,6 +42,7 @@ import org.sipral.SipralCallEvent
 import org.sipral.SipralCounters
 import org.sipral.SipralDtmfDetection
 import org.sipral.SipralEvent
+import org.sipral.SipralEventKind
 import org.sipral.SipralEventListener
 import org.sipral.SipralException
 import org.sipral.SipralHeader
@@ -61,6 +62,10 @@ import org.sipral.SipralTransport
 private const val TRANSMIT_BYTES = 1 shl 16
 private const val ADDRESS_BYTES = 64
 private const val PACKET_BYTES = 1500
+
+/** The first transport id a connection to a recording server is bound
+ * under. */
+private const val FIRST_RECORDING_LINK = 64L
 
 internal fun formatAddress(host: String, port: Int): String = "$host:$port"
 
@@ -769,6 +774,17 @@ class SipralClient private constructor(
      * client's own ICE policy for this call. [headers] go on the INVITE as
      * written -- an `Alert-Info` asking for a distinctive ring, an
      * `Answer-Mode` asking an intercom to pick up.
+     *
+     * [codecs] offers this call's audio in that order instead of the
+     * client's (`sipral_codec_info_t` names, comma-separated): `L16/16000` or
+     * `L16/8000` is how linear audio is offered at all. [text] binds a second
+     * socket at [mediaHost] and offers real-time text on it (RFC 4103):
+     * [SipralMedia.sendText] and [SipralCall.text] carry it once the far end
+     * agrees; it is not offered on a call keyed by SRTP or gathering ICE,
+     * which the text stream would leave in the clear. [feedback] offers
+     * RTP/AVPF with Generic NACKs and reduced-size RTCP (RFC 4585, RFC 5506),
+     * which a far end knowing only RTP/AVP refuses; [focus] says this end is
+     * a conference's focus (`isfocus`, RFC 4579).
      */
     fun placeCall(
         account: SipralAccount,
@@ -779,9 +795,19 @@ class SipralClient private constructor(
         srtp: Long = 0,
         ice: SipralIce? = null,
         headers: List<SipralHeader> = emptyList(),
+        codecs: String? = null,
+        text: Boolean = false,
+        feedback: Boolean = false,
+        focus: Boolean = false,
     ): SipralCall {
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
+        val textSocket = try {
+            if (text) DatagramSocket(InetSocketAddress(mediaHost, 0)) else null
+        } catch (refused: Exception) {
+            giveBackMediaSocket(mediaSocket, mediaAddress)
+            throw refused
+        }
         val config = SipralCallConfig(
             target = target,
             mediaAddress = mediaAddress,
@@ -789,15 +815,20 @@ class SipralClient private constructor(
             srtp = srtp,
             ice = (ice?.value ?: 0).toLong(),
             headers = headers.ifEmpty { null },
+            codecs = codecs,
+            textAddress = textSocket?.let { formatAddress(it.localAddress.hostAddress, it.localPort) },
+            feedback = if (feedback) SipralToggle.ON.value.toLong() else 0L,
+            focus = if (focus) 1L else 0L,
         )
         val callHandle = try {
             mapMediaSocket(mediaSocket, mediaAddress)
             retryBusy { Sipral.callPlace(handle, account.handle, config, nowMs()) }
         } catch (refused: Exception) {
             giveBackMediaSocket(mediaSocket, mediaAddress)
+            textSocket?.close()
             throw refused
         }
-        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress)
+        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress, textSocket = textSocket)
         track(call, callHandle, mediaAddress)
         return call
     }
@@ -805,9 +836,25 @@ class SipralClient private constructor(
     /**
      * Open a media socket for an incoming call and answer it there.
      * `event` is the `SIPRAL_EVENT_KIND_INCOMING_CALL` read off [events].
+     *
+     * [text] binds a second socket at [mediaHost] and takes the real-time
+     * text the offer carries on it. [codecs] answers in that order of this
+     * build's codecs instead of the client's -- `L16/16000` for linear
+     * audio -- and [focus] says this end is the focus of a conference
+     * (`isfocus`, RFC 4579). An offer that asked for RTCP feedback is
+     * answered on RTP/AVPF whatever this says (RFC 4585 §4.1 leaves an
+     * answerer no other way to take the stream); [feedback] adds what this
+     * end does with it, Generic NACKs and reduced-size RTCP.
      */
-    fun answerCall(event: SipralEvent, mediaHost: String = "127.0.0.1", mediaPort: Int = 0): SipralCall =
-        answerCall(event.call, mediaHost, mediaPort, event.payload.call)
+    fun answerCall(
+        event: SipralEvent,
+        mediaHost: String = "127.0.0.1",
+        mediaPort: Int = 0,
+        text: Boolean = false,
+        codecs: String? = null,
+        focus: Boolean = false,
+        feedback: Boolean = false,
+    ): SipralCall = answerCall(event.call, mediaHost, mediaPort, event.payload.call, Answered(text, codecs, focus, feedback))
 
     /**
      * [answerCall] by call handle, for a caller that has the handle and not
@@ -818,19 +865,48 @@ class SipralClient private constructor(
      * what it asserted.
      */
     fun answerCall(callHandle: Long, mediaHost: String = "127.0.0.1", mediaPort: Int = 0): SipralCall =
-        answerCall(callHandle, mediaHost, mediaPort, null)
+        answerCall(callHandle, mediaHost, mediaPort, null, Answered())
 
-    private fun answerCall(callHandle: Long, mediaHost: String, mediaPort: Int, incoming: SipralCallEvent?): SipralCall {
+    /** How [answerCall] answers: what `sipral_call_answer_with` takes beyond
+     * the media socket, none of it asked for by default. */
+    private data class Answered(
+        val text: Boolean = false,
+        val codecs: String? = null,
+        val focus: Boolean = false,
+        val feedback: Boolean = false,
+    ) {
+        val plain: Boolean
+            get() = !text && codecs == null && !focus && !feedback
+    }
+
+    private fun answerCall(
+        callHandle: Long,
+        mediaHost: String,
+        mediaPort: Int,
+        incoming: SipralCallEvent?,
+        how: Answered,
+    ): SipralCall {
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
-        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress, incoming)
+        val textSocket = try {
+            if (how.text) DatagramSocket(InetSocketAddress(mediaHost, 0)) else null
+        } catch (refused: Exception) {
+            giveBackMediaSocket(mediaSocket, mediaAddress)
+            throw refused
+        }
+        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress, incoming, textSocket)
         track(call, callHandle, mediaAddress)
         try {
             mapMediaSocket(mediaSocket, mediaAddress)
-            call.answer(mediaAddress)
+            if (how.plain) {
+                call.answer(mediaAddress)
+            } else {
+                call.answerWith(mediaAddress, how.codecs, how.focus, how.feedback)
+            }
         } catch (refused: Exception) {
             calls.remove(callHandle)
             giveBackMediaSocket(mediaSocket, mediaAddress)
+            textSocket?.close()
             throw refused
         }
         return call
@@ -944,6 +1020,136 @@ class SipralClient private constructor(
 
     internal fun forgetCall(callHandle: Long) {
         calls.remove(callHandle)
+    }
+
+    // -- connections to recording servers -------------------------------------
+
+    /** The TCP connections to recording servers, by the transport id each
+     * was bound under, and the next id: the number is the caller's to
+     * choose, and this layer binds no other transport but the main one. */
+    private val recordingLinks = ConcurrentHashMap<Long, Socket>()
+    private val nextRecordingLink = java.util.concurrent.atomic.AtomicLong(FIRST_RECORDING_LINK)
+
+    /** The recording sessions running, by handle: the call each records and
+     * the connection it went over. */
+    private val recordings = ConcurrentHashMap<Long, Pair<SipralCall, Long?>>()
+
+    /**
+     * Connect over TCP to a recording server at [destination] (`host:port`)
+     * and bind the connection as a transport of its own, for
+     * [SipralCall.recordTo]: its INVITE is larger than RFC 3261 §18.1.1 lets
+     * over UDP. `TRANSPORT_DOWN` when the server refused the connection.
+     */
+    internal fun openRecordingLink(destination: String): Long {
+        val socket = Socket()
+        try {
+            socket.bind(InetSocketAddress(InetAddress.getByName(currentHost), 0))
+            socket.connect(parseHostPort(destination), SignallingLink.PATIENCE_MS)
+            socket.tcpNoDelay = true
+        } catch (refused: Exception) {
+            socket.close()
+            throw SipralException(SipralStatus.TRANSPORT_DOWN, "the recording server $destination: ${refused.message}")
+        }
+        val id = nextRecordingLink.getAndIncrement()
+        val local = formatAddress(socket.localAddress.hostAddress, socket.localPort)
+        val remote = formatAddress(socket.inetAddress.hostAddress, socket.port)
+        try {
+            retryBusy { Sipral.stackTransportBind(handle, id, SipralTransport.TCP.value.toLong(), local, remote, nowMs()) }
+        } catch (refused: SipralException) {
+            socket.close()
+            throw refused
+        }
+        recordingLinks[id] = socket
+        Thread({ readRecordingLink(id, socket) }, "sipral-recording-$id").apply {
+            isDaemon = true
+            start()
+        }
+        return id
+    }
+
+    /** Close a connection to a recording server and unbind it. */
+    internal fun closeRecordingLink(id: Long) {
+        val socket = recordingLinks.remove(id) ?: return
+        try {
+            socket.close()
+        } catch (_: Exception) {
+            // closed either way
+        }
+        try {
+            retryBusy { Sipral.stackStreamClosed(handle, id, nowMs()) }
+        } catch (_: SipralException) {
+            // the stack is going away
+        }
+    }
+
+    private fun writeRecordingLink(id: Long, payload: ByteArray, len: Int) {
+        val socket = recordingLinks[id] ?: return
+        try {
+            synchronized(socket) {
+                socket.getOutputStream().write(payload, 0, len)
+                socket.getOutputStream().flush()
+            }
+        } catch (_: Exception) {
+            closeRecordingLink(id)
+        }
+    }
+
+    private fun readRecordingLink(id: Long, socket: Socket) {
+        val buffer = ByteArray(1 shl 16)
+        val input = try {
+            socket.getInputStream()
+        } catch (_: Exception) {
+            closeRecordingLink(id)
+            return
+        }
+        while (!closed.get()) {
+            val read = try {
+                input.read(buffer)
+            } catch (_: Exception) {
+                -1
+            }
+            if (read < 0) {
+                closeRecordingLink(id)
+                return
+            }
+            if (read == 0) {
+                continue
+            }
+            val bytes = buffer.copyOfRange(0, read)
+            try {
+                retryBusy(deadlineMs = 5_000) { Sipral.stackReceiveStream(handle, id, bytes, nowMs()) }
+            } catch (_: SipralException) {
+                closeRecordingLink(id)
+                return
+            }
+        }
+    }
+
+    /** A recording session is running for [call], over [link] when it has
+     * a connection of its own. */
+    internal fun recordingStarted(recording: Long, call: SipralCall, link: Long?) {
+        recordings[recording] = call to link
+    }
+
+    /** A recording session ended: its call stops copying, and its
+     * connection closes a second later, once what this end still owes the
+     * server -- the answer to its BYE -- has left on it. */
+    private fun recordingEnded(recording: Long) {
+        val (call, link) = recordings.remove(recording) ?: return
+        call.recordingEnded()
+        if (link != null) {
+            Thread({
+                try {
+                    Thread.sleep(1_000)
+                } catch (_: InterruptedException) {
+                    // closing now, then
+                }
+                closeRecordingLink(link)
+            }, "sipral-recording-close").apply {
+                isDaemon = true
+                start()
+            }
+        }
     }
 
     // -- media sockets behind a NAT ------------------------------------------
@@ -1381,18 +1587,26 @@ class SipralClient private constructor(
         turnStreamOf(event)?.let { turnAsked.add(it) }
         noteNat(event)
         calls[event.call]?.deliver(event)
+        if (event.kind == SipralEventKind.CALL_ENDED.value.toLong()) {
+            recordingEnded(event.call)
+        }
         eventsFlow.tryEmit(event)
     }
 
     private fun drainTransmit() {
         val data = ByteArray(TRANSMIT_BYTES)
         val destination = ByteArray(ADDRESS_BYTES)
-        val lens = LongArray(3)
+        val lens = LongArray(4)
         while (true) {
             val status = SipralSignalNative.stackPollTransmit(handle, data, destination, lens)
             val len = lens[0].toInt()
             if (status != SipralStatus.OK.value || len == 0) {
                 return
+            }
+            if (lens[3] != 0L) {
+                // a recording session's own connection
+                writeRecordingLink(lens[3], data, len)
+                continue
             }
             val link = link
             if (link != null) {
@@ -1545,6 +1759,9 @@ class SipralClient private constructor(
             loseTurnStream(local, tell = false)
         }
         link?.close()
+        for (id in recordingLinks.keys.toList()) {
+            recordingLinks.remove(id)?.close()
+        }
         Sipral.stackDestroy(handle)
         socket?.close()
     }

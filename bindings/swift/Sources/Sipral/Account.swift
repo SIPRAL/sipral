@@ -251,6 +251,81 @@ public final class Account: @unchecked Sendable {
             try Sipral.accountRefreshBinding(stack: stack.handle, account: handle, nowMs: stack.nowMs())
         }
     }
+
+    // MARK: - subscriptions and presence
+
+    /// `sipral_account_subscribe` (RFC 6665): watch `target`, a SIP URI, for
+    /// the event `package` -- `presence` (RFC 3856), `conference` (RFC 4575),
+    /// `dialog` for a busy lamp field, `message-summary` -- from this
+    /// account. `accept` is the `Accept` value when the package's default
+    /// body type is not the one wanted, `expiresSeconds` how long to ask for
+    /// (zero for an hour), and `destination` (`host:port`) where to send the
+    /// SUBSCRIBE when not where the account registers.
+    public func subscribe(
+        to target: String,
+        package: String,
+        accept: String? = nil,
+        expiresSeconds: UInt32 = 0,
+        destination: String? = nil
+    ) throws -> Subscription {
+        let made = try CStrings.with([target, package, accept, destination]) { parts in
+            var config = sipral_subscribe_config_t.sized()
+            config.target = parts[0].pointer
+            config.target_len = parts[0].count
+            config.package = parts[1].pointer
+            config.package_len = parts[1].count
+            config.accept = parts[2].pointer
+            config.accept_len = parts[2].count
+            config.expires_seconds = expiresSeconds
+            config.destination = parts[3].pointer
+            config.destination_len = parts[3].count
+            return try retryingBusy {
+                try Sipral.accountSubscribe(stack: stack.handle, account: handle, config: config, nowMs: stack.nowMs())
+            }
+        }
+        return Subscription(stack: stack, handle: made, package: package)
+    }
+
+    /// Watch `target`'s presence (RFC 3856): a `presence` subscription
+    /// asking for PIDF, whose every notification arrives as
+    /// `SipralEventKind.presenceChanged` with `presenceData.kind ==
+    /// .watched`: open or closed, the activity, the presentity and its note.
+    public func watchPresence(of target: String, expiresSeconds: UInt32 = 0, destination: String? = nil) throws -> Subscription {
+        try subscribe(
+            to: target, package: "presence", accept: "application/pidf+xml",
+            expiresSeconds: expiresSeconds, destination: destination
+        )
+    }
+
+    /// `sipral_account_publish_presence` (RFC 3903): publish this account's
+    /// presence to its registrar as the presence compositor; the first call
+    /// publishes and every later one modifies the same publication, which
+    /// the stack keeps refreshed until `unpublishPresence()`. What the
+    /// compositor did with it arrives as `SipralEventKind.presenceChanged`
+    /// with `presenceData.kind == .publication`, naming this account.
+    public func publishPresence(_ presence: Presence) throws {
+        try CStrings.with([presence.note]) { parts in
+            var document = sipral_presence_t.sized()
+            document.basic = presence.basic.rawValue
+            document.activity = presence.activity.rawValue
+            document.note = parts[0].pointer
+            document.note_len = parts[0].count
+            try retryingBusy {
+                try Sipral.accountPublishPresence(
+                    stack: stack.handle, account: handle, presence: document, nowMs: stack.nowMs()
+                )
+            }
+        }
+    }
+
+    /// `sipral_account_unpublish_presence`: take the published presence away;
+    /// `.removed` says when it is gone. `.wrongState` when nothing is
+    /// published.
+    public func unpublishPresence() throws {
+        try retryingBusy {
+            try Sipral.accountUnpublishPresence(stack: stack.handle, account: handle, nowMs: stack.nowMs())
+        }
+    }
 }
 
 /// What one account holds its calls to, and signs them with, beyond what the
