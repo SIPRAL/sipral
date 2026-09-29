@@ -457,7 +457,7 @@ fn every_example_answer_is_a_legal_answer_but_the_ones_known_not_to_be() {
                 }
             }
             Some(expected) => {
-                assert_eq!(result, Err(expected.to_owned()), "{}", exchange.context())
+                assert_eq!(result, Err(expected.to_owned()), "{}", exchange.context());
             }
         }
     }

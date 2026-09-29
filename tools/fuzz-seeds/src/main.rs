@@ -1548,7 +1548,7 @@ fn rtcp_fb_seeds() -> Result<Vec<Seed>, Wrong> {
             .feedback()
             .filter_map(|feedback| match feedback {
                 FeedbackPacket::GenericNack(nack) => Some(nack.lost().collect::<Vec<_>>()),
-                _ => None,
+                FeedbackPacket::Other { .. } => None,
             })
             .flatten()
             .collect();

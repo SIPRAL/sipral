@@ -107,11 +107,13 @@ fn wire(archived: &[u8]) -> Vec<u8> {
     };
     // the last element after a final LF is empty, not a line
     let body = body.strip_suffix(&[""]).unwrap_or(body);
-    let body: String = body.iter().map(|line| format!("{line}\r\n")).collect();
+    let body: String = body.iter().flat_map(|line| [*line, "\r\n"]).collect();
     let mut out = String::new();
     for line in head.iter().filter(|line| !line.is_empty()) {
         if line.to_ascii_lowercase().starts_with("content-length:") {
-            out.push_str(&format!("Content-Length: {}\r\n", body.len()));
+            out.push_str("Content-Length: ");
+            out.push_str(&body.len().to_string());
+            out.push_str("\r\n");
         } else {
             out.push_str(line);
             out.push_str("\r\n");
