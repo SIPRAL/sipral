@@ -251,6 +251,26 @@ final class SignallingTests: XCTestCase {
         XCTAssertEqual(failed.tls, SipralTlsFailure.none)
     }
 
+    /// A connection that is ready before its path names the local end --
+    /// what a loaded machine does -- still hands its local address on once
+    /// the path names it: the stack is created on that address and a
+    /// recording server's connection is bound by it, and an empty one is
+    /// refused as "not given" by whichever of the two it reaches.
+    func testALocalAddressThatArrivesAfterTheConnectionIsReadyIsStillTaken() {
+        var reads = 0
+        let named = SignallingConnection.localAddress(within: 2000) {
+            reads += 1
+            return reads < 4 ? nil : .hostPort(host: "127.0.0.1", port: 50600)
+        }
+        XCTAssertEqual(named, "127.0.0.1:50600")
+        XCTAssertEqual(reads, 4)
+    }
+
+    /// And one whose path never names it is refused, not handed on empty.
+    func testALocalAddressThatNeverArrivesIsNoAddress() {
+        XCTAssertNil(SignallingConnection.localAddress(within: 20) { nil })
+    }
+
     func testTheAccountRegistersAgainOnTheNewConnection() async throws {
         let registrar = try FakeRegistrar()
         defer { registrar.stop() }

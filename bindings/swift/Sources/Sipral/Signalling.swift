@@ -210,9 +210,15 @@ final class SignallingConnection: @unchecked Sendable {
             connection.cancel()
             throw refusal
         }
-        if case .hostPort(let localHost, let localPort)? = connection.currentPath?.localEndpoint {
-            local = "\(Self.text(localHost)):\(localPort.rawValue)"
+        let path = { [connection, queue] in queue.sync { connection.currentPath?.localEndpoint } }
+        guard let named = Self.localAddress(within: patienceMs, reading: path) else {
+            lock.withLock { finished = true }
+            connection.cancel()
+            throw SignallingRefusal(
+                error: .other, tls: .none, detail: "the connection to \(server) never named its local address"
+            )
         }
+        local = named
         if case .hostPort(let remoteHost, let remotePort) = connection.endpoint {
             remote = "\(Self.text(remoteHost)):\(remotePort.rawValue)"
         }
@@ -390,6 +396,23 @@ final class SignallingConnection: @unchecked Sendable {
     }
 
     private static func sentence(_ text: String) -> String { SignallingRefusal.sentence(text) }
+
+    /// The local end of a connection that is ready, as `host:port`, or
+    /// `nil` when `read` never named one within `patienceMs`. A connection
+    /// can be ready while its path does not name the local end yet -- on a
+    /// loaded machine the address arrives a moment later -- and that end is
+    /// what the stack is created on and a transport is bound by, so the wait
+    /// is for the address, not only for the state.
+    static func localAddress(within patienceMs: Int, reading read: () -> NWEndpoint?) -> String? {
+        let deadline = DispatchTime.now() + .milliseconds(patienceMs)
+        while true {
+            if case .hostPort(let host, let port)? = read() {
+                return "\(text(host)):\(port.rawValue)"
+            }
+            guard DispatchTime.now() < deadline else { return nil }
+            usleep(1000)
+        }
+    }
 
     private static func text(_ host: NWEndpoint.Host) -> String {
         switch host {
