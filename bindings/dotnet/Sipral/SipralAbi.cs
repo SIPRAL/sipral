@@ -126,6 +126,18 @@ public enum SipralStatus : int
     /// that ends makes room; raising the limit means a new stack.
     /// </summary>
     LimitReached = 16,
+    /// <summary>
+    /// The call never agreed on what this asks for: text sent on a call
+    /// whose answer took no `m=text` stream, say. Nothing was done, and
+    /// only a new offer that the far end accepts changes it.
+    /// </summary>
+    NotNegotiated = 20,
+    /// <summary>
+    /// The far end of this call is not a conference focus: its Contact
+    /// never carried `isfocus` (RFC 4579 §4.1), so there is no
+    /// conference to name or subscribe to.
+    /// </summary>
+    NotAFocus = 21,
 }
 
 /// <summary>
@@ -845,6 +857,10 @@ public enum SipralDtmf : uint
 /// Numbers already spent on features this build does not have:
 /// - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
 /// - 44: held for a second audio device event, which the audio engine did not need; spent all the same
+/// - 47: held for the caller identity a STIR/SHAKEN verification settled on (wave C, crypto)
+/// - 48: held for a digit heard in the audio itself (wave C, media)
+/// - 49: held for the call-progress or answering-machine verdict on a call (wave C, media)
+/// - 53: held for a transport that failed, with the TLS reason when there is one (wave C, tls-layers)
 /// </summary>
 public enum SipralEventKind : uint
 {
@@ -1322,6 +1338,51 @@ public enum SipralEventKind : uint
     /// neither.
     /// </summary>
     StunServer = 46,
+    /// <summary>
+    /// A `conference` subscription's picture of the conference changed,
+    /// or the conference ended (RFC 4575 §4.6).
+    ///
+    /// `payload.conference` says which subscription and what happened:
+    /// `SIPRAL_CONFERENCE_UPDATE_APPLIED` for a document merged into the
+    /// picture, with the version it is at and how many users it holds,
+    /// and `SIPRAL_CONFERENCE_UPDATE_ENDED` for a conference the focus
+    /// deleted, after which the subscription is being given up. The
+    /// picture itself is read with `sipral_subscription_conference` and
+    /// `sipral_subscription_conference_user_at`. A document that was late
+    /// or repeated raises nothing, and one that followed a lost one is
+    /// answered by the stack asking for full state again. `account` and
+    /// `call` are `SIPRAL_HANDLE_NONE`; the NOTIFY itself arrived just
+    /// before, as `SIPRAL_EVENT_KIND_NOTIFIED`.
+    /// </summary>
+    ConferenceChanged = 50,
+    /// <summary>
+    /// The far end typed something on the call's real-time text stream
+    /// (RFC 4103), in the order it typed it.
+    ///
+    /// `call` is the call; `payload.text` holds the text, UTF-8: an
+    /// erasure of the last character as BACKSPACE (U+0008), a new line
+    /// as LINE SEPARATOR (U+2028), an alert as BELL (U+0007), and a
+    /// REPLACEMENT CHARACTER (U+FFFD) for each block of text that was
+    /// lost and no redundant copy recovered (RFC 4103 §5.3), counted in
+    /// `payload.text.missing`.
+    /// </summary>
+    TextReceived = 51,
+    /// <summary>
+    /// Presence moved: a `presence` subscription was told about the
+    /// presentity (RFC 3856), or the state this account publishes (RFC
+    /// 3903) was published, refreshed, removed, lapsed or refused.
+    ///
+    /// `payload.presence.kind` says which. For a subscription,
+    /// `payload.presence.subscription` names it and the rest is what the
+    /// PIDF document said: open or closed, the first RPID activity, the
+    /// first note and the entity; the NOTIFY itself arrived just before,
+    /// as `SIPRAL_EVENT_KIND_NOTIFIED`. For a publication, `account`
+    /// names the account and
+    /// `payload.presence.publication_state` says what became of it, with
+    /// the SIP status, the lifetime the compositor granted and when the
+    /// stack refreshes it.
+    /// </summary>
+    PresenceChanged = 52,
 }
 
 /// <summary>
@@ -2403,6 +2464,256 @@ public enum SipralLogLevel : uint
     /// Every SIP message in and out, whole and redacted.
     /// </summary>
     Trace = 5,
+}
+
+/// <summary>
+/// What one conference document did. Names for
+/// `sipral_conference_event_t::update`.
+/// </summary>
+public enum SipralConferenceUpdate : uint
+{
+    /// <summary>
+    /// Never written by this build.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// It was merged into the picture.
+    /// </summary>
+    Applied = 1,
+    /// <summary>
+    /// The focus deleted the conference: the picture is empty, and the
+    /// subscription is being given up (RFC 4575 §4.6).
+    /// </summary>
+    Ended = 2,
+}
+
+/// <summary>
+/// Where one endpoint of a conference is (RFC 4575 §5.7.2). Names for
+/// `sipral_conference_user_t::status`.
+/// </summary>
+public enum SipralEndpointStatus : uint
+{
+    /// <summary>
+    /// The focus did not say, or said something the schema does not
+    /// list.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// `pending`: waiting for policy or for the focus.
+    /// </summary>
+    Pending = 1,
+    /// <summary>
+    /// `dialing-out`: the focus is calling it.
+    /// </summary>
+    DialingOut = 2,
+    /// <summary>
+    /// `dialing-in`: it is calling the focus.
+    /// </summary>
+    DialingIn = 3,
+    /// <summary>
+    /// `alerting`: it is ringing.
+    /// </summary>
+    Alerting = 4,
+    /// <summary>
+    /// `on-hold`.
+    /// </summary>
+    OnHold = 5,
+    /// <summary>
+    /// `connected`: it is in the conference.
+    /// </summary>
+    Connected = 6,
+    /// <summary>
+    /// `muted-via-focus`: in, and muted by the focus.
+    /// </summary>
+    MutedViaFocus = 7,
+    /// <summary>
+    /// `disconnecting`.
+    /// </summary>
+    Disconnecting = 8,
+    /// <summary>
+    /// `disconnected`: it has left.
+    /// </summary>
+    Disconnected = 9,
+}
+
+/// <summary>
+/// Which piece of text sipral_subscription_conference_text is being
+/// asked for. The first three are about the conference and ignore
+/// `index`; the rest are about the user at `index`.
+///
+/// Every one of them is what the focus wrote.
+/// </summary>
+public enum SipralConferenceText : uint
+{
+    /// <summary>
+    /// Never asked for.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// The conference's URI, the `entity` of `conference-info`.
+    /// </summary>
+    Entity = 1,
+    /// <summary>
+    /// Its `subject`.
+    /// </summary>
+    Subject = 2,
+    /// <summary>
+    /// Its `display-text`.
+    /// </summary>
+    DisplayText = 3,
+    /// <summary>
+    /// A user's `entity`: the address of record it takes part as.
+    /// </summary>
+    UserEntity = 4,
+    /// <summary>
+    /// A user's `display-text`.
+    /// </summary>
+    UserDisplayText = 5,
+    /// <summary>
+    /// The `entity` of a user's first endpoint: the device it is on.
+    /// </summary>
+    UserEndpoint = 6,
+}
+
+/// <summary>
+/// What a crate::event::SipralEventKind::PresenceChanged is about.
+/// Names for `sipral_presence_event_t::kind`.
+/// </summary>
+public enum SipralPresenceKind : uint
+{
+    /// <summary>
+    /// Never written by this build.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// A `presence` subscription was told about the presentity.
+    /// </summary>
+    Watched = 1,
+    /// <summary>
+    /// This account's own published presence moved.
+    /// </summary>
+    Publication = 2,
+}
+
+/// <summary>
+/// Whether a presentity can be reached: PIDF's `basic` (RFC 3863
+/// §4.1.4). Names for `sipral_presence_t::basic` and
+/// `sipral_presence_event_t::basic`.
+/// </summary>
+public enum SipralBasic : uint
+{
+    /// <summary>
+    /// Not said. A document published with this is refused, since
+    /// §4.1.3 wants one.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// Reachable.
+    /// </summary>
+    Open = 1,
+    /// <summary>
+    /// Not reachable.
+    /// </summary>
+    Closed = 2,
+}
+
+/// <summary>
+/// What the person behind a presentity is doing: the RPID activities
+/// (RFC 4480 §3.2) phones show. Names for `sipral_presence_t::activity`
+/// and `sipral_presence_event_t::activity`.
+/// </summary>
+public enum SipralActivity : uint
+{
+    /// <summary>
+    /// None said. Published, the document carries no person at all.
+    /// </summary>
+    None = 0,
+    /// <summary>
+    /// `away`.
+    /// </summary>
+    Away = 1,
+    /// <summary>
+    /// `busy`.
+    /// </summary>
+    Busy = 2,
+    /// <summary>
+    /// `on-the-phone`.
+    /// </summary>
+    OnThePhone = 3,
+    /// <summary>
+    /// `meeting`.
+    /// </summary>
+    Meeting = 4,
+    /// <summary>
+    /// `vacation`.
+    /// </summary>
+    Vacation = 5,
+    /// <summary>
+    /// Another activity, which this ABI has no number for.
+    /// </summary>
+    Other = 6,
+}
+
+/// <summary>
+/// What became of this account's published presence. Names for
+/// `sipral_presence_event_t::publication_state`.
+/// </summary>
+public enum SipralPublicationState : uint
+{
+    /// <summary>
+    /// Not a publication event.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// The compositor holds it: published, modified or refreshed.
+    /// </summary>
+    Published = 1,
+    /// <summary>
+    /// It was taken away (`sipral_account_unpublish_presence`).
+    /// </summary>
+    Removed = 2,
+    /// <summary>
+    /// Its lifetime ran out with no refresh; the next publish starts it
+    /// afresh.
+    /// </summary>
+    Expired = 3,
+    /// <summary>
+    /// The compositor refused, or never answered.
+    /// </summary>
+    Failed = 4,
+}
+
+/// <summary>
+/// Why a publication failed. Names for `sipral_presence_event_t::failure`.
+/// </summary>
+public enum SipralPublishFailure : uint
+{
+    /// <summary>
+    /// Nothing failed.
+    /// </summary>
+    None = 0,
+    /// <summary>
+    /// 489: the compositor does not know the `presence` package. Nothing
+    /// more is sent.
+    /// </summary>
+    BadEvent = 1,
+    /// <summary>
+    /// 423 with no `Min-Expires` this stack could meet.
+    /// </summary>
+    IntervalTooBrief = 2,
+    /// <summary>
+    /// A 2xx without the `SIP-ETag` every one must carry.
+    /// </summary>
+    NoEntityTag = 3,
+    /// <summary>
+    /// Any other refusal, a challenge nothing could answer among them;
+    /// `status_code` says which.
+    /// </summary>
+    Refused = 4,
+    /// <summary>
+    /// No answer at all.
+    /// </summary>
+    Unreachable = 5,
 }
 
 /// <summary>
@@ -3892,6 +4203,43 @@ public struct SipralCallConfig
     /// unmoved.
     /// </summary>
     public uint Ice;
+    /// <summary>
+    /// Where this call's real-time text arrives (RFC 4103): a second
+    /// socket the application bound, as an address and a port. Set, the
+    /// offer or answer carries an `m=text` stream for T.140 with its
+    /// redundancy, and once both ends agree it `sipral_media_send_text`,
+    /// `sipral_media_poll_text` and `sipral_media_receive_text` carry
+    /// it. Null for a call with no text. Not NUL-terminated.
+    ///
+    /// Read only with `media_address`, and not offered on a call keyed
+    /// by SRTP or DTLS-SRTP or gathering ICE: the text stream has no key
+    /// and no candidates of its own, and typed text sent in the clear
+    /// beside encrypted audio is worse than none.
+    ///
+    /// Appended at the tail (ABI 0.31), like `feedback` and `focus`; the
+    /// pinned `MIN_SIZE` is unmoved.
+    /// </summary>
+    public IntPtr TextAddress;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TextAddressLen;
+    /// <summary>
+    /// Whether this call asks for RTCP feedback: a `SipralToggle`. On
+    /// offers RTP/AVPF (RFC 4585) with Generic NACKs and reduced-size
+    /// RTCP (RFC 5506), and runs RFC 4585's timing when the answer takes
+    /// it; zero leaves it off, as it is by default, because a far end
+    /// that knows only RTP/AVP refuses a profile it does not know. Read
+    /// only with `media_address`. An offer that asks for it is answered
+    /// in kind whatever this says.
+    /// </summary>
+    public uint Feedback;
+    /// <summary>
+    /// Nonzero to say this end is the focus of a conference (RFC 4579
+    /// §3.3): `isfocus` goes on the Contact of every message this call
+    /// sends from here on.
+    /// </summary>
+    public uint Focus;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -4170,6 +4518,29 @@ public struct SipralMediaInfo
     /// Whether the watchdog currently considers inbound audio stopped.
     /// </summary>
     public uint Stalled;
+    /// <summary>
+    /// Whether the call agreed a real-time text stream (RFC 4103), which
+    /// `sipral_media_send_text` writes to.
+    ///
+    /// Appended at the tail (ABI 0.31), like the three below; a caller
+    /// built before them never reads them.
+    /// </summary>
+    public uint HasText;
+    /// <summary>
+    /// Whether the audio stream runs RTP/AVPF (RFC 4585): both ends named
+    /// a feedback profile.
+    /// </summary>
+    public uint Feedback;
+    /// <summary>
+    /// Whether both ends agreed Generic NACKs (`a=rtcp-fb:* nack`), so
+    /// that a gap in what arrives is asked for again.
+    /// </summary>
+    public uint GenericNack;
+    /// <summary>
+    /// Whether both ends agreed reduced-size RTCP (RFC 5506,
+    /// `a=rtcp-rsize`).
+    /// </summary>
+    public uint ReducedSize;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -4397,6 +4768,48 @@ public struct SipralStreamStats
     /// caller built before it existed never reads it.
     /// </summary>
     public ulong FramesUnderrun;
+    /// <summary>
+    /// Whether the stream runs RTP/AVPF (RFC 4585). Every count below is
+    /// zero while it does not.
+    ///
+    /// Appended at the tail (ABI 0.31), like everything below it.
+    /// </summary>
+    public uint Feedback;
+    /// <summary>
+    /// The `trr-int` both ends agreed: the least time between two
+    /// regular reports, in milliseconds. Zero for none.
+    /// </summary>
+    public uint TrrIntervalMs;
+    /// <summary>
+    /// Generic NACKs this end sent, each asking for one or more packets.
+    /// </summary>
+    public ulong NacksSent;
+    /// <summary>
+    /// The packets those NACKs asked for.
+    /// </summary>
+    public ulong PacketsNacked;
+    /// <summary>
+    /// Generic NACKs the far end sent.
+    /// </summary>
+    public ulong NacksReceived;
+    /// <summary>
+    /// The packets those asked this end for.
+    /// </summary>
+    public ulong PacketsAskedFor;
+    /// <summary>
+    /// Early RTCP packets this end sent: feedback that could not wait for
+    /// the next regular report.
+    /// </summary>
+    public ulong EarlyPackets;
+    /// <summary>
+    /// Reduced-size RTCP packets this end sent (RFC 5506).
+    /// </summary>
+    public ulong ReducedSizePackets;
+    /// <summary>
+    /// Feedback this end had to hold back, because the stream's RTCP
+    /// bandwidth had none to spare.
+    /// </summary>
+    public ulong FeedbackSuppressed;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -5555,6 +5968,129 @@ public struct SipralStunServerEvent
 }
 
 /// <summary>
+/// What a crate::event::SipralEventKind::ConferenceChanged carries.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralConferenceEvent
+{
+    /// <summary>
+    /// Which subscription.
+    /// </summary>
+    public ulong Subscription;
+    /// <summary>
+    /// A SipralConferenceUpdate.
+    /// </summary>
+    public uint Update;
+    /// <summary>
+    /// The version of the document the picture is at now; zero once the
+    /// conference ended.
+    /// </summary>
+    public uint Version;
+    /// <summary>
+    /// How many users the picture holds.
+    /// </summary>
+    public uint Users;
+}
+
+/// <summary>
+/// What a crate::event::SipralEventKind::TextReceived carries.
+///
+/// The text points into the event and is valid for as long as the
+/// callback is.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralTextEvent
+{
+    /// <summary>
+    /// What the far end typed, UTF-8, not NUL-terminated.
+    /// </summary>
+    public IntPtr Text;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TextLen;
+    /// <summary>
+    /// How many blocks of text were lost with no redundant copy to
+    /// recover them, each marked in `text` by a REPLACEMENT CHARACTER
+    /// (U+FFFD) where it fell.
+    /// </summary>
+    public uint Missing;
+}
+
+/// <summary>
+/// What a crate::event::SipralEventKind::PresenceChanged carries.
+///
+/// The text points into the event and is valid for as long as the
+/// callback is.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralPresenceEvent
+{
+    /// <summary>
+    /// A SipralPresenceKind.
+    /// </summary>
+    public uint Kind;
+    /// <summary>
+    /// SipralPresenceKind.Watched: which subscription.
+    /// `SIPRAL_HANDLE_NONE` for a publication, whose account is the
+    /// event's `account`.
+    /// </summary>
+    public ulong Subscription;
+    /// <summary>
+    /// SipralPresenceKind.Watched: a SipralBasic, open when any
+    /// of the presentity's tuples is open.
+    /// </summary>
+    public uint Basic;
+    /// <summary>
+    /// SipralPresenceKind.Watched: a SipralActivity, the first
+    /// the person listed.
+    /// </summary>
+    public uint Activity;
+    /// <summary>
+    /// SipralPresenceKind.Watched: the presentity, as the document
+    /// named it. Not NUL-terminated.
+    /// </summary>
+    public IntPtr Entity;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint EntityLen;
+    /// <summary>
+    /// SipralPresenceKind.Watched: the first note, the document's
+    /// own or else a tuple's. Null when there is none.
+    /// </summary>
+    public IntPtr Note;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint NoteLen;
+    /// <summary>
+    /// SipralPresenceKind.Publication: a SipralPublicationState.
+    /// </summary>
+    public uint PublicationState;
+    /// <summary>
+    /// SipralPresenceKind.Publication: a SipralPublishFailure
+    /// when the state is SipralPublicationState.Failed.
+    /// </summary>
+    public uint Failure;
+    /// <summary>
+    /// SipralPresenceKind.Publication: the status the compositor
+    /// answered with, when one did.
+    /// </summary>
+    public uint StatusCode;
+    /// <summary>
+    /// SipralPresenceKind.Publication: the lifetime granted, in
+    /// milliseconds, when it was published.
+    /// </summary>
+    public ulong ExpiresMs;
+    /// <summary>
+    /// SipralPresenceKind.Publication: how long until the stack
+    /// refreshes it, in milliseconds.
+    /// </summary>
+    public ulong RefreshInMs;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -5649,6 +6185,21 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralStunServerEvent StunServer;
+    /// <summary>
+    /// For SipralEventKind.ConferenceChanged.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralConferenceEvent Conference;
+    /// <summary>
+    /// For SipralEventKind.TextReceived.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralTextEvent Text;
+    /// <summary>
+    /// For SipralEventKind.PresenceChanged.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralPresenceEvent Presence;
 }
 
 /// <summary>
@@ -6219,6 +6770,203 @@ public struct SipralLogRecord
 }
 
 /// <summary>
+/// A conference as a `conference` subscription holds it, read with
+/// sipral_subscription_conference.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralConference
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The version of the last document merged.
+    /// </summary>
+    public uint Version;
+    /// <summary>
+    /// How many users the picture holds, which is what
+    /// sipral_subscription_conference_user_at reads by index.
+    /// </summary>
+    public uint Users;
+    /// <summary>
+    /// Whether the focus said how many users it counts
+    /// (`conference-state`'s `user-count`), which may differ from
+    /// `users`: a focus need not list every one.
+    /// </summary>
+    public uint HasUserCount;
+    /// <summary>
+    /// That count, when it said.
+    /// </summary>
+    public uint UserCount;
+    /// <summary>
+    /// `conference-state`'s `active`: one when the focus said it is, two
+    /// when it said it is not, zero when it said nothing.
+    /// </summary>
+    public uint Active;
+    /// <summary>
+    /// Its `locked`, the same way.
+    /// </summary>
+    public uint Locked;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralConference Sized()
+    {
+        var value = default(SipralConference);
+        value.Size = (nuint)Marshal.SizeOf<SipralConference>();
+        return value;
+    }
+}
+
+/// <summary>
+/// One user of a conference, read with
+/// sipral_subscription_conference_user_at; its text is read with
+/// sipral_subscription_conference_text.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralConferenceUser
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// How many endpoints — devices — the user is in the conference
+    /// from.
+    /// </summary>
+    public uint Endpoints;
+    /// <summary>
+    /// A SipralEndpointStatus: where the first of them is.
+    /// </summary>
+    public uint Status;
+    /// <summary>
+    /// How many media streams the first of them has.
+    /// </summary>
+    public uint Media;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralConferenceUser Sized()
+    {
+        var value = default(SipralConferenceUser);
+        value.Size = (nuint)Marshal.SizeOf<SipralConferenceUser>();
+        return value;
+    }
+}
+
+/// <summary>
+/// This account's presence, as sipral_account_publish_presence takes
+/// it.
+///
+/// Set `size` to `sizeof(sipral_presence_t)` and zero the rest before
+/// filling anything in.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralPresence
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// A SipralBasic, open or closed. Required.
+    /// </summary>
+    public uint Basic;
+    /// <summary>
+    /// A SipralActivity; SipralActivity.None publishes no
+    /// person at all. SipralActivity.Other is refused: there is no
+    /// name to publish it under.
+    /// </summary>
+    public uint Activity;
+    /// <summary>
+    /// A note a buddy list shows beside the name, UTF-8 and not
+    /// NUL-terminated, or null for none.
+    /// </summary>
+    public IntPtr Note;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint NoteLen;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralPresence Sized()
+    {
+        var value = default(SipralPresence);
+        value.Size = (nuint)Marshal.SizeOf<SipralPresence>();
+        return value;
+    }
+}
+
+/// <summary>
+/// Where a call is recorded, as sipral_call_record_to takes it.
+///
+/// Set `size` to `sizeof(sipral_record_config_t)` and zero the rest
+/// before filling anything in.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralRecordConfig
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The recording server's URI, the INVITE's target. Required. Not
+    /// NUL-terminated.
+    /// </summary>
+    public IntPtr Server;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ServerLen;
+    /// <summary>
+    /// Where to send the INVITE, as an address and a port, when not
+    /// where the recorded call's account sends. Null for there.
+    /// </summary>
+    public IntPtr Destination;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint DestinationLen;
+    /// <summary>
+    /// The transport `destination` is reached over, as
+    /// `sipral_call_config_t::transport` names one. Read only with
+    /// `destination`.
+    /// </summary>
+    public uint Transport;
+    /// <summary>
+    /// The socket the copy of this end's audio goes from, as an address
+    /// and a port, and what the offer names for the stream labelled `1`.
+    /// Required: a socket the application bound.
+    /// </summary>
+    public IntPtr ThisEnd;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ThisEndLen;
+    /// <summary>
+    /// The same for the far end's audio, labelled `2`. Required, and a
+    /// socket of its own.
+    /// </summary>
+    public IntPtr FarEnd;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint FarEndLen;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralRecordConfig Sized()
+    {
+        var value = default(SipralRecordConfig);
+        value.Size = (nuint)Marshal.SizeOf<SipralRecordConfig>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -6446,6 +7194,9 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_answer_media(ulong stack, ulong call, sbyte[] mediaAddress, nuint mediaAddressLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_answer_with(ulong stack, ulong call, in SipralCallConfig config, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_reject(ulong stack, ulong call, uint code, ulong nowMs);
@@ -6700,6 +7451,48 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_stack_diagnostics_json(ulong stack, sbyte[] buffer, nuint capacity, out nuint len);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_subscription_conference(ulong stack, ulong subscription, ref SipralConference outConference);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_subscription_conference_user_at(ulong stack, ulong subscription, nuint index, ref SipralConferenceUser outUser);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_subscription_conference_text(ulong stack, ulong subscription, nuint index, uint which, sbyte[] buffer, nuint capacity, out nuint needed);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_set_focus(ulong stack, ulong call, uint focus);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_conference_uri(ulong stack, ulong call, sbyte[] buffer, nuint capacity, out nuint needed);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_subscribe_conference(ulong stack, ulong call, out ulong subscription, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_publish_presence(ulong stack, ulong account, in SipralPresence presence, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_unpublish_presence(ulong stack, ulong account, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_send_text(ulong media, sbyte[] text, nuint textLen);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_poll_text(ulong media, ulong nowMs, ref SipralMediaPacket packet);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_receive_text(ulong media, byte[] data, nuint len, sbyte[] from, nuint fromLen, ulong nowMs, out uint taken);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_record_to(ulong stack, ulong call, in SipralRecordConfig config, out ulong recording, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_stop_recording_to(ulong stack, ulong call, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_poll_recording(ulong media, ref SipralMediaPacket packet, out uint farEnd);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_recording_start(ulong stack, sbyte[] note, nuint noteLen);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -6807,7 +7600,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 30;
+    public const uint AbiVersionMinor = 31;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -7006,6 +7799,37 @@ public static class Sipral
     /// asks before it shows a "send diagnostics" control.
     /// </summary>
     public const uint FeatureLogging = 16384;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. A call recorded to a recording server
+    /// (SIPREC, RFC 7866): `sipral_call_record_to` places the recording
+    /// session, and `sipral_media_poll_recording` hands out the copies of
+    /// the call's audio.
+    /// </summary>
+    public const uint FeatureSiprec = 1048576;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. The conference package kept for the
+    /// application (RFC 4575, `sipral_subscription_conference`), a focus
+    /// known by its `isfocus` (RFC 4579, `sipral_call_conference_uri`), and
+    /// presence published (RFC 3903, `sipral_account_publish_presence`) and
+    /// watched (RFC 3856, `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`).
+    /// </summary>
+    public const uint FeatureConference = 2097152;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. Real-time text in a call (RFC 4103):
+    /// `text_address` on the call's configuration, `sipral_media_send_text`
+    /// and `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+    /// </summary>
+    public const uint FeatureRealtimeText = 4194304;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. RTP/AVPF with Generic NACKs and
+    /// reduced-size RTCP (RFC 4585, RFC 5506): `feedback` on the call's
+    /// configuration, and what it agreed in `sipral_media_info_t`.
+    /// </summary>
+    public const uint FeatureRtcpFeedback = 8388608;
 
     /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
@@ -8032,6 +8856,34 @@ public static class Sipral
         var mediaAddressSigned = new sbyte[mediaAddressBytes.Length];
         Buffer.BlockCopy(mediaAddressBytes, 0, mediaAddressSigned, 0, mediaAddressBytes.Length);
         Check(NativeMethods.sipral_call_answer_media(stack, call, mediaAddressSigned, (nuint)mediaAddressSigned.Length, nowMs));
+    }
+
+    /// <summary>
+    /// Answer a call that came in with media this stack describes, from
+    /// `config`: `sipral_call_answer_media` with the choices
+    /// `sipral_call_ring_media` takes — `media_address`, `srtp`, `codecs`,
+    /// `ice`, `text_address` for real-time text, `feedback` for RTP/AVPF
+    /// and `focus` for a conference focus. Every other member names
+    /// something only a call to place needs, and setting one is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+    ///
+    /// On a call `sipral_call_ring_media` already rang, the 183's
+    /// description and session stand exactly as `sipral_call_answer_media`
+    /// says, and nothing in `config` but `focus` changes them.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_call_config_t` whose `size` member
+    /// says how long it is, with every pointer in it readable for the length
+    /// beside it.
+    /// </summary>
+    public static void CallAnswerWith(ulong stack, ulong call, in SipralCallConfig config, (string Name, string Value)[]? configHeaders, ulong nowMs)
+    {
+        using var configHeadersArray = new SipralHeaderArray(configHeaders);
+        var configValue = config;
+        configValue.Headers = configHeadersArray.Address;
+        configValue.HeadersLen = configHeadersArray.Count;
+        Check(NativeMethods.sipral_call_answer_with(stack, call, in configValue, nowMs));
     }
 
     /// <summary>
@@ -10337,6 +11189,292 @@ public static class Sipral
     {
         Check(NativeMethods.sipral_stack_diagnostics_json(stack, buffer, (nuint)buffer.Length, out var len));
         return len;
+    }
+
+    /// <summary>
+    /// What a `conference` subscription holds about the conference as a
+    /// whole (RFC 4575 §5.5).
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that holds no
+    /// conference: one to another package, one no document has reached yet,
+    /// or one that is not live.
+    ///
+    /// Safety
+    ///
+    /// `out_conference` must point at a `sipral_conference_t` whose `size`
+    /// member says how long it is.
+    /// </summary>
+    public static SipralConference SubscriptionConference(ulong stack, ulong subscription)
+    {
+        var conference = SipralConference.Sized();
+        Check(NativeMethods.sipral_subscription_conference(stack, subscription, ref conference));
+        return conference;
+    }
+
+    /// <summary>
+    /// One user of the conference, by index, in the order the focus first
+    /// named them. The index is stable only until the next
+    /// `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`.
+    ///
+    /// Safety
+    ///
+    /// `out_user` must point at a `sipral_conference_user_t` whose `size`
+    /// member says how long it is.
+    /// </summary>
+    public static SipralConferenceUser SubscriptionConferenceUserAt(ulong stack, ulong subscription, nuint index)
+    {
+        var user = SipralConferenceUser.Sized();
+        Check(NativeMethods.sipral_subscription_conference_user_at(stack, subscription, index, ref user));
+        return user;
+    }
+
+    /// <summary>
+    /// A piece of text about the conference or one of its users, copied into
+    /// the caller's buffer the way `sipral_subscription_dialog_text` copies
+    /// one: `out_needed` receives the bytes it needs including the NUL, a
+    /// buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing
+    /// written, and a piece the focus did not send is one byte, the NUL.
+    ///
+    /// `which` is a SipralConferenceText; `index` names the user for the
+    /// pieces about one, and is ignored for the others.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
+    /// point at one `size_t`.
+    /// </summary>
+    public static nuint SubscriptionConferenceText(ulong stack, ulong subscription, nuint index, uint which, sbyte[] buffer)
+    {
+        Check(NativeMethods.sipral_subscription_conference_text(stack, subscription, index, which, buffer, (nuint)buffer.Length, out var needed));
+        return needed;
+    }
+
+    /// <summary>
+    /// Say, or stop saying, that this end is the focus of a conference the
+    /// call belongs to (RFC 4579 §4.2): `isfocus` on the `Contact` of every
+    /// request and response the call sends from here on — the answer, for a
+    /// call not answered yet, and the next re-INVITE or UPDATE for one that
+    /// is up, which is how the far end learns it.
+    ///
+    /// `focus` is one to say it and zero to stop.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void CallSetFocus(ulong stack, ulong call, uint focus)
+    {
+        Check(NativeMethods.sipral_call_set_focus(stack, call, focus));
+    }
+
+    /// <summary>
+    /// The URI of the conference a call belongs to, when its far end said it
+    /// is a focus (`isfocus` in its `Contact`, RFC 4579 §4.2), copied into
+    /// the caller's buffer as `sipral_subscription_conference_text` copies.
+    ///
+    /// `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end said nothing of
+    /// the kind.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
+    /// point at one `size_t`.
+    /// </summary>
+    public static nuint CallConferenceUri(ulong stack, ulong call, sbyte[] buffer)
+    {
+        Check(NativeMethods.sipral_call_conference_uri(stack, call, buffer, (nuint)buffer.Length, out var needed));
+        return needed;
+    }
+
+    /// <summary>
+    /// Subscribe to the conference package of the call's focus (RFC 4579
+    /// §3.4), outside the call's dialog, from the call's own account, and
+    /// write the subscription's handle. It is kept like any subscription and
+    /// outlives the call; `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` says what it
+    /// learns.
+    ///
+    /// `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end did not say it is
+    /// a focus.
+    ///
+    /// Safety
+    ///
+    /// `out_subscription` must point at one `sipral_handle_t`.
+    /// </summary>
+    public static ulong CallSubscribeConference(ulong stack, ulong call, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_call_subscribe_conference(stack, call, out var subscription, nowMs));
+        return subscription;
+    }
+
+    /// <summary>
+    /// Publish this account's presence (RFC 3903, RFC 3856 §6.2): a PIDF
+    /// document for its address of record, open or closed, with the activity
+    /// and the note `presence` gives. The first call publishes it and every
+    /// later one modifies the same publication; the stack keeps it refreshed
+    /// until sipral_account_unpublish_presence.
+    ///
+    /// Nothing has happened when this returns: the PUBLISH is in the
+    /// transmit queue, and `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with
+    /// `SIPRAL_PRESENCE_KIND_PUBLICATION` says what the compositor did with
+    /// it.
+    ///
+    /// Safety
+    ///
+    /// `presence` must point at a `sipral_presence_t` whose `size` member
+    /// says how long it is, with its pointer readable for the length beside
+    /// it.
+    /// </summary>
+    public static void AccountPublishPresence(ulong stack, ulong account, in SipralPresence presence, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_account_publish_presence(stack, account, in presence, nowMs));
+    }
+
+    /// <summary>
+    /// Take this account's published presence away (RFC 3903 §4.5):
+    /// `SIPRAL_PUBLICATION_STATE_REMOVED` says when it is gone.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for an account that has published none.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void AccountUnpublishPresence(ulong stack, ulong account, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_account_unpublish_presence(stack, account, nowMs));
+    }
+
+    /// <summary>
+    /// Queue text the user typed for the far end, UTF-8.
+    ///
+    /// It goes in the next transmission interval (300 ms), at no more
+    /// characters a second than the far end said it takes, each block sent
+    /// twice more as redundancy where both ends agreed `red`. A CR LF, a
+    /// lone CR or a lone LF goes as a new line, and BACKSPACE (U+0008) erases
+    /// the far end's last character.
+    ///
+    /// `SIPRAL_STATUS_NOT_NEGOTIATED` on a call that agreed no text stream,
+    /// and `SIPRAL_STATUS_EXHAUSTED` when more is waiting unsent than a
+    /// stream holds; nothing is queued then, and a later call finds room as
+    /// the far end reads.
+    ///
+    /// Safety
+    ///
+    /// `text` must be readable for `text_len` bytes.
+    /// </summary>
+    public static void MediaSendText(ulong media, string text)
+    {
+        var textBytes = Encoding.UTF8.GetBytes(text);
+        var textSigned = new sbyte[textBytes.Length];
+        Buffer.BlockCopy(textBytes, 0, textSigned, 0, textBytes.Length);
+        Check(NativeMethods.sipral_media_send_text(media, textSigned, (nuint)textSigned.Length));
+    }
+
+    /// <summary>
+    /// The next datagram due on the call's text socket.
+    ///
+    /// A `len` of zero in the packet means nothing is due; call it again at
+    /// the deadline `sipral_stack_poll` names, or with every frame of audio.
+    /// Send what it writes from the socket at `text_address`, never the
+    /// audio one.
+    ///
+    /// `now_ms` is read as the stack reads it and moves nothing, as with
+    /// every media entry point.
+    ///
+    /// Safety
+    ///
+    /// `packet` must point at a `sipral_media_packet_t` as
+    /// `sipral_media_capture` describes.
+    /// </summary>
+    public static void MediaPollText(ulong media, ulong nowMs, ref SipralMediaPacket packet)
+    {
+        Check(NativeMethods.sipral_media_poll_text(media, nowMs, ref packet));
+    }
+
+    /// <summary>
+    /// Take a datagram off the call's text socket.
+    ///
+    /// `out_taken` is written with 1 when it was this call's text, and 0
+    /// when it was not: not RTP, another payload type, from somewhere other
+    /// than where the stream has latched, or on a call with no text. What it
+    /// carried arrives as `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+    ///
+    /// Safety
+    ///
+    /// `data` must be readable for `len` bytes, `from` for `from_len`, and
+    /// `out_taken` must point at one `uint32_t` or be null.
+    /// </summary>
+    public static uint MediaReceiveText(ulong media, byte[] data, string from, ulong nowMs)
+    {
+        var fromBytes = Encoding.UTF8.GetBytes(from);
+        var fromSigned = new sbyte[fromBytes.Length];
+        Buffer.BlockCopy(fromBytes, 0, fromSigned, 0, fromBytes.Length);
+        Check(NativeMethods.sipral_media_receive_text(media, data, (nuint)data.Length, fromSigned, (nuint)fromSigned.Length, nowMs, out var taken));
+        return taken;
+    }
+
+    /// <summary>
+    /// Record a call to a recording server (RFC 7866), and write the
+    /// recording session's handle to `out_recording`.
+    ///
+    /// The call must be one this stack runs the media of, with its audio
+    /// started: `SIPRAL_STATUS_WRONG_STATE` before
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED`, and for a call already being
+    /// recorded to a server. The recording session goes from the recorded
+    /// call's account, over a stream transport when the INVITE, which
+    /// carries the metadata beside the offer, is too large for UDP.
+    ///
+    /// Hanging the recording session up with
+    /// sipral_call_stop_recording_to or `sipral_call_hangup` stops the
+    /// recording; the server hanging it up does the same.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_record_config_t` whose `size` member
+    /// says how long it is, with every pointer in it readable for the length
+    /// beside it, and `out_recording` at one `sipral_handle_t`.
+    /// </summary>
+    public static ulong CallRecordTo(ulong stack, ulong call, in SipralRecordConfig config, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_call_record_to(stack, call, in config, out var recording, nowMs));
+        return recording;
+    }
+
+    /// <summary>
+    /// Stop recording a call to its recording server: the copies stop at
+    /// once, and the recording session is hung up.
+    ///
+    /// `call` is the recorded call, not the recording session.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call nothing records.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    /// </summary>
+    public static void CallStopRecordingTo(ulong stack, ulong call, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_call_stop_recording_to(stack, call, nowMs));
+    }
+
+    /// <summary>
+    /// The next copy of this call's audio for its recording server.
+    ///
+    /// A `len` of zero in the packet means none is waiting. Otherwise
+    /// `out_far_end` says which socket to send it from: 0 for `this_end`,
+    /// the copy of what this end sent, and 1 for `far_end`, the copy of what
+    /// it received. Collect them with every frame, in a loop to empty: a
+    /// copy nobody collects for a second is dropped, the oldest first.
+    ///
+    /// Safety
+    ///
+    /// `packet` must point at a `sipral_media_packet_t` as
+    /// `sipral_media_capture` describes, and `out_far_end` at one
+    /// `uint32_t`.
+    /// </summary>
+    public static uint MediaPollRecording(ulong media, ref SipralMediaPacket packet)
+    {
+        Check(NativeMethods.sipral_media_poll_recording(media, ref packet, out var farEnd));
+        return farEnd;
     }
 
     /// <summary>

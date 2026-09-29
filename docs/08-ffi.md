@@ -233,8 +233,13 @@ Rules for the ABI:
   (RFC 3428, RFC 3842), 37 to `..._QUALITY_REPORT_SENT` for the RTCP-XR
   quality reports, and 38 to `..._MEDIA_UNJOINED` for the local conference's
   own survivor notice. 39 and 40 went to `..._NAT_MAPPING` and `..._NAT_RELAY`,
-  and 41 to `..._REFERRAL`, a REFER outside any dialog. The next free number is
-  42.
+  and 41 to `..._REFERRAL`, a REFER outside any dialog. 42, 43, 45 and 46 went
+  to `..._TURN_STREAM`, `..._AUDIO_DEVICES_CHANGED`, `..._CALL_ADDRESS_WANTED`
+  and `..._STUN_SERVER`, with 44 held for audio devices. ABI 0.31 was written
+  in four branches at once, so its numbers were handed out before any of them
+  was: 50, 51 and 52 are `..._CONFERENCE_CHANGED`, `..._TEXT_RECEIVED` and
+  `..._PRESENCE_CHANGED`, and 47 to 49 and 53 are held for the other three.
+  The next free number is 54.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
@@ -1047,6 +1052,102 @@ child logger per target, `sipral.TRACE` = 5 below `DEBUG`), .NET's
 `sipral_stack_stun_servers` (`set_stun_servers`, `SetStunServers`,
 `setStunServers`), after which a stack created without STUN maps its media
 sockets as one created with it would.
+
+### Conferences, presence, real-time text, feedback and recording
+
+ABI 0.31 carries five protocols the facade runs (`docs/04-ua.md`,
+`docs/05-media.md`), each behind a feature bit set in every build:
+`SIPRAL_FEATURE_SIPREC` (`1 << 20`), `SIPRAL_FEATURE_CONFERENCE` (`1 << 21`,
+the conference package, `isfocus`, presence and PUBLISH together),
+`SIPRAL_FEATURE_REALTIME_TEXT` (`1 << 22`) and `SIPRAL_FEATURE_RTCP_FEEDBACK`
+(`1 << 23`). Two statuses are new: `SIPRAL_STATUS_NOT_NEGOTIATED` (20), for
+something the call never agreed, and `SIPRAL_STATUS_NOT_A_FOCUS` (21).
+
+**Conferences (RFC 4575, RFC 4579).** A subscription to the `conference`
+package — `sipral_account_subscribe` naming it, or
+`sipral_call_subscribe_conference` for the conference a call's focus runs —
+keeps a picture of the conference by §4.6's rules, and every document merged
+into it is `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` (50) with
+`payload.conference`: the subscription, `SIPRAL_CONFERENCE_UPDATE_APPLIED` or
+`..._ENDED`, the version and how many users. A document that follows a lost
+one makes the stack ask for full state by itself; a deleted conference ends
+the subscription. The picture is read with `sipral_subscription_conference`
+(version, users, the focus's `user-count`, `active` and `locked`),
+`sipral_subscription_conference_user_at` (one user: its endpoints, where the
+first is as a `SIPRAL_ENDPOINT_STATUS_*`, how many media streams) and
+`sipral_subscription_conference_text`, which copies the entity, subject,
+display text or a user's entity, display text or device the way
+`sipral_subscription_dialog_text` copies. A subscription to another package
+holds none, and says `SIPRAL_STATUS_NOT_SUPPORTED`. `sipral_call_conference_uri`
+copies the conference a call belongs to when its far end's `Contact` said
+`isfocus`, and is `SIPRAL_STATUS_NOT_A_FOCUS` otherwise. The other way round,
+`sipral_call_set_focus` puts `isfocus` on this end's `Contact` from the next
+message a call sends, and `sipral_call_config_t::focus` places or answers a call
+that way from its first.
+
+**Presence (RFC 3903, RFC 3856, RFC 3863, RFC 4480).**
+`sipral_account_publish_presence` takes a `sipral_presence_t` — open or closed
+(`SIPRAL_BASIC_*`), one RPID activity (`SIPRAL_ACTIVITY_*`, none for a
+document with no person) and a note — and publishes a PIDF document for the
+account's address of record. The first call publishes it and every later one
+modifies the same publication; the stack refreshes it, answers the
+compositor's challenges, starts afresh after a 412 and meets a 423's
+`Min-Expires`. `sipral_account_unpublish_presence` takes it away, and is
+`SIPRAL_STATUS_WRONG_STATE` for an account that published none.
+`SIPRAL_EVENT_KIND_PRESENCE_CHANGED` (52) says what became of it, with
+`payload.presence.kind` `SIPRAL_PRESENCE_KIND_PUBLICATION`, `account` naming
+the account, and the state (`SIPRAL_PUBLICATION_STATE_*`), the failure and SIP
+status when one was refused, the lifetime granted and when it is refreshed.
+The same event with `SIPRAL_PRESENCE_KIND_WATCHED` is a `presence`
+subscription's NOTIFY read: open or closed, the first activity, the first note
+and the entity, pointing into the event.
+
+**Real-time text (RFC 4103).** `sipral_call_config_t::text_address` names a
+second socket the application bound for a call's text, read with
+`media_address` on `sipral_call_place`, `sipral_call_ring_media`,
+`sipral_call_accept_transfer` and `sipral_call_answer_with`; set without
+`media_address` it is `SIPRAL_STATUS_INVALID_ARGUMENT`. The offer carries the
+`m=text` stream, an offered one is taken, and once both ends agree
+`sipral_media_info_t::has_text` is set. `sipral_media_send_text` queues typed
+UTF-8 (`SIPRAL_STATUS_NOT_NEGOTIATED` on a call with no text,
+`SIPRAL_STATUS_EXHAUSTED` when more is unsent than a stream holds),
+`sipral_media_poll_text` hands out the datagram due for the text socket, and
+`sipral_media_receive_text` takes one that arrived on it and says whether it
+was this call's. What the far end typed is `SIPRAL_EVENT_KIND_TEXT_RECEIVED`
+(51) with `payload.text`: the text, and how many lost blocks it marks with
+U+FFFD.
+
+**RTCP feedback (RFC 4585, RFC 5506).** `sipral_call_config_t::feedback`, a
+`SipralToggle`, makes a call offer RTP/AVPF with Generic NACKs and
+reduced-size RTCP; zero leaves it off, as the facade does, and an offer that
+asks for it is answered in kind either way. `sipral_media_info_t` appends
+`feedback`, `generic_nack` and `reduced_size`, what the two descriptions
+agreed, and `sipral_stream_stats_t` appends `feedback`, `trr_interval_ms` and
+the counts: NACKs sent and received, the packets each asked for, Early and
+reduced-size packets sent, and feedback the bandwidth held back.
+
+**Recording to a recording server (RFC 7866).** `sipral_call_record_to` takes
+a `sipral_record_config_t` — the server's URI, where to send the INVITE and
+over which transport (a stream one: the INVITE carries the metadata beside the
+offer and is too large for UDP), and the two sockets the copies go from,
+`this_end` and `far_end` — and writes the recording session's handle, a call
+like any other from then on. It needs a call this stack runs the audio of,
+started, and one not already recorded (`SIPRAL_STATUS_WRONG_STATE`
+otherwise). `sipral_media_poll_recording`, on the recorded call's media
+handle, hands out each copy with the server's address and `out_far_end`, zero
+for `this_end`'s socket and one for `far_end`'s; collect them with every
+frame. `sipral_call_stop_recording_to` stops the copies and hangs the
+recording session up, which the recorded call's end, and the server's hanging
+up, do by themselves.
+
+`sipral_call_answer_with` is the answer `sipral_call_ring_media` always had
+the configuration for: `sipral_call_answer_media` with the call's own
+`srtp`, `codecs`, `ice`, `text_address`, `feedback` and `focus`.
+
+`sipral_call_config_t`, `sipral_media_info_t` and `sipral_stream_stats_t`
+append their members at the tail with the pinned `MIN_SIZE` unmoved, and a
+caller built against 0.30 reads and sends none of them. The four bindings'
+generated layers carry every entry point, struct and name above.
 
 ## Media across the boundary
 

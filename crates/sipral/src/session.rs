@@ -746,6 +746,13 @@ impl MediaSession {
         }
     }
 
+    /// What RTP/AVPF feedback this stream agreed (RFC 4585, RFC 5506), or
+    /// `None` for one running plain RTP/AVP.
+    #[must_use]
+    pub fn feedback(&self) -> Option<sipral_rtp::avpf::Negotiated> {
+        self.rtp.feedback().map(|(negotiated, _)| negotiated)
+    }
+
     /// Run this stream's RTCP as RTP/AVPF from `now` on, with what the two
     /// descriptions agreed (RFC 4585, RFC 5506), or take what a later
     /// exchange agreed for one already running it.

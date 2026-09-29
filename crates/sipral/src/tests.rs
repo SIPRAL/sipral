@@ -12500,6 +12500,10 @@ fn copies(pair: &mut Pair, call: CallHandle) -> Vec<(SocketAddr, SocketAddr, Vec
         .expect("the caller's media");
     let mut out = Vec::new();
     while let Some(copy) = session.poll_recording() {
+        // the role and the socket say the same thing, for a caller that
+        // keeps its two sockets by role
+        assert_eq!(copy.far_end, copy.from == far_end_copy());
+        assert_eq!(!copy.far_end, copy.from == this_end_copy());
         out.push((copy.from, copy.destination, copy.payload.to_vec()));
     }
     out

@@ -30,7 +30,7 @@ use crate::{Endpoint, Fact, Flow, Script, Step, catalog, catalog_for, place_call
 const LOOPBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 const PATIENCE: Duration = Duration::from_secs(10);
 
-fn endpoint(seed: u8) -> Endpoint {
+pub(crate) fn endpoint(seed: u8) -> Endpoint {
     Endpoint::bind(
         [seed; 32],
         [seed ^ 0x5a; 32],
@@ -48,7 +48,7 @@ fn endpoint(seed: u8) -> Endpoint {
 /// for the far end to have anywhere to send the dialog's next request, and a
 /// dialler that gets an empty one drops the response rather than completing
 /// a dialog it cannot reach.
-fn local_account(endpoint: &Endpoint, name: &str) -> Account {
+pub(crate) fn local_account(endpoint: &Endpoint, name: &str) -> Account {
     Account::new(
         Uri::parse_str(&format!("sip:{name}@127.0.0.1")).expect("a URI"),
         Uri::parse_str("sip:127.0.0.1").expect("a URI"),
@@ -75,7 +75,7 @@ fn answer_everything(endpoint: &mut Endpoint, event: &Event, now: Instant) {
 }
 
 /// Whether either side has heard the call confirmed.
-fn confirmed(events: &[Event]) -> bool {
+pub(crate) fn confirmed(events: &[Event]) -> bool {
     events
         .iter()
         .any(|event| matches!(event, Event::Signalling(UaEvent::CallConfirmed { .. })))

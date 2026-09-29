@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)30)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)31)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -259,6 +259,37 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_LOGGING ((uint32_t)16384)
 
 /**
+ * See SIPRAL_FEATURE_DTMF. A call recorded to a recording server
+ * (SIPREC, RFC 7866): `sipral_call_record_to` places the recording
+ * session, and `sipral_media_poll_recording` hands out the copies of
+ * the call's audio.
+ */
+#define SIPRAL_FEATURE_SIPREC ((uint32_t)1048576)
+
+/**
+ * See SIPRAL_FEATURE_DTMF. The conference package kept for the
+ * application (RFC 4575, `sipral_subscription_conference`), a focus
+ * known by its `isfocus` (RFC 4579, `sipral_call_conference_uri`), and
+ * presence published (RFC 3903, `sipral_account_publish_presence`) and
+ * watched (RFC 3856, `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`).
+ */
+#define SIPRAL_FEATURE_CONFERENCE ((uint32_t)2097152)
+
+/**
+ * See SIPRAL_FEATURE_DTMF. Real-time text in a call (RFC 4103):
+ * `text_address` on the call's configuration, `sipral_media_send_text`
+ * and `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+ */
+#define SIPRAL_FEATURE_REALTIME_TEXT ((uint32_t)4194304)
+
+/**
+ * See SIPRAL_FEATURE_DTMF. RTP/AVPF with Generic NACKs and
+ * reduced-size RTCP (RFC 4585, RFC 5506): `feedback` on the call's
+ * configuration, and what it agreed in `sipral_media_info_t`.
+ */
+#define SIPRAL_FEATURE_RTCP_FEEDBACK ((uint32_t)8388608)
+
+/**
  * The buffer a caller has to bring for one outgoing packet.
  *
  * Not a path MTU — RTP does not discover one — but the bound the session
@@ -406,6 +437,9 @@ typedef struct sipral_referral_event sipral_referral_event_t;
 typedef struct sipral_turn_stream_event sipral_turn_stream_event_t;
 typedef struct sipral_audio_event sipral_audio_event_t;
 typedef struct sipral_stun_server_event sipral_stun_server_event_t;
+typedef struct sipral_conference_event sipral_conference_event_t;
+typedef struct sipral_text_event sipral_text_event_t;
+typedef struct sipral_presence_event sipral_presence_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -417,6 +451,10 @@ typedef struct sipral_audio_device sipral_audio_device_t;
 typedef struct sipral_audio_info sipral_audio_info_t;
 typedef struct sipral_audio_transmit sipral_audio_transmit_t;
 typedef struct sipral_log_record sipral_log_record_t;
+typedef struct sipral_conference sipral_conference_t;
+typedef struct sipral_conference_user sipral_conference_user_t;
+typedef struct sipral_presence sipral_presence_t;
+typedef struct sipral_record_config sipral_record_config_t;
 
 /**
  * The result of a call across the C ABI.
@@ -533,6 +571,18 @@ enum {
      * that ends makes room; raising the limit means a new stack.
      */
     SIPRAL_STATUS_LIMIT_REACHED = 16,
+    /**
+     * The call never agreed on what this asks for: text sent on a call
+     * whose answer took no `m=text` stream, say. Nothing was done, and
+     * only a new offer that the far end accepts changes it.
+     */
+    SIPRAL_STATUS_NOT_NEGOTIATED = 20,
+    /**
+     * The far end of this call is not a conference focus: its Contact
+     * never carried `isfocus` (RFC 4579 §4.1), so there is no
+     * conference to name or subscribe to.
+     */
+    SIPRAL_STATUS_NOT_AFOCUS = 21,
 };
 
 /**
@@ -1253,6 +1303,10 @@ enum {
  * Numbers already spent on features this build does not have:
  * - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
  * - 44: held for a second audio device event, which the audio engine did not need; spent all the same
+ * - 47: held for the caller identity a STIR/SHAKEN verification settled on (wave C, crypto)
+ * - 48: held for a digit heard in the audio itself (wave C, media)
+ * - 49: held for the call-progress or answering-machine verdict on a call (wave C, media)
+ * - 53: held for a transport that failed, with the TLS reason when there is one (wave C, tls-layers)
  */
 typedef uint32_t sipral_event_kind_t;
 enum {
@@ -1730,6 +1784,51 @@ enum {
      * neither.
      */
     SIPRAL_EVENT_KIND_STUN_SERVER = 46,
+    /**
+     * A `conference` subscription's picture of the conference changed,
+     * or the conference ended (RFC 4575 §4.6).
+     *
+     * `payload.conference` says which subscription and what happened:
+     * `SIPRAL_CONFERENCE_UPDATE_APPLIED` for a document merged into the
+     * picture, with the version it is at and how many users it holds,
+     * and `SIPRAL_CONFERENCE_UPDATE_ENDED` for a conference the focus
+     * deleted, after which the subscription is being given up. The
+     * picture itself is read with `sipral_subscription_conference` and
+     * `sipral_subscription_conference_user_at`. A document that was late
+     * or repeated raises nothing, and one that followed a lost one is
+     * answered by the stack asking for full state again. `account` and
+     * `call` are `SIPRAL_HANDLE_NONE`; the NOTIFY itself arrived just
+     * before, as `SIPRAL_EVENT_KIND_NOTIFIED`.
+     */
+    SIPRAL_EVENT_KIND_CONFERENCE_CHANGED = 50,
+    /**
+     * The far end typed something on the call's real-time text stream
+     * (RFC 4103), in the order it typed it.
+     *
+     * `call` is the call; `payload.text` holds the text, UTF-8: an
+     * erasure of the last character as BACKSPACE (U+0008), a new line
+     * as LINE SEPARATOR (U+2028), an alert as BELL (U+0007), and a
+     * REPLACEMENT CHARACTER (U+FFFD) for each block of text that was
+     * lost and no redundant copy recovered (RFC 4103 §5.3), counted in
+     * `payload.text.missing`.
+     */
+    SIPRAL_EVENT_KIND_TEXT_RECEIVED = 51,
+    /**
+     * Presence moved: a `presence` subscription was told about the
+     * presentity (RFC 3856), or the state this account publishes (RFC
+     * 3903) was published, refreshed, removed, lapsed or refused.
+     *
+     * `payload.presence.kind` says which. For a subscription,
+     * `payload.presence.subscription` names it and the rest is what the
+     * PIDF document said: open or closed, the first RPID activity, the
+     * first note and the entity; the NOTIFY itself arrived just before,
+     * as `SIPRAL_EVENT_KIND_NOTIFIED`. For a publication, `account`
+     * names the account and
+     * `payload.presence.publication_state` says what became of it, with
+     * the SIP status, the lifetime the compositor granted and when the
+     * stack refreshes it.
+     */
+    SIPRAL_EVENT_KIND_PRESENCE_CHANGED = 52,
 };
 
 /**
@@ -2811,6 +2910,256 @@ enum {
      * Every SIP message in and out, whole and redacted.
      */
     SIPRAL_LOG_LEVEL_TRACE = 5,
+};
+
+/**
+ * What one conference document did. Names for
+ * `sipral_conference_event_t::update`.
+ */
+typedef uint32_t sipral_conference_update_t;
+enum {
+    /**
+     * Never written by this build.
+     */
+    SIPRAL_CONFERENCE_UPDATE_UNKNOWN = 0,
+    /**
+     * It was merged into the picture.
+     */
+    SIPRAL_CONFERENCE_UPDATE_APPLIED = 1,
+    /**
+     * The focus deleted the conference: the picture is empty, and the
+     * subscription is being given up (RFC 4575 §4.6).
+     */
+    SIPRAL_CONFERENCE_UPDATE_ENDED = 2,
+};
+
+/**
+ * Where one endpoint of a conference is (RFC 4575 §5.7.2). Names for
+ * `sipral_conference_user_t::status`.
+ */
+typedef uint32_t sipral_endpoint_status_t;
+enum {
+    /**
+     * The focus did not say, or said something the schema does not
+     * list.
+     */
+    SIPRAL_ENDPOINT_STATUS_UNKNOWN = 0,
+    /**
+     * `pending`: waiting for policy or for the focus.
+     */
+    SIPRAL_ENDPOINT_STATUS_PENDING = 1,
+    /**
+     * `dialing-out`: the focus is calling it.
+     */
+    SIPRAL_ENDPOINT_STATUS_DIALING_OUT = 2,
+    /**
+     * `dialing-in`: it is calling the focus.
+     */
+    SIPRAL_ENDPOINT_STATUS_DIALING_IN = 3,
+    /**
+     * `alerting`: it is ringing.
+     */
+    SIPRAL_ENDPOINT_STATUS_ALERTING = 4,
+    /**
+     * `on-hold`.
+     */
+    SIPRAL_ENDPOINT_STATUS_ON_HOLD = 5,
+    /**
+     * `connected`: it is in the conference.
+     */
+    SIPRAL_ENDPOINT_STATUS_CONNECTED = 6,
+    /**
+     * `muted-via-focus`: in, and muted by the focus.
+     */
+    SIPRAL_ENDPOINT_STATUS_MUTED_VIA_FOCUS = 7,
+    /**
+     * `disconnecting`.
+     */
+    SIPRAL_ENDPOINT_STATUS_DISCONNECTING = 8,
+    /**
+     * `disconnected`: it has left.
+     */
+    SIPRAL_ENDPOINT_STATUS_DISCONNECTED = 9,
+};
+
+/**
+ * Which piece of text sipral_subscription_conference_text is being
+ * asked for. The first three are about the conference and ignore
+ * `index`; the rest are about the user at `index`.
+ *
+ * Every one of them is what the focus wrote.
+ */
+typedef uint32_t sipral_conference_text_t;
+enum {
+    /**
+     * Never asked for.
+     */
+    SIPRAL_CONFERENCE_TEXT_UNKNOWN = 0,
+    /**
+     * The conference's URI, the `entity` of `conference-info`.
+     */
+    SIPRAL_CONFERENCE_TEXT_ENTITY = 1,
+    /**
+     * Its `subject`.
+     */
+    SIPRAL_CONFERENCE_TEXT_SUBJECT = 2,
+    /**
+     * Its `display-text`.
+     */
+    SIPRAL_CONFERENCE_TEXT_DISPLAY_TEXT = 3,
+    /**
+     * A user's `entity`: the address of record it takes part as.
+     */
+    SIPRAL_CONFERENCE_TEXT_USER_ENTITY = 4,
+    /**
+     * A user's `display-text`.
+     */
+    SIPRAL_CONFERENCE_TEXT_USER_DISPLAY_TEXT = 5,
+    /**
+     * The `entity` of a user's first endpoint: the device it is on.
+     */
+    SIPRAL_CONFERENCE_TEXT_USER_ENDPOINT = 6,
+};
+
+/**
+ * What a crate::event::SipralEventKind::PresenceChanged is about.
+ * Names for `sipral_presence_event_t::kind`.
+ */
+typedef uint32_t sipral_presence_kind_t;
+enum {
+    /**
+     * Never written by this build.
+     */
+    SIPRAL_PRESENCE_KIND_UNKNOWN = 0,
+    /**
+     * A `presence` subscription was told about the presentity.
+     */
+    SIPRAL_PRESENCE_KIND_WATCHED = 1,
+    /**
+     * This account's own published presence moved.
+     */
+    SIPRAL_PRESENCE_KIND_PUBLICATION = 2,
+};
+
+/**
+ * Whether a presentity can be reached: PIDF's `basic` (RFC 3863
+ * §4.1.4). Names for `sipral_presence_t::basic` and
+ * `sipral_presence_event_t::basic`.
+ */
+typedef uint32_t sipral_basic_t;
+enum {
+    /**
+     * Not said. A document published with this is refused, since
+     * §4.1.3 wants one.
+     */
+    SIPRAL_BASIC_UNKNOWN = 0,
+    /**
+     * Reachable.
+     */
+    SIPRAL_BASIC_OPEN = 1,
+    /**
+     * Not reachable.
+     */
+    SIPRAL_BASIC_CLOSED = 2,
+};
+
+/**
+ * What the person behind a presentity is doing: the RPID activities
+ * (RFC 4480 §3.2) phones show. Names for `sipral_presence_t::activity`
+ * and `sipral_presence_event_t::activity`.
+ */
+typedef uint32_t sipral_activity_t;
+enum {
+    /**
+     * None said. Published, the document carries no person at all.
+     */
+    SIPRAL_ACTIVITY_NONE = 0,
+    /**
+     * `away`.
+     */
+    SIPRAL_ACTIVITY_AWAY = 1,
+    /**
+     * `busy`.
+     */
+    SIPRAL_ACTIVITY_BUSY = 2,
+    /**
+     * `on-the-phone`.
+     */
+    SIPRAL_ACTIVITY_ON_THE_PHONE = 3,
+    /**
+     * `meeting`.
+     */
+    SIPRAL_ACTIVITY_MEETING = 4,
+    /**
+     * `vacation`.
+     */
+    SIPRAL_ACTIVITY_VACATION = 5,
+    /**
+     * Another activity, which this ABI has no number for.
+     */
+    SIPRAL_ACTIVITY_OTHER = 6,
+};
+
+/**
+ * What became of this account's published presence. Names for
+ * `sipral_presence_event_t::publication_state`.
+ */
+typedef uint32_t sipral_publication_state_t;
+enum {
+    /**
+     * Not a publication event.
+     */
+    SIPRAL_PUBLICATION_STATE_UNKNOWN = 0,
+    /**
+     * The compositor holds it: published, modified or refreshed.
+     */
+    SIPRAL_PUBLICATION_STATE_PUBLISHED = 1,
+    /**
+     * It was taken away (`sipral_account_unpublish_presence`).
+     */
+    SIPRAL_PUBLICATION_STATE_REMOVED = 2,
+    /**
+     * Its lifetime ran out with no refresh; the next publish starts it
+     * afresh.
+     */
+    SIPRAL_PUBLICATION_STATE_EXPIRED = 3,
+    /**
+     * The compositor refused, or never answered.
+     */
+    SIPRAL_PUBLICATION_STATE_FAILED = 4,
+};
+
+/**
+ * Why a publication failed. Names for `sipral_presence_event_t::failure`.
+ */
+typedef uint32_t sipral_publish_failure_t;
+enum {
+    /**
+     * Nothing failed.
+     */
+    SIPRAL_PUBLISH_FAILURE_NONE = 0,
+    /**
+     * 489: the compositor does not know the `presence` package. Nothing
+     * more is sent.
+     */
+    SIPRAL_PUBLISH_FAILURE_BAD_EVENT = 1,
+    /**
+     * 423 with no `Min-Expires` this stack could meet.
+     */
+    SIPRAL_PUBLISH_FAILURE_INTERVAL_TOO_BRIEF = 2,
+    /**
+     * A 2xx without the `SIP-ETag` every one must carry.
+     */
+    SIPRAL_PUBLISH_FAILURE_NO_ENTITY_TAG = 3,
+    /**
+     * Any other refusal, a challenge nothing could answer among them;
+     * `status_code` says which.
+     */
+    SIPRAL_PUBLISH_FAILURE_REFUSED = 4,
+    /**
+     * No answer at all.
+     */
+    SIPRAL_PUBLISH_FAILURE_UNREACHABLE = 5,
 };
 
 /**
@@ -4199,6 +4548,43 @@ struct sipral_call_config {
      * unmoved.
      */
     uint32_t ice;
+    /**
+     * Where this call's real-time text arrives (RFC 4103): a second
+     * socket the application bound, as an address and a port. Set, the
+     * offer or answer carries an `m=text` stream for T.140 with its
+     * redundancy, and once both ends agree it `sipral_media_send_text`,
+     * `sipral_media_poll_text` and `sipral_media_receive_text` carry
+     * it. Null for a call with no text. Not NUL-terminated.
+     *
+     * Read only with `media_address`, and not offered on a call keyed
+     * by SRTP or DTLS-SRTP or gathering ICE: the text stream has no key
+     * and no candidates of its own, and typed text sent in the clear
+     * beside encrypted audio is worse than none.
+     *
+     * Appended at the tail (ABI 0.31), like `feedback` and `focus`; the
+     * pinned `MIN_SIZE` is unmoved.
+     */
+    const char *text_address;
+    /**
+     * How many bytes of it.
+     */
+    size_t text_address_len;
+    /**
+     * Whether this call asks for RTCP feedback: a `SipralToggle`. On
+     * offers RTP/AVPF (RFC 4585) with Generic NACKs and reduced-size
+     * RTCP (RFC 5506), and runs RFC 4585's timing when the answer takes
+     * it; zero leaves it off, as it is by default, because a far end
+     * that knows only RTP/AVP refuses a profile it does not know. Read
+     * only with `media_address`. An offer that asks for it is answered
+     * in kind whatever this says.
+     */
+    uint32_t feedback;
+    /**
+     * Nonzero to say this end is the focus of a conference (RFC 4579
+     * §3.3): `isfocus` goes on the Contact of every message this call
+     * sends from here on.
+     */
+    uint32_t focus;
 };
 
 /**
@@ -4433,6 +4819,29 @@ struct sipral_media_info {
      * Whether the watchdog currently considers inbound audio stopped.
      */
     uint32_t stalled;
+    /**
+     * Whether the call agreed a real-time text stream (RFC 4103), which
+     * `sipral_media_send_text` writes to.
+     *
+     * Appended at the tail (ABI 0.31), like the three below; a caller
+     * built before them never reads them.
+     */
+    uint32_t has_text;
+    /**
+     * Whether the audio stream runs RTP/AVPF (RFC 4585): both ends named
+     * a feedback profile.
+     */
+    uint32_t feedback;
+    /**
+     * Whether both ends agreed Generic NACKs (`a=rtcp-fb:* nack`), so
+     * that a gap in what arrives is asked for again.
+     */
+    uint32_t generic_nack;
+    /**
+     * Whether both ends agreed reduced-size RTCP (RFC 5506,
+     * `a=rtcp-rsize`).
+     */
+    uint32_t reduced_size;
 };
 
 /**
@@ -4649,6 +5058,48 @@ struct sipral_stream_stats {
      * caller built before it existed never reads it.
      */
     uint64_t frames_underrun;
+    /**
+     * Whether the stream runs RTP/AVPF (RFC 4585). Every count below is
+     * zero while it does not.
+     *
+     * Appended at the tail (ABI 0.31), like everything below it.
+     */
+    uint32_t feedback;
+    /**
+     * The `trr-int` both ends agreed: the least time between two
+     * regular reports, in milliseconds. Zero for none.
+     */
+    uint32_t trr_interval_ms;
+    /**
+     * Generic NACKs this end sent, each asking for one or more packets.
+     */
+    uint64_t nacks_sent;
+    /**
+     * The packets those NACKs asked for.
+     */
+    uint64_t packets_nacked;
+    /**
+     * Generic NACKs the far end sent.
+     */
+    uint64_t nacks_received;
+    /**
+     * The packets those asked this end for.
+     */
+    uint64_t packets_asked_for;
+    /**
+     * Early RTCP packets this end sent: feedback that could not wait for
+     * the next regular report.
+     */
+    uint64_t early_packets;
+    /**
+     * Reduced-size RTCP packets this end sent (RFC 5506).
+     */
+    uint64_t reduced_size_packets;
+    /**
+     * Feedback this end had to hold back, because the stream's RTCP
+     * bandwidth had none to spare.
+     */
+    uint64_t feedback_suppressed;
 };
 
 /**
@@ -5733,6 +6184,123 @@ struct sipral_stun_server_event {
 };
 
 /**
+ * What a crate::event::SipralEventKind::ConferenceChanged carries.
+ */
+struct sipral_conference_event {
+    /**
+     * Which subscription.
+     */
+    sipral_handle_t subscription;
+    /**
+     * A sipral_conference_update_t.
+     */
+    uint32_t update;
+    /**
+     * The version of the document the picture is at now; zero once the
+     * conference ended.
+     */
+    uint32_t version;
+    /**
+     * How many users the picture holds.
+     */
+    uint32_t users;
+};
+
+/**
+ * What a crate::event::SipralEventKind::TextReceived carries.
+ *
+ * The text points into the event and is valid for as long as the
+ * callback is.
+ */
+struct sipral_text_event {
+    /**
+     * What the far end typed, UTF-8, not NUL-terminated.
+     */
+    const char *text;
+    /**
+     * How many bytes of it.
+     */
+    size_t text_len;
+    /**
+     * How many blocks of text were lost with no redundant copy to
+     * recover them, each marked in `text` by a REPLACEMENT CHARACTER
+     * (U+FFFD) where it fell.
+     */
+    uint32_t missing;
+};
+
+/**
+ * What a crate::event::SipralEventKind::PresenceChanged carries.
+ *
+ * The text points into the event and is valid for as long as the
+ * callback is.
+ */
+struct sipral_presence_event {
+    /**
+     * A sipral_presence_kind_t.
+     */
+    uint32_t kind;
+    /**
+     * SIPRAL_PRESENCE_KIND_WATCHED: which subscription.
+     * `SIPRAL_HANDLE_NONE` for a publication, whose account is the
+     * event's `account`.
+     */
+    sipral_handle_t subscription;
+    /**
+     * SIPRAL_PRESENCE_KIND_WATCHED: a sipral_basic_t, open when any
+     * of the presentity's tuples is open.
+     */
+    uint32_t basic;
+    /**
+     * SIPRAL_PRESENCE_KIND_WATCHED: a sipral_activity_t, the first
+     * the person listed.
+     */
+    uint32_t activity;
+    /**
+     * SIPRAL_PRESENCE_KIND_WATCHED: the presentity, as the document
+     * named it. Not NUL-terminated.
+     */
+    const char *entity;
+    /**
+     * How many bytes of it.
+     */
+    size_t entity_len;
+    /**
+     * SIPRAL_PRESENCE_KIND_WATCHED: the first note, the document's
+     * own or else a tuple's. Null when there is none.
+     */
+    const char *note;
+    /**
+     * How many bytes of it.
+     */
+    size_t note_len;
+    /**
+     * SIPRAL_PRESENCE_KIND_PUBLICATION: a sipral_publication_state_t.
+     */
+    uint32_t publication_state;
+    /**
+     * SIPRAL_PRESENCE_KIND_PUBLICATION: a sipral_publish_failure_t
+     * when the state is SIPRAL_PUBLICATION_STATE_FAILED.
+     */
+    uint32_t failure;
+    /**
+     * SIPRAL_PRESENCE_KIND_PUBLICATION: the status the compositor
+     * answered with, when one did.
+     */
+    uint32_t status_code;
+    /**
+     * SIPRAL_PRESENCE_KIND_PUBLICATION: the lifetime granted, in
+     * milliseconds, when it was published.
+     */
+    uint64_t expires_ms;
+    /**
+     * SIPRAL_PRESENCE_KIND_PUBLICATION: how long until the stack
+     * refreshes it, in milliseconds.
+     */
+    uint64_t refresh_in_ms;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -5809,6 +6377,18 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_STUN_SERVER.
      */
     sipral_stun_server_event_t stun_server;
+    /**
+     * For SIPRAL_EVENT_KIND_CONFERENCE_CHANGED.
+     */
+    sipral_conference_event_t conference;
+    /**
+     * For SIPRAL_EVENT_KIND_TEXT_RECEIVED.
+     */
+    sipral_text_event_t text;
+    /**
+     * For SIPRAL_EVENT_KIND_PRESENCE_CHANGED.
+     */
+    sipral_presence_event_t presence;
 };
 
 /**
@@ -6266,6 +6846,159 @@ struct sipral_log_record {
      * since the line before this one. Zero almost always.
      */
     uint64_t suppressed;
+};
+
+/**
+ * A conference as a `conference` subscription holds it, read with
+ * sipral_subscription_conference.
+ */
+struct sipral_conference {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * The version of the last document merged.
+     */
+    uint32_t version;
+    /**
+     * How many users the picture holds, which is what
+     * sipral_subscription_conference_user_at reads by index.
+     */
+    uint32_t users;
+    /**
+     * Whether the focus said how many users it counts
+     * (`conference-state`'s `user-count`), which may differ from
+     * `users`: a focus need not list every one.
+     */
+    uint32_t has_user_count;
+    /**
+     * That count, when it said.
+     */
+    uint32_t user_count;
+    /**
+     * `conference-state`'s `active`: one when the focus said it is, two
+     * when it said it is not, zero when it said nothing.
+     */
+    uint32_t active;
+    /**
+     * Its `locked`, the same way.
+     */
+    uint32_t locked;
+};
+
+/**
+ * One user of a conference, read with
+ * sipral_subscription_conference_user_at; its text is read with
+ * sipral_subscription_conference_text.
+ */
+struct sipral_conference_user {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * How many endpoints — devices — the user is in the conference
+     * from.
+     */
+    uint32_t endpoints;
+    /**
+     * A sipral_endpoint_status_t: where the first of them is.
+     */
+    uint32_t status;
+    /**
+     * How many media streams the first of them has.
+     */
+    uint32_t media;
+};
+
+/**
+ * This account's presence, as sipral_account_publish_presence takes
+ * it.
+ *
+ * Set `size` to `sizeof(sipral_presence_t)` and zero the rest before
+ * filling anything in.
+ */
+struct sipral_presence {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * A sipral_basic_t, open or closed. Required.
+     */
+    uint32_t basic;
+    /**
+     * A sipral_activity_t; SIPRAL_ACTIVITY_NONE publishes no
+     * person at all. SIPRAL_ACTIVITY_OTHER is refused: there is no
+     * name to publish it under.
+     */
+    uint32_t activity;
+    /**
+     * A note a buddy list shows beside the name, UTF-8 and not
+     * NUL-terminated, or null for none.
+     */
+    const char *note;
+    /**
+     * How many bytes of it.
+     */
+    size_t note_len;
+};
+
+/**
+ * Where a call is recorded, as sipral_call_record_to takes it.
+ *
+ * Set `size` to `sizeof(sipral_record_config_t)` and zero the rest
+ * before filling anything in.
+ */
+struct sipral_record_config {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * The recording server's URI, the INVITE's target. Required. Not
+     * NUL-terminated.
+     */
+    const char *server;
+    /**
+     * How many bytes of it.
+     */
+    size_t server_len;
+    /**
+     * Where to send the INVITE, as an address and a port, when not
+     * where the recorded call's account sends. Null for there.
+     */
+    const char *destination;
+    /**
+     * How many bytes of it.
+     */
+    size_t destination_len;
+    /**
+     * The transport `destination` is reached over, as
+     * `sipral_call_config_t::transport` names one. Read only with
+     * `destination`.
+     */
+    uint32_t transport;
+    /**
+     * The socket the copy of this end's audio goes from, as an address
+     * and a port, and what the offer names for the stream labelled `1`.
+     * Required: a socket the application bound.
+     */
+    const char *this_end;
+    /**
+     * How many bytes of it.
+     */
+    size_t this_end_len;
+    /**
+     * The same for the far end's audio, labelled `2`. Required, and a
+     * socket of its own.
+     */
+    const char *far_end;
+    /**
+     * How many bytes of it.
+     */
+    size_t far_end_len;
 };
 
 /**
@@ -7012,6 +7745,27 @@ sipral_status_t sipral_call_answer(sipral_handle_t stack, sipral_handle_t call, 
  * `media_address` must be readable for `media_address_len` bytes.
  */
 sipral_status_t sipral_call_answer_media(sipral_handle_t stack, sipral_handle_t call, const char *media_address, size_t media_address_len, uint64_t now_ms);
+
+/**
+ * Answer a call that came in with media this stack describes, from
+ * `config`: `sipral_call_answer_media` with the choices
+ * `sipral_call_ring_media` takes — `media_address`, `srtp`, `codecs`,
+ * `ice`, `text_address` for real-time text, `feedback` for RTP/AVPF
+ * and `focus` for a conference focus. Every other member names
+ * something only a call to place needs, and setting one is
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+ *
+ * On a call `sipral_call_ring_media` already rang, the 183's
+ * description and session stand exactly as `sipral_call_answer_media`
+ * says, and nothing in `config` but `focus` changes them.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_call_config_t` whose `size` member
+ * says how long it is, with every pointer in it readable for the length
+ * beside it.
+ */
+sipral_status_t sipral_call_answer_with(sipral_handle_t stack, sipral_handle_t call, const sipral_call_config_t *config, uint64_t now_ms);
 
 /**
  * Refuse a call that came in, with a response code of your choosing.
@@ -8920,6 +9674,234 @@ sipral_status_t sipral_call_record_json(sipral_handle_t stack, sipral_handle_t c
  * capacity of zero, and `out_len` must point at one `size_t` or be null.
  */
 sipral_status_t sipral_stack_diagnostics_json(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_len);
+
+/**
+ * What a `conference` subscription holds about the conference as a
+ * whole (RFC 4575 §5.5).
+ *
+ * `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that holds no
+ * conference: one to another package, one no document has reached yet,
+ * or one that is not live.
+ *
+ * Safety
+ *
+ * `out_conference` must point at a `sipral_conference_t` whose `size`
+ * member says how long it is.
+ */
+sipral_status_t sipral_subscription_conference(sipral_handle_t stack, sipral_handle_t subscription, sipral_conference_t *out_conference);
+
+/**
+ * One user of the conference, by index, in the order the focus first
+ * named them. The index is stable only until the next
+ * `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`.
+ *
+ * Safety
+ *
+ * `out_user` must point at a `sipral_conference_user_t` whose `size`
+ * member says how long it is.
+ */
+sipral_status_t sipral_subscription_conference_user_at(sipral_handle_t stack, sipral_handle_t subscription, size_t index, sipral_conference_user_t *out_user);
+
+/**
+ * A piece of text about the conference or one of its users, copied into
+ * the caller's buffer the way `sipral_subscription_dialog_text` copies
+ * one: `out_needed` receives the bytes it needs including the NUL, a
+ * buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing
+ * written, and a piece the focus did not send is one byte, the NUL.
+ *
+ * `which` is a sipral_conference_text_t; `index` names the user for the
+ * pieces about one, and is ignored for the others.
+ *
+ * Safety
+ *
+ * `buffer` must be writable for `capacity` bytes, and `out_needed` must
+ * point at one `size_t`.
+ */
+sipral_status_t sipral_subscription_conference_text(sipral_handle_t stack, sipral_handle_t subscription, size_t index, uint32_t which, char *buffer, size_t capacity, size_t *out_needed);
+
+/**
+ * Say, or stop saying, that this end is the focus of a conference the
+ * call belongs to (RFC 4579 §4.2): `isfocus` on the `Contact` of every
+ * request and response the call sends from here on — the answer, for a
+ * call not answered yet, and the next re-INVITE or UPDATE for one that
+ * is up, which is how the far end learns it.
+ *
+ * `focus` is one to say it and zero to stop.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_call_set_focus(sipral_handle_t stack, sipral_handle_t call, uint32_t focus);
+
+/**
+ * The URI of the conference a call belongs to, when its far end said it
+ * is a focus (`isfocus` in its `Contact`, RFC 4579 §4.2), copied into
+ * the caller's buffer as `sipral_subscription_conference_text` copies.
+ *
+ * `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end said nothing of
+ * the kind.
+ *
+ * Safety
+ *
+ * `buffer` must be writable for `capacity` bytes, and `out_needed` must
+ * point at one `size_t`.
+ */
+sipral_status_t sipral_call_conference_uri(sipral_handle_t stack, sipral_handle_t call, char *buffer, size_t capacity, size_t *out_needed);
+
+/**
+ * Subscribe to the conference package of the call's focus (RFC 4579
+ * §3.4), outside the call's dialog, from the call's own account, and
+ * write the subscription's handle. It is kept like any subscription and
+ * outlives the call; `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` says what it
+ * learns.
+ *
+ * `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end did not say it is
+ * a focus.
+ *
+ * Safety
+ *
+ * `out_subscription` must point at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_call_subscribe_conference(sipral_handle_t stack, sipral_handle_t call, sipral_handle_t *out_subscription, uint64_t now_ms);
+
+/**
+ * Publish this account's presence (RFC 3903, RFC 3856 §6.2): a PIDF
+ * document for its address of record, open or closed, with the activity
+ * and the note `presence` gives. The first call publishes it and every
+ * later one modifies the same publication; the stack keeps it refreshed
+ * until sipral_account_unpublish_presence.
+ *
+ * Nothing has happened when this returns: the PUBLISH is in the
+ * transmit queue, and `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with
+ * `SIPRAL_PRESENCE_KIND_PUBLICATION` says what the compositor did with
+ * it.
+ *
+ * Safety
+ *
+ * `presence` must point at a `sipral_presence_t` whose `size` member
+ * says how long it is, with its pointer readable for the length beside
+ * it.
+ */
+sipral_status_t sipral_account_publish_presence(sipral_handle_t stack, sipral_handle_t account, const sipral_presence_t *presence, uint64_t now_ms);
+
+/**
+ * Take this account's published presence away (RFC 3903 §4.5):
+ * `SIPRAL_PUBLICATION_STATE_REMOVED` says when it is gone.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` for an account that has published none.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_account_unpublish_presence(sipral_handle_t stack, sipral_handle_t account, uint64_t now_ms);
+
+/**
+ * Queue text the user typed for the far end, UTF-8.
+ *
+ * It goes in the next transmission interval (300 ms), at no more
+ * characters a second than the far end said it takes, each block sent
+ * twice more as redundancy where both ends agreed `red`. A CR LF, a
+ * lone CR or a lone LF goes as a new line, and BACKSPACE (U+0008) erases
+ * the far end's last character.
+ *
+ * `SIPRAL_STATUS_NOT_NEGOTIATED` on a call that agreed no text stream,
+ * and `SIPRAL_STATUS_EXHAUSTED` when more is waiting unsent than a
+ * stream holds; nothing is queued then, and a later call finds room as
+ * the far end reads.
+ *
+ * Safety
+ *
+ * `text` must be readable for `text_len` bytes.
+ */
+sipral_status_t sipral_media_send_text(sipral_handle_t media, const char *text, size_t text_len);
+
+/**
+ * The next datagram due on the call's text socket.
+ *
+ * A `len` of zero in the packet means nothing is due; call it again at
+ * the deadline `sipral_stack_poll` names, or with every frame of audio.
+ * Send what it writes from the socket at `text_address`, never the
+ * audio one.
+ *
+ * `now_ms` is read as the stack reads it and moves nothing, as with
+ * every media entry point.
+ *
+ * Safety
+ *
+ * `packet` must point at a `sipral_media_packet_t` as
+ * `sipral_media_capture` describes.
+ */
+sipral_status_t sipral_media_poll_text(sipral_handle_t media, uint64_t now_ms, sipral_media_packet_t *packet);
+
+/**
+ * Take a datagram off the call's text socket.
+ *
+ * `out_taken` is written with 1 when it was this call's text, and 0
+ * when it was not: not RTP, another payload type, from somewhere other
+ * than where the stream has latched, or on a call with no text. What it
+ * carried arrives as `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+ *
+ * Safety
+ *
+ * `data` must be readable for `len` bytes, `from` for `from_len`, and
+ * `out_taken` must point at one `uint32_t` or be null.
+ */
+sipral_status_t sipral_media_receive_text(sipral_handle_t media, const uint8_t *data, size_t len, const char *from, size_t from_len, uint64_t now_ms, uint32_t *out_taken);
+
+/**
+ * Record a call to a recording server (RFC 7866), and write the
+ * recording session's handle to `out_recording`.
+ *
+ * The call must be one this stack runs the media of, with its audio
+ * started: `SIPRAL_STATUS_WRONG_STATE` before
+ * `SIPRAL_EVENT_KIND_MEDIA_STARTED`, and for a call already being
+ * recorded to a server. The recording session goes from the recorded
+ * call's account, over a stream transport when the INVITE, which
+ * carries the metadata beside the offer, is too large for UDP.
+ *
+ * Hanging the recording session up with
+ * sipral_call_stop_recording_to or `sipral_call_hangup` stops the
+ * recording; the server hanging it up does the same.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_record_config_t` whose `size` member
+ * says how long it is, with every pointer in it readable for the length
+ * beside it, and `out_recording` at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_call_record_to(sipral_handle_t stack, sipral_handle_t call, const sipral_record_config_t *config, sipral_handle_t *out_recording, uint64_t now_ms);
+
+/**
+ * Stop recording a call to its recording server: the copies stop at
+ * once, and the recording session is hung up.
+ *
+ * `call` is the recorded call, not the recording session.
+ * `SIPRAL_STATUS_WRONG_STATE` for a call nothing records.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_stop_recording_to(sipral_handle_t stack, sipral_handle_t call, uint64_t now_ms);
+
+/**
+ * The next copy of this call's audio for its recording server.
+ *
+ * A `len` of zero in the packet means none is waiting. Otherwise
+ * `out_far_end` says which socket to send it from: 0 for `this_end`,
+ * the copy of what this end sent, and 1 for `far_end`, the copy of what
+ * it received. Collect them with every frame, in a loop to empty: a
+ * copy nobody collects for a second is dropped, the oldest first.
+ *
+ * Safety
+ *
+ * `packet` must point at a `sipral_media_packet_t` as
+ * `sipral_media_capture` describes, and `out_far_end` at one
+ * `uint32_t`.
+ */
+sipral_status_t sipral_media_poll_recording(sipral_handle_t media, sipral_media_packet_t *packet, uint32_t *out_far_end);
 
 /**
  * Start recording the signalling this stack is fed from here on

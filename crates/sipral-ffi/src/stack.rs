@@ -2441,6 +2441,9 @@ pub(crate) mod tests {
         /// What every audio-devices event carried: change, origin, role and
         /// device, in the order they arrived.
         pub(crate) audio: Vec<(u32, u32, u32, u32)>,
+        /// What every conference, text and presence event carried, in the
+        /// order they arrived.
+        pub(crate) protocols: Vec<Told>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -2603,6 +2606,81 @@ pub(crate) mod tests {
         pub(crate) message_len: usize,
     }
 
+    /// What one conference, text or presence event said, copied out while
+    /// its pointers are still the library's to read. Each kind fills the
+    /// members its arm has and leaves the rest at their defaults.
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct Told {
+        pub(crate) kind: Option<SipralEventKind>,
+        pub(crate) account: SipralHandle,
+        pub(crate) call: SipralHandle,
+        pub(crate) subscription: SipralHandle,
+        pub(crate) update: u32,
+        pub(crate) version: u32,
+        pub(crate) users: u32,
+        pub(crate) text: String,
+        pub(crate) missing: u32,
+        pub(crate) presence_kind: u32,
+        pub(crate) basic: u32,
+        pub(crate) activity: u32,
+        pub(crate) entity: String,
+        pub(crate) note: Option<String>,
+        pub(crate) publication_state: u32,
+        pub(crate) failure: u32,
+        pub(crate) status_code: u32,
+        pub(crate) expires_ms: u64,
+        pub(crate) refresh_in_ms: u64,
+    }
+
+    /// The conference, text or presence arm of one event's payload.
+    ///
+    /// # Safety
+    ///
+    /// `event` must be one of the three kinds that fill those arms in.
+    unsafe fn told(event: &SipralEvent) -> Told {
+        let text = |pointer: *const c_char, len: usize| {
+            (!pointer.is_null()).then(|| {
+                let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), len) };
+                String::from_utf8_lossy(bytes).into_owned()
+            })
+        };
+        let mut out = Told {
+            kind: Some(event.kind),
+            account: event.account,
+            call: event.call,
+            ..Told::default()
+        };
+        match event.kind {
+            SipralEventKind::ConferenceChanged => {
+                let payload = unsafe { event.payload.conference };
+                out.subscription = payload.subscription;
+                out.update = payload.update;
+                out.version = payload.version;
+                out.users = payload.users;
+            }
+            SipralEventKind::TextReceived => {
+                let payload = unsafe { event.payload.text };
+                out.text = text(payload.text, payload.text_len).unwrap_or_default();
+                out.missing = payload.missing;
+            }
+            _ => {
+                let payload = unsafe { event.payload.presence };
+                out.subscription = payload.subscription;
+                out.presence_kind = payload.kind;
+                out.basic = payload.basic;
+                out.activity = payload.activity;
+                out.entity = text(payload.entity, payload.entity_len).unwrap_or_default();
+                out.note = text(payload.note, payload.note_len);
+                out.publication_state = payload.publication_state;
+                out.failure = payload.failure;
+                out.status_code = payload.status_code;
+                out.expires_ms = payload.expires_ms;
+                out.refresh_in_ms = payload.refresh_in_ms;
+            }
+        }
+        out
+    }
+
     /// What one `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` said, copied out while its
     /// pointers are still the library's to read.
     #[derive(Clone, Debug)]
@@ -2721,6 +2799,15 @@ pub(crate) mod tests {
         if event.kind == SipralEventKind::Referral {
             let referred = unsafe { referred(event) };
             observed.referrals.push(referred);
+        }
+        if matches!(
+            event.kind,
+            SipralEventKind::ConferenceChanged
+                | SipralEventKind::TextReceived
+                | SipralEventKind::PresenceChanged
+        ) {
+            let told = unsafe { told(event) };
+            observed.protocols.push(told);
         }
         if event.kind == SipralEventKind::AudioDevicesChanged {
             let audio = unsafe { event.payload.audio };

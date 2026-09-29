@@ -93,6 +93,10 @@ pub struct RecordingDatagram<'a> {
     pub from: SocketAddr,
     /// Where the recording server receives that stream.
     pub destination: SocketAddr,
+    /// Whether it is a copy of the far end's audio, the stream labelled `2`,
+    /// rather than this end's: which of the two sockets `from` is, for a
+    /// caller that keeps them by role.
+    pub far_end: bool,
     /// The RTP packet.
     pub payload: &'a [u8],
 }
@@ -319,7 +323,7 @@ pub(crate) struct Tap {
     sockets: [SocketAddr; 2],
     /// The source, sequence number and timestamp each stream starts from.
     numbers: [(u32, u16, u32); 2],
-    queue: VecDeque<(SocketAddr, SocketAddr, Vec<u8>)>,
+    queue: VecDeque<(usize, SocketAddr, SocketAddr, Vec<u8>)>,
     out: Vec<u8>,
 }
 
@@ -413,16 +417,17 @@ impl Tap {
         if self.queue.len() >= QUEUE {
             self.queue.pop_front();
         }
-        self.queue.push_back((from, destination, packet));
+        self.queue.push_back((stream, from, destination, packet));
     }
 
     /// The next copy to send.
     pub(crate) fn poll(&mut self) -> Option<RecordingDatagram<'_>> {
-        let (from, destination, packet) = self.queue.pop_front()?;
+        let (stream, from, destination, packet) = self.queue.pop_front()?;
         self.out = packet;
         Some(RecordingDatagram {
             from,
             destination,
+            far_end: stream == 1,
             payload: &self.out,
         })
     }

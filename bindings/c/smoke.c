@@ -42,7 +42,8 @@
     X(sipral_subscribe_config) X(sipral_watched_dialog) X(sipral_push_echo)   \
     X(sipral_processor_frame)                                                 \
     X(sipral_audio_device) X(sipral_audio_info) X(sipral_audio_transmit)    \
-    X(sipral_log_record)
+    X(sipral_log_record) X(sipral_conference) X(sipral_conference_user)     \
+    X(sipral_presence) X(sipral_record_config)
 
 static int failures;
 
@@ -133,6 +134,7 @@ struct fixture {
     sipral_handle_t account;
     sipral_handle_t call;
     sipral_handle_t subscription;
+    sipral_handle_t conference;
 };
 
 static uint8_t message_buffer[SIPRAL_MESSAGE_BYTES];
@@ -160,6 +162,23 @@ static const char fixture_dialog_info[] =
     "entity=\"sip:dave@example.com\">\n"
     "  <dialog id=\"smoke\"><state>early</state></dialog>\n"
     "</dialog-info>";
+
+/* One conference with one user in it, so that the two structs a conference
+ * subscription is read through have something to describe. */
+static const char fixture_conference_info[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<conference-info xmlns=\"urn:ietf:params:xml:ns:conference-info\" "
+    "entity=\"sip:room@example.com\" state=\"full\" version=\"1\">\n"
+    "  <users><user entity=\"sip:dave@example.com\" state=\"full\">"
+    "<endpoint entity=\"sip:dave@203.0.113.5\"><status>connected</status></endpoint>"
+    "</user></users>\n"
+    "</conference-info>";
+
+/* Where the recording server is, reached on a connection of its own: the
+ * INVITE of a recording session is too large for a datagram. */
+static const char fixture_recorder[] = "203.0.113.9:5060";
+static const char fixture_recorder_local[] = "192.0.2.30:5061";
+static const uint32_t fixture_recorder_transport = 1;
 
 /* A call that comes in with an offer and is answered with media of this
  * stack's own, because two of the structs describe a call's media and a call
@@ -282,6 +301,7 @@ static int fixture_up(struct fixture *fixture)
     fixture->stack = SIPRAL_HANDLE_NONE;
     fixture->account = SIPRAL_HANDLE_NONE;
     fixture->call = SIPRAL_HANDLE_NONE;
+    fixture->conference = SIPRAL_HANDLE_NONE;
     if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
         expect("could not read entropy for the stack the oldest lengths are tried on", 0);
         return 0;
@@ -662,10 +682,11 @@ static sipral_subscribe_config_t fixture_subscribe_config(size_t declared)
     return config;
 }
 
-/* A subscription of the fixture's own, granted and told about one dialog, so
- * that the struct a busy lamp field reads can be handed over at its oldest
- * published length. */
-static int fixture_subscribe(struct fixture *fixture)
+/* A subscription of the fixture's own to `package`, granted and told `body`
+ * as `content_type`, written to `out`. */
+static int fixture_subscribe_to(struct fixture *fixture, const char *package,
+                                const char *content_type, const char *body,
+                                sipral_handle_t *out)
 {
     /* Emptied first, so that the SUBSCRIBE read back below is this one's and
      * not something the stack had already queued: waking up refreshes every
@@ -686,8 +707,10 @@ static int fixture_subscribe(struct fixture *fixture)
         }
     }
     sipral_subscribe_config_t config = fixture_subscribe_config(sizeof config);
-    if (sipral_account_subscribe(fixture->stack, fixture->account, &config,
-                                 &fixture->subscription, 0) != SIPRAL_STATUS_OK) {
+    config.package = package;
+    config.package_len = strlen(package);
+    if (sipral_account_subscribe(fixture->stack, fixture->account, &config, out, 0) !=
+        SIPRAL_STATUS_OK) {
         return 0;
     }
     char subscribe[2048];
@@ -746,12 +769,12 @@ static int fixture_subscribe(struct fixture *fixture)
                       "Call-ID: %s\r\n"
                       "CSeq: 1 NOTIFY\r\n"
                       "Contact: <sip:pbx@203.0.113.5:5060>\r\n"
-                      "Event: dialog\r\n"
+                      "Event: %s\r\n"
                       "Subscription-State: active;expires=600\r\n"
-                      "Content-Type: application/dialog-info+xml\r\n"
+                      "Content-Type: %s\r\n"
                       "Content-Length: %zu\r\n\r\n%s",
-                      fixture_contact, notified, to, from, call_id,
-                      strlen(fixture_dialog_info), fixture_dialog_info);
+                      fixture_contact, notified, to, from, call_id, package, content_type,
+                      strlen(body), body);
     if (length <= 0 || (size_t)length >= sizeof notify) {
         return 0;
     }
@@ -763,13 +786,117 @@ static int fixture_subscribe(struct fixture *fixture)
     }
     sipral_poll_result_t poll = { 0 };
     poll.size = sizeof poll;
-    if (sipral_stack_poll(fixture->stack, 0, &poll) != SIPRAL_STATUS_OK) {
+    return sipral_stack_poll(fixture->stack, 0, &poll) == SIPRAL_STATUS_OK;
+}
+
+/* A subscription of the fixture's own, granted and told about one dialog, so
+ * that the struct a busy lamp field reads can be handed over at its oldest
+ * published length. */
+static int fixture_subscribe(struct fixture *fixture)
+{
+    if (!fixture_subscribe_to(fixture, "dialog", "application/dialog-info+xml",
+                              fixture_dialog_info, &fixture->subscription)) {
         return 0;
     }
     size_t dialogs = 0;
     return sipral_subscription_dialog_count(fixture->stack, fixture->subscription, &dialogs) ==
                SIPRAL_STATUS_OK &&
            dialogs == 1;
+}
+
+/* The same for the conference package, so that the two structs a
+ * conference's picture is read through have one to read. Made again whenever
+ * the one before is no longer live, as the busy lamp's is below. */
+static int fixture_conference(struct fixture *fixture)
+{
+    sipral_conference_t whole = { 0 };
+    whole.size = sizeof whole;
+    if (fixture->conference != SIPRAL_HANDLE_NONE &&
+        sipral_subscription_conference(fixture->stack, fixture->conference, &whole) ==
+            SIPRAL_STATUS_OK) {
+        return 1;
+    }
+    /* a picture that went away went with a suspension, which also stops the
+     * stack sending until it is told it woke */
+    if (fixture->conference != SIPRAL_HANDLE_NONE &&
+        sipral_stack_resumed(fixture->stack, 0) != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+    if (!fixture_subscribe_to(fixture, "conference", "application/conference-info+xml",
+                              fixture_conference_info, &fixture->conference)) {
+        return 0;
+    }
+    return sipral_subscription_conference(fixture->stack, fixture->conference, &whole) ==
+               SIPRAL_STATUS_OK &&
+           whole.users == 1;
+}
+
+static sipral_status_t conference_at(struct fixture *fixture, size_t declared)
+{
+    if (!fixture_conference(fixture)) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_conference_t whole = { 0 };
+    whole.size = declared;
+    return sipral_subscription_conference(fixture->stack, fixture->conference, &whole);
+}
+
+static sipral_status_t conference_user_at(struct fixture *fixture, size_t declared)
+{
+    if (!fixture_conference(fixture)) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_conference_user_t user = { 0 };
+    user.size = declared;
+    return sipral_subscription_conference_user_at(fixture->stack, fixture->conference, 0, &user);
+}
+
+/* Published open, with an activity and a note: the PUBLISH is queued, and
+ * nobody answers it here. */
+static sipral_status_t presence_at(struct fixture *fixture, size_t declared)
+{
+    static const char note[] = "smoke";
+    sipral_presence_t presence = { 0 };
+    presence.size = declared;
+    presence.basic = SIPRAL_BASIC_OPEN;
+    presence.activity = SIPRAL_ACTIVITY_ON_THE_PHONE;
+    presence.note = note;
+    presence.note_len = strlen(note);
+    return sipral_account_publish_presence(fixture->stack, fixture->account, &presence, 0);
+}
+
+/* The fixture's call recorded, which a call can be once: the pinned length
+ * is tried first and places the recording session, and the one byte short
+ * of it is refused before anything is looked at. */
+static sipral_status_t record_config_at(struct fixture *fixture, size_t declared)
+{
+    static int connected;
+    if (!connected) {
+        if (sipral_stack_transport_bind(fixture->stack, fixture_recorder_transport,
+                                        SIPRAL_TRANSPORT_TCP, fixture_recorder_local,
+                                        strlen(fixture_recorder_local), fixture_recorder,
+                                        strlen(fixture_recorder), 0,
+                                        NULL) != SIPRAL_STATUS_OK) {
+            return SIPRAL_STATUS_WRONG_STATE;
+        }
+        connected = 1;
+    }
+    static const char server[] = "sip:srs@example.com";
+    static const char this_end[] = "192.0.2.30:40010";
+    static const char far_end[] = "192.0.2.30:40012";
+    sipral_record_config_t config = { 0 };
+    config.size = declared;
+    config.server = server;
+    config.server_len = strlen(server);
+    config.destination = fixture_recorder;
+    config.destination_len = strlen(fixture_recorder);
+    config.transport = fixture_recorder_transport;
+    config.this_end = this_end;
+    config.this_end_len = strlen(this_end);
+    config.far_end = far_end;
+    config.far_end_len = strlen(far_end);
+    sipral_handle_t recording = SIPRAL_HANDLE_NONE;
+    return sipral_call_record_to(fixture->stack, fixture->call, &config, &recording, 0);
 }
 
 static sipral_status_t subscribe_config_at(struct fixture *fixture, size_t declared)
@@ -935,6 +1062,10 @@ static const struct {
     { "sipral_push_echo_t", push_echo_at },
     { "sipral_audio_device_t", audio_device_at },
     { "sipral_audio_info_t", audio_info_at },
+    { "sipral_conference_t", conference_at },
+    { "sipral_conference_user_t", conference_user_at },
+    { "sipral_presence_t", presence_at },
+    { "sipral_record_config_t", record_config_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])

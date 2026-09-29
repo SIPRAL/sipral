@@ -168,6 +168,25 @@ constants! {
     /// always carries the redaction both depend on; a bit so that a binding
     /// asks before it shows a "send diagnostics" control.
     pub const SIPRAL_FEATURE_LOGGING: u32 = 1 << 14;
+    /// See [`SIPRAL_FEATURE_DTMF`]. A call recorded to a recording server
+    /// (SIPREC, RFC 7866): `sipral_call_record_to` places the recording
+    /// session, and `sipral_media_poll_recording` hands out the copies of
+    /// the call's audio.
+    pub const SIPRAL_FEATURE_SIPREC: u32 = 1 << 20;
+    /// See [`SIPRAL_FEATURE_DTMF`]. The conference package kept for the
+    /// application (RFC 4575, `sipral_subscription_conference`), a focus
+    /// known by its `isfocus` (RFC 4579, `sipral_call_conference_uri`), and
+    /// presence published (RFC 3903, `sipral_account_publish_presence`) and
+    /// watched (RFC 3856, `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`).
+    pub const SIPRAL_FEATURE_CONFERENCE: u32 = 1 << 21;
+    /// See [`SIPRAL_FEATURE_DTMF`]. Real-time text in a call (RFC 4103):
+    /// `text_address` on the call's configuration, `sipral_media_send_text`
+    /// and `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+    pub const SIPRAL_FEATURE_REALTIME_TEXT: u32 = 1 << 22;
+    /// See [`SIPRAL_FEATURE_DTMF`]. RTP/AVPF with Generic NACKs and
+    /// reduced-size RTCP (RFC 4585, RFC 5506): `feedback` on the call's
+    /// configuration, and what it agreed in `sipral_media_info_t`.
+    pub const SIPRAL_FEATURE_RTCP_FEEDBACK: u32 = 1 << 23;
 }
 
 record! {
@@ -292,6 +311,18 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.logging {
         features |= SIPRAL_FEATURE_LOGGING;
     }
+    if capabilities.siprec {
+        features |= SIPRAL_FEATURE_SIPREC;
+    }
+    if capabilities.conference_and_presence {
+        features |= SIPRAL_FEATURE_CONFERENCE;
+    }
+    if capabilities.realtime_text {
+        features |= SIPRAL_FEATURE_REALTIME_TEXT;
+    }
+    if capabilities.rtcp_feedback {
+        features |= SIPRAL_FEATURE_RTCP_FEEDBACK;
+    }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -325,12 +356,13 @@ entry! {
 mod tests {
     use super::{
         SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_CALL_READDRESS, SIPRAL_FEATURE_CALLER_IDENTITY,
-        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_LIMITS, SIPRAL_FEATURE_LOGGING,
-        SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING,
-        SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS,
-        SIPRAL_FEATURE_TURN_STREAM, SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS,
-        SIPRAL_TRANSPORT_BIT_UDP, SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS,
-        SipralCapabilities, sipral_capabilities,
+        SIPRAL_FEATURE_CONFERENCE, SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_LIMITS,
+        SIPRAL_FEATURE_LOGGING, SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS,
+        SIPRAL_FEATURE_REALTIME_TEXT, SIPRAL_FEATURE_RECORDING, SIPRAL_FEATURE_RTCP_FEEDBACK,
+        SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SIPREC, SIPRAL_FEATURE_SRTP,
+        SIPRAL_FEATURE_SUBSCRIPTIONS, SIPRAL_FEATURE_TURN_STREAM, SIPRAL_TRANSPORT_BIT_TCP,
+        SIPRAL_TRANSPORT_BIT_TLS, SIPRAL_TRANSPORT_BIT_UDP, SIPRAL_TRANSPORT_BIT_WS,
+        SIPRAL_TRANSPORT_BIT_WSS, SipralCapabilities, sipral_capabilities,
     };
     use crate::error::last_error_text;
     use crate::status::SipralStatus;
@@ -413,6 +445,28 @@ mod tests {
             Capabilities::of_this_build().opus,
             "the bit is the facade's answer and not a second opinion"
         );
+    }
+
+    /// The four protocol bits of ABI 0.31 are the facade's answers, at the
+    /// numbers they were published at.
+    #[test]
+    fn the_protocol_bits_read_what_the_facade_says() {
+        let features = read().features;
+        let facade = Capabilities::of_this_build();
+        for (bit, number, present) in [
+            (SIPRAL_FEATURE_SIPREC, 20, facade.siprec),
+            (
+                SIPRAL_FEATURE_CONFERENCE,
+                21,
+                facade.conference_and_presence,
+            ),
+            (SIPRAL_FEATURE_REALTIME_TEXT, 22, facade.realtime_text),
+            (SIPRAL_FEATURE_RTCP_FEEDBACK, 23, facade.rtcp_feedback),
+        ] {
+            assert_eq!(bit, 1 << number);
+            assert_eq!(features & bit != 0, present, "bit {number}");
+            assert!(present, "bit {number} is in every build");
+        }
     }
 
     #[test]

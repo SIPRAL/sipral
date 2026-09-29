@@ -51,6 +51,8 @@ mod moved;
 mod pair;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 mod pipewire;
+#[cfg(test)]
+mod protocols;
 mod quality;
 mod referral;
 mod scale;

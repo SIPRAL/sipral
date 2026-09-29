@@ -2371,8 +2371,9 @@ marker and timing, under a source and a numbering of each stream's own, offset
 once so that loss, reordering and pauses in the original stay where they were.
 Named events and comfort noise are not offered to the server and are not
 copied. `MediaSession::poll_recording` (or `MediaEngine::poll_recording` for
-every call) hands out each copy with the socket to send it from and the
-server's address for its stream; one nobody collects for a second is dropped,
+every call) hands out each copy with the socket to send it from, whether it
+is the far end's (`RecordingDatagram::far_end`) and the server's address for
+its stream; one nobody collects for a second is dropped,
 the oldest first. A stream the server refused gets nothing.
 
 **The recording follows the call.** A hold changes who sends, and the server
