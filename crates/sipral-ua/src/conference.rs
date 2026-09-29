@@ -192,6 +192,9 @@ pub(crate) fn read_tree(body: &[u8], limits: TreeLimits) -> Result<XmlNode<'_>, 
     if body.len() > limits.bytes {
         return Err(DialogInfoError::TooLarge("document"));
     }
+    // XML 1.0 §4.3.3: a UTF-8 entity may begin with a byte order mark, which
+    // is not character data
+    let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
     let mut reader = Reader::new(body);
     let mut open: Vec<XmlNode<'_>> = Vec::new();
     let mut root: Option<XmlNode<'_>> = None;
@@ -1901,6 +1904,21 @@ version=\"2\"><users state=\"deleted\"/></conference-info>";
             .and_then(|description| description.subject)
             .expect("a subject");
         assert_eq!(subject.len(), 4_000);
+    }
+
+    #[test]
+    fn a_document_that_starts_with_a_byte_order_mark_is_read() {
+        // XML 1.0 §4.3.3 and Appendix F: a UTF-8 entity may begin with one,
+        // and it is not character data
+        let body = format!("\u{feff}{FULL}");
+        assert_eq!(ConferenceInfo::parse(body.as_bytes()), Ok(document(FULL)));
+        assert_eq!(
+            ConferenceInfo::parse(format!("\u{feff}\u{feff}{FULL}").as_bytes()),
+            Err(ConferenceInfoError::Malformed(
+                "text outside the root element"
+            )),
+            "one, and only first"
+        );
     }
 
     #[test]
