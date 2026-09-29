@@ -534,16 +534,18 @@ impl Pump {
                 break;
             }
             let now = (self.now)();
+            let transmit = &mut self.transmit;
             for call in &mut self.calls {
                 call.up.push(&self.captured);
                 while call.up.take(&mut call.frame) {
-                    match call.audio.capture(&call.frame, now) {
-                        Ok(Some(packet)) => (self.transmit)(call.id, packet),
-                        Ok(None) => {}
-                        Err(CallGone::Ended) => {
-                            ended.push(call.id);
-                            break;
-                        }
+                    let captured =
+                        call.audio
+                            .capture_each(call.id, &call.frame, now, &mut |id, packet| {
+                                transmit(id, packet);
+                            });
+                    if captured.is_err() {
+                        ended.push(call.id);
+                        break;
                     }
                 }
             }

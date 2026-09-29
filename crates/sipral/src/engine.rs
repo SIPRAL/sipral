@@ -4603,6 +4603,27 @@ impl MediaEngine {
         self.joins.get(&call).copied()
     }
 
+    /// A local conference for this engine's calls: any number of them, each
+    /// on its own codec, with or without this end —
+    /// [`LocalConference`](crate::LocalConference) says what it does and how
+    /// it is driven. The engine keeps nothing of it; the serial numbers of
+    /// its Ogg recordings are drawn from this engine's own randomness, as a
+    /// call's are.
+    ///
+    /// # Errors
+    /// Those of [`LocalConference::new`](crate::LocalConference::new).
+    pub fn local_conference(
+        &mut self,
+        config: crate::LocalConferenceConfig,
+    ) -> Result<crate::LocalConference, MediaError> {
+        let block = self.keys.block();
+        let mut seed = [0_u8; 8];
+        for (to, from) in seed.iter_mut().zip(block) {
+            *to = from;
+        }
+        crate::LocalConference::new(config, u64::from_le_bytes(seed))
+    }
+
     /// Join two active calls into a local conference of three: from here on,
     /// each call's far end hears the other's far end and this end's own
     /// microphone, mixed — [`MediaEngine::mix`] is what drives one frame of

@@ -12,6 +12,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A local conference of any number of calls, `sipral::LocalConference`.** `MediaEngine::local_conference` makes one over `sipral_media::nway`: calls join and leave at any time, each on its own codec, rate and frame (8 to 48 kHz, 10 to 60 ms), with or without this end's microphone and speaker as a member, and each hears everybody but itself. Per member, a mute and a gain each way; a member on hold leaves the others talking; a call whose codec moves is seated again at its new rate with its controls; a call that ends leaves by itself. Who joined, who left and why, and who is talking (loudest first) are reported as `ConferenceChange`s, and the whole mix is recorded through the call recorder in WAV or Ogg Opus. `sipral-audio`'s `CallAudio::capture_each` lets one entry the pump carries name each packet after a call of its own.
 - **Conferences, presence, real-time text, RTCP feedback and SIPREC in the .NET and Python layers:** subscriptions (`Account.Subscribe`/`subscribe`) with the conference picture read whole, presence watched and published, a call's text stream sent and read, AVPF asked for, a focus named and a call recorded to a recording server, with L16 proved as a codec.
 - **STIR/SHAKEN in calls.** An account given a P-256 key and the URL of its
   certificate signs every call it places (RFC 8224 §6.1, full-form PASSporT

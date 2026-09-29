@@ -250,6 +250,10 @@ pub struct Capabilities {
     /// Whether a call can negotiate RTP/AVPF and reduced-size RTCP (RFC
     /// 4585, RFC 5506): [`crate::CodecCatalog::with_feedback`].
     pub rtcp_feedback: bool,
+    /// Whether any number of calls, each on its own codec and rate, can be
+    /// mixed into one conference with or without this end:
+    /// [`crate::LocalConference`].
+    pub local_conference: bool,
 }
 
 impl Capabilities {
@@ -286,6 +290,7 @@ impl Capabilities {
             conference_and_presence: true,
             realtime_text: true,
             rtcp_feedback: true,
+            local_conference: true,
         }
     }
 }

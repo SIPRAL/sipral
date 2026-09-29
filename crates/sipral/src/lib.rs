@@ -30,7 +30,9 @@
 //!   [`MediaEngine::join`] pairs two of its own calls into a conference of
 //!   three with this end, [`MediaEngine::mix`] drives a frame of it, and
 //!   [`mix_two`] is the arithmetic either one or `sipral-ffi`'s own media
-//!   handles can call it through.
+//!   handles can call it through. [`LocalConference`] is the general case:
+//!   any number of calls, each at its own rate and on its own codec, with or
+//!   without this end, each hearing everybody but itself.
 //! - [`SessionShare`] — one call's media, for a thread that carries its audio
 //!   while another runs signalling. Each session has its own lock, so neither
 //!   thread waits on the other for longer than a frame.
@@ -159,6 +161,9 @@ mod headless;
 mod ice;
 mod inband;
 mod join;
+mod local_conference;
+#[cfg(test)]
+mod local_conference_tests;
 mod keying;
 #[cfg(feature = "redaction")]
 mod log;
@@ -211,6 +216,10 @@ pub use inband::{AmdConfig, AmdReason, AmdVerdict, BeepConfig, CallProgress, Con
 pub use inband::{DtmfDetection, IN_BAND_DIGIT_HOLD, ProgressConfig, ProgressDetection};
 pub use inband::{ProgressTone, ToneRegion};
 pub use join::{MixOutcome, mix_two};
+pub use local_conference::{
+    ConferenceChange, ConferenceDirection, ConferencePacket, Departure, Gain, LocalConference,
+    LocalConferenceConfig, MAX_CONFERENCE_MEMBERS, Member,
+};
 pub use keying::{AccountSrtp, SrtpPolicy};
 #[cfg(feature = "redaction")]
 pub use log::{BURST, Log, LogLevel, LogRecord, LogSink, PER_SECOND, QUEUE_CEILING, Travel};

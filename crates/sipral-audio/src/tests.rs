@@ -712,6 +712,75 @@ fn the_microphone_reaches_every_call_at_its_own_rate_and_the_packets_go_out() {
     );
 }
 
+/// Several streams carried as one entry — a local conference — each
+/// name their packets after a call of their own, and every packet reaches
+/// the transmit function under the name it was given rather than the
+/// entry's.
+#[test]
+fn an_entry_that_carries_several_calls_names_each_packet_after_its_own() {
+    struct Bridge;
+
+    impl crate::CallAudio for Bridge {
+        fn sample_rate(&self) -> Result<u32, crate::CallGone> {
+            Ok(16_000)
+        }
+
+        fn frame_samples(&self) -> Result<usize, crate::CallGone> {
+            Ok(320)
+        }
+
+        fn capture(
+            &mut self,
+            _frame: &[i16],
+            _now: Instant,
+        ) -> Result<Option<Outgoing>, crate::CallGone> {
+            Ok(None)
+        }
+
+        fn capture_each(
+            &mut self,
+            _own: CallId,
+            frame: &[i16],
+            _now: Instant,
+            send: &mut dyn FnMut(CallId, Outgoing),
+        ) -> Result<(), crate::CallGone> {
+            for member in [11, 12] {
+                send(
+                    member,
+                    Outgoing {
+                        destination: destination(),
+                        payload: vec![u8::try_from(frame.len() / 16).unwrap_or(0)],
+                        transport: crate::Transport::Udp,
+                    },
+                );
+            }
+            Ok(())
+        }
+
+        fn playback(&mut self, out: &mut [i16]) -> Result<(), crate::CallGone> {
+            out.fill(0);
+            Ok(())
+        }
+    }
+
+    let fake = a_desk();
+    let (mut engine, sent) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    engine.attach(7, Box::new(Bridge)).unwrap();
+    wait_ticks(&engine, 1);
+    for _ in 0..4 {
+        fake.speak_into("builtin-mic", &[1_000; 960]);
+    }
+    wait_ticks(&engine, 4);
+    let sent = sent.lock().unwrap();
+    assert!(
+        sent.iter().any(|(id, _)| *id == 11) && sent.iter().any(|(id, _)| *id == 12),
+        "{sent:?}"
+    );
+    assert!(sent.iter().all(|(id, _)| *id != 7), "{sent:?}");
+    assert!(sent.iter().all(|(_, packet)| packet.payload == [20]));
+}
+
 /// Two calls' playback are summed into the loudspeaker.
 #[test]
 fn every_call_is_heard_on_the_speaker_at_once() {
