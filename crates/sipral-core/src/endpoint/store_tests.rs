@@ -748,6 +748,43 @@ fn a_call_nothing_answers_gives_its_room_back_at_timer_b_and_is_counted() {
 }
 
 #[test]
+fn a_call_answered_and_hung_up_gives_its_room_back_before_its_invite_ends() {
+    // RFC 6026 keeps the INVITE's transaction for 64·T1 after the 2xx, and a
+    // call over before then is over: it does not go on holding a place under
+    // the ceiling for the rest of those 32 seconds
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint.config.max_dialogs = 1;
+    let invite = placed(&mut endpoint, t0);
+    deliver(
+        &mut endpoint,
+        &super::tests::respond_to(&invite, 200, "OK", Some("desk")),
+        t0,
+    );
+    let dialog = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Established { dialog, .. } => Some(dialog),
+            _ => None,
+        })
+        .expect("the call is up");
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    endpoint.bye(dialog, t0).expect("the BYE goes");
+    let bye = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &super::tests::respond_to(&bye, 200, "OK", None),
+        t0,
+    );
+    events(&mut endpoint);
+    assert_eq!(endpoint.in_flight().1, 0, "the dialog is gone");
+    endpoint
+        .invite(&super::tests::invite_request(), t0)
+        .expect("the call that ended left its room free");
+}
+
+#[test]
 fn a_stranger_is_refused_503_while_the_calls_this_end_placed_fill_the_ceiling() {
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);

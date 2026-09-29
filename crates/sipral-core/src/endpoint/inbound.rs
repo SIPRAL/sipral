@@ -500,6 +500,29 @@ impl Endpoint {
         }
     }
 
+    /// Whether a response to an INVITE this end sent may open a branch its
+    /// set does not have yet.
+    ///
+    /// The call the caller placed always opens: the first dialog of an
+    /// INVITE this end sent, and the first 2xx to it. Those are not always
+    /// one branch, since a forking proxy rings the desk phone and the
+    /// mobile and the mobile answers. Every branch past them is the far
+    /// end's to multiply, and opens only while max_dialogs has room: a
+    /// provisional that finds none is reported without a dialog, and a 2xx
+    /// is left unacknowledged for its sender to give up with a BYE
+    /// (§13.3.1.4). Acknowledging and hanging it up here instead would turn
+    /// every forged 2xx into two requests and their retransmissions, sent
+    /// to a Contact the sender chose.
+    fn fork_has_room(&self, set: Raw, status: StatusCode) -> bool {
+        self.dialogs.set(set).is_some_and(|branches| {
+            branches.is_empty()
+                || (status.is_success()
+                    && !branches
+                        .dialogs()
+                        .any(|dialog| dialog.state() == DialogState::Confirmed))
+        }) || self.dialogs_held() < self.config.max_dialogs
+    }
+
     /// Offer a response to the dialogs the INVITE has produced.
     fn on_fork(&mut self, id: TransactionId<InviteClient>, response: &RawMessage<'_>, flow: Flow) {
         let Some(status) = response.status() else {
@@ -508,23 +531,7 @@ impl Endpoint {
         let Some(set) = self.dialogs.set_for(id) else {
             return;
         };
-        // The call the caller placed always opens: the first dialog of an
-        // INVITE this end sent, and the first 2xx to it. Those are not always
-        // one branch, since a forking proxy rings the desk phone and the
-        // mobile and the mobile answers. Every branch past them is the far
-        // end's to multiply, and opens only while max_dialogs has room: a
-        // provisional that finds none is reported without a dialog, and a 2xx
-        // is left unacknowledged for its sender to give up with a BYE
-        // (§13.3.1.4). Acknowledging and hanging it up here instead would turn
-        // every forged 2xx into two requests and their retransmissions, sent
-        // to a Contact the sender chose.
-        let room = self.dialogs.set(set).is_some_and(|branches| {
-            branches.is_empty()
-                || (status.is_success()
-                    && !branches
-                        .dialogs()
-                        .any(|dialog| dialog.state() == DialogState::Confirmed))
-        }) || self.dialogs_held() < self.config.max_dialogs;
+        let room = self.fork_has_room(set, status);
         let Some(branches) = self.dialogs.set_mut(set) else {
             return;
         };
@@ -541,6 +548,7 @@ impl Endpoint {
                     self.ask_to_resolve(dialog);
                 }
                 if status.is_success() {
+                    self.dialogs.answered(set);
                     // 13.2.2.4: "The ACK MUST be passed to the client
                     // transport every time a retransmission of the 2xx final
                     // response that triggered the ACK arrives." The caller

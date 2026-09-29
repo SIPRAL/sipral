@@ -92,6 +92,10 @@ struct Branches {
     /// A final response other than a 2xx has arrived: whatever the set still
     /// holds is ending, and nothing will open it again.
     refused: bool,
+    /// A 2xx has come for one of its dialogs: the call it placed was
+    /// answered, and once the dialogs it holds have ended the call is over,
+    /// however long RFC 6026's timer M keeps the INVITE's transaction.
+    answered: bool,
 }
 
 /// Every dialog of one endpoint.
@@ -139,6 +143,7 @@ impl Dialogs {
             live: 0,
             awaiting: true,
             refused: false,
+            answered: false,
         });
         self.by_invite.insert(invite, raw);
         self.unopened += 1;
@@ -411,6 +416,14 @@ impl Dialogs {
         }
     }
 
+    /// A 2xx answered the INVITE a set follows: when its dialogs end, the
+    /// call it placed is over and stops counting against `max_dialogs`.
+    pub(crate) fn answered(&mut self, set: Raw) {
+        if let Some(branches) = self.sets.get_mut(set) {
+            branches.answered = true;
+        }
+    }
+
     /// Forget a dialog, and the set with it if that was the last one and its
     /// transaction has already finished.
     pub(crate) fn forget(&mut self, id: DialogId) -> Option<DialogKey> {
@@ -423,9 +436,10 @@ impl Dialogs {
             if branches.live == 0 {
                 if branches.invite.is_none() {
                     self.sets.remove(set);
-                } else if !branches.refused {
-                    // the INVITE is still running, and whatever answers it
-                    // next opens a dialog again
+                } else if !branches.refused && !branches.answered {
+                    // the INVITE is still running with nothing but early
+                    // dialogs to show for it, and whatever answers it next
+                    // opens a dialog again
                     branches.awaiting = true;
                     self.unopened += 1;
                 }
