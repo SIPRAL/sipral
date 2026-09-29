@@ -81,7 +81,9 @@ took the `sip:` URI one when they were run.
 
 ## The lab's TLS endpoint
 
-The lab has one TLS listener: coturn's, on 5349, in `scripts/lab.sh turn`
+The lab has two kinds of TLS listener. Asterisk's, for SIP, are described
+under "SIP over TLS in the four layers" below (`scripts/lab.sh tls`). The
+other is coturn's, on 5349, in `scripts/lab.sh turn`
 (`interop/turn/compose.override.yaml`). Its certificate is made for each run
 by `turn_certificate` in `scripts/lab.sh`: self-signed, P-256, for
 `turn.lab.sipral.test` as both CN and `subjectAltName`, with `serverAuth`.
@@ -1014,6 +1016,32 @@ How each platform's error becomes a `SipralTlsFailure`:
 
 Swift has TLS only where Network.framework is: on Linux a stack asked for
 `.tls` throws `.notSupported`, and `.tcp` works there on a plain socket.
+
+**In the lab.** `scripts/lab.sh tls` gives Asterisk three TLS listeners for
+the step alone (`interop/tls/`), each with a certificate a lab authority
+made for the run signed: 5061 for `asterisk.lab.sipral.test`, 5062 for
+`wrong.lab.sipral.test`, 5063 for the right name, expired in 2020. The
+Python, Kotlin and .NET agents are each run against 5061 trusting the
+platform's authorities alone, then against 5062 and 5063 trusting only the
+lab's, and then against 5061 trusting only the lab's, where they register
+and Asterisk calls them on that connection. What they printed, one run on
+the lab VM:
+
+```text
+probe 5061: transport failed error=connection_reset tls=untrusted: CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate
+probe 5062: transport failed error=connection_reset tls=name_mismatch: CERTIFICATE_VERIFY_FAILED: Hostname mismatch, certificate is not valid for 'asterisk.lab.sipral.test'.
+probe 5063: transport failed error=connection_reset tls=expired: CERTIFICATE_VERIFY_FAILED: certificate has expired
+```
+
+(Python). Kotlin said `unable to find valid certification path to
+requested target`, `no subjectAltName of the certificate names
+asterisk.lab.sipral.test` and `NotAfter: Thu Jan 02 00:00:00 UTC 2020`;
+.NET said `RemoteCertificateChainErrors; unable to get local issuer
+certificate`, `RemoteCertificateNameMismatch` and
+`RemoteCertificateChainErrors; certificate has expired`. Each then registered over TLS, Asterisk's
+contact for it read `;transport=tls`, and the call Asterisk placed to it
+was answered and carried the dialplan's `#` and audio both ways. The Swift
+agent did the same over TCP.
 
 ## What the application sees when TLS fails
 
