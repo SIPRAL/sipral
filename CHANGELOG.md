@@ -12,6 +12,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **An N-way conference mixer, `sipral_media::nway`.** Participants join
+  and leave at any point, each at 8, 16, 32 or 48 kHz with its own frame,
+  and each hears everybody but itself, resampled to its own rate. The mix
+  is formed on a 20 ms tick at 48 kHz, sans I/O, and allocates nothing
+  after a participant has joined. Per participant: gain in and out, mute in
+  and out, and listen-only. A soft limiter (1 ms attack, 80 ms release, a
+  ceiling at three quarters of full scale) keeps any number of loud legs off
+  the rail; an energy detector with hysteresis lists who is talking,
+  loudest first; and a tap records the whole mix at a chosen rate.
 - **The four idiomatic layers carry the rest of ABI 0.30.** Each stack
   class reads its counters (`counters()` / `Counters()`, the retransmission
   and limit counters among them), replaces its STUN servers while running
