@@ -47,6 +47,9 @@ allow = ["AGPL-3.0-only"]
 name = "sipral-nat"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]
+name = "sipral-stir"
+allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
 name = "sipral-dtls"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]

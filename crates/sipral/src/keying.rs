@@ -220,9 +220,19 @@ impl SrtpPolicy {
     /// `other` refuses, this refuses too. A call placed on an account may
     /// name its own policy, and one that would carry audio the account's
     /// would not is refused as the account's security policy (8.10).
+    ///
+    /// [`SrtpPolicy::DtlsRequired`] refuses one thing more than the other
+    /// policies that require encryption: keys that travelled in the body of
+    /// a message. So nothing but itself is at least as strict as it —
+    /// [`SrtpPolicy::Required`] takes an SDES answer, and
+    /// [`SrtpPolicy::DtlsOrSdes`] falls back to one.
     #[must_use]
     pub const fn at_least(self, other: Self) -> bool {
-        !other.requires() || self.requires()
+        match other {
+            #[cfg(feature = "dtls")]
+            Self::DtlsRequired => matches!(self, Self::DtlsRequired),
+            _ => !other.requires() || self.requires(),
+        }
     }
 }
 
@@ -623,6 +633,34 @@ mod tests {
         assert!(!SrtpPolicy::NotOffered.offers());
         assert!(SrtpPolicy::Offered.offers());
         assert!(SrtpPolicy::Required.offers());
+    }
+
+    /// A call may ask for more than its account and never for less: not
+    /// for audio in the clear where the account requires SRTP, and not for
+    /// keys in the body where the account requires the handshake.
+    #[test]
+    fn a_policy_is_at_least_as_strict_as_one_that_refuses_no_more_than_it() {
+        use SrtpPolicy::{NotOffered, Offered, Required};
+        assert!(Required.at_least(Required));
+        assert!(Required.at_least(Offered));
+        assert!(Required.at_least(NotOffered));
+        assert!(Offered.at_least(NotOffered));
+        assert!(NotOffered.at_least(Offered));
+        assert!(!Offered.at_least(Required));
+        assert!(!NotOffered.at_least(Required));
+        #[cfg(feature = "dtls")]
+        {
+            use SrtpPolicy::{DtlsOffered, DtlsOrSdes, DtlsRequired};
+            assert!(DtlsRequired.at_least(DtlsRequired));
+            assert!(DtlsRequired.at_least(Required));
+            assert!(DtlsRequired.at_least(DtlsOrSdes));
+            assert!(DtlsOrSdes.at_least(Required));
+            assert!(Required.at_least(DtlsOrSdes));
+            assert!(!Required.at_least(DtlsRequired), "an SDES answer is taken");
+            assert!(!DtlsOrSdes.at_least(DtlsRequired), "it falls back to one");
+            assert!(!DtlsOffered.at_least(DtlsRequired));
+            assert!(!DtlsOffered.at_least(Required));
+        }
     }
 
     #[test]

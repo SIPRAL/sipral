@@ -313,11 +313,15 @@ impl UserAgent {
                     .as_ref()
                     .map_or(DEFAULT_CERTIFICATE_WAIT, |config| config.certificate_wait);
                 let url = Box::from(pending.certificate_url());
+                // a wait too long for the clock to add is the default one
+                let deadline = now
+                    .checked_add(wait)
+                    .unwrap_or_else(|| now + DEFAULT_CERTIFICATE_WAIT);
                 self.stir.waiting.insert(
                     call,
                     Waiting {
                         pending: *pending,
-                        deadline: now + wait,
+                        deadline,
                         held,
                     },
                 );
@@ -738,19 +742,24 @@ pub(crate) fn http_date(unix: u64) -> String {
 
 /// The time a `Date` header field names, as seconds since the Unix epoch;
 /// `None` for anything but the `rfc1123-date` RFC 3261 §25.1 allows.
+///
+/// Each number is held to the digits the grammar gives it — `2DIGIT` for
+/// the day and the three fields of the time, `4DIGIT` for the year — which
+/// is also what keeps the arithmetic below inside a `u64` whatever a
+/// request says: the header field is the far end's.
 pub(crate) fn date_of(value: &[u8]) -> Option<u64> {
     let text = std::str::from_utf8(value).ok()?.trim();
     let (_weekday, rest) = text.split_once(", ")?;
     let mut parts = rest.split(' ');
-    let day: u64 = parts.next()?.parse().ok()?;
+    let day = digits_of(parts.next()?, 2)?;
     let month_name = parts.next()?;
     let month = MONTHS.iter().position(|name| *name == month_name)?;
-    let year: u64 = parts.next()?.parse().ok()?;
+    let year = digits_of(parts.next()?, 4)?;
     let clock = parts.next()?;
     if parts.next()? != "GMT" || parts.next().is_some() {
         return None;
     }
-    let mut fields = clock.split(':').map(|field| field.parse::<u64>().ok());
+    let mut fields = clock.split(':').map(|field| digits_of(field, 2));
     let (hour, minute, second) = (fields.next()??, fields.next()??, fields.next()??);
     if fields.next().is_some()
         || hour > 23
@@ -763,6 +772,13 @@ pub(crate) fn date_of(value: &[u8]) -> Option<u64> {
     let month = u64::try_from(month).ok()? + 1;
     let days = days_from_civil(year, month, day)?;
     Some(days * 86_400 + hour * 3600 + minute * 60 + second)
+}
+
+/// A field of exactly `count` ASCII digits, as a number.
+fn digits_of(field: &str, count: usize) -> Option<u64> {
+    (field.len() == count && field.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| field.parse().ok())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -787,6 +803,28 @@ mod tests {
         assert_eq!(date_of(b"Sat, 13 Nov 2010 23:29:00 UTC"), None);
         assert_eq!(date_of(b"Sat, 13 Foo 2010 23:29:00 GMT"), None);
         assert_eq!(date_of(b"Sat, 13 Nov 2010 24:29:00 GMT"), None);
+    }
+
+    /// The header field is the far end's: a year, day or time field wider
+    /// than RFC 3261 §25.1's `4DIGIT` and `2DIGIT` is refused rather than
+    /// multiplied past what a `u64` holds.
+    #[test]
+    fn a_date_with_a_field_too_wide_for_the_grammar_is_not_a_date() {
+        for bad in [
+            &b"Sat, 13 Nov 18446744073709551615 23:29:00 GMT"[..],
+            b"Sat, 13 Nov 99999999999999999999 23:29:00 GMT",
+            b"Sat, 13 Nov 02010 23:29:00 GMT",
+            b"Sat, 013 Nov 2010 23:29:00 GMT",
+            b"Sat, 13 Nov 2010 023:29:00 GMT",
+            b"Sat, 13 Nov 2010 23:29:99999999999999999999 GMT",
+            b"Sat, +3 Nov 2010 23:29:00 GMT",
+        ] {
+            assert_eq!(date_of(bad), None, "{}", String::from_utf8_lossy(bad));
+        }
+        assert_eq!(
+            date_of(b"Fri, 31 Dec 9999 23:59:59 GMT"),
+            Some(253_402_300_799)
+        );
     }
 
     #[test]
