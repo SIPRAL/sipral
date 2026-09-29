@@ -622,6 +622,7 @@ the generator itself — never the block, which the next run overwrites.
 | Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | blind transfer (C ABI) | pass | 2026-09-29 |
 | Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | attended transfer (C ABI) | pass | 2026-09-29 |
 | Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | DTLS-SRTP, held and resumed (C ABI) | pass | 2026-09-29 |
+| Kamailio, routing to three sipral stacks registered at it | 6.1.4 (proxy) | N-way local conference, three calls through the proxy | pass | 2026-09-29 |
 | OpenSIPS → FreeSWITCH | 4.0.2 (proxy) / 1.10.12 (FreeSWITCH) | register | pass | 2026-09-29 |
 | OpenSIPS → FreeSWITCH | 4.0.2 (proxy) / 1.10.12 (FreeSWITCH) | call | pass | 2026-09-29 |
 | OpenSIPS → FreeSWITCH | 4.0.2 (proxy) / 1.10.12 (FreeSWITCH) | hold and resume | pass | 2026-09-29 |
@@ -640,6 +641,7 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | blind transfer | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | attended transfer | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | DTMF, RFC 4733 | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | DTMF, RFC 4733, the answer renumbered | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | DTMF, SIP INFO | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | SRTP | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | hold with a codec change | pass | 2026-09-29 |
@@ -667,8 +669,8 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | Swift agent example | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | Kotlin agent example | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | .NET agent example | pass | 2026-09-29 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2022 ms, nothing after it (C ABI) | pass | 2026-09-29 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 48 ms (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2030 ms, nothing after it (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 54 ms (C ABI) | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | SDES required by the account (C ABI) | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | DTLS-SRTP required by the account (C ABI) | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | SRTP off on the account (C ABI) | pass | 2026-09-29 |
@@ -763,9 +765,43 @@ the generator itself — never the block, which the next run overwrites.
 | SRTP policy per account (SDES required, DTLS-SRTP required, off) | yes | yes | yes |
 | STIR/SHAKEN (RFC 8224, RFC 8588), signed and verified | yes | yes | yes |
 | SIP over TCP and TLS through the four idiomatic layers | yes | yes | yes |
-| Local conference of N calls, each on its own codec | yes | yes | not yet |
+| Local conference of N calls, each on its own codec | yes | yes | yes |
 
 <!-- END GENERATED interop-matrix -->
+
+### A live PBX
+
+The container lab runs every server on its defaults. Once, on 29 September
+2026, the same tree (ABI 0.32) also ran against a live FreePBX 16 demo system
+— Asterisk 18.9-cert13, `chan_pjsip` as FreePBX writes it: `direct_media`,
+`rtp_symmetric`, `rewrite_contact` and `send_pai` on every extension, RFC 4733
+digits, SDES on some extensions and not others, SIP over UDP on a port other
+than 5060. Each stack ran in a container on the PBX host's own network and
+registered as one of its existing extensions, so nothing stood between the
+two but the PBX; a few calls, no load, no impairment. It is not in the matrix
+above, which a run of `scripts/lab.sh` regenerates; it is recorded here.
+
+| Flow | Driven by | Result |
+|---|---|---|
+| register, and the binding given back | Rust harness | pass |
+| call out, to an extension where the Python layer's agent answered and echoed | Rust harness | pass: 101 frames sent, 91 back, 60 audible, MOS-LQ 4.4 |
+| hold and resume | Rust harness | pass |
+| blind transfer, and attended, the agent handed to a feature code that speaks and hangs up | Rust harness | pass, both; the agent heard 446 and 398 frames after it was handed over, and the PBX ended its call |
+| call in: the PBX originates a call that plays a prompt | Python layer's agent | pass: 1507 packets received, 1500 sent back |
+| DTMF: the PBX originates a call that sends `1`, `2`, `#` (RFC 4733) | Python layer's agent | pass: the three digits read, and the call hung up on `#` |
+| the caller's identity the PBX asserts, with the PBX as the account's trusted peer | Python layer, `CallerIdentity` | pass: `trusted`, `P-Asserted-Identity` the calling extension, with the display name the PBX holds for it, not one the caller sent |
+| SDES required, to the echo feature code | Python layer | pass: `AES_CM_128_HMAC_SHA1_80`, encrypted, 422 packets received |
+
+Only the Python layer's agent ran there; the Kotlin, .NET and Swift agents
+ran the same day in the container lab above. One thing this run found that the
+lab does not show: offering both of the account's SDES suites, the INVITE was
+1048 bytes, the PBX challenged it, and with the credentials added it passed
+RFC 3261 §18.1.1's 1300. The stack then asked for a stream transport
+(`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`), the Python layer signalling over UDP
+has none to bind, and the call waited with nothing on the wire and no end
+reported. This PBX listens for TCP on another port than for UDP, so a
+connection to the same address would not have reached it either. Offering one
+suite, the challenged INVITE was 1239 bytes, and the call above passed.
 
 Known peer behaviours worth writing down rather than rediscovering:
 
