@@ -158,16 +158,18 @@ public sealed class LocalConferenceTests : IDisposable
         }
         var loudest = await FirstMatchingAsync(carol.Media!.Frames, frame => Loudness(frame) > 2000);
         Assert.True(Loudness(loudest) > 2000, "Carol never heard Bob");
-        // and steadily: a call whose own thread still carried frames beside
-        // the conference would have every other frame taken from under it
+        // and steadily, for sixty of Bob's hundred frames: a call whose own
+        // thread still carried frames beside the conference would have every
+        // other frame taken from under it, and a frame clock slower than the
+        // conference's leaves gaps the buffers fill with silence
         var steady = 0;
         var counted = 0;
         await FirstMatchingAsync(carol.Media.Frames, frame =>
         {
             steady += Loudness(frame) > 2000 ? 1 : 0;
-            return ++counted == 25;
+            return ++counted == 60;
         });
-        Assert.True(steady >= 20, $"Carol heard Bob in {steady} of 25 frames");
+        Assert.True(steady >= 57, $"Carol heard Bob in {steady} of 60 frames");
 
         conference.Remove(toCarol);
         Assert.Equal(1u, conference.Info().Members);

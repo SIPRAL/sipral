@@ -141,14 +141,16 @@ class TwoCallsBridged(unittest.IsolatedAsyncioTestCase):
                 frame = await asyncio.wait_for(carol_call.media.frames.get(), timeout=TIMEOUT)
                 loudest = max(loudest, _loudness(frame))
             self.assertGreater(loudest, 2000, "Carol never heard Bob")
-            # and steadily: a call whose own thread still carried frames
-            # beside the conference would have every other frame taken
-            # from under it, and Carol would hear Bob half the time
+            # and steadily, for sixty of Bob's hundred frames: a call whose
+            # own thread still carried frames beside the conference would
+            # have every other frame taken from under it, and a frame clock
+            # slower than the conference's leaves gaps the buffers fill with
+            # silence
             steady = 0
-            for _ in range(25):
+            for _ in range(60):
                 frame = await asyncio.wait_for(carol_call.media.frames.get(), timeout=TIMEOUT)
                 steady += _loudness(frame) > 2000
-            self.assertGreaterEqual(steady, 20, f"Carol heard Bob in {steady} of 25 frames")
+            self.assertGreaterEqual(steady, 57, f"Carol heard Bob in {steady} of 60 frames")
 
             while not bob_call.media.frames.empty():
                 bob_call.media.frames.get_nowait()

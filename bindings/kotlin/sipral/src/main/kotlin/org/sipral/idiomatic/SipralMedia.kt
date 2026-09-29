@@ -511,9 +511,8 @@ class SipralMedia internal constructor(
     }
 
     private fun run() {
+        var due = System.nanoTime()
         while (!closed.get()) {
-            val started = System.nanoTime()
-
             if (active) {
                 try {
                     drainReceive()
@@ -554,14 +553,20 @@ class SipralMedia internal constructor(
                 }
             }
 
-            val elapsedMs = (System.nanoTime() - started) / 1_000_000
-            val remaining = frameMillis - elapsedMs
-            if (remaining > 0) {
+            // on a schedule, not a sleep after each frame: a sleep ends late,
+            // and a frame clock that loses what it overslept sends and plays
+            // fewer frames a second than the far end's clock expects, which
+            // its buffer then fills with silence
+            due += frameMillis * 1_000_000L
+            val remainingNs = due - System.nanoTime()
+            if (remainingNs > 0) {
                 try {
-                    Thread.sleep(remaining)
+                    Thread.sleep(remainingNs / 1_000_000L, (remainingNs % 1_000_000L).toInt())
                 } catch (_: InterruptedException) {
                     return
                 }
+            } else {
+                due = System.nanoTime()
             }
         }
     }

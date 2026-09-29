@@ -482,8 +482,8 @@ public final class Media: @unchecked Sendable {
 
     private func run() {
         var active = true
+        var next = DispatchTime.now()
         while !isClosed {
-            let started = DispatchTime.now()
             drainReceive()
 
             if active && (!pumpsFrames || carriedByConference) {
@@ -538,10 +538,16 @@ public final class Media: @unchecked Sendable {
                 pumpRecording()
             }
 
-            let elapsedNs = DispatchTime.now().uptimeNanoseconds &- started.uptimeNanoseconds
-            let remaining = frameSeconds - Double(elapsedNs) / 1_000_000_000
-            if remaining > 0 {
-                usleep(useconds_t(remaining * 1_000_000))
+            // on a schedule, not a sleep after each frame: a sleep ends late,
+            // and a frame clock that loses what it overslept sends and plays
+            // fewer frames a second than the far end's clock expects, which
+            // its buffer then fills with silence
+            next = next + .nanoseconds(Int(frameSeconds * 1_000_000_000))
+            let now = DispatchTime.now()
+            if next > now {
+                usleep(useconds_t((next.uptimeNanoseconds - now.uptimeNanoseconds) / 1000))
+            } else {
+                next = now
             }
         }
         closedSemaphore.signal()

@@ -128,11 +128,13 @@ private suspend fun whatOneFarEndSaysTheOtherHears(): String {
                 val carolFrames = assertNotNull(carolCall.media).frames
                 val heard = withTimeout(10_000) { carolFrames.first { loudness(it) > 2_000 } }
                 assertTrue(loudness(heard) > 2_000, "Carol never heard Bob")
-                // and steadily: a call whose own thread still carried frames
-                // beside the conference would have every other frame taken
-                // from under it
-                val steady = withTimeout(10_000) { carolFrames.take(25).toList() }.count { loudness(it) > 2_000 }
-                assertTrue(steady >= 20, "Carol heard Bob in $steady of 25 frames")
+                // and steadily, for sixty of Bob's hundred frames: a call
+                // whose own thread still carried frames beside the conference
+                // would have every other frame taken from under it, and a
+                // frame clock slower than the conference's leaves gaps the
+                // buffers fill with silence
+                val steady = withTimeout(10_000) { carolFrames.take(60).toList() }.count { loudness(it) > 2_000 }
+                assertTrue(steady >= 57, "Carol heard Bob in $steady of 60 frames")
 
                 conference.remove(toCarol)
                 assertEquals(1L, conference.info().members)

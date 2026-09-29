@@ -140,18 +140,20 @@ final class LocalConferenceTests: XCTestCase {
         let deadline = Date().addingTimeInterval(10)
         for await frame in carolFrames {
             if loudest > 2000 {
-                // and steadily: a call whose own thread still carried frames
-                // beside the conference would have every other frame taken
-                // from under it
+                // and steadily, for sixty of Bob's hundred frames: a call
+                // whose own thread still carried frames beside the conference
+                // would have every other frame taken from under it, and a
+                // frame clock slower than the conference's leaves gaps the
+                // buffers fill with silence
                 steady += loudness(frame) > 2000 ? 1 : 0
                 counted += 1
-                if counted == 25 { break }
+                if counted == 60 { break }
             }
             loudest = max(loudest, loudness(frame))
             if Date() > deadline { break }
         }
         XCTAssertGreaterThan(loudest, 2000, "Carol never heard Bob")
-        XCTAssertGreaterThanOrEqual(steady, 20, "Carol heard Bob in \(steady) of 25 frames")
+        XCTAssertGreaterThanOrEqual(steady, 57, "Carol heard Bob in \(steady) of 60 frames")
 
         try conference.remove(toCarol)
         XCTAssertEqual(try conference.info().members, 1)

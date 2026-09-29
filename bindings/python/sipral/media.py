@@ -553,8 +553,8 @@ class Media:
         out_written = ffi.new("size_t *")
         out_source = ffi.new("uint32_t *")
         playback = ffi.new(f"int16_t[{self.frame_samples}]")
+        due = time.monotonic()
         while not self._closed.is_set():
-            started = time.monotonic()
             self._drain_receive()
 
             if self._active:
@@ -587,7 +587,13 @@ class Media:
                 if status not in (lib.SIPRAL_STATUS_OK, lib.SIPRAL_STATUS_BUSY):
                     self._active = False
 
-            elapsed = time.monotonic() - started
-            remaining = self._frame_seconds - elapsed
+            # on a schedule, not a sleep after each frame: a wait ends late,
+            # and a frame clock that loses what it overslept sends and plays
+            # fewer frames a second than the far end's clock expects, which
+            # its buffer then fills with silence
+            due += self._frame_seconds
+            remaining = due - time.monotonic()
             if remaining > 0:
                 self._closed.wait(remaining)
+            else:
+                due = time.monotonic()
