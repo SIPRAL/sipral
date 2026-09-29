@@ -185,3 +185,71 @@ fn people_and_machines_answering_are_told_apart() {
         }
     }
 }
+
+/// Samples per second of CPU time `run` gets through, over `pcm` handed
+/// over in 20 ms frames, as the median of five passes.
+fn throughput(rate: SampleRate, pcm: &[i16], mut run: impl FnMut(&[i16])) -> f64 {
+    let frame = rate.samples(20);
+    let mut passes: Vec<f64> = (0..5)
+        .map(|_| {
+            let began = std::time::Instant::now();
+            for chunk in pcm.chunks(frame) {
+                run(chunk);
+            }
+            let seconds = began.elapsed().as_secs_f64();
+            f64::from(u32::try_from(pcm.len()).unwrap()) / seconds
+        })
+        .collect();
+    passes.sort_by(f64::total_cmp);
+    passes[2]
+}
+
+/// What one channel of each detector costs on this machine: samples
+/// processed per second of one core's time, and the same as a multiple of
+/// real time, which is how many channels one core could carry. Run with
+/// `cargo test -p sipral-media --release -- --ignored --nocapture cpu`.
+#[test]
+#[ignore = "a measurement, not a check: run it on the machine being sized"]
+fn cpu_per_channel() {
+    for rate in RATES {
+        let hz = f64::from(rate.hz());
+        let pcm = a_minute_of_speech(rate, 41);
+        let mut dtmf = DtmfDetector::new(rate);
+        let mut progress = ProgressDetector::new(rate, Region::Europe.tones());
+        let mut beep = BeepDetector::new(rate);
+        let mut amd = AnsweringMachineDetector::new(rate);
+        let rows = [
+            ("dtmf", throughput(rate, &pcm, |c| dtmf.process(c, |_| {}))),
+            (
+                "progress + sit",
+                throughput(rate, &pcm, |c| progress.process(c, |_| {})),
+            ),
+            ("beep", throughput(rate, &pcm, |c| beep.process(c, |_| {}))),
+            (
+                "amd",
+                throughput(rate, &pcm, |c| {
+                    if amd.process(c).is_some() {
+                        amd.reset();
+                    }
+                }),
+            ),
+            (
+                "all four",
+                throughput(rate, &pcm, |c| {
+                    dtmf.process(c, |_| {});
+                    progress.process(c, |_| {});
+                    beep.process(c, |_| {});
+                    if amd.process(c).is_some() {
+                        amd.reset();
+                    }
+                }),
+            ),
+        ];
+        for (name, samples_per_second) in rows {
+            println!(
+                "{rate:?} {name:>15}: {samples_per_second:>14.0} samples/s, {:>8.0}x real time",
+                samples_per_second / hz
+            );
+        }
+    }
+}

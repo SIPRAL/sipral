@@ -121,6 +121,8 @@ pub(crate) struct Analyzer {
     filled: usize,
     hop_energy: f64,
     bins: Vec<Bin>,
+    /// Each filter's last two outputs, while a window is run through.
+    states: Vec<(f64, f64)>,
     readings: Vec<Reading>,
     total_power: f64,
     hop_power: f64,
@@ -173,6 +175,7 @@ impl Analyzer {
         Self {
             rate: rate_hz,
             hop,
+            states: vec![(0.0, 0.0); bins.len()],
             buffer: vec![0.0; len],
             windowed: vec![0.0; len],
             window,
@@ -337,8 +340,25 @@ impl Analyzer {
         let hop = count_f64(self.hop);
         let bin_width = rate / count_f64(self.window.len());
         let window_sum = self.window_sum;
-        for (bin, reading) in self.bins.iter_mut().zip(self.readings.iter_mut()) {
-            let (re, im) = goertzel(&self.windowed, bin.coefficient, bin.cos, bin.sin);
+        // every filter over the window in one pass, sample by sample: the
+        // recurrences do not depend on each other, so the processor runs
+        // them side by side instead of waiting on one chain at a time
+        for state in &mut self.states {
+            *state = (0.0, 0.0);
+        }
+        for &x in &self.windowed {
+            for (state, bin) in self.states.iter_mut().zip(&self.bins) {
+                let next = x + bin.coefficient * state.0 - state.1;
+                *state = (next, state.0);
+            }
+        }
+        for ((bin, reading), &(s1, s2)) in self
+            .bins
+            .iter_mut()
+            .zip(self.readings.iter_mut())
+            .zip(&self.states)
+        {
+            let (re, im) = (s1 - bin.cos * s2, bin.sin * s2);
             let dft = rotate((re, im), bin.end_cos, -bin.end_sin);
             let magnitude = re.hypot(im);
             let offset_hz = match bin.previous {
