@@ -68,3 +68,5 @@ pub mod plc;
 pub mod processor;
 pub mod resample;
 pub mod vad;
+
+pub use formats::l16;
