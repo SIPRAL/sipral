@@ -60,8 +60,9 @@ the planner settles on the codec and direction the section describes.
   and holds the check to finding it.
 - §2.3 answers iLBC as payload type 99 where the offer had 97, which RFC
   3264 §6.1 allows. The answer builder writes the offer's number, as that
-  section recommends; the planner matches formats by number and finds no
-  codec in common, a gap the test pins.
+  section recommends; the planner matches the renumbered dynamic type by
+  what it maps to, and each end sends with the other's number and receives
+  with its own, which the test checks from both sides.
 - A stream carrying only `telephone-event` (§2.4 and the added stream of
   §4.1) is a legal stream, but `MediaPlan` holds exactly one codec and named
   events are not one, so `SessionDescription::media_plan` returns `NoCodec`

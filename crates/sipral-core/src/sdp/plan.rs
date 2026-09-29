@@ -449,12 +449,20 @@ pub struct MediaPlan {
     pub local: SocketAddr,
     /// Where to send, from the peer's `c=` and `m=`.
     pub remote: SocketAddr,
-    /// The one codec of the stream.
+    /// The one codec of the stream, under the payload type to send it with:
+    /// the peer's number for it (RFC 3264 §5.1).
     pub codec: NegotiatedCodec,
+    /// The payload type the codec arrives with: this end's own number for
+    /// it, which RFC 3264 §6.1 lets differ from [`MediaPlan::codec`]'s when
+    /// the answer renumbered a dynamic type.
+    pub codec_in: u8,
     /// Which way media may flow, as seen from here.
     pub direction: Direction,
-    /// The named-event payload type, when both descriptions listed one.
+    /// The named-event payload type to send with, when both descriptions
+    /// listed one: the peer's number.
     pub dtmf: Option<u8>,
+    /// The named-event payload type events arrive with: this end's number.
+    pub dtmf_in: Option<u8>,
     /// Where RTCP goes.
     pub rtcp: RtcpPlan,
     /// The keys, when the stream is secured.
@@ -503,7 +511,9 @@ impl SessionDescription {
         let remote_addr = socket_addr(peer_connection, theirs.port, stream)?;
 
         let payloads = common_payloads(ours, theirs);
-        let codec = agreed_codec(ours, theirs, &payloads).ok_or(SdpError::NoCodec { stream })?;
+        let (codec, codec_in) =
+            agreed_codec(ours, theirs, &payloads).ok_or(SdpError::NoCodec { stream })?;
+        let dtmf = agreed_dtmf(ours, theirs, &payloads);
 
         // "An agent MUST be capable of receiving SDP with a connection address
         // of 0.0.0.0, in which case it means that neither RTP nor RTCP should
@@ -530,8 +540,10 @@ impl SessionDescription {
             local,
             remote: remote_addr,
             codec,
+            codec_in,
             direction,
-            dtmf: agreed_dtmf(ours, theirs, &payloads),
+            dtmf: dtmf.map(|common| common.theirs),
+            dtmf_in: dtmf.map(|common| common.ours),
             rtcp,
             keying: keying(ours, remote, theirs, stream)?,
             voip_metrics_xr: remote.wants_voip_metrics_xr(theirs),
@@ -623,13 +635,66 @@ fn socket_addr(
     Ok(SocketAddr::new(address, port))
 }
 
-/// The payload types both `m=` lines carry, in the peer's order of preference.
-fn common_payloads(ours: &MediaDescription, theirs: &MediaDescription) -> Vec<u8> {
+/// One format both `m=` lines carry, under the number each end gave it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Common {
+    /// The number in our description: what arrives here (RFC 3264 §5.1, "the
+    /// payload type numbers indicate the value of the payload type field
+    /// ... the offerer expects to receive", and the same of the answer).
+    ours: u8,
+    /// The number in the peer's: what we send with (§5.1: "the offerer MUST
+    /// send with the payload type numbers from the answer", and §6.1 has the
+    /// answerer send with the offer's).
+    theirs: u8,
+}
+
+/// The formats both `m=` lines carry, in the peer's order of preference.
+///
+/// A number both list is one format, as it always was. A dynamic number the
+/// peer lists and ours does not is matched by what it maps to — encoding,
+/// clock rate and channels — to a dynamic number of ours: RFC 3264 §6.1
+/// keeps the offer's number in the answer only as a SHOULD, and RFC 4317
+/// §2.3 answers iLBC as 99 where the offer had 97.
+fn common_payloads(ours: &MediaDescription, theirs: &MediaDescription) -> Vec<Common> {
     let mine: Vec<u8> = ours.payload_types().collect();
-    theirs
-        .payload_types()
-        .filter(|payload| mine.contains(payload))
-        .collect()
+    let mut common: Vec<Common> = Vec::new();
+    for payload in theirs.payload_types() {
+        let found = if mine.contains(&payload) {
+            Some(payload)
+        } else {
+            theirs
+                .rtpmap(payload)
+                .filter(|_| DYNAMIC_PAYLOADS.contains(&payload))
+                .and_then(|map| {
+                    mine.iter().copied().find(|&candidate| {
+                        DYNAMIC_PAYLOADS.contains(&candidate)
+                            && !common.iter().any(|taken| taken.ours == candidate)
+                            && ours
+                                .rtpmap(candidate)
+                                .is_some_and(|mapped| same_format(&mapped, &map))
+                    })
+                })
+        };
+        if let Some(found) = found
+            && !common.iter().any(|taken| taken.ours == found)
+        {
+            common.push(Common {
+                ours: found,
+                theirs: payload,
+            });
+        }
+    }
+    common
+}
+
+/// Whether two mappings name one format: the same encoding, in any case
+/// (RFC 4855 §3), the same clock rate, and the same channel count, which is
+/// one where none is written (RFC 4566 §6).
+fn same_format(a: &RtpMap, b: &RtpMap) -> bool {
+    let channels = |map: &RtpMap| map.parameters.clone().unwrap_or_else(|| "1".to_owned());
+    a.encoding.eq_ignore_ascii_case(&b.encoding)
+        && a.clock_rate == b.clock_rate
+        && channels(a) == channels(b)
 }
 
 /// What a payload type maps to: the peer's line first, since it is the peer
@@ -642,29 +707,35 @@ fn mapping(ours: &MediaDescription, theirs: &MediaDescription, payload: u8) -> O
 }
 
 /// The first common format that is a codec rather than something carried
-/// beside one.
+/// beside one, under the peer's number, and the number it arrives with.
 fn agreed_codec(
     ours: &MediaDescription,
     theirs: &MediaDescription,
-    payloads: &[u8],
-) -> Option<NegotiatedCodec> {
-    payloads.iter().copied().find_map(|payload| {
+    payloads: &[Common],
+) -> Option<(NegotiatedCodec, u8)> {
+    payloads.iter().find_map(|common| {
         let codec = NegotiatedCodec {
-            rtpmap: mapping(ours, theirs, payload)?,
+            rtpmap: mapping(ours, theirs, common.theirs)?,
             // the peer's parameters configure what we send to it; ours stand
             // in only when it wrote none
             fmtp: theirs
-                .fmtp(payload)
-                .or_else(|| ours.fmtp(payload))
+                .fmtp(common.theirs)
+                .or_else(|| ours.fmtp(common.ours))
                 .map(str::to_owned),
         };
-        (!codec.is_encoding(TELEPHONE_EVENT) && !codec.is_encoding(COMFORT_NOISE)).then_some(codec)
+        (!codec.is_encoding(TELEPHONE_EVENT) && !codec.is_encoding(COMFORT_NOISE))
+            .then_some((codec, common.ours))
     })
 }
 
-fn agreed_dtmf(ours: &MediaDescription, theirs: &MediaDescription, payloads: &[u8]) -> Option<u8> {
-    payloads.iter().copied().find(|&payload| {
-        mapping(ours, theirs, payload)
+/// The named events both carry: the peer's number, and ours.
+fn agreed_dtmf(
+    ours: &MediaDescription,
+    theirs: &MediaDescription,
+    payloads: &[Common],
+) -> Option<Common> {
+    payloads.iter().copied().find(|common| {
+        mapping(ours, theirs, common.theirs)
             .is_some_and(|map| map.encoding.eq_ignore_ascii_case(TELEPHONE_EVENT))
     })
 }
@@ -908,6 +979,57 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
     fn opus() -> NegotiatedCodec {
         NegotiatedCodec::new(RtpMap::parse("111 opus/48000/2").expect("opus"))
             .with_fmtp("useinbandfec=1")
+    }
+
+    /// RFC 3264 §6.1 keeps the offer's numbers in the answer only as a
+    /// SHOULD: a peer that renumbers a dynamic codec and its named events
+    /// is matched by what the numbers map to, and each direction carries its
+    /// receiver's number (§5.1).
+    #[test]
+    fn a_renumbered_dynamic_codec_and_its_events_are_found_by_what_they_map_to() {
+        let offer = ours(
+            4000,
+            "111 101",
+            "a=rtpmap:111 opus/48000/2\r\na=fmtp:111 useinbandfec=1\r\n\
+             a=rtpmap:101 telephone-event/48000\r\na=fmtp:101 0-15\r\n",
+        );
+        let answer = theirs(
+            5000,
+            "107 110",
+            "a=rtpmap:107 OPUS/48000/2\r\na=rtpmap:110 telephone-event/48000\r\n",
+        );
+        let plan = offer.media_plan(&answer, 0).expect("a plan").expect("up");
+        assert_eq!(plan.codec.rtpmap.encoding, "OPUS");
+        assert_eq!((plan.codec.payload(), plan.codec_in), (107, 111));
+        assert_eq!(
+            plan.codec.fmtp.as_deref(),
+            Some("useinbandfec=1"),
+            "ours stands in for the parameters the peer left out"
+        );
+        assert_eq!((plan.dtmf, plan.dtmf_in), (Some(110), Some(101)));
+
+        let back = answer.media_plan(&offer, 0).expect("a plan").expect("up");
+        assert_eq!((back.codec.payload(), back.codec_in), (111, 107));
+        assert_eq!((back.dtmf, back.dtmf_in), (Some(101), Some(110)));
+
+        // a different clock rate or channel count is a different format
+        let mono = theirs(5000, "107", "a=rtpmap:107 opus/48000\r\n");
+        assert_eq!(
+            offer.media_plan(&mono, 0),
+            Err(SdpError::NoCodec { stream: 0 })
+        );
+        let narrow = theirs(5000, "0 110", "a=rtpmap:110 telephone-event/8000\r\n");
+        let plan = ours(4000, "0 101", "a=rtpmap:101 telephone-event/48000\r\n")
+            .media_plan(&narrow, 0)
+            .expect("a plan")
+            .expect("up");
+        assert_eq!((plan.dtmf, plan.dtmf_in), (None, None));
+        // and the same number on both sides is still the one format
+        let same = theirs(5000, "111", "a=rtpmap:111 opus/48000/2\r\n")
+            .media_plan(&offer, 0)
+            .expect("a plan")
+            .expect("up");
+        assert_eq!((same.codec.payload(), same.codec_in), (111, 111));
     }
 
     #[test]

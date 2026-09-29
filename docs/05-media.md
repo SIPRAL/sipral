@@ -26,9 +26,11 @@ and the application carries both:
 pub struct MediaPlan {
     pub local: SocketAddr,          // where to receive; the caller chose it
     pub remote: SocketAddr,         // where to send, from the answer's c= and m=
-    pub codec: NegotiatedCodec,     // payload type, clock rate, channels, fmtp
+    pub codec: NegotiatedCodec,     // payload type to send with, clock rate, channels, fmtp
+    pub codec_in: u8,               // the payload type it arrives with: our own number for it
     pub direction: Direction,       // sendrecv, sendonly, recvonly, inactive
-    pub dtmf: Option<u8>,           // telephone-event payload type, when agreed
+    pub dtmf: Option<u8>,           // telephone-event payload type to send with, when agreed
+    pub dtmf_in: Option<u8>,        // and the one events arrive with
     pub rtcp: RtcpPlan,             // muxed, a second port, or off
     pub keying: Option<Keying>,     // SDES material, or a DTLS fingerprint
     pub voip_metrics_xr: bool,      // whether this stream should send RFC 3611 XR reports
@@ -45,6 +47,13 @@ pub struct MediaCapabilities {
     pub voip_metrics_xr: bool,      // whether to ask the peer for RFC 3611 XR reports
 }
 ```
+
+A format both descriptions list under one number is that format. A dynamic
+payload type the peer lists under a number ours does not is matched by what it
+maps to — encoding, clock rate and channels — since RFC 3264 §6.1 keeps the
+offer's number in an answer only as a SHOULD (RFC 4317 §2.3 answers iLBC as 99
+to an offer of 97). Each end then sends with the other's number and takes in
+its own (§5.1), which is why the plan carries both.
 
 Neither mentions a socket, a device, a thread or a codec implementation, which
 is what lets one `sipral-ua` drive a softphone and an agent that puts PCM on a
@@ -2596,9 +2605,29 @@ session's own answer, refusal and end are `UaEvent`s on the handle
 
 A codec change in the recorded call is offered to the server on both streams
 (§7.1.1.1 changes a recorded stream with a new offer) and the copies follow
-it. The streams are plain `RTP/AVP`: a call keyed with SRTP is copied in the
-clear, to a server the application chose to trust with it, over whatever path
-it put between the two.
+it.
+
+**An encrypted call is recorded encrypted** (RFC 7866 §12.2). When the recorded
+call is keyed with SRTP, SDES or DTLS-SRTP alike, both streams are offered as
+`RTP/SAVP` with an RFC 4568 `a=crypto` line per suite the account's calls
+offer, each stream with keys of its own drawn from the engine's media seed.
+Each stream's copies are protected under this end's key for the line the
+server's answer took, and a stream the server refused, answered as plain RTP,
+or answered with a line that was not offered or cannot be held to gets
+nothing: the copies never leave the encryption behind. A re-offer for a codec
+change carries the same keys, and a stream that carries on under the same
+line keeps its place in the keystream. Copies that move to a call that
+replaced the recorded one, or to a stream the server took back, carry their
+numbering on rather than starting it over, so no SRTP index goes out twice
+under one key (RFC 3711 §9.1). An unencrypted call is recorded as plain
+`RTP/AVP`, and so is an encrypted one on an account that says it may be
+(`AccountSrtp::recording_in_clear`, `recording_in_clear` in
+`sipral_account_config_t`). A recording offered in the clear, for a call that
+was not encrypted, copies nothing of an encrypted call that replaces the
+recorded one, unless the account says it may. The keys travel in the recording session's
+signalling, which is why a recorder listens on TLS. This end offers SDES
+only: the SRC is the offerer of a recording session (§7.1), and a DTLS-SRTP
+handshake on the copies' sockets, which only send, is not offered.
 
 ## A local conference of two calls
 

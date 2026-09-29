@@ -748,8 +748,12 @@ public sealed partial class SipralStack : IDisposable
     /// them. The certificate a call names is asked for by
     /// <see cref="SipralEventKind.CallerVerification"/> at
     /// <see cref="SipralVerificationStage.CertificateWanted"/> and handed
-    /// over with <see cref="StirCertificate"/>.</summary>
-    public void Stir(byte[]? anchors, ulong freshnessSeconds = 0, ulong certificateWaitMs = 0, ulong? unixSeconds = null)
+    /// over with <see cref="StirCertificate"/>.
+    /// <paramref name="acceptServiceProviderCodes"/> lets a certificate that
+    /// names a service provider code rather than numbers vouch for any
+    /// caller, as a SHAKEN deployment's do; off, a certificate covers only
+    /// the numbers it names.</summary>
+    public void Stir(byte[]? anchors, ulong freshnessSeconds = 0, ulong certificateWaitMs = 0, ulong? unixSeconds = null, bool acceptServiceProviderCodes = false)
     {
         using var pin = new Interop.PinnedBytes(anchors is { Length: > 0 } ? anchors : null);
         var config = SipralStirConfig.Sized();
@@ -761,6 +765,7 @@ public sealed partial class SipralStack : IDisposable
         config.FreshnessSeconds = freshnessSeconds;
         config.CertificateWaitMs = certificateWaitMs;
         config.UnixSeconds = unixSeconds ?? (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        config.AcceptServiceProviderCodes = acceptServiceProviderCodes ? (uint)SipralToggle.On : 0;
         SipralErrors.Call(() => NativeMethods.sipral_stack_stir(Handle, config, NowMs), "sipral_stack_stir");
     }
 

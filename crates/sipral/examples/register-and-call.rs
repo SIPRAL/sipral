@@ -33,6 +33,8 @@ mod media_socket;
 mod srv;
 #[path = "common/udp_endpoint.rs"]
 mod udp_endpoint;
+#[path = "common/wall_clock.rs"]
+mod wall_clock;
 
 use std::env;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -41,7 +43,7 @@ use std::time::{Duration, Instant};
 
 use sipral::{
     Account, CallHandle, CodecCatalog, Credentials, EndpointConfig, Event, MediaConfig,
-    MediaEngine, OutgoingCall, UaEvent, Uri, UserAgent, WallClock,
+    MediaEngine, OutgoingCall, UaEvent, Uri, UserAgent,
 };
 
 use udp_endpoint::Endpoint;
@@ -150,7 +152,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let engine = MediaEngine::new(
         CodecCatalog::new(),
         MediaConfig::default(),
-        WallClock::from_unix(now, 0, 0),
+        wall_clock::at(now),
         entropy::seed()?,
     );
     let mut endpoint = Endpoint::bind(

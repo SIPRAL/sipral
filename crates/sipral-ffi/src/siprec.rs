@@ -13,7 +13,11 @@
 //!
 //! The copies of the recorded call's audio come out of
 //! [`sipral_media_poll_recording`] on the recorded call's media handle, to
-//! send from the two sockets the configuration named.
+//! send from the two sockets the configuration named. The copies of an
+//! encrypted call are SRTP, under SDES keys of their own in the recording
+//! session's offer (RFC 7866 §12.2), and a stream the server will not take as
+//! SRTP gets nothing — unless the account's `recording_in_clear` allows plain
+//! RTP (ABI 0.32).
 
 use std::ffi::c_char;
 use std::net::SocketAddr;

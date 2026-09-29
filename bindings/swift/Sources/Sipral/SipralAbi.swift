@@ -24,8 +24,8 @@ public typealias SipralHandle = sipral_handle_t
 /// the ABI's major version, and a new one is only ever added at the end.
 ///
 /// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
-/// statuses, and it stays reserved and never used, so no build returns
-/// it and `sipral_status_name` has no name for it.
+/// statuses, and it stays reserved, never used and never to be given to a
+/// status. No build returns it and `sipral_status_name` has no name for it.
 public enum SipralStatus: Int32, Sendable {
     /// The call did what it was asked to.
     case ok = 0

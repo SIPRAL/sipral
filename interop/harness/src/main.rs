@@ -383,6 +383,7 @@ fn main() -> ExitCode {
     // found
     if server == "asterisk" {
         flows.push(Flow::Dtmf4733);
+        flows.push(Flow::Renumbered);
         flows.push(Flow::DtmfInfo);
         flows.push(Flow::Srtp);
         flows.push(Flow::HoldCodecChange);
@@ -777,6 +778,13 @@ enum Flow {
     /// nothing in baresip's own account or call configuration can); this
     /// flow only has to still be waiting when it arrives.
     PeerHangup,
+    /// [`Flow::Dtmf4733`] with the answer renumbered: the named events
+    /// Asterisk answers as 96 are shown to the stack as 97 (RFC 3264 §6.1
+    /// lets an answer do that), and what the stack then sends as 97 goes on
+    /// the wire as 96 — a far end that renumbered, standing in front of one
+    /// that did not. The key goes out on the answer's number and comes back
+    /// on the offer's, which is what the planner has to have matched.
+    Renumbered,
     /// A call offering G.729 and nothing else, as Asterisk's own
     /// `labuser-g729` (the one endpoint that allows it), to the lab's echo
     /// extension (9008): the tone this end's G.729 encoder writes goes to
@@ -797,6 +805,7 @@ impl Flow {
             Self::Blind => "blind transfer",
             Self::Attended => "attended transfer",
             Self::Dtmf4733 => "DTMF, RFC 4733",
+            Self::Renumbered => "DTMF, RFC 4733, the answer renumbered",
             Self::DtmfInfo => "DTMF, SIP INFO",
             Self::Srtp => "SRTP",
             Self::HoldCodecChange => "hold with a codec change",
@@ -819,6 +828,7 @@ impl Flow {
             Self::Blind => "blind",
             Self::Attended => "attended",
             Self::Dtmf4733 => "dtmf",
+            Self::Renumbered => "renumber",
             Self::DtmfInfo => "dtmfinfo",
             Self::Srtp => "srtp",
             Self::HoldCodecChange => "holdcodec",
@@ -919,6 +929,12 @@ struct Endpoint {
     /// The SIP socket's own read buffer, kept here rather than on the stack
     /// of [`Endpoint::read_sip`], which every one of this loop's turns calls.
     sip_inbox: Vec<u8>,
+    /// `Flow::Renumbered`'s stand-in for a far end that renumbered a dynamic
+    /// payload type in its answer (RFC 3264 §6.1): `(answered, shown)`, the
+    /// number the server's answer gives it and the one the stack is shown
+    /// instead, the packets it then sends under `shown` written back as
+    /// `answered` on the wire.
+    renumber: Option<(u8, u8)>,
 }
 
 impl Endpoint {
@@ -971,6 +987,7 @@ impl Endpoint {
             transport,
             media: HashMap::new(),
             sip_inbox: vec![0_u8; 65_535],
+            renumber: None,
         })
     }
 
@@ -1029,8 +1046,11 @@ impl Endpoint {
         remote: SocketAddr,
         now: Instant,
     ) -> Result<SocketAddr, String> {
-        let media = Media::bind(now)?;
+        let mut media = Media::bind(now)?;
         let port = media.port()?;
+        if let Some((answered, shown)) = self.renumber {
+            media.rewrite_payload(shown, answered);
+        }
         self.media.insert(call, media);
         Ok(SocketAddr::new(route_to(remote), port))
     }
@@ -1101,12 +1121,18 @@ impl Endpoint {
                 Ok((length, from)) => {
                     arrived = true;
                     let data = self.sip_inbox.get(..length).unwrap_or_default();
+                    let data = match self.renumber {
+                        Some((answered, shown)) if data.starts_with(b"SIP/2.0 ") => {
+                            std::borrow::Cow::Owned(renumbered(data, answered, shown))
+                        }
+                        _ => std::borrow::Cow::Borrowed(data),
+                    };
                     let _ = self.agent.receive(
                         Input::Datagram {
                             transport: self.transport,
                             remote: from,
                             local: self.local,
-                            data,
+                            data: &data,
                         },
                         now,
                     );
@@ -1117,6 +1143,47 @@ impl Endpoint {
         }
         arrived
     }
+}
+
+/// `message` with payload type `from` written as `to` in its session
+/// description's `m=` lines, `a=rtpmap` and `a=fmtp`: a response renumbered
+/// the way a far end may renumber a dynamic type in its answer (RFC 3264
+/// §6.1). Two numbers of one width, so no length in the message moves.
+fn renumbered(message: &[u8], from: u8, to: u8) -> Vec<u8> {
+    let (from, to) = (from.to_string(), to.to_string());
+    let Ok(text) = std::str::from_utf8(message) else {
+        return message.to_vec();
+    };
+    if from.len() != to.len() {
+        return message.to_vec();
+    }
+    text.split_inclusive('\n')
+        .map(|line| {
+            let body = line.trim_end();
+            let end = line.get(body.len()..).unwrap_or_default();
+            if body.starts_with("m=") {
+                let tokens: Vec<&str> = body
+                    .split(' ')
+                    .enumerate()
+                    .map(|(index, token)| {
+                        if index >= 3 && token == from {
+                            to.as_str()
+                        } else {
+                            token
+                        }
+                    })
+                    .collect();
+                format!("{}{end}", tokens.join(" "))
+            } else if let Some(rest) = body.strip_prefix(&format!("a=rtpmap:{from} ")) {
+                format!("a=rtpmap:{to} {rest}{end}")
+            } else if let Some(rest) = body.strip_prefix(&format!("a=fmtp:{from} ")) {
+                format!("a=fmtp:{to} {rest}{end}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<String>()
+        .into_bytes()
 }
 
 /// Round the loop until the script is done or `deadline` passes.
@@ -1641,7 +1708,7 @@ impl Script {
             {
                 self.listen_until = Some(now + dwell());
             }
-            Step::Talking if self.flow == Flow::Dtmf4733 => {
+            Step::Talking if self.flow == Flow::Dtmf4733 || self.flow == Flow::Renumbered => {
                 self.step = Step::Dialling;
                 let dialled = self
                     .call
@@ -1834,7 +1901,7 @@ impl Script {
     /// number, since baresip is a single client rather than a dialplan.
     fn call_extension(&self) -> String {
         match self.flow {
-            Flow::Dtmf4733 | Flow::DtmfInfo => "9003".to_owned(),
+            Flow::Dtmf4733 | Flow::Renumbered | Flow::DtmfInfo => "9003".to_owned(),
             Flow::Srtp => "9004".to_owned(),
             Flow::Dtls => "9005".to_owned(),
             Flow::Mwi => "9007".to_owned(),
@@ -2044,7 +2111,7 @@ impl Script {
                 (Fact::Transferred, "the transfer did not complete"),
                 (Fact::Over, "the call did not end"),
             ],
-            Flow::Dtmf4733 => &[
+            Flow::Dtmf4733 | Flow::Renumbered => &[
                 (Fact::Registered, "no binding was granted"),
                 (Fact::Up, "the call did not connect"),
                 (
@@ -2152,8 +2219,11 @@ pub(crate) fn place_call(
     // a call handle is only minted by `place_with`, and the socket has to
     // exist before that call, so it is opened against a handle nothing has
     // been placed on yet and moved once the real one is known
-    let placeholder = Media::bind(now)?;
+    let mut placeholder = Media::bind(now)?;
     let port = placeholder.port()?;
+    if let Some((answered, shown)) = endpoint.renumber {
+        placeholder.rewrite_payload(shown, answered);
+    }
     let local = SocketAddr::new(route_to(remote), port);
     let call = endpoint
         .engine
@@ -2187,6 +2257,11 @@ fn run(
         now,
     )?;
     let account = endpoint.account(user, pass, server, remote)?;
+    if flow == Flow::Renumbered {
+        // this end offers its named events as 96, the first dynamic number
+        // its codecs leave free, and Asterisk answers them the same
+        endpoint.renumber = Some((96, 97));
+    }
 
     let mut script = Script::new(flow, account, extension, other, server, remote, now);
 
@@ -2378,6 +2453,7 @@ const fn seed(flow: Flow) -> [u8; 32] {
         Flow::Blind => [53; 32],
         Flow::Attended => [67; 32],
         Flow::Dtmf4733 => [79; 32],
+        Flow::Renumbered => [251; 32],
         Flow::DtmfInfo => [97; 32],
         Flow::Srtp => [83; 32],
         Flow::HoldCodecChange => [89; 32],
@@ -2405,6 +2481,7 @@ const fn media_seed(flow: Flow) -> [u8; 32] {
         Flow::Blind => [153; 32],
         Flow::Attended => [167; 32],
         Flow::Dtmf4733 => [179; 32],
+        Flow::Renumbered => [253; 32],
         Flow::DtmfInfo => [197; 32],
         Flow::Srtp => [183; 32],
         Flow::HoldCodecChange => [189; 32],
@@ -2790,6 +2867,24 @@ mod tests {
         );
     }
 
+    /// `Flow::Renumbered`'s stand-in renumbers the answer's `m=` line,
+    /// `a=rtpmap` and `a=fmtp` and nothing else, at no cost in length.
+    #[test]
+    fn an_answer_is_renumbered_in_its_description_and_nowhere_else() {
+        let answer = "SIP/2.0 200 OK\r\nCSeq: 96 INVITE\r\nContent-Length: 96\r\n\r\n\
+                      m=audio 10020 RTP/AVP 0 8 96\r\na=rtpmap:96 telephone-event/8000\r\n\
+                      a=fmtp:96 0-16\r\na=ptime:20\r\n";
+        let moved = String::from_utf8(super::renumbered(answer.as_bytes(), 96, 97)).expect("text");
+        assert_eq!(moved.len(), answer.len());
+        assert!(
+            moved.contains("m=audio 10020 RTP/AVP 0 8 97\r\n"),
+            "{moved}"
+        );
+        assert!(moved.contains("a=rtpmap:97 telephone-event/8000\r\n"));
+        assert!(moved.contains("a=fmtp:97 0-16\r\n"));
+        assert!(moved.contains("CSeq: 96 INVITE") && moved.contains("Content-Length: 96"));
+    }
+
     /// Every fixed endpoint identity byte this crate binds an endpoint with
     /// — the flow table's own [`seed`]/[`media_seed`] and each step's own
     /// constants — has to be distinct from every other one, or two flows (or
@@ -2813,6 +2908,7 @@ mod tests {
             Flow::Blind,
             Flow::Attended,
             Flow::Dtmf4733,
+            Flow::Renumbered,
             Flow::DtmfInfo,
             Flow::Srtp,
             Flow::HoldCodecChange,

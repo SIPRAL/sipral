@@ -423,6 +423,8 @@ mod tests {
             }),
             direction: Direction::SendRecv,
             dtmf: None,
+            dtmf_in: None,
+            codec_in: 0,
             rtcp: RtcpPlan::Off,
             keying: Some(Keying::Dtls {
                 fingerprints: vec!["sha-256 AA:BB".to_owned()],

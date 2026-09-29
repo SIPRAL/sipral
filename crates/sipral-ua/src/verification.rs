@@ -120,7 +120,8 @@ pub enum VerificationFailure {
     /// The PASSporT's `orig` is not the calling number the request names
     /// (RFC 8224 §6.2, Step 2, and §6.2.4).
     OrigMismatch,
-    /// Its `dest` does not name the number the request was sent to.
+    /// Its `dest` names neither the number nor the URI the request was sent
+    /// to, as its `To` or its Request-URI names it (RFC 8224 §6.2, §8.5).
     DestMismatch,
 }
 
@@ -140,7 +141,7 @@ impl fmt::Display for VerificationFailure {
             Self::BadSignature => "a signature that does not verify",
             Self::NumberNotCovered => "a certificate with no authority over the calling number",
             Self::OrigMismatch => "a PASSporT signed for another calling number",
-            Self::DestMismatch => "a PASSporT signed for another called number",
+            Self::DestMismatch => "a PASSporT signed for another called party",
         })
     }
 }

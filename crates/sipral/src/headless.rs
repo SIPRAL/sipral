@@ -526,6 +526,8 @@ mod tests {
             }),
             direction: Direction::SendRecv,
             dtmf: Some(101),
+            dtmf_in: Some(101),
+            codec_in: 0,
             rtcp: RtcpPlan::Off,
             keying: None,
             voip_metrics_xr: false,

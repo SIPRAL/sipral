@@ -139,7 +139,15 @@ fn stack_hearing(heard: &mut Heard, credentials: &Credentials, second: bool) -> 
 /// `sipral_stack_stir` with these anchors and this wall clock at `now_ms`
 /// zero.
 fn stir(handle: SipralHandle, anchors: &[u8], unix_seconds: u64) {
-    let config = SipralStirConfig {
+    let config = stir_config(anchors, unix_seconds);
+    let status = unsafe { sipral_stack_stir(handle, ptr::from_ref(&config), 0) };
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+}
+
+/// A `sipral_stir_config_t` with these anchors and this wall clock, the rest
+/// zero.
+fn stir_config(anchors: &[u8], unix_seconds: u64) -> SipralStirConfig {
+    SipralStirConfig {
         size: size_of::<SipralStirConfig>(),
         anchors: if anchors.is_empty() {
             ptr::null()
@@ -150,9 +158,178 @@ fn stir(handle: SipralHandle, anchors: &[u8], unix_seconds: u64) {
         freshness_seconds: 0,
         certificate_wait_ms: 0,
         unix_seconds,
-    };
-    let status = unsafe { sipral_stack_stir(handle, ptr::from_ref(&config), 0) };
+        accept_service_provider_codes: 0,
+    }
+}
+
+/// The verdict a stack trusting `credentials`' root reaches on `invite`,
+/// with `accept_service_provider_codes` set to `providers`.
+fn verdict_on(credentials: &Credentials, invite: &[u8], providers: u32) -> Verified {
+    let mut heard = Heard::default();
+    let callee = stack_hearing(&mut heard, credentials, true);
+    let mut config = stir_config(credentials.anchor.as_bytes(), 0);
+    config.accept_service_provider_codes = providers;
+    let status = unsafe { sipral_stack_stir(callee, ptr::from_ref(&config), 0) };
     assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    let (status, _) = account(callee, &called_account(0));
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    deliver(callee, invite, 20);
+    poll(callee, 20);
+    let wanted = heard
+        .verified
+        .first()
+        .cloned()
+        .expect("the certificate is wanted");
+    let chain = credentials.chain.as_bytes();
+    let status = unsafe {
+        sipral_call_stir_certificate(callee, wanted.call, chain.as_ptr(), chain.len(), 30)
+    };
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    poll(callee, 30);
+    let verdict = heard.verified.get(1).cloned().expect("the verdict");
+    assert_eq!(unsafe { sipral_stack_destroy(callee) }, SipralStatus::Ok);
+    verdict
+}
+
+/// ABI 0.32: a certificate that names a service provider code and no number
+/// covers the caller only when the stack's STIR configuration says codes
+/// count, and a value the toggle has no word for is refused.
+#[test]
+fn a_service_provider_code_covers_the_caller_only_when_the_stack_says_so() {
+    let credentials = sipral_stir::testing::provider_credentials("709J");
+    let invite = signed_invite(&credentials);
+    let numbers_only = verdict_on(&credentials, &invite, 0);
+    assert_eq!(
+        numbers_only.outcome,
+        SipralVerificationOutcome::Invalid as u32
+    );
+    assert_eq!(
+        numbers_only.failure,
+        SipralVerificationFailure::NumberNotCovered as u32
+    );
+    let providers = verdict_on(&credentials, &invite, crate::media::SipralToggle::On as u32);
+    assert_eq!(providers.outcome, SipralVerificationOutcome::Valid as u32);
+
+    let mut heard = Heard::default();
+    let stack = stack_hearing(&mut heard, &credentials, false);
+    let mut config = stir_config(&[], 0);
+    config.accept_service_provider_codes = 3;
+    let status = unsafe { sipral_stack_stir(stack, ptr::from_ref(&config), 0) };
+    assert_eq!(status, SipralStatus::InvalidArgument);
+    assert!(
+        last_error_text().contains("accept_service_provider_codes"),
+        "{}",
+        last_error_text()
+    );
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+/// ABI 0.32: an account says whether its encrypted calls may be recorded to
+/// a recording server in the clear, off unless it does, and a value the
+/// toggle has no word for is refused before the account is added.
+#[test]
+fn an_account_says_whether_its_encrypted_calls_may_be_recorded_in_the_clear() {
+    let credentials = credentials(&[CALLER]);
+    let mut heard = Heard::default();
+    let stack = stack_hearing(&mut heard, &credentials, false);
+    let in_clear = |handle: SipralHandle| {
+        crate::stack::with_stack(stack, |state| {
+            let id = state.accounts.get(handle).expect("the account");
+            Ok(state
+                .engine
+                .account_srtp(id)
+                .is_some_and(|srtp| srtp.recording_in_clear))
+        })
+        .expect("the stack")
+    };
+    let mut config = crate::account::tests::account_config();
+    let (status, quiet) = account(stack, &config);
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    assert!(!in_clear(quiet), "off unless said");
+    config.recording_in_clear = u64::from(crate::media::SipralToggle::On as u32);
+    (config.aor, config.aor_len) = text("sip:open@example.com");
+    let (status, open) = account(stack, &config);
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    assert!(in_clear(open));
+    config.recording_in_clear = 9;
+    let (status, _) = account(stack, &config);
+    assert_eq!(status, SipralStatus::InvalidArgument);
+    assert!(
+        last_error_text().contains("recording_in_clear"),
+        "{}",
+        last_error_text()
+    );
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+/// A caller built against ABI 0.31 declares the 384 bytes that header gave
+/// `sipral_account_config_t`, whose last four were padding then and may be
+/// left unwritten. Whatever they hold is not read as `recording_in_clear`:
+/// the account is added, and its encrypted calls are recorded encrypted.
+#[test]
+fn padding_a_0_31_caller_left_unwritten_is_not_read_as_recording_in_clear() {
+    const LENGTH_0_31: usize = 384;
+    let credentials = credentials(&[CALLER]);
+    let mut heard = Heard::default();
+    let stack = stack_hearing(&mut heard, &credentials, false);
+    let mut config = crate::account::tests::account_config();
+    config.size = LENGTH_0_31;
+    for garbage in [0xA5_u8, 0x01] {
+        let bytes = ptr::from_mut(&mut config).cast::<u8>();
+        for offset in LENGTH_0_31 - 4..LENGTH_0_31 {
+            // the padding a 0.31 caller never wrote, whatever its stack held
+            let byte = if offset == LENGTH_0_31 - 4 {
+                garbage
+            } else {
+                0
+            };
+            unsafe { bytes.add(offset).write(byte) };
+        }
+        (config.aor, config.aor_len) = text(if garbage == 1 {
+            "sip:one@example.com"
+        } else {
+            "sip:noise@example.com"
+        });
+        let (status, added) = account(stack, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let in_clear = crate::stack::with_stack(stack, |state| {
+            let id = state.accounts.get(added).expect("the account");
+            Ok(state
+                .engine
+                .account_srtp(id)
+                .is_some_and(|srtp| srtp.recording_in_clear))
+        })
+        .expect("the stack");
+        assert!(
+            !in_clear,
+            "padding holding {garbage:#x} was read as a toggle"
+        );
+    }
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+/// A stack created with no media clock dates its sender reports by the wall
+/// clock `sipral_stack_stir` pairs with `now_ms`, and one created with a
+/// media clock keeps it.
+#[test]
+fn a_stack_with_no_media_clock_takes_the_one_stir_is_given() {
+    let credentials = credentials(&[CALLER]);
+    let unix = credentials.not_before + 1_000;
+    for (media_clock, expected) in [(0, unix), (unix - 500, unix - 500)] {
+        let mut unused = Observed::default();
+        let mut config = config(record, &mut unused);
+        config.media_clock_unix_seconds = media_clock;
+        let (status, stack) = create(&config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        stir(stack, &[], unix);
+        let read = crate::stack::with_stack(stack, |state| {
+            let now = state.last_instant();
+            Ok(state.engine.wall_clock().unix_at(now))
+        })
+        .expect("the stack");
+        assert_eq!(read, expected, "media clock {media_clock}");
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
 }
 
 fn account(handle: SipralHandle, config: &SipralAccountConfig) -> (SipralStatus, SipralHandle) {
@@ -374,6 +551,7 @@ fn what_an_account_says_about_stir_is_checked_before_it_is_added() {
         freshness_seconds: 0,
         certificate_wait_ms: 0,
         unix_seconds: 0,
+        accept_service_provider_codes: 0,
     };
     assert_eq!(
         unsafe { sipral_stack_stir(clockless, ptr::from_ref(&stir), 0) },

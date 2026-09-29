@@ -47,21 +47,36 @@ impl std::fmt::Debug for Credentials {
 ///
 /// For a number TNAuthList cannot hold, or none at all: a test's own
 /// mistake.
-// a test's own mistake stops the test where it was made
-#[allow(clippy::expect_used)]
 #[must_use]
 pub fn credentials(numbers: &[&str]) -> Credentials {
+    issued(
+        numbers
+            .iter()
+            .map(|number| TnEntry::One((*number).to_owned()))
+            .collect(),
+    )
+}
+
+/// Credentials whose signing certificate's TNAuthList names the service
+/// provider code `code` and no number, as a SHAKEN certificate does.
+///
+/// # Panics
+///
+/// For a code TNAuthList cannot hold: a test's own mistake.
+#[must_use]
+pub fn provider_credentials(code: &str) -> Credentials {
+    issued(vec![TnEntry::Spc(code.to_owned())])
+}
+
+// a test's own mistake stops the test where it was made
+#[allow(clippy::expect_used)]
+fn issued(entries: Vec<TnEntry>) -> Credentials {
     let pki = Pki::new();
     let mut leaf = pki.leaf_spec();
     leaf.tn_auth_list = Some(
-        TnAuthList::new(
-            numbers
-                .iter()
-                .map(|number| TnEntry::One((*number).to_owned()))
-                .collect(),
-        )
-        .expect("numbers a TNAuthList can hold")
-        .to_der(),
+        TnAuthList::new(entries)
+            .expect("entries a TNAuthList can hold")
+            .to_der(),
     );
     let leaf = leaf.build(&pki.intermediate_key);
     let key: [u8; 32] = pki.leaf_key.to_bytes().into();

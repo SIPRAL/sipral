@@ -18,8 +18,8 @@ namespace Sipral;
 /// the ABI's major version, and a new one is only ever added at the end.
 ///
 /// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
-/// statuses, and it stays reserved and never used, so no build returns
-/// it and `sipral_status_name` has no name for it.
+/// statuses, and it stays reserved, never used and never to be given to a
+/// status. No build returns it and `sipral_status_name` has no name for it.
 /// </summary>
 public enum SipralStatus : int
 {
@@ -3932,10 +3932,11 @@ public struct SipralStackConfig
     /// The one number a stack that reads no clock cannot work out: RFC 3550
     /// §6.4.1 has a sender report carry "the wall clock time when this report
     /// was sent", and a monotonic instant is not one. Zero means the reports
-    /// count from the Unix epoch, which costs nothing a caller is likely to
-    /// miss — the round trip the far end computes is a difference, not an
-    /// absolute — and costs the correlation of this call's media with anything
-    /// else's.
+    /// take the wall clock `sipral_stack_stir` gives in `unix_seconds`, from
+    /// the moment it is given, and count from the Unix epoch until then:
+    /// the round trip the far end computes is a difference, not an
+    /// absolute, but the correlation of this call's media with anything
+    /// else's is not.
     /// </summary>
     public ulong MediaClockUnixSeconds;
     /// <summary>
@@ -4816,6 +4817,21 @@ public struct SipralAccountConfig
     /// full attestation, `A`.
     /// </summary>
     public uint StirAttestation;
+    /// <summary>
+    /// A `SipralToggle`: whether an encrypted call of this account may be
+    /// recorded to a recording server (`sipral_call_record_to`) in the
+    /// clear. Off by default: the copies of an encrypted call are offered
+    /// to the server as SRTP, with SDES keys in the recording session's
+    /// offer (RFC 4568), and a stream the server will not take that way
+    /// gets nothing (RFC 7866 §12.2). On, they go as plain RTP, as an
+    /// unencrypted call's always do. ABI 0.32.
+    ///
+    /// Sixty-four bits wide, where every other toggle takes thirty-two,
+    /// so that it starts past the 384 bytes of ABI 0.31: the last four
+    /// of those were padding, which a caller built against that header
+    /// may have left unwritten, and are never read.
+    /// </summary>
+    public ulong RecordingInClear;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -7928,9 +7944,21 @@ public struct SipralStirConfig
     /// the time, and only the caller can say which `now_ms` a time goes
     /// with, so the first call must give it.
     /// (`sipral_stack_config_t::media_clock_unix_seconds` goes with no
-    /// `now_ms` at all, and is not taken for it.)
+    /// `now_ms` at all, and is not taken for it.) A stack created with no
+    /// media clock dates its RTCP sender reports by this one too.
     /// </summary>
     public ulong UnixSeconds;
+    /// <summary>
+    /// A `SipralToggle`: whether a certificate whose TNAuthList names a
+    /// service provider code (RFC 8226 §9) has authority over every
+    /// calling number. Off by default, when only the numbers and ranges a
+    /// certificate names are its own: a code names a provider, not
+    /// numbers, and taking it as covering any number is a decision about
+    /// the providers the anchors certify — the one a SHAKEN deployment,
+    /// whose certificates carry codes and no numbers, makes by turning
+    /// this on. ABI 0.32.
+    /// </summary>
+    public uint AcceptServiceProviderCodes;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>

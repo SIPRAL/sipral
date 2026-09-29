@@ -154,6 +154,7 @@ public sealed class Account
                 config.StirOrigidLen = (nuint)stirOrigidBytes.Length;
             }
             config.StirAttestation = (uint)security.StirAttestation;
+            config.RecordingInClear = security.RecordingInClear ? (uint)SipralToggle.On : 0;
 
             SipralErrors.Call(() => NativeMethods.sipral_account_add(stack.Handle, config, out accountHandle), "sipral_account_add");
         }
@@ -352,7 +353,9 @@ public sealed class Account
 /// is A) and <see cref="StirOrigid"/> (one drawn for the account when left
 /// out). A PASSporT carries the time, which <see cref="SipralStack.Stir"/>
 /// gives the stack: call it first, with no anchors on a stack that only
-/// signs.</summary>
+/// signs. <see cref="RecordingInClear"/> lets the account's encrypted calls
+/// be recorded to a recording server as plain RTP; otherwise their copies go
+/// as SRTP or not at all (RFC 7866 §12.2).</summary>
 public sealed record AccountSecurity(
     SipralSrtp Srtp = 0,
     IReadOnlyList<string>? SrtpSuites = null,
@@ -361,4 +364,5 @@ public sealed record AccountSecurity(
     string? StirCertificateUrl = null,
     string? StirOrig = null,
     string? StirOrigid = null,
-    SipralAttestation StirAttestation = SipralAttestation.None);
+    SipralAttestation StirAttestation = SipralAttestation.None,
+    bool RecordingInClear = false);

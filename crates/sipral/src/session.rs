@@ -608,7 +608,7 @@ impl MediaSession {
             echo: None,
             render_delay: config.render_delay,
             dialling: Dialling::new(ticks_of(DIGIT_GAP, plan.codec.clock_rate())),
-            heard: plan.dtmf.map(EventReceiver::new),
+            heard: plan.dtmf_in.map(EventReceiver::new),
             events: Outbox::default(),
             codec_candidates: candidates,
             handshake_suite: None,
@@ -1599,7 +1599,9 @@ impl MediaSession {
         let heard = &mut self.heard;
         let events = &mut self.events;
         let signals = &mut self.signals;
-        let payload_type = self.plan.codec.payload();
+        // the codec arrives on this end's own number for it, which a peer
+        // that renumbered a dynamic type (RFC 3264 §6.1) sends with
+        let payload_type = self.plan.codec_in;
         let rate = self.plan.codec.clock_rate();
         // a peer that answered with one G.711 law and sends the other: real
         // equipment does this, and `accepted` (below) already lets the
@@ -1610,7 +1612,7 @@ impl MediaSession {
         // Unless this call's own negotiation put its named events on that
         // number: what arrives there is then a key, not audio, and the arm
         // for named events below is the one that has to see it.
-        let dtmf = self.plan.dtmf;
+        let dtmf = self.plan.dtmf_in;
         let foreign_law = sibling_law(coder.codec()).filter(|&(sibling, _)| dtmf != Some(sibling));
         match self.rtp.pull(self.activity) {
             Pull::Packet(frame) if frame.payload_type == COMFORT_NOISE => {
@@ -1748,6 +1750,10 @@ impl MediaSession {
         // and the buffer a digit or a beep is written into, for the same
         // reason: what goes out is borrowed from it
         let mut shaped = core::mem::take(&mut self.shaped);
+        // the frame about to be stamped stands for now on the media clock,
+        // which is what a sender report pairs with the wall clock (RFC 3550
+        // §6.4.1)
+        self.rtp.clock_at(self.elapsed(now));
         let sent = self.encode_frame(samples, echo.as_mut(), &mut shaped);
         self.shaped = shaped;
         self.echo = echo;
@@ -2440,9 +2446,13 @@ impl MediaSession {
         self.tap.is_some()
     }
 
-    /// Start copying this call's audio as `tap` says, or stop.
-    pub(crate) fn tap_to(&mut self, tap: Option<crate::siprec::Tap>) {
-        self.tap = tap;
+    /// Start copying this call's audio as `tap` says, or stop, and hand back
+    /// the copies that were running.
+    pub(crate) const fn tap_to(
+        &mut self,
+        tap: Option<crate::siprec::Tap>,
+    ) -> Option<crate::siprec::Tap> {
+        core::mem::replace(&mut self.tap, tap)
     }
 
     /// The copies running, to point them somewhere else.
@@ -2691,7 +2701,7 @@ impl MediaSession {
         self.suppressing = config.silence_suppression && !discontinuous;
         self.noise = Generator::new();
         self.stall_after = config.stall_after;
-        self.heard = plan.dtmf.map(EventReceiver::new);
+        self.heard = plan.dtmf_in.map(EventReceiver::new);
         self.plan = plan.clone();
         self.codec_candidates = candidates;
         self.last_inbound = now;
@@ -2812,6 +2822,11 @@ impl MediaSession {
     #[must_use]
     pub const fn plan(&self) -> &MediaPlan {
         &self.plan
+    }
+
+    /// Date this session's sender reports by `clock` from here on.
+    pub(crate) const fn set_wall_clock(&mut self, clock: WallClock) {
+        self.clock = clock;
     }
 
     /// How long a frame is, in milliseconds.
@@ -3260,7 +3275,9 @@ fn stream_config(
 }
 
 /// The payload types this stream will take in: what was agreed, the named
-/// events if any were, comfort noise, and — for G.711 — the sibling law.
+/// events if any were, comfort noise, and — for G.711 — the sibling law. The
+/// first two under this end's own numbers for them, which are what the far
+/// end sends with (RFC 3264 §5.1) when an answer renumbered them.
 ///
 /// The last of those is not a courtesy. A peer that answers with one
 /// companding law and sends the other is a real thing this stack has met, and
@@ -3269,15 +3286,13 @@ fn stream_config(
 /// law it actually names, which the two share a frame shape for (RFC 3551
 /// table 4).
 fn accepted(plan: &MediaPlan) -> PayloadTypes {
-    let mut types = PayloadTypes::none()
-        .with(plan.codec.payload())
-        .with(COMFORT_NOISE);
+    let mut types = PayloadTypes::none().with(plan.codec_in).with(COMFORT_NOISE);
     if let Ok(codec) = Codec::of_plan(plan)
         && let Some((sibling, _)) = sibling_law(codec)
     {
         types = types.with(sibling);
     }
-    match plan.dtmf {
+    match plan.dtmf_in {
         Some(payload) => types.with(payload),
         None => types,
     }

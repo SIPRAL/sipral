@@ -251,6 +251,14 @@ pub struct AccountSrtp {
     /// The account's suites, most preferred first — see
     /// [`CodecCatalog::with_srtp_suites`](crate::CodecCatalog::with_srtp_suites).
     pub suites: Option<Vec<Suite>>,
+    /// Whether an encrypted call of this account may be recorded to a
+    /// recording server ([`MediaEngine::record_to`](crate::MediaEngine::record_to))
+    /// in the clear. Off unless said: the copies of an encrypted call are
+    /// offered to the server as SRTP, keyed in the recording session's own
+    /// offer (RFC 4568), and a stream the server will not take that way gets
+    /// nothing (RFC 7866 §12.2). On, they go as plain RTP, as an unencrypted
+    /// call's always do.
+    pub recording_in_clear: bool,
 }
 
 impl AccountSrtp {
@@ -621,6 +629,8 @@ mod tests {
             }),
             direction: Direction::SendRecv,
             dtmf: None,
+            dtmf_in: None,
+            codec_in: 0,
             rtcp: RtcpPlan::Off,
             keying,
             voip_metrics_xr: false,

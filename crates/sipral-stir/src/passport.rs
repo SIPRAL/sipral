@@ -11,7 +11,7 @@
 //! nothing else, so a PASSporT whose `orig` has no `tn` is refused as
 //! malformed rather than accepted with nothing to check it against.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use crate::json::Value;
 use crate::verdict::{Failure, Malformed};
@@ -250,11 +250,114 @@ impl Dest {
         }
     }
 
+    /// A single called URI, in the canonical form of RFC 8224 §8.5
+    /// ([`canonical_uri`]).
+    #[must_use]
+    pub fn uri(uri: &str) -> Self {
+        Dest {
+            tn: Vec::new(),
+            uri: vec![canonical_uri(uri)],
+        }
+    }
+
     /// Whether there is no destination at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tn.is_empty() && self.uri.is_empty()
     }
+
+    /// Whether `number` is one of the called numbers.
+    #[must_use]
+    pub fn names_number(&self, number: &Tn) -> bool {
+        self.tn.contains(number)
+    }
+
+    /// Whether `uri` is one of the called URIs, both sides compared in the
+    /// canonical form of RFC 8224 §8.5: a signer that wrote a SIP URI with
+    /// its port, parameters or another case still names the same address
+    /// of record.
+    #[must_use]
+    pub fn names_uri(&self, uri: &str) -> bool {
+        let wanted = canonical_uri(uri);
+        self.uri
+            .iter()
+            .any(|signed| canonical_uri(signed) == wanted)
+    }
+}
+
+/// A URI in the canonical form RFC 8224 §8.5 gives a `sip:` or `sips:` URI
+/// before it goes into a PASSporT claim such as `dest.uri`:
+/// `scheme ":" user "@" host`, with the password, the port, the URI
+/// parameters and the headers dropped, scheme, user and host in lower case,
+/// and every percent-encoded unreserved character (RFC 3986 §2.3) decoded;
+/// an escape that stays is written with upper-case digits (RFC 3986
+/// §6.2.2.1). A SIP URI without a user part keeps just its host.
+///
+/// Any other URI comes back as written, but for its scheme in lower case:
+/// §8.5 describes the SIP and SIPS schemes alone.
+#[must_use]
+pub fn canonical_uri(uri: &str) -> String {
+    let trimmed = uri.trim();
+    let Some((scheme, rest)) = trimmed.split_once(':') else {
+        return trimmed.to_owned();
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "sip" && scheme != "sips" {
+        return format!("{scheme}:{rest}");
+    }
+    // the headers go first: a `?` cannot appear unescaped before them
+    let rest = rest.split_once('?').map_or(rest, |(before, _)| before);
+    let (user, hostport) = match rest.rsplit_once('@') {
+        Some((userinfo, hostport)) => {
+            // only the user is kept of the userinfo: the password, and the
+            // colon before it, go (§8.5)
+            let user = userinfo.split_once(':').map_or(userinfo, |(user, _)| user);
+            (Some(user), hostport)
+        }
+        None => (None, rest),
+    };
+    let hostport = hostport.split_once(';').map_or(hostport, |(host, _)| host);
+    let host = if hostport.starts_with('[') {
+        // an IPv6 reference keeps its brackets and its colons
+        hostport
+            .find(']')
+            .and_then(|end| hostport.get(..=end))
+            .unwrap_or(hostport)
+    } else {
+        hostport.split_once(':').map_or(hostport, |(host, _)| host)
+    };
+    let host = normalised(host);
+    match user {
+        Some(user) => format!("{scheme}:{}@{host}", normalised(user)),
+        None => format!("{scheme}:{host}"),
+    }
+}
+
+/// Lower case, with each escaped unreserved character decoded and every
+/// other escape written with upper-case digits (RFC 3986 §6.2.2).
+fn normalised(part: &str) -> String {
+    let mut out = String::with_capacity(part.len());
+    let mut chars = part.chars();
+    while let Some(c) = chars.next() {
+        let digits = chars.clone().take(2).collect::<String>();
+        let escaped = (c == '%'
+            && digits.len() == 2
+            && digits.chars().all(|digit| digit.is_ascii_hexdigit()))
+        .then(|| u8::from_str_radix(&digits, 16).ok())
+        .flatten();
+        match escaped {
+            Some(byte) => {
+                chars.nth(1);
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                    out.push(char::from(byte.to_ascii_lowercase()));
+                } else {
+                    let _ = write!(out, "%{byte:02X}");
+                }
+            }
+            None => out.extend(c.to_lowercase()),
+        }
+    }
+    out
 }
 
 /// The two claims RFC 8588 adds.
@@ -282,7 +385,8 @@ pub struct Claims {
 
 impl Claims {
     /// The claims in the deterministic form of RFC 8225 §9, with `attest`
-    /// and `origid` included when [`Claims::shaken`] is set.
+    /// and `origid` included when [`Claims::shaken`] is set, and each
+    /// `dest.uri` in the canonical form of RFC 8224 §8.5 ([`canonical_uri`]).
     #[must_use]
     pub fn to_json(&self) -> String {
         self.value(self.shaken.is_some()).canonical()
@@ -306,9 +410,13 @@ impl Claims {
             dest.push(("tn".to_owned(), Value::Array(numbers)));
         }
         if !self.dest.uri.is_empty() {
-            let mut uris: Vec<&String> = self.dest.uri.iter().collect();
+            // RFC 8224 §8.5: a SIP URI goes into a claim in its canonical
+            // form, which is also the form a verifier rebuilds a compact
+            // form's claims in
+            let mut uris: Vec<String> =
+                self.dest.uri.iter().map(|uri| canonical_uri(uri)).collect();
             uris.sort_unstable();
-            let uris = uris.into_iter().cloned().map(Value::String).collect();
+            let uris = uris.into_iter().map(Value::String).collect();
             dest.push(("uri".to_owned(), Value::Array(uris)));
         }
         let mut members = vec![

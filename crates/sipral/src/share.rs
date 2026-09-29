@@ -314,6 +314,8 @@ mod tests {
             }),
             direction: Direction::SendRecv,
             dtmf: None,
+            dtmf_in: None,
+            codec_in: 0,
             rtcp: RtcpPlan::Off,
             keying: None,
             voip_metrics_xr: false,

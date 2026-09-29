@@ -24,10 +24,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sipral::{
-    CallHandle, CallMedia, Event, MediaConfig, MediaEvent, OutgoingCall, RecordTo, UaEvent, Uri,
+    CallHandle, CallMedia, Event, MediaConfig, MediaEvent, OutgoingCall, RecordTo, SrtpPolicy,
+    UaEvent, Uri,
 };
 use sipral_core::endpoint::{Input, TransportId, TransportProtocol};
 use sipral_core::msg::HeaderName;
+use sipral_core::sdp::Crypto;
+use sipral_rtp::srtp::{Master, Policy, Suite, Unprotector};
 
 use crate::local::{confirmed, endpoint, local_account};
 use crate::{Endpoint, catalog, place_call};
@@ -253,8 +256,49 @@ fn bound_stream(endpoint: &mut Endpoint, stream: &TcpStream, now: Instant) {
         .expect("the connection is a transport");
 }
 
+/// The recorder's key for the stream at `index`, when it answers as SRTP: any
+/// thirty octets are an AES_CM_128_HMAC_SHA1_80 key and salt, and these are
+/// nobody's.
+const RECORDER_KEYS: [&str; 2] = [
+    "inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR",
+    "inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz",
+];
+
+/// The `AES_CM_128_HMAC_SHA1_80` line the offer carries on each of its two
+/// streams, if it offered SRTP: what the recorder takes, and the key it opens
+/// the copies with.
+fn offered_lines(offer: &str) -> Vec<Crypto> {
+    let mut lines = Vec::new();
+    let mut section = 0_usize;
+    for line in offer.lines() {
+        if line.starts_with("m=audio ") {
+            section += 1;
+        }
+        if let Some(value) = line.strip_prefix("a=crypto:")
+            && let Some(crypto) = Crypto::parse(value.trim())
+            && crypto.suite == "AES_CM_128_HMAC_SHA1_80"
+            && lines.len() < section
+        {
+            lines.push(crypto);
+        }
+    }
+    lines
+}
+
+/// What opens the copies a stream offered under `line` carries.
+fn opener(line: &Crypto) -> Unprotector {
+    let policy = line.policy().expect("a line the offerer wrote");
+    let keys = &policy.keys.first().expect("one key").keys;
+    Unprotector::new(
+        Policy::new(Suite::AesCm80),
+        Master::new(keys.key(), keys.salt()),
+    )
+}
+
 /// The recorder's answer: one receive-only stream per label, on the codec
-/// the offer names, at the two sockets it counts on.
+/// the offer names, at the two sockets it counts on — as SRTP, under the
+/// offered AES_CM_128_HMAC_SHA1_80 line and a key of its own, when the offer
+/// was.
 fn recorder_answer(offer: &str, first: SocketAddr, second: SocketAddr) -> Arc<[u8]> {
     let format = offer
         .lines()
@@ -270,22 +314,48 @@ fn recorder_answer(offer: &str, first: SocketAddr, second: SocketAddr) -> Arc<[u
     let mut answer = String::from(
         "v=0\r\no=recorder 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n",
     );
-    for (label, socket) in [("1", first), ("2", second)] {
+    let lines = offered_lines(offer);
+    for (index, (label, socket)) in [("1", first), ("2", second)].into_iter().enumerate() {
+        let (proto, crypto) = match lines.get(index) {
+            Some(line) => (
+                "RTP/SAVP",
+                format!(
+                    "a=crypto:{} AES_CM_128_HMAC_SHA1_80 {}\r\n",
+                    line.tag, RECORDER_KEYS[index]
+                ),
+            ),
+            None => ("RTP/AVP", String::new()),
+        };
         let _ = write!(
             answer,
-            "m=audio {} RTP/AVP {format}\r\n{rtpmap}a=label:{label}\r\na=recvonly\r\n",
+            "m=audio {} {proto} {format}\r\n{rtpmap}a=label:{label}\r\na=recvonly\r\n{crypto}",
             socket.port()
         );
     }
     Arc::from(answer.into_bytes())
 }
 
-/// How many RTP packets arrived on `socket` since the last time it was asked.
-fn counted(socket: &UdpSocket) -> u32 {
+/// How many RTP packets arrived on `socket` since the last time it was
+/// asked: under SRTP with `opener`, only those it opens, and `plain` counts
+/// any that arrived in the clear.
+fn counted(socket: &UdpSocket, opener: Option<&mut Unprotector>, plain: &mut u32) -> u32 {
     let mut inbox = [0_u8; 1_500];
     let mut count = 0;
+    let mut opener = opener;
     while let Ok((length, _)) = socket.recv_from(&mut inbox) {
-        count += u32::from(length > 12 && inbox[0] >> 6 == 2);
+        let Some(packet) = inbox.get_mut(..length) else {
+            continue;
+        };
+        if length <= 12 || packet[0] >> 6 != 2 {
+            continue;
+        }
+        match opener.as_deref_mut() {
+            Some(opener) => match opener.unprotect_rtp(packet) {
+                Ok(_) => count += 1,
+                Err(_) => *plain += 1,
+            },
+            None => count += 1,
+        }
     }
     count
 }
@@ -295,8 +365,21 @@ fn counted(socket: &UdpSocket) -> u32 {
 /// recorder answers it with a stream per party, both parties' audio reaches
 /// it on its own socket, and hanging up the call ends the recording.
 #[test]
-#[allow(clippy::too_many_lines)]
 fn a_call_is_recorded_to_a_recorder_over_real_sockets() {
+    recorded_over_real_sockets(false);
+}
+
+/// The same, on a call keyed with SDES: the recording session offers both
+/// streams as SRTP with keys of its own (RFC 7866 §12.2), the recorder takes
+/// them, and every copy that reaches it opens under the key offered for its
+/// stream — none arrives in the clear.
+#[test]
+fn an_encrypted_call_is_recorded_to_a_recorder_as_srtp_over_real_sockets() {
+    recorded_over_real_sockets(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn recorded_over_real_sockets(encrypted: bool) {
     let mut dialling = endpoint(231);
     let mut answering = endpoint(232);
     let mut recorder = endpoint(233);
@@ -326,10 +409,17 @@ fn a_call_is_recorded_to_a_recorder_over_real_sockets() {
     let outgoing =
         OutgoingCall::new(Uri::parse_str(&format!("sip:answering@{target}")).expect("a URI"))
             .to_address(dialling.transport, target);
-    let media = CallMedia::new(catalog(), MediaConfig::default());
+    let offered = if encrypted {
+        catalog().with_srtp(SrtpPolicy::Required)
+    } else {
+        catalog()
+    };
+    let media = CallMedia::new(offered, MediaConfig::default());
     let call =
         place_call(&mut dialling, account, outgoing, media, target, now).expect("the INVITE goes");
 
+    let mut openers: Vec<Unprotector> = Vec::new();
+    let mut plain = 0_u32;
     let mut recording: Option<CallHandle> = None;
     let mut at_the_recorder: Option<CallHandle> = None;
     let mut offer_seen = false;
@@ -361,6 +451,12 @@ fn a_call_is_recorded_to_a_recorder_over_real_sockets() {
                 assert!(
                     body.contains("a=label:1") && body.contains("a=label:2"),
                     "{body}"
+                );
+                openers = offered_lines(&body).iter().map(opener).collect();
+                assert_eq!(
+                    openers.len(),
+                    if encrypted { 2 } else { 0 },
+                    "SRTP offered exactly for an encrypted call: {body}"
                 );
                 let answer = recorder_answer(&body, address_of(&first), address_of(&second));
                 recorder
@@ -397,8 +493,12 @@ fn a_call_is_recorded_to_a_recorder_over_real_sockets() {
             };
             let _ = out.send_to(&payload, destination);
         }
-        heard_first += counted(&first);
-        heard_second += counted(&second);
+        let (one, two) = match openers.as_mut_slice() {
+            [one, two] => (Some(one), Some(two)),
+            _ => (None, None),
+        };
+        heard_first += counted(&first, one, &mut plain);
+        heard_second += counted(&second, two, &mut plain);
         if heard_first >= 25 && heard_second >= 25 && !hung_up {
             let _ = dialling.agent.hangup(call, now);
             hung_up = true;
@@ -426,4 +526,5 @@ fn a_call_is_recorded_to_a_recorder_over_real_sockets() {
         hung_up && recording_ended,
         "hanging up did not end the recording"
     );
+    assert_eq!(plain, 0, "copies of an encrypted call arrived in the clear");
 }

@@ -632,7 +632,18 @@ anchors. `media_clock_unix_seconds` is not taken for it: it goes with no
 
 `sipral_stack_stir(stack, &config, now_ms)` takes a `sipral_stir_config_t`:
 the trust anchors (PEM or DER, one after another), `freshness_seconds` (zero
-for sixty), `certificate_wait_ms` (zero for four seconds) and `unix_seconds`.
+for sixty), `certificate_wait_ms` (zero for four seconds) and `unix_seconds`,
+and from ABI 0.32 `accept_service_provider_codes`, a `SipralToggle` off by
+default: a certificate has authority over the numbers and ranges its
+TNAuthList names, and one that names a service provider code instead — what a
+SHAKEN certificate carries — covers every number only once this is on, the
+decision about the certified providers being the deployment's. A stack
+created with `media_clock_unix_seconds` zero dates its RTCP sender reports by
+the `unix_seconds` this call pairs with `now_ms`, from then on (RFC 3550
+§6.4.1). The called party is compared with the PASSporT's `dest` in every
+case — the number or SIP URI in `To` or the Request-URI, each canonical (RFC
+8224 §8.3, §8.5) — and a mismatch is `SIPRAL_VERIFICATION_FAILURE_DEST_MISMATCH`
+with `detail` naming what was signed and what the request names.
 The verification service then works in two halves of
 `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` (47), whose `payload.verification`
 says which by `stage`:
@@ -1288,6 +1299,20 @@ for `this_end`'s socket and one for `far_end`'s; collect them with every
 frame. `sipral_call_stop_recording_to` stops the copies and hangs the
 recording session up, which the recorded call's end, and the server's hanging
 up, do by themselves.
+
+**An encrypted call is recorded encrypted (ABI 0.32).** The copies of a call
+keyed with SRTP go to the server as SRTP, offered with SDES keys of their own
+in the recording session's INVITE (RFC 7866 §12.2), and a stream the server
+will not take that way gets nothing. `sipral_account_config_t` appends
+`recording_in_clear`, a `SipralToggle` off by default: on, the account's
+encrypted calls are recorded as plain RTP, as an unencrypted call always is.
+It is 64 bits wide, unlike every other toggle, because the struct's 0.31
+length of 384 bytes ended in four bytes of padding after `stir_attestation`:
+a 32-bit member would have sat in them, read from bytes a 0.31 caller may
+never have written, and declared the same length. A member appended to a
+released struct starts at or past the struct's released length, never in its
+tail padding. The keys ride in the recording session's signalling, which is one more reason
+to send it over TLS.
 
 `sipral_call_answer_with` is the answer `sipral_call_ring_media` always had
 the configuration for: `sipral_call_answer_media` with the call's own

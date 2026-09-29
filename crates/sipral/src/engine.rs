@@ -592,6 +592,20 @@ struct Recording {
     numbers: [(u32, u16, u32); 2],
     /// Where the server receives each stream, once it has answered.
     destinations: Option<[Option<SocketAddr>; 2]>,
+    /// The SDES keys the two streams were offered with, for a recorded call
+    /// that is encrypted: its copies go to the server as SRTP (RFC 7866
+    /// §12.2), and a stream the server will not take as SRTP gets nothing.
+    /// `None` copies in the clear.
+    keys: Option<crate::siprec::StreamKeys>,
+    /// Whether the recorded call's account lets an encrypted call be copied
+    /// in the clear ([`AccountSrtp::recording_in_clear`]).
+    in_clear: bool,
+    /// The server's last answer, which says which offered line keys each
+    /// stream.
+    answer: Option<SessionDescription>,
+    /// The copies taken off a recorded call that another replaced, waiting
+    /// for that call's session to carry on in.
+    parked: Option<crate::siprec::Tap>,
     /// The direction the metadata last told the server about, and whether
     /// new metadata is waiting for a change in the recording session to end.
     told: Option<Direction>,
@@ -1762,6 +1776,24 @@ impl MediaEngine {
     #[must_use]
     pub const fn catalog(&self) -> &CodecCatalog {
         &self.catalog
+    }
+
+    /// Say what the wall clock reads, when the reading [`MediaEngine::new`]
+    /// was given was none worth having — an application that only learns the
+    /// time later. Every call's sender reports, the running ones' included,
+    /// carry it from here on (RFC 3550 §6.4.1), and so do the certificates a
+    /// DTLS-SRTP call makes.
+    pub fn set_wall_clock(&mut self, clock: WallClock) {
+        self.clock = clock;
+        for held in self.sessions.values() {
+            share::lock(held).session.set_wall_clock(clock);
+        }
+    }
+
+    /// The wall clock this engine dates its reports by.
+    #[must_use]
+    pub const fn wall_clock(&self) -> WallClock {
+        self.clock
     }
 
     /// Give `account`'s calls an SRTP policy and suites of their own, laid
@@ -4027,7 +4059,7 @@ impl MediaEngine {
         let annex_b = annex_b_in_use(&managed.catalog, local, remote, &plan);
         let feedback = match (live_stream(local), live_stream(remote)) {
             (Some(ours), Some(theirs)) => {
-                crate::feedback::negotiated(ours, theirs, plan.codec.payload())
+                crate::feedback::negotiated(ours, theirs, (plan.codec_in, plan.codec.payload()))
             }
             _ => None,
         };
@@ -4264,15 +4296,29 @@ impl MediaEngine {
         if self.recordings.values().any(|held| held.recorded == call) {
             return Err(MediaError::AlreadyRecording);
         }
-        let (codec, direction) = {
+        let (codec, direction, encrypted) = {
             let held = self.sessions.get(&call).ok_or(MediaError::NoDescription)?;
             let slot = share::lock(held);
             let plan = slot.session.plan();
-            (plan.codec.clone(), plan.direction)
+            (plan.codec.clone(), plan.direction, plan.keying.is_some())
         };
         let account = agent
             .call_account(call)
             .ok_or(MediaError::Signalling(UaError::NoSuchAccount))?;
+        // RFC 7866 §12.2: the recording carries what the call did, and a call
+        // kept from eavesdroppers is not copied past them in the clear unless
+        // the account said it may be
+        let in_clear = self
+            .accounts
+            .get(&account)
+            .is_some_and(|srtp| srtp.recording_in_clear);
+        let keys = (encrypted && !in_clear).then(|| {
+            let catalog = self.account_catalog(account);
+            [
+                self.draw_offer_keys(&catalog),
+                self.draw_offer_keys(&catalog),
+            ]
+        });
         let ends = call_ends(agent, call).ok_or(MediaError::NoSuchCall)?;
         let ids = [(); 5].map(|()| crate::siprec::draw_id(agent));
         let [session, this_party, far_party, this_stream, far_stream] = ids;
@@ -4283,7 +4329,7 @@ impl MediaEngine {
         );
         let (identity, session_id) = draw(agent);
         let (other, _) = draw(agent);
-        let offer = crate::siprec::offer(&codec, &to, session_id);
+        let offer = crate::siprec::offer(&codec, &to, session_id, keys.as_ref());
         let mut outgoing = OutgoingCall::new(to.server.clone())
             .offer(Arc::from(offer.to_bytes()))
             .recording_session(&parties.metadata(direction))?;
@@ -4304,6 +4350,10 @@ impl MediaEngine {
                     (other.ssrc, other.sequence, other.timestamp),
                 ],
                 destinations: None,
+                keys,
+                in_clear,
+                answer: None,
+                parked: None,
                 told: Some(direction),
                 owed: false,
             },
@@ -4334,7 +4384,7 @@ impl MediaEngine {
         now: Instant,
     ) -> Result<(), MediaError> {
         let recording = self.recording_of(call).ok_or(MediaError::NotRecording)?;
-        self.untap(call);
+        drop(self.untap(call));
         self.recordings.remove(&recording);
         agent.hangup(recording, now)?;
         Ok(())
@@ -4419,14 +4469,29 @@ impl MediaEngine {
         let Some(answer) = answer else {
             return;
         };
-        held.destinations = Some(crate::siprec::destinations(answer));
-        self.attach_tap(recording);
+        let mut destinations = crate::siprec::destinations(answer);
+        if let Some(keys) = held.keys.as_ref() {
+            // a stream the server did not take as SRTP under a line this end
+            // offered is one this end sends nothing to
+            let keyed = crate::siprec::protection(answer, keys);
+            for (destination, keyed) in destinations.iter_mut().zip(keyed) {
+                if keyed.is_none() {
+                    *destination = None;
+                }
+            }
+        }
+        held.destinations = Some(destinations);
+        held.answer = Some(answer.clone());
+        self.attach_tap(recording, true);
     }
 
     /// Copy the recorded call's audio to where the server receives it, on
-    /// the session running now; one already copying is pointed there.
-    fn attach_tap(&mut self, recording: CallHandle) {
-        let Some(held) = self.recordings.get(&recording) else {
+    /// the session running now; one already copying is pointed there, and
+    /// copies taken off a call this one replaced carry on here. `answered`
+    /// when the server has just answered, which may have moved the line that
+    /// keys an SRTP stream.
+    fn attach_tap(&mut self, recording: CallHandle, answered: bool) {
+        let Some(held) = self.recordings.get_mut(&recording) else {
             return;
         };
         let Some(destinations) = held.destinations else {
@@ -4436,23 +4501,58 @@ impl MediaEngine {
             return;
         };
         let mut slot = share::lock(session);
-        if let Some(tap) = slot.session.tap() {
-            tap.redirect(destinations);
+        // a recording session that went in the clear, for a call that was
+        // not encrypted then, copies nothing of an encrypted call that
+        // replaced it unless the account said it may (RFC 7866 §12.2); the
+        // copies wait, numbered as they were, for audio they may carry
+        if held.keys.is_none() && !held.in_clear && slot.session.plan().keying.is_some() {
+            if let Some(running) = slot.session.tap_to(None) {
+                held.parked = Some(running);
+            }
             return;
         }
-        slot.session.tap_to(Some(crate::siprec::Tap::new(
-            &held.to,
-            destinations,
-            held.payload_type,
-            held.numbers,
-        )));
+        let keyed = || {
+            held.keys
+                .as_ref()
+                .zip(held.answer.as_ref())
+                .map(|(keys, answer)| crate::siprec::protection(answer, keys))
+        };
+        if let Some(tap) = slot.session.tap() {
+            tap.redirect(destinations);
+            if let Some(keyed) = keyed().filter(|_| answered) {
+                tap.protect(keyed);
+            }
+            return;
+        }
+        let received = slot.session.plan().codec_in;
+        let (mut tap, fresh) = match held.parked.take() {
+            Some(mut tap) => {
+                tap.follow();
+                tap.copy_payload_type((held.payload_type, received));
+                tap.redirect(destinations);
+                (tap, false)
+            }
+            None => (
+                crate::siprec::Tap::new(
+                    &held.to,
+                    destinations,
+                    (held.payload_type, received),
+                    held.numbers,
+                ),
+                true,
+            ),
+        };
+        if let Some(keyed) = keyed().filter(|_| answered || fresh) {
+            tap.protect(keyed);
+        }
+        slot.session.tap_to(Some(tap));
     }
 
-    /// Stop copying `call`'s audio.
-    fn untap(&mut self, call: CallHandle) {
-        if let Some(session) = self.sessions.get(&call) {
-            share::lock(session).session.tap_to(None);
-        }
+    /// Stop copying `call`'s audio, and hand back the copies that ran.
+    fn untap(&mut self, call: CallHandle) -> Option<crate::siprec::Tap> {
+        self.sessions
+            .get(&call)
+            .and_then(|session| share::lock(session).session.tap_to(None))
     }
 
     /// A recorded call moved to another codec: offer the server its two
@@ -4462,11 +4562,11 @@ impl MediaEngine {
         let Some(recording) = self.recording_of(call) else {
             return;
         };
-        let Some(codec) = self
-            .sessions
-            .get(&call)
-            .map(|session| share::lock(session).session.plan().codec.clone())
-        else {
+        let Some((codec, received)) = self.sessions.get(&call).map(|session| {
+            let slot = share::lock(session);
+            let plan = slot.session.plan();
+            (plan.codec.clone(), plan.codec_in)
+        }) else {
             return;
         };
         let Some(held) = self.recordings.get_mut(&recording) else {
@@ -4475,14 +4575,14 @@ impl MediaEngine {
         if held.payload_type == codec.payload() {
             return;
         }
-        let offer = crate::siprec::offer(&codec, &held.to, held.session_id);
+        let offer = crate::siprec::offer(&codec, &held.to, held.session_id, held.keys.as_ref());
         // `reoffer` moves the `o=` version on (RFC 3264 §8)
         if agent.reoffer(recording, &offer.to_bytes(), now).is_ok() {
             held.payload_type = codec.payload();
             if let Some(session) = self.sessions.get(&call)
                 && let Some(tap) = share::lock(session).session.tap()
             {
-                tap.copy_payload_type(codec.payload());
+                tap.copy_payload_type((codec.payload(), received));
             }
         }
     }
@@ -4526,13 +4626,15 @@ impl MediaEngine {
             return;
         };
         let id = crate::siprec::draw_id(agent);
-        self.untap(replaced);
+        let running = self.untap(replaced);
         if let Some(held) = self.recordings.get_mut(&recording) {
             held.recorded = call;
             held.parties.replace_far_end(id, far, name);
             held.owed = true;
+            // the copies carry on, numbered and keyed as they were
+            held.parked = running;
         }
-        self.attach_tap(recording);
+        self.attach_tap(recording, false);
         self.send_metadata(recording, agent, now);
         self.recorded_codec(call, agent, now);
     }
@@ -4568,7 +4670,7 @@ impl MediaEngine {
     /// copying at once: the call that replaced a recorded one, most often.
     fn tap_new_session(&mut self, call: CallHandle) {
         if let Some(recording) = self.recording_of(call) {
-            self.attach_tap(recording);
+            self.attach_tap(recording, false);
         }
     }
 }
@@ -5995,6 +6097,8 @@ mod keying_guards {
             }),
             direction: Direction::SendRecv,
             dtmf: None,
+            dtmf_in: None,
+            codec_in: 0,
             rtcp: RtcpPlan::Off,
             keying,
             voip_metrics_xr: false,
@@ -6391,6 +6495,8 @@ mod counter_wiring {
             }),
             direction: Direction::SendRecv,
             dtmf: None,
+            dtmf_in: None,
+            codec_in: 0,
             rtcp,
             keying: None,
             voip_metrics_xr: false,

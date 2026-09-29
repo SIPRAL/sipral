@@ -168,6 +168,7 @@ public final class Account: @unchecked Sendable {
                 config.stir_origid_len = parts[11].count
             }
             config.stir_attestation = security.stirAttestation.rawValue
+            config.recording_in_clear = security.recordingInClear ? UInt64(SipralToggle.on.rawValue) : 0
             return try key.withUnsafeBufferPointer { keyBytes in
                 if !keyBytes.isEmpty {
                     config.stir_key = keyBytes.baseAddress
@@ -343,7 +344,9 @@ public final class Account: @unchecked Sendable {
 /// `stirOrig` or the number in the AOR, claiming `stirAttestation` (`.none`
 /// is A) and `stirOrigid` (one drawn for the account when `nil`). A PASSporT
 /// carries the time, which `SipralStack.stir` gives the stack: call it first,
-/// with no anchors on a stack that only signs.
+/// with no anchors on a stack that only signs. `recordingInClear` lets the
+/// account's encrypted calls be recorded to a recording server as plain RTP;
+/// otherwise their copies go as SRTP or not at all (RFC 7866 §12.2).
 public struct AccountSecurity: Sendable {
     public var srtp: SipralSrtp?
     public var srtpSuites: [String]
@@ -353,6 +356,7 @@ public struct AccountSecurity: Sendable {
     public var stirOrig: String?
     public var stirOrigid: String?
     public var stirAttestation: SipralAttestation
+    public var recordingInClear: Bool
 
     public init(
         srtp: SipralSrtp? = nil,
@@ -362,7 +366,8 @@ public struct AccountSecurity: Sendable {
         stirCertificateUrl: String? = nil,
         stirOrig: String? = nil,
         stirOrigid: String? = nil,
-        stirAttestation: SipralAttestation = .none
+        stirAttestation: SipralAttestation = .none,
+        recordingInClear: Bool = false
     ) {
         self.srtp = srtp
         self.srtpSuites = srtpSuites
@@ -372,5 +377,6 @@ public struct AccountSecurity: Sendable {
         self.stirOrig = stirOrig
         self.stirOrigid = stirOrigid
         self.stirAttestation = stirAttestation
+        self.recordingInClear = recordingInClear
     }
 }

@@ -882,6 +882,7 @@ server:
 | blind transfer | connected, the transfer completed (its own status read from the `NOTIFY` sipfrag), the far end ended it | all three |
 | attended transfer | as blind, plus the consultation leg itself connected first | all three |
 | DTMF, RFC 4733 | connected, a digit sent as a named telephone event named back the same way by the lab's own dialplan (`interop/asterisk/extensions.conf`'s 9003), hung up, ended. Not run through the proxy to FreeSWITCH yet: its 9003 in `interop/freeswitch/lab.xml` never named the digit back, dialled at once or after a pause, and a flow is not run where it is known not to pass until the reason is found | Asterisk only |
+| DTMF, RFC 4733, the answer renumbered | as DTMF, RFC 4733, with the harness standing in for a far end that renumbered a dynamic type in its answer (RFC 3264 §6.1): Asterisk's answer names the events 96, the stack is shown 97, and what it sends as 97 goes on the wire as 96. The digit goes out on the answer's number and comes back on the offer's, so the planner has matched the renumbered type by what it maps to, and the session takes it in on its own number | Asterisk only |
 | DTMF, SIP INFO | connected, the same digit sent by `UserAgent::send_dtmf_info` instead, answered with success (`UaEvent::DtmfSent`) and named back the same way by extension 9003 — against the lab's own `labuser-infodtmf` endpoint (`interop/asterisk/pjsip.conf`, `dtmf_mode=info`), so `SendDTMF()`'s own echo goes back over INFO too and this end's receiving half is exercised against a real peer as well as its sending one — hung up, ended | Asterisk only |
 | SRTP | connected under SDES against the lab's own SDES endpoint (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004) — refused rather than answered plainly if the far end will not key it | Asterisk only |
 | DTLS-SRTP, held and resumed | connected against the lab's own DTLS endpoint — on Asterisk `interop/asterisk/pjsip.conf`'s `labuser-dtls`, on FreeSWITCH extension 9005 of `interop/freeswitch/lab.xml`, which makes secure media mandatory for that call alone and certifies with the RSA-4096 key FreeSWITCH generates for itself, so the flow is also the proof that a peer's RSA certificate keys a call in either role — keyed by its own handshake — `SIPRAL_EVENT_KIND_MEDIA_SECURED` for that call, not `MEDIA_STARTED`: a DTLS call is still waiting for its keys there — then held and resumed, both agreed, hung up by this end, ended. A handshake that fails is named from `MEDIA_FAILED`'s own reason and ends the flow at once. Audio is required only *after* the resume, not merely after the call connects: the hold and the resume are both re-offers that hand the DTLS roles back with `a=setup:actpass` (RFC 8842 §5.5), so audio heard once they are agreed says the far end answered with the roles already in force (§5.3) and the association that keyed the call still carries it | all three |
@@ -989,7 +990,9 @@ takes part in: real-time text and RTCP feedback on a call between two of the
 harness's endpoints, text carried each way on sockets of its own, and a call
 recorded to a third endpoint that takes recording sessions, the recording
 session on a real TCP connection and both parties' copies counted on the
-recorder's two sockets.
+recorder's two sockets — and again on a call keyed with SDES, whose copies
+the recorder takes as SRTP and opens under the keys the recording session
+offered, none of them arriving in the clear.
 
 ## Tooling
 

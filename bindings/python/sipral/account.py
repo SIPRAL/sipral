@@ -103,6 +103,7 @@ class Account:
         stir_orig: str | None = None,
         stir_origid: str | None = None,
         stir_attestation: int = 0,
+        recording_in_clear: bool = False,
     ) -> "Account":
         aor_bytes = aor.encode("utf-8")
         registrar_address_bytes = registrar_address.encode("utf-8")
@@ -187,6 +188,7 @@ class Account:
             config.stir_origid = origid_buf
             config.stir_origid_len = len(origid_bytes)
         config.stir_attestation = int(stir_attestation)
+        config.recording_in_clear = 1 if recording_in_clear else 0
 
         out_account = ffi.new("sipral_handle_t *")
         _call(

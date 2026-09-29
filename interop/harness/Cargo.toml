@@ -64,6 +64,12 @@ getrandom = "0.2.17"
 # `opus`: the recording flow (src/inband.rs) writes Ogg Opus beside its WAV
 # only when this binary links libopus; `scripts/lab.sh inband` builds with it,
 # every other step without.
+[dev-dependencies]
+# The recording flow's recorder opens the SRTP copies an encrypted call's
+# recording session sends (src/protocols.rs), with the transform the stack
+# itself runs; tests only.
+sipral-rtp = { path = "../../crates/sipral-rtp", version = "0.0.1" }
+
 [features]
 opus = ["sipral/opus"]
 pipewire = ["dep:sipral-io-pipewire"]

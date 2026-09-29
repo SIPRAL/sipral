@@ -451,6 +451,8 @@ class SipralClient private constructor(
             userAgent = userAgent,
             entropy = entropy,
             codecs = codecs,
+            // the wall clock the RTCP sender reports carry (RFC 3550 §6.4.1)
+            mediaClockUnixSeconds = System.currentTimeMillis() / 1000,
             mediaSeed = mediaSeed,
             ice = (ice?.value ?: 0).toLong(),
             nat = if (stunServer != null) SipralNat.STUN.value.toLong() else 0,
@@ -644,19 +646,24 @@ class SipralClient private constructor(
      * machine's; a client whose accounts only sign calls this too, with no
      * anchors, before adding them. The certificate a call names is asked for
      * by `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` ([verificationOf]) and
-     * handed over with [stirCertificate].
+     * handed over with [stirCertificate]. [acceptServiceProviderCodes] lets
+     * a certificate that names a service provider code rather than numbers
+     * vouch for any caller, as a SHAKEN deployment's do; off, a certificate
+     * covers only the numbers it names.
      */
     fun stir(
         anchors: ByteArray?,
         freshnessSeconds: Long = 0,
         certificateWaitMs: Long = 0,
         unixSeconds: Long = System.currentTimeMillis() / 1000,
+        acceptServiceProviderCodes: Boolean = false,
     ) {
         val config = SipralStirConfig(
             anchors = anchors?.takeIf { it.isNotEmpty() },
             freshnessSeconds = freshnessSeconds,
             certificateWaitMs = certificateWaitMs,
             unixSeconds = unixSeconds,
+            acceptServiceProviderCodes = if (acceptServiceProviderCodes) SipralToggle.ON.value.toLong() else 0,
         )
         retryBusy { Sipral.stackStir(handle, config, nowMs()) }
     }

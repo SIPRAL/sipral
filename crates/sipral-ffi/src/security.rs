@@ -224,8 +224,18 @@ record! {
         /// the time, and only the caller can say which `now_ms` a time goes
         /// with, so the first call must give it.
         /// (`sipral_stack_config_t::media_clock_unix_seconds` goes with no
-        /// `now_ms` at all, and is not taken for it.)
+        /// `now_ms` at all, and is not taken for it.) A stack created with no
+        /// media clock dates its RTCP sender reports by this one too.
         pub unix_seconds: u64,
+        /// A `SipralToggle`: whether a certificate whose TNAuthList names a
+        /// service provider code (RFC 8226 §9) has authority over every
+        /// calling number. Off by default, when only the numbers and ranges a
+        /// certificate names are its own: a code names a provider, not
+        /// numbers, and taking it as covering any number is a decision about
+        /// the providers the anchors certify — the one a SHAKEN deployment,
+        /// whose certificates carry codes and no numbers, makes by turning
+        /// this on. ABI 0.32.
+        pub accept_service_provider_codes: u32,
     }
 }
 
@@ -507,8 +517,21 @@ fn configure_stir(
             .add(anchors)
             .map_err(|error| fail(SipralStatus::InvalidArgument, format!("anchors: {error}")))?;
     }
+    let providers = crate::media::toggled(
+        config.accept_service_provider_codes,
+        "accept_service_provider_codes",
+        false,
+    )?;
     if config.unix_seconds != 0 {
         state.agent.set_wall_clock(now, config.unix_seconds);
+        // RFC 3550 §6.4.1: a sender report carries the wall clock, and a
+        // stack created without one takes it from the first that pairs one
+        // with a `now_ms`
+        if !state.media_clock {
+            state
+                .engine
+                .set_wall_clock(sipral::WallClock::from_unix(now, config.unix_seconds, 0));
+        }
     } else if !state.agent.knows_the_time() {
         return Err(fail(
             SipralStatus::WrongState,
@@ -522,7 +545,9 @@ fn configure_stir(
     if config.certificate_wait_ms != 0 {
         stir = stir.certificate_wait(std::time::Duration::from_millis(config.certificate_wait_ms));
     }
-    state.agent.set_stir(stir);
+    state
+        .agent
+        .set_stir(stir.accept_service_provider_codes(providers));
     Ok(())
 }
 
