@@ -104,13 +104,17 @@ public final class Account: @unchecked Sendable {
         expiresSeconds: UInt64,
         sessionTimer: SessionTimer,
         privacy: Privacy,
-        trustedPeers: [String]
+        trustedPeers: [String],
+        security: AccountSecurity
     ) throws -> Account {
         let given = contact
         let contact = contact ?? defaultContact(aor: aor, bindAddress: stack.bindAddress)
         let peers = trustedPeers.isEmpty ? nil : trustedPeers.joined(separator: ",")
+        let suites = security.srtpSuites.isEmpty ? nil : security.srtpSuites.joined(separator: ",")
+        let key = security.stirKey ?? []
         let handle: SipralHandle = try CStrings.with(
-            [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers]
+            [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers,
+             suites, security.stirCertificateUrl, security.stirOrig, security.stirOrigid]
         ) { parts in
             var config = sipral_account_config_t.sized()
             config.aor = parts[0].pointer
@@ -144,8 +148,33 @@ public final class Account: @unchecked Sendable {
                 config.trusted_peers = peersPointer
                 config.trusted_peers_len = parts[7].count
             }
-            return try retryingBusy {
-                try Sipral.accountAdd(stack: stack.handle, config: config, configHeaders: [])
+            config.srtp = security.srtp?.rawValue ?? 0
+            if let suitesPointer = parts[8].pointer {
+                config.srtp_suites = suitesPointer
+                config.srtp_suites_len = parts[8].count
+            }
+            config.stir_verification = security.stirVerification.rawValue
+            if let urlPointer = parts[9].pointer {
+                config.stir_certificate_url = urlPointer
+                config.stir_certificate_url_len = parts[9].count
+            }
+            if let origPointer = parts[10].pointer {
+                config.stir_orig = origPointer
+                config.stir_orig_len = parts[10].count
+            }
+            if let origidPointer = parts[11].pointer {
+                config.stir_origid = origidPointer
+                config.stir_origid_len = parts[11].count
+            }
+            config.stir_attestation = security.stirAttestation.rawValue
+            return try key.withUnsafeBufferPointer { keyBytes in
+                if !keyBytes.isEmpty {
+                    config.stir_key = keyBytes.baseAddress
+                    config.stir_key_len = keyBytes.count
+                }
+                return try retryingBusy {
+                    try Sipral.accountAdd(stack: stack.handle, config: config, configHeaders: [])
+                }
             }
         }
         return Account(
@@ -203,5 +232,52 @@ public final class Account: @unchecked Sendable {
         try retryingBusy {
             try Sipral.accountRefreshBinding(stack: stack.handle, account: handle, nowMs: stack.nowMs())
         }
+    }
+}
+
+/// What one account holds its calls to, and signs them with, beyond what the
+/// stack does: the `srtp` and `stir_*` members of `sipral_account_config_t`,
+/// given to `SipralStack.addAccount`.
+///
+/// `srtp` is the account's own SRTP policy over the stack's (`nil` keeps the
+/// stack's); a call it places may ask for more and never less. `srtpSuites`
+/// are the suites it runs, most preferred first, by their RFC 4568 and RFC
+/// 7714 names; RFC 7714's GCM ones only if named. `stirVerification` is what
+/// the account does with the `Identity` of the calls it receives, once
+/// `SipralStack.stir` gave the stack trust anchors. `stirKey` (a P-256 key:
+/// the bare 32 bytes, or SEC1 or PKCS #8 in DER or PEM) with
+/// `stirCertificateUrl` signs every call the account places (RFC 8224), as
+/// `stirOrig` or the number in the AOR, claiming `stirAttestation` (`.none`
+/// is A) and `stirOrigid` (one drawn for the account when `nil`). A PASSporT
+/// carries the time, which `SipralStack.stir` gives the stack: call it first,
+/// with no anchors on a stack that only signs.
+public struct AccountSecurity: Sendable {
+    public var srtp: SipralSrtp?
+    public var srtpSuites: [String]
+    public var stirVerification: SipralStirVerification
+    public var stirKey: [UInt8]?
+    public var stirCertificateUrl: String?
+    public var stirOrig: String?
+    public var stirOrigid: String?
+    public var stirAttestation: SipralAttestation
+
+    public init(
+        srtp: SipralSrtp? = nil,
+        srtpSuites: [String] = [],
+        stirVerification: SipralStirVerification = .default,
+        stirKey: [UInt8]? = nil,
+        stirCertificateUrl: String? = nil,
+        stirOrig: String? = nil,
+        stirOrigid: String? = nil,
+        stirAttestation: SipralAttestation = .none
+    ) {
+        self.srtp = srtp
+        self.srtpSuites = srtpSuites
+        self.stirVerification = stirVerification
+        self.stirKey = stirKey
+        self.stirCertificateUrl = stirCertificateUrl
+        self.stirOrig = stirOrig
+        self.stirOrigid = stirOrigid
+        self.stirAttestation = stirAttestation
     }
 }

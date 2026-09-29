@@ -52,6 +52,7 @@ import org.sipral.SipralNat
 import org.sipral.SipralRecovery
 import org.sipral.SipralSrtp
 import org.sipral.SipralStackConfig
+import org.sipral.SipralStirConfig
 import org.sipral.SipralStatus
 import org.sipral.SipralToggle
 import org.sipral.SipralTransport
@@ -525,6 +526,44 @@ class SipralClient private constructor(
         stunServer = servers.firstOrNull()
     }
 
+    /**
+     * `sipral_stack_stir`: verify the callers of the calls this client's
+     * accounts receive against [anchors] (PEM or DER certificates, the
+     * STI-PA's roots in a SHAKEN deployment) from now on (RFC 8224),
+     * replacing what an earlier call set. [unixSeconds] is the wall clock
+     * now, which a PASSporT is signed and judged by, and defaults to this
+     * machine's; a client whose accounts only sign calls this too, with no
+     * anchors, before adding them. The certificate a call names is asked for
+     * by `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` ([verificationOf]) and
+     * handed over with [stirCertificate].
+     */
+    fun stir(
+        anchors: ByteArray?,
+        freshnessSeconds: Long = 0,
+        certificateWaitMs: Long = 0,
+        unixSeconds: Long = System.currentTimeMillis() / 1000,
+    ) {
+        val config = SipralStirConfig(
+            anchors = anchors?.takeIf { it.isNotEmpty() },
+            freshnessSeconds = freshnessSeconds,
+            certificateWaitMs = certificateWaitMs,
+            unixSeconds = unixSeconds,
+        )
+        retryBusy { Sipral.stackStir(handle, config, nowMs()) }
+    }
+
+    /**
+     * `sipral_call_stir_certificate`: the chain the URL a verification asked
+     * for yielded -- PEM or DER, the signing certificate first -- or null for
+     * one that could not be had. [call] is the handle the event named: the
+     * call has not been announced yet. Its verdict follows as
+     * `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` at
+     * `SIPRAL_VERIFICATION_STAGE_VERIFIED`.
+     */
+    fun stirCertificate(call: Long, chain: ByteArray?) {
+        retryBusy { Sipral.callStirCertificate(handle, call, chain ?: ByteArray(0), nowMs()) }
+    }
+
     // -- accounts and calls ------------------------------------------------
 
     /**
@@ -540,7 +579,9 @@ class SipralClient private constructor(
      * account trusts -- usually the registrar or the trunk -- RFC 3325's
      * trust domain: a call from one of them has its asserted identity read
      * ([callerIdentity]), from anywhere else it is left out, and once any
-     * are named no identity field leaves toward any other peer.
+     * are named no identity field leaves toward any other peer. [security]
+     * is the account's own SRTP policy and suites, and its STIR/SHAKEN
+     * verification and signing ([SipralAccountSecurity]).
      */
     fun addAccount(
         aor: String,
@@ -555,6 +596,7 @@ class SipralClient private constructor(
         sessionTimer: SipralSessionTimerChoice = SipralSessionTimerChoice.Default,
         privacy: Set<SipralPrivacy> = emptySet(),
         trustedPeers: List<String> = emptyList(),
+        security: SipralAccountSecurity = SipralAccountSecurity(),
     ): SipralAccount {
         val account = SipralAccount.add(
             this,
@@ -570,6 +612,7 @@ class SipralClient private constructor(
             sessionTimer = sessionTimer,
             privacy = privacy,
             trustedPeers = trustedPeers,
+            security = security,
         )
         synchronized(movingLock) { accounts[account.handle] = account }
         return account

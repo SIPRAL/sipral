@@ -49,6 +49,7 @@ class SipralAccount internal constructor(
             sessionTimer: SipralSessionTimerChoice,
             privacy: Set<SipralPrivacy>,
             trustedPeers: List<String>,
+            security: SipralAccountSecurity,
         ): SipralAccount {
             val written = contact ?: client.defaultContact(aor)
             val (timer, seconds) = sessionTimer.raw
@@ -69,6 +70,14 @@ class SipralAccount internal constructor(
                 sessionIntervalSeconds = seconds,
                 privacy = SipralPrivacy.bits(privacy),
                 trustedPeers = trustedPeers.takeIf { it.isNotEmpty() }?.joinToString(","),
+                srtp = (security.srtp?.value ?: 0).toLong(),
+                srtpSuites = security.srtpSuites.takeIf { it.isNotEmpty() }?.joinToString(","),
+                stirVerification = (security.stirVerification?.value ?: 0).toLong(),
+                stirKey = security.stirKey?.takeIf { it.isNotEmpty() },
+                stirCertificateUrl = security.stirCertificateUrl,
+                stirOrig = security.stirOrig,
+                stirOrigid = security.stirOrigid,
+                stirAttestation = (security.stirAttestation?.value ?: 0).toLong(),
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
             return SipralAccount(client, accountHandle, aor, registrarAddress, written, contact)

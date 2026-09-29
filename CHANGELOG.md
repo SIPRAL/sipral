@@ -45,6 +45,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   stream, whether it is encrypted, by SDES or DTLS-SRTP, with which suite, and
   whether the exchange authenticated the far end; `sipral_media_event_t`
   carries the same on media started, changed and secured.
+- **STIR/SHAKEN, SRTP per account and the encryption report in the four
+  idiomatic layers.** Adding an account takes its SRTP policy and suites and
+  its STIR verification and signing (`add_account(srtp=..., stir_key=...)`,
+  `AccountSecurity` in .NET and Swift, `SipralAccountSecurity` in Kotlin); the
+  stack gives the time and the trust anchors (`stir`) and hands over a
+  fetched certificate chain (`stir_certificate`); the caller-verification
+  event and the caller identity carry the verdict, and the media object's
+  `encryption()` the report.
 
 - **The four idiomatic layers carry the rest of ABI 0.30.** Each stack
   class reads its counters (`counters()` / `Counters()`, the retransmission

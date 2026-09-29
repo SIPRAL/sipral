@@ -14,6 +14,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
 import org.sipral.Sipral
 import org.sipral.SipralException
+import org.sipral.SipralKeyExchange
+import org.sipral.SipralMediaKind
+import org.sipral.SipralSrtpSuite
 import org.sipral.SipralCandidateKind
 import org.sipral.SipralMediaInfo
 import org.sipral.SipralPathKind
@@ -172,6 +175,26 @@ class SipralMedia internal constructor(
             )
         }
     }
+
+    /**
+     * The call's encryption report, now (`sipral_media_encryption_count` and
+     * `sipral_media_encryption_at`): per stream, whether it is encrypted, how
+     * its keys were exchanged, the suite, and whether the exchange
+     * authenticated the far end -- SDES never does, a DTLS-SRTP handshake
+     * whose certificate matched the signalled fingerprint does.
+     */
+    fun encryption(): List<SipralStreamProtection> =
+        (0 until Sipral.mediaEncryptionCount(handle)).map { index ->
+            val stream = Sipral.mediaEncryptionAt(handle, index)
+            SipralStreamProtection(
+                media = SipralMediaKind.of(stream.media.toInt()) ?: SipralMediaKind.UNKNOWN,
+                encrypted = stream.encrypted != 0L,
+                keyExchange = SipralKeyExchange.of(stream.keyExchange.toInt()) ?: SipralKeyExchange.NONE,
+                suite = SipralSrtpSuite.of(stream.suite.toInt()),
+                authenticated = stream.authenticated != 0L,
+                awaitingKeys = stream.awaitingKeys != 0L,
+            )
+        }
 
     /**
      * Queue 16-bit mono PCM to go out, one frame at a time. A chunk that is
