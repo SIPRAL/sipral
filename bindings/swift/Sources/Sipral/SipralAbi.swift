@@ -78,6 +78,18 @@ public enum SipralStatus: Int32, Sendable {
     /// the connection. What rode on it is lost with it, and the call that
     /// said so says what that was.
     case streamBroken = 12
+    /// An audio device id names nothing this stack's engine has ever
+    /// listed. Refused before any platform call is made;
+    /// `sipral_audio_device_at` says what the ids are.
+    case noSuchDevice = 13
+    /// The audio device exists and cannot serve: it has no channels in
+    /// the direction asked, it is not plugged in, or the platform
+    /// refused to open it. The last error says which.
+    case deviceUnusable = 14
+    /// The platform did not answer about its audio devices within
+    /// `sipral_stack_config_t::audio_probe_ms`: a driver is stuck, and
+    /// the engine is not waiting on it. What was asked was not done.
+    case deviceTimedOut = 15
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -546,7 +558,7 @@ public enum SipralDtmf: UInt32, Sendable {
 /// refuse it, which is what makes adding one safe.
 ///
 /// Numbers already spent on features this build does not have:
-/// - 16: the set of audio devices changed (A2)
+/// - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
 public enum SipralEventKind: UInt32, Sendable {
     /// The stack is running on this thread.
     ///
@@ -886,6 +898,20 @@ public enum SipralEventKind: UInt32, Sendable {
     /// is still queued for it, and close it. `account` and `call` are
     /// `SIPRAL_HANDLE_NONE`: a socket is neither.
     case turnStream = 42
+    /// The audio engine's devices moved: a device arrived or left, the
+    /// system's default changed, a role was put on a device, lost the
+    /// one it was on, or was reopened on another. Only on a stack
+    /// created with `sipral_stack_config_t::audio` set to
+    /// `SIPRAL_AUDIO_DEVICE`.
+    ///
+    /// `payload.audio` says what changed and who changed it —
+    /// `SIPRAL_AUDIO_ORIGIN_SYSTEM` for the operating system,
+    /// `SIPRAL_AUDIO_ORIGIN_ENGINE` for this library doing what the
+    /// application asked or what a loss made it do — so that an
+    /// application can note the first and need not re-apply its own
+    /// choice on hearing the second. `account` and `call` are
+    /// `SIPRAL_HANDLE_NONE`: a device is neither.
+    case audioDevicesChanged = 43
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1329,6 +1355,90 @@ public enum SipralDialogText: UInt32, Sendable {
     case remoteTarget = 8
 }
 
+/// Who pumps a stack's audio: `sipral_stack_config_t::audio`.
+///
+/// Zero is application mode because zero is what a configuration
+/// written against any earlier header says, and a caller that pumps its
+/// own frames must go on pumping them when the library underneath it is
+/// updated. The idiomatic layers each choose their own default.
+public enum SipralAudio: UInt32, Sendable {
+    /// The application opens the devices and pumps the frames through
+    /// `sipral_media_capture` and `sipral_media_playback`. What every
+    /// stack was before device mode existed.
+    case application = 0
+    /// The library opens the platform's devices and pumps every
+    /// managed call itself; the packets it encodes reach the
+    /// application's socket through `audio_transmit_callback`.
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` on a platform this build has no
+    /// backend for, which `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+    case device = 1
+}
+
+/// When the devices are opened, in device mode:
+/// `sipral_stack_config_t::audio_activation`.
+public enum SipralAudioActivation: UInt32, Sendable {
+    /// With the first managed call's media, or the first ring; closed
+    /// with the last. What a desktop softphone wants.
+    case automatic = 0
+    /// Only between `sipral_audio_activate` and `sipral_audio_deactivate`,
+    /// whatever the calls do. What CallKit and the telecom framework
+    /// want: they say when the audio session is this application's,
+    /// and a device opened before they do is a device that does not work.
+    case manual = 1
+}
+
+/// What a device is used for.
+public enum SipralAudioRole: UInt32, Sendable {
+    /// The call's microphone.
+    case microphone = 1
+    /// The call's loudspeaker or earpiece.
+    case speaker = 2
+    /// Where an incoming call is announced, which need not be where it
+    /// is answered: the room's speaker for the ring, the headset for
+    /// the call.
+    case ringer = 3
+}
+
+/// Which way audio flows, for gain, mute and the meter.
+public enum SipralAudioDirection: UInt32, Sendable {
+    /// From the microphone. Its gain is the microphone gain.
+    case input = 1
+    /// To the loudspeaker. Its gain is the volume.
+    case output = 2
+}
+
+/// What changed, on `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`.
+public enum SipralAudioChange: UInt32, Sendable {
+    /// A device arrived or left; the list has been refreshed, and
+    /// `sipral_audio_device_at` reads the new one. Every id that was
+    /// valid still is: a device that left keeps its row, marked absent.
+    case listChanged = 1
+    /// The system's default for `direction` moved. A role the
+    /// application put on a device stays there; one on the system's
+    /// route follows, and says so with `SIPRAL_AUDIO_CHANGE_REOPENED`.
+    case defaultChanged = 2
+    /// `role` is on `device` because `sipral_audio_select` said so.
+    case selected = 3
+    /// The device `role` was running on went away. The engine reopens
+    /// the role on its fallback and reports that separately.
+    case lost = 4
+    /// `role` is running on `device` again.
+    case reopened = 5
+    /// `role` could not be opened on anything; that direction is
+    /// silence until a device arrives.
+    case unavailable = 6
+}
+
+/// Who made a change: the operating system, or this library doing what
+/// the application asked or what a loss made it do. An application
+/// notes the first and acts on neither by re-applying its own choice.
+public enum SipralAudioOrigin: UInt32, Sendable {
+    /// The operating system, or a person at a socket.
+    case system = 1
+    /// The engine.
+    case engine = 2
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -1563,6 +1673,36 @@ public extension sipral_push_echo_t {
     }
 }
 
+public extension sipral_audio_device_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_audio_info_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_audio_transmit_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -1776,6 +1916,19 @@ public enum Sipral {
     /// than UDP answers `SIPRAL_STATUS_NOT_SUPPORTED` as a `turn_server`
     /// does.
     public static let featureTurnStream: UInt32 = 1024
+
+    /// See SIPRAL_FEATURE_DTMF. The built-in audio engine: a stack
+    /// created with `sipral_stack_config_t::audio` set to
+    /// `SIPRAL_AUDIO_DEVICE` opens the platform's devices and pumps every
+    /// managed call itself, with the `sipral_audio_*` entry points to list,
+    /// choose and control them. Clear on a platform this build has no
+    /// backend for — Linux and Android today — where `SIPRAL_AUDIO_DEVICE`
+    /// answers `SIPRAL_STATUS_NOT_SUPPORTED` and the application pumps the
+    /// frames as it always has.
+    ///
+    /// This crate's own answer rather than the facade's: the engine sits
+    /// beside the facade, not under it, so the facade has nothing to say.
+    public static let featureAudioDevice: UInt32 = 2048
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -5039,6 +5192,255 @@ public enum Sipral {
             }
         try check(status)
         return len
+    }
+
+    /// Ask the platform what devices there are, and say how many the list
+    /// holds now.
+    ///
+    /// A device seen before keeps its id; one that has gone keeps its row,
+    /// marked absent; a new one gets the next id. The engine refreshes by
+    /// itself when the platform announces a change, so this is for a
+    /// settings screen opening, not for polling.
+    /// `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not answer
+    /// within `audio_probe_ms`, with the list left as it was.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t` or be null.
+    public static func audioRefresh(stack: SipralHandle) throws -> Int {
+        try ensureAbi()
+        var count = Int()
+        let status = sipral_audio_refresh(stack, &count)
+        try check(status)
+        return count
+    }
+
+    /// How many devices the list holds, present or not.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    public static func audioDeviceCount(stack: SipralHandle) throws -> Int {
+        try ensureAbi()
+        var count = Int()
+        let status = sipral_audio_device_count(stack, &count)
+        try check(status)
+        return count
+    }
+
+    /// The device at `index` in the list, and its name into `buffer`.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end.
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when the name does not fit, with the
+    /// length needed in `out_needed` and the struct filled in all the same;
+    /// the name is UTF-8 and not NUL-terminated.
+    ///
+    /// Safety
+    ///
+    /// `out_device` must point at a `sipral_audio_device_t` whose `size`
+    /// member says how long it is; `buffer` must be writable for `capacity`
+    /// bytes or null with a capacity of zero; `out_needed` must point at one
+    /// `size_t` or be null.
+    public static func audioDeviceAt(stack: SipralHandle, index: Int, buffer: inout [CChar]) throws -> (device: sipral_audio_device_t, needed: Int) {
+        try ensureAbi()
+        var device = sipral_audio_device_t.sized()
+        var needed = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p3 in
+                sipral_audio_device_at(stack, index, &device, p3.baseAddress, p3.count, &needed)
+            }
+        try check(status)
+        return (device: device, needed: needed)
+    }
+
+    /// Put a role on a device, or back on the system's route with a
+    /// `device` of zero.
+    ///
+    /// Refused before any platform call is made: `SIPRAL_STATUS_NO_SUCH_DEVICE`
+    /// for an id the list never held, `SIPRAL_STATUS_DEVICE_UNUSABLE` for a
+    /// device with no channels in the role's direction or one that is not
+    /// plugged in, `SIPRAL_STATUS_NOT_SUPPORTED` where the platform cannot
+    /// put that role on a device of its own — macOS runs the call's
+    /// microphone and loudspeaker as one unit, and the microphone follows
+    /// the system's input. A refused selection changes nothing.
+    ///
+    /// While the engine is active the role is reopened at once, the gain and
+    /// the mute of its direction carried over, and
+    /// `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` says `SIPRAL_AUDIO_CHANGE_SELECTED`
+    /// from the engine. A device chosen and later unplugged is a preference:
+    /// the role runs on the system's route meanwhile and goes back to the
+    /// device when it returns.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    public static func audioSelect(stack: SipralHandle, role: UInt32, device: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_audio_select(stack, role, device)
+        try check(status)
+    }
+
+    /// What a role was asked to be on, and what it is running on: the id
+    /// chosen with `sipral_audio_select` or zero for the system's route, and
+    /// the id of the device the role is actually open on or zero when it is
+    /// not open. The two differ while a chosen device is unplugged.
+    ///
+    /// Safety
+    ///
+    /// Each out parameter must point at one `uint32_t` or be null.
+    public static func audioSelection(stack: SipralHandle, role: UInt32) throws -> (selected: UInt32, running: UInt32) {
+        try ensureAbi()
+        var selected = UInt32()
+        var running = UInt32()
+        let status = sipral_audio_selection(stack, role, &selected, &running)
+        try check(status)
+        return (selected: selected, running: running)
+    }
+
+    /// Set the gain of one direction, as a fixed-point ratio with 256 for
+    /// unity: 128 halves, 512 doubles, 0 is silence, and anything above 1024
+    /// is taken as 1024. The input direction's gain is the microphone gain;
+    /// the output's is the volume. Applied to the frames rather than to the
+    /// operating system's own control, so a film playing beside the call is
+    /// not turned down with it, and kept across every device change.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    public static func audioSetGain(stack: SipralHandle, direction: UInt32, gain: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_audio_set_gain(stack, direction, gain)
+        try check(status)
+    }
+
+    /// The gain of one direction, in the steps `sipral_audio_set_gain` takes.
+    ///
+    /// Safety
+    ///
+    /// `out_gain` must point at one `uint32_t`.
+    public static func audioGain(stack: SipralHandle, direction: UInt32) throws -> UInt32 {
+        try ensureAbi()
+        var gain = UInt32()
+        let status = sipral_audio_gain(stack, direction, &gain)
+        try check(status)
+        return gain
+    }
+
+    /// Mute one direction, or unmute it, kept across every device change. A
+    /// muted microphone still runs and sends silence, so the far end hears a
+    /// stream rather than a gap.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    public static func audioSetMuted(stack: SipralHandle, direction: UInt32, muted: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_audio_set_muted(stack, direction, muted)
+        try check(status)
+    }
+
+    /// Whether one direction is muted: one or zero into `out_muted`.
+    ///
+    /// Safety
+    ///
+    /// `out_muted` must point at one `uint32_t`.
+    public static func audioMuted(stack: SipralHandle, direction: UInt32) throws -> UInt32 {
+        try ensureAbi()
+        var muted = UInt32()
+        let status = sipral_audio_muted(stack, direction, &muted)
+        try check(status)
+        return muted
+    }
+
+    /// The meter of one direction: the loudest sample of the last tenth of a
+    /// second, 0 to 32767, held for between one window and two so that a
+    /// bar drawn from it neither flickers nor sticks. Cheap enough to poll
+    /// at a window's frame rate; zero while nothing is open.
+    ///
+    /// Safety
+    ///
+    /// `out_peak` must point at one `uint32_t`.
+    public static func audioLevel(stack: SipralHandle, direction: UInt32) throws -> UInt32 {
+        try ensureAbi()
+        var peak = UInt32()
+        let status = sipral_audio_level(stack, direction, &peak)
+        try check(status)
+        return peak
+    }
+
+    /// Open the devices and start the pump now, whatever the calls are
+    /// doing. Under `SIPRAL_AUDIO_ACTIVATION_MANUAL` this is the only thing
+    /// that does; under automatic activation it opens them early.
+    ///
+    /// `SIPRAL_STATUS_DEVICE_UNUSABLE` or `SIPRAL_STATUS_DEVICE_TIMED_OUT`
+    /// when a direction could not be opened: the engine is active all the
+    /// same, silent in that direction, and `sipral_audio_info` says which.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    public static func audioActivate(stack: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_audio_activate(stack)
+        try check(status)
+    }
+
+    /// Close the devices and stop the pump. The calls stay attached and get
+    /// their audio back on the next activation.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    public static func audioDeactivate(stack: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_audio_deactivate(stack)
+        try check(status)
+    }
+
+    /// Play a ring tone on the ringer — the device `SIPRAL_AUDIO_ROLE_RINGER`
+    /// is on, or the loudspeaker when it is on none of its own — until
+    /// `sipral_audio_stop_ringing`, or once through when `looped` is zero.
+    /// The tone is mono sixteen-bit samples at `sample_rate_hz`, copied, so
+    /// the caller's buffer is its own again when this returns. Under
+    /// automatic activation a ring opens the devices.
+    ///
+    /// Safety
+    ///
+    /// `samples` must be readable for `sample_count` `int16_t`.
+    public static func audioRing(stack: SipralHandle, samples: [Int16], sampleRateHz: UInt32, looped: UInt32) throws {
+        try ensureAbi()
+        let status =
+            samples.withUnsafeBufferPointer { p1 in
+                sipral_audio_ring(stack, p1.baseAddress, p1.count, sampleRateHz, looped)
+            }
+        try check(status)
+    }
+
+    /// Stop the ring. Under automatic activation, with no call up, the
+    /// devices close with it.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    public static func audioStopRinging(stack: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_audio_stop_ringing(stack)
+        try check(status)
+    }
+
+    /// What the engine is doing: whether it is active, whether the platform
+    /// cancels echo, the delay a canceller needs, and where each role runs.
+    ///
+    /// Safety
+    ///
+    /// `out_info` must point at a `sipral_audio_info_t` whose `size` member
+    /// says how long it is.
+    public static func audioInfo(stack: SipralHandle) throws -> sipral_audio_info_t {
+        try ensureAbi()
+        var info = sipral_audio_info_t.sized()
+        let status = sipral_audio_info(stack, &info)
+        try check(status)
+        return info
     }
 
 }

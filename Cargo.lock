@@ -883,6 +883,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipral-audio"
+version = "0.0.1"
+dependencies = [
+ "sipral",
+ "sipral-io-common",
+ "sipral-io-coreaudio",
+ "sipral-io-wasapi",
+ "sipral-media",
+]
+
+[[package]]
 name = "sipral-core"
 version = "0.0.1"
 
@@ -920,6 +931,7 @@ name = "sipral-ffi"
 version = "0.0.1"
 dependencies = [
  "sipral",
+ "sipral-audio",
  "sipral-core",
  "sipral-nat",
  "sipral-ua",

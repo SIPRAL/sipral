@@ -203,6 +203,21 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_TURN_STREAM ((uint32_t)1024)
 
 /**
+ * See SIPRAL_FEATURE_DTMF. The built-in audio engine: a stack
+ * created with `sipral_stack_config_t::audio` set to
+ * `SIPRAL_AUDIO_DEVICE` opens the platform's devices and pumps every
+ * managed call itself, with the `sipral_audio_*` entry points to list,
+ * choose and control them. Clear on a platform this build has no
+ * backend for — Linux and Android today — where `SIPRAL_AUDIO_DEVICE`
+ * answers `SIPRAL_STATUS_NOT_SUPPORTED` and the application pumps the
+ * frames as it always has.
+ *
+ * This crate's own answer rather than the facade's: the engine sits
+ * beside the facade, not under it, so the facade has nothing to say.
+ */
+#define SIPRAL_FEATURE_AUDIO_DEVICE ((uint32_t)2048)
+
+/**
  * The buffer a caller has to bring for one outgoing packet.
  *
  * Not a path MTU — RTP does not discover one — but the bound the session
@@ -307,6 +322,7 @@ typedef struct sipral_nat_event sipral_nat_event_t;
 typedef struct sipral_nat_relay_event sipral_nat_relay_event_t;
 typedef struct sipral_referral_event sipral_referral_event_t;
 typedef struct sipral_turn_stream_event sipral_turn_stream_event_t;
+typedef struct sipral_audio_event sipral_audio_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -314,6 +330,9 @@ typedef struct sipral_screen_request sipral_screen_request_t;
 typedef struct sipral_subscribe_config sipral_subscribe_config_t;
 typedef struct sipral_watched_dialog sipral_watched_dialog_t;
 typedef struct sipral_push_echo sipral_push_echo_t;
+typedef struct sipral_audio_device sipral_audio_device_t;
+typedef struct sipral_audio_info sipral_audio_info_t;
+typedef struct sipral_audio_transmit sipral_audio_transmit_t;
 
 /**
  * The result of a call across the C ABI.
@@ -404,6 +423,24 @@ enum {
      * said so says what that was.
      */
     SIPRAL_STATUS_STREAM_BROKEN = 12,
+    /**
+     * An audio device id names nothing this stack's engine has ever
+     * listed. Refused before any platform call is made;
+     * `sipral_audio_device_at` says what the ids are.
+     */
+    SIPRAL_STATUS_NO_SUCH_DEVICE = 13,
+    /**
+     * The audio device exists and cannot serve: it has no channels in
+     * the direction asked, it is not plugged in, or the platform
+     * refused to open it. The last error says which.
+     */
+    SIPRAL_STATUS_DEVICE_UNUSABLE = 14,
+    /**
+     * The platform did not answer about its audio devices within
+     * `sipral_stack_config_t::audio_probe_ms`: a driver is stuck, and
+     * the engine is not waiting on it. What was asked was not done.
+     */
+    SIPRAL_STATUS_DEVICE_TIMED_OUT = 15,
 };
 
 /**
@@ -1122,7 +1159,7 @@ enum {
  * refuse it, which is what makes adding one safe.
  *
  * Numbers already spent on features this build does not have:
- * - 16: the set of audio devices changed (A2)
+ * - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
  */
 typedef uint32_t sipral_event_kind_t;
 enum {
@@ -1546,6 +1583,22 @@ enum {
      * `SIPRAL_HANDLE_NONE`: a socket is neither.
      */
     SIPRAL_EVENT_KIND_TURN_STREAM = 42,
+    /**
+     * The audio engine's devices moved: a device arrived or left, the
+     * system's default changed, a role was put on a device, lost the
+     * one it was on, or was reopened on another. Only on a stack
+     * created with `sipral_stack_config_t::audio` set to
+     * `SIPRAL_AUDIO_DEVICE`.
+     *
+     * `payload.audio` says what changed and who changed it —
+     * `SIPRAL_AUDIO_ORIGIN_SYSTEM` for the operating system,
+     * `SIPRAL_AUDIO_ORIGIN_ENGINE` for this library doing what the
+     * application asked or what a loss made it do — so that an
+     * application can note the first and need not re-apply its own
+     * choice on hearing the second. `account` and `call` are
+     * `SIPRAL_HANDLE_NONE`: a device is neither.
+     */
+    SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED = 43,
 };
 
 /**
@@ -2286,6 +2339,142 @@ enum {
 };
 
 /**
+ * Who pumps a stack's audio: `sipral_stack_config_t::audio`.
+ *
+ * Zero is application mode because zero is what a configuration
+ * written against any earlier header says, and a caller that pumps its
+ * own frames must go on pumping them when the library underneath it is
+ * updated. The idiomatic layers each choose their own default.
+ */
+typedef uint32_t sipral_audio_t;
+enum {
+    /**
+     * The application opens the devices and pumps the frames through
+     * `sipral_media_capture` and `sipral_media_playback`. What every
+     * stack was before device mode existed.
+     */
+    SIPRAL_AUDIO_APPLICATION = 0,
+    /**
+     * The library opens the platform's devices and pumps every
+     * managed call itself; the packets it encodes reach the
+     * application's socket through `audio_transmit_callback`.
+     * `SIPRAL_STATUS_NOT_SUPPORTED` on a platform this build has no
+     * backend for, which `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+     */
+    SIPRAL_AUDIO_DEVICE = 1,
+};
+
+/**
+ * When the devices are opened, in device mode:
+ * `sipral_stack_config_t::audio_activation`.
+ */
+typedef uint32_t sipral_audio_activation_t;
+enum {
+    /**
+     * With the first managed call's media, or the first ring; closed
+     * with the last. What a desktop softphone wants.
+     */
+    SIPRAL_AUDIO_ACTIVATION_AUTOMATIC = 0,
+    /**
+     * Only between `sipral_audio_activate` and `sipral_audio_deactivate`,
+     * whatever the calls do. What CallKit and the telecom framework
+     * want: they say when the audio session is this application's,
+     * and a device opened before they do is a device that does not work.
+     */
+    SIPRAL_AUDIO_ACTIVATION_MANUAL = 1,
+};
+
+/**
+ * What a device is used for.
+ */
+typedef uint32_t sipral_audio_role_t;
+enum {
+    /**
+     * The call's microphone.
+     */
+    SIPRAL_AUDIO_ROLE_MICROPHONE = 1,
+    /**
+     * The call's loudspeaker or earpiece.
+     */
+    SIPRAL_AUDIO_ROLE_SPEAKER = 2,
+    /**
+     * Where an incoming call is announced, which need not be where it
+     * is answered: the room's speaker for the ring, the headset for
+     * the call.
+     */
+    SIPRAL_AUDIO_ROLE_RINGER = 3,
+};
+
+/**
+ * Which way audio flows, for gain, mute and the meter.
+ */
+typedef uint32_t sipral_audio_direction_t;
+enum {
+    /**
+     * From the microphone. Its gain is the microphone gain.
+     */
+    SIPRAL_AUDIO_DIRECTION_INPUT = 1,
+    /**
+     * To the loudspeaker. Its gain is the volume.
+     */
+    SIPRAL_AUDIO_DIRECTION_OUTPUT = 2,
+};
+
+/**
+ * What changed, on `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`.
+ */
+typedef uint32_t sipral_audio_change_t;
+enum {
+    /**
+     * A device arrived or left; the list has been refreshed, and
+     * `sipral_audio_device_at` reads the new one. Every id that was
+     * valid still is: a device that left keeps its row, marked absent.
+     */
+    SIPRAL_AUDIO_CHANGE_LIST_CHANGED = 1,
+    /**
+     * The system's default for `direction` moved. A role the
+     * application put on a device stays there; one on the system's
+     * route follows, and says so with `SIPRAL_AUDIO_CHANGE_REOPENED`.
+     */
+    SIPRAL_AUDIO_CHANGE_DEFAULT_CHANGED = 2,
+    /**
+     * `role` is on `device` because `sipral_audio_select` said so.
+     */
+    SIPRAL_AUDIO_CHANGE_SELECTED = 3,
+    /**
+     * The device `role` was running on went away. The engine reopens
+     * the role on its fallback and reports that separately.
+     */
+    SIPRAL_AUDIO_CHANGE_LOST = 4,
+    /**
+     * `role` is running on `device` again.
+     */
+    SIPRAL_AUDIO_CHANGE_REOPENED = 5,
+    /**
+     * `role` could not be opened on anything; that direction is
+     * silence until a device arrives.
+     */
+    SIPRAL_AUDIO_CHANGE_UNAVAILABLE = 6,
+};
+
+/**
+ * Who made a change: the operating system, or this library doing what
+ * the application asked or what a loss made it do. An application
+ * notes the first and acts on neither by re-applying its own choice.
+ */
+typedef uint32_t sipral_audio_origin_t;
+enum {
+    /**
+     * The operating system, or a person at a socket.
+     */
+    SIPRAL_AUDIO_ORIGIN_SYSTEM = 1,
+    /**
+     * The engine.
+     */
+    SIPRAL_AUDIO_ORIGIN_ENGINE = 2,
+};
+
+/**
  * The one callback a stack has.
  *
  * It is called from inside `sipral_stack_poll`, on the thread that called
@@ -2353,6 +2542,12 @@ typedef uint32_t (*sipral_screen_callback_t)(const sipral_screen_request_t *requ
  * valid for the duration of this one call and no longer.
  */
 typedef void (*sipral_processor_callback_t)(const sipral_processor_frame_t *frame, void *user_data);
+
+/**
+ * Where the packets the engine encodes go: the application's, called
+ * on the engine's thread with one `sipral_audio_transmit_t` per packet.
+ */
+typedef void (*sipral_audio_transmit_callback_t)(const sipral_audio_transmit_t *transmit, void *user_data);
 
 /**
  * The version of the ABI this library provides.
@@ -2904,6 +3099,53 @@ struct sipral_stack_config {
      * unmoved.
      */
     uint32_t turn_transport;
+    /**
+     * Who pumps this stack's audio: a `SipralAudio`. Zero, and
+     * `SIPRAL_AUDIO_APPLICATION`, is the application, through
+     * `sipral_media_capture` and `sipral_media_playback`, as every
+     * stack was before this member existed. `SIPRAL_AUDIO_DEVICE` has
+     * the library open the platform's devices and pump every managed
+     * call itself — see crate::audio — and needs
+     * `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
+     * platform this build has no backend for, which
+     * `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+     *
+     * Appended at the tail (task 8.6.18), with the five below; the
+     * pinned `MIN_SIZE` is unmoved.
+     */
+    uint32_t audio;
+    /**
+     * When the devices are opened, in device mode: a
+     * `SipralAudioActivation`, or zero for
+     * `SIPRAL_AUDIO_ACTIVATION_AUTOMATIC`.
+     */
+    uint32_t audio_activation;
+    /**
+     * Where the packets the engine encodes go, in device mode: called
+     * on the engine's thread with one `sipral_audio_transmit_t` per
+     * packet, to be sent from the call's media socket. Required with
+     * `SIPRAL_AUDIO_DEVICE`, ignored otherwise.
+     */
+    sipral_audio_transmit_callback_t audio_transmit_callback;
+    /**
+     * Handed back to `audio_transmit_callback` unread.
+     */
+    void *audio_transmit_user_data;
+    /**
+     * How long a platform call about the devices may block before the
+     * engine reports it as stuck, in milliseconds; zero for the
+     * engine's own default of three seconds. A driver that has stopped
+     * answering is answered `SIPRAL_STATUS_DEVICE_TIMED_OUT`, on a
+     * thread the engine walks away from, rather than waited for.
+     */
+    uint64_t audio_probe_ms;
+    /**
+     * The rate the devices are asked to run at, in device mode; zero
+     * for 48000. Every call is resampled between its own rate and
+     * this one, and a platform that answers with another rate is
+     * taken at its word.
+     */
+    uint32_t audio_device_rate_hz;
 };
 
 /**
@@ -4765,6 +5007,34 @@ struct sipral_turn_stream_event {
 };
 
 /**
+ * What `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` carries.
+ */
+struct sipral_audio_event {
+    /**
+     * A `SipralAudioChange`.
+     */
+    uint32_t change;
+    /**
+     * A `SipralAudioOrigin`.
+     */
+    uint32_t origin;
+    /**
+     * A `SipralAudioRole`, for a change about one role; zero otherwise.
+     */
+    uint32_t role;
+    /**
+     * A `SipralAudioDirection`, for `SIPRAL_AUDIO_CHANGE_DEFAULT_CHANGED`;
+     * zero otherwise.
+     */
+    uint32_t direction;
+    /**
+     * The device the change is about — the one a role landed on, or
+     * the one that went — or zero.
+     */
+    uint32_t device;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -4833,6 +5103,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_TURN_STREAM.
      */
     sipral_turn_stream_event_t turn_stream;
+    /**
+     * For SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED.
+     */
+    sipral_audio_event_t audio;
 };
 
 /**
@@ -5100,6 +5374,149 @@ struct sipral_push_echo {
      * tell from a lead of zero.
      */
     uint64_t refresh_lead_ms;
+};
+
+/**
+ * One device, as `sipral_audio_device_at` fills it in. The name is
+ * written beside it, into the caller's buffer.
+ *
+ * Set `size` to `sizeof(sipral_audio_device_t)` before the call.
+ */
+struct sipral_audio_device {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * The engine's name for the device: stable across refreshes, never
+     * reused, never zero. What `sipral_audio_select` takes.
+     */
+    uint32_t id;
+    /**
+     * How many channels it captures; zero for a device that is no
+     * microphone.
+     */
+    uint32_t input_channels;
+    /**
+     * How many channels it plays; zero likewise.
+     */
+    uint32_t output_channels;
+    /**
+     * One when the system records from it by default.
+     */
+    uint32_t default_input;
+    /**
+     * One when the system plays to it by default.
+     */
+    uint32_t default_output;
+    /**
+     * One when the last refresh still found it. A device that went
+     * keeps its row and its id, so that a selection saved against it
+     * still names something.
+     */
+    uint32_t present;
+};
+
+/**
+ * What the engine is doing, as `sipral_audio_info` fills it in.
+ *
+ * Set `size` to `sizeof(sipral_audio_info_t)` before the call.
+ */
+struct sipral_audio_info {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * One while the devices are open and the pump is running.
+     */
+    uint32_t active;
+    /**
+     * One when the platform's own processing sits behind the
+     * microphone: the voice-processing unit on macOS and iOS, which
+     * cancels the loudspeaker's echo itself; on Windows, a stream
+     * accepted as a communications stream, which puts the endpoint's
+     * own processing behind it where the endpoint has any — a virtual
+     * cable has none, and cancels nothing. An application that wants
+     * the echo gone regardless attaches a processor to each call with
+     * `sipral_call_attach_processor`; the delay it needs is
+     * `render_delay_ms`, and the engine tells each managed call that
+     * number itself, again after every device change.
+     */
+    uint32_t system_echo_cancellation;
+    /**
+     * The loudspeaker-to-microphone delay the devices report, in
+     * milliseconds.
+     */
+    uint64_t render_delay_ms;
+    /**
+     * The rate the microphone runs at, or zero when it is not open.
+     */
+    uint32_t microphone_rate_hz;
+    /**
+     * The rate the loudspeaker runs at, or zero when it is not open.
+     */
+    uint32_t speaker_rate_hz;
+    /**
+     * The device the microphone is running on, or zero.
+     */
+    uint32_t microphone;
+    /**
+     * The device the loudspeaker is running on, or zero.
+     */
+    uint32_t speaker;
+    /**
+     * The device the ringer is running on, or zero when the ring goes
+     * through the loudspeaker.
+     */
+    uint32_t ringer;
+};
+
+/**
+ * One packet the engine encoded from the microphone, handed to
+ * `sipral_stack_config_t::audio_transmit_callback`: send it from the
+ * call's media socket and return.
+ *
+ * Filled by the library and handed to the callback as a `const`
+ * pointer, the shape `sipral_processor_frame_t` is: read `size` before
+ * anything past it, and read nothing once the callback has returned.
+ * The callback runs on the engine's own thread, once per frame per
+ * call; it may call `sipral_media_receive` and the other media entry
+ * points, and must not destroy the stack.
+ */
+struct sipral_audio_transmit {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * The call whose socket this leaves from.
+     */
+    sipral_handle_t call;
+    /**
+     * How it leaves, as a `SipralTransport`: `SIPRAL_TRANSPORT_UDP` is
+     * a datagram from the media socket; `SIPRAL_TRANSPORT_TCP` and
+     * `SIPRAL_TRANSPORT_TLS` are bytes to write, in order, on the
+     * socket's connection to its TURN server, as `sipral_media_capture`
+     * marks them.
+     */
+    uint32_t protocol;
+    /**
+     * Where to send it, `host:port`, UTF-8 and not NUL-terminated.
+     */
+    const char *destination;
+    /**
+     * How many bytes of it.
+     */
+    size_t destination_len;
+    /**
+     * The octets.
+     */
+    const uint8_t *payload;
+    /**
+     * How many of them.
+     */
+    size_t payload_len;
 };
 
 /**
@@ -7666,6 +8083,201 @@ sipral_status_t sipral_stack_recording_start(sipral_handle_t stack, const char *
  * capacity of zero, and `out_len` must point at one `size_t` or be null.
  */
 sipral_status_t sipral_stack_recording_stop(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_len);
+
+/**
+ * Ask the platform what devices there are, and say how many the list
+ * holds now.
+ *
+ * A device seen before keeps its id; one that has gone keeps its row,
+ * marked absent; a new one gets the next id. The engine refreshes by
+ * itself when the platform announces a change, so this is for a
+ * settings screen opening, not for polling.
+ * `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not answer
+ * within `audio_probe_ms`, with the list left as it was.
+ *
+ * Safety
+ *
+ * `out_count` must point at one `size_t` or be null.
+ */
+sipral_status_t sipral_audio_refresh(sipral_handle_t stack, size_t *out_count);
+
+/**
+ * How many devices the list holds, present or not.
+ *
+ * Safety
+ *
+ * `out_count` must point at one `size_t`.
+ */
+sipral_status_t sipral_audio_device_count(sipral_handle_t stack, size_t *out_count);
+
+/**
+ * The device at `index` in the list, and its name into `buffer`.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end.
+ * `SIPRAL_STATUS_BUFFER_TOO_SMALL` when the name does not fit, with the
+ * length needed in `out_needed` and the struct filled in all the same;
+ * the name is UTF-8 and not NUL-terminated.
+ *
+ * Safety
+ *
+ * `out_device` must point at a `sipral_audio_device_t` whose `size`
+ * member says how long it is; `buffer` must be writable for `capacity`
+ * bytes or null with a capacity of zero; `out_needed` must point at one
+ * `size_t` or be null.
+ */
+sipral_status_t sipral_audio_device_at(sipral_handle_t stack, size_t index, sipral_audio_device_t *out_device, char *buffer, size_t capacity, size_t *out_needed);
+
+/**
+ * Put a role on a device, or back on the system's route with a
+ * `device` of zero.
+ *
+ * Refused before any platform call is made: `SIPRAL_STATUS_NO_SUCH_DEVICE`
+ * for an id the list never held, `SIPRAL_STATUS_DEVICE_UNUSABLE` for a
+ * device with no channels in the role's direction or one that is not
+ * plugged in, `SIPRAL_STATUS_NOT_SUPPORTED` where the platform cannot
+ * put that role on a device of its own — macOS runs the call's
+ * microphone and loudspeaker as one unit, and the microphone follows
+ * the system's input. A refused selection changes nothing.
+ *
+ * While the engine is active the role is reopened at once, the gain and
+ * the mute of its direction carried over, and
+ * `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` says `SIPRAL_AUDIO_CHANGE_SELECTED`
+ * from the engine. A device chosen and later unplugged is a preference:
+ * the role runs on the system's route meanwhile and goes back to the
+ * device when it returns.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns.
+ */
+sipral_status_t sipral_audio_select(sipral_handle_t stack, uint32_t role, uint32_t device);
+
+/**
+ * What a role was asked to be on, and what it is running on: the id
+ * chosen with `sipral_audio_select` or zero for the system's route, and
+ * the id of the device the role is actually open on or zero when it is
+ * not open. The two differ while a chosen device is unplugged.
+ *
+ * Safety
+ *
+ * Each out parameter must point at one `uint32_t` or be null.
+ */
+sipral_status_t sipral_audio_selection(sipral_handle_t stack, uint32_t role, uint32_t *out_selected, uint32_t *out_running);
+
+/**
+ * Set the gain of one direction, as a fixed-point ratio with 256 for
+ * unity: 128 halves, 512 doubles, 0 is silence, and anything above 1024
+ * is taken as 1024. The input direction's gain is the microphone gain;
+ * the output's is the volume. Applied to the frames rather than to the
+ * operating system's own control, so a film playing beside the call is
+ * not turned down with it, and kept across every device change.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns.
+ */
+sipral_status_t sipral_audio_set_gain(sipral_handle_t stack, uint32_t direction, uint32_t gain);
+
+/**
+ * The gain of one direction, in the steps `sipral_audio_set_gain` takes.
+ *
+ * Safety
+ *
+ * `out_gain` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_audio_gain(sipral_handle_t stack, uint32_t direction, uint32_t *out_gain);
+
+/**
+ * Mute one direction, or unmute it, kept across every device change. A
+ * muted microphone still runs and sends silence, so the far end hears a
+ * stream rather than a gap.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns.
+ */
+sipral_status_t sipral_audio_set_muted(sipral_handle_t stack, uint32_t direction, uint32_t muted);
+
+/**
+ * Whether one direction is muted: one or zero into `out_muted`.
+ *
+ * Safety
+ *
+ * `out_muted` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_audio_muted(sipral_handle_t stack, uint32_t direction, uint32_t *out_muted);
+
+/**
+ * The meter of one direction: the loudest sample of the last tenth of a
+ * second, 0 to 32767, held for between one window and two so that a
+ * bar drawn from it neither flickers nor sticks. Cheap enough to poll
+ * at a window's frame rate; zero while nothing is open.
+ *
+ * Safety
+ *
+ * `out_peak` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_audio_level(sipral_handle_t stack, uint32_t direction, uint32_t *out_peak);
+
+/**
+ * Open the devices and start the pump now, whatever the calls are
+ * doing. Under `SIPRAL_AUDIO_ACTIVATION_MANUAL` this is the only thing
+ * that does; under automatic activation it opens them early.
+ *
+ * `SIPRAL_STATUS_DEVICE_UNUSABLE` or `SIPRAL_STATUS_DEVICE_TIMED_OUT`
+ * when a direction could not be opened: the engine is active all the
+ * same, silent in that direction, and `sipral_audio_info` says which.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns.
+ */
+sipral_status_t sipral_audio_activate(sipral_handle_t stack);
+
+/**
+ * Close the devices and stop the pump. The calls stay attached and get
+ * their audio back on the next activation.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns.
+ */
+sipral_status_t sipral_audio_deactivate(sipral_handle_t stack);
+
+/**
+ * Play a ring tone on the ringer — the device `SIPRAL_AUDIO_ROLE_RINGER`
+ * is on, or the loudspeaker when it is on none of its own — until
+ * `sipral_audio_stop_ringing`, or once through when `looped` is zero.
+ * The tone is mono sixteen-bit samples at `sample_rate_hz`, copied, so
+ * the caller's buffer is its own again when this returns. Under
+ * automatic activation a ring opens the devices.
+ *
+ * Safety
+ *
+ * `samples` must be readable for `sample_count` `int16_t`.
+ */
+sipral_status_t sipral_audio_ring(sipral_handle_t stack, const int16_t *samples, size_t sample_count, uint32_t sample_rate_hz, uint32_t looped);
+
+/**
+ * Stop the ring. Under automatic activation, with no call up, the
+ * devices close with it.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns.
+ */
+sipral_status_t sipral_audio_stop_ringing(sipral_handle_t stack);
+
+/**
+ * What the engine is doing: whether it is active, whether the platform
+ * cancels echo, the delay a canceller needs, and where each role runs.
+ *
+ * Safety
+ *
+ * `out_info` must point at a `sipral_audio_info_t` whose `size` member
+ * says how long it is.
+ */
+sipral_status_t sipral_audio_info(sipral_handle_t stack, sipral_audio_info_t *out_info);
 
 #ifdef __cplusplus
 } /* extern "C" */

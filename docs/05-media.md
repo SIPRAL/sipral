@@ -2108,6 +2108,81 @@ the machine moved, and reopening is what re-applies the selection. On Linux
 the default is the `default.audio.sink` and `default.audio.source` keys of the
 session's `"default"` metadata object, which is what `DeviceMonitor` watches.
 
+### The built-in engine: device mode
+
+Everything above is one device, one stream, one direction at a time, and it
+stays that way. What sits on top of it is `sipral-audio`: the engine that
+lists the devices, opens the chosen ones, keeps them open, and pumps every
+call between them — the piece a softphone otherwise writes for itself, once
+per application, and gets wrong once per rule below. It depends on the
+facade and on the platform crates; nothing depends on it but `sipral-ffi`,
+and only for the stack that asks. The core stays device-free, and the
+application that pumps its own frames still can.
+
+One thread, one tick every twenty milliseconds. Whatever the microphone has
+captured is resampled to each call's own rate (`sipral-media`'s resampler,
+one lane per call and direction, with a queue on the far side because a
+resampler does not produce whole frames) and encoded, and the packet goes
+out through the application's transmit function; each call's playback is
+pulled at its own rate, resampled to the loudspeaker's and summed into the
+frame the loudspeaker is written, wide and then clamped. The devices are
+asked for 48 kHz and taken at whatever they answer. A ring tone — the
+application's own samples, looped or once — goes to the ringer's stream, or
+into the loudspeaker's sum when the ringer is that same device or the
+platform cannot open a second output. A loudspeaker is kept two frames
+ahead and no more; a microphone is drained every tick, however many frames
+it has. With no microphone the calls are still fed silence, so the far end
+hears a stream and not a gap; with no loudspeaker the calls are still pulled
+every tick, so their jitter buffers drain and their echo reference moves.
+
+The engine is written against three traits — a backend that lists and opens,
+a capture stream, a playback stream — and every rule it keeps is tested
+against a backend made of fakes, with no device in the room:
+
+- a device's handle is the engine's, issued once and never reused; a
+  refresh keeps it, an unplugged device keeps its row marked absent, and a
+  role that is running is not reopened by a refresh;
+- a device with no channels in a direction is listed with the count and
+  refused for that direction; a handle never issued is refused before any
+  platform call; so is a device that is not plugged in;
+- a change the engine made and one the operating system made carry
+  different origins, and a role the application put on a device does not
+  follow the default when the system moves it, so nothing above can loop;
+- the gain and the mute of a direction are the engine's and are applied to
+  whatever stream the direction is on next;
+- the ring has an output of its own;
+- the devices open with the first call or the first ring and close with
+  the last, or only when the application says, for the platforms whose
+  frameworks say when audio is the application's;
+- a platform call is made from a thread the engine can walk away from, and
+  a driver that does not answer within the probe wait is a timeout, with the
+  driver's thread left to finish when it likes and asked nothing more until
+  it does;
+- a device pulled out from under a role is reported as the system's doing,
+  reopened on the system's route as the engine's, and the selection is kept
+  as a preference honoured when the device returns;
+- nothing in the pump needs an instruction the oldest supported machine
+  lacks: integer resampling, integer mixing, and `scripts/check.sh` refuses
+  a `target-cpu` or `target-feature` anywhere in the tree.
+
+What each platform gives it: on macOS and iOS the voice-processing unit is
+duplex and there is one per process, so the microphone and the loudspeaker
+are the two halves of one stream opened on the loudspeaker's device, the
+microphone follows the system's input and cannot be chosen apart, a second
+output for the ring cannot be opened beside it, and the old unit is closed
+before the new one is opened on a device change — two alive at once is what
+blocks inside the framework. The system cancels the echo. On Windows an
+endpoint is one direction, so all three roles open streams of their own,
+each asked for as a communications stream; whether Windows took it as one is
+what the engine reports as system echo cancellation, and where it did not
+the application attaches a canceller to each call at the seam above with the
+two streams' latencies as its reference. The endpoint list carries channel
+counts read from each endpoint's mix format without initialising a client
+on it. Linux has no backend yet — `sipral-io-pipewire` links a library the
+packaged Python wheel must not require — and Android's devices belong to
+the Kotlin layer's own `CallAudio`; on both the engine says so before a
+stack is created, and the application pumps as it always has.
+
 ## Per call, not per process (D6)
 
 `sipral` never opens a device, so it cannot enumerate one or answer "which

@@ -62,7 +62,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 default = ["opus", "dtls", "ice", "stun"]
 opus = ["sipral/opus"]
 dtls = ["sipral/dtls"]
-ice = ["sipral/ice", "sipral/ice-lite"]
+ice = ["sipral/ice", "sipral/ice-lite", "sipral-audio/ice"]
 stun = ["sipral/stun"]
 
 [dependencies]
@@ -73,8 +73,17 @@ stun = ["sipral/stun"]
 sipral = { path = "../sipral", version = "0.0.1", default-features = false }
 sipral-core.workspace = true
 sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
+# the built-in audio engine behind `sipral_stack_config_t::audio`: the
+# platform's devices opened and pumped by the library, for the stack that
+# asks. Its `ice` follows this crate's, so that what the pump captures says
+# how it leaves a media socket the way `sipral_media_capture` does.
+sipral-audio = { path = "../sipral-audio", version = "0.0.1" }
 
 [dev-dependencies]
+# the engine's fake platform, for this crate's own tests of device mode:
+# a feature turned on from here reaches only the test build, so no release
+# build of the library carries a fake device
+sipral-audio = { path = "../sipral-audio", version = "0.0.1", features = ["fake"] }
 # the far end's connectivity checks, signed with the password this end's offer
 # gave out, for the tests of what reaches a call's socket before its media
 # handle does. The same STUN code the facade already links, so nothing new

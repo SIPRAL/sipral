@@ -12,6 +12,32 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The library opens the audio devices itself, for the stack that asks.**
+  `sipral-audio` is the built-in engine: the platform's devices listed with
+  their channel counts under handles that survive a refresh and an unplug,
+  the microphone, the speaker and the ringer chosen separately, every call
+  resampled to the device's rate and summed into the loudspeaker, the
+  microphone into every call, a ring tone on the ringer's own output, gain
+  and mute per direction kept across a device change, a level meter per
+  direction, a device lost reopened on the system's route with the
+  selection kept as a preference, a change the engine made told apart from
+  one the operating system announced, activation either following the
+  calls or left to the application for CallKit and Telecom, and every
+  platform call bounded by a timeout so that a stuck driver is a status.
+  macOS and iOS run on `sipral-io-coreaudio`'s voice-processing unit,
+  Windows on `sipral-io-wasapi` — which now reports each endpoint's channel
+  count — and Linux and Android keep pumping from the application. Over the
+  C ABI (0.29): `sipral_stack_config_t::audio` (`SIPRAL_AUDIO_DEVICE`, with
+  `audio_transmit_callback` for the application's socket, `audio_activation`,
+  `audio_probe_ms`, `audio_device_rate_hz`), the fifteen `sipral_audio_*`
+  entry points, `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` (43) with its
+  origin, `SIPRAL_STATUS_NO_SUCH_DEVICE` (13), `_DEVICE_UNUSABLE` (14) and
+  `_DEVICE_TIMED_OUT` (15), and `SIPRAL_FEATURE_AUDIO_DEVICE` (2048). A
+  zeroed configuration is application mode, so nothing changes for a caller
+  that pumps its own frames, the four idiomatic layers included. The gate
+  refuses a `target-cpu` or `target-feature` anywhere in the tree, so the
+  packaged library needs no instruction beyond its target's baseline.
+
 - **The C ABI names every SRTP suite the stack runs.**
   `sipral_srtp_suite_t` grew `SIPRAL_SRTP_SUITE_AES256_CM80` (4),
   `_AES256_CM32` (5), `_AEAD_AES128_GCM` (6) and `_AEAD_AES256_GCM` (7), so

@@ -506,20 +506,16 @@ The Rust surface for each of these already exists somewhere below
 
 ### Not built anywhere yet
 
-- **A2** — audio devices on desktop. By design, first: the core deliberately
-  has no device in it, and this is the application's and the operating
-  system's. What exists besides that design boundary is not the feature
-  either — `sipral-io-wasapi`, `sipral-io-coreaudio` and `sipral-io-pipewire`
-  exist, and each lists devices under an identity that survives unplug and
-  replug (the endpoint identifier, the device UID, the node's `node.name`),
-  but none of them is depended on by anything, so none of it reaches the
-  facade or the C ABI.
-- **A3** — volume, mute, level metering. The same design boundary as A2. The
-  same three crates apply `sipral-io-common`'s gain, mute and meter to their
-  own frames, and nothing above them references any of it.
-- **A2**'s half of **D6** — which device a call uses. The other two halves,
-  codec order and transport, are per call in C today; no device crosses this
-  boundary at all, which is A2's to answer and A2 is not built.
+- **A2**'s half of **D6** — which device a call uses. A2 itself is built
+  (`sipral-audio`, and `sipral_stack_config_t::audio` in C: `docs/08-ffi.md`,
+  "The built-in audio engine"), with the microphone, the speaker and the
+  ringer chosen per stack. Per call — one call on the headset while another
+  rings the room — is the one piece of A2 still open: the engine's roles are
+  per engine, and a call has no device of its own yet. A3 is built with A2:
+  gain, mute and the meter per direction, kept across a device change.
+  Linux has no backend for the engine yet (`sipral-io-pipewire` links a
+  library the packaged wheel must not require), so on Linux A2 and A3 stay
+  the application's.
 
 ---
 

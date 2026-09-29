@@ -159,7 +159,7 @@ mod fake;
 #[cfg(target_os = "windows")]
 pub use endpoint::{DeviceMonitor, default_device, devices};
 #[cfg(target_os = "windows")]
-pub use stream::{CaptureStream, PlaybackStream, StreamConfig};
+pub use stream::{CaptureStream, PlaybackStream, StreamConfig, channels};
 
 #[cfg(test)]
 mod tests {

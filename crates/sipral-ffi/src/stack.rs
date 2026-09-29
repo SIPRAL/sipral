@@ -117,6 +117,7 @@ use sipral_ua::{
 };
 
 use crate::abi::{codes, record};
+use crate::audio::SipralAudioTransmitCallback;
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
 use crate::handle::{
@@ -527,6 +528,41 @@ record! {
         /// Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
         /// unmoved.
         pub turn_transport: u32,
+        /// Who pumps this stack's audio: a `SipralAudio`. Zero, and
+        /// `SIPRAL_AUDIO_APPLICATION`, is the application, through
+        /// `sipral_media_capture` and `sipral_media_playback`, as every
+        /// stack was before this member existed. `SIPRAL_AUDIO_DEVICE` has
+        /// the library open the platform's devices and pump every managed
+        /// call itself — see [`crate::audio`] — and needs
+        /// `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
+        /// platform this build has no backend for, which
+        /// `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+        ///
+        /// Appended at the tail (task 8.6.18), with the five below; the
+        /// pinned `MIN_SIZE` is unmoved.
+        pub audio: u32,
+        /// When the devices are opened, in device mode: a
+        /// `SipralAudioActivation`, or zero for
+        /// `SIPRAL_AUDIO_ACTIVATION_AUTOMATIC`.
+        pub audio_activation: u32,
+        /// Where the packets the engine encodes go, in device mode: called
+        /// on the engine's thread with one `sipral_audio_transmit_t` per
+        /// packet, to be sent from the call's media socket. Required with
+        /// `SIPRAL_AUDIO_DEVICE`, ignored otherwise.
+        pub audio_transmit_callback: SipralAudioTransmitCallback,
+        /// Handed back to `audio_transmit_callback` unread.
+        pub audio_transmit_user_data: *mut c_void,
+        /// How long a platform call about the devices may block before the
+        /// engine reports it as stuck, in milliseconds; zero for the
+        /// engine's own default of three seconds. A driver that has stopped
+        /// answering is answered `SIPRAL_STATUS_DEVICE_TIMED_OUT`, on a
+        /// thread the engine walks away from, rather than waited for.
+        pub audio_probe_ms: u64,
+        /// The rate the devices are asked to run at, in device mode; zero
+        /// for 48000. Every call is resampled between its own rate and
+        /// this one, and a platform that answers with another rate is
+        /// taken at its word.
+        pub audio_device_rate_hz: u32,
     }
 }
 
@@ -705,6 +741,10 @@ pub(crate) const FAREWELL_CEILING: usize = 256;
 struct StackEntry {
     state: Mutex<StackState>,
     outbox: Mutex<Outbox>,
+    /// The audio engine, reachable without the state's lock: a level meter
+    /// polled from a window must not answer `SIPRAL_STATUS_BUSY` because
+    /// signalling is busy.
+    audio: Option<crate::audio::Shared>,
 }
 
 impl StackEntry {
@@ -935,6 +975,13 @@ pub(crate) struct StackState {
     /// without the feature never asks, and has nothing to keep.
     #[cfg(feature = "stun")]
     pub(crate) nat: crate::nat::Nat,
+    /// The built-in audio engine, on a stack created in device mode. Shared
+    /// with the stack's entry so that the `sipral_audio_*` entry points
+    /// reach it without this state's lock.
+    pub(crate) audio: Option<crate::audio::Shared>,
+    /// The caller's clock as the engine's pump reads it: what
+    /// `StackState::advance` writes on every poll.
+    clock: Arc<crate::audio::Clock>,
 }
 
 // Safety: the user pointer is the caller's and is only ever handed back to
@@ -1017,6 +1064,7 @@ impl StackState {
     pub(crate) fn advance(&mut self, now_ms: u64) -> Result<Instant, Fail> {
         let now = self.checked_instant(now_ms)?;
         self.commit_clock(now_ms);
+        self.clock.polled(now_ms);
         Ok(now)
     }
 
@@ -1097,6 +1145,13 @@ fn entry_of(stack: SipralHandle) -> Result<Arc<StackEntry>, Fail> {
         return Err(inside_media());
     }
     STACKS.get(stack).map_err(handle_failed)
+}
+
+/// The audio engine of the stack a handle names, without the stack's lock:
+/// `None` on a stack in application mode.
+pub(crate) fn audio_of(stack: SipralHandle) -> Result<Option<crate::audio::Shared>, Fail> {
+    let entry = STACKS.get(stack).map_err(handle_failed)?;
+    Ok(entry.audio.clone())
 }
 
 fn inside_media() -> Fail {
@@ -1351,6 +1406,10 @@ entry! {
 /// # Safety
 ///
 /// `config` as [`sipral_stack_create`] takes it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one configuration read in one place, in the order its members are declared"
+)]
 pub(crate) unsafe fn create_on(
     tags: &'static StackTags,
     config: *const SipralStackConfig,
@@ -1384,6 +1443,8 @@ pub(crate) unsafe fn create_on(
     endpoint.timers = timers;
 
     let origin = Instant::now();
+    let clock = crate::audio::Clock::new(origin);
+    let audio = unsafe { crate::audio::configured(&config, &clock) }?;
     let engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
     let mut agent = UserAgent::new(endpoint, seed)
         .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))?;
@@ -1445,6 +1506,8 @@ pub(crate) unsafe fn create_on(
         started: false,
         #[cfg(feature = "stun")]
         nat: crate::nat::Nat::default(),
+        audio: audio.clone(),
+        clock,
     };
     // the main transport is the first signalling socket kept mapped; its
     // first request is waiting in `sipral_stack_poll_transmit` from here on
@@ -1460,6 +1523,7 @@ pub(crate) unsafe fn create_on(
     let entry = StackEntry {
         state: Mutex::new(state),
         outbox: Mutex::new(Outbox::default()),
+        audio,
     };
     STACKS
         .insert(stamp, entry)
@@ -1705,6 +1769,20 @@ fn run(
             _identity: None,
         });
     }
+    // the audio engine's own news: a device gone, a default moved, a role
+    // reopened. Its lock is taken after the engine's events above have been
+    // translated, and never while a platform call is in flight on it — the
+    // engine makes those from a thread of its own
+    if let Some(audio) = state.audio.clone() {
+        let mut engine = audio.lock().unwrap_or_else(PoisonError::into_inner);
+        engine.service();
+        while let Some(event) = engine.poll_event() {
+            raised.push(Delivery::bare(crate::event::audio_changed(
+                stack,
+                crate::audio::event_of(event),
+            )));
+        }
+    }
 
     let deadline = [
         state.agent.poll_timeout(),
@@ -1784,7 +1862,34 @@ fn drain(
                 }
                 signalling(stack, state, said, raised, unclaimed);
             }
-            Event::Media { call, event } => media(stack, state, call, &event, raised, unclaimed),
+            Event::Media { call, event } => {
+                // in device mode a call's session is the engine's to pump
+                // from the moment its media starts to the moment it ends
+                if let Some(audio) = state.audio.clone() {
+                    match event {
+                        MediaEvent::Started { .. } => {
+                            if let (Some(share), Ok(handle)) =
+                                (state.engine.share(call), state.calls.name_of(call))
+                            {
+                                let _ = audio
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .attach(handle, Box::new(share));
+                            }
+                        }
+                        MediaEvent::Ended(_) => {
+                            if let Ok(handle) = state.calls.name_of(call) {
+                                audio
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .detach(handle);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                media(stack, state, call, &event, raised, unclaimed);
+            }
             // the facade is free to grow a vocabulary faster than this ABI,
             // and a number counted is more honest than a kind invented
             _ => *unclaimed = unclaimed.saturating_add(1),
@@ -2026,6 +2131,9 @@ pub(crate) mod tests {
         pub(crate) resolves: Vec<Asked>,
         /// What every referral event carried, in the order they arrived.
         pub(crate) referrals: Vec<Referring>,
+        /// What every audio-devices event carried: change, origin, role and
+        /// device, in the order they arrived.
+        pub(crate) audio: Vec<(u32, u32, u32, u32)>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -2288,6 +2396,12 @@ pub(crate) mod tests {
             let referred = unsafe { referred(event) };
             observed.referrals.push(referred);
         }
+        if event.kind == SipralEventKind::AudioDevicesChanged {
+            let audio = unsafe { event.payload.audio };
+            observed
+                .audio
+                .push((audio.change, audio.origin, audio.role, audio.device));
+        }
     }
 
     unsafe extern "C" fn poll_again(event: *const SipralEvent, user_data: *mut c_void) {
@@ -2345,6 +2459,12 @@ pub(crate) mod tests {
             timer_t1_ms: 0,
             timer_t2_ms: 0,
             timer_t4_ms: 0,
+            audio: 0,
+            audio_activation: 0,
+            audio_transmit_callback: None,
+            audio_transmit_user_data: ptr::null_mut(),
+            audio_probe_ms: 0,
+            audio_device_rate_hz: 0,
             codecs: ptr::null(),
             codecs_len: 0,
             frame_ms: 0,

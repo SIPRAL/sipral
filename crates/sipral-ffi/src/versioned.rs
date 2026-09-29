@@ -70,6 +70,10 @@ pub(crate) mod min_size {
     #![allow(unreachable_pub)]
     /// `sipral_abi_version_t`
     pub const ABI_VERSION: usize = 24;
+    /// `sipral_audio_device_t`
+    pub const AUDIO_DEVICE: usize = 32;
+    /// `sipral_audio_info_t`
+    pub const AUDIO_INFO: usize = 48;
     /// `sipral_account_config_t`
     pub const ACCOUNT_CONFIG: usize = 144;
     /// `sipral_call_config_t`

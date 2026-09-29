@@ -474,6 +474,11 @@ pub(crate) use {alias, codes, constants, record};
 pub const MIN_SIZES: &[(&str, usize)] = &[
     ("SipralAbiVersion", crate::versioned::min_size::ABI_VERSION),
     (
+        "SipralAudioDevice",
+        crate::versioned::min_size::AUDIO_DEVICE,
+    ),
+    ("SipralAudioInfo", crate::versioned::min_size::AUDIO_INFO),
+    (
         "SipralAccountConfig",
         crate::versioned::min_size::ACCOUNT_CONFIG,
     ),
@@ -535,7 +540,12 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
 /// no oldest published length that matters. The exceptions are named here
 /// rather than left to be noticed, because a struct that quietly went unpinned
 /// would look exactly like these two.
-pub const FILLED_BY_US: &[&str] = &["SipralEvent", "SipralScreenRequest", "SipralProcessorFrame"];
+pub const FILLED_BY_US: &[&str] = &[
+    "SipralEvent",
+    "SipralScreenRequest",
+    "SipralProcessorFrame",
+    "SipralAudioTransmit",
+];
 
 /// Everything this ABI publishes, and the only list a person maintains.
 ///
@@ -553,6 +563,7 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralEventCallback,
         crate::screening::SipralScreenCallback,
         crate::media::SipralProcessorCallback,
+        crate::audio::SipralAudioTransmitCallback,
     ],
     enumerations: &[
         crate::status::SipralStatus::ABI,
@@ -594,6 +605,12 @@ pub const SURFACE: Surface = Surface {
         crate::subscription::SipralDialogDirection::ABI,
         crate::subscription::SipralDialogEnded::ABI,
         crate::subscription::SipralDialogText::ABI,
+        crate::audio::SipralAudio::ABI,
+        crate::audio::SipralAudioActivation::ABI,
+        crate::audio::SipralAudioRole::ABI,
+        crate::audio::SipralAudioDirection::ABI,
+        crate::audio::SipralAudioChange::ABI,
+        crate::audio::SipralAudioOrigin::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -627,6 +644,7 @@ pub const SURFACE: Surface = Surface {
         crate::nat::SipralNatRelayEvent::ABI,
         crate::event::SipralReferralEvent::ABI,
         crate::nat::SipralTurnStreamEvent::ABI,
+        crate::audio::SipralAudioEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -634,6 +652,9 @@ pub const SURFACE: Surface = Surface {
         crate::subscription::SipralSubscribeConfig::ABI,
         crate::subscription::SipralWatchedDialog::ABI,
         crate::announce::SipralPushEcho::ABI,
+        crate::audio::SipralAudioDevice::ABI,
+        crate::audio::SipralAudioInfo::ABI,
+        crate::audio::SipralAudioTransmit::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -760,6 +781,21 @@ pub const SURFACE: Surface = Surface {
         crate::diagnostics::sipral_stack_diagnostics_json::ABI,
         crate::diagnostics::sipral_stack_recording_start::ABI,
         crate::diagnostics::sipral_stack_recording_stop::ABI,
+        crate::audio::sipral_audio_refresh::ABI,
+        crate::audio::sipral_audio_device_count::ABI,
+        crate::audio::sipral_audio_device_at::ABI,
+        crate::audio::sipral_audio_select::ABI,
+        crate::audio::sipral_audio_selection::ABI,
+        crate::audio::sipral_audio_set_gain::ABI,
+        crate::audio::sipral_audio_gain::ABI,
+        crate::audio::sipral_audio_set_muted::ABI,
+        crate::audio::sipral_audio_muted::ABI,
+        crate::audio::sipral_audio_level::ABI,
+        crate::audio::sipral_audio_activate::ABI,
+        crate::audio::sipral_audio_deactivate::ABI,
+        crate::audio::sipral_audio_ring::ABI,
+        crate::audio::sipral_audio_stop_ringing::ABI,
+        crate::audio::sipral_audio_info::ABI,
     ],
 };
 
@@ -940,6 +976,7 @@ mod tests {
             "SipralNatRelayEvent",
             "SipralReferralEvent",
             "SipralTurnStreamEvent",
+            "SipralAudioEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];
@@ -981,6 +1018,7 @@ mod tests {
                 "SipralEventCallback",
                 "SipralScreenCallback",
                 "SipralProcessorCallback",
+                "SipralAudioTransmitCallback",
             ]
         );
     }

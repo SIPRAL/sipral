@@ -95,6 +95,24 @@ enum class SipralStatus(val value: Int) {
      * said so says what that was.
      */
     STREAM_BROKEN(12),
+    /**
+     * An audio device id names nothing this stack's engine has ever
+     * listed. Refused before any platform call is made;
+     * `sipral_audio_device_at` says what the ids are.
+     */
+    NO_SUCH_DEVICE(13),
+    /**
+     * The audio device exists and cannot serve: it has no channels in
+     * the direction asked, it is not plugged in, or the platform
+     * refused to open it. The last error says which.
+     */
+    DEVICE_UNUSABLE(14),
+    /**
+     * The platform did not answer about its audio devices within
+     * `sipral_stack_config_t::audio_probe_ms`: a driver is stuck, and
+     * the engine is not waiting on it. What was asked was not done.
+     */
+    DEVICE_TIMED_OUT(15),
     ;
 
     companion object {
@@ -886,7 +904,7 @@ enum class SipralDtmf(val value: Int) {
  * refuse it, which is what makes adding one safe.
  *
  * Numbers already spent on features this build does not have:
- * - 16: the set of audio devices changed (A2)
+ * - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
  */
 enum class SipralEventKind(val value: Int) {
     /**
@@ -1309,6 +1327,22 @@ enum class SipralEventKind(val value: Int) {
      * `SIPRAL_HANDLE_NONE`: a socket is neither.
      */
     TURN_STREAM(42),
+    /**
+     * The audio engine's devices moved: a device arrived or left, the
+     * system's default changed, a role was put on a device, lost the
+     * one it was on, or was reopened on another. Only on a stack
+     * created with `sipral_stack_config_t::audio` set to
+     * `SIPRAL_AUDIO_DEVICE`.
+     *
+     * `payload.audio` says what changed and who changed it —
+     * `SIPRAL_AUDIO_ORIGIN_SYSTEM` for the operating system,
+     * `SIPRAL_AUDIO_ORIGIN_ENGINE` for this library doing what the
+     * application asked or what a loss made it do — so that an
+     * application can note the first and need not re-apply its own
+     * choice on hearing the second. `account` and `call` are
+     * `SIPRAL_HANDLE_NONE`: a device is neither.
+     */
+    AUDIO_DEVICES_CHANGED(43),
     ;
 
     companion object {
@@ -2130,6 +2164,166 @@ enum class SipralDialogText(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralDialogText? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Who pumps a stack's audio: `sipral_stack_config_t::audio`.
+ *
+ * Zero is application mode because zero is what a configuration
+ * written against any earlier header says, and a caller that pumps its
+ * own frames must go on pumping them when the library underneath it is
+ * updated. The idiomatic layers each choose their own default.
+ */
+enum class SipralAudio(val value: Int) {
+    /**
+     * The application opens the devices and pumps the frames through
+     * `sipral_media_capture` and `sipral_media_playback`. What every
+     * stack was before device mode existed.
+     */
+    APPLICATION(0),
+    /**
+     * The library opens the platform's devices and pumps every
+     * managed call itself; the packets it encodes reach the
+     * application's socket through `audio_transmit_callback`.
+     * `SIPRAL_STATUS_NOT_SUPPORTED` on a platform this build has no
+     * backend for, which `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+     */
+    DEVICE(1),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAudio? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * When the devices are opened, in device mode:
+ * `sipral_stack_config_t::audio_activation`.
+ */
+enum class SipralAudioActivation(val value: Int) {
+    /**
+     * With the first managed call's media, or the first ring; closed
+     * with the last. What a desktop softphone wants.
+     */
+    AUTOMATIC(0),
+    /**
+     * Only between `sipral_audio_activate` and `sipral_audio_deactivate`,
+     * whatever the calls do. What CallKit and the telecom framework
+     * want: they say when the audio session is this application's,
+     * and a device opened before they do is a device that does not work.
+     */
+    MANUAL(1),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAudioActivation? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a device is used for.
+ */
+enum class SipralAudioRole(val value: Int) {
+    /**
+     * The call's microphone.
+     */
+    MICROPHONE(1),
+    /**
+     * The call's loudspeaker or earpiece.
+     */
+    SPEAKER(2),
+    /**
+     * Where an incoming call is announced, which need not be where it
+     * is answered: the room's speaker for the ring, the headset for
+     * the call.
+     */
+    RINGER(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAudioRole? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Which way audio flows, for gain, mute and the meter.
+ */
+enum class SipralAudioDirection(val value: Int) {
+    /**
+     * From the microphone. Its gain is the microphone gain.
+     */
+    INPUT(1),
+    /**
+     * To the loudspeaker. Its gain is the volume.
+     */
+    OUTPUT(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAudioDirection? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What changed, on `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`.
+ */
+enum class SipralAudioChange(val value: Int) {
+    /**
+     * A device arrived or left; the list has been refreshed, and
+     * `sipral_audio_device_at` reads the new one. Every id that was
+     * valid still is: a device that left keeps its row, marked absent.
+     */
+    LIST_CHANGED(1),
+    /**
+     * The system's default for `direction` moved. A role the
+     * application put on a device stays there; one on the system's
+     * route follows, and says so with `SIPRAL_AUDIO_CHANGE_REOPENED`.
+     */
+    DEFAULT_CHANGED(2),
+    /**
+     * `role` is on `device` because `sipral_audio_select` said so.
+     */
+    SELECTED(3),
+    /**
+     * The device `role` was running on went away. The engine reopens
+     * the role on its fallback and reports that separately.
+     */
+    LOST(4),
+    /**
+     * `role` is running on `device` again.
+     */
+    REOPENED(5),
+    /**
+     * `role` could not be opened on anything; that direction is
+     * silence until a device arrives.
+     */
+    UNAVAILABLE(6),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAudioChange? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Who made a change: the operating system, or this library doing what
+ * the application asked or what a loss made it do. An application
+ * notes the first and acts on neither by re-applying its own choice.
+ */
+enum class SipralAudioOrigin(val value: Int) {
+    /**
+     * The operating system, or a person at a socket.
+     */
+    SYSTEM(1),
+    /**
+     * The engine.
+     */
+    ENGINE(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAudioOrigin? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -3155,6 +3349,132 @@ data class SipralPushEcho(
 }
 
 /**
+ * One device, as `sipral_audio_device_at` fills it in. The name is
+ * written beside it, into the caller's buffer.
+ *
+ * Set `size` to `sizeof(sipral_audio_device_t)` before the call.
+ */
+data class SipralAudioDevice(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * The engine's name for the device: stable across refreshes, never
+     * reused, never zero. What `sipral_audio_select` takes.
+     */
+    val id: Long,
+    /**
+     * How many channels it captures; zero for a device that is no
+     * microphone.
+     */
+    val inputChannels: Long,
+    /**
+     * How many channels it plays; zero likewise.
+     */
+    val outputChannels: Long,
+    /**
+     * One when the system records from it by default.
+     */
+    val defaultInput: Long,
+    /**
+     * One when the system plays to it by default.
+     */
+    val defaultOutput: Long,
+    /**
+     * One when the last refresh still found it. A device that went
+     * keeps its row and its id, so that a selection saved against it
+     * still names something.
+     */
+    val present: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 7
+
+        fun of(slots: LongArray): SipralAudioDevice = SipralAudioDevice(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+            slots[4],
+            slots[5],
+            slots[6],
+        )
+    }
+}
+
+/**
+ * What the engine is doing, as `sipral_audio_info` fills it in.
+ *
+ * Set `size` to `sizeof(sipral_audio_info_t)` before the call.
+ */
+data class SipralAudioInfo(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * One while the devices are open and the pump is running.
+     */
+    val active: Long,
+    /**
+     * One when the platform's own processing sits behind the
+     * microphone: the voice-processing unit on macOS and iOS, which
+     * cancels the loudspeaker's echo itself; on Windows, a stream
+     * accepted as a communications stream, which puts the endpoint's
+     * own processing behind it where the endpoint has any — a virtual
+     * cable has none, and cancels nothing. An application that wants
+     * the echo gone regardless attaches a processor to each call with
+     * `sipral_call_attach_processor`; the delay it needs is
+     * `render_delay_ms`, and the engine tells each managed call that
+     * number itself, again after every device change.
+     */
+    val systemEchoCancellation: Long,
+    /**
+     * The loudspeaker-to-microphone delay the devices report, in
+     * milliseconds.
+     */
+    val renderDelayMs: Long,
+    /**
+     * The rate the microphone runs at, or zero when it is not open.
+     */
+    val microphoneRateHz: Long,
+    /**
+     * The rate the loudspeaker runs at, or zero when it is not open.
+     */
+    val speakerRateHz: Long,
+    /**
+     * The device the microphone is running on, or zero.
+     */
+    val microphone: Long,
+    /**
+     * The device the loudspeaker is running on, or zero.
+     */
+    val speaker: Long,
+    /**
+     * The device the ringer is running on, or zero when the ring goes
+     * through the loudspeaker.
+     */
+    val ringer: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 9
+
+        fun of(slots: LongArray): SipralAudioInfo = SipralAudioInfo(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+            slots[4],
+            slots[5],
+            slots[6],
+            slots[7],
+            slots[8],
+        )
+    }
+}
+
+/**
  * One header field an application hands over: a name and a value, UTF-8,
  * neither NUL-terminated.
  *
@@ -3528,6 +3848,49 @@ class SipralStackConfig(
      * unmoved.
      */
     val turnTransport: Long = 0,
+    /**
+     * Who pumps this stack's audio: a `SipralAudio`. Zero, and
+     * `SIPRAL_AUDIO_APPLICATION`, is the application, through
+     * `sipral_media_capture` and `sipral_media_playback`, as every
+     * stack was before this member existed. `SIPRAL_AUDIO_DEVICE` has
+     * the library open the platform's devices and pump every managed
+     * call itself — see crate::audio — and needs
+     * `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
+     * platform this build has no backend for, which
+     * `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+     *
+     * Appended at the tail (task 8.6.18), with the five below; the
+     * pinned `MIN_SIZE` is unmoved.
+     */
+    val audio: Long = 0,
+    /**
+     * When the devices are opened, in device mode: a
+     * `SipralAudioActivation`, or zero for
+     * `SIPRAL_AUDIO_ACTIVATION_AUTOMATIC`.
+     */
+    val audioActivation: Long = 0,
+    /**
+     * Where the packets the engine encodes go, in device mode: called
+     * on the engine's thread with one `sipral_audio_transmit_t` per
+     * packet, to be sent from the call's media socket. Required with
+     * `SIPRAL_AUDIO_DEVICE`, ignored otherwise.
+     */
+    val audioTransmitListener: SipralAudioTransmitListener? = null,
+    /**
+     * How long a platform call about the devices may block before the
+     * engine reports it as stuck, in milliseconds; zero for the
+     * engine's own default of three seconds. A driver that has stopped
+     * answering is answered `SIPRAL_STATUS_DEVICE_TIMED_OUT`, on a
+     * thread the engine walks away from, rather than waited for.
+     */
+    val audioProbeMs: Long = 0,
+    /**
+     * The rate the devices are asked to run at, in device mode; zero
+     * for 48000. Every call is resampled between its own rate and
+     * this one, and a platform that answers with another rate is
+     * taken at its word.
+     */
+    val audioDeviceRateHz: Long = 0,
 )
 
 /**
@@ -4472,6 +4835,34 @@ data class SipralTurnStreamEvent(
 )
 
 /**
+ * What `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` carries.
+ */
+data class SipralAudioEvent(
+    /**
+     * A `SipralAudioChange`.
+     */
+    val change: Long,
+    /**
+     * A `SipralAudioOrigin`.
+     */
+    val origin: Long,
+    /**
+     * A `SipralAudioRole`, for a change about one role; zero otherwise.
+     */
+    val role: Long,
+    /**
+     * A `SipralAudioDirection`, for `SIPRAL_AUDIO_CHANGE_DEFAULT_CHANGED`;
+     * zero otherwise.
+     */
+    val direction: Long,
+    /**
+     * The device the change is about — the one a role landed on, or
+     * the one that went — or zero.
+     */
+    val device: Long,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -4540,6 +4931,10 @@ class SipralEventPayload(
      * For SipralEventKind.TURN_STREAM.
      */
     val turnStream: SipralTurnStreamEvent,
+    /**
+     * For SipralEventKind.AUDIO_DEVICES_CHANGED.
+     */
+    val audio: SipralAudioEvent,
 )
 
 class SipralEvent(
@@ -5043,6 +5438,28 @@ class SipralEvent(
      * The TURN server, `host:port`, as `turn_server` named it.
      */
     private val payloadTurnStreamServer: String? = null,
+    /**
+     * A `SipralAudioChange`.
+     */
+    private val payloadAudioChange: Long = 0,
+    /**
+     * A `SipralAudioOrigin`.
+     */
+    private val payloadAudioOrigin: Long = 0,
+    /**
+     * A `SipralAudioRole`, for a change about one role; zero otherwise.
+     */
+    private val payloadAudioRole: Long = 0,
+    /**
+     * A `SipralAudioDirection`, for `SIPRAL_AUDIO_CHANGE_DEFAULT_CHANGED`;
+     * zero otherwise.
+     */
+    private val payloadAudioDirection: Long = 0,
+    /**
+     * The device the change is about — the one a role landed on, or
+     * the one that went — or zero.
+     */
+    private val payloadAudioDevice: Long = 0,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -5061,6 +5478,7 @@ class SipralEvent(
             SipralNatRelayEvent(payloadRelayOutcome, payloadRelayCode, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason),
             SipralReferralEvent(payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget, payloadReferralReferredBy),
             SipralTurnStreamEvent(payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal, payloadTurnStreamServer),
+            SipralAudioEvent(payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice),
         )
 }
 
@@ -5132,10 +5550,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -5421,6 +5839,119 @@ internal object SipralProcessorListeners {
 }
 
 /**
+ * One packet the engine encoded from the microphone, handed to
+ * `sipral_stack_config_t::audio_transmit_callback`: send it from the
+ * call's media socket and return.
+ *
+ * Filled by the library and handed to the callback as a `const`
+ * pointer, the shape `sipral_processor_frame_t` is: read `size` before
+ * anything past it, and read nothing once the callback has returned.
+ * The callback runs on the engine's own thread, once per frame per
+ * call; it may call `sipral_media_receive` and the other media entry
+ * points, and must not destroy the stack.
+ */
+class SipralAudioTransmit(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * The call whose socket this leaves from.
+     */
+    val call: Long,
+    /**
+     * How it leaves, as a `SipralTransport`: `SIPRAL_TRANSPORT_UDP` is
+     * a datagram from the media socket; `SIPRAL_TRANSPORT_TCP` and
+     * `SIPRAL_TRANSPORT_TLS` are bytes to write, in order, on the
+     * socket's connection to its TURN server, as `sipral_media_capture`
+     * marks them.
+     */
+    val protocol: Long,
+    /**
+     * Where to send it, `host:port`, UTF-8 and not NUL-terminated.
+     */
+    val destination: String?,
+    /**
+     * The octets.
+     */
+    val payload: ByteArray?,
+)
+
+/**
+ * Where the packets the engine encodes go: the application's, called
+ * on the engine's thread with one `sipral_audio_transmit_t` per packet.
+ *
+ * In Kotlin it is this interface, called on the thread that polls. The JNI
+ * shim attaches that thread to the JVM for the length of the call when it
+ * is not attached already. What a listener throws goes to that thread's
+ * uncaught exception handler, and the poll carries on once the handler
+ * returns. Android's default handler does not return: it ends the process.
+ */
+fun interface SipralAudioTransmitListener {
+    fun onTransmit(transmit: SipralAudioTransmit)
+}
+
+/**
+ * Every SipralAudioTransmitListener a live handle was made with, under the key the JNI
+ * shim hands back with each event. The native side holds no reference
+ * to a listener at all: an event for a handle already destroyed finds
+ * nothing here and goes nowhere.
+ */
+internal object SipralAudioTransmitListeners {
+    private val listening = HashMap<Long, SipralAudioTransmitListener>()
+    private val handles = HashMap<Long, Long>()
+    private var last = 0L
+
+    /** Keep a listener, and say what key the shim will hand it back under: zero for none. */
+    fun register(listener: SipralAudioTransmitListener?): Long {
+        if (listener == null) {
+            return 0
+        }
+        synchronized(this) {
+            // the key crosses as a C pointer, which is 32 bits wide on half of Android
+            check(last < Int.MAX_VALUE) { "every key a listener can be kept under has been handed out" }
+            last += 1
+            listening[last] = listener
+            return last
+        }
+    }
+
+    /** Tie a kept listener to the handle the call made, or let it go when the call failed. */
+    fun made(key: Long, status: Int, handle: Long) {
+        if (key == 0L) {
+            return
+        }
+        synchronized(this) {
+            if (status == SipralStatus.OK.value) {
+                handles[handle] = key
+            } else {
+                listening.remove(key)
+            }
+        }
+    }
+
+    /** Let go of the listener a destroyed handle was left with. */
+    fun gone(handle: Long) {
+        synchronized(this) {
+            val key = handles.remove(handle) ?: return
+            listening.remove(key)
+        }
+    }
+
+    /** Called by the JNI shim, once per event, on the thread that polls. */
+    @JvmStatic
+    fun deliver(key: Long, size: Long, call: Long, protocol: Long, destination: ByteArray?, payload: ByteArray?) {
+        val listener = synchronized(this) { listening[key] } ?: return
+        try {
+            listener.onTransmit(SipralAudioTransmit(size, call, protocol, destination?.let { String(it, Charsets.UTF_8) }, payload))
+        } catch (failure: Throwable) {
+            val thread = Thread.currentThread()
+            thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
+        }
+    }
+}
+
+/**
  * What a call across the boundary answered, when it did not answer
  * OK. The message is the calling thread's last error, read before
  * anything else on this thread could replace it.
@@ -5462,7 +5993,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -5571,6 +6102,21 @@ internal object SipralNative {
     external fun sipral_stack_diagnostics_json(stack: Long, buffer: ByteArray, len: LongArray): Int
     external fun sipral_stack_recording_start(stack: Long, note: ByteArray): Int
     external fun sipral_stack_recording_stop(stack: Long, buffer: ByteArray, len: LongArray): Int
+    external fun sipral_audio_refresh(stack: Long, count: LongArray): Int
+    external fun sipral_audio_device_count(stack: Long, count: LongArray): Int
+    external fun sipral_audio_device_at(stack: Long, index: Long, device: LongArray, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_audio_select(stack: Long, role: Long, device: Long): Int
+    external fun sipral_audio_selection(stack: Long, role: Long, selected: LongArray, running: LongArray): Int
+    external fun sipral_audio_set_gain(stack: Long, direction: Long, gain: Long): Int
+    external fun sipral_audio_gain(stack: Long, direction: Long, gain: LongArray): Int
+    external fun sipral_audio_set_muted(stack: Long, direction: Long, muted: Long): Int
+    external fun sipral_audio_muted(stack: Long, direction: Long, muted: LongArray): Int
+    external fun sipral_audio_level(stack: Long, direction: Long, peak: LongArray): Int
+    external fun sipral_audio_activate(stack: Long): Int
+    external fun sipral_audio_deactivate(stack: Long): Int
+    external fun sipral_audio_ring(stack: Long, samples: ShortArray, sampleRateHz: Long, looped: Long): Int
+    external fun sipral_audio_stop_ringing(stack: Long): Int
+    external fun sipral_audio_info(stack: Long, info: LongArray): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -5737,6 +6283,21 @@ object Sipral {
      * does.
      */
     const val FEATURE_TURN_STREAM: Long = 1024
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. The built-in audio engine: a stack
+     * created with `sipral_stack_config_t::audio` set to
+     * `SIPRAL_AUDIO_DEVICE` opens the platform's devices and pumps every
+     * managed call itself, with the `sipral_audio_*` entry points to list,
+     * choose and control them. Clear on a platform this build has no
+     * backend for — Linux and Android today — where `SIPRAL_AUDIO_DEVICE`
+     * answers `SIPRAL_STATUS_NOT_SUPPORTED` and the application pumps the
+     * frames as it always has.
+     *
+     * This crate's own answer rather than the facade's: the engine sits
+     * beside the facade, not under it, so the facade has nothing to say.
+     */
+    const val FEATURE_AUDIO_DEVICE: Long = 2048
 
     /**
      * The buffer a caller has to bring for one outgoing packet.
@@ -5978,11 +6539,13 @@ object Sipral {
         val configTurnPassword = config.turnPassword?.toByteArray(Charsets.UTF_8)
         val stackSlot = LongArray(1)
         val configEventCallback = SipralEventListeners.register(config.eventListener)
+        val configAudioTransmitCallback = SipralAudioTransmitListeners.register(config.audioTransmitListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
+            SipralAudioTransmitListeners.made(configAudioTransmitCallback, status, stackSlot[0])
         }
         check(status)
         return stackSlot[0]
@@ -6035,6 +6598,7 @@ object Sipral {
     fun stackDestroy(stack: Long) {
         val status = SipralNative.sipral_stack_destroy(stack)
         SipralEventListeners.gone(stack)
+        SipralAudioTransmitListeners.gone(stack)
         SipralScreenListeners.gone(stack)
         check(status)
     }
@@ -8828,6 +9392,249 @@ object Sipral {
         val lenSlot = LongArray(1)
         check(SipralNative.sipral_stack_recording_stop(stack, buffer, lenSlot))
         return lenSlot[0]
+    }
+
+    /**
+     * Ask the platform what devices there are, and say how many the list
+     * holds now.
+     *
+     * A device seen before keeps its id; one that has gone keeps its row,
+     * marked absent; a new one gets the next id. The engine refreshes by
+     * itself when the platform announces a change, so this is for a
+     * settings screen opening, not for polling.
+     * `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not answer
+     * within `audio_probe_ms`, with the list left as it was.
+     *
+     * Safety
+     *
+     * `out_count` must point at one `size_t` or be null.
+     */
+    fun audioRefresh(stack: Long): Long {
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_audio_refresh(stack, countSlot))
+        return countSlot[0]
+    }
+
+    /**
+     * How many devices the list holds, present or not.
+     *
+     * Safety
+     *
+     * `out_count` must point at one `size_t`.
+     */
+    fun audioDeviceCount(stack: Long): Long {
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_audio_device_count(stack, countSlot))
+        return countSlot[0]
+    }
+
+    /**
+     * The device at `index` in the list, and its name into `buffer`.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end.
+     * `SIPRAL_STATUS_BUFFER_TOO_SMALL` when the name does not fit, with the
+     * length needed in `out_needed` and the struct filled in all the same;
+     * the name is UTF-8 and not NUL-terminated.
+     *
+     * Safety
+     *
+     * `out_device` must point at a `sipral_audio_device_t` whose `size`
+     * member says how long it is; `buffer` must be writable for `capacity`
+     * bytes or null with a capacity of zero; `out_needed` must point at one
+     * `size_t` or be null.
+     */
+    fun audioDeviceAt(stack: Long, index: Long, buffer: ByteArray): Pair<SipralAudioDevice, Long> {
+        val deviceSlots = LongArray(SipralAudioDevice.SLOTS)
+        val neededSlot = LongArray(1)
+        check(SipralNative.sipral_audio_device_at(stack, index, deviceSlots, buffer, neededSlot))
+        return Pair(SipralAudioDevice.of(deviceSlots), neededSlot[0])
+    }
+
+    /**
+     * Put a role on a device, or back on the system's route with a
+     * `device` of zero.
+     *
+     * Refused before any platform call is made: `SIPRAL_STATUS_NO_SUCH_DEVICE`
+     * for an id the list never held, `SIPRAL_STATUS_DEVICE_UNUSABLE` for a
+     * device with no channels in the role's direction or one that is not
+     * plugged in, `SIPRAL_STATUS_NOT_SUPPORTED` where the platform cannot
+     * put that role on a device of its own — macOS runs the call's
+     * microphone and loudspeaker as one unit, and the microphone follows
+     * the system's input. A refused selection changes nothing.
+     *
+     * While the engine is active the role is reopened at once, the gain and
+     * the mute of its direction carried over, and
+     * `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` says `SIPRAL_AUDIO_CHANGE_SELECTED`
+     * from the engine. A device chosen and later unplugged is a preference:
+     * the role runs on the system's route meanwhile and goes back to the
+     * device when it returns.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun audioSelect(stack: Long, role: Long, device: Long) {
+        check(SipralNative.sipral_audio_select(stack, role, device))
+    }
+
+    /**
+     * What a role was asked to be on, and what it is running on: the id
+     * chosen with `sipral_audio_select` or zero for the system's route, and
+     * the id of the device the role is actually open on or zero when it is
+     * not open. The two differ while a chosen device is unplugged.
+     *
+     * Safety
+     *
+     * Each out parameter must point at one `uint32_t` or be null.
+     */
+    fun audioSelection(stack: Long, role: Long): Pair<Long, Long> {
+        val selectedSlot = LongArray(1)
+        val runningSlot = LongArray(1)
+        check(SipralNative.sipral_audio_selection(stack, role, selectedSlot, runningSlot))
+        return Pair(selectedSlot[0], runningSlot[0])
+    }
+
+    /**
+     * Set the gain of one direction, as a fixed-point ratio with 256 for
+     * unity: 128 halves, 512 doubles, 0 is silence, and anything above 1024
+     * is taken as 1024. The input direction's gain is the microphone gain;
+     * the output's is the volume. Applied to the frames rather than to the
+     * operating system's own control, so a film playing beside the call is
+     * not turned down with it, and kept across every device change.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun audioSetGain(stack: Long, direction: Long, gain: Long) {
+        check(SipralNative.sipral_audio_set_gain(stack, direction, gain))
+    }
+
+    /**
+     * The gain of one direction, in the steps `sipral_audio_set_gain` takes.
+     *
+     * Safety
+     *
+     * `out_gain` must point at one `uint32_t`.
+     */
+    fun audioGain(stack: Long, direction: Long): Long {
+        val gainSlot = LongArray(1)
+        check(SipralNative.sipral_audio_gain(stack, direction, gainSlot))
+        return gainSlot[0]
+    }
+
+    /**
+     * Mute one direction, or unmute it, kept across every device change. A
+     * muted microphone still runs and sends silence, so the far end hears a
+     * stream rather than a gap.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun audioSetMuted(stack: Long, direction: Long, muted: Long) {
+        check(SipralNative.sipral_audio_set_muted(stack, direction, muted))
+    }
+
+    /**
+     * Whether one direction is muted: one or zero into `out_muted`.
+     *
+     * Safety
+     *
+     * `out_muted` must point at one `uint32_t`.
+     */
+    fun audioMuted(stack: Long, direction: Long): Long {
+        val mutedSlot = LongArray(1)
+        check(SipralNative.sipral_audio_muted(stack, direction, mutedSlot))
+        return mutedSlot[0]
+    }
+
+    /**
+     * The meter of one direction: the loudest sample of the last tenth of a
+     * second, 0 to 32767, held for between one window and two so that a
+     * bar drawn from it neither flickers nor sticks. Cheap enough to poll
+     * at a window's frame rate; zero while nothing is open.
+     *
+     * Safety
+     *
+     * `out_peak` must point at one `uint32_t`.
+     */
+    fun audioLevel(stack: Long, direction: Long): Long {
+        val peakSlot = LongArray(1)
+        check(SipralNative.sipral_audio_level(stack, direction, peakSlot))
+        return peakSlot[0]
+    }
+
+    /**
+     * Open the devices and start the pump now, whatever the calls are
+     * doing. Under `SIPRAL_AUDIO_ACTIVATION_MANUAL` this is the only thing
+     * that does; under automatic activation it opens them early.
+     *
+     * `SIPRAL_STATUS_DEVICE_UNUSABLE` or `SIPRAL_STATUS_DEVICE_TIMED_OUT`
+     * when a direction could not be opened: the engine is active all the
+     * same, silent in that direction, and `sipral_audio_info` says which.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun audioActivate(stack: Long) {
+        check(SipralNative.sipral_audio_activate(stack))
+    }
+
+    /**
+     * Close the devices and stop the pump. The calls stay attached and get
+     * their audio back on the next activation.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun audioDeactivate(stack: Long) {
+        check(SipralNative.sipral_audio_deactivate(stack))
+    }
+
+    /**
+     * Play a ring tone on the ringer — the device `SIPRAL_AUDIO_ROLE_RINGER`
+     * is on, or the loudspeaker when it is on none of its own — until
+     * `sipral_audio_stop_ringing`, or once through when `looped` is zero.
+     * The tone is mono sixteen-bit samples at `sample_rate_hz`, copied, so
+     * the caller's buffer is its own again when this returns. Under
+     * automatic activation a ring opens the devices.
+     *
+     * Safety
+     *
+     * `samples` must be readable for `sample_count` `int16_t`.
+     */
+    fun audioRing(stack: Long, samples: ShortArray, sampleRateHz: Long, looped: Long) {
+        check(SipralNative.sipral_audio_ring(stack, samples, sampleRateHz, looped))
+    }
+
+    /**
+     * Stop the ring. Under automatic activation, with no call up, the
+     * devices close with it.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun audioStopRinging(stack: Long) {
+        check(SipralNative.sipral_audio_stop_ringing(stack))
+    }
+
+    /**
+     * What the engine is doing: whether it is active, whether the platform
+     * cancels echo, the delay a canceller needs, and where each role runs.
+     *
+     * Safety
+     *
+     * `out_info` must point at a `sipral_audio_info_t` whose `size` member
+     * says how long it is.
+     */
+    fun audioInfo(stack: Long): SipralAudioInfo {
+        val infoSlots = LongArray(SipralAudioInfo.SLOTS)
+        check(SipralNative.sipral_audio_info(stack, infoSlots))
+        return SipralAudioInfo.of(infoSlots)
     }
 
 }

@@ -525,6 +525,23 @@ exported=$(tracked '*.rs' | xargs grep -ln 'no_mangle' 2>/dev/null \
     printf '        use entry! in crates/sipral-ffi, or the panic reaches C.\n'
 }
 
+# A packaged library runs on whatever machine its target names, which for
+# x86_64 is a machine from 2004: a `target-cpu` or `target-feature` in any
+# build configuration would have the compiler emit instructions an older
+# PC does not have, and the first one it meets is a SIGILL in a customer's
+# log with nothing in ours. Nothing in this tree names one, and this is what
+# keeps it so; runtime detection in a dependency is that dependency's own
+# and is fine, since it checks before it runs.
+step "no CPU instructions beyond the baseline"
+tuned=$(others '*.toml' '*.sh' '*.ps1' 'build.rs' \
+    | xargs grep -ln 'target-cpu\|target-feature' 2>/dev/null || true)
+[ -z "$tuned" ] && pass "no target-cpu or target-feature in any build configuration" || {
+    fail "a build configuration names a CPU or a feature beyond the baseline:"
+    printf '        %s\n' $tuned
+    printf '        docs/05-media.md, "The built-in engine": a packaged library\n'
+    printf '        must run on the oldest machine its target names.\n'
+}
+
 # B7. The header and the three bindings are printed from the declarations in
 # sipral-ffi, so the one thing a person can forget is the line in abi.rs that
 # names a declaration. These four scans are that line's other half: the first

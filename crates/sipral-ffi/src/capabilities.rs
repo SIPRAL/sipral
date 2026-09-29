@@ -127,6 +127,18 @@ constants! {
     /// than UDP answers `SIPRAL_STATUS_NOT_SUPPORTED` as a `turn_server`
     /// does.
     pub const SIPRAL_FEATURE_TURN_STREAM: u32 = 1 << 10;
+    /// See [`SIPRAL_FEATURE_DTMF`]. The built-in audio engine: a stack
+    /// created with `sipral_stack_config_t::audio` set to
+    /// `SIPRAL_AUDIO_DEVICE` opens the platform's devices and pumps every
+    /// managed call itself, with the `sipral_audio_*` entry points to list,
+    /// choose and control them. Clear on a platform this build has no
+    /// backend for — Linux and Android today — where `SIPRAL_AUDIO_DEVICE`
+    /// answers `SIPRAL_STATUS_NOT_SUPPORTED` and the application pumps the
+    /// frames as it always has.
+    ///
+    /// This crate's own answer rather than the facade's: the engine sits
+    /// beside the facade, not under it, so the facade has nothing to say.
+    pub const SIPRAL_FEATURE_AUDIO_DEVICE: u32 = 1 << 11;
 }
 
 record! {
@@ -236,6 +248,9 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.turn_streams {
         features |= SIPRAL_FEATURE_TURN_STREAM;
     }
+    if crate::audio::available() {
+        features |= SIPRAL_FEATURE_AUDIO_DEVICE;
+    }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -268,11 +283,12 @@ entry! {
 #[cfg(test)]
 mod tests {
     use super::{
-        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG,
-        SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING, SIPRAL_FEATURE_RTCP_MUX,
-        SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS, SIPRAL_FEATURE_TURN_STREAM,
-        SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS, SIPRAL_TRANSPORT_BIT_UDP,
-        SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS, SipralCapabilities, sipral_capabilities,
+        SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE,
+        SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING,
+        SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS,
+        SIPRAL_FEATURE_TURN_STREAM, SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS,
+        SIPRAL_TRANSPORT_BIT_UDP, SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS,
+        SipralCapabilities, sipral_capabilities,
     };
     use crate::error::last_error_text;
     use crate::status::SipralStatus;
@@ -388,6 +404,25 @@ mod tests {
             features & SIPRAL_FEATURE_ICE != 0
         );
         assert_eq!(SIPRAL_FEATURE_TURN_STREAM, 1024);
+    }
+
+    /// The engine's bit is this crate's answer, and it is set exactly where
+    /// `sipral-audio` has a backend for the platform the test runs on.
+    #[test]
+    fn the_audio_engine_reads_present_exactly_where_the_platform_has_a_backend() {
+        assert_eq!(
+            read().features & SIPRAL_FEATURE_AUDIO_DEVICE != 0,
+            sipral_audio::platform_has_backend()
+        );
+        assert_eq!(
+            read().features & SIPRAL_FEATURE_AUDIO_DEVICE != 0,
+            cfg!(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "windows"
+            ))
+        );
+        assert_eq!(SIPRAL_FEATURE_AUDIO_DEVICE, 2048);
     }
 
     #[test]

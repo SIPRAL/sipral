@@ -76,6 +76,18 @@ codes! {
         /// the connection. What rode on it is lost with it, and the call that
         /// said so says what that was.
         StreamBroken = 12,
+        /// An audio device id names nothing this stack's engine has ever
+        /// listed. Refused before any platform call is made;
+        /// `sipral_audio_device_at` says what the ids are.
+        NoSuchDevice = 13,
+        /// The audio device exists and cannot serve: it has no channels in
+        /// the direction asked, it is not plugged in, or the platform
+        /// refused to open it. The last error says which.
+        DeviceUnusable = 14,
+        /// The platform did not answer about its audio devices within
+        /// `sipral_stack_config_t::audio_probe_ms`: a driver is stuck, and
+        /// the engine is not waiting on it. What was asked was not done.
+        DeviceTimedOut = 15,
     }
 }
 
@@ -104,6 +116,9 @@ entry! {
             10 => c"not sent".as_ptr(),
             11 => c"not supported in this build".as_ptr(),
             12 => c"stream broken".as_ptr(),
+            13 => c"no such device".as_ptr(),
+            14 => c"device unusable".as_ptr(),
+            15 => c"device timed out".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -142,6 +157,9 @@ mod tests {
             SipralStatus::NotSent,
             SipralStatus::NotSupported,
             SipralStatus::StreamBroken,
+            SipralStatus::NoSuchDevice,
+            SipralStatus::DeviceUnusable,
+            SipralStatus::DeviceTimedOut,
         ];
         for status in all {
             let code = status as i32;
@@ -152,7 +170,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in 0..=12 {
+        for code in 0..=15 {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -163,7 +181,7 @@ mod tests {
 
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
-        assert!(name(13).is_none());
+        assert!(name(16).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -188,5 +206,8 @@ mod tests {
         assert_eq!(SipralStatus::NotSent as i32, 10);
         assert_eq!(SipralStatus::NotSupported as i32, 11);
         assert_eq!(SipralStatus::StreamBroken as i32, 12);
+        assert_eq!(SipralStatus::NoSuchDevice as i32, 13);
+        assert_eq!(SipralStatus::DeviceUnusable as i32, 14);
+        assert_eq!(SipralStatus::DeviceTimedOut as i32, 15);
     }
 }

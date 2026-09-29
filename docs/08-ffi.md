@@ -1267,6 +1267,106 @@ is a three-valued `sipral_toggle_t` — default, on, off — because a zeroed st
 cannot otherwise tell "off" from "nothing was said", and
 `sipral_stack_settings_t` reads back what each of them came to.
 
+### The built-in audio engine (device mode)
+
+Everything above pumps frames: the application takes them from whatever
+device it opened and hands them to `sipral_media_capture`, and takes what
+`sipral_media_playback` gives it to the device. That stays, unchanged, as
+**application mode** — what a zeroed `sipral_stack_config_t` says, and what
+every caller compiled against an earlier header therefore keeps. **Device
+mode** is the other answer to `sipral_stack_config_t::audio` (appended after
+`turn_transport`, ABI 0.29, `MIN_SIZE` unmoved): `SIPRAL_AUDIO_DEVICE` has
+the library open the platform's own devices — `sipral-io-coreaudio`'s
+voice-processing unit on macOS and iOS, `sipral-io-wasapi`'s communications
+streams on Windows, through the `sipral-audio` crate that sits beside the
+facade rather than under it — and pump every managed call itself, from the
+moment its media starts to the moment it ends. The socket is still the
+application's: each packet the engine encodes reaches
+**`audio_transmit_callback`** as a `sipral_audio_transmit_t` — the call, the
+`destination`, the `protocol` the way `sipral_media_packet_t` marks it, the
+octets — on the engine's own thread, to be sent and returned from; received
+packets go in through `sipral_media_receive` as before. The callback is
+required with `SIPRAL_AUDIO_DEVICE`, and a platform this build has no backend
+for answers `SIPRAL_STATUS_NOT_SUPPORTED`, which
+`SIPRAL_FEATURE_AUDIO_DEVICE` (2048) says before a stack is created: set on
+macOS, iOS and Windows; clear on Linux, where `sipral-io-pipewire` would
+link a library the packaged wheel must not require, and on Android, whose
+devices belong to the Kotlin layer's own `CallAudio`.
+
+The engine keeps ten rules a softphone on another stack has been bitten by,
+each tested against a platform made of fakes (`crates/sipral-audio/src/tests.rs`)
+and again through this ABI (`crates/sipral-ffi/src/audio.rs`):
+
+- **A device's id is the engine's, never reused, and survives a refresh.**
+  `sipral_audio_refresh` asks the platform again; a device seen before keeps
+  its `sipral_audio_device_t::id`, one that has gone keeps its row with
+  `present` zero, and a new one gets the next number. A role running on a
+  device is not reopened by a refresh. `sipral_audio_device_count` and
+  `sipral_audio_device_at(stack, index, &device, buffer, capacity, &needed)`
+  read the list, the name UTF-8 into the caller's buffer.
+- **Channel counts are listed and refused.** `input_channels` and
+  `output_channels` say what a device can do; `sipral_audio_select` on a
+  device with none in the role's direction is `SIPRAL_STATUS_DEVICE_UNUSABLE`
+  (14), as is one that is not plugged in, and an id the list never held is
+  `SIPRAL_STATUS_NO_SUCH_DEVICE` (13) — all three before any platform call.
+- **Microphone, speaker and ringer are chosen separately**, as
+  `sipral_audio_role_t`, with `sipral_audio_select(stack, role, id)` and zero
+  for the system's route; `sipral_audio_selection` reads back both what was
+  asked for and what the role is running on, which differ while a chosen
+  device is unplugged: the selection is kept as a preference, the role runs
+  on the system's route meanwhile, and goes back when the device returns. On
+  macOS the microphone and the loudspeaker are the two halves of one unit, so
+  choosing the microphone or a ringer of its own is
+  `SIPRAL_STATUS_NOT_SUPPORTED` there and the ring goes through the
+  loudspeaker; Windows opens a stream per endpoint and takes all three.
+- **A change the engine made and one the operating system made are told
+  apart.** `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` (43) carries
+  `payload.audio.origin`: `SIPRAL_AUDIO_ORIGIN_SYSTEM` for a device arriving
+  or leaving or the default moving, `SIPRAL_AUDIO_ORIGIN_ENGINE` for a
+  selection applied or a role reopened on its fallback. A role the
+  application put on a device does not follow the default when the system
+  moves it, and an application that ignores engine-origin events cannot
+  re-apply its own choice in a loop.
+- **Gain and mute belong to the direction, not the stream.**
+  `sipral_audio_set_gain(stack, direction, gain)` — 256 is unity, the input
+  direction is the microphone gain — and `sipral_audio_set_muted` are kept
+  by the engine and applied to whatever device the direction is on, so a
+  headset unplugged mid-call comes back at the volume the person set.
+  `sipral_audio_level` is the meter, per direction, cheap enough for a
+  window's timer.
+- **The ring has an output of its own.** `sipral_audio_ring(stack, samples,
+  count, rate, looped)` plays the application's tone on the ringer's device
+  until `sipral_audio_stop_ringing`, whatever the speaker is on.
+- **Activation is decoupled from the calls** with
+  `sipral_stack_config_t::audio_activation`: automatic opens the devices with
+  the first call's media or the first ring and closes them with the last;
+  manual opens them only between `sipral_audio_activate` and
+  `sipral_audio_deactivate`, which is what CallKit's `didActivate` and the
+  telecom framework's audio-route callbacks are for.
+- **A stuck driver is a status, not a hang.** Every platform call is made
+  from a thread the engine can walk away from, bounded by
+  `audio_probe_ms` (default three seconds):
+  `SIPRAL_STATUS_DEVICE_TIMED_OUT` (15), and the entry point returns.
+- **No instruction beyond the baseline.** The resampler and the mixer are
+  plain integer arithmetic; `scripts/check.sh` refuses a `target-cpu` or
+  `target-feature` in any build configuration in the tree, so a packaged
+  library runs on the oldest machine its target names.
+- **Echo cancellation is reported, not assumed.** `sipral_audio_info` says
+  whether the platform's own processing sits behind the microphone
+  (`system_echo_cancellation`: the voice-processing unit on Apple's
+  platforms, which cancels; a communications stream Windows accepted, which
+  applies whatever processing the endpoint has — a virtual cable has none,
+  and the lab's measurement through VB-CABLE reads 0 dB of echo return loss
+  with the flag set) and what the devices report as `render_delay_ms`; the
+  application that wants the echo gone regardless attaches a canceller to
+  each call through `sipral_call_attach_processor` as before, and the engine
+  tells every managed call that delay itself, again after every device
+  change.
+
+None of the idiomatic layers sets `audio` yet, so each keeps pumping its own
+frames exactly as it did; giving each its own device-mode API is the layer
+agents' work, on top of this surface.
+
 ## One declaration, and every printed file (the header, the four bindings and the JNI shim)
 
 B7's failure is a C seam declared in several places that have to agree: a

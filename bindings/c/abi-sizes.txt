@@ -10,6 +10,9 @@
 # itself and no caller ever declares one.
 sipral_abi_version_t 24 24
 sipral_account_config_t 144 240
+sipral_audio_device_t 32 32
+sipral_audio_info_t 48 48
+sipral_audio_transmit_t - 56
 sipral_call_config_t 80 128
 sipral_capabilities_t 24 24
 sipral_codec_candidate_t 24 24
@@ -23,7 +26,7 @@ sipral_poll_result_t 48 48
 sipral_processor_frame_t - 64
 sipral_push_echo_t 24 24
 sipral_screen_request_t - 48
-sipral_stack_config_t 176 288
+sipral_stack_config_t 176 328
 sipral_stack_settings_t 72 88
 sipral_stream_stats_t 152 264
 sipral_subscribe_config_t 88 88

@@ -37,6 +37,7 @@ use sipral_ua::{
 };
 
 use crate::abi::{alias, codes, record};
+use crate::audio::SipralAudioEvent;
 use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
@@ -229,7 +230,7 @@ event_kinds! {
         // Held for what `docs/13-client-requirements.md` already commits to, so
         // that features written in separate branches cannot arrive holding the same
         // number. Taking one means turning its line into a kind, in place.
-        reserved 16 = "the set of audio devices changed (A2)";
+        reserved 16 = "held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same";
 
         /// What one call's media cost, delivered once, after
         /// `SIPRAL_EVENT_KIND_CALL_ENDED`.
@@ -523,6 +524,20 @@ event_kinds! {
         /// is still queued for it, and close it. `account` and `call` are
         /// `SIPRAL_HANDLE_NONE`: a socket is neither.
         42 = TurnStream, c"turn stream";
+        /// The audio engine's devices moved: a device arrived or left, the
+        /// system's default changed, a role was put on a device, lost the
+        /// one it was on, or was reopened on another. Only on a stack
+        /// created with `sipral_stack_config_t::audio` set to
+        /// `SIPRAL_AUDIO_DEVICE`.
+        ///
+        /// `payload.audio` says what changed and who changed it —
+        /// `SIPRAL_AUDIO_ORIGIN_SYSTEM` for the operating system,
+        /// `SIPRAL_AUDIO_ORIGIN_ENGINE` for this library doing what the
+        /// application asked or what a loss made it do — so that an
+        /// application can note the first and need not re-apply its own
+        /// choice on hearing the second. `account` and `call` are
+        /// `SIPRAL_HANDLE_NONE`: a device is neither.
+        43 = AudioDevicesChanged, c"audio devices changed";
     }
 }
 
@@ -587,6 +602,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::NatRelay, "relay"),
     (SipralEventKind::Referral, "referral"),
     (SipralEventKind::TurnStream, "turn_stream"),
+    (SipralEventKind::AudioDevicesChanged, "audio"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1209,6 +1225,8 @@ record! {
         pub referral: SipralReferralEvent,
         /// For [`SipralEventKind::TurnStream`].
         pub turn_stream: SipralTurnStreamEvent,
+        /// For [`SipralEventKind::AudioDevicesChanged`].
+        pub audio: SipralAudioEvent,
     }
 }
 
@@ -1388,6 +1406,15 @@ pub(crate) fn turn_stream(stack: SipralHandle, payload: SipralTurnStreamEvent) -
         stack,
         SipralEventKind::TurnStream,
         payload!(turn_stream: payload),
+    )
+}
+
+/// What the audio engine's devices did, as C reads it.
+pub(crate) fn audio_changed(stack: SipralHandle, payload: SipralAudioEvent) -> SipralEvent {
+    SipralEvent::of(
+        stack,
+        SipralEventKind::AudioDevicesChanged,
+        payload!(audio: payload),
     )
 }
 
@@ -2750,7 +2777,8 @@ mod tests {
         assert_eq!(SipralEventKind::NatRelay as u32, 40);
         assert_eq!(SipralEventKind::Referral as u32, 41);
         assert_eq!(SipralEventKind::TurnStream as u32, 42);
-        assert_eq!(SipralEventKind::ALL.len(), 41, "and there are no others");
+        assert_eq!(SipralEventKind::AudioDevicesChanged as u32, 43);
+        assert_eq!(SipralEventKind::ALL.len(), 42, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2822,7 +2850,12 @@ mod tests {
         assert_eq!(name(40).as_deref(), Some("nat relay"), "40 is live");
         assert_eq!(name(41).as_deref(), Some("referral"), "41 is live");
         assert_eq!(name(42).as_deref(), Some("turn stream"), "42 is live");
-        assert_eq!(name(43), None, "past the last kind");
+        assert_eq!(
+            name(43).as_deref(),
+            Some("audio devices changed"),
+            "43 is live"
+        );
+        assert_eq!(name(44), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

@@ -1,0 +1,42 @@
+[package]
+name = "sipral-audio"
+description = "The built-in audio engine: the platform's devices opened, pumped and mixed for a Sipral call, behind one API on every platform."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[features]
+# The backend made of fakes, for a test of whatever sits above this crate:
+# the ffi's own device-mode tests turn it on from their dev-dependencies, so
+# a release build of the library never carries it.
+fake = []
+# The facade's ICE, carried up: with it a datagram the pump captured says
+# whether it leaves the media socket as a datagram or goes down the socket's
+# connection to a TURN server (`Outgoing::transport`); without it every one
+# is a datagram. Off here so that a build of the facade without ICE builds
+# this crate too; `sipral-ffi` turns it on beside `sipral/ice`.
+ice = ["sipral/ice"]
+
+[dependencies]
+# a call's session, which is what the pump captures into and plays out of
+sipral = { path = "../sipral", version = "0.0.1", default-features = false }
+# the resampler between a device's rate and a call's, and the mixer's arithmetic
+sipral-media = { path = "../sipral-media", version = "0.0.1", default-features = false }
+# gain, mute and the meter, which every backend applies to its own frames
+sipral-io-common = { path = "../sipral-io-common", version = "0.0.1" }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+sipral-io-coreaudio = { path = "../sipral-io-coreaudio", version = "0.0.1" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sipral-io-wasapi = { path = "../sipral-io-wasapi", version = "0.0.1" }
+
+[lints]
+workspace = true

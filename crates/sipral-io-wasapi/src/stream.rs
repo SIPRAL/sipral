@@ -1198,6 +1198,54 @@ unsafe fn read_wave(pointer: *const WaveFormat) -> Option<WaveFormatExtensible> 
     Some(whole)
 }
 
+/// How many channels an endpoint's shared-mode engine runs, which is what
+/// a list of devices a person picks from shows beside each one.
+///
+/// Read from the endpoint's mix format without initialising a client on it,
+/// so asking costs an activation and a property read and leaves nothing
+/// open. Every endpoint is one direction, so the count is for `direction`
+/// and the other direction of the same endpoint is zero.
+///
+/// # Errors
+/// [`Error::NoDevice`] for an identifier the machine does not have, and
+/// [`Error::Call`] naming whichever call refused.
+pub fn channels(id: &DeviceId, direction: Direction) -> Result<u16, Error> {
+    let _apartment = Apartment::enter()?;
+    let enumerator = endpoint::enumerator()?;
+    let opened = endpoint::open(&enumerator, Some(id), direction)?;
+    let interface = AudioClientVtable::IID;
+    let mut raw: *mut c_void = ptr::null_mut();
+    // SAFETY: a live endpoint, a documented interface identifier and a live
+    // out-parameter.
+    let status = unsafe {
+        (opened.vtable().activate)(
+            opened.as_ptr(),
+            &raw const interface,
+            CLSCTX_ALL,
+            ptr::null_mut(),
+            &raw mut raw,
+        )
+    };
+    sys::check("IMMDevice::Activate (IAudioClient)", status)?;
+    // SAFETY: the call succeeded, so the pointer is a live client whose
+    // reference this takes over.
+    let client = unsafe { Com::<AudioClientVtable>::from_raw(raw.cast::<AudioClient>()) }
+        .ok_or(Error::NoDevice)?;
+    let mut mixed: *mut WaveFormat = ptr::null_mut();
+    // SAFETY: a live client and a live out-parameter.
+    let status = unsafe { (client.vtable().get_mix_format)(client.as_ptr(), &raw mut mixed) };
+    sys::check("IAudioClient::GetMixFormat", status)?;
+    let unreadable = Error::Call {
+        call: "IAudioClient::GetMixFormat",
+        status: HResult::new(AUDCLNT_E_UNSUPPORTED_FORMAT),
+    };
+    // SAFETY: what the call wrote is task memory this takes over.
+    let mixed = unsafe { TaskMemory::from_raw(mixed) }.ok_or(unreadable)?;
+    // SAFETY: the memory holds the format the call wrote.
+    let wave = unsafe { read_wave(mixed.as_ptr()) }.ok_or(unreadable)?;
+    Ok(mixformat::describe(&wave)?.channels)
+}
+
 /// The render client for an output endpoint, the capture client for an input
 /// one, and never both: a WASAPI client serves one direction.
 type Services = (

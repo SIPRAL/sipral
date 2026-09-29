@@ -100,6 +100,24 @@ public enum SipralStatus : int
     /// said so says what that was.
     /// </summary>
     StreamBroken = 12,
+    /// <summary>
+    /// An audio device id names nothing this stack's engine has ever
+    /// listed. Refused before any platform call is made;
+    /// `sipral_audio_device_at` says what the ids are.
+    /// </summary>
+    NoSuchDevice = 13,
+    /// <summary>
+    /// The audio device exists and cannot serve: it has no channels in
+    /// the direction asked, it is not plugged in, or the platform
+    /// refused to open it. The last error says which.
+    /// </summary>
+    DeviceUnusable = 14,
+    /// <summary>
+    /// The platform did not answer about its audio devices within
+    /// `sipral_stack_config_t::audio_probe_ms`: a driver is stuck, and
+    /// the engine is not waiting on it. What was asked was not done.
+    /// </summary>
+    DeviceTimedOut = 15,
 }
 
 /// <summary>
@@ -817,7 +835,7 @@ public enum SipralDtmf : uint
 /// that meets a kind it does not know must ignore that event rather than
 /// refuse it, which is what makes adding one safe.
 /// Numbers already spent on features this build does not have:
-/// - 16: the set of audio devices changed (A2)
+/// - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
 /// </summary>
 public enum SipralEventKind : uint
 {
@@ -1241,6 +1259,22 @@ public enum SipralEventKind : uint
     /// `SIPRAL_HANDLE_NONE`: a socket is neither.
     /// </summary>
     TurnStream = 42,
+    /// <summary>
+    /// The audio engine's devices moved: a device arrived or left, the
+    /// system's default changed, a role was put on a device, lost the
+    /// one it was on, or was reopened on another. Only on a stack
+    /// created with `sipral_stack_config_t::audio` set to
+    /// `SIPRAL_AUDIO_DEVICE`.
+    ///
+    /// `payload.audio` says what changed and who changed it —
+    /// `SIPRAL_AUDIO_ORIGIN_SYSTEM` for the operating system,
+    /// `SIPRAL_AUDIO_ORIGIN_ENGINE` for this library doing what the
+    /// application asked or what a loss made it do — so that an
+    /// application can note the first and need not re-apply its own
+    /// choice on hearing the second. `account` and `call` are
+    /// `SIPRAL_HANDLE_NONE`: a device is neither.
+    /// </summary>
+    AudioDevicesChanged = 43,
 }
 
 /// <summary>
@@ -1981,6 +2015,142 @@ public enum SipralDialogText : uint
 }
 
 /// <summary>
+/// Who pumps a stack's audio: `sipral_stack_config_t::audio`.
+///
+/// Zero is application mode because zero is what a configuration
+/// written against any earlier header says, and a caller that pumps its
+/// own frames must go on pumping them when the library underneath it is
+/// updated. The idiomatic layers each choose their own default.
+/// </summary>
+public enum SipralAudio : uint
+{
+    /// <summary>
+    /// The application opens the devices and pumps the frames through
+    /// `sipral_media_capture` and `sipral_media_playback`. What every
+    /// stack was before device mode existed.
+    /// </summary>
+    Application = 0,
+    /// <summary>
+    /// The library opens the platform's devices and pumps every
+    /// managed call itself; the packets it encodes reach the
+    /// application's socket through `audio_transmit_callback`.
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` on a platform this build has no
+    /// backend for, which `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+    /// </summary>
+    Device = 1,
+}
+
+/// <summary>
+/// When the devices are opened, in device mode:
+/// `sipral_stack_config_t::audio_activation`.
+/// </summary>
+public enum SipralAudioActivation : uint
+{
+    /// <summary>
+    /// With the first managed call's media, or the first ring; closed
+    /// with the last. What a desktop softphone wants.
+    /// </summary>
+    Automatic = 0,
+    /// <summary>
+    /// Only between `sipral_audio_activate` and `sipral_audio_deactivate`,
+    /// whatever the calls do. What CallKit and the telecom framework
+    /// want: they say when the audio session is this application's,
+    /// and a device opened before they do is a device that does not work.
+    /// </summary>
+    Manual = 1,
+}
+
+/// <summary>
+/// What a device is used for.
+/// </summary>
+public enum SipralAudioRole : uint
+{
+    /// <summary>
+    /// The call's microphone.
+    /// </summary>
+    Microphone = 1,
+    /// <summary>
+    /// The call's loudspeaker or earpiece.
+    /// </summary>
+    Speaker = 2,
+    /// <summary>
+    /// Where an incoming call is announced, which need not be where it
+    /// is answered: the room's speaker for the ring, the headset for
+    /// the call.
+    /// </summary>
+    Ringer = 3,
+}
+
+/// <summary>
+/// Which way audio flows, for gain, mute and the meter.
+/// </summary>
+public enum SipralAudioDirection : uint
+{
+    /// <summary>
+    /// From the microphone. Its gain is the microphone gain.
+    /// </summary>
+    Input = 1,
+    /// <summary>
+    /// To the loudspeaker. Its gain is the volume.
+    /// </summary>
+    Output = 2,
+}
+
+/// <summary>
+/// What changed, on `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`.
+/// </summary>
+public enum SipralAudioChange : uint
+{
+    /// <summary>
+    /// A device arrived or left; the list has been refreshed, and
+    /// `sipral_audio_device_at` reads the new one. Every id that was
+    /// valid still is: a device that left keeps its row, marked absent.
+    /// </summary>
+    ListChanged = 1,
+    /// <summary>
+    /// The system's default for `direction` moved. A role the
+    /// application put on a device stays there; one on the system's
+    /// route follows, and says so with `SIPRAL_AUDIO_CHANGE_REOPENED`.
+    /// </summary>
+    DefaultChanged = 2,
+    /// <summary>
+    /// `role` is on `device` because `sipral_audio_select` said so.
+    /// </summary>
+    Selected = 3,
+    /// <summary>
+    /// The device `role` was running on went away. The engine reopens
+    /// the role on its fallback and reports that separately.
+    /// </summary>
+    Lost = 4,
+    /// <summary>
+    /// `role` is running on `device` again.
+    /// </summary>
+    Reopened = 5,
+    /// <summary>
+    /// `role` could not be opened on anything; that direction is
+    /// silence until a device arrives.
+    /// </summary>
+    Unavailable = 6,
+}
+
+/// <summary>
+/// Who made a change: the operating system, or this library doing what
+/// the application asked or what a loss made it do. An application
+/// notes the first and acts on neither by re-applying its own choice.
+/// </summary>
+public enum SipralAudioOrigin : uint
+{
+    /// <summary>
+    /// The operating system, or a person at a socket.
+    /// </summary>
+    System = 1,
+    /// <summary>
+    /// The engine.
+    /// </summary>
+    Engine = 2,
+}
+
+/// <summary>
 /// The one callback a stack has.
 ///
 /// It is called from inside `sipral_stack_poll`, on the thread that called
@@ -2060,6 +2230,16 @@ public delegate uint SipralScreenCallback(IntPtr request, IntPtr userData);
 /// </summary>
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 public delegate void SipralProcessorCallback(IntPtr frame, IntPtr userData);
+
+/// <summary>
+/// Where the packets the engine encodes go: the application's, called
+/// on the engine's thread with one `sipral_audio_transmit_t` per packet.
+///
+/// Hand it over as a function pointer: keep the delegate alive for as
+/// long as the stack is, and pass Marshal.GetFunctionPointerForDelegate.
+/// </summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate void SipralAudioTransmitCallback(IntPtr transmit, IntPtr userData);
 
 /// <summary>
 /// The version of the ABI this library provides.
@@ -2646,6 +2826,53 @@ public struct SipralStackConfig
     /// unmoved.
     /// </summary>
     public uint TurnTransport;
+    /// <summary>
+    /// Who pumps this stack's audio: a `SipralAudio`. Zero, and
+    /// `SIPRAL_AUDIO_APPLICATION`, is the application, through
+    /// `sipral_media_capture` and `sipral_media_playback`, as every
+    /// stack was before this member existed. `SIPRAL_AUDIO_DEVICE` has
+    /// the library open the platform's devices and pump every managed
+    /// call itself — see crate::audio — and needs
+    /// `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
+    /// platform this build has no backend for, which
+    /// `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+    ///
+    /// Appended at the tail (task 8.6.18), with the five below; the
+    /// pinned `MIN_SIZE` is unmoved.
+    /// </summary>
+    public uint Audio;
+    /// <summary>
+    /// When the devices are opened, in device mode: a
+    /// `SipralAudioActivation`, or zero for
+    /// `SIPRAL_AUDIO_ACTIVATION_AUTOMATIC`.
+    /// </summary>
+    public uint AudioActivation;
+    /// <summary>
+    /// Where the packets the engine encodes go, in device mode: called
+    /// on the engine's thread with one `sipral_audio_transmit_t` per
+    /// packet, to be sent from the call's media socket. Required with
+    /// `SIPRAL_AUDIO_DEVICE`, ignored otherwise.
+    /// </summary>
+    public SipralAudioTransmitCallback AudioTransmitCallback;
+    /// <summary>
+    /// Handed back to `audio_transmit_callback` unread.
+    /// </summary>
+    public IntPtr AudioTransmitUserData;
+    /// <summary>
+    /// How long a platform call about the devices may block before the
+    /// engine reports it as stuck, in milliseconds; zero for the
+    /// engine's own default of three seconds. A driver that has stopped
+    /// answering is answered `SIPRAL_STATUS_DEVICE_TIMED_OUT`, on a
+    /// thread the engine walks away from, rather than waited for.
+    /// </summary>
+    public ulong AudioProbeMs;
+    /// <summary>
+    /// The rate the devices are asked to run at, in device mode; zero
+    /// for 48000. Every call is resampled between its own rate and
+    /// this one, and a platform that answers with another rate is
+    /// taken at its word.
+    /// </summary>
+    public uint AudioDeviceRateHz;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -4678,6 +4905,36 @@ public struct SipralTurnStreamEvent
 }
 
 /// <summary>
+/// What `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` carries.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralAudioEvent
+{
+    /// <summary>
+    /// A `SipralAudioChange`.
+    /// </summary>
+    public uint Change;
+    /// <summary>
+    /// A `SipralAudioOrigin`.
+    /// </summary>
+    public uint Origin;
+    /// <summary>
+    /// A `SipralAudioRole`, for a change about one role; zero otherwise.
+    /// </summary>
+    public uint Role;
+    /// <summary>
+    /// A `SipralAudioDirection`, for `SIPRAL_AUDIO_CHANGE_DEFAULT_CHANGED`;
+    /// zero otherwise.
+    /// </summary>
+    public uint Direction;
+    /// <summary>
+    /// The device the change is about — the one a role landed on, or
+    /// the one that went — or zero.
+    /// </summary>
+    public uint Device;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -4762,6 +5019,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralTurnStreamEvent TurnStream;
+    /// <summary>
+    /// For SipralEventKind.AudioDevicesChanged.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralAudioEvent Audio;
 }
 
 /// <summary>
@@ -5093,6 +5355,182 @@ public struct SipralPushEcho
     {
         var value = default(SipralPushEcho);
         value.Size = (nuint)Marshal.SizeOf<SipralPushEcho>();
+        return value;
+    }
+}
+
+/// <summary>
+/// One device, as `sipral_audio_device_at` fills it in. The name is
+/// written beside it, into the caller's buffer.
+///
+/// Set `size` to `sizeof(sipral_audio_device_t)` before the call.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralAudioDevice
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The engine's name for the device: stable across refreshes, never
+    /// reused, never zero. What `sipral_audio_select` takes.
+    /// </summary>
+    public uint Id;
+    /// <summary>
+    /// How many channels it captures; zero for a device that is no
+    /// microphone.
+    /// </summary>
+    public uint InputChannels;
+    /// <summary>
+    /// How many channels it plays; zero likewise.
+    /// </summary>
+    public uint OutputChannels;
+    /// <summary>
+    /// One when the system records from it by default.
+    /// </summary>
+    public uint DefaultInput;
+    /// <summary>
+    /// One when the system plays to it by default.
+    /// </summary>
+    public uint DefaultOutput;
+    /// <summary>
+    /// One when the last refresh still found it. A device that went
+    /// keeps its row and its id, so that a selection saved against it
+    /// still names something.
+    /// </summary>
+    public uint Present;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralAudioDevice Sized()
+    {
+        var value = default(SipralAudioDevice);
+        value.Size = (nuint)Marshal.SizeOf<SipralAudioDevice>();
+        return value;
+    }
+}
+
+/// <summary>
+/// What the engine is doing, as `sipral_audio_info` fills it in.
+///
+/// Set `size` to `sizeof(sipral_audio_info_t)` before the call.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralAudioInfo
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// One while the devices are open and the pump is running.
+    /// </summary>
+    public uint Active;
+    /// <summary>
+    /// One when the platform's own processing sits behind the
+    /// microphone: the voice-processing unit on macOS and iOS, which
+    /// cancels the loudspeaker's echo itself; on Windows, a stream
+    /// accepted as a communications stream, which puts the endpoint's
+    /// own processing behind it where the endpoint has any — a virtual
+    /// cable has none, and cancels nothing. An application that wants
+    /// the echo gone regardless attaches a processor to each call with
+    /// `sipral_call_attach_processor`; the delay it needs is
+    /// `render_delay_ms`, and the engine tells each managed call that
+    /// number itself, again after every device change.
+    /// </summary>
+    public uint SystemEchoCancellation;
+    /// <summary>
+    /// The loudspeaker-to-microphone delay the devices report, in
+    /// milliseconds.
+    /// </summary>
+    public ulong RenderDelayMs;
+    /// <summary>
+    /// The rate the microphone runs at, or zero when it is not open.
+    /// </summary>
+    public uint MicrophoneRateHz;
+    /// <summary>
+    /// The rate the loudspeaker runs at, or zero when it is not open.
+    /// </summary>
+    public uint SpeakerRateHz;
+    /// <summary>
+    /// The device the microphone is running on, or zero.
+    /// </summary>
+    public uint Microphone;
+    /// <summary>
+    /// The device the loudspeaker is running on, or zero.
+    /// </summary>
+    public uint Speaker;
+    /// <summary>
+    /// The device the ringer is running on, or zero when the ring goes
+    /// through the loudspeaker.
+    /// </summary>
+    public uint Ringer;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralAudioInfo Sized()
+    {
+        var value = default(SipralAudioInfo);
+        value.Size = (nuint)Marshal.SizeOf<SipralAudioInfo>();
+        return value;
+    }
+}
+
+/// <summary>
+/// One packet the engine encoded from the microphone, handed to
+/// `sipral_stack_config_t::audio_transmit_callback`: send it from the
+/// call's media socket and return.
+///
+/// Filled by the library and handed to the callback as a `const`
+/// pointer, the shape `sipral_processor_frame_t` is: read `size` before
+/// anything past it, and read nothing once the callback has returned.
+/// The callback runs on the engine's own thread, once per frame per
+/// call; it may call `sipral_media_receive` and the other media entry
+/// points, and must not destroy the stack.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralAudioTransmit
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The call whose socket this leaves from.
+    /// </summary>
+    public ulong Call;
+    /// <summary>
+    /// How it leaves, as a `SipralTransport`: `SIPRAL_TRANSPORT_UDP` is
+    /// a datagram from the media socket; `SIPRAL_TRANSPORT_TCP` and
+    /// `SIPRAL_TRANSPORT_TLS` are bytes to write, in order, on the
+    /// socket's connection to its TURN server, as `sipral_media_capture`
+    /// marks them.
+    /// </summary>
+    public uint Protocol;
+    /// <summary>
+    /// Where to send it, `host:port`, UTF-8 and not NUL-terminated.
+    /// </summary>
+    public IntPtr Destination;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint DestinationLen;
+    /// <summary>
+    /// The octets.
+    /// </summary>
+    public IntPtr Payload;
+    /// <summary>
+    /// How many of them.
+    /// </summary>
+    public nuint PayloadLen;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralAudioTransmit Sized()
+    {
+        var value = default(SipralAudioTransmit);
+        value.Size = (nuint)Marshal.SizeOf<SipralAudioTransmit>();
         return value;
     }
 }
@@ -5566,6 +6004,51 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_recording_stop(ulong stack, sbyte[] buffer, nuint capacity, out nuint len);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_refresh(ulong stack, out nuint count);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_device_count(ulong stack, out nuint count);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_device_at(ulong stack, nuint index, ref SipralAudioDevice outDevice, sbyte[] buffer, nuint capacity, out nuint needed);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_select(ulong stack, uint role, uint device);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_selection(ulong stack, uint role, out uint selected, out uint running);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_set_gain(ulong stack, uint direction, uint gain);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_gain(ulong stack, uint direction, out uint gain);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_set_muted(ulong stack, uint direction, uint muted);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_muted(ulong stack, uint direction, out uint muted);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_level(ulong stack, uint direction, out uint peak);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_activate(ulong stack);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_deactivate(ulong stack);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_ring(ulong stack, short[] samples, nuint sampleCount, uint sampleRateHz, uint looped);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_stop_ringing(ulong stack);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_info(ulong stack, ref SipralAudioInfo outInfo);
+
 }
 
 /// <summary>Everything the library does, with the C conventions read
@@ -5754,6 +6237,21 @@ public static class Sipral
     /// does.
     /// </summary>
     public const uint FeatureTurnStream = 1024;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. The built-in audio engine: a stack
+    /// created with `sipral_stack_config_t::audio` set to
+    /// `SIPRAL_AUDIO_DEVICE` opens the platform's devices and pumps every
+    /// managed call itself, with the `sipral_audio_*` entry points to list,
+    /// choose and control them. Clear on a platform this build has no
+    /// backend for — Linux and Android today — where `SIPRAL_AUDIO_DEVICE`
+    /// answers `SIPRAL_STATUS_NOT_SUPPORTED` and the application pumps the
+    /// frames as it always has.
+    ///
+    /// This crate's own answer rather than the facade's: the engine sits
+    /// beside the facade, not under it, so the facade has nothing to say.
+    /// </summary>
+    public const uint FeatureAudioDevice = 2048;
 
     /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
@@ -8928,6 +9426,256 @@ public static class Sipral
     {
         Check(NativeMethods.sipral_stack_recording_stop(stack, buffer, (nuint)buffer.Length, out var len));
         return len;
+    }
+
+    /// <summary>
+    /// Ask the platform what devices there are, and say how many the list
+    /// holds now.
+    ///
+    /// A device seen before keeps its id; one that has gone keeps its row,
+    /// marked absent; a new one gets the next id. The engine refreshes by
+    /// itself when the platform announces a change, so this is for a
+    /// settings screen opening, not for polling.
+    /// `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not answer
+    /// within `audio_probe_ms`, with the list left as it was.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t` or be null.
+    /// </summary>
+    public static nuint AudioRefresh(ulong stack)
+    {
+        Check(NativeMethods.sipral_audio_refresh(stack, out var count));
+        return count;
+    }
+
+    /// <summary>
+    /// How many devices the list holds, present or not.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    /// </summary>
+    public static nuint AudioDeviceCount(ulong stack)
+    {
+        Check(NativeMethods.sipral_audio_device_count(stack, out var count));
+        return count;
+    }
+
+    /// <summary>
+    /// The device at `index` in the list, and its name into `buffer`.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end.
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when the name does not fit, with the
+    /// length needed in `out_needed` and the struct filled in all the same;
+    /// the name is UTF-8 and not NUL-terminated.
+    ///
+    /// Safety
+    ///
+    /// `out_device` must point at a `sipral_audio_device_t` whose `size`
+    /// member says how long it is; `buffer` must be writable for `capacity`
+    /// bytes or null with a capacity of zero; `out_needed` must point at one
+    /// `size_t` or be null.
+    /// </summary>
+    public static (SipralAudioDevice Device, nuint Needed) AudioDeviceAt(ulong stack, nuint index, sbyte[] buffer)
+    {
+        var device = SipralAudioDevice.Sized();
+        Check(NativeMethods.sipral_audio_device_at(stack, index, ref device, buffer, (nuint)buffer.Length, out var needed));
+        return (device, needed);
+    }
+
+    /// <summary>
+    /// Put a role on a device, or back on the system's route with a
+    /// `device` of zero.
+    ///
+    /// Refused before any platform call is made: `SIPRAL_STATUS_NO_SUCH_DEVICE`
+    /// for an id the list never held, `SIPRAL_STATUS_DEVICE_UNUSABLE` for a
+    /// device with no channels in the role's direction or one that is not
+    /// plugged in, `SIPRAL_STATUS_NOT_SUPPORTED` where the platform cannot
+    /// put that role on a device of its own — macOS runs the call's
+    /// microphone and loudspeaker as one unit, and the microphone follows
+    /// the system's input. A refused selection changes nothing.
+    ///
+    /// While the engine is active the role is reopened at once, the gain and
+    /// the mute of its direction carried over, and
+    /// `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` says `SIPRAL_AUDIO_CHANGE_SELECTED`
+    /// from the engine. A device chosen and later unplugged is a preference:
+    /// the role runs on the system's route meanwhile and goes back to the
+    /// device when it returns.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    /// </summary>
+    public static void AudioSelect(ulong stack, uint role, uint device)
+    {
+        Check(NativeMethods.sipral_audio_select(stack, role, device));
+    }
+
+    /// <summary>
+    /// What a role was asked to be on, and what it is running on: the id
+    /// chosen with `sipral_audio_select` or zero for the system's route, and
+    /// the id of the device the role is actually open on or zero when it is
+    /// not open. The two differ while a chosen device is unplugged.
+    ///
+    /// Safety
+    ///
+    /// Each out parameter must point at one `uint32_t` or be null.
+    /// </summary>
+    public static (uint Selected, uint Running) AudioSelection(ulong stack, uint role)
+    {
+        Check(NativeMethods.sipral_audio_selection(stack, role, out var selected, out var running));
+        return (selected, running);
+    }
+
+    /// <summary>
+    /// Set the gain of one direction, as a fixed-point ratio with 256 for
+    /// unity: 128 halves, 512 doubles, 0 is silence, and anything above 1024
+    /// is taken as 1024. The input direction's gain is the microphone gain;
+    /// the output's is the volume. Applied to the frames rather than to the
+    /// operating system's own control, so a film playing beside the call is
+    /// not turned down with it, and kept across every device change.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    /// </summary>
+    public static void AudioSetGain(ulong stack, uint direction, uint gain)
+    {
+        Check(NativeMethods.sipral_audio_set_gain(stack, direction, gain));
+    }
+
+    /// <summary>
+    /// The gain of one direction, in the steps `sipral_audio_set_gain` takes.
+    ///
+    /// Safety
+    ///
+    /// `out_gain` must point at one `uint32_t`.
+    /// </summary>
+    public static uint AudioGain(ulong stack, uint direction)
+    {
+        Check(NativeMethods.sipral_audio_gain(stack, direction, out var gain));
+        return gain;
+    }
+
+    /// <summary>
+    /// Mute one direction, or unmute it, kept across every device change. A
+    /// muted microphone still runs and sends silence, so the far end hears a
+    /// stream rather than a gap.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    /// </summary>
+    public static void AudioSetMuted(ulong stack, uint direction, uint muted)
+    {
+        Check(NativeMethods.sipral_audio_set_muted(stack, direction, muted));
+    }
+
+    /// <summary>
+    /// Whether one direction is muted: one or zero into `out_muted`.
+    ///
+    /// Safety
+    ///
+    /// `out_muted` must point at one `uint32_t`.
+    /// </summary>
+    public static uint AudioMuted(ulong stack, uint direction)
+    {
+        Check(NativeMethods.sipral_audio_muted(stack, direction, out var muted));
+        return muted;
+    }
+
+    /// <summary>
+    /// The meter of one direction: the loudest sample of the last tenth of a
+    /// second, 0 to 32767, held for between one window and two so that a
+    /// bar drawn from it neither flickers nor sticks. Cheap enough to poll
+    /// at a window's frame rate; zero while nothing is open.
+    ///
+    /// Safety
+    ///
+    /// `out_peak` must point at one `uint32_t`.
+    /// </summary>
+    public static uint AudioLevel(ulong stack, uint direction)
+    {
+        Check(NativeMethods.sipral_audio_level(stack, direction, out var peak));
+        return peak;
+    }
+
+    /// <summary>
+    /// Open the devices and start the pump now, whatever the calls are
+    /// doing. Under `SIPRAL_AUDIO_ACTIVATION_MANUAL` this is the only thing
+    /// that does; under automatic activation it opens them early.
+    ///
+    /// `SIPRAL_STATUS_DEVICE_UNUSABLE` or `SIPRAL_STATUS_DEVICE_TIMED_OUT`
+    /// when a direction could not be opened: the engine is active all the
+    /// same, silent in that direction, and `sipral_audio_info` says which.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    /// </summary>
+    public static void AudioActivate(ulong stack)
+    {
+        Check(NativeMethods.sipral_audio_activate(stack));
+    }
+
+    /// <summary>
+    /// Close the devices and stop the pump. The calls stay attached and get
+    /// their audio back on the next activation.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    /// </summary>
+    public static void AudioDeactivate(ulong stack)
+    {
+        Check(NativeMethods.sipral_audio_deactivate(stack));
+    }
+
+    /// <summary>
+    /// Play a ring tone on the ringer — the device `SIPRAL_AUDIO_ROLE_RINGER`
+    /// is on, or the loudspeaker when it is on none of its own — until
+    /// `sipral_audio_stop_ringing`, or once through when `looped` is zero.
+    /// The tone is mono sixteen-bit samples at `sample_rate_hz`, copied, so
+    /// the caller's buffer is its own again when this returns. Under
+    /// automatic activation a ring opens the devices.
+    ///
+    /// Safety
+    ///
+    /// `samples` must be readable for `sample_count` `int16_t`.
+    /// </summary>
+    public static void AudioRing(ulong stack, short[] samples, uint sampleRateHz, uint looped)
+    {
+        Check(NativeMethods.sipral_audio_ring(stack, samples, (nuint)samples.Length, sampleRateHz, looped));
+    }
+
+    /// <summary>
+    /// Stop the ring. Under automatic activation, with no call up, the
+    /// devices close with it.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    /// </summary>
+    public static void AudioStopRinging(ulong stack)
+    {
+        Check(NativeMethods.sipral_audio_stop_ringing(stack));
+    }
+
+    /// <summary>
+    /// What the engine is doing: whether it is active, whether the platform
+    /// cancels echo, the delay a canceller needs, and where each role runs.
+    ///
+    /// Safety
+    ///
+    /// `out_info` must point at a `sipral_audio_info_t` whose `size` member
+    /// says how long it is.
+    /// </summary>
+    public static SipralAudioInfo AudioInfo(ulong stack)
+    {
+        var info = SipralAudioInfo.Sized();
+        Check(NativeMethods.sipral_audio_info(stack, ref info));
+        return info;
     }
 
 }
