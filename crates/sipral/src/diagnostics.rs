@@ -23,7 +23,11 @@
 //! decision that names a far end and the packets from it still line up.
 
 use sipral_core::dialog::CallId;
-pub use sipral_diag::{Mode as RedactionMode, RedactError, Redactor};
+pub use sipral_diag::{
+    ExportError, Mode as RedactionMode, RedactError, Redactor, Replayed, redact_text,
+};
+use std::time::Instant;
+
 use sipral_ua::{CallHandle, Recording, UserAgent};
 
 /// One call's D1 record, redacted, as the JSON `docs/14-diagnostics.md`
@@ -59,4 +63,28 @@ pub fn redacted_recording(
     redactor: Redactor,
 ) -> Result<Vec<u8>, RedactError> {
     sipral_diag::export(recording, Some(redactor))
+}
+
+/// A D2 recording replayed into `target`, as one pcapng file with both
+/// directions of the session in it, every message redacted.
+///
+/// A recording holds only what arrived; [`redacted_recording`] exports
+/// that. This feeds it back into a live layer built with
+/// [`Recording::seed`] and the configuration the recorded stack ran with,
+/// and places every message the layer writes in answer beside what arrived,
+/// marked outbound — so the NOC reads the call the way a capture taken at
+/// this end would show it. What the application did on its own comes back
+/// to [`Replayed::cue`], under the name the recording gave it, for the
+/// caller to do again; see `sipral_diag::export_replayed`.
+///
+/// # Errors
+/// [`ExportError::Replay`] when `target` refuses a frame, and
+/// [`ExportError::Redact`] when a message cannot be read to be redacted.
+pub fn replayed_capture<T: Replayed>(
+    recording: &Recording,
+    target: &mut T,
+    origin: Instant,
+    redactor: Redactor,
+) -> Result<Vec<u8>, ExportError> {
+    sipral_diag::export_replayed(recording, target, origin, Some(redactor))
 }

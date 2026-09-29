@@ -170,7 +170,8 @@ pub use codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME
 pub use counters::{CallDispositionCounts, Counter, Counters, Gauge, RegistrationFailureCounts};
 #[cfg(feature = "redaction")]
 pub use diagnostics::{
-    RedactError, RedactionMode, Redactor, redacted_call_record, redacted_recording,
+    ExportError, RedactError, RedactionMode, Redactor, Replayed, redact_text, redacted_call_record,
+    redacted_recording, replayed_capture,
 };
 #[cfg(feature = "dtls")]
 pub use dtls::Identity;

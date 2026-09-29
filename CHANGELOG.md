@@ -12,6 +12,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A replayed session exported as one pcapng with both directions.**
+  `sipral_diag::export_replayed` (and `sipral::replayed_capture`, redacted)
+  replays a `.sipralrec` into a live layer and places every message this end
+  writes beside what arrived, each packet marked inbound or outbound in its
+  `epb_flags`; `diag-export`'s far-end-only files carry the inbound mark too.
+  Read back by `tshark` with every message decoded and its direction shown.
+  Redaction now also pseudonymises the user name of an SDP `o=` line, and
+  `sipral_diag::redact_text` applies the same rules to free text.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when

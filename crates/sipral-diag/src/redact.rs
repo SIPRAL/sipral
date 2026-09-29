@@ -240,7 +240,7 @@ pub fn redact_message(bytes: &[u8], red: &mut Redactor) -> Result<Vec<u8>, Redac
     // the body is redacted, and its IP literals scanned, before anything
     // downstream reads its length: Content-Length has to match the body
     // this function is about to emit, not the one the message arrived with
-    let new_body = scan_ip_literals(&redact_body(message.body()), red);
+    let new_body = scan_ip_literals(&redact_body(message.body(), red), red);
 
     let start_line = match message.kind() {
         MessageKind::Request(method) => {
@@ -310,24 +310,170 @@ pub fn redact_record_json(json: &str, red: &mut Redactor) -> String {
     String::from_utf8(scan_ip_literals(json.as_bytes(), red)).unwrap_or_else(|_| json.to_owned())
 }
 
-/// SDES key material dropped from an `a=crypto:` line; everything else in
-/// the body passes through unchanged here, and picks up its IP redaction
-/// from [`scan_ip_literals`] over the whole message afterwards.
-fn redact_body(body: &[u8]) -> Vec<u8> {
+/// Free text — a log line, an error sentence, a state report — with what
+/// [`redact_message`] takes out of a message taken out of it too, for text
+/// that is not a message and cannot be parsed as one.
+///
+/// Three passes, each the same rule [`redact_message`] applies structurally:
+///
+/// - **Credentials are dropped, not pseudonymised.** Everything on a line
+///   after `Authorization:`, `Proxy-Authorization:` or `Digest ` becomes
+///   `REDACTED`, and an SDES `inline:` key is cut out the way it is in an SDP
+///   body.
+/// - **A SIP, SIPS or tel URI's user part** — the name or the number — is
+///   pseudonymised wherever a `sip:`, `sips:` or `tel:` is written, so a URI
+///   an application handed in and an error sentence quoted back reads as the
+///   same pseudonym the redacted messages carry.
+/// - **Every IPv4 or IPv6 literal** is pseudonymised, scanned out of the
+///   original text and never out of a pseudonym already written.
+///
+/// A display name written loose in a sentence is not recognisable as one and
+/// is not touched; nothing this crate's callers write puts one there.
+#[must_use]
+pub fn redact_text(text: &str, red: &mut Redactor) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (kept, secret) = split_credentials(line);
+        redact_uris_and_addresses(kept, red, &mut out);
+        if let Some(tail) = secret {
+            if kept.to_ascii_lowercase().ends_with("authorization:") {
+                out.push(' ');
+            }
+            out.push_str("REDACTED");
+            out.push_str(tail);
+        }
+    }
+    out
+}
+
+/// A line cut where a credential starts: what may be kept, and — when a
+/// credential was found — the line ending that follows it, so the output
+/// keeps the line structure the input had.
+fn split_credentials(line: &str) -> (&str, Option<&str>) {
+    const MARKERS: [&str; 4] = [
+        "proxy-authorization:",
+        "authorization:",
+        "digest ",
+        "inline:",
+    ];
+    let lower = line.to_ascii_lowercase();
+    let cut = MARKERS
+        .iter()
+        .filter_map(|marker| lower.find(marker).map(|at| at + marker.len()))
+        .min();
+    let Some(cut) = cut else {
+        return (line, None);
+    };
+    let ending = if line.ends_with("\r\n") {
+        "\r\n"
+    } else if line.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    (line.get(..cut).unwrap_or(line), Some(ending))
+}
+
+/// The URI and address passes of [`redact_text`] over one piece of a line,
+/// appended to `out`.
+fn redact_uris_and_addresses(text: &str, red: &mut Redactor, out: &mut String) {
+    let lower = text.to_ascii_lowercase();
+    let mut plain_from = 0;
+    let mut at = 0;
+    while at < text.len() {
+        let Some((scheme_len, tel)) = uri_scheme_at(&lower, at) else {
+            at += lower
+                .get(at..)
+                .and_then(|rest| rest.chars().next())
+                .map_or(1, char::len_utf8);
+            continue;
+        };
+        let user_start = at + scheme_len;
+        let rest = text.get(user_start..).unwrap_or("");
+        let run = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '>' | '<' | '"' | ',' | ')' | '\''))
+            .unwrap_or(rest.len());
+        let candidate = rest.get(..run).unwrap_or("");
+        let user_len = if tel {
+            candidate.find(';').unwrap_or(candidate.len())
+        } else {
+            candidate.find('@').unwrap_or(0)
+        };
+        if user_len == 0 {
+            at = user_start;
+            continue;
+        }
+        out.push_str(&scan_ip_literals_str(
+            text.get(plain_from..user_start).unwrap_or(""),
+            red,
+        ));
+        let user = candidate.get(..user_len).unwrap_or("");
+        out.push_str(&red.identifier(user.as_bytes()));
+        plain_from = user_start + user_len;
+        at = plain_from;
+    }
+    out.push_str(&scan_ip_literals_str(
+        text.get(plain_from..).unwrap_or(""),
+        red,
+    ));
+}
+
+/// Whether a `sip:`, `sips:` or `tel:` scheme starts at `at` in `lower` — and
+/// is not the tail of a longer word — with its length and whether it is
+/// `tel:`.
+fn uri_scheme_at(lower: &str, at: usize) -> Option<(usize, bool)> {
+    let preceded_by_word = lower
+        .get(..at)
+        .and_then(|before| before.chars().next_back())
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    if preceded_by_word {
+        return None;
+    }
+    let rest = lower.get(at..)?;
+    [("sips:", false), ("sip:", false), ("tel:", true)]
+        .into_iter()
+        .find(|(scheme, _)| rest.starts_with(scheme))
+        .map(|(scheme, tel)| (scheme.len(), tel))
+}
+
+/// SDES key material dropped from an `a=crypto:` line, and the user name of
+/// an `o=` line (RFC 4566 §5.2: "the user's login on the originating host")
+/// pseudonymised like any other user part — `-`, which is what a host with
+/// no notion of users writes, is left as it is. Everything else in the body
+/// passes through unchanged here, and picks up its IP redaction from
+/// [`scan_ip_literals`] over the whole message afterwards.
+fn redact_body(body: &[u8], red: &mut Redactor) -> Vec<u8> {
     let text = String::from_utf8_lossy(body);
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
-        if line
-            .trim_start()
-            .to_ascii_lowercase()
-            .starts_with("a=crypto:")
-        {
+        let lower = line.trim_start().to_ascii_lowercase();
+        if lower.starts_with("a=crypto:") {
             out.push_str(&redact_crypto_line(line));
+        } else if lower.starts_with("o=") {
+            out.push_str(&redact_origin_line(line, red));
         } else {
             out.push_str(line);
         }
     }
     out.into_bytes()
+}
+
+fn redact_origin_line(line: &str, red: &mut Redactor) -> String {
+    let Some(start) = line.find("o=").map(|at| at + 2) else {
+        return line.to_string();
+    };
+    let rest = line.get(start..).unwrap_or("");
+    let end = rest.find(' ').unwrap_or(rest.len());
+    let user = rest.get(..end).unwrap_or("");
+    if user.is_empty() || user == "-" {
+        return line.to_string();
+    }
+    format!(
+        "{}{}{}",
+        line.get(..start).unwrap_or(""),
+        red.identifier(user.as_bytes()),
+        rest.get(end..).unwrap_or("")
+    )
 }
 
 fn redact_crypto_line(line: &str) -> String {
@@ -541,7 +687,7 @@ fn scan_ip_literals_str(text: &str, red: &mut Redactor) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mode, Redactor, redact_message, redact_record_json};
+    use super::{Mode, Redactor, redact_message, redact_record_json, redact_text};
 
     fn hash_redactor() -> Redactor {
         Redactor::new(Mode::Hash(b"organisation-secret".to_vec()))
@@ -848,6 +994,80 @@ Content-Length: 0\r\n\r\n",
             message.contains(&format!("UDP {pseudonym}:5060")),
             "{record} / {message}"
         );
+    }
+
+    #[test]
+    fn free_text_loses_its_user_parts_addresses_and_credentials() {
+        let mut red = hash_redactor();
+        let line = "placing sip:alice@192.0.2.9:5060 from 2001:db8::7 for tel:+40721000111;phone-context=x \
+                    Authorization: Digest username=\"alice\", response=\"f00d\"";
+        let out = redact_text(line, &mut red);
+        assert!(!out.contains("alice"), "{out}");
+        assert!(!out.contains("192.0.2.9"), "{out}");
+        assert!(!out.contains("2001:db8::7"), "{out}");
+        assert!(!out.contains("+40721000111"), "{out}");
+        assert!(!out.contains("f00d"), "{out}");
+        assert!(
+            out.contains(":5060 from "),
+            "the shape of the sentence stays: {out}"
+        );
+        assert!(out.contains(";phone-context=x"), "{out}");
+        assert!(out.ends_with("Authorization: REDACTED"), "{out}");
+    }
+
+    #[test]
+    fn free_text_and_a_message_agree_on_a_user_and_an_address() {
+        let mut red = hash_redactor();
+        let text = redact_text("sip:a@192.0.2.9", &mut red);
+        let message = redact(
+            b"OPTIONS sip:a@192.0.2.9 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK1\r\n\
+From: <sip:a@example.com>;tag=1\r\n\
+To: <sip:example.com>\r\n\
+Call-ID: a@b\r\n\
+CSeq: 1 OPTIONS\r\n\
+Content-Length: 0\r\n\r\n",
+            &mut red,
+        );
+        assert!(
+            message.starts_with(&format!("OPTIONS {text} SIP/2.0")),
+            "{text} / {message}"
+        );
+    }
+
+    #[test]
+    fn a_word_that_merely_ends_in_a_scheme_is_not_a_uri() {
+        let mut red = hash_redactor();
+        assert_eq!(
+            redact_text("hotel:lobby@desk", &mut red),
+            "hotel:lobby@desk"
+        );
+        assert_eq!(
+            redact_text("an SDES inline:secretkey|2^20", &mut red),
+            "an SDES inline:REDACTED"
+        );
+    }
+
+    #[test]
+    fn the_user_name_of_an_sdp_origin_line_is_replaced_and_a_dash_is_kept() {
+        let invite = |user: &str| {
+            let body = format!("v=0\r\no={user} 1 1 IN IP4 192.0.2.4\r\ns=-\r\n");
+            format!(
+                "INVITE sip:a@example.com SIP/2.0\r\n\
+From: <sip:b@example.com>;tag=1\r\n\
+To: <sip:a@example.com>\r\n\
+Call-ID: a@b\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let out = redact(invite("bob").as_bytes(), &mut hash_redactor());
+        assert!(!out.contains("o=bob"), "{out}");
+        assert!(out.contains(" 1 1 IN IP4 "), "{out}");
+        let anonymous = redact(invite("-").as_bytes(), &mut hash_redactor());
+        assert!(anonymous.contains("o=- 1 1 IN IP4"), "{anonymous}");
     }
 
     #[test]
