@@ -446,6 +446,9 @@ impl Publication {
                 self.in_flight = Some(sent);
                 return;
             }
+            // a 412 answers a condition, and an initial PUBLISH names none:
+            // publishing afresh would be the very request just refused
+            412 if sent.if_match.is_none() => self.fail(PublishFailure::Refused, Some(status)),
             // §4: the entity tag is not
             // one it knows any more, so the state is not there to refresh,
             // modify or remove
@@ -837,6 +840,27 @@ Call-ID: pub@example.com\r\nCSeq: 1 PUBLISH\r\n{extra}Content-Length: 0\r\n\r\n"
         answer(&mut publication, 412, "", t0);
         assert!(publication.poll_transmit().is_none());
         assert_eq!(events(&mut publication), vec![PublishEvent::Removed]);
+    }
+
+    #[test]
+    fn a_412_to_a_publish_that_named_no_entity_tag_is_a_refusal() {
+        let t0 = Instant::now();
+        let mut publication = Publication::new("presence");
+        publication.publish("application/pidf+xml", body("<presence/>"));
+        assert_eq!(only(&mut publication).kind(), PublishKind::Initial);
+        // there was no condition to fail: publishing afresh would send the
+        // same request again, and the same answer back, for as long as the
+        // compositor keeps answering
+        answer(&mut publication, 412, "", t0);
+        assert!(publication.poll_transmit().is_none());
+        assert!(!publication.is_in_flight());
+        assert_eq!(
+            events(&mut publication),
+            vec![PublishEvent::Failed {
+                reason: PublishFailure::Refused,
+                status: StatusCode::new(412).ok(),
+            }]
+        );
     }
 
     #[test]
