@@ -63,6 +63,10 @@ use sipral_nat::stun::{
     AttributeType, Class, Message, MessageBuilder, Method as StunMethod, TransactionId,
 };
 use sipral_nat::turn::{ChannelData, ChannelNumber, StreamFraming, Transport};
+use sipral_rtp::avpf::{
+    FeedbackPacket, GenericNackBuilder, NackEntry, ReceivedRtcp, ReducedSize, ReducedSizeBuilder,
+    RtcpFb, RtcpForm, write_compound_with_feedback,
+};
 use sipral_rtp::rtt::{ReceiverConfig, SenderConfig, TextEvent, TextReceiver, TextSender};
 use sipral_rtp::srtp::{Master, Policy, Protector, SrtpError, Suite, Unprotector};
 use sipral_rtp::{
@@ -1487,6 +1491,91 @@ fn rtcp_seeds() -> Result<Vec<Seed>, Wrong> {
         CompoundPacket::parse(&bytes)
             .map_err(|why| Wrong(format!("the {name} seed does not parse: {why:?}")))?;
         out.push((name, bytes));
+    }
+    Ok(out)
+}
+
+/// The `rtcp_fb` target reads its input as an RTCP datagram, compound or
+/// reduced size, and as the value of an `a=rtcp-fb` line. The seeds are one
+/// of each shape: a receiver report and CNAME with a Generic NACK after them
+/// (RFC 4585 §3.1), the same NACK alone as reduced-size RTCP (RFC 5506
+/// §4.1), and two `a=rtcp-fb` values of RFC 4585 §4.2.
+fn rtcp_fb_seeds() -> Result<Vec<Seed>, Wrong> {
+    const MEDIA_SSRC: u32 = 0x8765_4321;
+    // one entry for 100 with 101 and 103 in its mask, one for 120
+    let lost = [100_u16, 101, 103, 120];
+    let entries = NackEntry::pack(lost);
+    let nacks = [GenericNackBuilder {
+        sender_ssrc: SSRC,
+        media_ssrc: MEDIA_SSRC,
+        entries: &entries,
+    }];
+    let cname = SdesItem {
+        kind: CNAME,
+        text: b"alice@192.0.2.1",
+    };
+    let chunks = [ChunkBuilder {
+        ssrc: SSRC,
+        items: &[cname],
+    }];
+    let compound = CompoundBuilder::new(
+        SenderOrReceiver::Receiver(ReceiverReportBuilder {
+            ssrc: SSRC,
+            reports: &[],
+        }),
+        SourceDescriptionBuilder { chunks: &chunks },
+    );
+    let mut with_nack = vec![0; 512];
+    let written = write_compound_with_feedback(&compound, &nacks, &mut with_nack)
+        .map_err(|why| Wrong(format!("the compound NACK seed does not write: {why:?}")))?;
+    with_nack.truncate(written);
+    let reduced = ReducedSizeBuilder { nacks: &nacks };
+    let mut alone = vec![0; reduced.encoded_len()];
+    let written = reduced
+        .write(&mut alone)
+        .map_err(|why| Wrong(format!("the reduced-size seed does not write: {why:?}")))?;
+    alone.truncate(written);
+
+    // each read the way the target reads it: the right form under the
+    // right policy, and the NACK in it reporting what was lost
+    for (name, bytes, negotiated, form) in [
+        ("compound-then-nack", &with_nack, false, RtcpForm::Compound),
+        ("reduced-size-nack", &alone, true, RtcpForm::ReducedSize),
+    ] {
+        let read = ReceivedRtcp::parse(bytes, &ReducedSize::new(negotiated))
+            .map_err(|why| Wrong(format!("the {name} seed does not read: {why:?}")))?;
+        let reported: Vec<u16> = read
+            .feedback()
+            .filter_map(|feedback| match feedback {
+                FeedbackPacket::GenericNack(nack) => Some(nack.lost().collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if read.form() != form || reported != lost {
+            return Err(Wrong(format!(
+                "the {name} seed reads as {:?} reporting {reported:?}",
+                read.form()
+            )));
+        }
+    }
+    if ReceivedRtcp::parse(&alone, &ReducedSize::new(false)).is_ok() {
+        return Err(Wrong(
+            "the reduced-size seed reads where a=rtcp-rsize was not negotiated".to_owned(),
+        ));
+    }
+    let mut out = vec![
+        ("compound-then-nack", with_nack),
+        ("reduced-size-nack", alone),
+    ];
+    for (name, value) in [
+        ("rtcp-fb-nack", "96 nack"),
+        ("rtcp-fb-trr-int", "* trr-int 100"),
+    ] {
+        if RtcpFb::parse(value).is_none() {
+            return Err(Wrong(format!("the {name} seed is not an a=rtcp-fb value")));
+        }
+        out.push((name, value.as_bytes().to_vec()));
     }
     Ok(out)
 }
@@ -3157,6 +3246,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("parse", sip_seeds()?),
         ("replay", replay_seeds()?),
         ("rtcp", rtcp_seeds()?),
+        ("rtcp_fb", rtcp_fb_seeds()?),
         ("rtp_dtmf", rtp_dtmf_seeds()?),
         ("rtt", rtt_seeds()?),
         ("sdp", sdp_seeds()?),

@@ -1209,7 +1209,8 @@ mod tests {
     use sipral_core::msg::{MediaTypeRef, Multipart, ParseMode, ParseScratch, parse};
 
     /// RFC 7865 §8.1's complete metadata example as the RFC prints it, less
-    /// the three columns of page indentation.
+    /// the three columns of page indentation and with its two carrier
+    /// domains moved under `example.com`, the only change.
     const RFC_7865_EXAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <recording xmlns='urn:ietf:params:xml:ns:recording:1'>
   <datamode>complete</datamode>
@@ -1217,7 +1218,7 @@ mod tests {
     <associate-time>2010-12-16T23:41:07Z</associate-time>
     <!-- Standardized extension -->
     <call-center xmlns='urn:ietf:params:xml:ns:callcenter'>
-          <supervisor>sip:alice@atlanta.com</supervisor>
+          <supervisor>sip:alice@atlanta.example.com</supervisor>
     </call-center>
     <mydata xmlns='http://example.com/my'>
           <structure>FOO!</structure>
@@ -1235,7 +1236,7 @@ mod tests {
         </mydata>
   </session>
   <participant participant_id="srfBElmCRp2QB23b7Mpk0w==">
-        <nameID aor="sip:bob@biloxi.com">
+        <nameID aor="sip:bob@biloxi.example.com">
            <name xml:lang="it">Bob</name>
         </nameID>
         <!-- Standardized extension -->
@@ -1245,7 +1246,7 @@ mod tests {
         </mydata>
   </participant>
   <participant participant_id="zSfPoSvdSDCmU3A3TRDxAw==">
-        <nameID aor="sip:Paul@biloxi.com">
+        <nameID aor="sip:Paul@biloxi.example.com">
           <name xml:lang="it">Paul</name>
         </nameID>
         <!-- Standardized extension -->
@@ -1483,8 +1484,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                ("sip:bob@biloxi.com", "Bob"),
-                ("sip:Paul@biloxi.com", "Paul")
+                ("sip:bob@biloxi.example.com", "Bob"),
+                ("sip:Paul@biloxi.example.com", "Paul")
             ]
         );
         let labels: Vec<Option<&str>> = m.streams.iter().map(|s| s.label.as_deref()).collect();
