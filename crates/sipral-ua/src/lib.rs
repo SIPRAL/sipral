@@ -79,6 +79,7 @@ mod parked;
 /// RFC 4480 — under their own path because `Tuple`, `Note` and `Contact`
 /// are PIDF's vocabulary, not this crate's.
 pub mod presence;
+mod publish;
 mod quality_report;
 pub mod referral;
 #[cfg(test)]
@@ -122,6 +123,9 @@ pub use lifecycle::{
 pub use message::{MAX_UNSAFE_BODY_BYTES, MessageHandle};
 pub use mwi::{MessageClass, MessageSummary, MessageSummaryError};
 pub use presence::{Presence, PresenceError};
+pub use publish::{
+    Publication, PublishError, PublishEvent, PublishFailure, PublishKind, PublishRequest,
+};
 pub use quality_report::{QualityReportMetrics, RemoteQualityMetrics};
 pub use registration::{PushEcho, RegistrarInfo, SnapshotError};
 #[cfg(feature = "reference-loop")]
