@@ -59,7 +59,15 @@ public sealed class SipralTlsTrust
     {
         if (_only)
         {
-            var policy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust };
+            // revocation as SslStream's own default leaves it, unchecked: a
+            // policy of one's own starts from Online instead, and a private
+            // authority publishes no revocation list, so on Linux every
+            // certificate it signed would read as a chain error
+            var policy = new X509ChainPolicy
+            {
+                TrustMode = X509ChainTrustMode.CustomRootTrust,
+                RevocationMode = X509RevocationMode.NoCheck,
+            };
             policy.CustomTrustStore.AddRange(_authorities);
             options.CertificateChainPolicy = policy;
         }
@@ -75,6 +83,7 @@ public sealed class SipralTlsTrust
                 again.ChainPolicy.ExtraStore.AddRange(extra);
                 again.ChainPolicy.CustomTrustStore.AddRange(extra);
                 again.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                again.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
                 if (again.Build(new X509Certificate2(certificate)))
                 {
                     return true;

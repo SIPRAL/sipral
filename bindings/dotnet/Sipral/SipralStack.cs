@@ -1701,7 +1701,14 @@ public sealed partial class SipralStack : IDisposable
                 var options = new SslClientAuthenticationOptions { TargetHost = _turnServerName };
                 if (_turnTrustedCertificates is { Count: > 0 } roots)
                 {
-                    var policy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust };
+                    // revocation unchecked, as SslStream's own default: a
+                    // policy of one's own starts from Online, and a
+                    // private authority publishes no revocation list
+                    var policy = new X509ChainPolicy
+                    {
+                        TrustMode = X509ChainTrustMode.CustomRootTrust,
+                        RevocationMode = X509RevocationMode.NoCheck,
+                    };
                     policy.CustomTrustStore.AddRange(roots);
                     options.CertificateChainPolicy = policy;
                 }

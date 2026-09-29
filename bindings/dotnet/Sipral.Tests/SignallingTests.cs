@@ -248,6 +248,39 @@ public sealed class SignallingTests
         Assert.Contains(stack.BindAddress, Header("Contact", register));
     }
 
+    /// <summary>A certificate a private authority signed, trusted with that
+    /// authority as the only one: no revocation list is published for it,
+    /// and none is asked for, as <see cref="SslStream"/> asks for none by
+    /// default.</summary>
+    [Fact]
+    public async Task ACertificateAPinnedAuthoritySignedIsTrustedWithNoRevocationListToAsk()
+    {
+        using var authorityKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var authorityRequest = new CertificateRequest("CN=Sipral test authority", authorityKey, HashAlgorithmName.SHA256);
+        authorityRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        authorityRequest.CertificateExtensions.Add(
+            new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+        using var authority = authorityRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+        using var leafKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var leafRequest = new CertificateRequest($"CN={ServerName}", leafKey, HashAlgorithmName.SHA256);
+        var names = new SubjectAlternativeNameBuilder();
+        names.AddDnsName(ServerName);
+        leafRequest.CertificateExtensions.Add(names.Build());
+        leafRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+            new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, critical: false));
+        using var signed = leafRequest.Create(authority, DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1),
+            new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+        using var withKey = signed.CopyWithPrivateKey(leafKey);
+        using var leaf = new X509Certificate2(withKey.Export(X509ContentType.Pfx));
+        using var trusted = new X509Certificate2(authority.Export(X509ContentType.Cert));
+        using var registrar = new Registrar(leaf);
+        using var stack = Over(registrar.Address, trust: SipralTlsTrust.OnlyAuthority(trusted));
+        Assert.True(stack.Connected);
+        var account = stack.AddAccount($"sip:alice@{ServerName}", registrar.Address, registrar: $"sip:{ServerName}");
+        account.Register();
+        await Registered(stack);
+    }
+
     private static async Task<SipralTransportFailedEventInfo> Refused(SipralStack stack)
     {
         var args = await NextEvent(stack, SipralEventKind.TransportFailed);
