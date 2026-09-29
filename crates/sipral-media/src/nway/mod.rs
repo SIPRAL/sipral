@@ -120,4 +120,6 @@ pub const RECORDING_TICKS: usize = 5;
 pub const MAX_PARTICIPANTS: usize = 1_024;
 
 #[cfg(test)]
+mod realtime;
+#[cfg(test)]
 mod tests;
