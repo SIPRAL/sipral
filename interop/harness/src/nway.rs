@@ -119,10 +119,10 @@ impl Party {
                 Event::Signalling(UaEvent::Registered { .. }) => self.registered = true,
                 Event::Signalling(UaEvent::IncomingCall { call, .. }) => {
                     if let Ok(local) = self.endpoint.open_media(call, self.remote, now) {
-                        let _ = self
-                            .endpoint
-                            .engine
-                            .answer(&mut self.endpoint.agent, call, local, now);
+                        let _ =
+                            self.endpoint
+                                .engine
+                                .answer(&mut self.endpoint.agent, call, local, now);
                     }
                 }
                 Event::Signalling(UaEvent::CallConfirmed { call, .. }) => self.call = Some(call),
@@ -412,8 +412,10 @@ fn lab(server: &str, remote: SocketAddr, user: &str, pass: &str) -> Result<Lab, 
         changes: Vec::new(),
     };
     let mut parties = Vec::new();
-    for (((name, codec, hz), seed), media_seed) in
-        MEMBERS.into_iter().zip(MEMBER_SEEDS).zip(MEMBER_MEDIA_SEEDS)
+    for (((name, codec, hz), seed), media_seed) in MEMBERS
+        .into_iter()
+        .zip(MEMBER_SEEDS)
+        .zip(MEMBER_MEDIA_SEEDS)
     {
         let catalog = CodecCatalog::with_order(&[codec]).map_err(|error| error.to_string())?;
         let mut endpoint = Endpoint::bind(
@@ -498,7 +500,11 @@ pub(crate) fn run(
 
 /// Whether `levels` has every pitch in `heard` and none of the others.
 fn hears(who: &str, levels: [f64; 3], heard: [bool; 3]) -> Result<(), String> {
-    for ((level, wanted), name) in levels.iter().zip(heard).zip(MEMBERS.map(|(name, _, _)| name)) {
+    for ((level, wanted), name) in levels
+        .iter()
+        .zip(heard)
+        .zip(MEMBERS.map(|(name, _, _)| name))
+    {
         if wanted && *level < HEARD {
             return Err(format!(
                 "{who} did not hear {name} ({level:.0} at its pitch): {levels:.0?}"
@@ -532,8 +538,16 @@ fn verdict(lab: &Lab) -> Result<String, String> {
     if !told {
         return Err("conf-c hung up and the conference never said it left".to_owned());
     }
-    hears("conf-a, once conf-c had left,", a_after, [false, true, false])?;
-    hears("conf-b, once conf-c had left,", b_after, [true, false, false])?;
+    hears(
+        "conf-a, once conf-c had left,",
+        a_after,
+        [false, true, false],
+    )?;
+    hears(
+        "conf-b, once conf-c had left,",
+        b_after,
+        [true, false, false],
+    )?;
     let [[_, a_b, a_c], [b_a, _, b_c], [c_a, c_b, _]] = [a, b, c];
     let [_, a_b_after, _] = a_after;
     let [b_a_after, _, _] = b_after;

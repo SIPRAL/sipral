@@ -161,10 +161,10 @@ mod headless;
 mod ice;
 mod inband;
 mod join;
+mod keying;
 mod local_conference;
 #[cfg(test)]
 mod local_conference_tests;
-mod keying;
 #[cfg(feature = "redaction")]
 mod log;
 #[cfg(feature = "stun")]
@@ -216,11 +216,11 @@ pub use inband::{AmdConfig, AmdReason, AmdVerdict, BeepConfig, CallProgress, Con
 pub use inband::{DtmfDetection, IN_BAND_DIGIT_HOLD, ProgressConfig, ProgressDetection};
 pub use inband::{ProgressTone, ToneRegion};
 pub use join::{MixOutcome, mix_two};
+pub use keying::{AccountSrtp, SrtpPolicy};
 pub use local_conference::{
     ConferenceChange, ConferenceDirection, ConferencePacket, Departure, Gain, LocalConference,
     LocalConferenceConfig, MAX_CONFERENCE_MEMBERS, Member,
 };
-pub use keying::{AccountSrtp, SrtpPolicy};
 #[cfg(feature = "redaction")]
 pub use log::{BURST, Log, LogLevel, LogRecord, LogSink, PER_SECOND, QUEUE_CEILING, Travel};
 #[cfg(feature = "stun")]

@@ -1069,8 +1069,8 @@ mod tests {
     use crate::call::{sipral_call_join, sipral_call_leave};
     use crate::error::last_error_text;
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
-    use crate::media::tests::{Buffers, arrive, media_of, release};
     use crate::media::SipralProcessorFrame;
+    use crate::media::tests::{Buffers, arrive, media_of, release};
     use crate::record::SipralRecordingOptions;
     use crate::stack::tests::{Observed, poll};
     use crate::stack::with_stack;
@@ -1287,12 +1287,28 @@ mod tests {
     /// conference.
     fn two_calls_in_one(
         observed: &mut Observed,
-    ) -> (SipralHandle, SipralHandle, SipralHandle, SipralHandle, SipralHandle) {
+    ) -> (
+        SipralHandle,
+        SipralHandle,
+        SipralHandle,
+        SipralHandle,
+        SipralHandle,
+    ) {
         let (stack, call_a, call_b) = media_call_pair(observed);
         let media_a = media_of(stack, call_a);
         let conference = create(stack, &config(3, 8_000));
-        assert_eq!(add(conference, call_a), SipralStatus::Ok, "{}", last_error_text());
-        assert_eq!(add(conference, call_b), SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            add(conference, call_a),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            add(conference, call_b),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
         (stack, call_a, call_b, media_a, conference)
     }
 
@@ -1318,17 +1334,41 @@ mod tests {
             (standing.local, standing.sample_rate, standing.frame_samples),
             (1, 8_000, 160)
         );
-        assert_eq!(member_at(conference, 0).member, conference, "this end first");
+        assert_eq!(
+            member_at(conference, 0).member,
+            conference,
+            "this end first"
+        );
         assert_eq!(member_at(conference, 1).member, call_a);
         assert_eq!(member_at(conference, 2).member, call_b);
         assert_eq!(member_at(conference, 1).gain_input, 256);
 
         let heard = run(conference, (call_a, media_a, call_b), 3_000, 40, 1);
-        assert!(heard.speaker > 2_000, "this end did not hear call a: {}", heard.speaker);
-        assert!(heard.to_b > 0.5, "call b's far end did not hear call a: {}", heard.to_b);
-        assert!(heard.to_a < 0.05, "call a's far end heard itself: {}", heard.to_a);
-        assert!(heard.packets_b >= 19, "call b was sent {} packets in 20 ticks", heard.packets_b);
-        assert!(heard.packets_a >= 19, "call a was sent {} packets in 20 ticks", heard.packets_a);
+        assert!(
+            heard.speaker > 2_000,
+            "this end did not hear call a: {}",
+            heard.speaker
+        );
+        assert!(
+            heard.to_b > 0.5,
+            "call b's far end did not hear call a: {}",
+            heard.to_b
+        );
+        assert!(
+            heard.to_a < 0.05,
+            "call a's far end heard itself: {}",
+            heard.to_a
+        );
+        assert!(
+            heard.packets_b >= 19,
+            "call b was sent {} packets in 20 ticks",
+            heard.packets_b
+        );
+        assert!(
+            heard.packets_a >= 19,
+            "call a was sent {} packets in 20 ticks",
+            heard.packets_a
+        );
 
         poll(stack, 3_800);
         let mut talker = u64::MAX;
@@ -1378,8 +1418,16 @@ mod tests {
         );
         assert_eq!(member_at(conference, 1).muted_input, 1);
         let heard = run(conference, (call_a, media_a, call_b), 3_800, 20, 41);
-        assert!(heard.to_b < 0.05, "call b heard a muted call a: {}", heard.to_b);
-        assert!(heard.speaker < 200, "this end heard a muted call a: {}", heard.speaker);
+        assert!(
+            heard.to_b < 0.05,
+            "call b heard a muted call a: {}",
+            heard.to_b
+        );
+        assert!(
+            heard.speaker < 200,
+            "this end heard a muted call a: {}",
+            heard.speaker
+        );
         assert_eq!(
             unsafe { sipral_local_conference_set_muted(conference, call_a, 1, 0) },
             SipralStatus::Ok
@@ -1429,10 +1477,18 @@ mod tests {
             "{}",
             last_error_text()
         );
-        assert_eq!(unsafe { sipral_call_leave(stack, call_a) }, SipralStatus::Ok);
+        assert_eq!(
+            unsafe { sipral_call_leave(stack, call_a) },
+            SipralStatus::Ok
+        );
 
         // call b back in, and its call ending takes it out by itself
-        assert_eq!(add(conference, call_b), SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            add(conference, call_b),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
         hangup(stack, call_b, 4_400);
         let _ = tick(conference, 4_420, &[0; FRAME], FRAME);
         poll(stack, 4_440);
@@ -1470,7 +1526,12 @@ mod tests {
         let (stack, call_a, call_b) = media_call_pair(&mut observed);
         let conference = create(stack, &config(2, 0));
         assert_eq!(info(conference).sample_rate, 16_000, "zero is 16 kHz");
-        assert_eq!(add(conference, call_a), SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            add(conference, call_a),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
         assert_eq!(add(conference, call_b), SipralStatus::ConferenceRefused);
         assert!(
             last_error_text().contains("no place left"),
@@ -1480,9 +1541,7 @@ mod tests {
 
         let mut refused = SIPRAL_HANDLE_NONE;
         assert_eq!(
-            unsafe {
-                sipral_local_conference_create(stack, &config(4, 44_100), &raw mut refused)
-            },
+            unsafe { sipral_local_conference_create(stack, &config(4, 44_100), &raw mut refused) },
             SipralStatus::ConferenceRefused
         );
         let without_this_end = SipralLocalConferenceConfig {
@@ -1497,7 +1556,12 @@ mod tests {
             SipralStatus::ConferenceRefused,
             "a call in another conference"
         );
-        assert_eq!(add(bridge, call_b), SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            add(bridge, call_b),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
         let ticked = tick(bridge, 3_000, &[], 320);
         assert!(ticked.speaker.iter().all(|sample| *sample == 0));
         for handle in [conference, bridge] {
@@ -1535,7 +1599,10 @@ mod tests {
             bitrate: 0,
             checkpoint_ms: 0,
         };
-        let stereo = SipralRecordingOptions { layout: 1, ..options };
+        let stereo = SipralRecordingOptions {
+            layout: 1,
+            ..options
+        };
         assert_eq!(
             unsafe {
                 sipral_local_conference_record_start(
@@ -1605,7 +1672,8 @@ mod tests {
     unsafe extern "C" fn call_back_in(_frame: *const SipralProcessorFrame, user_data: *mut c_void) {
         let reentered = unsafe { &*user_data.cast::<Reentered>() };
         let mut info = info_zeroed();
-        let conference = unsafe { sipral_local_conference_info(reentered.conference, &raw mut info) };
+        let conference =
+            unsafe { sipral_local_conference_info(reentered.conference, &raw mut info) };
         let stack = unsafe { crate::stack::sipral_stack_poll(reentered.stack, 0, ptr::null_mut()) };
         reentered.said.lock().unwrap().push((conference, stack));
     }
@@ -1667,7 +1735,13 @@ mod tests {
     /// platform.
     fn device_pair(
         observed: &mut Observed,
-    ) -> (SipralHandle, SipralHandle, SipralHandle, Packets, FakeControl) {
+    ) -> (
+        SipralHandle,
+        SipralHandle,
+        SipralHandle,
+        Packets,
+        FakeControl,
+    ) {
         let fake = a_desk();
         FAKE_PLATFORM.with_borrow_mut(|slot| *slot = Some(fake.clone()));
         let packets: Packets = Arc::new(Mutex::new(Vec::new()));
@@ -1710,8 +1784,18 @@ mod tests {
             "{before:?}"
         );
         let conference = create(stack, &config(3, 16_000));
-        assert_eq!(add(conference, call_a), SipralStatus::Ok, "{}", last_error_text());
-        assert_eq!(add(conference, call_b), SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            add(conference, call_a),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            add(conference, call_b),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
         let carried = attached(stack);
         assert_eq!(carried, [conference], "{carried:?}");
         let mut speaker = [0_i16; 320];
@@ -1740,9 +1824,9 @@ mod tests {
             let to_a = sent
                 .iter()
                 .any(|(call, destination, _)| *call == call_a && destination == PEER_MEDIA);
-            let to_b = sent.iter().any(|(call, destination, _)| {
-                *call == call_b && destination == SECOND_PEER_MEDIA
-            });
+            let to_b = sent
+                .iter()
+                .any(|(call, destination, _)| *call == call_b && destination == SECOND_PEER_MEDIA);
             if to_a && to_b {
                 assert!(
                     sent.iter().all(|(call, _, _)| *call != conference),
@@ -1773,7 +1857,9 @@ mod tests {
         );
         let carried = attached(stack);
         assert!(
-            carried.contains(&call_a) && carried.contains(&call_b) && !carried.contains(&conference),
+            carried.contains(&call_a)
+                && carried.contains(&call_b)
+                && !carried.contains(&conference),
             "{carried:?}"
         );
         assert_eq!(

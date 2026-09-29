@@ -581,7 +581,9 @@ fn extra_flows(
     // its own
     if server == "kamailio" && wanted.split(',').any(|name| name.trim() == "nway") {
         match nway::run(server, remote, user, pass) {
-            Ok(said) => println!("  pass  N-way local conference, three calls through the proxy{said}"),
+            Ok(said) => {
+                println!("  pass  N-way local conference, three calls through the proxy{said}");
+            }
             Err(why) => {
                 println!("  FAIL  N-way local conference, three calls through the proxy — {why}");
                 failures += 1;

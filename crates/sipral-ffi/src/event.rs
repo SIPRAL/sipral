@@ -39,9 +39,9 @@ use sipral_ua::{
 use crate::abi::{alias, codes, record};
 use crate::audio::SipralAudioEvent;
 use crate::conference::SipralConferenceEvent;
-use crate::local_conference::SipralLocalConferenceEvent;
 use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+use crate::local_conference::SipralLocalConferenceEvent;
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
 use crate::names::Names;
 use crate::nat::{

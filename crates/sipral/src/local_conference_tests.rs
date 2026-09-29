@@ -14,11 +14,12 @@ use std::time::{Duration, Instant};
 
 use sipral_media::formats::wav::HEADER_LEN;
 
+use crate::CallHandle;
 use crate::codec::CodecCatalog;
 use crate::error::MediaError;
 use crate::local_conference::{
-    ConferenceChange, ConferenceDirection, Departure, Gain, LocalConference,
-    LocalConferenceConfig, Member,
+    ConferenceChange, ConferenceDirection, Departure, Gain, LocalConference, LocalConferenceConfig,
+    Member,
 };
 use crate::record::RecordingOptions;
 use crate::record::tests::Buffer;
@@ -26,7 +27,6 @@ use crate::tests::{
     Stack, callee_media, callee_sip, caller_media, caller_sip, carol_media, carol_sip, connect_two,
     settle_two,
 };
-use crate::CallHandle;
 
 const TICK: Duration = Duration::from_millis(20);
 
@@ -129,8 +129,22 @@ impl Quartet {
         let mut ends = Vec::new();
         for (seed, sip, media, codecs, hz, user) in [
             (62, callee_sip(), callee_media(), bob_codecs, BOB_HZ, "bob"),
-            (63, carol_sip(), carol_media(), &["G722"][..], CAROL_HZ, "carol"),
-            (64, dave_sip(), dave_media(), &[DAVE_CODEC][..], DAVE_HZ, "dave"),
+            (
+                63,
+                carol_sip(),
+                carol_media(),
+                &["G722"][..],
+                CAROL_HZ,
+                "carol",
+            ),
+            (
+                64,
+                dave_sip(),
+                dave_media(),
+                &[DAVE_CODEC][..],
+                DAVE_HZ,
+                "dave",
+            ),
         ] {
             let catalog = CodecCatalog::with_order(codecs).expect("an order");
             let mut stack = Stack::new(seed, sip, media, catalog, now);
@@ -400,7 +414,10 @@ fn a_member_on_hold_leaves_the_others_talking() {
     quartet.forget();
     quartet.run(25, true);
 
-    assert!(quartet.conference.contains(dave), "a held member was dropped");
+    assert!(
+        quartet.conference.contains(dave),
+        "a held member was dropped"
+    );
     assert_hears("bob", quartet.heard_by(0), [false, true, false, true]);
     assert_hears("carol", quartet.heard_by(1), [true, false, false, true]);
     assert_hears("this end", quartet.heard_here(), [true, true, false, false]);
@@ -489,7 +506,10 @@ fn the_talkers_are_reported_as_they_change() {
     let dave = Member::Call(quartet.end(2).near);
     let talking = quartet.conference.talkers().to_vec();
     assert_eq!(talking.len(), 2, "{talking:?}");
-    assert!(talking.contains(&bob) && talking.contains(&dave), "{talking:?}");
+    assert!(
+        talking.contains(&bob) && talking.contains(&dave),
+        "{talking:?}"
+    );
     assert!(quartet.changes().contains(&ConferenceChange::Talkers));
 }
 
@@ -571,7 +591,11 @@ fn a_conference_without_this_end_bridges_its_calls() {
 
     assert_hears("bob", quartet.heard_by(0), [false, true, true, false]);
     assert_hears("carol", quartet.heard_by(1), [true, false, true, false]);
-    assert_hears("this end", quartet.heard_here(), [false, false, false, false]);
+    assert_hears(
+        "this end",
+        quartet.heard_here(),
+        [false, false, false, false],
+    );
 }
 
 /// The recording is the whole conference: every member at its own pitch,
@@ -586,18 +610,23 @@ fn the_recording_keeps_the_whole_mix() {
         .start_recording(Box::new(file.clone()), &RecordingOptions::default())
         .expect("the recording starts");
     assert_eq!(
-        quartet.conference.start_recording(
-            Box::new(Buffer::new()),
-            &RecordingOptions::default()
-        ),
+        quartet
+            .conference
+            .start_recording(Box::new(Buffer::new()), &RecordingOptions::default()),
         Err(MediaError::AlreadyRecording)
     );
     quartet.run(25, true);
     assert!(quartet.conference.is_recording());
-    quartet.conference.stop_recording().expect("the file is finished");
+    quartet
+        .conference
+        .stop_recording()
+        .expect("the file is finished");
 
     let wav = file.contents();
-    assert_eq!(crate::record::tests::field(&wav, crate::record::tests::CHANNELS_AT, 2), 1);
+    assert_eq!(
+        crate::record::tests::field(&wav, crate::record::tests::CHANNELS_AT, 2),
+        1
+    );
     assert_eq!(
         crate::record::tests::field(&wav, crate::record::tests::RATE_AT, 4),
         LOCAL_RATE
@@ -645,7 +674,11 @@ fn a_member_whose_codec_moves_is_seated_again_at_the_new_rate() {
     assert_eq!(quartet.ends[0].rate(), 8_000);
     quartet
         .conference
-        .set_gain(Member::Call(bob), ConferenceDirection::Output, Gain::ratio(1, 2))
+        .set_gain(
+            Member::Call(bob),
+            ConferenceDirection::Output,
+            Gain::ratio(1, 2),
+        )
         .expect("bob is a member");
     quartet.run(20, true);
     let now = quartet.now;
@@ -662,7 +695,10 @@ fn a_member_whose_codec_moves_is_seated_again_at_the_new_rate() {
     quartet.forget();
     quartet.run(25, true);
 
-    assert!(quartet.conference.contains(bob), "a member that moved was dropped");
+    assert!(
+        quartet.conference.contains(bob),
+        "a member that moved was dropped"
+    );
     assert_eq!(
         quartet
             .conference

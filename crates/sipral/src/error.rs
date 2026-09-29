@@ -494,7 +494,10 @@ impl MediaError {
                  different lengths, so they cannot be mixed without resampling",
             ),
             Self::ConferenceFull { capacity } => {
-                write!(f, "the conference holds {capacity} members and has no place left")
+                write!(
+                    f,
+                    "the conference holds {capacity} members and has no place left"
+                )
             }
             Self::ConferenceIncompatible {
                 hertz,

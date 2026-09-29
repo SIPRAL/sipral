@@ -435,7 +435,11 @@ impl LocalConference {
     ///
     /// # Errors
     /// [`MediaError::NotInConference`] for a member that is not in it.
-    pub fn muted(&self, member: Member, direction: ConferenceDirection) -> Result<bool, MediaError> {
+    pub fn muted(
+        &self,
+        member: Member,
+        direction: ConferenceDirection,
+    ) -> Result<bool, MediaError> {
         let controls = self
             .mixer
             .controls(self.id_of(member)?)
