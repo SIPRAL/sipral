@@ -1809,6 +1809,101 @@ version=\"2\"><conference-state state=\"partial\"><user-count>34</user-count>\
     }
 
     #[test]
+    fn a_partial_user_changes_its_roles_only_when_it_lists_them() {
+        let mut conference = held();
+        let with_roles = partial(
+            2,
+            "<user entity=\"sip:bob@example.com\" state=\"partial\">\
+<roles><entry>participant</entry></roles></user>",
+        );
+        conference.apply(&document(&with_roles));
+        let without = partial(
+            3,
+            "<user entity=\"sip:bob@example.com\" state=\"partial\">\
+<display-text>Robert</display-text></user>",
+        );
+        assert_eq!(
+            conference.apply(&document(&without)),
+            ConferenceUpdate::Applied
+        );
+        let bob = conference.user("sip:bob@example.com").expect("bob");
+        assert_eq!(bob.display_text.as_deref(), Some("Robert"));
+        assert_eq!(
+            bob.roles,
+            vec![Box::<str>::from("participant")],
+            "roles not mentioned are kept"
+        );
+        let replaced = partial(
+            4,
+            "<user entity=\"sip:bob@example.com\" state=\"partial\">\
+<roles><entry>moderator</entry></roles></user>",
+        );
+        conference.apply(&document(&replaced));
+        assert_eq!(
+            conference.user("sip:bob@example.com").expect("bob").roles,
+            vec![Box::<str>::from("moderator")],
+            "roles are not keyed: listed, they are the whole list"
+        );
+    }
+
+    #[test]
+    fn a_full_user_holds_none_of_the_endpoints_it_marks_deleted() {
+        let mut conference = held();
+        let update = partial(
+            2,
+            "<user entity=\"sip:bob@example.com\" state=\"full\">\
+<endpoint entity=\"sip:bob@pc33.example.com\" state=\"deleted\"/>\
+<endpoint entity=\"sip:bob@phone.example.com\"/></user>",
+        );
+        assert_eq!(
+            conference.apply(&document(&update)),
+            ConferenceUpdate::Applied
+        );
+        let bob = conference.user("sip:bob@example.com").expect("bob");
+        assert_eq!(bob.endpoints.len(), 1);
+        assert_eq!(&*bob.endpoints[0].entity, "sip:bob@phone.example.com");
+        assert_eq!(bob.endpoints[0].state, ElementState::Full);
+    }
+
+    #[test]
+    fn a_deleted_users_element_empties_the_table() {
+        let mut conference = held();
+        let update = "<conference-info entity=\"sips:conf233@example.com\" state=\"partial\" \
+version=\"2\"><users state=\"deleted\"/></conference-info>";
+        assert_eq!(
+            conference.apply(&document(update)),
+            ConferenceUpdate::Applied
+        );
+        assert!(conference.users().is_empty());
+        assert!(conference.description().is_some());
+    }
+
+    #[test]
+    fn text_past_the_bound_is_refused_however_it_is_split() {
+        // each piece is under the tokeniser's own bound; together they are not
+        let piece = "x".repeat(1_000);
+        let body = format!(
+            "<conference-info entity=\"sip:c@example.com\" version=\"1\">\
+<conference-description><subject>{piece}<!---->{piece}<!---->{piece}<!---->{piece}\
+<!---->{piece}</subject></conference-description></conference-info>"
+        );
+        assert_eq!(
+            ConferenceInfo::parse(body.as_bytes()),
+            Err(ConferenceInfoError::TooLarge("element content"))
+        );
+        let four = format!(
+            "<conference-info entity=\"sip:c@example.com\" version=\"1\">\
+<conference-description><subject>{piece}<!---->{piece}<!---->{piece}<!---->{piece}\
+</subject></conference-description></conference-info>"
+        );
+        let subject = document(&four)
+            .description
+            .and_then(|description| description.subject)
+            .expect("a subject");
+        assert_eq!(subject.len(), 4_000);
+    }
+
+    #[test]
     fn a_deleted_section_is_gone() {
         let mut conference = held();
         let update = "<conference-info entity=\"sips:conf233@example.com\" state=\"partial\" \
