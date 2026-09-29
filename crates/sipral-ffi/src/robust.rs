@@ -126,7 +126,9 @@ fn start_line(message: &[u8]) -> String {
 /// What a thread may be answered, whatever it asked and whenever: every
 /// status this surface has for a call that could not be done now, and none
 /// that says the library broke. `Panic` is not among them — a caught panic
-/// is still a bug, and this is the test that would find one.
+/// is still a bug, and this is the test that would find one. `LimitReached`
+/// is: the workers place calls faster than they hang them up, and past
+/// `max_dialogs` a call placed is refused before anything is sent.
 const TOLERATED: &[SipralStatus] = &[
     SipralStatus::Ok,
     SipralStatus::Busy,
@@ -136,6 +138,7 @@ const TOLERATED: &[SipralStatus] = &[
     SipralStatus::InvalidArgument,
     SipralStatus::NotSent,
     SipralStatus::Exhausted,
+    SipralStatus::LimitReached,
 ];
 
 /// A stack that asserts on a thread it was not told about brings the whole

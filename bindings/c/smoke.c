@@ -41,7 +41,8 @@
     X(sipral_suspending) X(sipral_screen_request)                             \
     X(sipral_subscribe_config) X(sipral_watched_dialog) X(sipral_push_echo)   \
     X(sipral_processor_frame)                                                 \
-    X(sipral_audio_device) X(sipral_audio_info) X(sipral_audio_transmit)
+    X(sipral_audio_device) X(sipral_audio_info) X(sipral_audio_transmit)    \
+    X(sipral_log_record)
 
 static int failures;
 
