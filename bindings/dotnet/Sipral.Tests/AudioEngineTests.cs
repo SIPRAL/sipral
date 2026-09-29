@@ -76,10 +76,12 @@ public sealed class AudioEngineTests
             Assert.False(string.IsNullOrEmpty(device.Name));
             Assert.True(device.IsMicrophone || device.IsSpeaker, device.Name);
         });
+        // keyed by id: two devices may share a name (a dock's input and its
+        // output are both called after the dock), never an id
         var again = stack.Audio.Refresh();
         Assert.Equal(
-            listed.ToDictionary(d => d.Name, d => d.Id),
-            again.Where(d => d.Present).ToDictionary(d => d.Name, d => d.Id));
+            listed.ToDictionary(d => d.Id, d => d.Name),
+            again.Where(d => d.Present).ToDictionary(d => d.Id, d => d.Name));
     }
 
     [Fact]
