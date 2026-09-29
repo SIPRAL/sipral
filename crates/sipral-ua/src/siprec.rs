@@ -8,9 +8,10 @@
 //! recording session: an INVITE whose SDP carries the recorded media and whose
 //! second body part says what that media is (RFC 7866 §6.1). The model of
 //! that second part is RFC 7865's — a recording session records communication
-//! sessions, grouped, with participants who send and receive streams — and its
-//! format is RFC 7866's `application/rs-metadata+xml`, in the
-//! `urn:ietf:params:xml:ns:recording:1` namespace.
+//! sessions, grouped, with participants who send and receive streams — and so
+//! is its format: the XML of RFC 7865's schema, in the
+//! `urn:ietf:params:xml:ns:recording:1` namespace, carried as
+//! `application/rs-metadata+xml`.
 //!
 //! [`RecordingMetadata`](crate::siprec::RecordingMetadata) is that
 //! document, one field per element. It is written with
@@ -27,7 +28,7 @@
 //! the same reason: the bytes come from the network, and a reader that has no
 //! document type declaration, no entities beyond XML's five and no CDATA has
 //! nothing in it to exploit. Elements this module does not know are skipped
-//! with their content, which is where RFC 7866's extension data lives. As with
+//! with their content, which is where RFC 7865's extension data lives. As with
 //! dialog information, namespaces are matched by local name, except that a
 //! root that declares a default namespace other than the recording one is not
 //! a recording document.
@@ -45,9 +46,9 @@ use sipral_core::sdp::SessionDescription;
 
 use crate::dialoginfo::{Attributes, DialogInfoError, Node, Reader, as_str, local_name, unescape};
 
-/// The media type of recording metadata (RFC 7866).
+/// The media type of recording metadata (RFC 7865, RFC 7866).
 pub const METADATA_CONTENT_TYPE: &str = "application/rs-metadata+xml";
-/// The namespace of recording metadata (RFC 7866).
+/// The namespace of recording metadata (RFC 7865).
 pub const NAMESPACE: &str = "urn:ietf:params:xml:ns:recording:1";
 /// The disposition of the metadata part of a recording session's body
 /// (RFC 7866).
@@ -87,7 +88,9 @@ pub enum SiprecError {
     TooLarge(&'static str),
     /// Text that is not UTF-8.
     NotUtf8,
-    /// The root element is not `recording`, or is in another namespace.
+    /// The root element is not `recording`, or declares a default namespace
+    /// other than the recording one. A prefixed root's namespace is not
+    /// looked up.
     NotRecording,
     /// An element lacks an attribute the schema requires.
     MissingAttribute(&'static str),
@@ -260,7 +263,7 @@ pub struct ParticipantStreamAssoc {
     pub recv: Vec<String>,
 }
 
-/// One recording metadata document (RFC 7866).
+/// One recording metadata document (RFC 7865).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecordingMetadata {
     /// `datamode`. Absent from a document, it is read as complete.
@@ -575,7 +578,7 @@ impl RecordedCall {
     }
 }
 
-/// A metadata identifier from 128 bits, as RFC 7866's schema types them: a UUID
+/// A metadata identifier from 128 bits, as RFC 7865's schema types them: a UUID
 /// (RFC 4122) in base64 (RFC 4648 §4).
 #[must_use]
 pub fn metadata_id(uuid: [u8; 16]) -> String {
@@ -1196,7 +1199,7 @@ mod tests {
     use super::*;
     use sipral_core::msg::{MediaTypeRef, Multipart, ParseMode, ParseScratch, parse};
 
-    /// After the complete metadata example in RFC 7866, extension data and
+    /// After the complete metadata example in RFC 7865, extension data and
     /// comments included: a group, one session, two participants each sending one of two
     /// labelled streams, and every association.
     const RFC_EXAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
