@@ -16,8 +16,13 @@
 //! Sans-I/O like the rest of the crate: no clock, no socket, no random
 //! number drawn here. Written from RFC 4585 and RFC 5506 alone.
 
+pub mod feedback;
 pub mod sdp;
 
+pub use feedback::{
+    FMT_GENERIC_NACK, FeedbackBuildError, FeedbackError, FeedbackPacket, GenericNack,
+    GenericNackBuilder, NackEntries, NackEntry, PSFB, RTPFB,
+};
 pub use sdp::{
     Feedback, FeedbackPayload, FeedbackValue, RTCP_FB, RTCP_RSIZE, RtcpFb, RtpProfile,
     answer_attributes, offers_rsize, rsize_negotiated, rtcp_fb,
