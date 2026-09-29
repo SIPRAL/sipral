@@ -261,16 +261,16 @@ impl TextSender {
     }
 
     /// When [`poll`](Self::poll) next has something to do: `None` while
-    /// idle, with nothing typed and no redundancy owed.
+    /// idle, with nothing typed and no redundancy owed. An opportunity too
+    /// far off for the clock to hold is [`Duration::MAX`].
     #[must_use]
     pub fn next_poll(&self) -> Option<Duration> {
         if self.buffer.is_empty() && self.owed == 0 {
             return None;
         }
-        Some(
-            self.last_tick
-                .map_or(Duration::ZERO, |tick| tick + self.config.interval),
-        )
+        Some(self.last_tick.map_or(Duration::ZERO, |tick| {
+            tick.saturating_add(self.config.interval)
+        }))
     }
 
     /// Take the transmission opportunity due at `now`, if one is: the
@@ -298,7 +298,7 @@ impl TextSender {
         let payload = self.payload(&block, timestamp);
         let marker = self
             .last_sent
-            .is_none_or(|sent| now >= sent + self.config.interval * 2);
+            .is_none_or(|sent| now >= sent.saturating_add(self.config.interval.saturating_mul(2)));
         let header = RtpHeader {
             marker,
             payload_type: self
@@ -630,6 +630,32 @@ mod tests {
                 (8, b"c".to_vec(), true),
             ]
         );
+    }
+
+    #[test]
+    fn an_interval_too_long_to_add_to_the_clock_saturates() {
+        let config = |interval| SenderConfig {
+            redundancy: None,
+            send_bom: false,
+            cps: None,
+            interval,
+            ..SenderConfig::new(T140, RED)
+        };
+        // the next opportunity lies past what the clock holds
+        let mut tx = sender(config(Duration::MAX));
+        tx.push("a").unwrap();
+        assert!(tx.poll(ms(1)).is_some());
+        tx.push("b").unwrap();
+        assert_eq!(tx.next_poll(), Some(Duration::MAX));
+        assert_eq!(tx.poll(ms(2)), None);
+        // the next opportunity fits, twice the interval does not
+        let long = Duration::from_secs(u64::MAX / 2 + 1);
+        let mut tx = sender(config(long));
+        tx.push("a").unwrap();
+        assert!(tx.poll(ms(0)).is_some());
+        tx.push("b").unwrap();
+        assert_eq!(tx.next_poll(), Some(long));
+        assert!(!tx.poll(long).unwrap().header.marker);
     }
 
     #[test]
