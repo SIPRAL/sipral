@@ -124,6 +124,41 @@ public final class Media: @unchecked Sendable {
         try Sipral.mediaStatistics(media: handle, nowMs: stack.nowMs())
     }
 
+    /// `sipral_media_record_start_with`: record both directions to `path` --
+    /// WAV, or Ogg Opus where the build has Opus; one channel, or this end
+    /// on the left and the far end on the right; at `sampleRate` (zero for
+    /// the call's); Ogg Opus at `bitrate` (zero for libopus's choice); made
+    /// to survive a crash every `checkpointMs` (zero for five seconds). The
+    /// file is finished by `stopRecording()`, by the call ending, or by the
+    /// stack closing.
+    public func record(
+        to path: String, format: SipralRecordingFormat = .wav, layout: SipralRecordingLayout = .mixed,
+        sampleRate: UInt32 = 0, bitrate: UInt32 = 0, checkpointMs: UInt32 = 0
+    ) throws {
+        var options = sipral_recording_options_t()
+        options.size = MemoryLayout<sipral_recording_options_t>.size
+        options.format = format.rawValue
+        options.layout = layout.rawValue
+        options.sample_rate = sampleRate
+        options.bitrate = bitrate
+        options.checkpoint_ms = checkpointMs
+        try retryingBusy { try Sipral.mediaRecordStartWith(media: handle, path: path, options: options) }
+    }
+
+    /// `sipral_media_record_stop`: stop, and finish the file.
+    public func stopRecording() throws {
+        try retryingBusy { try Sipral.mediaRecordStop(media: handle) }
+    }
+
+    /// `sipral_media_record_state`: whether a recording is running, and how
+    /// many milliseconds of audio it has taken.
+    public var recording: (running: Bool, recordedMs: UInt64) {
+        get throws {
+            let state = try retryingBusy { try Sipral.mediaRecordState(media: handle) }
+            return (state.recording != 0, state.recordedMs)
+        }
+    }
+
     /// Every path this call's ICE agent tried -- the candidate pairs its
     /// checklist held, then the relays it held -- and what became of each
     /// (`sipral_media_path_candidate_count`/`_at`; D5's transport and NAT

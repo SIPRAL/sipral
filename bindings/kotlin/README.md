@@ -362,6 +362,24 @@ can make a phone dial is a toll-fraud vector, so each one is the
 application's decision. `ReferralCheck.kt`, run with `IdiomaticCheck.kt`,
 proves both halves on the wire.
 
+### What a call carries in its audio, and recording it
+
+A digit the far end leaves in the audio arrives as
+`SIPRAL_EVENT_KIND_IN_BAND_DIGIT`, read with `digitOf` like any other: by
+default on a call that negotiated no telephone event, and on every call or
+none with `SipralClient.open(dtmfDetection = SipralDtmfDetection.ALWAYS)` /
+`OFF` or `call.setDtmfDetection(...)`. `call.sendDtmf(digits)` writes the
+tones into the audio where the far end took no telephone event, and
+`via = SipralDtmf.IN_BAND.value.toLong()` does so on any call.
+`call.detectProgress(SipralProgressOptions(...))`, straight after
+`placeCall`, reports the network's tones, who answered and the machine's
+beep as `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`, read with `progressOf`.
+`call.setConsentTone(...)` beeps while the call is recorded.
+`media.record(path, format, layout, sampleRate, bitrate, checkpointMs)`
+writes WAV or Ogg Opus, mixed or stereo with this end on the left, and
+`stopRecording()` / `recording` stop it and say how far it got.
+`InBandCheck.kt`, run with `IdiomaticCheck.kt`, proves each on loopback.
+
 ## The ConnectionService helper
 
 Split in two, so that the part worth testing needs no Android:

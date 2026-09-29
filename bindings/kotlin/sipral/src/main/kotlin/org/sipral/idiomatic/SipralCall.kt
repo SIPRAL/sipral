@@ -19,11 +19,17 @@ import kotlinx.coroutines.withTimeout
 import org.sipral.Sipral
 import org.sipral.SipralCallEvent
 import org.sipral.SipralCallState
+import org.sipral.SipralConsentTone
+import org.sipral.SipralDtmfDetection
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralHeader
+import org.sipral.SipralProgressConfig
+import org.sipral.SipralProgressEvent
 import org.sipral.SipralStatus
+import org.sipral.SipralToggle
+import org.sipral.SipralToneRegion
 
 /**
  * A `sipral_handle_t` naming one call, and the actions it takes.
@@ -292,9 +298,81 @@ class SipralCall internal constructor(
     }
 
     /** `sipral_call_send_dtmf`. `via` is a `SipralDtmf` value; RTP (1) is
-     * the default and the one every gateway on the path carries end to end. */
+     * the default and the one every gateway on the path carries end to end,
+     * and sends the tones in the audio on a call that negotiated no
+     * telephone event; `IN_BAND` (4) sends the tones on any call. */
     fun sendDtmf(digits: String, via: Long = 1, durationMs: Long = 100) {
         retryBusy { Sipral.callSendDtmf(client.handle, handle, digits, via, durationMs, client.nowMs()) }
+    }
+
+    /** `sipral_call_dtmf_detection`: when this call listens for digits in
+     * the far end's audio. One heard there is a
+     * `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`, read with [digitOf] like any
+     * other. */
+    fun setDtmfDetection(mode: SipralDtmfDetection) {
+        retryBusy { Sipral.callDtmfDetection(client.handle, handle, mode.value.toLong()) }
+    }
+
+    /**
+     * `sipral_call_detect_progress`: listen for the network's tones, decide
+     * who answered and listen for the machine's beep, as [options] say.
+     * Call it straight after [SipralClient.placeCall], before the far end
+     * answers; each thing heard is a `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`,
+     * read with [progressOf].
+     */
+    fun detectProgress(options: SipralProgressOptions = SipralProgressOptions()) {
+        val config = SipralProgressConfig(
+            listen = SipralToggle.ON.value.toLong(),
+            region = options.region.value.toLong(),
+            answeringMachine = toggleOf(options.answeringMachine),
+            beep = toggleOf(options.beep),
+            beepWindowMs = options.beepWindowMs,
+            maxInitialSilenceMs = options.maxInitialSilenceMs,
+            maxGreetingMs = options.maxGreetingMs,
+            silenceAfterGreetingMs = options.silenceAfterGreetingMs,
+            maxWords = options.maxWords,
+            minWordMs = options.minWordMs,
+            minWordGapMs = options.minWordGapMs,
+            maxDecisionMs = options.maxDecisionMs,
+            minSpeechAboveFloorDb = options.minSpeechAboveFloorDb,
+            beepMinMs = options.beepMinMs,
+            beepMaxMs = options.beepMaxMs,
+            toneCycles = options.toneCycles,
+        )
+        retryBusy { Sipral.callDetectProgress(client.handle, handle, config) }
+    }
+
+    /** `sipral_call_detect_progress` with listening off. */
+    fun stopProgress() {
+        val config = SipralProgressConfig(listen = SipralToggle.OFF.value.toLong())
+        retryBusy { Sipral.callDetectProgress(client.handle, handle, config) }
+    }
+
+    /** `sipral_call_consent_tone`: beep while this call is recorded, every
+     * value left at zero the library's default (1400 Hz, 18 dB below 0 dBm0,
+     * 200 ms every fifteen seconds); [local] has this end hear it too. */
+    fun setConsentTone(
+        frequencyHz: Long = 0,
+        attenuationDb: Long = 0,
+        lengthMs: Long = 0,
+        intervalMs: Long = 0,
+        local: Boolean = true,
+    ) {
+        val tone = SipralConsentTone(
+            enabled = SipralToggle.ON.value.toLong(),
+            frequencyHz = frequencyHz,
+            attenuationDb = attenuationDb,
+            lengthMs = lengthMs,
+            intervalMs = intervalMs,
+            local = toggleOf(local),
+        )
+        retryBusy { Sipral.callConsentTone(client.handle, handle, tone) }
+    }
+
+    /** `sipral_call_consent_tone` with the tone off. */
+    fun clearConsentTone() {
+        val tone = SipralConsentTone(enabled = SipralToggle.OFF.value.toLong())
+        retryBusy { Sipral.callConsentTone(client.handle, handle, tone) }
     }
 
     /**
@@ -403,3 +481,37 @@ fun digitOf(event: SipralEvent): Char? {
     val digit = event.payload.media.digit
     return if (digit == 0L) null else digit.toInt().toChar()
 }
+
+/**
+ * What a call told to listen heard, off `payload.progress` of a
+ * `SIPRAL_EVENT_KIND_PROGRESS_DETECTED` -- a network's tone, who answered,
+ * or the machine's beep, `what` saying which -- and null for any other
+ * kind, whose bytes in that arm are another arm's.
+ */
+fun progressOf(event: SipralEvent): SipralProgressEvent? =
+    if (event.kind == SipralEventKind.PROGRESS_DETECTED.value.toLong()) event.payload.progress else null
+
+/** How [SipralCall.detectProgress] listens: the network's tones, whether
+ * to decide who answered and whether to listen for the machine's beep, and
+ * every limit of `sipral_progress_config_t`, each zero for the library's
+ * default. */
+data class SipralProgressOptions(
+    val region: SipralToneRegion = SipralToneRegion.EUROPE,
+    val answeringMachine: Boolean = true,
+    val beep: Boolean = true,
+    val beepWindowMs: Long = 0,
+    val maxInitialSilenceMs: Long = 0,
+    val maxGreetingMs: Long = 0,
+    val silenceAfterGreetingMs: Long = 0,
+    val maxWords: Long = 0,
+    val minWordMs: Long = 0,
+    val minWordGapMs: Long = 0,
+    val maxDecisionMs: Long = 0,
+    val minSpeechAboveFloorDb: Long = 0,
+    val beepMinMs: Long = 0,
+    val beepMaxMs: Long = 0,
+    val toneCycles: Long = 0,
+)
+
+/** A `SipralToggle` saying yes or no. */
+private fun toggleOf(on: Boolean): Long = (if (on) SipralToggle.ON else SipralToggle.OFF).value.toLong()

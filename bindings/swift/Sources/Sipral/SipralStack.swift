@@ -244,6 +244,10 @@ public final class SipralStack: @unchecked Sendable {
     /// RTCP (RFC 3550 §11), and a call is refused a port outside it. Both
     /// zero -- the default -- leave the ports to the operating system. Every
     /// pair taken throws `.exhausted` rather than binding outside the range.
+    ///
+    /// `dtmfDetection` is when a call listens for keypad digits in the far
+    /// end's audio: `.auto` on the calls that negotiated no telephone event,
+    /// `.always` or `.off`; `Call.setDtmfDetection` changes it for one call.
     public init(
         audio: AudioMode = .platformDefault,
         bindHost: String = "127.0.0.1",
@@ -269,7 +273,8 @@ public final class SipralStack: @unchecked Sendable {
         rtpPortMin: UInt16 = 0,
         rtpPortMax: UInt16 = 0,
         network: Network? = nil,
-        stunFallbacks: [String] = []
+        stunFallbacks: [String] = [],
+        dtmfDetection: SipralDtmfDetection = .auto
     ) throws {
         self.rtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? nil : (rtpPortMin, rtpPortMax)
         let socket = try UDPSocket(host: bindHost, port: bindPort)
@@ -332,6 +337,7 @@ public final class SipralStack: @unchecked Sendable {
                     config.diagnostic_records = diagnosticRecords
                     config.rtp_port_min = UInt32(rtpPortMin)
                     config.rtp_port_max = UInt32(rtpPortMax)
+                    config.dtmf_detection = dtmfDetection.rawValue
                     if audio.isDevice {
                         config.audio_transmit_callback = sipralAudioTransmitTrampoline
                         config.audio_transmit_user_data = boxPointer

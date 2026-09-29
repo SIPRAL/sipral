@@ -28,6 +28,14 @@ __all__ = [
     "Arrival",
     "DigitSource",
     "DtmfVia",
+    "DtmfDetection",
+    "ToneRegion",
+    "ProgressKind",
+    "ProgressTone",
+    "AmdVerdict",
+    "AmdReason",
+    "RecordingFormat",
+    "RecordingLayout",
     "Direction",
     "MediaFault",
     "Ice",
@@ -124,7 +132,36 @@ Arrival = _enum("Arrival", "SIPRAL_ARRIVAL_")
 DigitSource = _enum("DigitSource", "SIPRAL_DIGIT_SOURCE_")
 
 #: A `sipral_dtmf_t`: which way `sipral_call_send_dtmf` sends a digit.
-DtmfVia = _enum("DtmfVia", "SIPRAL_DTMF_")
+#: Excludes `sipral_dtmf_detection_t`, which shares the start.
+DtmfVia = _enum("DtmfVia", "SIPRAL_DTMF_", exclude=("SIPRAL_DTMF_DETECTION_",))
+
+#: A `sipral_dtmf_detection_t`: when a call listens for digits in the far
+#: end's audio (`Stack(dtmf_detection=...)`, `Call.set_dtmf_detection`).
+DtmfDetection = _enum("DtmfDetection", "SIPRAL_DTMF_DETECTION_")
+
+#: A `sipral_tone_region_t`: whose call-progress tones
+#: :meth:`sipral.call.Call.detect_progress` listens for.
+ToneRegion = _enum("ToneRegion", "SIPRAL_TONE_REGION_")
+
+#: A `sipral_progress_kind_t`: what `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`
+#: heard, ``fields["what"]``.
+ProgressKind = _enum("ProgressKind", "SIPRAL_PROGRESS_KIND_")
+
+#: A `sipral_progress_tone_t`, ``fields["tone"]`` on a progress event.
+ProgressTone = _enum("ProgressTone", "SIPRAL_PROGRESS_TONE_")
+
+#: A `sipral_amd_verdict_t`: who answered, ``fields["verdict"]``.
+AmdVerdict = _enum("AmdVerdict", "SIPRAL_AMD_VERDICT_")
+
+#: A `sipral_amd_reason_t`: which rule decided, ``fields["reason"]``.
+AmdReason = _enum("AmdReason", "SIPRAL_AMD_REASON_")
+
+#: A `sipral_recording_format_t`, for :meth:`sipral.media.Media.record`.
+RecordingFormat = _enum("RecordingFormat", "SIPRAL_RECORDING_FORMAT_")
+
+#: A `sipral_recording_layout_t`: one channel, or this end left and the far
+#: end right.
+RecordingLayout = _enum("RecordingLayout", "SIPRAL_RECORDING_LAYOUT_")
 
 #: A `sipral_direction_t`: which way audio may flow, as seen from here.
 Direction = _enum("Direction", "SIPRAL_DIRECTION_")

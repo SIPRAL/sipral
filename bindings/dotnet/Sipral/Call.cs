@@ -56,8 +56,10 @@ public sealed class Call : IDisposable
     public IAsyncEnumerable<SipralEventArgs> Events => _events.Reader.ReadAllAsync();
 
     /// <summary>Just the digits: <see cref="SipralEventKind.DigitReceived"/>'s
-    /// own character, so a voice agent that only cares about DTMF does
-    /// not have to filter <see cref="Events"/> itself.</summary>
+    /// and <see cref="SipralEventKind.InBandDigit"/>'s own character, so a
+    /// voice agent that only cares about DTMF does not have to filter
+    /// <see cref="Events"/> itself, nor care which way a key was
+    /// sent.</summary>
     public IAsyncEnumerable<char> Dtmf => _dtmf.Reader.ReadAllAsync();
 
     /// <summary>Fired synchronously, on the stack's poll thread, for
@@ -119,7 +121,8 @@ public sealed class Call : IDisposable
         }
         _events.Writer.TryWrite(args);
 
-        if (args.Kind == SipralEventKind.DigitReceived && args.Media?.Digit is char digit)
+        if (args.Kind is SipralEventKind.DigitReceived or SipralEventKind.InBandDigit
+            && args.Media?.Digit is char digit)
         {
             _dtmf.Writer.TryWrite(digit);
         }
@@ -276,11 +279,94 @@ public sealed class Call : IDisposable
         }
     }
 
-    /// <summary><c>sipral_call_send_dtmf</c>.</summary>
+    /// <summary><c>sipral_call_send_dtmf</c>. <see cref="SipralDtmf.Rtp"/>
+    /// sends named events, or the tones in the audio on a call that
+    /// negotiated none; <see cref="SipralDtmf.InBand"/> sends the tones on
+    /// any call.</summary>
     public void SendDtmf(string digits, SipralDtmf via = SipralDtmf.Rtp, uint durationMs = 100)
     {
         var encoded = ToSBytes(digits);
         SipralErrors.Call(() => NativeMethods.sipral_call_send_dtmf(_stack.Handle, Handle, encoded, (nuint)encoded.Length, (uint)via, durationMs, _stack.NowMs), "sipral_call_send_dtmf");
+    }
+
+    /// <summary><c>sipral_call_dtmf_detection</c>: when this call listens
+    /// for digits in the far end's audio. One heard there is a
+    /// <see cref="SipralEventKind.InBandDigit"/>, and reaches
+    /// <see cref="Dtmf"/> like any other.</summary>
+    public void SetDtmfDetection(SipralDtmfDetection mode)
+    {
+        SipralErrors.Call(() => NativeMethods.sipral_call_dtmf_detection(_stack.Handle, Handle, (uint)mode), "sipral_call_dtmf_detection");
+    }
+
+    /// <summary><c>sipral_call_detect_progress</c>: listen for the network's
+    /// tones, decide who answered and listen for the machine's beep, as
+    /// <paramref name="options"/> say (<see langword="null"/> for every
+    /// default). Call it straight after <see cref="SipralStack.PlaceCall"/>,
+    /// before the far end answers; each thing heard is a
+    /// <see cref="SipralEventKind.ProgressDetected"/> with
+    /// <see cref="SipralEventArgs.Progress"/> set.</summary>
+    public void DetectProgress(SipralProgressOptions? options = null)
+    {
+        var o = options ?? new SipralProgressOptions();
+        var config = new SipralProgressConfig
+        {
+            Size = (nuint)Marshal.SizeOf<SipralProgressConfig>(),
+            Listen = (uint)SipralToggle.On,
+            Region = (uint)o.Region,
+            AnsweringMachine = (uint)(o.AnsweringMachine ? SipralToggle.On : SipralToggle.Off),
+            Beep = (uint)(o.Beep ? SipralToggle.On : SipralToggle.Off),
+            BeepWindowMs = o.BeepWindowMs,
+            MaxInitialSilenceMs = o.MaxInitialSilenceMs,
+            MaxGreetingMs = o.MaxGreetingMs,
+            SilenceAfterGreetingMs = o.SilenceAfterGreetingMs,
+            MaxWords = o.MaxWords,
+            MinWordMs = o.MinWordMs,
+            MinWordGapMs = o.MinWordGapMs,
+            MaxDecisionMs = o.MaxDecisionMs,
+            MinSpeechAboveFloorDb = o.MinSpeechAboveFloorDb,
+            BeepMinMs = o.BeepMinMs,
+            BeepMaxMs = o.BeepMaxMs,
+            ToneCycles = o.ToneCycles,
+        };
+        SipralErrors.Call(() => NativeMethods.sipral_call_detect_progress(_stack.Handle, Handle, config), "sipral_call_detect_progress");
+    }
+
+    /// <summary><c>sipral_call_detect_progress</c> with listening off.</summary>
+    public void StopProgress()
+    {
+        var config = new SipralProgressConfig
+        {
+            Size = (nuint)Marshal.SizeOf<SipralProgressConfig>(),
+            Listen = (uint)SipralToggle.Off,
+        };
+        SipralErrors.Call(() => NativeMethods.sipral_call_detect_progress(_stack.Handle, Handle, config), "sipral_call_detect_progress");
+    }
+
+    /// <summary><c>sipral_call_consent_tone</c>: beep while this call is
+    /// recorded, every value left at zero the library's default (1400 Hz,
+    /// 18 dB below 0 dBm0, 200 ms every fifteen seconds);
+    /// <paramref name="local"/> has this end hear it too.</summary>
+    public void SetConsentTone(uint frequencyHz = 0, uint attenuationDb = 0, uint lengthMs = 0, uint intervalMs = 0, bool local = true)
+    {
+        Consent(SipralToggle.On, frequencyHz, attenuationDb, lengthMs, intervalMs, local);
+    }
+
+    /// <summary><c>sipral_call_consent_tone</c> with the tone off.</summary>
+    public void ClearConsentTone() => Consent(SipralToggle.Off, 0, 0, 0, 0, true);
+
+    private void Consent(SipralToggle enabled, uint frequencyHz, uint attenuationDb, uint lengthMs, uint intervalMs, bool local)
+    {
+        var tone = new SipralConsentTone
+        {
+            Size = (nuint)Marshal.SizeOf<SipralConsentTone>(),
+            Enabled = (uint)enabled,
+            FrequencyHz = frequencyHz,
+            AttenuationDb = attenuationDb,
+            LengthMs = lengthMs,
+            IntervalMs = intervalMs,
+            Local = (uint)(local ? SipralToggle.On : SipralToggle.Off),
+        };
+        SipralErrors.Call(() => NativeMethods.sipral_call_consent_tone(_stack.Handle, Handle, tone), "sipral_call_consent_tone");
     }
 
     /// <summary>

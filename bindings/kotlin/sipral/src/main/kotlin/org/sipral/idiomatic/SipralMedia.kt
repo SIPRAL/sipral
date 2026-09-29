@@ -18,6 +18,9 @@ import org.sipral.SipralCandidateKind
 import org.sipral.SipralMediaInfo
 import org.sipral.SipralPathKind
 import org.sipral.SipralPathOutcome
+import org.sipral.SipralRecordingFormat
+import org.sipral.SipralRecordingLayout
+import org.sipral.SipralRecordingOptions
 import org.sipral.SipralStatus
 import org.sipral.SipralStreamStats
 
@@ -143,6 +146,46 @@ class SipralMedia internal constructor(
 
     /** `sipral_media_statistics`. */
     fun statistics(): SipralStreamStats = Sipral.mediaStatistics(handle, client.nowMs())
+
+    /**
+     * `sipral_media_record_start_with`: record both directions to [path] --
+     * WAV, or Ogg Opus where the build has Opus; one channel, or this end on
+     * the left and the far end on the right; at [sampleRate] (zero for the
+     * call's); Ogg Opus at [bitrate] (zero for libopus's choice); made to
+     * survive a crash every [checkpointMs] (zero for five seconds). The file
+     * is finished by [stopRecording], by the call ending, or by the client
+     * closing.
+     */
+    fun record(
+        path: String,
+        format: SipralRecordingFormat = SipralRecordingFormat.WAV,
+        layout: SipralRecordingLayout = SipralRecordingLayout.MIXED,
+        sampleRate: Long = 0,
+        bitrate: Long = 0,
+        checkpointMs: Long = 0,
+    ) {
+        val options = SipralRecordingOptions(
+            format = format.value.toLong(),
+            layout = layout.value.toLong(),
+            sampleRate = sampleRate,
+            bitrate = bitrate,
+            checkpointMs = checkpointMs,
+        )
+        retryBusy { Sipral.mediaRecordStartWith(handle, path, options) }
+    }
+
+    /** `sipral_media_record_stop`: stop, and finish the file. */
+    fun stopRecording() {
+        retryBusy { Sipral.mediaRecordStop(handle) }
+    }
+
+    /** `sipral_media_record_state`: whether a recording is running, and how
+     * many milliseconds of audio it has taken. */
+    val recording: Pair<Boolean, Long>
+        get() {
+            val (running, taken) = retryBusy { Sipral.mediaRecordState(handle) }
+            return (running != 0L) to taken
+        }
 
     /**
      * Every path this call's ICE agent tried -- the candidate pairs its

@@ -41,6 +41,32 @@ public struct SipralEvent: Sendable {
     public let audioData: AudioEventData?
     /// `payload.stun_server`, for `SipralEventKind.stunServer` only.
     public let stunServerData: StunServerEventData?
+    /// `payload.progress`, for `SipralEventKind.progressDetected` only.
+    public internal(set) var progressData: ProgressEventData? = nil
+}
+
+/// What a call told to listen heard (`sipral_progress_event_t`): a tone of
+/// its network, the special information tone, who answered, or the
+/// machine's beep. `what` says which of the other members mean anything.
+public struct ProgressEventData: Sendable {
+    public let what: SipralProgressKind?
+    public let tone: SipralProgressTone?
+    public let verdict: SipralAmdVerdict?
+    public let reason: SipralAmdReason?
+    /// A tone's first burst from the first frame listened to; the decision
+    /// after answer; the beep's end after answer.
+    public let atMs: UInt64
+    public let initialSilenceMs: UInt64
+    public let greetingMs: UInt64
+    public let words: UInt32
+    /// The beep's frequency, as measured.
+    public let frequencyHz: UInt32
+    /// How long the beep sounded.
+    public let lengthMs: UInt64
+    /// The special information tone's three frequencies and lengths, as
+    /// measured.
+    public let sitHz: [UInt32]
+    public let sitMs: [UInt32]
 }
 
 /// The STUN server in use moved to another in the list, or every one of
@@ -235,7 +261,25 @@ enum SipralEventDecoder {
         SipralEventKind.digitReceived.rawValue,
         SipralEventKind.mediaSecured.rawValue,
         SipralEventKind.mediaPathChosen.rawValue,
+        SipralEventKind.inBandDigit.rawValue,
     ]
+
+    private static func progressData(_ progress: sipral_progress_event_t) -> ProgressEventData {
+        ProgressEventData(
+            what: SipralProgressKind(rawValue: progress.what),
+            tone: SipralProgressTone(rawValue: progress.tone),
+            verdict: SipralAmdVerdict(rawValue: progress.verdict),
+            reason: SipralAmdReason(rawValue: progress.reason),
+            atMs: progress.at_ms,
+            initialSilenceMs: progress.initial_silence_ms,
+            greetingMs: progress.greeting_ms,
+            words: progress.words,
+            frequencyHz: progress.frequency_hz,
+            lengthMs: progress.length_ms,
+            sitHz: [progress.sit_hz_1, progress.sit_hz_2, progress.sit_hz_3],
+            sitMs: [progress.sit_ms_1, progress.sit_ms_2, progress.sit_ms_3]
+        )
+    }
 
     private static func bytes(_ pointer: UnsafePointer<UInt8>?, _ length: Int) -> [UInt8]? {
         guard let pointer, length > 0 else { return nil }
@@ -446,7 +490,7 @@ enum SipralEventDecoder {
             announceData = self.announceData(raw.payload.announce)
         }
 
-        return SipralEvent(
+        var event = SipralEvent(
             kindRaw: kindRaw,
             kind: SipralEventKind(rawValue: kindRaw),
             kindName: kindName,
@@ -465,5 +509,9 @@ enum SipralEventDecoder {
             audioData: audioData,
             stunServerData: stunServerData
         )
+        if kindRaw == SipralEventKind.progressDetected.rawValue {
+            event.progressData = progressData(raw.payload.progress)
+        }
+        return event
     }
 }
