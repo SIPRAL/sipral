@@ -17,7 +17,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sipral_core::msg::{BodyPart, MediaTypeRef, Multipart, MultipartBuilder, MultipartKind, Part};
+use sipral_core::msg::{
+    BodyPart, MediaTypeRef, Multipart, MultipartBuilder, MultipartKind, MultipartLimits, Part,
+};
 use sipral_ua::siprec::RecordingMetadata;
 
 const FALLBACK: &[u8] = b"multipart/mixed;boundary=b";
@@ -74,7 +76,14 @@ fuzz_target!(|data: &[u8]| {
     };
     let rebuilt_type =
         MediaTypeRef::parse(built.content_type().as_bytes()).expect("the builder's own type");
-    let reread = Multipart::parse(&rebuilt_type, built.body()).expect("the builder's own body");
+    // the rewrite gives every part a Content-Type line and a longer boundary,
+    // so a body read just under the byte bound can come back over it
+    let rebuilt_limits = MultipartLimits {
+        max_bytes: usize::MAX,
+        ..MultipartLimits::DEFAULT
+    };
+    let reread = Multipart::parse_with_limits(&rebuilt_type, built.body(), rebuilt_limits)
+        .expect("the builder's own body");
     assert_eq!(reread.parts().len(), leaves.len());
     for (again, part) in reread.parts().iter().zip(&leaves) {
         assert_eq!(again.body(), part.body());
