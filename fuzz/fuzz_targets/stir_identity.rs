@@ -22,7 +22,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use sipral_stir::{
-    Attest, Claims, Dest, Identity, OrigId, Shaken, TnAuthList, Tn, TrustAnchors, Verifier,
+    Attest, Claims, Dest, Identity, OrigId, Shaken, Tn, TnAuthList, TrustAnchors, Verifier,
 };
 
 /// The time every chain is checked at: 2026-09-21.

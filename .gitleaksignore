@@ -1,0 +1,6 @@
+# Findings in history that are not secrets. Each line is the fingerprint
+# gitleaks prints: commit, file, rule, line.
+#
+# A test's PEM armour around a key it builds at run time from the scalar
+# 0x33..33; the line has since been written so that no armour is in it.
+d98a8319b37f676970d595e62a56ee726725e9ee:crates/sipral-stir/src/tests.rs:private-key:154

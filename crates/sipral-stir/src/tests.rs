@@ -150,8 +150,11 @@ fn a_signer_takes_its_key_in_the_form_it_is_kept() {
         &crate::der::write(0x06, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
     ));
     let sec1 = crate::der::write(0x30, &sec1);
+    // the label is spliced in, so that the source holds no armoured key a
+    // secret scanner would take for a real one
+    let label = "EC PRIVATE KEY";
     let pem = format!(
-        "-----BEGIN EC PRIVATE KEY-----\n{}\n-----END EC PRIVATE KEY-----\n",
+        "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
         base64::encode_standard(&sec1)
     );
     let from_pem = Signer::from_key(pem.as_bytes(), X5U).unwrap();

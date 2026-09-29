@@ -672,6 +672,7 @@ version = "0.0.1"
 dependencies = [
  "p256",
  "x509-cert",
+ "zeroize",
 ]
 
 [[package]]

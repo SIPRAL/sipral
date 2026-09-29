@@ -3463,19 +3463,38 @@ pub(crate) mod tests {
 
     #[test]
     fn every_named_srtp_value_is_taken_and_anything_else_builds_nothing() {
-        for value in [
+        let handshake = [
+            crate::media::SipralSrtp::Dtls as u32,
+            crate::media::SipralSrtp::DtlsRequired as u32,
+            crate::media::SipralSrtp::DtlsOrSdes as u32,
+        ];
+        let mut taken = vec![
             0,
             crate::media::SipralSrtp::NotOffered as u32,
             crate::media::SipralSrtp::Offered as u32,
             crate::media::SipralSrtp::Required as u32,
-            crate::media::SipralSrtp::DtlsOrSdes as u32,
-        ] {
+        ];
+        if cfg!(feature = "dtls") {
+            taken.extend(handshake);
+        }
+        for value in taken {
             let mut observed = Observed::default();
             let mut config = config(record, &mut observed);
             config.srtp = value;
             let (status, handle) = create(&config);
             assert_eq!(status, SipralStatus::Ok, "{value}: {}", last_error_text());
             assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+        }
+
+        // a build without the handshake refuses every value that names it,
+        // rather than build a stack that places the calls in the clear
+        for value in handshake.into_iter().filter(|_| !cfg!(feature = "dtls")) {
+            let mut observed = Observed::default();
+            let mut config = config(record, &mut observed);
+            config.srtp = value;
+            let (status, handle) = create(&config);
+            assert_eq!(status, SipralStatus::NotSupported, "{value}");
+            assert_eq!(handle, SIPRAL_HANDLE_NONE, "{value}: nothing was built");
         }
 
         let mut observed = Observed::default();
