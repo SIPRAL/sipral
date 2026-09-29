@@ -608,8 +608,8 @@ fn write_person(out: &mut String, person: &Person) -> Result<(), PresenceError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        Activity, Basic, Contact, MAX_TUPLES, Note, Person, Presence, PresenceError, Tuple,
-        format_qvalue, qvalue,
+        Activity, Basic, Contact, MAX_ACTIVITIES, MAX_NOTES, MAX_TUPLES, Note, Person, Presence,
+        PresenceError, Tuple, format_qvalue, qvalue,
     };
 
     /// RFC 3863 §6's example: two tuples, one with an extension inside its
@@ -945,6 +945,42 @@ mod tests {
             Presence::parse(body.as_bytes()),
             Err(PresenceError::TooLarge("tuples"))
         );
+    }
+
+    #[test]
+    fn more_notes_or_activities_than_the_bound_are_refused() {
+        let notes = |count: usize| "<note>n</note>".repeat(count);
+        for (count, expected) in [
+            (MAX_NOTES, Ok(MAX_NOTES)),
+            (MAX_NOTES + 1, Err(PresenceError::TooLarge("notes"))),
+        ] {
+            let body = format!(
+                "<presence entity=\"pres:a@example.com\"><tuple id=\"t\"><status/>{}</tuple>\
+</presence>",
+                notes(count)
+            );
+            assert_eq!(
+                Presence::parse(body.as_bytes()).map(|presence| presence.tuples[0].notes.len()),
+                expected
+            );
+        }
+        for (count, expected) in [
+            (MAX_ACTIVITIES, Ok(MAX_ACTIVITIES)),
+            (
+                MAX_ACTIVITIES + 1,
+                Err(PresenceError::TooLarge("activities")),
+            ),
+        ] {
+            let body = format!(
+                "<presence entity=\"pres:a@example.com\"><person id=\"p\"><activities>{}\
+</activities></person></presence>",
+                "<away/>".repeat(count)
+            );
+            assert_eq!(
+                Presence::parse(body.as_bytes()).map(|presence| presence.activities().len()),
+                expected
+            );
+        }
     }
 
     #[test]
