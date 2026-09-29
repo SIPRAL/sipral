@@ -1260,7 +1260,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   rows into failures. Every header lab.sh prints now ends a section, those
   four steps have rows and features, and an `ok`/`FAIL` line in a step that
   produced no row stops the generator, in both modes, naming the line.
-  `--self-test` runs the generator's own tests.
+  `--self-test` runs the generator's own tests. In the same batch,
+  `scripts/bench.sh scale` counts each call it asks for once: a call never
+  answered is no longer counted again as never ended, and a call that fails
+  early no longer stops the placing short of the calls asked for.
 - **A 2xx lost on UDP is sent again until its ACK arrives.** RFC 3261
   §13.3.1.4 has the answering end repeat its 2xx, T1 doubling up to T2, and
   nothing did: the INVITE's retransmissions stop at the first provisional,
