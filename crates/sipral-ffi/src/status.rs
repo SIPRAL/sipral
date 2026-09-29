@@ -94,6 +94,13 @@ codes! {
         /// `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
         /// that ends makes room; raising the limit means a new stack.
         LimitReached = 16,
+        /// Refused by the account's security policy (ABI 0.31): a call that
+        /// would carry audio unencrypted where its account, or its own
+        /// configuration, requires SRTP, or that names a policy weaker than
+        /// its account's. An INVITE refused this way has been answered with
+        /// 488 Not Acceptable Here; a call being placed never left. The last
+        /// error says which.
+        SecurityPolicy = 18,
     }
 }
 
@@ -126,6 +133,7 @@ entry! {
             14 => c"device unusable".as_ptr(),
             15 => c"device timed out".as_ptr(),
             16 => c"limit reached".as_ptr(),
+            18 => c"refused by security policy".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -168,6 +176,7 @@ mod tests {
             SipralStatus::DeviceUnusable,
             SipralStatus::DeviceTimedOut,
             SipralStatus::LimitReached,
+            SipralStatus::SecurityPolicy,
         ];
         for status in all {
             let code = status as i32;
@@ -178,7 +187,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in 0..=16 {
+        for code in (0..=16).chain([18]) {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -190,6 +199,7 @@ mod tests {
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
         assert!(name(17).is_none());
+        assert!(name(19).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -218,5 +228,6 @@ mod tests {
         assert_eq!(SipralStatus::DeviceUnusable as i32, 14);
         assert_eq!(SipralStatus::DeviceTimedOut as i32, 15);
         assert_eq!(SipralStatus::LimitReached as i32, 16);
+        assert_eq!(SipralStatus::SecurityPolicy as i32, 18);
     }
 }

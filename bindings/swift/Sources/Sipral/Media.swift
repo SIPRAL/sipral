@@ -9,6 +9,18 @@ import Glibc
 import CSipral
 import Dispatch
 
+/// How one stream of a call is protected: a `sipral_stream_encryption_t`
+/// read out (`Media.encryption()`). `awaitingKeys` is a stream that will be
+/// encrypted once its DTLS-SRTP handshake ends.
+public struct StreamProtection: Sendable, Equatable {
+    public let media: SipralMediaKind
+    public let encrypted: Bool
+    public let keyExchange: SipralKeyExchange
+    public let suite: SipralSrtpSuite?
+    public let authenticated: Bool
+    public let awaitingKeys: Bool
+}
+
 /// One path a call's ICE agent tried, and what became of it: a
 /// `sipral_path_candidate_t` with its two addresses read out.
 public struct PathCandidate: Sendable, Equatable {
@@ -122,6 +134,26 @@ public final class Media: @unchecked Sendable {
 
     public func statistics() throws -> sipral_stream_stats_t {
         try Sipral.mediaStatistics(media: handle, nowMs: stack.nowMs())
+    }
+
+    /// The call's encryption report, now (`sipral_media_encryption_count`
+    /// and `sipral_media_encryption_at`): per stream, whether it is
+    /// encrypted, how its keys were exchanged, the suite, and whether the
+    /// exchange authenticated the far end -- SDES never does, a DTLS-SRTP
+    /// handshake whose certificate matched the signalled fingerprint does.
+    public func encryption() throws -> [StreamProtection] {
+        let count = try Sipral.mediaEncryptionCount(media: handle)
+        return try (0..<count).map { index in
+            let stream = try Sipral.mediaEncryptionAt(media: handle, index: index)
+            return StreamProtection(
+                media: SipralMediaKind(rawValue: stream.media) ?? .unknown,
+                encrypted: stream.encrypted != 0,
+                keyExchange: SipralKeyExchange(rawValue: stream.key_exchange) ?? .none,
+                suite: SipralSrtpSuite(rawValue: stream.suite),
+                authenticated: stream.authenticated != 0,
+                awaitingKeys: stream.awaiting_keys != 0
+            )
+        }
     }
 
     /// Every path this call's ICE agent tried -- the candidate pairs its

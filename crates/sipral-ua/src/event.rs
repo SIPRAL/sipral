@@ -276,6 +276,50 @@ pub enum UaEvent {
         /// `From`, `To` or `Call-ID` could not be read.
         identity: Option<std::sync::Arc<crate::CallIdentity>>,
     },
+    /// A call's `Identity` header field (RFC 8224) names a certificate this
+    /// end has to fetch before it can say who is calling: the call is held
+    /// back until [`UserAgent::stir_certificate`](crate::UserAgent::stir_certificate)
+    /// hands over what `url` yielded, or says nothing could be had.
+    ///
+    /// The fetch is the application's — its cache, its HTTP client and their
+    /// timeouts — and it is waited for only so long
+    /// ([`StirConfig::certificate_wait`](crate::StirConfig::certificate_wait));
+    /// after that the call is verified as one whose certificate could not be
+    /// had. The handle names a call the application has not been told about
+    /// yet: [`UaEvent::CallerVerified`] and then [`UaEvent::IncomingCall`]
+    /// follow, or [`UaEvent::CallEnded`] if the caller gives up first.
+    CertificateWanted {
+        /// The call waiting.
+        call: CallHandle,
+        /// The `info` URL of its `Identity` header field.
+        url: Box<str>,
+    },
+    /// This end's verification service reached its verdict on who is
+    /// calling (RFC 8224 §6.2).
+    ///
+    /// Queued immediately before the [`UaEvent::IncomingCall`] naming the
+    /// same call, whose identity carries the same verdict
+    /// ([`CallerIdentity::verification`](crate::CallerIdentity::verification)),
+    /// so an application reading in order has it before the phone rings.
+    /// For an account set to refuse what does not verify
+    /// ([`StirVerification::Strict`](crate::StirVerification::Strict)) and a
+    /// call that did not, `verification.refused` is set, the call has been
+    /// answered with the response RFC 8224 §6.2.2 prescribes, and
+    /// [`UaEvent::CallEnded`] follows instead.
+    ///
+    /// Only for an account whose verification is in force: one set to
+    /// [`StirVerification::Off`](crate::StirVerification::Off), or to report
+    /// on an agent given no trust anchors, never raises it.
+    CallerVerified {
+        /// The call.
+        call: CallHandle,
+        /// The account it came in on, when it could be told.
+        account: Option<AccountId>,
+        /// The verdict.
+        verification: std::sync::Arc<crate::CallerVerification>,
+        /// The INVITE, whole.
+        request: OwnedMessage,
+    },
     /// A response short of an answer: the far end is ringing, or is playing
     /// something before it answers.
     CallProgress {

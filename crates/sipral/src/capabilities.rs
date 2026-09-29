@@ -216,6 +216,16 @@ pub struct Capabilities {
     /// report ([`crate::MediaEngine::state`]). Both redact what they write,
     /// so both come with the `redaction` feature, on by default.
     pub logging: bool,
+    /// Whether an account can sign the calls it places and have the callers
+    /// of the ones it receives verified (STIR/SHAKEN, RFC 8224 and RFC 8588):
+    /// [`crate::StirSigning`], [`crate::StirConfig`]. Behind the `stir`
+    /// feature, on by default.
+    pub stir: bool,
+    /// Whether each account can hold its calls to an SRTP policy and suites
+    /// of its own ([`crate::MediaEngine::set_account_srtp`]), and each call
+    /// report how its streams are protected ([`crate::MediaSession::encryption`]).
+    /// In every build.
+    pub srtp_per_account: bool,
 }
 
 impl Capabilities {
@@ -244,6 +254,8 @@ impl Capabilities {
             call_readdress: true,
             caller_identity: true,
             logging: cfg!(feature = "redaction"),
+            stir: cfg!(feature = "stir"),
+            srtp_per_account: true,
         }
     }
 }
@@ -336,9 +348,15 @@ mod tests {
         let offer = CodecCatalog::new()
             .with_srtp(SrtpPolicy::Offered)
             .offering(
-                Some([
-                    KeySalt::new(&[3; 32], &[4; 12]),
-                    KeySalt::new(&[9; 16], &[10; 14]),
+                Some(vec![
+                    (
+                        sipral_core::sdp::CryptoSuite::AeadAes256Gcm,
+                        KeySalt::new(&[3; 32], &[4; 12]),
+                    ),
+                    (
+                        sipral_core::sdp::CryptoSuite::AesCm80,
+                        KeySalt::new(&[9; 16], &[10; 14]),
+                    ),
                 ]),
                 None,
             )

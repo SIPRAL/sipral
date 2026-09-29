@@ -512,6 +512,47 @@ public final class SipralStack: @unchecked Sendable {
         natQueue.sync { currentStunServer = servers.first }
     }
 
+    /// `sipral_stack_stir`: verify the callers of the calls this stack's
+    /// accounts receive against `anchors` (PEM or DER certificates, the
+    /// STI-PA's roots in a SHAKEN deployment) from now on (RFC 8224),
+    /// replacing what an earlier call set. `unixSeconds` is the wall clock
+    /// now, which a PASSporT is signed and judged by, and defaults to this
+    /// machine's; a stack whose accounts only sign calls this too, with no
+    /// anchors, before adding them. The certificate a call names is asked for
+    /// by `SipralEventKind.callerVerification` (`SipralEvent.verificationData`)
+    /// and handed over with `stirCertificate(call:chain:)`.
+    public func stir(
+        anchors: [UInt8]?,
+        freshnessSeconds: UInt64 = 0,
+        certificateWaitMs: UInt64 = 0,
+        unixSeconds: UInt64? = nil
+    ) throws {
+        let now = unixSeconds ?? UInt64(time(nil))
+        let given = anchors ?? []
+        try given.withUnsafeBufferPointer { bytes in
+            var config = sipral_stir_config_t.sized()
+            if !bytes.isEmpty {
+                config.anchors = bytes.baseAddress
+                config.anchors_len = bytes.count
+            }
+            config.freshness_seconds = freshnessSeconds
+            config.certificate_wait_ms = certificateWaitMs
+            config.unix_seconds = now
+            try retryingBusy { try Sipral.stackStir(stack: handle, config: config, nowMs: nowMs()) }
+        }
+    }
+
+    /// `sipral_call_stir_certificate`: the chain the URL a verification asked
+    /// for yielded -- PEM or DER, the signing certificate first -- or `nil`
+    /// for one that could not be had. `call` is the handle the event named:
+    /// the call has not been announced yet. Its verdict follows as
+    /// `SipralEventKind.callerVerification` at `.verified`.
+    public func stirCertificate(call: SipralHandle, chain: [UInt8]?) throws {
+        try retryingBusy {
+            try Sipral.callStirCertificate(stack: handle, call: call, chain: chain ?? [], nowMs: nowMs())
+        }
+    }
+
     /// Elapsed milliseconds since this stack was created -- what every entry
     /// point below expects `now_ms` to be.
     public func nowMs() -> UInt64 {
@@ -532,7 +573,9 @@ public final class SipralStack: @unchecked Sendable {
     /// registrar or the trunk -- RFC 3325's trust domain: a call from one of
     /// them has its asserted identity read (`CallerIdentity`), from anywhere
     /// else it is left out, and once any are named no identity field leaves
-    /// toward any other peer.
+    /// toward any other peer. `security` is the account's own SRTP policy
+    /// and suites, and its STIR/SHAKEN verification and signing
+    /// (`AccountSecurity`).
     public func addAccount(
         aor: String,
         registrarAddress: String,
@@ -544,7 +587,8 @@ public final class SipralStack: @unchecked Sendable {
         expiresSeconds: UInt64 = 0,
         sessionTimer: SessionTimer = .default,
         privacy: Privacy = [],
-        trustedPeers: [String] = []
+        trustedPeers: [String] = [],
+        security: AccountSecurity = AccountSecurity()
     ) throws -> Account {
         let account = try Account.add(
             stack: self,
@@ -558,7 +602,8 @@ public final class SipralStack: @unchecked Sendable {
             expiresSeconds: expiresSeconds,
             sessionTimer: sessionTimer,
             privacy: privacy,
-            trustedPeers: trustedPeers
+            trustedPeers: trustedPeers,
+            security: security
         )
         movingQueue.sync { accounts[account.handle] = account }
         return account

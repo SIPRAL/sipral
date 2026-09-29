@@ -350,10 +350,12 @@ final class PushKitBridgeTests: XCTestCase {
                 endCause: nil, identityTrusted: false, assertedUri: nil, assertedDisplay: nil, verstat: nil,
                 privacy: [], divertedFrom: nil, diversionReason: nil, diversionCount: 0, historyCount: 0,
                 answerMode: nil, answerModeRequired: false, privAnswerMode: nil, privAnswerModeRequired: false,
-                answerAfterMs: nil, ringSource: nil, alertInfo: nil
+                answerAfterMs: nil, ringSource: nil, alertInfo: nil,
+                verification: nil, attestation: nil, verificationFailure: nil
             ),
             mediaData: nil, registrationData: nil, announceData: nil, natData: nil, relayData: nil,
-            referralData: nil, turnStreamData: nil, audioData: nil, stunServerData: nil
+            referralData: nil, turnStreamData: nil, audioData: nil, stunServerData: nil,
+            verificationData: nil
         )
 
         pushKit.matchIncomingCall(event, on: stack)

@@ -68,14 +68,14 @@ use sipral_core::msg::OwnedMessage;
 use sipral_core::sdp::RtcpPlan;
 use sipral_core::sdp::{
     AcceptedStream, Attribute, Connection, CryptoSuite, Direction, KeySalt, Keying,
-    MediaDescription, MediaPlan, NegotiatedCodec, Origin, SessionDescription, StreamAnswer, parse,
-    static_rtpmap,
+    MediaDescription, MediaPlan, NegotiatedCodec, Origin, SdpError, SessionDescription,
+    StreamAnswer, parse, static_rtpmap,
 };
 #[cfg(feature = "dtls")]
 use sipral_dtls::setup::{Party, Setup};
 use sipral_ua::{
-    AccountId, CallHandle, CallState, OutgoingCall, OutgoingExtras, StatusCode, UaError, UaEvent,
-    UserAgent,
+    AccountId, CallHandle, CallState, OutgoingCall, OutgoingExtras, Reason, StatusCode, UaError,
+    UaEvent, UserAgent,
 };
 use zeroize::Zeroizing;
 
@@ -89,7 +89,7 @@ use crate::error::MediaError;
 use crate::event::{DigitSource, Event, MediaEvent};
 #[cfg(feature = "dtls")]
 use crate::keying::SrtpPolicy;
-use crate::keying::{self, Shape};
+use crate::keying::{self, AccountSrtp, Shape};
 use crate::payloads::Payloads;
 use crate::ports::{PortsExhausted, RtpPorts};
 use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
@@ -246,6 +246,11 @@ struct Managed {
     /// until then a refusal leaves the call on the list it had, as RFC 3261
     /// §14.1 leaves the session.
     pending: Option<Pending>,
+    /// Whether the far end answered this end's offer in a way the call's
+    /// SRTP policy refuses ([`MediaError::SrtpRequired`]): a call placed from
+    /// here that is to be hung up, with a `Reason` saying why, once its 2xx
+    /// has been acknowledged.
+    refused_keying: bool,
 }
 
 /// A codec change on its way to the far end.
@@ -413,6 +418,11 @@ pub struct MediaEngine {
     /// afterwards — a call's own copy lives in [`Managed`], so changing this
     /// engine's default cannot move a call already in progress.
     catalog: CodecCatalog,
+    /// What each account's calls do about SRTP, where the account said
+    /// something of its own ([`MediaEngine::set_account_srtp`]): laid over
+    /// [`MediaEngine::catalog`] when a call of that account is placed or
+    /// arrives, and never read again on the call's behalf afterwards.
+    accounts: BTreeMap<AccountId, AccountSrtp>,
     config: MediaConfig,
     clock: WallClock,
     /// Ordered rather than hashed so that two runs of the same test drain
@@ -631,6 +641,7 @@ impl MediaEngine {
     ) -> Self {
         Self {
             catalog,
+            accounts: BTreeMap::new(),
             config,
             clock,
             sessions: BTreeMap::new(),
@@ -782,6 +793,9 @@ impl MediaEngine {
         if !catalog.srtp().wants_dtls() {
             return Ok(None);
         }
+        // a call whose suites leave the handshake nothing to offer is
+        // refused before any description names a fingerprint
+        crate::dtls::profiles(catalog.srtp_suites())?;
         let theirs = offered.and_then(setup_in);
         let role = running
             .and_then(|call| self.sessions.get(&call))
@@ -1441,7 +1455,18 @@ impl MediaEngine {
         // the certificate the call's own description named, whatever this
         // engine presents to calls described since
         let identity = self.identity_for(Some(call), now)?;
-        crate::dtls::Handshake::start(&identity, keying, side.party(), ours, &mut self.keys, now)
+        let profiles = self.calls.get(&call).map_or(Ok(Vec::new()), |managed| {
+            crate::dtls::profiles(managed.catalog.srtp_suites())
+        })?;
+        crate::dtls::Handshake::start(
+            &identity,
+            keying,
+            side.party(),
+            ours,
+            profiles,
+            &mut self.keys,
+            now,
+        )
     }
 
     /// A record of the DTLS-SRTP handshake that one call owes the far end,
@@ -1686,6 +1711,56 @@ impl MediaEngine {
         &self.catalog
     }
 
+    /// Give `account`'s calls an SRTP policy and suites of their own, laid
+    /// over this engine's catalogue: the policy a call placed from it offers
+    /// and holds its answer to, and the one an INVITE that arrives for it is
+    /// answered under. [`AccountSrtp::default`] takes the account back to the
+    /// engine's own.
+    ///
+    /// A call already in progress keeps the catalogue it started with.
+    ///
+    /// # Errors
+    /// What [`CodecCatalog::with_srtp_suites`] refuses, with nothing kept.
+    pub fn set_account_srtp(
+        &mut self,
+        account: AccountId,
+        srtp: AccountSrtp,
+    ) -> Result<(), MediaError> {
+        srtp.over(self.catalog.clone())?;
+        if srtp == AccountSrtp::default() {
+            self.accounts.remove(&account);
+        } else {
+            self.accounts.insert(account, srtp);
+        }
+        Ok(())
+    }
+
+    /// What `account` said about SRTP of its own, if anything
+    /// ([`MediaEngine::set_account_srtp`]).
+    #[must_use]
+    pub fn account_srtp(&self, account: AccountId) -> Option<&AccountSrtp> {
+        self.accounts.get(&account)
+    }
+
+    /// The catalogue a call of `account` starts from: this engine's own, with
+    /// whatever the account said about SRTP laid over it.
+    #[must_use]
+    pub fn account_catalog(&self, account: AccountId) -> CodecCatalog {
+        self.accounts
+            .get(&account)
+            .and_then(|srtp| srtp.over(self.catalog.clone()).ok())
+            .unwrap_or_else(|| self.catalog.clone())
+    }
+
+    /// How each stream of a call is protected, now: the encryption report
+    /// ([`MediaSession::encryption`]). `None` for a call with no session.
+    #[must_use]
+    pub fn encryption(&self, call: CallHandle) -> Option<Vec<crate::StreamEncryption>> {
+        self.sessions
+            .get(&call)
+            .map(|held| share::lock(held).session.encryption())
+    }
+
     /// What one call is actually offering, once it exists — this engine's
     /// default unless [`MediaEngine::place_with`] or
     /// [`MediaEngine::answer_with`] gave it its own, and that call's own from
@@ -1794,7 +1869,7 @@ impl MediaEngine {
         local: SocketAddr,
         now: Instant,
     ) -> Result<CallHandle, MediaError> {
-        let media = CallMedia::new(self.catalog.clone(), self.config.clone());
+        let media = CallMedia::new(self.account_catalog(account), self.config.clone());
         self.place_with(agent, account, outgoing, local, media, now)
     }
 
@@ -1850,7 +1925,10 @@ impl MediaEngine {
         let (identity, session_id) = draw(agent);
         // drawn after the identity, so that the same call placed with and
         // without SDES starts from the same SSRC and the same sequence number
-        let keys = catalog.srtp().offers().then(|| self.draw_offer_keys());
+        let keys = catalog
+            .srtp()
+            .offers()
+            .then(|| self.draw_offer_keys(&catalog));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
         let ice = self.first_ice(None, &catalog, local, public, handed, true, now)?;
         let described = public.unwrap_or(local);
@@ -1890,6 +1968,7 @@ impl MediaEngine {
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
+                refused_keying: false,
             },
         );
         Ok(call)
@@ -1921,7 +2000,11 @@ impl MediaEngine {
         extra: OutgoingExtras<'_>,
         now: Instant,
     ) -> Result<CallHandle, MediaError> {
-        let media = CallMedia::new(self.catalog.clone(), self.config.clone());
+        let catalog = agent.call_account(call).map_or_else(
+            || self.catalog.clone(),
+            |account| self.account_catalog(account),
+        );
+        let media = CallMedia::new(catalog, self.config.clone());
         self.accept_transfer_with(agent, call, local, extra, media, now)
     }
 
@@ -1970,7 +2053,10 @@ impl MediaEngine {
         let public = public.or_else(|| handed.mapped());
         let catalog = CallMedia::offering(catalog, public);
         let (identity, session_id) = draw(agent);
-        let keys = catalog.srtp().offers().then(|| self.draw_offer_keys());
+        let keys = catalog
+            .srtp()
+            .offers()
+            .then(|| self.draw_offer_keys(&catalog));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
         let ice = self.first_ice(None, &catalog, local, public, handed, true, now)?;
         let described = public.unwrap_or(local);
@@ -2009,6 +2095,7 @@ impl MediaEngine {
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
+                refused_keying: false,
             },
         );
         Ok(new)
@@ -2125,10 +2212,10 @@ impl MediaEngine {
             return Err(MediaError::NoDescription);
         };
         if !keying_allows(&catalog, Some(&offer)) {
-            return Err(MediaError::SrtpRequired);
+            return Err(refuse_insecure(agent, call, now));
         }
         let keys = will_key(&catalog, Some(&offer))
-            .then(|| draw_key_for(suite_for_own_key(Some(&offer)), &mut self.keys));
+            .then(|| draw_key_for(suite_for_own_key(Some(&offer), &catalog), &mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Answering, Some(&offer), None, now)?;
         let ice = self.first_ice(Some(call), &catalog, local, public, handed, false, now)?;
         let mut description = write_answer(
@@ -2271,7 +2358,7 @@ impl MediaEngine {
         let (session_id, version) = (managed.session_id, managed.version.saturating_add(1));
         let offered = managed.remote.clone();
         if !keying_allows(&catalog, offered.as_ref()) {
-            return Err(MediaError::SrtpRequired);
+            return Err(refuse_insecure(agent, call, now));
         }
         // an INVITE with no offer leaves this end offering, so which side it
         // is on is decided by what arrived rather than by which method was
@@ -2303,7 +2390,10 @@ impl MediaEngine {
                 keyed(dtls.as_ref()),
             )?
         } else {
-            let keys = catalog.srtp().offers().then(|| self.draw_offer_keys());
+            let keys = catalog
+                .srtp()
+                .offers()
+                .then(|| self.draw_offer_keys(&catalog));
             write_offer(
                 &catalog,
                 described,
@@ -3158,7 +3248,12 @@ impl MediaEngine {
     /// Act on what the user agent said.
     fn absorb(&mut self, event: &UaEvent, agent: &mut UserAgent, now: Instant) {
         match event {
-            UaEvent::IncomingCall { call, request, .. } => self.arrived(*call, request, agent),
+            UaEvent::IncomingCall {
+                call,
+                account,
+                request,
+                ..
+            } => self.arrived(*call, *account, request, agent),
             UaEvent::CallForked { call, sibling } => self.forked(*call, *sibling, agent, now),
             UaEvent::CallProgress { call, response, .. } => {
                 // a 183 with a description is early media: a network
@@ -3167,6 +3262,7 @@ impl MediaEngine {
             }
             UaEvent::CallConfirmed { call, response, .. } => {
                 self.take_body(*call, response.as_ref(), now);
+                self.hang_up_insecure(*call, agent, now);
             }
             UaEvent::SessionChanged {
                 call,
@@ -3206,6 +3302,23 @@ impl MediaEngine {
         }
     }
 
+    /// A call this end placed whose answer the call's SRTP policy refused:
+    /// acknowledged by now, since the 2xx that carried the answer is what
+    /// confirmed it, and hung up (RFC 3261 §13.2.2.4: a UAC that does not
+    /// want the dialog an acknowledged 2xx made sends a BYE), the `Reason`
+    /// saying 488 so the far end's logs say why (RFC 3326).
+    fn hang_up_insecure(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
+        let refused = self
+            .calls
+            .get_mut(&call)
+            .is_some_and(|managed| core::mem::take(&mut managed.refused_keying));
+        if refused {
+            let reason = Reason::sip(488, "SRTP required");
+            // a call already ending needs no second goodbye
+            let _ = agent.hangup_for(call, &[reason], now);
+        }
+    }
+
     /// A digit arrived by SIP INFO. Folded into the same
     /// [`MediaEvent::DigitReceived`] the media reports RFC 4733 events with —
     /// `crate::event`'s own module doc says why — rather than forwarded as
@@ -3238,8 +3351,15 @@ impl MediaEngine {
     /// call now, before the application has had a chance to say anything
     /// about it — [`MediaEngine::answer_with`] replaces them for this call
     /// alone when it is asked to.
-    fn arrived(&mut self, call: CallHandle, request: &OwnedMessage, agent: &mut UserAgent) {
+    fn arrived(
+        &mut self,
+        call: CallHandle,
+        account: Option<AccountId>,
+        request: &OwnedMessage,
+        agent: &mut UserAgent,
+    ) {
         let (identity, session_id) = draw(agent);
+        let catalog = account.map_or_else(|| self.catalog.clone(), |id| self.account_catalog(id));
         self.calls.insert(
             call,
             Managed {
@@ -3250,7 +3370,7 @@ impl MediaEngine {
                 identity,
                 session_id,
                 version: 1,
-                catalog: self.catalog.clone(),
+                catalog,
                 config: self.config.clone(),
                 // nothing has been written for this call yet: what it will
                 // say about DTLS-SRTP, and about ICE, is decided when it is
@@ -3265,6 +3385,7 @@ impl MediaEngine {
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
+                refused_keying: false,
             },
         );
     }
@@ -3391,17 +3512,23 @@ impl MediaEngine {
         in_force: Option<KeySalt>,
     ) -> Option<KeySalt> {
         will_key(catalog, Some(offer)).then(|| {
-            in_force.unwrap_or_else(|| draw_key_for(suite_for_own_key(Some(offer)), &mut self.keys))
+            in_force.unwrap_or_else(|| {
+                draw_key_for(suite_for_own_key(Some(offer), catalog), &mut self.keys)
+            })
         })
     }
 
-    /// One key per suite `keying::OFFERED` names, in that order, for a fresh
-    /// offer this end is about to write. Each width matches the suite it is
-    /// drawn for, and RFC 4568 §6.1's "MUST be unique ... with respect to
-    /// other master keys in the entire SDP message" holds because every draw
+    /// One key per suite `catalog` offers, in that order, for a fresh offer
+    /// this end is about to write. Each width matches the suite it is drawn
+    /// for, and RFC 4568 §6.1's "MUST be unique ... with respect to other
+    /// master keys in the entire SDP message" holds because every draw
     /// moves this engine's own counter on.
-    fn draw_offer_keys(&mut self) -> [KeySalt; keying::OFFERED.len()] {
-        keying::OFFERED.map(|suite| draw_key_for(suite, &mut self.keys))
+    fn draw_offer_keys(&mut self, catalog: &CodecCatalog) -> Vec<(CryptoSuite, KeySalt)> {
+        catalog
+            .sdes_offered()
+            .into_iter()
+            .map(|suite| (suite, draw_key_for(suite, &mut self.keys)))
+            .collect()
     }
 
     /// The far end offered something the user agent has no policy for: a
@@ -3715,12 +3842,27 @@ impl MediaEngine {
                 self.fail(call, MediaError::StreamRefused);
                 return;
             }
+            // a secured stream the far end described with no key: under a
+            // policy that requires one, that is the policy's refusal, and a
+            // call this end placed is hung up for it
+            Err(SdpError::CryptoMissing { .. }) if managed.catalog.srtp().requires() => {
+                if let Some(managed) = self.calls.get_mut(&call) {
+                    managed.refused_keying = true;
+                }
+                self.fail(call, MediaError::SrtpRequired);
+                return;
+            }
             Err(error) => {
                 self.fail(call, MediaError::from(error));
                 return;
             }
         };
         if let Err(error) = keying_holds(&managed.catalog, &plan, remote) {
+            if error == MediaError::SrtpRequired
+                && let Some(managed) = self.calls.get_mut(&call)
+            {
+                managed.refused_keying = true;
+            }
             self.fail(call, error);
             return;
         }
@@ -4246,19 +4388,64 @@ fn write_offer(
     address: SocketAddr,
     session_id: u64,
     version: u64,
-    keys: Option<[KeySalt; keying::OFFERED.len()]>,
+    keys: Option<Vec<(CryptoSuite, KeySalt)>>,
     dtls: Option<Keyed<'_>>,
 ) -> SessionDescription {
     let mut description = SessionDescription::new(
         Origin::new(session_id, version, address.ip()),
         Connection::new(address.ip()),
     );
-    description.media.push(catalog.offering(keys, dtls).offer(
-        AUDIO,
-        address.port(),
-        Direction::SendRecv,
-    ));
+    let stream = catalog
+        .offering(keys, dtls)
+        .offer(AUDIO, address.port(), Direction::SendRecv);
+    description.media.push(fall_back(stream, catalog, dtls));
     description
+}
+
+/// `SrtpPolicy::DtlsOrSdes`: the SDES offer, with the fingerprint and the
+/// role beside its crypto lines, so that a DTLS-SRTP peer answers one and an
+/// SDES-only peer the other. Every other policy's offer is left as written.
+#[cfg(feature = "dtls")]
+fn fall_back(
+    mut stream: MediaDescription,
+    catalog: &CodecCatalog,
+    dtls: Option<Keyed<'_>>,
+) -> MediaDescription {
+    if let Some(keyed) = dtls.filter(|_| catalog.srtp().falls_back()) {
+        let at = stream
+            .attributes
+            .iter()
+            .position(|attribute| attribute.name == "crypto")
+            .unwrap_or(stream.attributes.len());
+        stream.attributes.splice(
+            at..at,
+            [
+                Attribute::with_value("fingerprint", keyed.fingerprint),
+                Attribute::with_value("setup", keyed.setup),
+            ],
+        );
+    }
+    stream
+}
+
+/// Without the feature there is no fingerprint to fall back from.
+#[cfg(not(feature = "dtls"))]
+const fn fall_back(
+    stream: MediaDescription,
+    _catalog: &CodecCatalog,
+    _dtls: Option<Keyed<'_>>,
+) -> MediaDescription {
+    stream
+}
+
+/// Refuse an INVITE whose offer this call's SRTP policy will not carry
+/// audio on: 488 Not Acceptable Here (RFC 3261 §21.4.26), the answer to an
+/// offer whose terms this end cannot take. The error to return with it.
+fn refuse_insecure(agent: &mut UserAgent, call: CallHandle, now: Instant) -> MediaError {
+    // a call already answered or gone has nothing left to refuse, and the
+    // error still says why it was not answered here
+    let _ = agent.reject(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+    MediaError::SrtpRequired
 }
 
 /// Whether this call will let a stream described like this carry audio.
@@ -4290,10 +4477,10 @@ fn will_key(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> boo
 /// Computed here rather than threaded down from `take_stream` because the
 /// key has to exist before that function is reached: `write_answer` takes the
 /// key already drawn, not a suite to draw one from.
-fn suite_for_own_key(offered: Option<&SessionDescription>) -> CryptoSuite {
+fn suite_for_own_key(offered: Option<&SessionDescription>, catalog: &CodecCatalog) -> CryptoSuite {
     offered
         .and_then(|offer| offer.media.first())
-        .and_then(keying::acceptable)
+        .and_then(|stream| keying::acceptable(stream, catalog.srtp_suites()))
         .map_or(CryptoSuite::AesCm80, |policy| policy.suite)
 }
 
@@ -4413,8 +4600,13 @@ fn take_stream(
     // certificate and the role it will take, and never by a crypto line: the
     // two are different key management protocols and a description carrying
     // both has agreed to neither
+    // Under `SrtpPolicy::DtlsOrSdes` the answer follows the offer: a
+    // fingerprint is answered with ours, and crypto lines alone with SDES
     #[cfg(feature = "dtls")]
-    let handshake = dtls.filter(|_| keying::is_secure(&offered.proto));
+    let handshake = dtls.filter(|_| {
+        keying::is_secure(&offered.proto)
+            && (!catalog.srtp().falls_back() || offered.attribute("fingerprint").is_some())
+    });
     #[cfg(not(feature = "dtls"))]
     let handshake: Option<Keyed<'_>> = None;
     // RFC 4568 §7.1.2: a stream on the secure profile is answered by
@@ -4422,7 +4614,7 @@ fn take_stream(
     // no third answer, and a stream taken without a key would be one both
     // ends believe is encrypted
     let crypto = if keying::is_secure(&offered.proto) && handshake.is_none() {
-        match (keying::acceptable(offered), keys) {
+        match (keying::acceptable(offered, catalog.srtp_suites()), keys) {
             (Some(line), Some(keys)) => Some(keying::answer_line(&line, keys.clone())),
             _ => return StreamAnswer::Reject,
         }
@@ -4899,8 +5091,42 @@ impl MediaEngine {
                 }
                 line
             }),
+            UaEvent::CallerVerified {
+                call, verification, ..
+            } => self.log_verification(*call, verification, now),
             other => self.log_line(Debug, "signalling", now, || variant(other)),
         }
+    }
+
+    /// The verdict on a caller and why, never the numbers: what a log may
+    /// carry about a caller is the redactor's to decide, and it is not handed
+    /// these.
+    fn log_verification(
+        &self,
+        call: CallHandle,
+        verification: &sipral_ua::CallerVerification,
+        now: Instant,
+    ) {
+        use crate::LogLevel::{Info, Warn};
+        use core::fmt::Write as _;
+        let level = if verification.refused { Warn } else { Info };
+        self.log_line(level, "identity", now, || {
+            let mut line = format!("call {}: caller {:?}", number(call), verification.outcome);
+            if let Some(attestation) = verification.attestation {
+                let _ = write!(line, ", attestation {}", attestation.as_str());
+            }
+            if let Some(failure) = verification.failure {
+                let _ = write!(line, ", {failure}");
+            }
+            if let Some((code, _)) = verification
+                .response
+                .as_ref()
+                .filter(|_| verification.refused)
+            {
+                let _ = write!(line, ", refused {code}");
+            }
+            line
+        });
     }
 
     fn log_media(&self, call: CallHandle, event: &MediaEvent, now: Instant) {

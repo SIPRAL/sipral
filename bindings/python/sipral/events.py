@@ -18,16 +18,29 @@ import dataclasses
 from ._sipral_cffi import ffi, lib
 from .enums import (
     AnswerMode,
+    Attestation,
     AudioChange,
     AudioDirection,
     AudioOrigin,
     AudioRole,
+    KeyExchange,
     Privacy,
     RingSource,
+    VerificationFailure,
+    VerificationOutcome,
+    VerificationStage,
     Verstat,
 )
 
-__all__ = ["Answering", "AudioNotice", "CallerIdentity", "EndCause", "Event"]
+__all__ = [
+    "Answering",
+    "AudioNotice",
+    "CallerIdentity",
+    "EndCause",
+    "Event",
+    "Protection",
+    "Verification",
+]
 
 
 def _bytes(pointer, length: int) -> bytes | None:
@@ -113,6 +126,48 @@ class Event:
             diversion_reason=f["diversion_reason"],
             diversion_count=int(f["diversion_count"]),
             history_count=int(f["history_count"]),
+            verification=VerificationOutcome(f["verification"]),
+            attestation=Attestation(f["attestation"]),
+            verification_failure=VerificationFailure(f["verification_failure"]),
+        )
+
+    @property
+    def verification(self) -> "Verification | None":
+        """`SIPRAL_EVENT_KIND_CALLER_VERIFICATION`, typed: the certificate
+        this stack's verification service wants (``stage`` is
+        ``CERTIFICATE_WANTED``; fetch ``certificate_url`` and hand it to
+        :meth:`sipral.stack.Stack.stir_certificate`), or its verdict on the
+        caller. ``None`` on any other event."""
+        if self.kind != lib.SIPRAL_EVENT_KIND_CALLER_VERIFICATION:
+            return None
+        f = self.fields
+        return Verification(
+            stage=VerificationStage(f["stage"]),
+            outcome=VerificationOutcome(f["outcome"]),
+            failure=VerificationFailure(f["failure"]),
+            attestation=Attestation(f["attestation"]),
+            verstat=Verstat(f["verstat"]),
+            response_code=int(f["response_code"]),
+            refused=bool(f["refused"]),
+            certificate_url=f["certificate_url"],
+            orig=f["orig"],
+            origid=f["origid"],
+            detail=f["detail"],
+        )
+
+    @property
+    def protection(self) -> "Protection | None":
+        """How the call's media is protected, on the media events that
+        start, change or secure it -- the encryption report as it stood.
+        ``None`` on any other event."""
+        if self.kind not in _PROTECTION_KINDS:
+            return None
+        f = self.fields
+        return Protection(
+            key_exchange=KeyExchange(f["key_exchange"]),
+            encrypted=bool(f["encrypted"]),
+            authenticated=bool(f["authenticated"]),
+            suite=int(f["suite"]),
         )
 
     @property
@@ -201,6 +256,47 @@ class CallerIdentity:
     diversion_reason: str | None
     diversion_count: int
     history_count: int
+    #: This stack's own verdict on the caller (RFC 8224), for an account that
+    #: verifies: unlike ``verstat``, what this end checked itself.
+    verification: "VerificationOutcome" = VerificationOutcome.NONE
+    attestation: "Attestation" = Attestation.NONE
+    verification_failure: "VerificationFailure" = VerificationFailure.NONE
+
+
+@dataclasses.dataclass(frozen=True)
+class Verification:
+    """One half of a caller's verification (RFC 8224 Section 6.2): the
+    certificate wanted, or the verdict. ``refused`` says a strict account
+    refused the call with ``response_code``, and it ends rather than
+    rings."""
+
+    stage: "VerificationStage"
+    outcome: "VerificationOutcome"
+    failure: "VerificationFailure"
+    attestation: "Attestation"
+    verstat: "Verstat"
+    response_code: int
+    refused: bool
+    certificate_url: str | None
+    orig: str | None
+    origid: str | None
+    detail: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class Protection:
+    """How one stream is protected: the encryption report's entry, on a
+    media event or from :meth:`sipral.media.Media.encryption`. ``suite`` is a
+    :class:`sipral.enums.SrtpSuite` number, zero while none runs;
+    ``authenticated`` is set for a DTLS-SRTP stream whose handshake checked
+    the far end's certificate against its signalled fingerprint, and never
+    for SDES."""
+
+    key_exchange: "KeyExchange"
+    encrypted: bool
+    authenticated: bool
+    suite: int
+    awaiting_keys: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -279,6 +375,29 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "answer_after_ms": int(call.answer_after_ms) if call.has_answer_after else None,
             "ring_source": int(call.ring_source),
             "alert_info": _text(call.alert_info, call.alert_info_len),
+            "verification": int(call.verification),
+            "attestation": int(call.attestation),
+            "verification_failure": int(call.verification_failure),
+        }
+
+    # Who is calling, as a signature says: the certificate wanted, or the
+    # verdict (`Stack.stir`, `Stack.stir_certificate`).
+    if kind == lib.SIPRAL_EVENT_KIND_CALLER_VERIFICATION:
+        verification = payload.verification
+        return {
+            "stage": int(verification.stage),
+            "outcome": int(verification.outcome),
+            "failure": int(verification.failure),
+            "attestation": int(verification.attestation),
+            "verstat": int(verification.verstat),
+            "response_code": int(verification.response_code),
+            "refused": bool(verification.refused),
+            "certificate_url": _text(
+                verification.certificate_url, verification.certificate_url_len
+            ),
+            "orig": _text(verification.orig, verification.orig_len),
+            "origid": _text(verification.origid, verification.origid_len),
+            "detail": _text(verification.detail, verification.detail_len),
         }
 
     # The audio engine's own news, in device mode: a device arrived or left,
@@ -309,6 +428,9 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "held_ms": int(media.held_ms),
             "suite": int(media.suite),
             "source": int(media.source),
+            "key_exchange": int(media.key_exchange),
+            "encrypted": bool(media.encrypted),
+            "authenticated": bool(media.authenticated),
         }
 
     if kind == lib.SIPRAL_EVENT_KIND_RESOLVE_NEEDED:
@@ -404,6 +526,14 @@ _CALL_KINDS = frozenset(
         lib.SIPRAL_EVENT_KIND_CALL_ENDED,
         lib.SIPRAL_EVENT_KIND_DTMF_SENT,
         lib.SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED,
+    }
+)
+
+_PROTECTION_KINDS = frozenset(
+    {
+        lib.SIPRAL_EVENT_KIND_MEDIA_STARTED,
+        lib.SIPRAL_EVENT_KIND_MEDIA_CHANGED,
+        lib.SIPRAL_EVENT_KIND_MEDIA_SECURED,
     }
 )
 

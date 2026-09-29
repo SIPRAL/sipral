@@ -175,6 +175,29 @@ val account = client.addAccount(
 )
 ```
 
+### STIR/SHAKEN, SRTP per account and the encryption report
+
+`addAccount(..., security = SipralAccountSecurity(stirKey = key,
+stirCertificateUrl = url))` signs every call the account places (RFC 8224,
+with RFC 8588's `attest` and `origid`); the key is the bare 32 bytes or SEC1
+or PKCS #8 in DER or PEM, and the client needs the time first:
+`client.stir(null)` on one that only signs. A signed INVITE is some five
+hundred octets longer, and past RFC 3261's 1300 over UDP it needs a stream
+transport. `client.stir(anchors)` verifies the callers of every account that
+reports (the default) or is `SipralStirVerification.STRICT`:
+`SIPRAL_EVENT_KIND_CALLER_VERIFICATION`, read with `verificationOf(event)`,
+asks at `CERTIFICATE_WANTED` for the chain at `certificateUrl`, which
+`client.stirCertificate(event.call, chain)` hands over (null for one that
+could not be had); the verdict follows as the same kind, just before the
+call, and `SipralCallerIdentity.verification` carries it.
+`SipralAccountSecurity(srtp = SipralSrtp.REQUIRED, srtpSuites =
+listOf("AES_CM_128_HMAC_SHA1_80"))` holds every call of one account to its
+own SRTP policy and suites; a call may ask for more and never less.
+`call.media?.encryption()` is the encryption report (`SipralStreamProtection`:
+how the keys were exchanged, encrypted, the suite, and whether the exchange
+authenticated the far end), and `payload.media` carries the same on media
+started, changed and secured.
+
 ### A call on the move
 
 `client.networkChanged(SipralNetwork(SipralLink.WIFI, "10.0.0.7", interfaceName = "wlan0"))`

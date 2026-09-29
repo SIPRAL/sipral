@@ -62,6 +62,39 @@ impl Tn {
         }
     }
 
+    /// The number in `written` in the canonical form of RFC 8224 §8.3: a
+    /// leading `+` and the visual separators of RFC 3966 §5.1.1 (`-`, `.`,
+    /// `(`, `)`) and spaces dropped, what is left being one to fifteen of
+    /// `0123456789#*` with at least one digit among them.
+    ///
+    /// Only the first step of §8.3. Turning a national or dial-string
+    /// number into E.164 needs the country and dialling plan of the
+    /// deployment, which this crate does not know; a number that reaches
+    /// here in another form is canonical in that form, as §8.3 allows "in
+    /// the case that an implementation cannot determine how to convert the
+    /// number".
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidTn`] for text holding anything else — a letter makes it a
+    /// name rather than a number (RFC 8224 §8.1) — or nothing but
+    /// separators.
+    pub fn canonical(written: &str) -> Result<Self, InvalidTn> {
+        let body = written.strip_prefix('+').unwrap_or(written);
+        let mut number = String::with_capacity(body.len());
+        for c in body.chars() {
+            match c {
+                '0'..='9' | '#' | '*' => number.push(c),
+                '-' | '.' | '(' | ')' | ' ' => {}
+                _ => return Err(InvalidTn),
+            }
+        }
+        if !number.bytes().any(|b| b.is_ascii_digit()) {
+            return Err(InvalidTn);
+        }
+        Tn::new(&number)
+    }
+
     /// The number.
     #[must_use]
     pub fn as_str(&self) -> &str {

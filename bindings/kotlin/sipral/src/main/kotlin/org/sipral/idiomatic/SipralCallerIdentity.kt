@@ -16,6 +16,9 @@ import org.sipral.SipralSessionTimer
 import org.sipral.SipralSrtpSuite
 import org.sipral.SipralStatus
 import org.sipral.SipralVerstat
+import org.sipral.SipralAttestation
+import org.sipral.SipralVerificationFailure
+import org.sipral.SipralVerificationOutcome
 
 /**
  * The `Privacy` values of RFC 3323 §4.2: what a caller asked to keep to
@@ -138,6 +141,12 @@ data class SipralCallerIdentity(
     val diversions: List<SipralDiversion>,
     /** Every `History-Info` entry. */
     val history: List<SipralHistoryEntry>,
+    /** This end's own STIR/SHAKEN verdict on the call's `Identity` (RFC
+     * 8224), when the account verifies: the outcome, the attestation a valid
+     * SHAKEN PASSporT claimed, and why an invalid one did not hold. */
+    val verification: SipralVerificationOutcome = SipralVerificationOutcome.NONE,
+    val attestation: SipralAttestation = SipralAttestation.NONE,
+    val verificationFailure: SipralVerificationFailure = SipralVerificationFailure.NONE,
 )
 
 /** How a call asked to be answered (RFC 5373) and rung (`Alert-Info`).
@@ -236,6 +245,11 @@ internal object IdentityReader {
             history = texts(client, call, SipralIdentityText.HISTORY).mapIndexedNotNull { index, uri ->
                 uri?.let { SipralHistoryEntry(it, historyIndexes.getOrNull(index)) }
             },
+            verification = SipralVerificationOutcome.of((data?.verification ?: 0L).toInt())
+                ?: SipralVerificationOutcome.NONE,
+            attestation = SipralAttestation.of((data?.attestation ?: 0L).toInt()) ?: SipralAttestation.NONE,
+            verificationFailure = SipralVerificationFailure.of((data?.verificationFailure ?: 0L).toInt())
+                ?: SipralVerificationFailure.NONE,
         )
     }
 

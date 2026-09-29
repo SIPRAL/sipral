@@ -55,6 +55,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -431,6 +432,29 @@ struct seen {
     sipral_handle_t referral;
     char referral_target[192];
     uint32_t referral_lapsed;
+    /* 8.10: the encryption report the last media event that carries one
+     * said -- how the keys were exchanged (`sipral_key_exchange_t`), whether
+     * the stream is encrypted, whether the exchange authenticated the far
+     * end, and the suite */
+    uint32_t key_exchange;
+    uint32_t report_encrypted;
+    uint32_t report_authenticated;
+    uint32_t report_suite;
+    /* 8.10, `harness-c stir`: the verification service at work on an
+     * incoming call -- the certificate it wants, for which call, and the
+     * verdict it reached */
+    int certificate_wanted;
+    sipral_handle_t verifying_call;
+    char certificate_url[256];
+    int verified;
+    uint32_t verification_outcome;
+    uint32_t verification_failure;
+    uint32_t verification_attestation;
+    uint32_t verification_refused;
+    uint32_t verification_code;
+    char verified_orig[32];
+    /* and the verdict the incoming call's own event carried */
+    uint32_t incoming_verification;
     int events;
     char fault[192];
 };
@@ -456,6 +480,17 @@ static void keep(char *out, size_t room, const void *bytes, size_t len)
 
 #define MARKER 0x5A1AB5u
 
+/* 8.10: what a media event that starts, changes or secures a call's media
+ * says about how it is protected -- the same facts the encryption report
+ * gives at any other moment. */
+static void note_report(struct seen *seen, const sipral_media_event_t *media)
+{
+    seen->key_exchange = media->key_exchange;
+    seen->report_encrypted = media->encrypted;
+    seen->report_authenticated = media->authenticated;
+    seen->report_suite = media->suite;
+}
+
 static void on_event(const sipral_event_t *event, void *user_data)
 {
     struct seen *seen = (struct seen *)user_data;
@@ -477,7 +512,26 @@ static void on_event(const sipral_event_t *event, void *user_data)
         if (seen->incoming == SIPRAL_HANDLE_NONE) {
             seen->incoming = event->call;
             seen->incoming_account = event->account;
+            seen->incoming_verification = event->payload.call.verification;
             keep(seen->invited, sizeof seen->invited, event->message, event->message_len);
+        }
+        break;
+    case SIPRAL_EVENT_KIND_CALLER_VERIFICATION:
+        if (event->payload.verification.stage == SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED) {
+            seen->certificate_wanted = 1;
+            seen->verifying_call = event->call;
+            keep(seen->certificate_url, sizeof seen->certificate_url,
+                 event->payload.verification.certificate_url,
+                 event->payload.verification.certificate_url_len);
+        } else {
+            seen->verified = 1;
+            seen->verification_outcome = event->payload.verification.outcome;
+            seen->verification_failure = event->payload.verification.failure;
+            seen->verification_attestation = event->payload.verification.attestation;
+            seen->verification_refused = event->payload.verification.refused;
+            seen->verification_code = event->payload.verification.response_code;
+            keep(seen->verified_orig, sizeof seen->verified_orig,
+                 event->payload.verification.orig, event->payload.verification.orig_len);
         }
         break;
     case SIPRAL_EVENT_KIND_CALL_CONFIRMED:
@@ -562,13 +616,16 @@ static void on_event(const sipral_event_t *event, void *user_data)
         seen->media_started = 1;
         seen->codec_started = event->payload.media.codec;
         seen->codec_now = event->payload.media.codec;
+        note_report(seen, &event->payload.media);
         break;
     case SIPRAL_EVENT_KIND_MEDIA_CHANGED:
         seen->codec_now = event->payload.media.codec;
+        note_report(seen, &event->payload.media);
         break;
     case SIPRAL_EVENT_KIND_MEDIA_SECURED:
         seen->media_secured = 1;
         seen->secured_suite = event->payload.media.suite;
+        note_report(seen, &event->payload.media);
         break;
     case SIPRAL_EVENT_KIND_MEDIA_FAILED:
         seen->media_failed = 1;
@@ -662,6 +719,10 @@ struct endpoint {
 
     int sip_fd;
     int rtp_fd;
+    /* `harness-c stir`: a TCP connection the stack's signalling also runs
+     * on, bound as transport STIR_TCP_TRANSPORT -- a signed INVITE is too
+     * large for a datagram (RFC 3261 §18.1.1) -- or -1 */
+    int sip_tcp_fd;
     /* `FLOW_ICE_NAT` over TCP: the RTP socket's connection to the TURN
      * server, opened when the stack asks and read on every turn of the loop
      * from then on, media handle or not */
@@ -784,6 +845,25 @@ static int listening;
 static uint32_t ice_for_this_flow;
 static uint32_t referrals_for_this_flow;
 
+/* The server this run's flows are placed against, as the command line named
+ * it: what `extension_for` needs to tell Asterisk's SDES extension from
+ * FreeSWITCH's. */
+static const char *server_for_this_run;
+
+/* 8.10: the SRTP policy the account a flow opens holds its calls to, a
+ * `SIPRAL_SRTP_*` in `sipral_account_config_t::srtp`, or zero for the
+ * stack's own -- every flow but the three that prove the policy per
+ * account. */
+static uint32_t account_srtp_for_this_flow;
+
+/* 8.10, `harness-c stir`: what the account being opened signs with and how
+ * it verifies. A key and its certificate's URL, both or neither, and a
+ * `SIPRAL_STIR_VERIFICATION_*`. */
+static const uint8_t *stir_key_for_this_flow;
+static size_t stir_key_len_for_this_flow;
+static const char *stir_url_for_this_flow;
+static uint32_t stir_verification_for_this_flow;
+
 /* Whether SIPRAL_REGISTRAR_KEEPALIVE says `off`. */
 static int keepalive_off(void)
 {
@@ -827,7 +907,17 @@ static void flush_signalling(struct endpoint *end)
         if (message.len == 0) {
             return;
         }
-        if (address_of(destination, &to) == 0) {
+        if (message.transport != SIPRAL_TRANSPORT_MAIN && end->sip_tcp_fd >= 0) {
+            size_t written = 0;
+            while (written < message.len) {
+                ssize_t put = send(end->sip_tcp_fd, out + written, message.len - written,
+                                   NO_SIGNAL);
+                if (put <= 0) {
+                    break;
+                }
+                written += (size_t)put;
+            }
+        } else if (address_of(destination, &to) == 0) {
             (void)sendto(end->sip_fd, out, message.len, 0,
                          (const struct sockaddr *)&to, sizeof to);
         }
@@ -841,10 +931,21 @@ static void flush_signalling(struct endpoint *end)
     }
 }
 
-/* Everything that has arrived on the signalling socket. */
+/* The transport number `harness-c stir` binds its TCP connections as. */
+#define STIR_TCP_TRANSPORT 1u
+
+/* Everything that has arrived on the signalling socket, and on the TCP
+ * connection beside it when there is one. */
 static void read_signalling(struct endpoint *end, uint64_t now)
 {
     static uint8_t in[DATAGRAM];
+    if (end->sip_tcp_fd >= 0) {
+        ssize_t got = recv(end->sip_tcp_fd, in, sizeof in, 0);
+        if (got > 0) {
+            (void)sipral_stack_receive_stream(end->stack, STIR_TCP_TRANSPORT, in, (size_t)got,
+                                              now);
+        }
+    }
     for (;;) {
         struct sockaddr_in from;
         socklen_t length = sizeof from;
@@ -1550,6 +1651,10 @@ static void seeds_for(unsigned which, uint8_t signalling[32], uint8_t media[32])
 
 static void close_endpoint(struct endpoint *end)
 {
+    if (end->sip_tcp_fd >= 0) {
+        (void)close(end->sip_tcp_fd);
+        end->sip_tcp_fd = -1;
+    }
     if (end->stack != SIPRAL_HANDLE_NONE) {
         (void)sipral_stack_destroy(end->stack);
         end->stack = SIPRAL_HANDLE_NONE;
@@ -1589,6 +1694,7 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     memset(end, 0, sizeof *end);
     end->sip_fd = -1;
     end->rtp_fd = -1;
+    end->sip_tcp_fd = -1;
     end->turn_fd = -1;
     end->seen.marker = MARKER;
     end->server = *remote;
@@ -1707,6 +1813,27 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     account.contact_len = strlen(contact);
     account.registrar_address = registrar_address;
     account.registrar_address_len = strlen(registrar_address);
+    account.srtp = account_srtp_for_this_flow;
+    account.stir_verification = stir_verification_for_this_flow;
+    if (stir_key_for_this_flow != NULL && stir_url_for_this_flow != NULL) {
+        /* a signing account needs the wall clock, paired with this
+         * program's own `now_ms`: a stack that only signs gives it with no
+         * anchors */
+        sipral_stir_config_t clock;
+        memset(&clock, 0, sizeof clock);
+        clock.size = sizeof clock;
+        clock.unix_seconds = (uint64_t)time(NULL);
+        status = sipral_stack_stir(end->stack, &clock, now_ms());
+        if (status != SIPRAL_STATUS_OK) {
+            wrong("sipral_stack_stir", status);
+            close_endpoint(end);
+            return -1;
+        }
+        account.stir_key = stir_key_for_this_flow;
+        account.stir_key_len = stir_key_len_for_this_flow;
+        account.stir_certificate_url = stir_url_for_this_flow;
+        account.stir_certificate_url_len = strlen(stir_url_for_this_flow);
+    }
 
     status = sipral_account_add(end->stack, &account, &end->account);
     if (status != SIPRAL_STATUS_OK) {
@@ -1823,6 +1950,13 @@ enum flow {
      * which is scripts/lab.sh's own `turn` step. Run only when SIPRAL_FLOWS
      * names it. */
     FLOW_ICE_NAT,
+    /* 8.10: the SRTP policy per account, against each server -- SDES
+     * required, DTLS-SRTP required, and off -- set on the account rather
+     * than on the call, and the encryption report read back. Run only when
+     * SIPRAL_FLOWS names them: scripts/lab.sh's own `security` step. */
+    FLOW_ACCOUNT_SDES,
+    FLOW_ACCOUNT_DTLS,
+    FLOW_ACCOUNT_OFF,
     FLOW_COUNT
 };
 
@@ -1891,6 +2025,12 @@ static const char *flow_name(enum flow which)
         return "called behind a NAT, through STUN";
     case FLOW_ICE_NAT:
         return "full ICE through two NATs, calling";
+    case FLOW_ACCOUNT_SDES:
+        return "SDES required by the account";
+    case FLOW_ACCOUNT_DTLS:
+        return "DTLS-SRTP required by the account";
+    case FLOW_ACCOUNT_OFF:
+        return "SRTP off on the account";
     case FLOW_COUNT:
     default:
         return "?";
@@ -1940,6 +2080,12 @@ static const char *flow_key(enum flow which)
         return "natin";
     case FLOW_ICE_NAT:
         return "icenat";
+    case FLOW_ACCOUNT_SDES:
+        return "acctsdes";
+    case FLOW_ACCOUNT_DTLS:
+        return "acctdtls";
+    case FLOW_ACCOUNT_OFF:
+        return "acctoff";
     case FLOW_COUNT:
     default:
         return "?";
@@ -1993,7 +2139,7 @@ static void account_for(enum flow which, const char *server, const char **user,
     if (strcmp(server, "asterisk") != 0) {
         return;
     }
-    if (which == FLOW_SRTP) {
+    if (which == FLOW_SRTP || which == FLOW_ACCOUNT_SDES) {
         named = getenv("SIPRAL_USER_SRTP");
         secret = getenv("SIPRAL_PASS_SRTP");
         fallback = "labuser-srtp";
@@ -2001,7 +2147,7 @@ static void account_for(enum flow which, const char *server, const char **user,
         named = getenv("SIPRAL_USER_INFODTMF");
         secret = getenv("SIPRAL_PASS_INFODTMF");
         fallback = "labuser-infodtmf";
-    } else if (which == FLOW_DTLS) {
+    } else if (which == FLOW_DTLS || which == FLOW_ACCOUNT_DTLS) {
         named = getenv("SIPRAL_USER_DTLS");
         secret = getenv("SIPRAL_PASS_DTLS");
         fallback = "labuser-dtls";
@@ -2189,6 +2335,14 @@ static int runs_against(enum flow which, const char *server, int for_baresip)
         return wanted != NULL && selected(wanted, "natin") && stun != NULL
                && stun[0] != '\0';
     }
+    case FLOW_ACCOUNT_SDES:
+    case FLOW_ACCOUNT_DTLS:
+    case FLOW_ACCOUNT_OFF: {
+        /* only when named: scripts/lab.sh's own `security` step, against
+         * Asterisk and through the proxy to FreeSWITCH */
+        const char *wanted = getenv("SIPRAL_FLOWS");
+        return wanted != NULL && selected(wanted, flow_key(which));
+    }
     case FLOW_NAT: {
         /* only a run that named a STUN server, which is only scripts/lab.sh's
          * own `nat` step: anywhere else there is no NAT in front of this end
@@ -2237,7 +2391,14 @@ static const char *extension_for(enum flow which, const char *named)
     case FLOW_SRTP:
         return "9004";
     case FLOW_DTLS:
+    case FLOW_ACCOUNT_DTLS:
         return "9005";
+    case FLOW_ACCOUNT_SDES:
+        /* Asterisk's SDES endpoint answers 9004; FreeSWITCH behind the proxy
+         * makes secure media mandatory on 9005 and takes SDES there too */
+        return server_for_this_run != NULL && strcmp(server_for_this_run, "asterisk") == 0
+                   ? "9004"
+                   : "9005";
     case FLOW_MWI:
         return "9007";
     case FLOW_G729:
@@ -3103,6 +3264,80 @@ static int flow_ice_nat(struct endpoint *end, const char *server, const char *ex
     return 0;
 }
 
+/* The encryption report of the call a flow placed, stream 0, asked of the
+ * library at this moment. */
+static int report_of(const struct endpoint *end, sipral_stream_encryption_t *stream)
+{
+    size_t count = 0;
+    sipral_status_t status = sipral_media_encryption_count(end->media, &count);
+    if (status != SIPRAL_STATUS_OK || count != 1u) {
+        wrong_text("the encryption report does not name one stream");
+        return -1;
+    }
+    memset(stream, 0, sizeof *stream);
+    stream->size = sizeof *stream;
+    status = sipral_media_encryption_at(end->media, 0, stream);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_media_encryption_at", status);
+        return -1;
+    }
+    return 0;
+}
+
+/* 8.10: a call placed on an account that holds it to a policy of its own,
+ * the call itself naming none: what the far end answered is what the
+ * account asked for, audio crosses, and the encryption report -- asked of
+ * the library and carried on the media events -- says how it is protected.
+ * SDES keys the stream from the first packet and authenticates nothing;
+ * DTLS-SRTP keys it a handshake later and authenticates the far end by the
+ * fingerprint its answer carried; off leaves it in the clear. */
+static int account_policy_held(struct endpoint *end, enum flow which)
+{
+    sipral_stream_encryption_t stream;
+    uint32_t exchange = which == FLOW_ACCOUNT_SDES   ? (uint32_t)SIPRAL_KEY_EXCHANGE_SDES
+                        : which == FLOW_ACCOUNT_DTLS ? (uint32_t)SIPRAL_KEY_EXCHANGE_DTLS
+                                                     : (uint32_t)SIPRAL_KEY_EXCHANGE_NONE;
+    int encrypted = which != FLOW_ACCOUNT_OFF;
+    int authenticated = which == FLOW_ACCOUNT_DTLS;
+
+    if (which == FLOW_ACCOUNT_DTLS) {
+        (void)wait_until(end, keyed_media_arrived, DWELL_MS);
+        if (keying_failed(end)) {
+            return -1;
+        }
+    }
+    dwell(end, DWELL_MS);
+    if (report_of(end, &stream) != 0) {
+        return -1;
+    }
+    if (stream.key_exchange != exchange || (stream.encrypted != 0) != encrypted
+        || (stream.authenticated != 0) != authenticated || stream.awaiting_keys != 0) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "the encryption report says key exchange %u, encrypted %u, "
+                       "authenticated %u, awaiting %u",
+                       (unsigned)stream.key_exchange, (unsigned)stream.encrypted,
+                       (unsigned)stream.authenticated, (unsigned)stream.awaiting_keys);
+        return -1;
+    }
+    if (encrypted && stream.suite == SIPRAL_SRTP_SUITE_UNKNOWN) {
+        wrong_text("an encrypted stream reports no suite");
+        return -1;
+    }
+    if (end->seen.key_exchange != exchange || (end->seen.report_encrypted != 0) != encrypted) {
+        wrong_text("the media events disagree with the encryption report");
+        return -1;
+    }
+    if (encrypted && !secured(end)) {
+        wrong_text("the call connected but never ran under the account's policy");
+        return -1;
+    }
+    if (encrypted) {
+        end->seen.media_secured = 1;
+        end->seen.secured_suite = stream.suite;
+    }
+    return 0;
+}
+
 static int run_flow(enum flow which, struct endpoint *end, const char *server,
                     const char *extension, const char *other)
 {
@@ -3451,6 +3686,11 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
         break;
     }
 
+    case FLOW_ACCOUNT_SDES:
+    case FLOW_ACCOUNT_DTLS:
+    case FLOW_ACCOUNT_OFF:
+        return account_policy_held(end, which);
+
     case FLOW_REGISTER:
     case FLOW_MESSAGE:
     case FLOW_MWI:
@@ -3477,7 +3717,8 @@ static int audio_holds(const struct endpoint *end, enum flow which)
 {
     const char *required = getenv("SIPRAL_REQUIRE_AUDIO");
     if (which != FLOW_CALL && which != FLOW_SRTP && which != FLOW_NAT
-        && which != FLOW_NAT_INCOMING && which != FLOW_G729 && which != FLOW_PEER_HANGUP) {
+        && which != FLOW_NAT_INCOMING && which != FLOW_G729 && which != FLOW_PEER_HANGUP
+        && which != FLOW_ACCOUNT_SDES && which != FLOW_ACCOUNT_OFF) {
         return 1;
     }
     if (end->sent == 0) {
@@ -4056,6 +4297,366 @@ static int listener_done(struct endpoint *end)
  * taken with `sipral_call_accept_transfer`, which places the call it names
  * with this end's media, and the tone is played into it for `DWELL_MS` before
  * this end hangs up. Every step prints a line scripts/lab.sh reads. */
+/* -- STIR/SHAKEN between two stacks of this library ----------------------- */
+
+/* 8.10: the numbers the two ends are, as the test certificate scripts/lab.sh's
+ * `security` step makes covers the first (interop/stir/run.sh). */
+#define STIR_CALLER "12155551212"
+#define STIR_CALLED "12125551213"
+
+/* How long one STIR call is given to be verified, answered and heard. */
+#define STIR_PATIENCE_MS 15000u
+
+/* Everything a file holds, up to `room` bytes; zero on success. */
+static int slurp(const char *path, uint8_t *out, size_t room, size_t *len)
+{
+    FILE *file;
+    if (path == NULL) {
+        return -1;
+    }
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        return -1;
+    }
+    *len = fread(out, 1, room, file);
+    (void)fclose(file);
+    return *len == 0 || *len == room ? -1 : 0;
+}
+
+/* Fetch the certificate a verification asked for, the way an application
+ * does it: over HTTP, from the URL the PASSporT named. Only a URL made of
+ * what a lab URL is made of is fetched, since it goes on a command line. */
+static int fetch(const char *url, uint8_t *out, size_t room, size_t *len)
+{
+    char command[384];
+    FILE *pipe;
+    const char *at;
+    for (at = url; *at != '\0'; at++) {
+        if (!isalnum((unsigned char)*at) && strchr(":/._-", *at) == NULL) {
+            return -1;
+        }
+    }
+    (void)snprintf(command, sizeof command, "curl -sf --max-time 3 '%s'", url);
+    pipe = popen(command, "r");
+    if (pipe == NULL) {
+        return -1;
+    }
+    *len = fread(out, 1, room, pipe);
+    return pclose(pipe) == 0 && *len > 0 && *len < room ? 0 : -1;
+}
+
+/* A socket that does not wait: a signalling connection is read on every
+ * turn of the loop, whether or not anything arrived. */
+static int unblocked(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    return flags < 0 ? -1 : fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+/* The TCP connection a signed call goes out on, and comes in on: the callee
+ * listens on the address its UDP socket has, the caller connects to it, and
+ * each binds its end as STIR_TCP_TRANSPORT -- what an application does when
+ * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` says a request will not fit a
+ * datagram, done before the request rather than after, since a signed
+ * INVITE never does. */
+static int stir_connect(struct endpoint *caller, struct endpoint *callee)
+{
+    struct sockaddr_in at;
+    struct sockaddr_in local;
+    socklen_t length = sizeof local;
+    char caller_local[SIPRAL_ADDRESS_BYTES];
+    char callee_local[SIPRAL_ADDRESS_BYTES];
+    int listener;
+    int one = 1;
+    sipral_status_t status;
+    if (address_of(callee->sip_address, &at) != 0) {
+        wrong_text("the callee has no address");
+        return -1;
+    }
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener < 0
+        || setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0
+        || bind(listener, (const struct sockaddr *)&at, sizeof at) != 0
+        || listen(listener, 1) != 0) {
+        wrong_text("the callee cannot listen on TCP");
+        if (listener >= 0) {
+            (void)close(listener);
+        }
+        return -1;
+    }
+    caller->sip_tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (caller->sip_tcp_fd < 0
+        || connect(caller->sip_tcp_fd, (const struct sockaddr *)&at, sizeof at) != 0
+        || getsockname(caller->sip_tcp_fd, (struct sockaddr *)&local, &length) != 0
+        || address_text(&local, caller_local, sizeof caller_local) != 0) {
+        wrong_text("the caller cannot connect on TCP");
+        (void)close(listener);
+        return -1;
+    }
+    callee->sip_tcp_fd = accept(listener, NULL, NULL);
+    (void)close(listener);
+    if (callee->sip_tcp_fd < 0 || unblocked(callee->sip_tcp_fd) != 0
+        || unblocked(caller->sip_tcp_fd) != 0) {
+        wrong_text("the callee never took the TCP connection");
+        return -1;
+    }
+    (void)snprintf(callee_local, sizeof callee_local, "%s", callee->sip_address);
+    status = sipral_stack_transport_bind(caller->stack, STIR_TCP_TRANSPORT,
+                                         SIPRAL_TRANSPORT_TCP, caller_local,
+                                         strlen(caller_local), callee->sip_address,
+                                         strlen(callee->sip_address), now_ms(), NULL);
+    if (status == SIPRAL_STATUS_OK) {
+        status = sipral_stack_transport_bind(callee->stack, STIR_TCP_TRANSPORT,
+                                             SIPRAL_TRANSPORT_TCP, callee_local,
+                                             strlen(callee_local), caller_local,
+                                             strlen(caller_local), now_ms(), NULL);
+    }
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_stack_transport_bind", status);
+        return -1;
+    }
+    return 0;
+}
+
+/* Place the call at STIR_CALLED, on the TCP connection above. */
+static int stir_place(struct endpoint *caller, const struct endpoint *callee)
+{
+    sipral_call_config_t call;
+    char target[192];
+    sipral_status_t status;
+    (void)snprintf(target, sizeof target, "sip:%s@%s", STIR_CALLED, callee->sip_address);
+    memset(&call, 0, sizeof call);
+    call.size = sizeof call;
+    call.target = target;
+    call.target_len = strlen(target);
+    call.media_address = caller->rtp_address;
+    call.media_address_len = strlen(caller->rtp_address);
+    call.destination = callee->sip_address;
+    call.destination_len = strlen(callee->sip_address);
+    call.transport = STIR_TCP_TRANSPORT;
+    status = sipral_call_place(caller->stack, caller->account, &call, &caller->call, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_place", status);
+        return -1;
+    }
+    return 0;
+}
+
+/* One call from a signing stack to a verifying one, each on its own
+ * sockets in this process: the caller signs as STIR_CALLER with the key at
+ * `key_path` whose chain is at `url` (both NULL for a caller that signs
+ * nothing), the callee verifies against the anchor at SIPRAL_STIR_ANCHOR
+ * under `verification`, fetches the certificate when asked, and answers
+ * whatever it is told of. `refused` is whether the callee is expected to
+ * refuse the call rather than ring. */
+static int stir_call(const char *label, const char *key_path, const char *url,
+                     uint32_t verification, int refused, uint32_t outcome, uint32_t code)
+{
+    static uint8_t key[8192];
+    static uint8_t anchor[65536];
+    static uint8_t chain[65536];
+    size_t key_len = 0;
+    size_t anchor_len = 0;
+    size_t chain_len = 0;
+    struct sockaddr_in nowhere;
+    struct sockaddr_in callee_at;
+    struct endpoint callee;
+    struct endpoint caller;
+    sipral_stir_config_t stir;
+    sipral_status_t status;
+    uint64_t deadline;
+    int fetched = 0;
+    int ok = 0;
+
+    trouble[0] = '\0';
+    if (slurp(getenv("SIPRAL_STIR_ANCHOR"), anchor, sizeof anchor, &anchor_len) != 0) {
+        printf("  FAIL  %s — SIPRAL_STIR_ANCHOR names no readable certificate\n", label);
+        return -1;
+    }
+    if (key_path != NULL && slurp(key_path, key, sizeof key, &key_len) != 0) {
+        printf("  FAIL  %s — no readable key at %s\n", label, key_path);
+        return -1;
+    }
+    (void)address_of("127.0.0.1:9", &nowhere);
+
+    calling_a_peer = 1;
+    stir_key_for_this_flow = NULL;
+    stir_url_for_this_flow = NULL;
+    stir_verification_for_this_flow = verification;
+    if (open_endpoint(&callee, 60u, "127.0.0.1", &nowhere, STIR_CALLED, "") != 0) {
+        printf("  FAIL  %s — the callee: %s\n", label, trouble);
+        return -1;
+    }
+    memset(&stir, 0, sizeof stir);
+    stir.size = sizeof stir;
+    stir.anchors = anchor;
+    stir.anchors_len = anchor_len;
+    stir.unix_seconds = (uint64_t)time(NULL);
+    status = sipral_stack_stir(callee.stack, &stir, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        printf("  FAIL  %s — sipral_stack_stir: %s\n", label, sipral_status_name(status));
+        close_endpoint(&callee);
+        return -1;
+    }
+
+    (void)address_of(callee.sip_address, &callee_at);
+    stir_verification_for_this_flow = 0u;
+    if (key_path != NULL) {
+        stir_key_for_this_flow = key;
+        stir_key_len_for_this_flow = key_len;
+        stir_url_for_this_flow = url;
+    }
+    if (open_endpoint(&caller, 61u, "127.0.0.1", &callee_at, "+" STIR_CALLER, "") != 0) {
+        printf("  FAIL  %s — the caller: %s\n", label, trouble);
+        close_endpoint(&callee);
+        return -1;
+    }
+    stir_key_for_this_flow = NULL;
+    stir_url_for_this_flow = NULL;
+
+    if (stir_connect(&caller, &callee) != 0 || stir_place(&caller, &callee) != 0) {
+        printf("  FAIL  %s — %s\n", label, trouble);
+        close_endpoint(&caller);
+        close_endpoint(&callee);
+        return -1;
+    }
+
+    deadline = now_ms() + STIR_PATIENCE_MS;
+    while (now_ms() < deadline) {
+        uint64_t now = now_ms();
+        pump(&caller, now);
+        pump(&callee, now);
+        if (callee.seen.certificate_wanted && !fetched) {
+            fetched = 1;
+            if (fetch(callee.seen.certificate_url, chain, sizeof chain, &chain_len) != 0) {
+                chain_len = 0;
+            }
+            status = sipral_call_stir_certificate(callee.stack, callee.seen.verifying_call,
+                                                  chain_len == 0 ? NULL : chain, chain_len,
+                                                  now_ms());
+            if (status != SIPRAL_STATUS_OK) {
+                wrong("sipral_call_stir_certificate", status);
+                break;
+            }
+        }
+        if (callee.call == SIPRAL_HANDLE_NONE && callee.seen.incoming != SIPRAL_HANDLE_NONE) {
+            callee.call = callee.seen.incoming;
+            callee.echoing = 1;
+            status = sipral_call_answer_media(callee.stack, callee.call, callee.rtp_address,
+                                              strlen(callee.rtp_address), now_ms());
+            if (status != SIPRAL_STATUS_OK) {
+                wrong("sipral_call_answer_media", status);
+                break;
+            }
+        }
+        if (callee.call != SIPRAL_HANDLE_NONE && callee.seen.confirmed
+            && callee.media == SIPRAL_HANDLE_NONE && open_media(&callee, callee.call) != 0) {
+            break;
+        }
+        if (caller.seen.confirmed && caller.media == SIPRAL_HANDLE_NONE
+            && open_media(&caller, caller.call) != 0) {
+            break;
+        }
+        if (caller.seen.ended || (caller.media != SIPRAL_HANDLE_NONE && caller.audible >= 10u)) {
+            break;
+        }
+        sleep_ms(5);
+    }
+
+    if (trouble[0] != '\0') {
+        printf("  FAIL  %s — %s\n", label, trouble);
+    } else if (!callee.seen.verified) {
+        printf("  FAIL  %s — no verdict was reached\n", label);
+    } else if (callee.seen.verification_outcome != outcome
+               || callee.seen.verification_code != code
+               || (callee.seen.verification_refused != 0) != refused) {
+        printf("  FAIL  %s — the verdict was outcome %u, failure %u, response %u, refused %u\n",
+               label, (unsigned)callee.seen.verification_outcome,
+               (unsigned)callee.seen.verification_failure,
+               (unsigned)callee.seen.verification_code,
+               (unsigned)callee.seen.verification_refused);
+    } else if (refused && (caller.seen.confirmed || callee.seen.incoming != SIPRAL_HANDLE_NONE)) {
+        printf("  FAIL  %s — a call the callee refused rang all the same\n", label);
+    } else if (refused && !caller.seen.ended) {
+        printf("  FAIL  %s — the caller never heard the refusal\n", label);
+    } else if (!refused
+               && (callee.seen.incoming_verification != outcome || caller.audible == 0u)) {
+        printf("  FAIL  %s — the call rang carrying verdict %u, and %u audible frames came back\n",
+               label, (unsigned)callee.seen.incoming_verification, caller.audible);
+    } else if (outcome == SIPRAL_VERIFICATION_OUTCOME_VALID
+               && (callee.seen.verification_attestation != SIPRAL_ATTESTATION_A
+                   || strcmp(callee.seen.verified_orig, STIR_CALLER) != 0)) {
+        printf("  FAIL  %s — verified attestation %u for %s\n", label,
+               (unsigned)callee.seen.verification_attestation, callee.seen.verified_orig);
+    } else {
+        ok = 1;
+        if (refused) {
+            printf("  pass  %s   (refused %u by the verifying end, the caller hung up on)\n", label,
+                   (unsigned)callee.seen.verification_code);
+        } else {
+            printf("  pass  %s   (verdict %u, %u sent, %u back, %u audible)\n", label,
+                   (unsigned)callee.seen.verification_outcome, caller.sent, caller.received,
+                   caller.audible);
+        }
+    }
+    if (caller.call != SIPRAL_HANDLE_NONE && !caller.seen.ended) {
+        (void)sipral_call_hangup(caller.stack, caller.call, now_ms());
+        deadline = now_ms() + 3000u;
+        while (now_ms() < deadline && !caller.seen.ended) {
+            pump(&caller, now_ms());
+            pump(&callee, now_ms());
+            sleep_ms(5);
+        }
+    }
+    close_endpoint(&caller);
+    close_endpoint(&callee);
+    calling_a_peer = 0;
+    stir_verification_for_this_flow = 0u;
+    return ok ? 0 : -1;
+}
+
+/* `harness-c stir`: three calls between a signing stack and a verifying one
+ * -- a signed call verified and carried, an unsigned one refused 428 by a
+ * strict account, and one signed by a certificate nobody trusts refused 437
+ * -- the certificates made for the run by scripts/lab.sh's `security` step
+ * (interop/stir/run.sh) and served over HTTP beside this process. */
+static int run_stir(void)
+{
+    const char *key = getenv("SIPRAL_STIR_KEY");
+    const char *url = getenv("SIPRAL_STIR_URL");
+    const char *rogue_key = getenv("SIPRAL_STIR_ROGUE_KEY");
+    const char *rogue_url = getenv("SIPRAL_STIR_ROGUE_URL");
+    int failed = 0;
+    if (key == NULL || url == NULL || rogue_key == NULL || rogue_url == NULL) {
+        printf("SIPRAL_STIR_KEY, _URL, _ROGUE_KEY and _ROGUE_URL are all needed\n");
+        return 1;
+    }
+    if (stir_call("a signed call, verified and carried", key, url,
+                  (uint32_t)SIPRAL_STIR_VERIFICATION_REPORT, 0,
+                  (uint32_t)SIPRAL_VERIFICATION_OUTCOME_VALID, 0u)
+        != 0) {
+        failed++;
+    }
+    if (stir_call("an unsigned call, refused by a strict account", NULL, NULL,
+                  (uint32_t)SIPRAL_STIR_VERIFICATION_STRICT, 1,
+                  (uint32_t)SIPRAL_VERIFICATION_OUTCOME_ABSENT, 428u)
+        != 0) {
+        failed++;
+    }
+    if (stir_call("a call signed by a certificate nobody trusts, refused", rogue_key, rogue_url,
+                  (uint32_t)SIPRAL_STIR_VERIFICATION_STRICT, 1,
+                  (uint32_t)SIPRAL_VERIFICATION_OUTCOME_INVALID, 437u)
+        != 0) {
+        failed++;
+    }
+    if (failed == 0) {
+        printf("every STIR call passed\n");
+        return 0;
+    }
+    printf("%d STIR call(s) failed\n", failed);
+    return 1;
+}
+
 static int run_listen(const char *server, uint16_t port, const char *user, const char *pass)
 {
     struct sockaddr_in remote;
@@ -4867,7 +5468,8 @@ int main(int argc, char **argv)
 
     listening = strcmp(server, "listen") == 0;
     robust = strcmp(server, "robust") == 0;
-    if (!listening && !robust) {
+    server_for_this_run = server;
+    if (!listening && !robust && strcmp(server, "stir") != 0) {
         if (resolve(server, port, &remote) != 0
             || address_text(&remote, remote_text, sizeof remote_text) != 0) {
             printf("cannot resolve %s:%u\n", server, (unsigned)port);
@@ -4896,6 +5498,12 @@ int main(int argc, char **argv)
         }
         seed_hex(g_run_seed, hex);
         printf("seed: %s\n", hex);
+    }
+
+    /* `harness-c stir`: two stacks of this library, one signing and one
+     * verifying, with nothing between them */
+    if (strcmp(server, "stir") == 0) {
+        return run_stir();
     }
 
     /* `harness-c robust <peer> [port]`: the same */
@@ -4930,6 +5538,12 @@ int main(int argc, char **argv)
                                  : NULL;
         calling_a_peer = flow == FLOW_ICE_NAT;
         codecs_for_this_flow = flow == FLOW_G729 ? "G729" : NULL;
+        account_srtp_for_this_flow = flow == FLOW_ACCOUNT_SDES
+                                         ? (uint32_t)SIPRAL_SRTP_REQUIRED
+                                     : flow == FLOW_ACCOUNT_DTLS
+                                         ? (uint32_t)SIPRAL_SRTP_DTLS_REQUIRED
+                                     : flow == FLOW_ACCOUNT_OFF ? (uint32_t)SIPRAL_SRTP_NOT_OFFERED
+                                                                : 0u;
         turn_for_this_flow = NULL;
         turn_user_for_this_flow = NULL;
         turn_password_for_this_flow = NULL;

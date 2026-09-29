@@ -134,6 +134,17 @@ codes! {
         AlertInfo = 10,
         /// Every `info=` value on `Alert-Info`.
         AlertName = 11,
+        /// The calling number this stack's verification found a valid
+        /// PASSporT signed for (RFC 8224 §6.2), canonical: one entry, or none
+        /// when nothing verified. ABI 0.31.
+        VerifiedOrig = 12,
+        /// Its origination identifier (RFC 8588 §5), a UUID.
+        VerifiedOrigid = 13,
+        /// The URL of the certificate it was verified against, or that could
+        /// not be had.
+        VerificationCertificate = 14,
+        /// Why it did not verify, in words, for a log.
+        VerificationDetail = 15,
     }
 }
 
@@ -291,8 +302,31 @@ fn pieces(identity: &CallIdentity, which: SipralIdentityText) -> Vec<&[u8]> {
             .iter()
             .map(|one| one.as_bytes())
             .collect(),
+        SipralIdentityText::VerifiedOrig => verified(caller, |verdict| verdict.orig.as_deref()),
+        SipralIdentityText::VerifiedOrigid => verified(caller, |verdict| verdict.origid.as_deref()),
+        SipralIdentityText::VerificationCertificate => {
+            verified(caller, |verdict| verdict.certificate_url.as_deref())
+        }
+        SipralIdentityText::VerificationDetail => {
+            verified(caller, |verdict| verdict.detail.as_deref())
+        }
         SipralIdentityText::Unknown => Vec::new(),
     }
+}
+
+/// One text of this stack's own verdict on the caller, as a list of one or
+/// none.
+fn verified<'a>(
+    caller: &'a sipral_ua::CallerIdentity,
+    piece: impl Fn(&'a sipral_ua::CallerVerification) -> Option<&'a str>,
+) -> Vec<&'a [u8]> {
+    caller
+        .verification
+        .as_ref()
+        .and_then(piece)
+        .map(str::as_bytes)
+        .into_iter()
+        .collect()
 }
 
 fn which_of(which: u32) -> Result<SipralIdentityText, Fail> {
@@ -308,6 +342,10 @@ fn which_of(which: u32) -> Result<SipralIdentityText, Fail> {
         9 => SipralIdentityText::HistoryIndex,
         10 => SipralIdentityText::AlertInfo,
         11 => SipralIdentityText::AlertName,
+        12 => SipralIdentityText::VerifiedOrig,
+        13 => SipralIdentityText::VerifiedOrigid,
+        14 => SipralIdentityText::VerificationCertificate,
+        15 => SipralIdentityText::VerificationDetail,
         other => {
             return Err(fail(
                 SipralStatus::InvalidArgument,

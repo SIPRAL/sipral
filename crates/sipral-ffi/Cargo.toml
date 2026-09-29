@@ -59,8 +59,17 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 # are in every build of the header; a build without the feature refuses
 # `SIPRAL_NAT_STUN` with `SIPRAL_STATUS_NOT_SUPPORTED`, and
 # `SIPRAL_FEATURE_STUN` says so first.
-default = ["opus", "dtls", "ice", "stun"]
+#
+# `stir` is the fifth, carried up the same way and on by default: the
+# facade's STIR/SHAKEN, whose signer, trust anchors and verdicts the entry
+# points here build and read. The header does not branch on it either —
+# `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`, `sipral_stack_stir` and the
+# account's `stir_*` members are in every build of it; a build without the
+# feature answers `SIPRAL_STATUS_NOT_SUPPORTED` to a key or to trust
+# anchors, and `SIPRAL_FEATURE_STIR` says so first.
+default = ["opus", "dtls", "ice", "stun", "stir"]
 opus = ["sipral/opus"]
+stir = ["sipral/stir", "sipral-ua/stir"]
 dtls = ["sipral/dtls"]
 ice = ["sipral/ice", "sipral/ice-lite", "sipral-audio/ice"]
 stun = ["sipral/stun"]
@@ -91,6 +100,9 @@ sipral-audio = { path = "../sipral-audio", version = "0.0.1", features = ["fake"
 # handle does. The same STUN code the facade already links, so nothing new
 # enters the build.
 sipral-nat = { path = "../sipral-nat", version = "0.0.1" }
+# the throwaway STIR PKI the tests of a signed call through this ABI verify
+# against, built in memory from fixed keys
+sipral-stir = { path = "../sipral-stir", version = "0.0.1", features = ["testing"] }
 
 [lints.rust]
 unsafe_code = "allow"

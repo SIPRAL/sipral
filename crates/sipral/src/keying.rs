@@ -135,6 +135,25 @@ pub enum SrtpPolicy {
     /// refused too.
     #[cfg(feature = "dtls")]
     DtlsRequired,
+    /// Offer DTLS-SRTP with SDES beside it for a peer that has no DTLS, and
+    /// let no stream on this call carry audio unencrypted.
+    ///
+    /// The offer is one stream on `RTP/SAVP` carrying both `a=fingerprint`
+    /// and `a=setup` and the `a=crypto` lines: a peer that does DTLS-SRTP
+    /// answers with its own fingerprint and the call is keyed by the
+    /// handshake, and a peer that knows only SDES ignores the fingerprint
+    /// and answers a crypto line, as RFC 4568 has it answer any. `RTP/SAVP`
+    /// rather than `UDP/TLS/RTP/SAVP` (RFC 5764 §8), because the SDES-only
+    /// peer this fallback exists for refuses a stream on a profile it does
+    /// not know, and a DTLS-SRTP peer reads the fingerprint either way.
+    ///
+    /// Answering, an offer carrying a fingerprint is answered with this
+    /// end's own and keyed by the handshake, one carrying only crypto lines
+    /// with SDES, and a plain one is refused as under
+    /// [`SrtpPolicy::Required`]. What the key costs over a transport somebody
+    /// else can read is RFC 4568 §7's, for the calls that fall back.
+    #[cfg(feature = "dtls")]
+    DtlsOrSdes,
 }
 
 impl SrtpPolicy {
@@ -145,7 +164,7 @@ impl SrtpPolicy {
         match self {
             Self::NotOffered => false,
             #[cfg(feature = "dtls")]
-            Self::DtlsOffered | Self::DtlsRequired => true,
+            Self::DtlsOffered | Self::DtlsRequired | Self::DtlsOrSdes => true,
             Self::Offered | Self::Required => true,
         }
     }
@@ -163,7 +182,7 @@ impl SrtpPolicy {
             #[cfg(feature = "dtls")]
             Self::DtlsOffered => false,
             #[cfg(feature = "dtls")]
-            Self::DtlsRequired => true,
+            Self::DtlsRequired | Self::DtlsOrSdes => true,
             Self::Required => true,
         }
     }
@@ -180,30 +199,107 @@ impl SrtpPolicy {
         match self {
             Self::NotOffered | Self::Offered | Self::Required => false,
             #[cfg(feature = "dtls")]
-            Self::DtlsOffered | Self::DtlsRequired => true,
+            Self::DtlsOffered | Self::DtlsRequired | Self::DtlsOrSdes => true,
+        }
+    }
+
+    /// Whether an offer under this policy carries SDES beside a
+    /// DTLS-SRTP fingerprint, and an answer takes whichever the offer
+    /// carried ([`SrtpPolicy::DtlsOrSdes`]).
+    #[must_use]
+    #[cfg_attr(not(feature = "dtls"), allow(dead_code))]
+    pub(crate) const fn falls_back(self) -> bool {
+        match self {
+            #[cfg(feature = "dtls")]
+            Self::DtlsOrSdes => true,
+            _ => false,
+        }
+    }
+
+    /// Whether this policy is at least as strict as `other`: whatever
+    /// `other` refuses, this refuses too. A call placed on an account may
+    /// name its own policy, and one that would carry audio the account's
+    /// would not is refused as the account's security policy (8.10).
+    ///
+    /// [`SrtpPolicy::DtlsRequired`] refuses one thing more than the other
+    /// policies that require encryption: keys that travelled in the body of
+    /// a message. So nothing but itself is at least as strict as it —
+    /// [`SrtpPolicy::Required`] takes an SDES answer, and
+    /// [`SrtpPolicy::DtlsOrSdes`] falls back to one.
+    #[must_use]
+    pub const fn at_least(self, other: Self) -> bool {
+        match other {
+            #[cfg(feature = "dtls")]
+            Self::DtlsRequired => matches!(self, Self::DtlsRequired),
+            _ => !other.requires() || self.requires(),
         }
     }
 }
 
-/// The `a=crypto` lines this end offers, one per [`OFFERED`] suite in the
-/// same order, tagged from 1, each carrying the matching key of `keys`.
+/// What one account's calls do about SRTP, laid over the engine's own
+/// catalogue ([`MediaEngine::set_account_srtp`](crate::MediaEngine::set_account_srtp)):
+/// the SRTP policy per account.
+///
+/// Either half left `None` keeps what the engine's catalogue says; a call
+/// placed with a catalogue of its own
+/// ([`MediaEngine::place_with`](crate::MediaEngine::place_with)) says the
+/// rest for itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AccountSrtp {
+    /// The account's policy.
+    pub policy: Option<SrtpPolicy>,
+    /// The account's suites, most preferred first — see
+    /// [`CodecCatalog::with_srtp_suites`](crate::CodecCatalog::with_srtp_suites).
+    pub suites: Option<Vec<Suite>>,
+}
+
+impl AccountSrtp {
+    /// `catalog` with this laid over it.
+    ///
+    /// # Errors
+    /// What [`CodecCatalog::with_srtp_suites`](crate::CodecCatalog::with_srtp_suites)
+    /// refuses.
+    pub(crate) fn over(
+        &self,
+        mut catalog: crate::CodecCatalog,
+    ) -> Result<crate::CodecCatalog, MediaError> {
+        if let Some(policy) = self.policy {
+            catalog = catalog.with_srtp(policy);
+        }
+        if let Some(suites) = self.suites.as_deref() {
+            catalog = catalog.with_srtp_suites(suites)?;
+        }
+        Ok(catalog)
+    }
+}
+
+/// The `a=crypto` lines this end offers, one per suite in the order given,
+/// tagged from 1, each carrying the key drawn for it.
 ///
 /// `keys` is one key per offered suite, each already the width that suite's
 /// own `key_len`/`salt_len` calls for — [`crate::engine`]'s `draw_key_for`
-/// draws them that way — and in [`OFFERED`]'s own order, so the tag, the
+/// draws them that way — in the order they are offered in, so the tag, the
 /// suite name and the key line up without this function having to ask which
 /// is which.
-pub(crate) fn offer_lines(keys: [KeySalt; OFFERED.len()]) -> Vec<Crypto> {
-    OFFERED
-        .into_iter()
-        .zip(keys)
+pub(crate) fn offer_lines(keys: Vec<(CryptoSuite, KeySalt)>) -> Vec<Crypto> {
+    keys.into_iter()
         .enumerate()
         .map(|(index, (suite, key))| {
-            // tags start at 1; OFFERED has two entries, so this always fits
+            // tags start at 1; a catalogue names at most the seven suites
+            // there are, so this always fits
             let tag = u32::try_from(index).unwrap_or(0) + 1;
             CryptoPolicy::new(tag, suite, key).to_crypto()
         })
         .collect()
+}
+
+/// The suites an SDES offer under `suites` names, in that order: the
+/// catalogue's own list, or [`OFFERED`] when it named none.
+pub(crate) fn sdes_suites(suites: Option<&[Suite]>) -> Vec<CryptoSuite> {
+    suites.map_or_else(
+        || OFFERED.to_vec(),
+        |named| named.iter().copied().map(crypto_suite).collect(),
+    )
 }
 
 /// The line an answer carries: the tag and suite of the accepted offer
@@ -258,10 +354,20 @@ pub(crate) fn key_in_force(stream: &MediaDescription) -> Option<KeySalt> {
 ///
 /// `None` where §7.1.2's other branch applies — no line is acceptable, and
 /// the stream is refused rather than taken on terms nobody agreed.
-pub(crate) fn acceptable(offered: &MediaDescription) -> Option<CryptoPolicy> {
-    crypto_lines(offered)
-        .filter(understood)
-        .find_map(|line| line.policy().filter(usable))
+///
+/// `allowed` is the catalogue's own list of suites, when it named one: a
+/// line under any other suite is passed over as unsupported, which is what
+/// an account that set its suites asked for. `None` takes every suite this
+/// build runs.
+pub(crate) fn acceptable(
+    offered: &MediaDescription,
+    allowed: Option<&[Suite]>,
+) -> Option<CryptoPolicy> {
+    crypto_lines(offered).filter(understood).find_map(|line| {
+        line.policy().filter(usable).filter(|policy| {
+            allowed.is_none_or(|allowed| allowed.contains(&transform(policy.suite)))
+        })
+    })
 }
 
 /// Whether a stream is described on one of the secure profiles, which is what
@@ -427,10 +533,23 @@ fn crypto_lines(stream: &MediaDescription) -> impl Iterator<Item = Crypto> + '_ 
         .filter_map(|attribute| Crypto::parse(attribute.value.as_deref()?))
 }
 
+/// The SDP name of a transform: [`transform`] the other way.
+pub(crate) const fn crypto_suite(suite: Suite) -> CryptoSuite {
+    match suite {
+        Suite::AesCm80 => CryptoSuite::AesCm80,
+        Suite::AesCm32 => CryptoSuite::AesCm32,
+        Suite::AesF8 => CryptoSuite::AesF8,
+        Suite::Aes256Cm80 => CryptoSuite::Aes256Cm80,
+        Suite::Aes256Cm32 => CryptoSuite::Aes256Cm32,
+        Suite::AeadAes128Gcm => CryptoSuite::AeadAes128Gcm,
+        Suite::AeadAes256Gcm => CryptoSuite::AeadAes256Gcm,
+    }
+}
+
 /// The transform a suite names, on the media side of the boundary. Two
 /// enumerations of the same seven suites, because the crate that reads SDP
 /// and the crate that encrypts packets do not depend on each other.
-const fn transform(suite: CryptoSuite) -> Suite {
+pub(crate) const fn transform(suite: CryptoSuite) -> Suite {
     match suite {
         CryptoSuite::AesCm80 => Suite::AesCm80,
         CryptoSuite::AesCm32 => Suite::AesCm32,
@@ -464,13 +583,19 @@ mod tests {
     /// One key per suite [`OFFERED`] names, each the width its own suite
     /// calls for, filled from `fill` on so the four are never the same
     /// bytes.
-    fn offer_keys(fill: u8) -> [KeySalt; OFFERED.len()] {
-        OFFERED.map(|suite| {
-            KeySalt::new(
-                &vec![fill; suite.key_len()],
-                &vec![fill.wrapping_add(1); suite.salt_len()],
-            )
-        })
+    fn offer_keys(fill: u8) -> Vec<(CryptoSuite, KeySalt)> {
+        OFFERED
+            .iter()
+            .map(|suite| {
+                (
+                    *suite,
+                    KeySalt::new(
+                        &vec![fill; suite.key_len()],
+                        &vec![fill.wrapping_add(1); suite.salt_len()],
+                    ),
+                )
+            })
+            .collect()
     }
 
     fn stream(text: &str) -> sipral_core::sdp::MediaDescription {
@@ -510,6 +635,34 @@ mod tests {
         assert!(SrtpPolicy::Required.offers());
     }
 
+    /// A call may ask for more than its account and never for less: not
+    /// for audio in the clear where the account requires SRTP, and not for
+    /// keys in the body where the account requires the handshake.
+    #[test]
+    fn a_policy_is_at_least_as_strict_as_one_that_refuses_no_more_than_it() {
+        use SrtpPolicy::{NotOffered, Offered, Required};
+        assert!(Required.at_least(Required));
+        assert!(Required.at_least(Offered));
+        assert!(Required.at_least(NotOffered));
+        assert!(Offered.at_least(NotOffered));
+        assert!(NotOffered.at_least(Offered));
+        assert!(!Offered.at_least(Required));
+        assert!(!NotOffered.at_least(Required));
+        #[cfg(feature = "dtls")]
+        {
+            use SrtpPolicy::{DtlsOffered, DtlsOrSdes, DtlsRequired};
+            assert!(DtlsRequired.at_least(DtlsRequired));
+            assert!(DtlsRequired.at_least(Required));
+            assert!(DtlsRequired.at_least(DtlsOrSdes));
+            assert!(DtlsOrSdes.at_least(Required));
+            assert!(Required.at_least(DtlsOrSdes));
+            assert!(!Required.at_least(DtlsRequired), "an SDES answer is taken");
+            assert!(!DtlsOrSdes.at_least(DtlsRequired), "it falls back to one");
+            assert!(!DtlsOffered.at_least(DtlsRequired));
+            assert!(!DtlsOffered.at_least(Required));
+        }
+    }
+
     #[test]
     fn the_offer_is_one_line_per_offered_suite_tagged_in_order_strongest_first() {
         let lines = offer_lines(offer_keys(7));
@@ -540,7 +693,7 @@ mod tests {
              a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\
              a=crypto:3 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n",
         );
-        let taken = acceptable(&offered).expect("one of the three is supported");
+        let taken = acceptable(&offered, None).expect("one of the three is supported");
         assert_eq!(taken.tag, 2);
         assert_eq!(taken.suite, CryptoSuite::AesCm32);
     }
@@ -555,7 +708,7 @@ mod tests {
              a=crypto:1 AES_CM_128_HMAC_SHA1_80 \
              inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA UNENCRYPTED_SRTP\r\n",
         );
-        assert!(acceptable(&unencrypted).is_none());
+        assert!(acceptable(&unencrypted, None).is_none());
 
         // §6.3.7: an unknown parameter with no leading dash invalidates the
         // line, and one with a dash may be ignored
@@ -564,14 +717,17 @@ mod tests {
              a=crypto:1 AES_CM_128_HMAC_SHA1_80 \
              inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA FEC_ORDER=FEC_SRTP\r\n",
         );
-        assert!(acceptable(&unknown).is_none());
+        assert!(acceptable(&unknown, None).is_none());
 
         let optional = stream(
             "m=audio 5004 RTP/SAVP 0\r\n\
              a=crypto:1 AES_CM_128_HMAC_SHA1_80 \
              inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA -SOMETHING WSH=128\r\n",
         );
-        assert!(acceptable(&optional).is_some(), "a hint is not a refusal");
+        assert!(
+            acceptable(&optional, None).is_some(),
+            "a hint is not a refusal"
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ use p256::ecdsa::{Signature, SigningKey};
 use crate::MAX_IDENTITY_LEN;
 use crate::base64;
 use crate::identity::{Identity, Token, is_absolute_uri};
+use crate::key;
 use crate::passport::{ALG, Claims, PPT_SHAKEN, header_value};
 
 /// Why a PASSporT could not be signed.
@@ -66,6 +67,29 @@ impl Signer {
             key,
             x5u: x5u.to_owned(),
         })
+    }
+
+    /// A signer holding the private key in `key`, whichever form it is kept
+    /// in: the bare 32-octet scalar, an `ECPrivateKey` (RFC 5915), or a
+    /// PKCS #8 `PrivateKeyInfo` around one (RFC 5958), each as DER or as
+    /// PEM (RFC 7468's `EC PRIVATE KEY` and `PRIVATE KEY`), a certificate
+    /// beside it in the same file skipped. An encrypted key is refused: its
+    /// passphrase is the application's to use.
+    ///
+    /// # Errors
+    ///
+    /// [`SignError::InvalidKey`] for a key in none of these forms or on
+    /// another curve, or [`SignError::InvalidUri`].
+    pub fn from_key(key: &[u8], x5u: &str) -> Result<Self, SignError> {
+        let scalar = zeroize::Zeroizing::new(key::scalar(key).map_err(|_| SignError::InvalidKey)?);
+        Signer::new(&scalar, x5u)
+    }
+
+    /// The URI of the certificate chain, as every PASSporT signed here names
+    /// it in `x5u` and every Identity header field in `info`.
+    #[must_use]
+    pub fn certificate_url(&self) -> &str {
+        &self.x5u
     }
 
     /// The public key, as the uncompressed point of SEC 1 §2.3.3: what the

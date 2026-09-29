@@ -593,10 +593,85 @@ least 90) — the per-account session timer the Rust `Account` always had and
 C did not; `privacy`, the `SIPRAL_PRIVACY_*` bits every call the account
 places asks for, anonymous in `From`; and `trusted_peers`, the comma-separated
 addresses whose asserted identities the account believes and toward which
-alone it asserts its own. SRTP and ICE are not per account in Rust — they are
-per stack and per call, which the C ABI already carries — so nothing was
-added for them. `SIPRAL_FEATURE_CALLER_IDENTITY` (`1 << 12`) says the build
-has all of this.
+alone it asserts its own. `SIPRAL_FEATURE_CALLER_IDENTITY` (`1 << 12`) says
+the build has all of this. SRTP per account came at 0.31, below.
+
+### Who is calling, as a signature says (STIR/SHAKEN)
+
+ABI 0.31, behind `SIPRAL_FEATURE_STIR` (`1 << 16`), the Rust side of which is
+`docs/04-ua.md`'s STIR/SHAKEN section. `sipral_account_config_t` appends, after
+`srtp_suites` below:
+
+| Member | What it says |
+|---|---|
+| `stir_verification` | a `sipral_stir_verification_t`: zero or `REPORT` verifies and reports once the stack has trust anchors, `STRICT` refuses what does not verify with RFC 8224 §6.2.2's response, `OFF` verifies nothing |
+| `stir_key`, `stir_certificate_url` | the P-256 key every call the account places is signed with — the bare scalar, or an `EC PRIVATE KEY` or `PRIVATE KEY` in DER or PEM — and where its certificate chain is published; both or neither |
+| `stir_orig` | the number it signs as, or null for the one in `aor` |
+| `stir_origid`, `stir_attestation` | RFC 8588's `origid` (null draws one for the account) and `attest` (zero is `A`) |
+
+A signing account needs the wall clock, which `sipral_stack_stir` gives the
+stack as `unix_seconds` paired with its `now_ms` — the one pairing only the
+application can make, since `now_ms` counts from wherever the application's
+clock does; without it `sipral_account_add` answers
+`SIPRAL_STATUS_WRONG_STATE`. A stack that only signs makes that call with no
+anchors. `media_clock_unix_seconds` is not taken for it: it goes with no
+`now_ms`.
+
+`sipral_stack_stir(stack, &config, now_ms)` takes a `sipral_stir_config_t`:
+the trust anchors (PEM or DER, one after another), `freshness_seconds` (zero
+for sixty), `certificate_wait_ms` (zero for four seconds) and `unix_seconds`.
+The verification service then works in two halves of
+`SIPRAL_EVENT_KIND_CALLER_VERIFICATION` (47), whose `payload.verification`
+says which by `stage`:
+
+- `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`: fetch `certificate_url`,
+  from a cache or over HTTPS, and hand the chain to
+  `sipral_call_stir_certificate(stack, call, chain, len, now_ms)` — null and
+  zero for one that could not be had. The call waits, and has not been
+  announced: `call` names it all the same. Calling back into the stack from
+  the callback is refused as ever (`SIPRAL_STATUS_BUSY`), so the answer comes
+  after the poll returns.
+- `SIPRAL_VERIFICATION_STAGE_VERIFIED`: the verdict — `outcome`, `failure`,
+  `attestation`, `verstat`, `orig`, `origid`, `certificate_url`, `detail`,
+  and `response_code`, the response §6.2.2 prescribes. It arrives just before
+  `SIPRAL_EVENT_KIND_INCOMING_CALL`, whose call events then carry
+  `verification`, `attestation` and `verification_failure` (appended to
+  `sipral_call_event_t`); with `refused` set, the account was strict, that
+  response went out, and `SIPRAL_EVENT_KIND_CALL_ENDED` follows instead.
+  `sipral_call_identity_text` reads `SIPRAL_IDENTITY_TEXT_VERIFIED_ORIG`,
+  `_VERIFIED_ORIGID`, `_VERIFICATION_CERTIFICATE` and `_VERIFICATION_DETAIL`
+  for the rest of the call.
+
+### SRTP per account, and the encryption report
+
+ABI 0.31, `SIPRAL_FEATURE_SRTP_POLICY` (`1 << 17`). `sipral_account_config_t`
+appends `srtp`, a `sipral_srtp_t` for every call of the account over the
+stack's own (zero keeps the stack's), and `srtp_suites`, the suites those
+calls run, most preferred first, by their RFC 4568 §6.2 and RFC 7714 §14.2
+names separated by commas — the SDES lines offered and accepted and the
+DTLS-SRTP profiles offered and chosen (`docs/05-media.md`). `sipral_srtp_t`
+gains `SIPRAL_SRTP_DTLS_OR_SDES` (6): DTLS-SRTP, falling back to SDES, never
+unencrypted.
+
+`SIPRAL_STATUS_SECURITY_POLICY` (18) is what a call refused by its security
+policy answers: `sipral_call_answer_media` or `sipral_call_ring_media` on an
+INVITE whose offer the call's policy will not carry audio on, which has been
+answered 488 by then; and `sipral_call_place`, `sipral_call_ring_media` or
+`sipral_call_accept_transfer` naming a `srtp` looser than the one its account
+set, before anything is built. A call this end placed that the far end
+answered in the clear under a required policy is hung up with a `Reason` of
+488, after `SIPRAL_EVENT_KIND_MEDIA_FAILED` with
+`SIPRAL_MEDIA_FAULT_SECURITY_POLICY` (10).
+
+The encryption report is `sipral_media_encryption_count(media, &count)` and
+`sipral_media_encryption_at(media, index, &stream)`, a
+`sipral_stream_encryption_t` per stream: `media`, `encrypted`,
+`key_exchange` (a `sipral_key_exchange_t`), `suite`, `authenticated` — set
+for a DTLS-SRTP stream once its handshake checked the far end's certificate
+against the signalled fingerprint, never for SDES — and `awaiting_keys`.
+`sipral_media_event_t` appends `key_exchange`, `encrypted` and
+`authenticated`, filled with `suite` on `SIPRAL_EVENT_KIND_MEDIA_STARTED`,
+`_MEDIA_CHANGED` and `_MEDIA_SECURED`.
 
 ### A call that moves with the network
 

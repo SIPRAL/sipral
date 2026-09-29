@@ -41,6 +41,28 @@ public struct SipralEvent: Sendable {
     public let audioData: AudioEventData?
     /// `payload.stun_server`, for `SipralEventKind.stunServer` only.
     public let stunServerData: StunServerEventData?
+    /// `payload.verification`, for `SipralEventKind.callerVerification` only.
+    public let verificationData: VerificationEventData?
+}
+
+/// What a `SipralEventKind.callerVerification` carries
+/// (`sipral_verification_event_t`). At `.certificateWanted` the application
+/// fetches `certificateUrl` and hands the chain to
+/// `SipralStack.stirCertificate(call:chain:)`; at `.verified` the rest is the
+/// verdict, announced just before the call it is about, which `refused` says
+/// a strict account turned away with `responseCode`.
+public struct VerificationEventData: Sendable {
+    public let stage: SipralVerificationStage?
+    public let outcome: SipralVerificationOutcome?
+    public let failure: SipralVerificationFailure?
+    public let attestation: SipralAttestation?
+    public let verstat: SipralVerstat?
+    public let responseCode: UInt32
+    public let refused: Bool
+    public let certificateUrl: String?
+    public let orig: String?
+    public let origid: String?
+    public let detail: String?
 }
 
 /// The STUN server in use moved to another in the list, or every one of
@@ -167,6 +189,12 @@ public struct CallEventData: Sendable {
     public let ringSource: SipralRingSource?
     /// The first `Alert-Info` URI.
     public let alertInfo: String?
+    /// This end's own STIR/SHAKEN verdict on the call's `Identity` (RFC
+    /// 8224), when the account verifies: the outcome, the attestation a
+    /// valid SHAKEN PASSporT claimed, and why an invalid one did not hold.
+    public let verification: SipralVerificationOutcome?
+    public let attestation: SipralAttestation?
+    public let verificationFailure: SipralVerificationFailure?
 }
 
 public struct MediaEventData: Sendable {
@@ -184,6 +212,12 @@ public struct MediaEventData: Sendable {
     public let suite: UInt32
     public let sourceRaw: UInt32
     public let source: SipralDigitSource?
+    /// How the call's keys were exchanged, whether it is encrypted, and
+    /// whether the exchange authenticated the far end, on media started,
+    /// changed and secured.
+    public let keyExchange: SipralKeyExchange?
+    public let encrypted: Bool
+    public let authenticated: Bool
 
     /// Which SRTP suite keys the call, on `SipralEventKind.mediaSecured`:
     /// RFC 4568's AES-CM, RFC 6188's AES-256 and RFC 7714's AES-GCM each have
@@ -286,7 +320,10 @@ enum SipralEventDecoder {
             privAnswerModeRequired: call.priv_answer_mode_required != 0,
             answerAfterMs: call.has_answer_after != 0 ? call.answer_after_ms : nil,
             ringSource: SipralRingSource(rawValue: call.ring_source),
-            alertInfo: text(call.alert_info, call.alert_info_len)
+            alertInfo: text(call.alert_info, call.alert_info_len),
+            verification: SipralVerificationOutcome(rawValue: call.verification),
+            attestation: SipralAttestation(rawValue: call.attestation),
+            verificationFailure: SipralVerificationFailure(rawValue: call.verification_failure)
         )
     }
 
@@ -331,7 +368,10 @@ enum SipralEventDecoder {
             heldMs: media.held_ms,
             suite: media.suite,
             sourceRaw: media.source,
-            source: SipralDigitSource(rawValue: media.source)
+            source: SipralDigitSource(rawValue: media.source),
+            keyExchange: SipralKeyExchange(rawValue: media.key_exchange),
+            encrypted: media.encrypted != 0,
+            authenticated: media.authenticated != 0
         )
     }
 
@@ -395,6 +435,22 @@ enum SipralEventDecoder {
         )
     }
 
+    private static func verificationData(_ verification: sipral_verification_event_t) -> VerificationEventData {
+        VerificationEventData(
+            stage: SipralVerificationStage(rawValue: verification.stage),
+            outcome: SipralVerificationOutcome(rawValue: verification.outcome),
+            failure: SipralVerificationFailure(rawValue: verification.failure),
+            attestation: SipralAttestation(rawValue: verification.attestation),
+            verstat: SipralVerstat(rawValue: verification.verstat),
+            responseCode: verification.response_code,
+            refused: verification.refused != 0,
+            certificateUrl: textC(verification.certificate_url, verification.certificate_url_len),
+            orig: textC(verification.orig, verification.orig_len),
+            origid: textC(verification.origid, verification.origid_len),
+            detail: textC(verification.detail, verification.detail_len)
+        )
+    }
+
     private static func referralData(_ referral: sipral_referral_event_t) -> ReferralEventData {
         ReferralEventData(
             statusCode: referral.status_code,
@@ -422,8 +478,11 @@ enum SipralEventDecoder {
         var turnStreamData: TurnStreamEventData?
         var audioData: AudioEventData?
         var stunServerData: StunServerEventData?
+        var verificationData: VerificationEventData?
 
-        if kindRaw == SipralEventKind.stunServer.rawValue {
+        if kindRaw == SipralEventKind.callerVerification.rawValue {
+            verificationData = self.verificationData(raw.payload.verification)
+        } else if kindRaw == SipralEventKind.stunServer.rawValue {
             stunServerData = self.stunServerData(raw.payload.stun_server)
         } else if kindRaw == SipralEventKind.audioDevicesChanged.rawValue {
             audioData = self.audioData(raw.payload.audio)
@@ -463,7 +522,8 @@ enum SipralEventDecoder {
             referralData: referralData,
             turnStreamData: turnStreamData,
             audioData: audioData,
-            stunServerData: stunServerData
+            stunServerData: stunServerData,
+            verificationData: verificationData
         )
     }
 }

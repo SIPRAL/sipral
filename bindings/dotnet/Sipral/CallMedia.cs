@@ -184,6 +184,29 @@ public sealed class CallMedia : IDisposable
         return paths;
     }
 
+    /// <summary>The call's encryption report, now
+    /// (<c>sipral_media_encryption_count</c> and
+    /// <c>sipral_media_encryption_at</c>): per stream, whether it is
+    /// encrypted, how its keys were exchanged, the suite, and whether the
+    /// exchange authenticated the far end — SDES never does, a DTLS-SRTP
+    /// handshake whose certificate matched the signalled fingerprint
+    /// does.</summary>
+    public IReadOnlyList<SipralStreamProtection> Encryption()
+    {
+        nuint count = 0;
+        SipralErrors.Call(() => NativeMethods.sipral_media_encryption_count(Handle, out count), "sipral_media_encryption_count");
+        var streams = new List<SipralStreamProtection>((int)count);
+        for (nuint index = 0; index < count; index++)
+        {
+            var stream = SipralStreamEncryption.Sized();
+            SipralErrors.Check(NativeMethods.sipral_media_encryption_at(Handle, index, ref stream), "sipral_media_encryption_at");
+            streams.Add(new SipralStreamProtection(
+                (SipralMediaKind)stream.Media, stream.Encrypted != 0, (SipralKeyExchange)stream.KeyExchange,
+                (SipralSrtpSuite)stream.Suite, stream.Authenticated != 0, stream.AwaitingKeys != 0));
+        }
+        return streams;
+    }
+
     // -- the two frame-carrying calls, as Span/ReadOnlySpan ---------------
 
     /// <summary><c>sipral_media_playback</c>: the frame due for the

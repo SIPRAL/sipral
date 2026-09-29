@@ -524,6 +524,11 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
         crate::versioned::min_size::WATCHED_DIALOG,
     ),
     ("SipralPushEcho", crate::versioned::min_size::PUSH_ECHO),
+    ("SipralStirConfig", crate::versioned::min_size::STIR_CONFIG),
+    (
+        "SipralStreamEncryption",
+        crate::versioned::min_size::STREAM_ENCRYPTION,
+    ),
     ("SipralTransmit", crate::versioned::min_size::TRANSMIT),
     // 32, the same literal `crate::lifecycle::SipralSuspending`'s own
     // `Versioned` impl pins its `MIN_SIZE` at — see the comment there for why
@@ -620,6 +625,13 @@ pub const SURFACE: Surface = Surface {
         crate::identity::SipralIdentityText::ABI,
         crate::identity::SipralSessionTimer::ABI,
         crate::log::SipralLogLevel::ABI,
+        crate::security::SipralKeyExchange::ABI,
+        crate::security::SipralMediaKind::ABI,
+        crate::security::SipralStirVerification::ABI,
+        crate::security::SipralAttestation::ABI,
+        crate::security::SipralVerificationOutcome::ABI,
+        crate::security::SipralVerificationFailure::ABI,
+        crate::security::SipralVerificationStage::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -655,6 +667,7 @@ pub const SURFACE: Surface = Surface {
         crate::nat::SipralTurnStreamEvent::ABI,
         crate::audio::SipralAudioEvent::ABI,
         crate::nat::SipralStunServerEvent::ABI,
+        crate::event::SipralVerificationEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -666,6 +679,8 @@ pub const SURFACE: Surface = Surface {
         crate::audio::SipralAudioInfo::ABI,
         crate::audio::SipralAudioTransmit::ABI,
         crate::log::SipralLogRecord::ABI,
+        crate::security::SipralStirConfig::ABI,
+        crate::security::SipralStreamEncryption::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -819,6 +834,10 @@ pub const SURFACE: Surface = Surface {
         crate::log::sipral_stack_state::ABI,
         crate::ports::sipral_stack_rtp_port_reserve::ABI,
         crate::ports::sipral_stack_rtp_port_release::ABI,
+        crate::security::sipral_stack_stir::ABI,
+        crate::security::sipral_call_stir_certificate::ABI,
+        crate::security::sipral_media_encryption_count::ABI,
+        crate::security::sipral_media_encryption_at::ABI,
     ],
 };
 
@@ -1001,6 +1020,7 @@ mod tests {
             "SipralTurnStreamEvent",
             "SipralAudioEvent",
             "SipralStunServerEvent",
+            "SipralVerificationEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

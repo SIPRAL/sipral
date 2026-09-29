@@ -428,6 +428,25 @@ pub(crate) struct Call {
     /// Who the INVITE of a call this end answered said was calling, read
     /// once, as it arrived, behind the account's trust gate.
     pub(crate) identity: Option<Arc<CallIdentity>>,
+    /// The `Identity` and `Date` a call this end placed carries, signed once
+    /// when it was placed (RFC 8224 §6.1) and written again on every INVITE
+    /// the call sends afterwards: a 422's retry asks again on the same
+    /// call, and a PASSporT still fresh says the same thing.
+    pub(crate) signed: Option<SignedHeaders>,
+}
+
+/// `Identity` (RFC 8224 §4), or `y` in its compact form (§13.1).
+pub(crate) const IDENTITY: sipral_core::msg::HeaderName<'static> =
+    sipral_core::msg::HeaderName::Identity;
+
+/// The two header fields a signed INVITE carries (RFC 8224 §6.1).
+#[derive(Clone, Debug)]
+pub(crate) struct SignedHeaders {
+    /// The `Identity` header field value.
+    pub(crate) identity: Box<[u8]>,
+    /// The `Date` §6.1 Step 3 has the signer add, `None` when the
+    /// application wrote one of its own.
+    pub(crate) date: Option<Box<[u8]>>,
 }
 
 /// A session change this end has offered.
@@ -631,6 +650,7 @@ impl Call {
             headers: Vec::new(),
             ended_by: Box::default(),
             identity: None,
+            signed: None,
         }
     }
 
@@ -686,6 +706,7 @@ impl Call {
             headers: Vec::new(),
             ended_by: Box::default(),
             identity: None,
+            signed: None,
         }
     }
 
@@ -736,6 +757,7 @@ impl Call {
             headers: other.headers.clone(),
             ended_by: Box::default(),
             identity: None,
+            signed: None,
         }
     }
 }

@@ -26,6 +26,7 @@ use std::ffi::c_char;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use sipral::AccountSrtp;
 use sipral_core::auth::Credentials;
 use sipral_core::msg::{HeaderName, Uri};
 use sipral_ua::{Account, HeadersFor, Push};
@@ -36,6 +37,7 @@ use crate::error::{Fail, entry, fail};
 use crate::event::registration_state;
 use crate::handle::SipralHandle;
 use crate::header::{SipralHeader, supplied};
+use crate::media::media_failed;
 use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{required_text, text};
@@ -199,6 +201,56 @@ record! {
         pub trusted_peers: *const c_char,
         /// How many bytes of it.
         pub trusted_peers_len: usize,
+        /// A `SipralSrtp`: what this account's calls do about SRTP, over the
+        /// stack's own `srtp` — offered, required, DTLS-SRTP, or DTLS-SRTP
+        /// falling back to SDES — or zero for the stack's. A call placed from
+        /// it may name a stricter policy of its own and never a looser one
+        /// (`SIPRAL_STATUS_SECURITY_POLICY`), and an INVITE it cannot answer
+        /// under it is refused with 488. ABI 0.31, like every member below.
+        pub srtp: u32,
+        /// The SRTP suites this account's calls run, most preferred first,
+        /// as RFC 4568 §6.2 and RFC 7714 §14.2 name them and separated by
+        /// commas: `AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80`. The `a=crypto`
+        /// lines an SDES offer carries, the lines an SDES answer takes, and
+        /// the DTLS-SRTP profiles a handshake offers and accepts — GCM among
+        /// them only if named. Null for this build's own. Every line is in
+        /// the INVITE: past two or three over UDP it needs a stream.
+        pub srtp_suites: *const c_char,
+        /// How many bytes of it.
+        pub srtp_suites_len: usize,
+        /// A `SipralStirVerification`: what this account does with the
+        /// `Identity` header fields of the calls it receives (RFC 8224 §6.2).
+        /// Zero reports, once `sipral_stack_stir` has given the stack trust
+        /// anchors.
+        pub stir_verification: u32,
+        /// The P-256 private key this account signs its calls with (RFC 8224
+        /// §6.1): the bare 32-octet scalar, or an `EC PRIVATE KEY` or
+        /// `PRIVATE KEY` in DER or PEM. Null and zero signs nothing. Needs the
+        /// wall clock `sipral_stack_stir` gives the stack in `unix_seconds`;
+        /// `SIPRAL_STATUS_WRONG_STATE` without it.
+        pub stir_key: *const u8,
+        /// How many bytes of it.
+        pub stir_key_len: usize,
+        /// Where the certificate chain for `stir_key` is published: the
+        /// `x5u` and `info` of every PASSporT this account signs. Required
+        /// with `stir_key`, and only with it.
+        pub stir_certificate_url: *const c_char,
+        /// How many bytes of it.
+        pub stir_certificate_url_len: usize,
+        /// The telephone number this account signs as, canonicalised by
+        /// RFC 8224 §8.3's first step, or null for the number in `aor`'s user
+        /// part.
+        pub stir_orig: *const c_char,
+        /// How many bytes of it.
+        pub stir_orig_len: usize,
+        /// The origination identifier every call it signs claims (RFC 8588
+        /// §5), a UUID, or null for one the stack draws for the account.
+        pub stir_origid: *const c_char,
+        /// How many bytes of it.
+        pub stir_origid_len: usize,
+        /// A `SipralAttestation`: the level it claims (RFC 8588 §4), zero for
+        /// full attestation, `A`.
+        pub stir_attestation: u32,
     }
 }
 
@@ -461,6 +513,7 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
         account = account.push(push);
     }
     account = unsafe { with_call_options(account, config) }?;
+    account = unsafe { crate::security::with_stir(state, account, config) }?;
     if config.expires_seconds != 0 {
         account = account.expires(expiry(config.expires_seconds)?);
     }
@@ -493,11 +546,24 @@ entry! {
             return Err(fail(SipralStatus::InvalidArgument, "out_account is null"));
         }
         let config = unsafe { read_versioned(config) }?;
+        // read before the stack is locked, like a call's own, so a value this
+        // ABI names nothing for never reaches the point of building anything
+        let srtp = AccountSrtp {
+            policy: crate::media::srtp_policy(config.srtp, "srtp")?,
+            suites: crate::security::srtp_suites(unsafe {
+                text(config.srtp_suites, config.srtp_suites_len, "srtp_suites")
+            }?)?,
+        };
         let handle = with_stack(stack, |state| {
             let account = unsafe { account_from(state, &config) }?;
             let id = state.agent.add_account(account);
+            if let Err(error) = state.engine.set_account_srtp(id, srtp.clone()) {
+                state.agent.remove_account(id);
+                return Err(media_failed(&error));
+            }
             let handle = state.accounts.insert(id).map_err(|status| {
                 state.agent.remove_account(id);
+                let _ = state.engine.set_account_srtp(id, AccountSrtp::default());
                 fail(status, "no room for another account on this stack")
             })?;
             // behind a NAT whose answer is already in, the account starts out
@@ -527,6 +593,8 @@ entry! {
         with_stack(stack, |state| {
             let id = state.accounts.remove(account).map_err(handle_failed)?;
             state.agent.remove_account(id);
+            // the default is the engine's own, which is what forgets it
+            let _ = state.engine.set_account_srtp(id, AccountSrtp::default());
             Ok(())
         })
     }
@@ -677,6 +745,19 @@ pub(crate) mod tests {
             privacy: 0,
             trusted_peers: ptr::null(),
             trusted_peers_len: 0,
+            srtp: 0,
+            srtp_suites: ptr::null(),
+            srtp_suites_len: 0,
+            stir_verification: 0,
+            stir_key: ptr::null(),
+            stir_key_len: 0,
+            stir_certificate_url: ptr::null(),
+            stir_certificate_url_len: 0,
+            stir_orig: ptr::null(),
+            stir_orig_len: 0,
+            stir_origid: ptr::null(),
+            stir_origid_len: 0,
+            stir_attestation: 0,
         }
     }
 

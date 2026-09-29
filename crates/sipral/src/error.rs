@@ -231,14 +231,23 @@ pub enum MediaError {
     #[cfg(feature = "ice")]
     MovesWithIce,
     /// The call asked for SRTP and would have carried audio without it: a
-    /// plain offer arriving at a call set to [`SrtpPolicy::Required`], or a
-    /// plain re-offer inside one.
+    /// plain offer arriving at a call set to [`SrtpPolicy::Required`], a
+    /// plain re-offer inside one, a plain answer to its own offer, or an
+    /// answer keyed the way its policy exists to avoid.
     ///
     /// The refusal is the point. Answering it plainly would be a silent
     /// downgrade, and there is no way for anyone on either end to notice one.
+    /// The call is refused with it, not left to the application: an INVITE
+    /// with 488 Not Acceptable Here (RFC 3261 §21.4.26), a re-offer the same
+    /// way, and a call this end placed and the far end answered plainly
+    /// with a BYE whose `Reason` says 488 (RFC 3326), once its 2xx has been
+    /// acknowledged (§13.2.2.4).
     ///
     /// [`SrtpPolicy::Required`]: crate::SrtpPolicy::Required
     SrtpRequired,
+    /// A list of SRTP suites that names none, or names one twice
+    /// ([`CodecCatalog::with_srtp_suites`](crate::CodecCatalog::with_srtp_suites)).
+    NoSrtpSuite,
     /// The crypto line the negotiation settled on asks for something this
     /// build will not be held to: more than one master key on the line, one
     /// of RFC 4568 §6.3's session parameters that turns off encryption or
@@ -475,6 +484,9 @@ impl MediaError {
                 "this call runs ICE, which moves by a restart and not a new address"
             }
             Self::SrtpRequired => "this call requires SRTP and the far end described none",
+            Self::NoSrtpSuite => {
+                "a list of SRTP suites must name each suite once, and at least one"
+            }
             Self::UnusableKeying => "the crypto line asks for terms this build will not be held to",
             _ => return None,
         })
@@ -605,6 +617,7 @@ mod tests {
             MediaError::NoSuchCall,
             MediaError::NoDtlsSrtp,
             MediaError::SrtpRequired,
+            MediaError::NoSrtpSuite,
             MediaError::UnusableKeying,
             MediaError::NoDtmf,
             MediaError::TooManyDigits,

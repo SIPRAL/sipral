@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)30)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)31)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -259,6 +259,27 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_LOGGING ((uint32_t)16384)
 
 /**
+ * See SIPRAL_FEATURE_DTMF. STIR/SHAKEN (RFC 8224, RFC 8588): an
+ * account given a key and a certificate URL signs every call it places
+ * (`stir_key`, `stir_certificate_url` in `sipral_account_config_t`), and
+ * a stack given trust anchors (`sipral_stack_stir`) verifies who is
+ * calling before the phone rings — `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
+ * `sipral_call_stir_certificate`, and the verdict on every call event.
+ * Behind a compile-time feature, on by default. ABI 0.31.
+ */
+#define SIPRAL_FEATURE_STIR ((uint32_t)65536)
+
+/**
+ * See SIPRAL_FEATURE_DTMF. An SRTP policy and suites per account
+ * (`srtp`, `srtp_suites` in `sipral_account_config_t`), the policy that
+ * falls back from DTLS-SRTP to SDES (`SIPRAL_SRTP_DTLS_OR_SDES`), calls
+ * refused by it with `SIPRAL_STATUS_SECURITY_POLICY`, and the
+ * encryption report of every call (`sipral_media_encryption_at`). ABI
+ * 0.31.
+ */
+#define SIPRAL_FEATURE_SRTP_POLICY ((uint32_t)131072)
+
+/**
  * The buffer a caller has to bring for one outgoing packet.
  *
  * Not a path MTU — RTP does not discover one — but the bound the session
@@ -406,6 +427,7 @@ typedef struct sipral_referral_event sipral_referral_event_t;
 typedef struct sipral_turn_stream_event sipral_turn_stream_event_t;
 typedef struct sipral_audio_event sipral_audio_event_t;
 typedef struct sipral_stun_server_event sipral_stun_server_event_t;
+typedef struct sipral_verification_event sipral_verification_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -417,6 +439,8 @@ typedef struct sipral_audio_device sipral_audio_device_t;
 typedef struct sipral_audio_info sipral_audio_info_t;
 typedef struct sipral_audio_transmit sipral_audio_transmit_t;
 typedef struct sipral_log_record sipral_log_record_t;
+typedef struct sipral_stir_config sipral_stir_config_t;
+typedef struct sipral_stream_encryption sipral_stream_encryption_t;
 
 /**
  * The result of a call across the C ABI.
@@ -533,6 +557,15 @@ enum {
      * that ends makes room; raising the limit means a new stack.
      */
     SIPRAL_STATUS_LIMIT_REACHED = 16,
+    /**
+     * Refused by the account's security policy (ABI 0.31): a call that
+     * would carry audio unencrypted where its account, or its own
+     * configuration, requires SRTP, or that names a policy weaker than
+     * its account's. An INVITE refused this way has been answered with
+     * 488 Not Acceptable Here; a call being placed never left. The last
+     * error says which.
+     */
+    SIPRAL_STATUS_SECURITY_POLICY = 18,
 };
 
 /**
@@ -679,6 +712,18 @@ enum {
      * policy exists to avoid trusting.
      */
     SIPRAL_SRTP_DTLS_REQUIRED = 5,
+    /**
+     * SrtpPolicy::DtlsOrSdes: DTLS-SRTP, falling back to SDES for a
+     * peer that has no DTLS, and never unencrypted. The offer is one
+     * `RTP/SAVP` stream carrying both the fingerprint and the crypto
+     * lines, and the answer decides which keys the call; an offer that
+     * arrives is answered the way it was keyed, and a plain one is
+     * refused with 488. ABI 0.31.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+     * `SIPRAL_FEATURE_DTLS_SRTP`.
+     */
+    SIPRAL_SRTP_DTLS_OR_SDES = 6,
 };
 
 /**
@@ -1082,6 +1127,13 @@ enum {
      * non-ICE profile to fall back to falls back here.
      */
     SIPRAL_MEDIA_FAULT_ICE = 9,
+    /**
+     * The call's SRTP policy refused what the far end described: a plain
+     * answer to a call that requires SRTP, which this end then hangs up
+     * with a `Reason` of 488, or a plain re-offer inside one, refused
+     * with 488 and the call left on the keys it had. ABI 0.31.
+     */
+    SIPRAL_MEDIA_FAULT_SECURITY_POLICY = 10,
 };
 
 /**
@@ -1730,6 +1782,24 @@ enum {
      * neither.
      */
     SIPRAL_EVENT_KIND_STUN_SERVER = 46,
+    /**
+     * Who is calling, as a signature says (RFC 8224, RFC 8588): the
+     * stack's verification service at work on an INVITE for an account
+     * that verifies its callers. ABI 0.31.
+     *
+     * `payload.verification.stage` says which half.
+     * `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`: the certificate at
+     * `certificate_url` is needed; fetch it and hand it to
+     * `sipral_call_stir_certificate`, or hand over nothing if it cannot
+     * be had. The call waits, and the application has not been told of
+     * it yet — `call` names it all the same, for the answer.
+     * `SIPRAL_VERIFICATION_STAGE_VERIFIED`: the verdict, queued just
+     * before the `SIPRAL_EVENT_KIND_INCOMING_CALL` naming the same call,
+     * whose call events carry it too; or, with `refused` set, before the
+     * `SIPRAL_EVENT_KIND_CALL_ENDED` of a call its strict account
+     * refused with `response_code`. `message` is the INVITE.
+     */
+    SIPRAL_EVENT_KIND_CALLER_VERIFICATION = 47,
 };
 
 /**
@@ -2755,6 +2825,25 @@ enum {
      * Every `info=` value on `Alert-Info`.
      */
     SIPRAL_IDENTITY_TEXT_ALERT_NAME = 11,
+    /**
+     * The calling number this stack's verification found a valid
+     * PASSporT signed for (RFC 8224 §6.2), canonical: one entry, or none
+     * when nothing verified. ABI 0.31.
+     */
+    SIPRAL_IDENTITY_TEXT_VERIFIED_ORIG = 12,
+    /**
+     * Its origination identifier (RFC 8588 §5), a UUID.
+     */
+    SIPRAL_IDENTITY_TEXT_VERIFIED_ORIGID = 13,
+    /**
+     * The URL of the certificate it was verified against, or that could
+     * not be had.
+     */
+    SIPRAL_IDENTITY_TEXT_VERIFICATION_CERTIFICATE = 14,
+    /**
+     * Why it did not verify, in words, for a log.
+     */
+    SIPRAL_IDENTITY_TEXT_VERIFICATION_DETAIL = 15,
 };
 
 /**
@@ -2811,6 +2900,226 @@ enum {
      * Every SIP message in and out, whole and redacted.
      */
     SIPRAL_LOG_LEVEL_TRACE = 5,
+};
+
+/**
+ * How a stream's SRTP keys were exchanged. Names for
+ * `sipral_stream_encryption_t::key_exchange` and
+ * `sipral_media_event_t::key_exchange`.
+ */
+typedef uint32_t sipral_key_exchange_t;
+enum {
+    /**
+     * None: the stream was never meant to be encrypted, or the event is
+     * not about one.
+     */
+    SIPRAL_KEY_EXCHANGE_NONE = 0,
+    /**
+     * In the session description (RFC 4568's `a=crypto`): as protected
+     * as the signalling transport that carried it.
+     */
+    SIPRAL_KEY_EXCHANGE_SDES = 1,
+    /**
+     * By a DTLS handshake on the media path (RFC 5764), the far end's
+     * certificate checked against the fingerprint its signalling named.
+     */
+    SIPRAL_KEY_EXCHANGE_DTLS = 2,
+};
+
+/**
+ * What a stream carries. Names for `sipral_stream_encryption_t::media`.
+ */
+typedef uint32_t sipral_media_kind_t;
+enum {
+    /**
+     * Something this ABI has no word for.
+     */
+    SIPRAL_MEDIA_KIND_UNKNOWN = 0,
+    /**
+     * `m=audio`.
+     */
+    SIPRAL_MEDIA_KIND_AUDIO = 1,
+};
+
+/**
+ * What an account does with the `Identity` header fields of the calls
+ * it receives (RFC 8224 §6.2). Names for
+ * `sipral_account_config_t::stir_verification`.
+ */
+typedef uint32_t sipral_stir_verification_t;
+enum {
+    /**
+     * This build's default, which is `REPORT`.
+     */
+    SIPRAL_STIR_VERIFICATION_DEFAULT = 0,
+    /**
+     * Verify nothing.
+     */
+    SIPRAL_STIR_VERIFICATION_OFF = 1,
+    /**
+     * Verify, report the verdict on the call, and deliver every call
+     * whatever it says. In force once the stack has trust anchors
+     * (`sipral_stack_stir`); without any, nothing is fetched or
+     * verified.
+     */
+    SIPRAL_STIR_VERIFICATION_REPORT = 2,
+    /**
+     * Verify, and refuse a call that does not verify with the response
+     * RFC 8224 §6.2.2 prescribes: 428 with no `Identity`, 436 for a
+     * certificate that cannot be had, 437 for one nobody trusted, 438
+     * for a signature that does not hold, 403 "Stale Date". In force
+     * with or without trust anchors: with none, nothing verifies.
+     */
+    SIPRAL_STIR_VERIFICATION_STRICT = 3,
+};
+
+/**
+ * The attestation level of a SHAKEN PASSporT (RFC 8588 §4). Names for
+ * `sipral_account_config_t::stir_attestation`,
+ * `sipral_verification_event_t::attestation` and
+ * `sipral_call_event_t::attestation`.
+ */
+typedef uint32_t sipral_attestation_t;
+enum {
+    /**
+     * None said: on an account, full attestation; on a verdict, a
+     * PASSporT with no SHAKEN claims, or no valid one.
+     */
+    SIPRAL_ATTESTATION_NONE = 0,
+    /**
+     * Full: the signer knows the caller and that the number is theirs.
+     */
+    SIPRAL_ATTESTATION_A = 1,
+    /**
+     * Partial: the signer knows the caller, not the number.
+     */
+    SIPRAL_ATTESTATION_B = 2,
+    /**
+     * Gateway: the signer knows only where the call entered its
+     * network.
+     */
+    SIPRAL_ATTESTATION_C = 3,
+};
+
+/**
+ * What a verification came to. Names for
+ * `sipral_verification_event_t::outcome` and
+ * `sipral_call_event_t::verification`.
+ */
+typedef uint32_t sipral_verification_outcome_t;
+enum {
+    /**
+     * Nothing was verified: the account does not verify, or the stack
+     * has no trust anchors and the account only reports.
+     */
+    SIPRAL_VERIFICATION_OUTCOME_NONE = 0,
+    /**
+     * A PASSporT signed by a certificate with authority over the calling
+     * number, fresh, for the numbers the request names.
+     */
+    SIPRAL_VERIFICATION_OUTCOME_VALID = 1,
+    /**
+     * One was there and does not hold: `failure` says why.
+     */
+    SIPRAL_VERIFICATION_OUTCOME_INVALID = 2,
+    /**
+     * Nothing this end could verify: no `Identity`, or only ones naming
+     * a PASSporT extension it does not support.
+     */
+    SIPRAL_VERIFICATION_OUTCOME_ABSENT = 3,
+};
+
+/**
+ * Why a verification did not hold. Names for
+ * `sipral_verification_event_t::failure` and
+ * `sipral_call_event_t::verification_failure`.
+ */
+typedef uint32_t sipral_verification_failure_t;
+enum {
+    /**
+     * Nothing failed.
+     */
+    SIPRAL_VERIFICATION_FAILURE_NONE = 0,
+    /**
+     * No `Identity` header field.
+     */
+    SIPRAL_VERIFICATION_FAILURE_NO_IDENTITY = 1,
+    /**
+     * Only ones naming a `ppt` this end does not support.
+     */
+    SIPRAL_VERIFICATION_FAILURE_UNSUPPORTED_PPT = 2,
+    /**
+     * The header field or its PASSporT is not well formed.
+     */
+    SIPRAL_VERIFICATION_FAILURE_MALFORMED = 3,
+    /**
+     * Signed with an algorithm other than ES256.
+     */
+    SIPRAL_VERIFICATION_FAILURE_UNSUPPORTED_ALGORITHM = 4,
+    /**
+     * `iat` outside the freshness window.
+     */
+    SIPRAL_VERIFICATION_FAILURE_STALE = 5,
+    /**
+     * The certificate could not be fetched, or did not arrive in time.
+     */
+    SIPRAL_VERIFICATION_FAILURE_CERTIFICATE_UNAVAILABLE = 6,
+    /**
+     * What the `info` URL yielded is not a chain this end can read.
+     */
+    SIPRAL_VERIFICATION_FAILURE_CERTIFICATE_UNREADABLE = 7,
+    /**
+     * The chain leads to no trust anchor.
+     */
+    SIPRAL_VERIFICATION_FAILURE_UNTRUSTED = 8,
+    /**
+     * A certificate in it is outside its validity period.
+     */
+    SIPRAL_VERIFICATION_FAILURE_EXPIRED = 9,
+    /**
+     * The chain breaks a rule of path validation.
+     */
+    SIPRAL_VERIFICATION_FAILURE_INVALID_CHAIN = 10,
+    /**
+     * The signature does not verify.
+     */
+    SIPRAL_VERIFICATION_FAILURE_BAD_SIGNATURE = 11,
+    /**
+     * The certificate has no authority over the calling number.
+     */
+    SIPRAL_VERIFICATION_FAILURE_NUMBER_NOT_COVERED = 12,
+    /**
+     * Signed for another calling number than the request names.
+     */
+    SIPRAL_VERIFICATION_FAILURE_ORIG_MISMATCH = 13,
+    /**
+     * Signed for another called number.
+     */
+    SIPRAL_VERIFICATION_FAILURE_DEST_MISMATCH = 14,
+};
+
+/**
+ * Which half of a caller's verification an event reports. Names for
+ * `sipral_verification_event_t::stage`.
+ */
+typedef uint32_t sipral_verification_stage_t;
+enum {
+    /**
+     * Never sent.
+     */
+    SIPRAL_VERIFICATION_STAGE_UNKNOWN = 0,
+    /**
+     * The certificate at `certificate_url` is wanted: fetch it and hand
+     * it to `sipral_call_stir_certificate`, or hand over nothing to say
+     * it could not be had. The call waits, unannounced, until then or
+     * until `certificate_wait_ms` runs out.
+     */
+    SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED = 1,
+    /**
+     * The verdict is in. `SIPRAL_EVENT_KIND_INCOMING_CALL` follows, or,
+     * when `refused` is set, `SIPRAL_EVENT_KIND_CALL_ENDED`.
+     */
+    SIPRAL_VERIFICATION_STAGE_VERIFIED = 2,
 };
 
 /**
@@ -4049,6 +4358,82 @@ struct sipral_account_config {
      * How many bytes of it.
      */
     size_t trusted_peers_len;
+    /**
+     * A `SipralSrtp`: what this account's calls do about SRTP, over the
+     * stack's own `srtp` — offered, required, DTLS-SRTP, or DTLS-SRTP
+     * falling back to SDES — or zero for the stack's. A call placed from
+     * it may name a stricter policy of its own and never a looser one
+     * (`SIPRAL_STATUS_SECURITY_POLICY`), and an INVITE it cannot answer
+     * under it is refused with 488. ABI 0.31, like every member below.
+     */
+    uint32_t srtp;
+    /**
+     * The SRTP suites this account's calls run, most preferred first,
+     * as RFC 4568 §6.2 and RFC 7714 §14.2 name them and separated by
+     * commas: `AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80`. The `a=crypto`
+     * lines an SDES offer carries, the lines an SDES answer takes, and
+     * the DTLS-SRTP profiles a handshake offers and accepts — GCM among
+     * them only if named. Null for this build's own. Every line is in
+     * the INVITE: past two or three over UDP it needs a stream.
+     */
+    const char *srtp_suites;
+    /**
+     * How many bytes of it.
+     */
+    size_t srtp_suites_len;
+    /**
+     * A `SipralStirVerification`: what this account does with the
+     * `Identity` header fields of the calls it receives (RFC 8224 §6.2).
+     * Zero reports, once `sipral_stack_stir` has given the stack trust
+     * anchors.
+     */
+    uint32_t stir_verification;
+    /**
+     * The P-256 private key this account signs its calls with (RFC 8224
+     * §6.1): the bare 32-octet scalar, or an `EC PRIVATE KEY` or
+     * `PRIVATE KEY` in DER or PEM. Null and zero signs nothing. Needs the
+     * wall clock `sipral_stack_stir` gives the stack in `unix_seconds`;
+     * `SIPRAL_STATUS_WRONG_STATE` without it.
+     */
+    const uint8_t *stir_key;
+    /**
+     * How many bytes of it.
+     */
+    size_t stir_key_len;
+    /**
+     * Where the certificate chain for `stir_key` is published: the
+     * `x5u` and `info` of every PASSporT this account signs. Required
+     * with `stir_key`, and only with it.
+     */
+    const char *stir_certificate_url;
+    /**
+     * How many bytes of it.
+     */
+    size_t stir_certificate_url_len;
+    /**
+     * The telephone number this account signs as, canonicalised by
+     * RFC 8224 §8.3's first step, or null for the number in `aor`'s user
+     * part.
+     */
+    const char *stir_orig;
+    /**
+     * How many bytes of it.
+     */
+    size_t stir_orig_len;
+    /**
+     * The origination identifier every call it signs claims (RFC 8588
+     * §5), a UUID, or null for one the stack draws for the account.
+     */
+    const char *stir_origid;
+    /**
+     * How many bytes of it.
+     */
+    size_t stir_origid_len;
+    /**
+     * A `SipralAttestation`: the level it claims (RFC 8588 §4), zero for
+     * full attestation, `A`.
+     */
+    uint32_t stir_attestation;
 };
 
 /**
@@ -5105,6 +5490,25 @@ struct sipral_call_event {
      * How many bytes of it.
      */
     size_t alert_info_len;
+    /**
+     * A sipral_verification_outcome_t:
+     * this stack's own verdict on the caller (RFC 8224 §6.2), for an
+     * account that verifies; zero when nothing was verified. Unlike
+     * `verstat`, which is what a network before this end concluded,
+     * this is what this end checked itself. ABI 0.31.
+     */
+    uint32_t verification;
+    /**
+     * A sipral_attestation_t: the
+     * level a valid SHAKEN PASSporT claimed.
+     */
+    uint32_t attestation;
+    /**
+     * A sipral_verification_failure_t:
+     * why the verdict did not hold. `sipral_call_identity_text` reads
+     * the number it was signed for, its `origid` and its certificate URL.
+     */
+    uint32_t verification_failure;
 };
 
 /**
@@ -5209,6 +5613,27 @@ struct sipral_media_event {
      * kind. Not whether a collector accepted it.
      */
     uint32_t quality_report_sent;
+    /**
+     * A sipral_key_exchange_t: how
+     * the call's keys were exchanged, for
+     * SIPRAL_EVENT_KIND_MEDIA_STARTED, SIPRAL_EVENT_KIND_MEDIA_CHANGED
+     * and SIPRAL_EVENT_KIND_MEDIA_SECURED, which carry the encryption
+     * report of the call's stream: this, `encrypted`, `authenticated`,
+     * and `suite` from then on. ABI 0.31.
+     */
+    uint32_t key_exchange;
+    /**
+     * Whether the stream is encrypted, now. Zero at the start of a
+     * DTLS-SRTP call, whose keys arrive with
+     * SIPRAL_EVENT_KIND_MEDIA_SECURED.
+     */
+    uint32_t encrypted;
+    /**
+     * Whether the key exchange authenticated the far end: a DTLS-SRTP
+     * handshake that checked its certificate against the signalled
+     * fingerprint. Never for SDES.
+     */
+    uint32_t authenticated;
 };
 
 /**
@@ -5733,6 +6158,83 @@ struct sipral_stun_server_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_CALLER_VERIFICATION carries: one half of
+ * the verification of who is calling (RFC 8224 §6.2).
+ */
+struct sipral_verification_event {
+    /**
+     * A sipral_verification_stage_t:
+     * the certificate is wanted, or the verdict is in.
+     */
+    uint32_t stage;
+    /**
+     * A sipral_verification_outcome_t,
+     * for a verdict.
+     */
+    uint32_t outcome;
+    /**
+     * A sipral_verification_failure_t:
+     * why it did not hold.
+     */
+    uint32_t failure;
+    /**
+     * A sipral_attestation_t: the
+     * level a valid SHAKEN PASSporT claimed.
+     */
+    uint32_t attestation;
+    /**
+     * A sipral_verstat_t: the `verstat`
+     * this verdict comes to (3GPP TS 24.229).
+     */
+    uint32_t verstat;
+    /**
+     * The response RFC 8224 §6.2.2 prescribes for the failure, zero for
+     * a valid one. Sent only when `refused` is set.
+     */
+    uint32_t response_code;
+    /**
+     * Whether the call was refused with it, which only a strict account
+     * does.
+     */
+    uint32_t refused;
+    /**
+     * The URL of the certificate: the one to fetch, or the one that was
+     * verified. UTF-8, not NUL-terminated; null and zero when there is
+     * none.
+     */
+    const char *certificate_url;
+    /**
+     * How many bytes of it.
+     */
+    size_t certificate_url_len;
+    /**
+     * The calling number a valid PASSporT was signed for, canonical.
+     */
+    const char *orig;
+    /**
+     * How many bytes of it.
+     */
+    size_t orig_len;
+    /**
+     * The origination identifier a valid SHAKEN PASSporT claimed (RFC
+     * 8588 §5), a UUID.
+     */
+    const char *origid;
+    /**
+     * How many bytes of it.
+     */
+    size_t origid_len;
+    /**
+     * Why it did not hold, in more words than `failure`, for a log.
+     */
+    const char *detail;
+    /**
+     * How many bytes of it.
+     */
+    size_t detail_len;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -5809,6 +6311,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_STUN_SERVER.
      */
     sipral_stun_server_event_t stun_server;
+    /**
+     * For SIPRAL_EVENT_KIND_CALLER_VERIFICATION.
+     */
+    sipral_verification_event_t verification;
 };
 
 /**
@@ -6266,6 +6772,94 @@ struct sipral_log_record {
      * since the line before this one. Zero almost always.
      */
     uint64_t suppressed;
+};
+
+/**
+ * How a stack verifies the callers of the calls its accounts receive.
+ *
+ * Set `size` to `sizeof(sipral_stir_config_t)` and zero the rest before
+ * filling anything in.
+ */
+struct sipral_stir_config {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * The trust anchors — the STI-PA's approved roots in a SHAKEN
+     * deployment — as PEM or DER certificates, one after another. Null
+     * and zero for none, which turns verification off for every account
+     * that only reports.
+     */
+    const uint8_t *anchors;
+    /**
+     * How many bytes of them.
+     */
+    size_t anchors_len;
+    /**
+     * How far a PASSporT's `iat` may be from now, either way, in
+     * seconds; zero for RFC 8224 §6.2's sixty.
+     */
+    uint64_t freshness_seconds;
+    /**
+     * How long a call waits for `sipral_call_stir_certificate` before
+     * its certificate counts as one that could not be had, in
+     * milliseconds; zero for four seconds.
+     */
+    uint64_t certificate_wait_ms;
+    /**
+     * The wall clock at `now_ms`, in seconds since 1970, or zero to keep
+     * the one an earlier call gave. A PASSporT is signed and judged by
+     * the time, and only the caller can say which `now_ms` a time goes
+     * with, so the first call must give it.
+     * (`sipral_stack_config_t::media_clock_unix_seconds` goes with no
+     * `now_ms` at all, and is not taken for it.)
+     */
+    uint64_t unix_seconds;
+};
+
+/**
+ * How one stream of a call is protected: one entry of the encryption
+ * report.
+ *
+ * Set `size` to `sizeof(sipral_stream_encryption_t)` before the call.
+ */
+struct sipral_stream_encryption {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * A sipral_media_kind_t: what the stream carries.
+     */
+    uint32_t media;
+    /**
+     * Whether what it sends is encrypted and what it takes
+     * authenticated, now. Zero while it waits for the handshake that
+     * keys it.
+     */
+    uint32_t encrypted;
+    /**
+     * A sipral_key_exchange_t: how its keys were exchanged.
+     */
+    uint32_t key_exchange;
+    /**
+     * A sipral_srtp_suite_t: the transform it runs, once it runs one.
+     */
+    uint32_t suite;
+    /**
+     * Whether the key exchange authenticated the far end: set for a
+     * DTLS-SRTP stream once its handshake finished, the far end's
+     * certificate having matched its signalled fingerprint; never for
+     * SDES, whose key is exactly as authentic as the signalling
+     * transport, which this library cannot see.
+     */
+    uint32_t authenticated;
+    /**
+     * Whether it agreed to be encrypted and is still waiting for its
+     * keys.
+     */
+    uint32_t awaiting_keys;
 };
 
 /**
@@ -9248,6 +9842,73 @@ sipral_status_t sipral_stack_rtp_port_reserve(sipral_handle_t stack, uint32_t *o
  * Safe to call with any handle value.
  */
 sipral_status_t sipral_stack_rtp_port_release(sipral_handle_t stack, uint32_t port);
+
+/**
+ * Verify the callers of the calls this stack's accounts receive, against
+ * `config`'s trust anchors, from now on (RFC 8224 §6.2).
+ *
+ * Replaces whatever an earlier call set. Every account that reports —
+ * the default — verifies once there is at least one anchor, and none
+ * does with none; an account set to `SIPRAL_STIR_VERIFICATION_STRICT`
+ * verifies either way. `config.unix_seconds` is the wall clock at
+ * `now_ms`, and the stack signs and verifies by it from here on; zero
+ * keeps what an earlier call gave, and is `SIPRAL_STATUS_WRONG_STATE`
+ * on the first. A stack whose accounts only sign calls makes this call
+ * too, with no anchors.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for anchors that are not
+ * certificates, or whose key is not P-256; `SIPRAL_STATUS_NOT_SUPPORTED`
+ * in a build without `SIPRAL_FEATURE_STIR`.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_stir_config_t` whose `size` member
+ * says how long it is, with `anchors` readable for `anchors_len` bytes.
+ */
+sipral_status_t sipral_stack_stir(sipral_handle_t stack, const sipral_stir_config_t *config, uint64_t now_ms);
+
+/**
+ * The certificate chain a call's `Identity` named, as fetched from the
+ * URL `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` gave with
+ * `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED` — PEM or DER, the
+ * signing certificate first — or null and zero for one that could not
+ * be fetched.
+ *
+ * The call's verdict is reached here and reported, and the call
+ * delivered or refused, before this returns; the events come out of the
+ * next `sipral_stack_poll`. `SIPRAL_STATUS_STALE_HANDLE` for a call no
+ * longer waiting: it was already answered, its wait ran out, or the
+ * caller gave up.
+ *
+ * Safety
+ *
+ * `chain` must be readable for `chain_len` bytes, or null with a length
+ * of zero.
+ */
+sipral_status_t sipral_call_stir_certificate(sipral_handle_t stack, sipral_handle_t call, const uint8_t *chain, size_t chain_len, uint64_t now_ms);
+
+/**
+ * How many streams one call's encryption report has: one per stream
+ * the call carries, which for this library is its one audio stream.
+ *
+ * Safety
+ *
+ * `out_count` must point at one `size_t`.
+ */
+sipral_status_t sipral_media_encryption_count(sipral_handle_t media, size_t *out_count);
+
+/**
+ * How one stream of a call is protected, now: whether it is encrypted,
+ * how its keys were exchanged, which suite it runs, and whether the
+ * exchange authenticated the far end. An index past the end is
+ * `SIPRAL_STATUS_INVALID_ARGUMENT`.
+ *
+ * Safety
+ *
+ * `out_stream` must point at a `sipral_stream_encryption_t` whose `size`
+ * member says how long it is.
+ */
+sipral_status_t sipral_media_encryption_at(sipral_handle_t media, size_t index, sipral_stream_encryption_t *out_stream);
 
 #ifdef __cplusplus
 } /* extern "C" */

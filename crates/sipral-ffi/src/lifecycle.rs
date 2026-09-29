@@ -762,6 +762,19 @@ mod tests {
             privacy: 0,
             trusted_peers: ptr::null(),
             trusted_peers_len: 0,
+            srtp: 0,
+            srtp_suites: ptr::null(),
+            srtp_suites_len: 0,
+            stir_verification: 0,
+            stir_key: ptr::null(),
+            stir_key_len: 0,
+            stir_certificate_url: ptr::null(),
+            stir_certificate_url_len: 0,
+            stir_orig: ptr::null(),
+            stir_orig_len: 0,
+            stir_origid: ptr::null(),
+            stir_origid_len: 0,
+            stir_attestation: 0,
         }
     }
 

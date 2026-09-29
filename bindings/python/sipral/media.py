@@ -20,7 +20,9 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from . import events as _events
 from ._sipral_cffi import ffi, lib
+from .enums import KeyExchange
 from .errors import call as _call
 
 if TYPE_CHECKING:
@@ -142,6 +144,34 @@ class Media:
             "recorded_ms": int(out.recorded_ms),
             "stalled": bool(out.stalled),
         }
+
+    def encryption(self) -> list[_events.Protection]:
+        """The encryption report: how each stream of this call is protected,
+        now (`sipral_media_encryption_count`, `sipral_media_encryption_at`).
+        One entry per stream, which for this library is the call's audio."""
+        count = ffi.new("size_t *")
+        _call(
+            lambda: lib.sipral_media_encryption_count(self.handle, count),
+            "sipral_media_encryption_count",
+        )
+        report = []
+        for index in range(int(count[0])):
+            out = ffi.new("sipral_stream_encryption_t *")
+            out.size = ffi.sizeof("sipral_stream_encryption_t")
+            _call(
+                lambda: lib.sipral_media_encryption_at(self.handle, index, out),
+                "sipral_media_encryption_at",
+            )
+            report.append(
+                _events.Protection(
+                    key_exchange=KeyExchange(int(out.key_exchange)),
+                    encrypted=bool(out.encrypted),
+                    authenticated=bool(out.authenticated),
+                    suite=int(out.suite),
+                    awaiting_keys=bool(out.awaiting_keys),
+                )
+            )
+        return report
 
     def statistics(self) -> dict[str, object]:
         """`sipral_media_statistics`, as a plain `dict`.
