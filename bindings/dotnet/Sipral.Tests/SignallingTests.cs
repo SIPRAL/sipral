@@ -315,6 +315,29 @@ public sealed class SignallingTests
         Assert.Equal(SipralTlsFailure.NameMismatch, (await Refused(stack)).Tls);
     }
 
+    /// <summary>With a private authority beside the platform's, a certificate
+    /// it signed registers, and one it signed for another name is a name
+    /// mismatch: the platform's own chain error does not hide the name.</summary>
+    [Fact]
+    public async Task APrivateAuthorityBesideThePlatformsTrustsItsOwnAndStillChecksTheName()
+    {
+        using var certificate = Good();
+        using (var registrar = new Registrar(certificate))
+        using (var stack = Over(registrar.Address, trust: SipralTlsTrust.PrivateAuthority(certificate)))
+        {
+            Assert.True(stack.Connected);
+            var account = stack.AddAccount($"sip:alice@{ServerName}", registrar.Address, registrar: $"sip:{ServerName}");
+            account.Register();
+            await Registered(stack);
+        }
+        using (var registrar = new Registrar(certificate))
+        using (var stack = Over(registrar.Address, name: "other.sipral.test",
+            trust: SipralTlsTrust.PrivateAuthority(certificate)))
+        {
+            Assert.Equal(SipralTlsFailure.NameMismatch, (await Refused(stack)).Tls);
+        }
+    }
+
     [Fact]
     public async Task AnExpiredCertificateIsExpired()
     {

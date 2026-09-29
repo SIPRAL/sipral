@@ -74,19 +74,22 @@ public sealed class SipralTlsTrust
         var extra = _only ? null : _authorities;
         options.RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
         {
-            if (extra is { Count: > 0 } && errors == SslPolicyErrors.RemoteCertificateChainErrors
+            if (extra is { Count: > 0 } && errors.HasFlag(SslPolicyErrors.RemoteCertificateChainErrors)
                 && certificate is not null)
             {
                 // beside the platform's: the chain the platform refused is
-                // built again with the private authority among the roots
+                // built again with the private authority among the roots,
+                // and whatever else the platform found still stands
                 using var again = new X509Chain();
                 again.ChainPolicy.ExtraStore.AddRange(extra);
                 again.ChainPolicy.CustomTrustStore.AddRange(extra);
                 again.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                 again.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                var rest = errors & ~SslPolicyErrors.RemoteCertificateChainErrors;
                 if (again.Build(new X509Certificate2(certificate)))
                 {
-                    return true;
+                    verdict.Record(rest, again);
+                    return rest == SslPolicyErrors.None;
                 }
                 verdict.Record(errors, again);
                 return false;
