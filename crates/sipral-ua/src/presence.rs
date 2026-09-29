@@ -581,7 +581,9 @@ fn write_person(out: &mut String, person: &Person) -> Result<(), PresenceError> 
                     out.push_str("</rpid:other>");
                 }
                 Activity::Unlisted(ref name) => {
-                    if !is_ncname(name) || &**name == "other" {
+                    // `note` and `other` are the list's own elements, not
+                    // activities an empty element of that name could say
+                    if !is_ncname(name) || matches!(&**name, "other" | "note") {
                         return Err(PresenceError::Unwritable(
                             "an activity name that is not an XML name",
                         ));
@@ -821,6 +823,26 @@ mod tests {
             presence.to_xml(),
             Err(PresenceError::Unwritable("a priority above 1"))
         );
+    }
+
+    #[test]
+    fn an_unlisted_activity_named_like_the_lists_own_elements_is_not_written() {
+        // RFC 4480: inside `activities`, `note` is a note and `other` carries
+        // text; an empty element of either name is not the activity asked for
+        for name in ["note", "other"] {
+            let mut presence = Presence::new("pres:a@example.com");
+            presence.person = Some(Person {
+                id: "p".into(),
+                activities: vec![Activity::Unlisted(name.into())],
+            });
+            assert_eq!(
+                presence.to_xml(),
+                Err(PresenceError::Unwritable(
+                    "an activity name that is not an XML name"
+                )),
+                "{name}"
+            );
+        }
     }
 
     #[test]
