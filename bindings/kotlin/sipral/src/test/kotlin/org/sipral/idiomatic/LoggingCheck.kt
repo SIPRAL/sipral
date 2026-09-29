@@ -12,9 +12,15 @@
 
 package org.sipral.idiomatic
 
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.logging.Handler
+import java.util.logging.Level
+import java.util.logging.LogRecord
+import java.util.logging.Logger
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import kotlin.test.assertEquals
@@ -117,7 +123,101 @@ private fun aRangeWithNoPairLeftSaysSo(): String {
     return "a range with no pair left says so"
 }
 
+/** Every record a `java.util.logging` logger passed on. */
+private class Caught : Handler() {
+    val records = CopyOnWriteArrayList<LogRecord>()
+    val arrived = CountDownLatch(1)
+
+    override fun publish(record: LogRecord) {
+        records += record
+        arrived.countDown()
+    }
+
+    override fun flush() {}
+
+    override fun close() {}
+}
+
+/** The state text once it holds [expected]: a stack the poll thread held
+ * when asked answers with the last snapshot a poll kept. */
+private fun stateOnceSettled(client: SipralClient, expected: String): String {
+    val deadline = System.currentTimeMillis() + 3_000
+    var text = client.state()
+    while (!text.contains(expected) && System.currentTimeMillis() < deadline) {
+        Thread.sleep(50)
+        text = client.state()
+    }
+    return text
+}
+
+private fun aLineReachesTheChildLoggerOfItsTarget(): String {
+    val logger = Logger.getLogger("sipral-check-${System.nanoTime()}").apply {
+        useParentHandlers = false
+        level = Level.FINE
+    }
+    val caught = Caught()
+    logger.addHandler(caught)
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+        client.logTo(logger)
+        assertEquals(SipralStatus.WRONG_STATE.value, refuse(client))
+        assertTrue(caught.arrived.await(10, TimeUnit.SECONDS), "the refusal never reached the logger")
+        val record = caught.records.first()
+        assertEquals("${logger.name}.api", record.loggerName)
+        assertEquals(Level.FINE, record.level)
+        assertTrue(record.message.startsWith("refused, WrongState"), record.message)
+        val text = stateOnceSettled(client, "log: debug,")
+        assertTrue(text.contains("log: debug,"), text)
+    }
+    return "a line reached the child logger of its target at FINE"
+}
+
+private fun theStackIsAsQuietAsTheLogger(): String {
+    val logger = Logger.getLogger("sipral-check-${System.nanoTime()}").apply {
+        useParentHandlers = false
+        level = Level.INFO
+    }
+    val caught = Caught()
+    logger.addHandler(caught)
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+        client.logTo(logger)
+        assertEquals(SipralStatus.WRONG_STATE.value, refuse(client))
+        assertTrue(caught.records.isEmpty(), "a debug line reached a logger at INFO")
+        val text = stateOnceSettled(client, "log: info,")
+        assertTrue(text.contains("log: info,"), text)
+    }
+    assertEquals(SipralLogLevel.TRACE, logLevelFor(Level.ALL))
+    assertEquals(SipralLogLevel.OFF, logLevelFor(Level.OFF))
+    assertEquals(Level.FINEST, julLevelOf(SipralLogLevel.TRACE))
+    return "the stack logs no more than its logger keeps"
+}
+
+private fun aRequestNobodyAnswersIsCountedAsSentAgain(): String {
+    DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { silent ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+            assertEquals(0L, client.counters().requestsRetransmitted)
+            val account = client.addAccount(
+                aor = "sip:alice@sipral.invalid",
+                registrarAddress = "127.0.0.1:${silent.localPort}",
+                registrar = "sip:sipral.invalid",
+            )
+            account.register()
+            val deadline = System.currentTimeMillis() + 5_000
+            while (client.counters().requestsRetransmitted == 0L && System.currentTimeMillis() < deadline) {
+                Thread.sleep(100)
+            }
+            val counters = client.counters()
+            assertTrue(counters.requestsRetransmitted > 0, "$counters")
+            assertTrue(counters.registrationsAttempted > 0, "$counters")
+            assertEquals(0L, counters.requestsRefusedAtLimit)
+        }
+    }
+    return "a REGISTER nobody answered was counted as sent again"
+}
+
 internal suspend fun loggingChecks(): String = listOf(
+    aLineReachesTheChildLoggerOfItsTarget(),
+    theStackIsAsQuietAsTheLogger(),
+    aRequestNobodyAnswersIsCountedAsSentAgain(),
     aRefusedCallIsLoggedWithNobodyInIt(),
     theStateNamesTheAccountAndNotThePerson(),
     aCallIsCarriedOnEvenPortsFromEachClientsRange(),

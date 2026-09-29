@@ -4,7 +4,9 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using Sipral;
@@ -51,6 +53,102 @@ public sealed class LoggingTests
         var count = heard.Count;
         Assert.Equal(SipralStatus.WrongState, Refuse(stack));
         Assert.Equal(count, heard.Count);
+    }
+
+    /// <summary>Every event a trace source passed on.</summary>
+    private sealed class Caught : TraceListener
+    {
+        public ConcurrentQueue<(TraceEventType Type, int Id, string Message)> Events { get; } = new();
+        public ManualResetEventSlim Arrived { get; } = new();
+
+        public override void TraceEvent(TraceEventCache? cache, string source, TraceEventType type, int id, string? message)
+        {
+            Events.Enqueue((type, id, message ?? ""));
+            Arrived.Set();
+        }
+
+        public override void Write(string? message)
+        {
+        }
+
+        public override void WriteLine(string? message)
+        {
+        }
+    }
+
+    [Fact]
+    public void ALineReachesATraceSourceAsItsEventType()
+    {
+        using var stack = new SipralStack(audio: SipralAudio.Application);
+        var source = new TraceSource("sipral-test-verbose", SourceLevels.Verbose);
+        var caught = new Caught();
+        source.Listeners.Clear();
+        source.Listeners.Add(caught);
+        stack.LogTo(source);
+
+        Assert.Equal(SipralStatus.WrongState, Refuse(stack));
+        Assert.True(caught.Arrived.Wait(Timeout));
+        Assert.True(caught.Events.TryPeek(out var line));
+        Assert.Equal(TraceEventType.Verbose, line.Type);
+        Assert.Equal((int)SipralLogLevel.Debug, line.Id);
+        Assert.StartsWith("api: refused, WrongState", line.Message);
+        Assert.Contains("log: debug,", StateOnceSettled(stack, "log: debug,"));
+    }
+
+    [Fact]
+    public void TheStackIsAsQuietAsTheTraceSource()
+    {
+        using var stack = new SipralStack(audio: SipralAudio.Application);
+        var source = new TraceSource("sipral-test-information", SourceLevels.Information);
+        var caught = new Caught();
+        source.Listeners.Clear();
+        source.Listeners.Add(caught);
+        stack.LogTo(source);
+
+        Assert.Equal(SipralStatus.WrongState, Refuse(stack));
+        Assert.Empty(caught.Events);
+        Assert.Contains("log: info,", StateOnceSettled(stack, "log: info,"));
+        Assert.Equal(SipralLogLevel.Trace, SipralStack.LogLevelFor(SourceLevels.All));
+        Assert.Equal(SipralLogLevel.Off, SipralStack.LogLevelFor(SourceLevels.Off));
+        Assert.Equal(TraceEventType.Warning, SipralStack.TraceEventTypeOf(SipralLogLevel.Warn));
+    }
+
+    /// <summary>The state text once it holds <paramref name="expected"/>:
+    /// a stack the poll thread held when asked answers with the last
+    /// snapshot a poll kept.</summary>
+    private static string StateOnceSettled(SipralStack stack, string expected)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        var text = stack.State();
+        while (!text.Contains(expected) && DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(50);
+            text = stack.State();
+        }
+        return text;
+    }
+
+    [Fact]
+    public void ARequestNobodyAnswersIsCountedAsSentAgain()
+    {
+        using var silent = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        silent.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        using var stack = new SipralStack(audio: SipralAudio.Application);
+        Assert.Equal(0ul, stack.Counters().RequestsRetransmitted);
+        var account = stack.AddAccount(
+            "sip:alice@sipral.invalid", $"127.0.0.1:{((IPEndPoint)silent.LocalEndPoint!).Port}",
+            registrar: "sip:sipral.invalid");
+        account.Register();
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (stack.Counters().RequestsRetransmitted == 0 && DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(100);
+        }
+        var counters = stack.Counters();
+        Assert.True(counters.RequestsRetransmitted > 0);
+        Assert.True(counters.RegistrationsAttempted > 0);
+        Assert.Equal(0ul, counters.RequestsRefusedAtLimit);
     }
 
     [Fact]

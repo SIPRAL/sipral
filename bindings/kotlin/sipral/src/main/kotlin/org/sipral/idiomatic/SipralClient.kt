@@ -29,6 +29,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.logging.LogRecord
+import java.util.logging.Logger
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -37,6 +39,7 @@ import org.sipral.SipralAudioTransmit
 import org.sipral.SipralAudioTransmitListener
 import org.sipral.SipralCallConfig
 import org.sipral.SipralCallEvent
+import org.sipral.SipralCounters
 import org.sipral.SipralEvent
 import org.sipral.SipralEventListener
 import org.sipral.SipralException
@@ -90,9 +93,7 @@ private class TurnStream(val socket: Socket) {
 class SipralClient private constructor(
     socket: DatagramSocket,
     bindAddress: String,
-    /** The STUN server this client asks where its sockets appear from, as
-     * `host:port`, or null for a client that asks nobody. */
-    val stunServer: String?,
+    stunServer: String?,
     private val turnServer: String?,
     private val turn: SipralTurnServer?,
     /** Who runs this client's audio, as it was opened. */
@@ -103,6 +104,13 @@ class SipralClient private constructor(
     val rtpPorts: Pair<Int, Int>?,
 ) : AutoCloseable {
     internal var handle: Long = 0L
+        private set
+
+    /** The STUN server this client asks where its sockets appear from, as
+     * `host:port`, or null for a client that asks nobody: the one it was
+     * opened with, then the first of what [setStunServers] last named. */
+    @Volatile
+    var stunServer: String? = stunServer
         private set
 
     /** The signalling socket: read and written by the poll thread, and put
@@ -456,6 +464,65 @@ class SipralClient private constructor(
         val buffer = ByteArray(Sipral.STATE_TEXT_MAX.toInt())
         val length = Sipral.stackState(handle, buffer).toInt()
         return String(buffer, 0, maxOf(0, length - 1), Charsets.UTF_8)
+    }
+
+    /**
+     * Send this client's log to `java.util.logging`, which every JVM and
+     * Android carries with no library to add (on Android it reaches logcat).
+     * Each line goes to the child logger of its target -- `sipral.call`,
+     * `sipral.sip`, `sipral.api` and so on under the default `sipral`
+     * logger (`docs/17-observability.md` lists the targets) -- so an
+     * application filters by the part of the stack that wrote it. The
+     * levels map as `ERROR` to `SEVERE`, `WARN` to `WARNING`, `INFO` to
+     * `INFO`, `DEBUG` to `FINE` and `TRACE` to `FINEST`; a line that follows
+     * a flood says how many lines were turned away before it. [level] left
+     * null follows the logger's effective level as it is now, so lines the
+     * logger would drop are never formatted. An application on SLF4J or
+     * Timber hands [setLog] a lambda that calls it instead. Replaces
+     * whatever [setLog] installed.
+     */
+    fun logTo(logger: Logger = Logger.getLogger("sipral"), level: SipralLogLevel? = null) {
+        val children = ConcurrentHashMap<String, Logger>()
+        setLog(level ?: logLevelFor(effectiveLevel(logger))) { line, target, message, suppressed ->
+            val child = children.getOrPut(target) { Logger.getLogger("${logger.name}.$target") }
+            val julLevel = julLevelOf(line)
+            if (child.isLoggable(julLevel)) {
+                val text = if (suppressed == 0L) message else "$message ($suppressed lines turned away before this one)"
+                child.log(LogRecord(julLevel, text).apply { loggerName = child.name })
+            }
+        }
+    }
+
+    /**
+     * This client's health counters since it was opened
+     * (`sipral_stack_counters`): registrations, how calls ended, what was
+     * screened, and -- new in ABI 0.30 -- requests and responses sent again,
+     * transactions timed out and requests refused at a limit. One struct
+     * copy, cheap enough to sample on a timer; every field only grows except
+     * `activeCalls`.
+     */
+    fun counters(): SipralCounters = retryBusy { Sipral.stackCounters(handle) }
+
+    /**
+     * Ask these STUN servers from now on, in order of preference, each
+     * `host:port` -- what [open]'s `stunServer` and `stunFallbacks` would
+     * have named -- without opening the client again
+     * (`sipral_stack_stun_servers`). Every socket the stack keeps mapped is
+     * asked again of the new list at once: `SIPRAL_EVENT_KIND_STUN_SERVER`
+     * ([stunServerOf]) says the server in use moved and
+     * `SIPRAL_EVENT_KIND_NAT_MAPPING` what the new one answers. On a client
+     * opened without a STUN server the signalling socket starts being kept
+     * mapped, and every media socket opened from then on is asked where it
+     * appears from before its call is described. An empty list asks nobody
+     * any more: accounts a STUN answer moved register their own address
+     * again, and calls are described by their sockets' own addresses. A
+     * client with a TURN server keeps asking STUN, so an empty list there
+     * throws `SipralStatus.INVALID_ARGUMENT`, as does an entry that is not
+     * an address and a port.
+     */
+    fun setStunServers(servers: List<String>) {
+        retryBusy { Sipral.stackStunServers(handle, servers.joinToString(","), nowMs()) }
+        stunServer = servers.firstOrNull()
     }
 
     // -- accounts and calls ------------------------------------------------

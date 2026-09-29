@@ -352,7 +352,9 @@ stack and a full one.
 order, when `stunServer` stops answering; every socket moves on by itself,
 and a `.stunServer` event (`stunServerData`: the state, the server, the one
 before it) says when the server in use changed or every one failed
-(`docs/06-nat.md`, "More than one server").
+(`docs/06-nat.md`, "More than one server"). `stack.setStunServers([...])`
+replaces the list on a running stack, and turns STUN on for one created
+without it; an empty list turns it off again.
 
 Behind a NAT, every account `stunServer` showed to be behind one keeps its
 registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
@@ -367,6 +369,33 @@ it an incoming call is answered 503 and `placeCall` throws
 `.limitReached`. `maxServerTransactions` (256), `diagnosticDecisions` (64)
 and `diagnosticRecords` (32) are the other ceilings, zero for the default
 each (`docs/08-ffi.md`, "Limits, and what went out twice").
+
+### The log, the state and the counters
+
+```swift
+try stack.logTo(subsystem: "com.example.phone", level: .info)
+print(try stack.counters().requestsRetransmitted)
+let report = try stack.state()   // redacted, from any thread
+```
+
+`logTo(subsystem:level:)` sends the stack's log to the unified logging
+system: one `os.Logger` per part of the stack that wrote a line, as its
+category (`call`, `registration`, `sip`, `api`, ...), `.error` as
+`OSLogType.error`, `.warn` as `.default`, `.info` as `.info`, and `.debug`
+and `.trace` as `.debug` (`SipralLogLevel.osLogType`). Every line is
+redacted before it leaves the library — no user part, number, IP address or
+credential (`docs/17-observability.md`) — so it is logged as public, and
+Console shows its text rather than `<private>`. The system keeps warnings
+and errors; info and debug lines are seen live, with `log stream --level
+debug`. `setLog(level:handler:)`
+takes a closure instead, and is what Linux, which has no unified logging,
+uses. `counters()` is a `SipralCounters`: registrations, how calls ended,
+what screening refused and, since ABI 0.30, `requestsRetransmitted`,
+`responsesRetransmitted`, `transactionsTimedOut` and
+`requestsRefusedAtLimit`. `state()` is the redacted text snapshot of what the
+stack holds. `SipralStack(rtpPortMin: ..., rtpPortMax: ...)` keeps every
+media socket this package opens inside a firewall's range.
+`Tests/SipralTests/LoggingTests.swift` proves each.
 
 `TurnServer(..., transport: .tcp)` reaches the TURN server over TCP, for the
 network that lets no UDP out, and `.tls` over TLS (RFC 8656 §3.1) — 5349 is

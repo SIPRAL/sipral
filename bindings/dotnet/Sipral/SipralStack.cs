@@ -73,7 +73,10 @@ public sealed class SipralStack : IDisposable
     private readonly byte[] _receiveBuffer = new byte[TransmitBytes];
     private readonly byte[] _stunReceiveBuffer = new byte[TransmitBytes];
 
-    private readonly SipralNat _nat;
+    /// <summary>Whether media sockets are asked where they appear from:
+    /// what the stack was created with, and then what
+    /// <see cref="SetStunServers"/> last named.</summary>
+    private volatile SipralNat _nat;
     private readonly bool _turn;
     private readonly object _natLock = new();
 
@@ -573,6 +576,103 @@ public sealed class SipralStack : IDisposable
             "sipral_stack_state");
         var bytes = (byte[])(Array)buffer;
         return Encoding.UTF8.GetString(bytes, 0, (int)length - 1);
+    }
+
+    /// <summary>Send this stack's log to a <see cref="TraceSource"/>, the
+    /// logging the base class library carries with no package to add. Each
+    /// line is traced with the part of the stack that wrote it in front —
+    /// <c>call: …</c>, <c>sip: …</c>, <c>api: …</c> — as event type
+    /// <see cref="TraceEventType.Error"/> for
+    /// <see cref="SipralLogLevel.Error"/>,
+    /// <see cref="TraceEventType.Warning"/> for
+    /// <see cref="SipralLogLevel.Warn"/>,
+    /// <see cref="TraceEventType.Information"/> for
+    /// <see cref="SipralLogLevel.Info"/>, and
+    /// <see cref="TraceEventType.Verbose"/> for
+    /// <see cref="SipralLogLevel.Debug"/> and
+    /// <see cref="SipralLogLevel.Trace"/>, with the level's number as the
+    /// event id; a line that follows a flood says how many lines were turned
+    /// away before it. <paramref name="level"/> left out follows the source's
+    /// switch as it is now — <see cref="SourceLevels.All"/> is
+    /// <see cref="SipralLogLevel.Trace"/>, <see cref="SourceLevels.Verbose"/>
+    /// is <see cref="SipralLogLevel.Debug"/> — so lines the source would drop
+    /// are never formatted. An application on
+    /// <c>Microsoft.Extensions.Logging</c> hands <see cref="SetLog"/> a
+    /// delegate that calls its <c>ILogger</c> instead
+    /// (<c>bindings/dotnet/README.md</c>). Replaces whatever
+    /// <see cref="SetLog"/> installed.</summary>
+    public void LogTo(TraceSource source, SipralLogLevel? level = null)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        SetLog(level ?? LogLevelFor(source.Switch.Level), (line, target, message, suppressed) =>
+        {
+            var text = suppressed == 0
+                ? $"{target}: {message}"
+                : $"{target}: {message} ({suppressed} lines turned away before this one)";
+            source.TraceEvent(TraceEventTypeOf(line), (int)line, text);
+        });
+    }
+
+    /// <summary>The event type a line at <paramref name="level"/> is traced
+    /// as by <see cref="LogTo"/>.</summary>
+    public static TraceEventType TraceEventTypeOf(SipralLogLevel level) => level switch
+    {
+        SipralLogLevel.Error => TraceEventType.Error,
+        SipralLogLevel.Warn => TraceEventType.Warning,
+        SipralLogLevel.Info => TraceEventType.Information,
+        _ => TraceEventType.Verbose,
+    };
+
+    /// <summary>The quietest stack level that still carries every line a
+    /// switch at <paramref name="levels"/> lets through.</summary>
+    public static SipralLogLevel LogLevelFor(SourceLevels levels) => levels switch
+    {
+        SourceLevels.All => SipralLogLevel.Trace,
+        _ when levels.HasFlag(SourceLevels.Verbose) => SipralLogLevel.Debug,
+        _ when levels.HasFlag(SourceLevels.Information) => SipralLogLevel.Info,
+        _ when levels.HasFlag(SourceLevels.Warning) => SipralLogLevel.Warn,
+        _ when levels.HasFlag(SourceLevels.Error) => SipralLogLevel.Error,
+        _ => SipralLogLevel.Off,
+    };
+
+    /// <summary>This stack's health counters since it was created
+    /// (<c>sipral_stack_counters</c>): registrations, how calls ended, what
+    /// was screened, and — new in ABI 0.30 — requests and responses sent
+    /// again, transactions timed out and requests refused at a limit. One
+    /// struct copy, cheap enough to sample on a timer; every member only
+    /// grows except <see cref="SipralCounters.ActiveCalls"/>.</summary>
+    public SipralCounters Counters()
+    {
+        var counters = new SipralCounters { Size = (nuint)Marshal.SizeOf<SipralCounters>() };
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_counters(Handle, ref counters),
+            "sipral_stack_counters");
+        return counters;
+    }
+
+    /// <summary>Ask these STUN servers from now on, in order of preference,
+    /// each <c>host:port</c> — what <c>stunServer</c> and
+    /// <c>stunFallbacks</c> would have named — without creating the stack
+    /// again (<c>sipral_stack_stun_servers</c>). Every socket the stack keeps
+    /// mapped is asked again of the new list at once:
+    /// <see cref="SipralEventKind.StunServer"/> says the server in use moved
+    /// and <see cref="SipralEventKind.NatMapping"/> what the new one answers.
+    /// On a stack created without a STUN server the signalling socket starts
+    /// being kept mapped, and every media socket opened from then on is asked
+    /// where it appears from before its call is described. An empty list
+    /// asks nobody any more: accounts a STUN answer moved register their own
+    /// address again, and calls are described by their sockets' own
+    /// addresses. A stack with a TURN server keeps asking STUN, so an empty
+    /// list there throws with <see cref="SipralStatus.InvalidArgument"/>, as
+    /// does an entry that is not an address and a port.</summary>
+    public void SetStunServers(IReadOnlyList<string> servers)
+    {
+        ArgumentNullException.ThrowIfNull(servers);
+        var listed = ToSBytes(string.Join(",", servers));
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_stun_servers(Handle, listed, (nuint)listed.Length, NowMs),
+            "sipral_stack_stun_servers");
+        _nat = listed.Length == 0 ? SipralNat.Off : SipralNat.Stun;
     }
 
     /// <summary><c>host:port</c>, the text shape every address crosses

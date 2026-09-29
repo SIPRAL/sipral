@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -44,12 +45,14 @@ import kotlin.test.assertTrue
 import org.sipral.SipralCandidateKind
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralException
 import org.sipral.SipralIce
 import org.sipral.SipralPathKind
 import org.sipral.SipralPathOutcome
 import org.sipral.SipralNatMapping
 import org.sipral.SipralNatRelay
 import org.sipral.SipralNatRelayEvent
+import org.sipral.SipralStatus
 import org.sipral.SipralStunServerState
 import org.sipral.SipralTransport
 
@@ -346,6 +349,41 @@ private fun aSilentFirstServerHandsOver(host: String): String {
                 val sip = assertNotNull(mapped(), "the next server's answer never became a mapping")
                 assertEquals(FakeStunServer.mapped(client.bindAddress), sip.mapped)
                 return "a silent first STUN server handed the socket to the next"
+            }
+        }
+    }
+}
+
+/** [SipralClient.setStunServers] on a client opened with nobody to ask: the
+ * signalling socket is mapped at once, a call placed afterwards is offered
+ * at the address the server handed out, and an entry that is not an address
+ * is refused. */
+private fun aListNamedLaterMapsTheSignallingAndTheCalls(host: String): String {
+    FakeStunServer(host).use { stun ->
+        stun.open = true
+        DatagramSocket(0, InetAddress.getByName(host)).use { peer ->
+            val peerAddress = formatAddress(host, peer.localPort)
+            SipralClient.open(audio = SipralAudioMode.Application, bindHost = host).use { client ->
+                val seen = recordEvents(client, 15_000)
+                client.setStunServers(listOf(stun.address))
+                assertEquals(stun.address, client.stunServer)
+                val deadline = System.currentTimeMillis() + 10_000
+                fun mapped() = seen.toList().mapNotNull { natOf(it) }.firstOrNull { it.signalling != 0L }
+                while (mapped() == null && System.currentTimeMillis() < deadline) Thread.sleep(20)
+                val sip = assertNotNull(mapped(), "the server named later never mapped the signalling socket")
+                assertEquals(FakeStunServer.mapped(client.bindAddress), sip.mapped)
+
+                val account = client.addAccount(aor = "sip:alice@example.invalid", registrarAddress = peerAddress)
+                client.placeCall(account, target = "sip:bob@$peerAddress", mediaHost = host).use {
+                    val invite = assertNotNull(read(peer, "INVITE "), "no INVITE reached the far end")
+                    assertTrue(invite.contains("c=IN IP4 203.0.113.7"), "the SDP does not name the public address:\n$invite")
+                }
+
+                client.setStunServers(emptyList())
+                assertNull(client.stunServer)
+                val refused = assertFailsWith<SipralException> { client.setStunServers(listOf("not an address")) }
+                assertEquals(SipralStatus.INVALID_ARGUMENT, refused.status)
+                return "a STUN server named on an open client mapped its signalling and its calls"
             }
         }
     }
@@ -932,6 +970,7 @@ internal suspend fun natChecks(): String {
     return listOf(
         stunMappingReachesContactAndSdp(host),
         aSilentFirstServerHandsOver(host),
+        aListNamedLaterMapsTheSignallingAndTheCalls(host),
         registrarFlowIsKeptOpenBehindTheNat(host),
         turnRelayIsAllocatedAndOffered(host),
         iceBehindStunCarriesAudio(host),

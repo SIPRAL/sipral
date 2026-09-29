@@ -225,6 +225,9 @@ turn to, in order, when `stunServer` stops answering; every socket moves on
 by itself, and a `SipralEventKind.StunServer` event (`evt.StunServer`: the
 state, the server, the one before it) says when the server in use changed or
 every one failed (`docs/06-nat.md`, "More than one server").
+`stack.SetStunServers(new[] { ... })` replaces the list on a running stack,
+and turns STUN on for one created without it; an empty list turns it off
+again.
 
 Behind a NAT, every account `stunServer` showed to be behind one keeps its
 registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
@@ -240,6 +243,45 @@ it an incoming call is answered 503 and `PlaceCall` throws with
 `diagnosticDecisions` (64) and `diagnosticRecords` (32) are the other
 ceilings, zero for the default each (`docs/08-ffi.md`, "Limits, and what
 went out twice").
+
+### The log, the state and the counters
+
+```csharp
+var source = new TraceSource("Sipral", SourceLevels.Information);
+stack.LogTo(source);                          // follows the switch's level
+Console.WriteLine(stack.Counters().RequestsRetransmitted);
+File.WriteAllText("crash.txt", stack.State()); // redacted, from any thread
+```
+
+`LogTo(TraceSource)` sends the stack's log to the tracing the base class
+library carries, with no package to add: each line as `target: message`
+(`call`, `registration`, `sip`, `api`, ...), `Error`/`Warn`/`Info` as
+`TraceEventType.Error`/`Warning`/`Information` and `Debug`/`Trace` as
+`Verbose`, the level's number as the event id. An application on
+`Microsoft.Extensions.Logging` hands `SetLog` a delegate that calls its own
+`ILogger`, which keeps this package free of that dependency:
+
+```csharp
+stack.SetLog(SipralLogLevel.Info, (level, target, message, suppressed) =>
+    logger.Log(level switch
+    {
+        SipralLogLevel.Error => LogLevel.Error,
+        SipralLogLevel.Warn => LogLevel.Warning,
+        SipralLogLevel.Info => LogLevel.Information,
+        SipralLogLevel.Debug => LogLevel.Debug,
+        _ => LogLevel.Trace,
+    }, "{Target}: {Message}", target, message));
+```
+
+Every line is redacted before it leaves the library: no user part, number,
+IP address or credential (`docs/17-observability.md`). `Counters()` returns
+the `SipralCounters` struct: registrations, how calls ended, what screening
+refused and, since ABI 0.30, `RequestsRetransmitted`,
+`ResponsesRetransmitted`, `TransactionsTimedOut` and
+`RequestsRefusedAtLimit`. `State()` is the redacted text snapshot of what the
+stack holds. `new SipralStack(rtpPortMin: ..., rtpPortMax: ...)` keeps every
+media socket this package opens inside a firewall's range.
+`Sipral.Tests/LoggingTests.cs` proves each.
 
 ### A REFER from outside any call
 

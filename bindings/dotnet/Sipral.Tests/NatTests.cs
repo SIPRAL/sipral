@@ -446,6 +446,40 @@ public sealed class NatTests
         }
     }
 
+    /// <summary><see cref="SipralStack.SetStunServers"/> on a stack created
+    /// with nobody to ask: the signalling socket is mapped at once, a call
+    /// placed afterwards is offered at the address the server handed out,
+    /// and an entry that is not an address is refused.</summary>
+    [Fact]
+    public async Task AListNamedLaterMapsTheSignallingAndTheCalls()
+    {
+        using var server = new FakeStunServer("203.0.113.7", 40020);
+        using var alice = new SipralStack(audio: SipralAudio.Application);
+        using var bob = new SipralStack(audio: SipralAudio.Application);
+
+        alice.SetStunServers(new[] { server.Address });
+        var mapped = await FirstMatchingAsync(alice.Events, e => e.Kind == SipralEventKind.NatMapping, Timeout);
+        Assert.Equal("203.0.113.7:40020", mapped.Nat!.Mapped);
+
+        var aliceAccount = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
+        bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);
+        var aliceCall = alice.PlaceCall(aliceAccount, $"sip:bob@{bob.BindAddress}");
+        try
+        {
+            var incoming = await FirstMatchingAsync(bob.Events, e => e.Kind == SipralEventKind.IncomingCall, Timeout);
+            var message = Encoding.UTF8.GetString(incoming.Message ?? Array.Empty<byte>());
+            Assert.Contains("c=IN IP4 203.0.113.7", message);
+        }
+        finally
+        {
+            aliceCall.Close();
+        }
+
+        alice.SetStunServers(Array.Empty<string>());
+        var refused = Assert.Throws<SipralException>(() => alice.SetStunServers(new[] { "not an address" }));
+        Assert.Equal(SipralStatus.InvalidArgument, refused.Status);
+    }
+
     [Fact]
     public async Task CallOffersTheMappedMediaAddress()
     {

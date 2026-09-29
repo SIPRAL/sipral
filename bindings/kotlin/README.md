@@ -293,6 +293,9 @@ to, in order, when `stunServer` stops answering; every socket moves on by
 itself, and a `STUN_SERVER` event (read with `stunServerOf`: the state, the
 server, the one before it) says when the server in use changed or every one
 failed (`docs/06-nat.md`, "More than one server").
+`client.setStunServers(listOf(...))` replaces the list on an open client,
+and turns STUN on for one opened without it; an empty list turns it off
+again.
 
 Behind a NAT, every account `stunServer` showed to be behind one keeps its
 registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
@@ -307,6 +310,32 @@ it an incoming call is answered 503 and `placeCall` throws with
 `LIMIT_REACHED`. `maxServerTransactions` (256), `diagnosticDecisions` (64)
 and `diagnosticRecords` (32) are the other ceilings, zero for the default
 each (`docs/08-ffi.md`, "Limits, and what went out twice").
+
+### The log, the state and the counters
+
+```kotlin
+client.logTo()                                   // java.util.logging, "sipral"
+Logger.getLogger("sipral.sip").level = Level.FINEST   // whole SIP messages
+println(client.counters().requestsRetransmitted)
+crashReport.attach(client.state())               // redacted, from any thread
+```
+
+`logTo(logger, level)` sends the client's log to `java.util.logging`, which
+every JVM and Android carries (on Android it reaches logcat): each line to
+the child logger of the part of the stack that wrote it (`sipral.call`,
+`sipral.registration`, `sipral.sip`, `sipral.api`, ...), `ERROR` as
+`SEVERE`, `WARN` as `WARNING`, `INFO` as `INFO`, `DEBUG` as `FINE` and
+`TRACE` as `FINEST` (`julLevelOf`). Left null, `level` follows the logger's
+effective level. An application on SLF4J or Timber hands `setLog` a lambda
+that calls it instead. Every line is redacted before it leaves the library:
+no user part, number, IP address or credential (`docs/17-observability.md`).
+`counters()` returns the `SipralCounters` data class: registrations, how
+calls ended, what screening refused and, since ABI 0.30,
+`requestsRetransmitted`, `responsesRetransmitted`, `transactionsTimedOut` and
+`requestsRefusedAtLimit`. `state()` is the redacted text snapshot of what the
+stack holds. `open(rtpPortMin = ..., rtpPortMax = ...)` keeps every media
+socket the client opens inside a firewall's range. `LoggingCheck.kt` proves
+each.
 
 `SipralTurnServer(..., transport = SipralTransport.TCP)` reaches the TURN
 server over TCP, for the network that lets no UDP out, and `TLS` over TLS

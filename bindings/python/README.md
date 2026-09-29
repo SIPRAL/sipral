@@ -208,7 +208,9 @@ to, in order, when `stun_server` stops answering; every socket moves on by
 itself, and an `EventKind.STUN_SERVER` event (`fields["state"]` a
 `StunServerState`, `fields["server"]`, `fields["previous"]`) says when the
 server in use changed or every one failed (`docs/06-nat.md`, "More than one
-server").
+server"). `stack.set_stun_servers([...])` replaces the list on a running
+stack, and turns STUN on for one created without it; an empty list turns it
+off again.
 
 Behind a NAT, every account `stun_server` showed to be behind one keeps its
 registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
@@ -224,6 +226,36 @@ it an incoming call is answered 503 and `place_call` raises with
 `diagnostic_decisions` (64) and `diagnostic_records` (32) are the other
 ceilings, zero for the default each (`docs/08-ffi.md`, "Limits, and what
 went out twice").
+
+## The log, the state and the counters
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+stack.log_to()                      # the "sipral" logger, at its own level
+logging.getLogger("sipral.sip").setLevel(sipral.TRACE)   # whole SIP messages
+print(stack.counters().requests_retransmitted)
+print(stack.state())                # for a crash report
+```
+
+`stack.log_to(logger=None, level=None)` sends the stack's log to the
+standard `logging` module: each line to the child logger of the part of the
+stack that wrote it (`sipral.call`, `sipral.registration`, `sipral.sip`,
+`sipral.api`, ...), `ERROR`/`WARN`/`INFO`/`DEBUG` as their `logging`
+namesakes and `TRACE` as `sipral.TRACE` (5). Left out, `level` follows the
+logger's effective level, so lines nobody keeps are never formatted.
+`stack.set_log(level, handler)` takes a plain callable instead. Every line is
+redacted before it leaves the library: no user part, number, IP address or
+credential (`docs/17-observability.md`).
+
+`stack.counters()` is a frozen `sipral.Counters`: registrations, how calls
+ended, what screening refused, and, since ABI 0.30, `requests_retransmitted`,
+`responses_retransmitted`, `transactions_timed_out` and
+`requests_refused_at_limit`. `stack.state()` is the redacted text snapshot
+of everything the stack holds, safe from any thread. `Stack(rtp_port_min=...,
+rtp_port_max=...)` keeps every media socket this package opens inside a
+firewall's range. `tests/test_logging.py` and `tests/test_nat.py` prove each.
 
 ## A REFER from outside any call
 

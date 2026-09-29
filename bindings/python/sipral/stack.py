@@ -15,6 +15,7 @@ package is written by hand against (`docs/08-ffi.md`, "Swift").
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import selectors
 import socket
@@ -28,11 +29,39 @@ from ._sipral_cffi import ffi, lib
 from .account import Account
 from .audio import Audio
 from .call import Call
+from .counters import Counters
 from .enums import AudioMode, Feature, Link, LogLevel, Recovery
 from .errors import call as _retry
 from .errors import check
 
-__all__ = ["Stack", "features"]
+__all__ = ["TRACE", "Stack", "features"]
+
+#: The :mod:`logging` level a ``LogLevel.TRACE`` line is logged at: below
+#: ``logging.DEBUG``, which ``LogLevel.DEBUG`` takes, since a trace line holds
+#: a whole SIP message and wants turning on apart from the debug lines.
+TRACE = 5
+
+_PYTHON_LEVELS = {
+    LogLevel.ERROR: logging.ERROR,
+    LogLevel.WARN: logging.WARNING,
+    LogLevel.INFO: logging.INFO,
+    LogLevel.DEBUG: logging.DEBUG,
+    LogLevel.TRACE: TRACE,
+}
+
+
+def _log_level_for(python_level: int) -> LogLevel:
+    """The quietest stack level that still carries every line a logger at
+    ``python_level`` keeps."""
+    if python_level <= TRACE:
+        return LogLevel.TRACE
+    if python_level <= logging.DEBUG:
+        return LogLevel.DEBUG
+    if python_level <= logging.INFO:
+        return LogLevel.INFO
+    if python_level <= logging.WARNING:
+        return LogLevel.WARN
+    return LogLevel.ERROR
 
 
 def features() -> Feature:
@@ -709,6 +738,74 @@ class Stack:
             "sipral_stack_state",
         )
         return ffi.string(buffer, int(length[0]) - 1).decode("utf-8")
+
+    def log_to(self, logger: logging.Logger | None = None, level: int | None = None) -> None:
+        """Send this stack's log to the standard :mod:`logging` module.
+
+        Each line goes to ``logger.getChild(target)`` -- ``sipral.call``,
+        ``sipral.sip``, ``sipral.api`` and so on under the default ``sipral``
+        logger (`docs/17-observability.md` lists the targets) -- so an application filters by the part of the stack that wrote it
+        the way it filters any library. The levels map as ``ERROR`` to
+        ``logging.ERROR``, ``WARN`` to ``logging.WARNING``, ``INFO`` to
+        ``logging.INFO``, ``DEBUG`` to ``logging.DEBUG`` and ``TRACE`` to
+        :data:`TRACE` (5, below ``DEBUG``). ``level`` is the stack's own
+        :class:`sipral.enums.LogLevel`; left out, it follows the logger's
+        effective level when this is called, so lines the logger would drop
+        are never formatted. A line that follows a flood carries the count
+        of lines turned away before it as ``record.sipral_suppressed``.
+        ``log_to`` replaces whatever :meth:`set_log` installed, and
+        ``set_log(LogLevel.OFF)`` turns it off.
+        """
+        logger = logger if logger is not None else logging.getLogger("sipral")
+        if level is None:
+            level = _log_level_for(logger.getEffectiveLevel())
+        children: dict[str, logging.Logger] = {}
+
+        def deliver(line_level: int, target: str, message: str, suppressed: int) -> None:
+            child = children.get(target)
+            if child is None:
+                child = children.setdefault(target, logger.getChild(target))
+            python_level = _PYTHON_LEVELS.get(line_level, logging.DEBUG)
+            if child.isEnabledFor(python_level):
+                child.log(python_level, "%s", message, extra={"sipral_suppressed": suppressed})
+
+        self.set_log(level, deliver)
+
+    def counters(self) -> Counters:
+        """This stack's health counters since it was created
+        (`sipral_stack_counters`): registrations, how calls ended, what was
+        screened, what went out again, what timed out and what was refused
+        at a limit. One struct copy -- cheap enough to sample on a timer."""
+        out = ffi.new("sipral_counters_t *")
+        out.size = ffi.sizeof("sipral_counters_t")
+        _retry(lambda: lib.sipral_stack_counters(self.handle, out), "sipral_stack_counters")
+        return Counters.from_raw(out)
+
+    def set_stun_servers(self, servers: Sequence[str]) -> None:
+        """Ask these STUN servers from now on, in order of preference, each
+        ``host:port`` -- what ``stun_server`` and ``stun_fallbacks`` would
+        have named -- without creating the stack again
+        (`sipral_stack_stun_servers`).
+
+        Every socket the stack keeps mapped is asked again of the new list
+        at once; ``EventKind.STUN_SERVER`` says the server in use moved and
+        ``EventKind.NAT_MAPPING`` what the new one answers. On a stack
+        created without a STUN server the signalling socket starts being
+        kept mapped, and every media socket opened from then on is asked
+        where it appears from before its call is described. An empty list
+        asks nobody any more: accounts a STUN answer moved register their
+        own address again, and calls are described by their sockets' own
+        addresses. A stack with a TURN server keeps asking STUN, so an empty
+        list there raises :class:`SipralError` with
+        ``SIPRAL_STATUS_INVALID_ARGUMENT``.
+        """
+        text = ",".join(servers).encode("utf-8")
+        buffer = ffi.new("char[]", text) if text else ffi.NULL
+        _retry(
+            lambda: lib.sipral_stack_stun_servers(self.handle, buffer, len(text), self.now_ms()),
+            "sipral_stack_stun_servers",
+        )
+        self._nat = lib.SIPRAL_NAT_STUN if text else lib.SIPRAL_NAT_OFF
 
     def reject_call(self, event: _events.Event, code: int = 486) -> None:
         """`sipral_call_reject` for an incoming call nothing has answered,

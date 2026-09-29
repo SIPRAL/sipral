@@ -7,6 +7,9 @@ import Darwin
 import Glibc
 #endif
 import Foundation
+#if canImport(OSLog)
+import OSLog
+#endif
 import XCTest
 @testable import Sipral
 
@@ -101,6 +104,87 @@ final class LoggingTests: XCTestCase {
             let port = try XCTUnwrap(call.mediaAddress.split(separator: ":").last.flatMap { Int($0) })
             XCTAssertTrue(port >= low && port < high && port % 2 == 0, "media on \(port)")
         }
+    }
+
+    #if canImport(OSLog)
+    /// `logTo(subsystem:level:)`: a registrar's refusal -- a warning, which
+    /// the unified logging system keeps where it drops debug lines -- reaches
+    /// it under the category of its target, read back from this process's own
+    /// log store.
+    func testALineReachesTheUnifiedLogUnderItsTarget() throws {
+        let subsystem = "org.sipral.test.\(UUID().uuidString)"
+        let registrar = try UDPSocket(host: "127.0.0.1", port: 0)
+        defer { registrar.close() }
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let since = Date().addingTimeInterval(-1)
+        try stack.logTo(subsystem: subsystem, level: .info)
+        let account = try stack.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: registrar.localAddress, registrar: "sip:sipral.invalid"
+        )
+        try account.register()
+        let refused = DispatchTime.now() + 5
+        var answered = false
+        while !answered && DispatchTime.now() < refused {
+            if let (data, source) = registrar.receive() {
+                let request = String(decoding: data, as: UTF8.self)
+                if request.hasPrefix("REGISTER ") {
+                    _ = registrar.send(forbidden(to: request), to: source)
+                    answered = true
+                }
+            } else {
+                usleep(10_000)
+            }
+        }
+        XCTAssertTrue(answered, "no REGISTER reached the registrar")
+
+        let store = try OSLogStore(scope: .currentProcessIdentifier)
+        let matching = NSPredicate(format: "subsystem == %@", subsystem)
+        var found: OSLogEntryLog?
+        let deadline = Date().addingTimeInterval(5)
+        while found == nil && Date() < deadline {
+            found = try store.getEntries(at: store.position(date: since), matching: matching)
+                .compactMap { $0 as? OSLogEntryLog }
+                .first { $0.category == "registration" && $0.level == .notice }
+            if found == nil { usleep(100_000) }
+        }
+        let entry = try XCTUnwrap(found, "no warning reached the unified log under \(subsystem)")
+        XCTAssertFalse(entry.composedMessage.contains("<private>"), entry.composedMessage)
+        XCTAssertFalse(entry.composedMessage.contains("alice"), entry.composedMessage)
+        XCTAssertEqual(SipralLogLevel.warn.osLogType, .default)
+        XCTAssertEqual(SipralLogLevel.error.osLogType, .error)
+        XCTAssertEqual(SipralLogLevel.trace.osLogType, .debug)
+    }
+
+    /// A registrar's `403 Forbidden` to `request`.
+    private func forbidden(to request: String) -> [UInt8] {
+        let lines = request.components(separatedBy: "\r\n")
+        let copied = ["Via", "From", "To", "Call-ID", "CSeq"].compactMap { name in
+            lines.first { $0.lowercased().hasPrefix("\(name.lowercased()):") }
+        }
+        let head = ["SIP/2.0 403 Forbidden"] + copied.map { $0.lowercased().hasPrefix("to:") ? "\($0);tag=registrar" : $0 }
+        return Array((head + ["Content-Length: 0", "", ""]).joined(separator: "\r\n").utf8)
+    }
+    #endif
+
+    func testARequestNobodyAnswersIsCountedAsSentAgain() throws {
+        let silent = try UDPSocket(host: "127.0.0.1", port: 0)
+        defer { silent.close() }
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        XCTAssertEqual(try stack.counters().requestsRetransmitted, 0)
+        let account = try stack.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: silent.localAddress, registrar: "sip:sipral.invalid"
+        )
+        try account.register()
+        let deadline = DispatchTime.now() + 5
+        while try stack.counters().requestsRetransmitted == 0 && DispatchTime.now() < deadline {
+            usleep(100_000)
+        }
+        let counters = try stack.counters()
+        XCTAssertGreaterThan(counters.requestsRetransmitted, 0)
+        XCTAssertGreaterThan(counters.registrationsAttempted, 0)
+        XCTAssertEqual(counters.requestsRefusedAtLimit, 0)
     }
 
     func testARangeWithNoPairLeftSaysSo() throws {

@@ -47,7 +47,8 @@ import struct
 import threading
 import unittest
 
-from sipral import Stack
+from sipral import SipralError, Stack
+from sipral._sipral_cffi import lib
 from sipral.enums import (
     AudioMode,
     CallState,
@@ -331,6 +332,51 @@ class ASilentFirstServerHandsOver(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(changed.fields["previous"], self.silent_address)
         self.assertEqual(changed.fields["server"], self.server.address)
         self.assertEqual(mapped.fields["mapped"], f"{self.PUBLIC_HOST}:{self.PUBLIC_PORT}")
+
+
+class StunServersNamedOnARunningStack(unittest.IsolatedAsyncioTestCase):
+    """:meth:`Stack.set_stun_servers` on a stack created with nobody to
+    ask: the signalling socket is mapped at once, a call placed afterwards
+    is offered at the address the server handed out, and an empty list
+    stops the asking again."""
+
+    PUBLIC_HOST = "203.0.113.7"  # RFC 5737 TEST-NET-3: never a real route
+    PUBLIC_PORT = 40020
+
+    async def asyncSetUp(self) -> None:
+        self.server = _FakeStunServer(self.PUBLIC_HOST, self.PUBLIC_PORT)
+        loop = asyncio.get_running_loop()
+        self.alice = Stack(loop=loop, audio=AudioMode.APPLICATION)
+        self.bob = Stack(loop=loop, audio=AudioMode.APPLICATION)
+
+    async def asyncTearDown(self) -> None:
+        self.alice.close()
+        self.bob.close()
+        self.server.close()
+
+    async def test_a_list_named_later_maps_the_signalling_and_the_calls(self) -> None:
+        self.alice.set_stun_servers([self.server.address])
+        event = None
+        while event is None or event.kind != EventKind.NAT_MAPPING:
+            event = await asyncio.wait_for(self.alice.events.get(), timeout=5)
+        self.assertTrue(event.fields["signalling"])
+        self.assertEqual(event.fields["mapped"], f"{self.PUBLIC_HOST}:{self.PUBLIC_PORT}")
+
+        account = self.alice.add_account("sip:alice@sipral.invalid", registrar_address=self.bob.bind_address)
+        self.bob.add_account("sip:bob@sipral.invalid", registrar_address=self.alice.bind_address)
+        call = self.alice.place_call(account, f"sip:bob@{self.bob.bind_address}")
+        self.addAsyncCleanup(call.close)
+        incoming = None
+        while incoming is None or incoming.kind != EventKind.INCOMING_CALL:
+            incoming = await asyncio.wait_for(self.bob.events.get(), timeout=10)
+        self.assertIn(f"c=IN IP4 {self.PUBLIC_HOST}".encode("ascii"), incoming.message)
+
+    async def test_an_empty_list_is_taken_and_a_name_is_refused(self) -> None:
+        self.alice.set_stun_servers([self.server.address])
+        self.alice.set_stun_servers([])
+        with self.assertRaises(SipralError) as refused:
+            self.alice.set_stun_servers(["not an address"])
+        self.assertEqual(refused.exception.status, lib.SIPRAL_STATUS_INVALID_ARGUMENT)
 
 
 class TwoStacksTalkThroughStun(unittest.IsolatedAsyncioTestCase):

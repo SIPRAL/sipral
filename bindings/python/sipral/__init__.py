@@ -40,10 +40,11 @@ from __future__ import annotations
 from .account import Account
 from .audio import Audio, AudioDevice, AudioInfo
 from .call import Call
+from .counters import Counters
 from .errors import SipralError
 from .events import Answering, AudioNotice, CallerIdentity, EndCause, Event
 from .media import Media
-from .stack import Stack, features
+from .stack import TRACE, Stack, features
 
 __version__ = "0.0.1"
 
@@ -56,11 +57,13 @@ __all__ = [
     "AudioNotice",
     "Call",
     "CallerIdentity",
+    "Counters",
     "EndCause",
     "Event",
     "Media",
     "SipralError",
     "Stack",
+    "TRACE",
     "__version__",
     "features",
 ]

@@ -12,6 +12,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The four idiomatic layers carry the rest of ABI 0.30.** Each stack
+  class reads its counters (`counters()` / `Counters()`, the retransmission
+  and limit counters among them), replaces its STUN servers while running
+  (`set_stun_servers` / `SetStunServers` / `setStunServers`, which also turns
+  STUN on or off), and sends its log to the platform's own logging with no
+  dependency added: Python's `logging` (`Stack.log_to`, a child logger per
+  target, `sipral.TRACE` below `DEBUG`), .NET's `TraceSource`
+  (`SipralStack.LogTo`), `java.util.logging` on the JVM and Android
+  (`SipralClient.logTo`), and `os.Logger` on Apple platforms
+  (`SipralStack.logTo(subsystem:level:)`, a category per target). The state
+  snapshot now also names the signalling counters.
 - **A stack's limits are set and read over the C ABI (0.30).**
   `sipral_stack_config_t` appends `max_dialogs`, `max_server_transactions`,
   `diagnostic_decisions` and `diagnostic_records`, each zero for its

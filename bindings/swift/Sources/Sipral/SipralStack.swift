@@ -124,8 +124,11 @@ public final class SipralStack: @unchecked Sendable {
     public typealias LogHandler = @Sendable (SipralLogLevel, String, String, UInt64) -> Void
 
     /// The STUN server this stack asks where its sockets appear from, as
-    /// `host:port`, or `nil` for a stack that asks nobody.
-    public let stunServer: String?
+    /// `host:port`, or `nil` for a stack that asks nobody: the one it was
+    /// created with, then the first of what `setStunServers(_:)` last named.
+    public var stunServer: String? { natQueue.sync { currentStunServer } }
+    /// What `stunServer` answers. Guarded by `natQueue`.
+    private var currentStunServer: String?
     private let turnServer: String?
     private let turn: TurnServer?
 
@@ -273,7 +276,7 @@ public final class SipralStack: @unchecked Sendable {
         self.socket = socket
         self.audioMode = audio
         self.network = network ?? Network(link: .wired, address: bindHost)
-        self.stunServer = stunServer
+        self.currentStunServer = stunServer
         self.turnServer = turn?.address
         self.turn = turn
         self.origin = .now()
@@ -447,6 +450,66 @@ public final class SipralStack: @unchecked Sendable {
         let length = try Sipral.stackState(stack: handle, buffer: &buffer)
         let bytes = buffer.prefix(max(0, length - 1)).map { UInt8(bitPattern: $0) }
         return String(decoding: bytes, as: UTF8.self)
+    }
+
+    #if canImport(os)
+    /// Send this stack's log to the unified logging system: one `os.Logger`
+    /// per target under `subsystem` -- category `call`, `sip`, `api` and so
+    /// on (`docs/17-observability.md` lists the targets) -- so Console and
+    /// `log stream --predicate 'subsystem == "org.sipral"'` filter by the
+    /// part of the stack that wrote a line. The levels map as `.error` to
+    /// `OSLogType.error`, `.warn` to `.default`, `.info` to `.info`, and
+    /// `.debug` and `.trace` to `.debug` (`SipralLogLevel.osLogType`); a line
+    /// that follows a flood says how many lines were turned away before it.
+    /// Every line is already redacted by the stack, so it is logged as
+    /// public: nothing reaches it that `<private>` would have hidden.
+    /// `level` is the stack's own, and the unified logging system decides
+    /// separately which of what arrives it keeps. Replaces whatever
+    /// `setLog(level:handler:)` installed.
+    public func logTo(subsystem: String = "org.sipral", level: SipralLogLevel = .info) throws {
+        let loggers = OSLoggers(subsystem: subsystem)
+        try setLog(level: level) { line, target, message, suppressed in
+            let logger = loggers.logger(for: target)
+            if suppressed == 0 {
+                logger.log(level: line.osLogType, "\(message, privacy: .public)")
+            } else {
+                logger.log(
+                    level: line.osLogType,
+                    "\(message, privacy: .public) (\(suppressed, privacy: .public) lines turned away before this one)"
+                )
+            }
+        }
+    }
+    #endif
+
+    /// This stack's health counters since it was created
+    /// (`sipral_stack_counters`): registrations, how calls ended, what was
+    /// screened, and -- new in ABI 0.30 -- requests and responses sent
+    /// again, transactions timed out and requests refused at a limit. One
+    /// struct copy, cheap enough to sample on a timer.
+    public func counters() throws -> SipralCounters {
+        SipralCounters(try retryingBusy { try Sipral.stackCounters(stack: handle) })
+    }
+
+    /// Ask these STUN servers from now on, in order of preference, each
+    /// `host:port` -- what `stunServer` and `stunFallbacks` would have named
+    /// -- without creating the stack again (`sipral_stack_stun_servers`).
+    ///
+    /// Every socket the stack keeps mapped is asked again of the new list at
+    /// once: `SipralEventKind.stunServer` says the server in use moved and
+    /// `.natMapping` what the new one answers. On a stack created without a
+    /// STUN server the signalling socket starts being kept mapped, and every
+    /// media socket opened from then on is asked where it appears from
+    /// before its call is described. An empty list asks nobody any more:
+    /// accounts a STUN answer moved register their own address again, and
+    /// calls are described by their sockets' own addresses. A stack with a
+    /// TURN server keeps asking STUN, so an empty list there throws
+    /// `.invalidArgument`, as does an entry that is not an address and a
+    /// port.
+    public func setStunServers(_ servers: [String]) throws {
+        let listed = servers.joined(separator: ",")
+        try retryingBusy { try Sipral.stackStunServers(stack: handle, servers: listed, nowMs: nowMs()) }
+        natQueue.sync { currentStunServer = servers.first }
     }
 
     /// Elapsed milliseconds since this stack was created -- what every entry

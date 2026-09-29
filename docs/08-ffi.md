@@ -1037,6 +1037,17 @@ the account and not the person, two stacks on loopback whose call is carried
 on even ports from each one's range, and a one-pair range that says
 `EXHAUSTED` on the second socket.
 
+Each binding also hands the log to the platform's own logging, with nothing
+added to its dependencies: Python's `Stack.log_to` to the `logging` module (a
+child logger per target, `sipral.TRACE` = 5 below `DEBUG`), .NET's
+`SipralStack.LogTo` to a `TraceSource`, Kotlin's `SipralClient.logTo` to
+`java.util.logging`, and Swift's `SipralStack.logTo(subsystem:level:)` to
+`os.Logger`, a category per target. The same stack classes read
+`sipral_stack_counters` (`counters()`, `Counters()`) and call
+`sipral_stack_stun_servers` (`set_stun_servers`, `SetStunServers`,
+`setStunServers`), after which a stack created without STUN maps its media
+sockets as one created with it would.
+
 ## Media across the boundary
 
 The ABI is built over `crates/sipral`, the facade that joins signalling to

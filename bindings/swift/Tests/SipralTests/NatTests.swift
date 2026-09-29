@@ -346,6 +346,42 @@ final class NatTests: XCTestCase {
         XCTAssertTrue(invite.contains("a=rtcp-mux"), "one mapping describes one port, so the offer asks for rtcp-mux")
     }
 
+    /// `setStunServers(_:)` on a stack created with nobody to ask: the
+    /// signalling socket is mapped at once, a call placed afterwards is
+    /// offered at the address the server handed out, and an entry that is
+    /// not an address is refused.
+    func testAListNamedLaterMapsTheSignallingAndTheCalls() async throws {
+        let stun = try FakeStunServer()
+        defer { stun.stop() }
+        stun.open = true
+        let peer = try UDPSocket(host: "127.0.0.1", port: 0)
+        defer { peer.close() }
+        let alice = try SipralStack(audio: .application)
+        defer { alice.close() }
+        let events = alice.events()
+
+        try alice.setStunServers([stun.address])
+        XCTAssertEqual(alice.stunServer, stun.address)
+        let signalling = await first(events) { $0.natData?.signalling == true }
+        let nat = try XCTUnwrap(signalling?.natData, "the server named later never mapped the signalling socket")
+        XCTAssertEqual(nat.mapped, FakeStunServer.mapped(alice.bindAddress))
+
+        let account = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: peer.localAddress)
+        let call = try alice.placeCall(account: account, target: "sip:bob@\(peer.localAddress)")
+        defer { call.close() }
+        let mediaEvent = await first(events) { $0.natData?.signalling == false }
+        let media = try XCTUnwrap(mediaEvent?.natData, "the media socket was never mapped")
+        let invite = try XCTUnwrap(read(peer, startingWith: "INVITE "), "no INVITE reached the far end")
+        let publicMedia = UDPSocket.parse(FakeStunServer.mapped(media.local))
+        XCTAssertTrue(invite.contains("m=audio \(publicMedia.port) "), "the SDP does not name the public port")
+
+        try alice.setStunServers([])
+        XCTAssertNil(alice.stunServer)
+        XCTAssertThrowsError(try alice.setStunServers(["not an address"])) { error in
+            XCTAssertEqual((error as? SipralError)?.status, .invalidArgument)
+        }
+    }
+
     /// `stunFallbacks`: the first server named never answers, and the
     /// signalling socket is asked of the next one once five and a half
     /// seconds have gone by, with `SipralEventKind.stunServer` saying so.
