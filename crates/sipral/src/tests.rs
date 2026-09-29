@@ -13444,6 +13444,61 @@ fn an_account_that_allows_it_records_an_encrypted_call_in_the_clear() {
     );
 }
 
+/// A recording session that went in the clear, for a call that was not
+/// encrypted, copies nothing of an encrypted call that replaces it: the
+/// server was never offered keys for it.
+#[test]
+fn a_plain_recording_copies_nothing_of_an_encrypted_call_that_replaces_the_recorded_one() {
+    let (mut pair, mut server, call, _, _) = recorded_call();
+    let plain = "v=0\r\no=carol 1 1 IN IP4 192.0.2.7\r\ns=-\r\nc=IN IP4 192.0.2.7\r\n\
+t=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+    let keyed = format!(
+        "v=0\r\no=carol 1 1 IN IP4 192.0.2.7\r\ns=-\r\nc=IN IP4 192.0.2.7\r\n\
+t=0 0\r\nm=audio 4000 RTP/SAVP 0\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 {THEIRS}\r\n"
+    );
+    let invite = replacing_invite(&pair, call)
+        .replace(plain, &keyed)
+        .replace(
+            &format!("Content-Length: {}", plain.len()),
+            &format!("Content-Length: {}", keyed.len()),
+        );
+    let now = pair.now;
+    pair.caller.deliver(invite.as_bytes(), callee_sip(), now);
+    pair.caller.drain(now, false);
+    let new = pair
+        .caller
+        .heard
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::IncomingCall { call: new, .. }) => Some(*new),
+            _ => None,
+        })
+        .expect("the replacing call arrived");
+    pair.caller
+        .engine
+        .answer(&mut pair.caller.agent, new, caller_media(), now)
+        .expect("the answer goes");
+    acknowledge_replacing(&mut pair, &mut server);
+    let _ = settle_with(&mut pair, &mut server);
+    let mut session = pair
+        .caller
+        .engine
+        .session(new)
+        .expect("the replacing call's media");
+    assert!(session.is_encrypted());
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    tone(&mut samples, 8_000, &mut phase);
+    let sent = session
+        .capture(&samples, pair.now)
+        .expect("it encodes")
+        .is_some();
+    drop(session);
+    assert!(sent, "the replacing call sends its frame");
+    assert_eq!(copies(&mut pair, new), [], "nothing in the clear");
+}
+
 #[test]
 fn a_hold_tells_the_server_who_sends_and_the_end_of_the_call_ends_the_recording() {
     let (mut pair, mut server, call, _, recording) = recorded_call();

@@ -2622,7 +2622,9 @@ numbering on rather than starting it over, so no SRTP index goes out twice
 under one key (RFC 3711 §9.1). An unencrypted call is recorded as plain
 `RTP/AVP`, and so is an encrypted one on an account that says it may be
 (`AccountSrtp::recording_in_clear`, `recording_in_clear` in
-`sipral_account_config_t`). The keys travel in the recording session's
+`sipral_account_config_t`). A recording offered in the clear, for a call that
+was not encrypted, copies nothing of an encrypted call that replaces the
+recorded one, unless the account says it may. The keys travel in the recording session's
 signalling, which is why a recorder listens on TLS. This end offers SDES
 only: the SRC is the offerer of a recording session (§7.1), and a DTLS-SRTP
 handshake on the copies' sockets, which only send, is not offered.

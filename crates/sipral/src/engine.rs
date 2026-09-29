@@ -597,6 +597,9 @@ struct Recording {
     /// §12.2), and a stream the server will not take as SRTP gets nothing.
     /// `None` copies in the clear.
     keys: Option<crate::siprec::StreamKeys>,
+    /// Whether the recorded call's account lets an encrypted call be copied
+    /// in the clear ([`AccountSrtp::recording_in_clear`]).
+    in_clear: bool,
     /// The server's last answer, which says which offered line keys each
     /// stream.
     answer: Option<SessionDescription>,
@@ -4348,6 +4351,7 @@ impl MediaEngine {
                 ],
                 destinations: None,
                 keys,
+                in_clear,
                 answer: None,
                 parked: None,
                 told: Some(direction),
@@ -4496,13 +4500,23 @@ impl MediaEngine {
         let Some(session) = self.sessions.get(&held.recorded) else {
             return;
         };
+        let mut slot = share::lock(session);
+        // a recording session that went in the clear, for a call that was
+        // not encrypted then, copies nothing of an encrypted call that
+        // replaced it unless the account said it may (RFC 7866 §12.2); the
+        // copies wait, numbered as they were, for audio they may carry
+        if held.keys.is_none() && !held.in_clear && slot.session.plan().keying.is_some() {
+            if let Some(running) = slot.session.tap_to(None) {
+                held.parked = Some(running);
+            }
+            return;
+        }
         let keyed = || {
             held.keys
                 .as_ref()
                 .zip(held.answer.as_ref())
                 .map(|(keys, answer)| crate::siprec::protection(answer, keys))
         };
-        let mut slot = share::lock(session);
         if let Some(tap) = slot.session.tap() {
             tap.redirect(destinations);
             if let Some(keyed) = keyed().filter(|_| answered) {
