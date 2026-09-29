@@ -7,7 +7,10 @@
 //! [`ogg`] is the container of RFC 3533, pages and all, with a reader strict
 //! enough to check what the writer produced. [`ogg_opus`] puts Opus packets
 //! that were already encoded into it the way RFC 7845 asks, so a call
-//! recording in Opus costs no second encode.
+//! recording in Opus costs no second encode. [`wav`] is the other recording
+//! format: sixteen-bit PCM in RIFF/WAVE, stereo with the local side on the
+//! left and the remote side on the right, growing into RF64 past four
+//! gibibytes.
 //!
 //! None of it needs the `opus` feature. The Ogg Opus writer takes packets
 //! and their durations; where they came from is the caller's business.
@@ -18,3 +21,4 @@
 
 pub mod ogg;
 pub mod ogg_opus;
+pub mod wav;
