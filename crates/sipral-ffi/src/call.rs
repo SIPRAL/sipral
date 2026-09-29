@@ -1434,6 +1434,11 @@ entry! {
         with_stack(stack, |state| {
             let a = state.calls.get(call_a).map_err(handle_failed)?;
             let b = state.calls.get(call_b).map_err(handle_failed)?;
+            if crate::local_conference::in_a_conference(state, a)
+                || crate::local_conference::in_a_conference(state, b)
+            {
+                return Err(media_failed(&sipral::MediaError::AlreadyJoined));
+            }
             state.engine.join(a, b).map_err(|error| media_failed(&error))
         })
     }

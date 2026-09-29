@@ -148,6 +148,8 @@ pub(crate) enum Kind {
     Dialog,
     /// `sipral_account_message`'s.
     Message,
+    /// `sipral_local_conference_create`'s.
+    Conference,
 }
 
 impl Kind {
@@ -161,12 +163,13 @@ impl Kind {
             Self::Announcement => 5,
             Self::Dialog => 6,
             Self::Message => 7,
+            Self::Conference => 8,
         }
     }
 
     /// The kind these four bits name, or none for a pattern no table mints —
     /// which is most of them: four bits hold sixteen values and this library
-    /// has eight kinds.
+    /// has nine kinds.
     const fn from_bits(bits: u8) -> Option<Self> {
         match bits {
             0 => Some(Self::Stack),
@@ -177,6 +180,7 @@ impl Kind {
             5 => Some(Self::Announcement),
             6 => Some(Self::Dialog),
             7 => Some(Self::Message),
+            8 => Some(Self::Conference),
             _ => None,
         }
     }
@@ -193,6 +197,7 @@ impl Kind {
             Self::Announcement => "an announced call",
             Self::Dialog => "a dialog waiting to be resolved",
             Self::Message => "a message send",
+            Self::Conference => "a local conference",
         }
     }
 }

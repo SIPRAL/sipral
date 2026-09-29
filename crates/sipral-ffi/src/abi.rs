@@ -560,6 +560,18 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
         "SipralRecordConfig",
         crate::versioned::min_size::RECORD_CONFIG,
     ),
+    (
+        "SipralLocalConferenceConfig",
+        crate::versioned::min_size::LOCAL_CONFERENCE_CONFIG,
+    ),
+    (
+        "SipralLocalConferenceInfo",
+        crate::versioned::min_size::LOCAL_CONFERENCE_INFO,
+    ),
+    (
+        "SipralLocalConferenceMember",
+        crate::versioned::min_size::LOCAL_CONFERENCE_MEMBER,
+    ),
 ];
 
 /// The versioned-shaped structs with no pinned length, and why.
@@ -675,6 +687,8 @@ pub const SURFACE: Surface = Surface {
         crate::presence::SipralActivity::ABI,
         crate::presence::SipralPublicationState::ABI,
         crate::presence::SipralPublishFailure::ABI,
+        crate::local_conference::SipralLocalConferenceChange::ABI,
+        crate::local_conference::SipralDeparture::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -717,6 +731,7 @@ pub const SURFACE: Surface = Surface {
         crate::realtime_text::SipralTextEvent::ABI,
         crate::presence::SipralPresenceEvent::ABI,
         crate::transport::SipralTransportFailedEvent::ABI,
+        crate::local_conference::SipralLocalConferenceEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -737,6 +752,9 @@ pub const SURFACE: Surface = Surface {
         crate::conference::SipralConferenceUser::ABI,
         crate::presence::SipralPresence::ABI,
         crate::siprec::SipralRecordConfig::ABI,
+        crate::local_conference::SipralLocalConferenceConfig::ABI,
+        crate::local_conference::SipralLocalConferenceInfo::ABI,
+        crate::local_conference::SipralLocalConferenceMember::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -914,6 +932,19 @@ pub const SURFACE: Surface = Surface {
         crate::inband::sipral_call_detect_progress::ABI,
         crate::inband::sipral_call_consent_tone::ABI,
         crate::record::sipral_media_record_start_with::ABI,
+        crate::local_conference::sipral_local_conference_create::ABI,
+        crate::local_conference::sipral_local_conference_destroy::ABI,
+        crate::local_conference::sipral_local_conference_add::ABI,
+        crate::local_conference::sipral_local_conference_remove::ABI,
+        crate::local_conference::sipral_local_conference_set_muted::ABI,
+        crate::local_conference::sipral_local_conference_set_gain::ABI,
+        crate::local_conference::sipral_local_conference_info::ABI,
+        crate::local_conference::sipral_local_conference_member_at::ABI,
+        crate::local_conference::sipral_local_conference_talker_at::ABI,
+        crate::local_conference::sipral_local_conference_tick::ABI,
+        crate::local_conference::sipral_local_conference_poll_transmit::ABI,
+        crate::local_conference::sipral_local_conference_record_start::ABI,
+        crate::local_conference::sipral_local_conference_record_stop::ABI,
     ],
 };
 
@@ -1102,6 +1133,7 @@ mod tests {
             "SipralTextEvent",
             "SipralPresenceEvent",
             "SipralTransportFailedEvent",
+            "SipralLocalConferenceEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

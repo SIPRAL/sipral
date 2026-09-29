@@ -1538,12 +1538,15 @@ thread_local! {
 
 /// This thread's mark on a stack, for as long as it is working on the media
 /// of one of that stack's calls.
-struct Inside {
+pub(crate) struct Inside {
     stack: SipralHandle,
 }
 
 impl Inside {
-    fn enter(stack: SipralHandle) -> Self {
+    /// Mark this thread as inside `stack`'s media — or inside a local
+    /// conference's tick, named by the conference's own handle — until the
+    /// mark is dropped.
+    pub(crate) fn enter(stack: SipralHandle) -> Self {
         INSIDE.with_borrow_mut(|inside| inside.push(stack));
         Self { stack }
     }

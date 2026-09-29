@@ -221,6 +221,11 @@ constants! {
     /// reduced-size RTCP (RFC 4585, RFC 5506): `feedback` on the call's
     /// configuration, and what it agreed in `sipral_media_info_t`.
     pub const SIPRAL_FEATURE_RTCP_FEEDBACK: u32 = 1 << 23;
+    /// See [`SIPRAL_FEATURE_DTMF`]. A local conference of any number of
+    /// calls, each on its own codec and rate, with or without this end
+    /// (ABI 0.32): `sipral_local_conference_create` and
+    /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
+    pub const SIPRAL_FEATURE_LOCAL_CONFERENCE: u32 = 1 << 24;
 }
 
 record! {
@@ -369,6 +374,9 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.rtcp_feedback {
         features |= SIPRAL_FEATURE_RTCP_FEEDBACK;
     }
+    if capabilities.local_conference {
+        features |= SIPRAL_FEATURE_LOCAL_CONFERENCE;
+    }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -403,6 +411,7 @@ mod tests {
     use super::{
         SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_CALL_READDRESS, SIPRAL_FEATURE_CALLER_IDENTITY,
         SIPRAL_FEATURE_CONFERENCE, SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_LIMITS,
+        SIPRAL_FEATURE_LOCAL_CONFERENCE,
         SIPRAL_FEATURE_LOGGING, SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS,
         SIPRAL_FEATURE_REALTIME_TEXT, SIPRAL_FEATURE_RECORDING, SIPRAL_FEATURE_RTCP_FEEDBACK,
         SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SIPREC, SIPRAL_FEATURE_SRTP,
@@ -509,6 +518,7 @@ mod tests {
             ),
             (SIPRAL_FEATURE_REALTIME_TEXT, 22, facade.realtime_text),
             (SIPRAL_FEATURE_RTCP_FEEDBACK, 23, facade.rtcp_feedback),
+            (SIPRAL_FEATURE_LOCAL_CONFERENCE, 24, facade.local_conference),
         ] {
             assert_eq!(bit, 1 << number);
             assert_eq!(features & bit != 0, present, "bit {number}");

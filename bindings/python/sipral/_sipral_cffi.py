@@ -63,7 +63,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR 31
+#define SIPRAL_ABI_VERSION_MINOR 32
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -341,6 +341,14 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_RTCP_FEEDBACK 8388608
 
 /**
+ * See SIPRAL_FEATURE_DTMF. A local conference of any number of
+ * calls, each on its own codec and rate, with or without this end
+ * (ABI 0.32): `sipral_local_conference_create` and
+ * `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
+ */
+#define SIPRAL_FEATURE_LOCAL_CONFERENCE 16777216
+
+/**
  * The buffer a caller has to bring for one outgoing packet.
  *
  * Not a path MTU — RTP does not discover one — but the bound the session
@@ -537,6 +545,7 @@ typedef struct sipral_conference_event sipral_conference_event_t;
 typedef struct sipral_text_event sipral_text_event_t;
 typedef struct sipral_presence_event sipral_presence_event_t;
 typedef struct sipral_transport_failed_event sipral_transport_failed_event_t;
+typedef struct sipral_local_conference_event sipral_local_conference_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -557,12 +566,19 @@ typedef struct sipral_conference sipral_conference_t;
 typedef struct sipral_conference_user sipral_conference_user_t;
 typedef struct sipral_presence sipral_presence_t;
 typedef struct sipral_record_config sipral_record_config_t;
+typedef struct sipral_local_conference_config sipral_local_conference_config_t;
+typedef struct sipral_local_conference_info sipral_local_conference_info_t;
+typedef struct sipral_local_conference_member sipral_local_conference_member_t;
 
 /**
  * The result of a call across the C ABI.
  *
  * The numbers are part of the ABI. A value keeps its meaning for the life of
  * the ABI's major version, and a new one is only ever added at the end.
+ *
+ * 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
+ * statuses, and it stays reserved and never used, so no build returns
+ * it and `sipral_status_name` has no name for it.
  */
 typedef int32_t sipral_status_t;
 enum {
@@ -709,6 +725,13 @@ enum {
      * the stack with `sipral_stack_transport_bind`, and ask again.
      */
     SIPRAL_STATUS_TRANSPORT_DOWN = 22,
+    /**
+     * A local conference would not take the call (ABI 0.32): it is
+     * full, the call is already in a conference or joined into a pair
+     * with `sipral_call_join`, or its codec hears at a rate the
+     * conference does not mix. The last error says which.
+     */
+    SIPRAL_STATUS_CONFERENCE_REFUSED = 23,
 };
 
 /**
@@ -2090,6 +2113,19 @@ enum {
      * are `SIPRAL_HANDLE_NONE`: a transport is neither.
      */
     SIPRAL_EVENT_KIND_TRANSPORT_FAILED = 53,
+    /**
+     * A local conference changed (ABI 0.32): a member joined or left, who
+     * is talking changed, or its recording stopped by itself.
+     *
+     * `payload.local_conference` says which conference and what
+     * happened: `member` is the call that joined or left — or the
+     * conference's own handle for this end — `departure` why it left,
+     * and `members`, `talkers` and `loudest` how the conference stands
+     * now. The talkers themselves are read with
+     * `sipral_local_conference_talker_at`. `account` and `call` are
+     * `SIPRAL_HANDLE_NONE`: a conference is neither.
+     */
+    SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED = 54,
 };
 
 /**
@@ -3868,6 +3904,63 @@ enum {
      * No answer at all.
      */
     SIPRAL_PUBLISH_FAILURE_UNREACHABLE = 5,
+};
+
+/**
+ * What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` says happened.
+ * Names for `sipral_local_conference_event_t::change`.
+ */
+typedef uint32_t sipral_local_conference_change_t;
+enum {
+    /**
+     * Never written by this build.
+     */
+    SIPRAL_LOCAL_CONFERENCE_CHANGE_UNKNOWN = 0,
+    /**
+     * `member` joined: a call added, or this end when the conference was
+     * made with it.
+     */
+    SIPRAL_LOCAL_CONFERENCE_CHANGE_JOINED = 1,
+    /**
+     * `member` left, for the reason `departure` gives.
+     */
+    SIPRAL_LOCAL_CONFERENCE_CHANGE_LEFT = 2,
+    /**
+     * Who is talking changed: `talkers` and `loudest` say who now, and
+     * `sipral_local_conference_talker_at` lists them, loudest first.
+     */
+    SIPRAL_LOCAL_CONFERENCE_CHANGE_TALKERS = 3,
+    /**
+     * The conference's recording stopped by itself: the file would not
+     * take what was written. It holds the audio up to its last
+     * checkpoint.
+     */
+    SIPRAL_LOCAL_CONFERENCE_CHANGE_RECORDING_STOPPED = 4,
+};
+
+/**
+ * Why a member left. Names for
+ * `sipral_local_conference_event_t::departure`.
+ */
+typedef uint32_t sipral_departure_t;
+enum {
+    /**
+     * Nobody left.
+     */
+    SIPRAL_DEPARTURE_NONE = 0,
+    /**
+     * `sipral_local_conference_remove` took it out.
+     */
+    SIPRAL_DEPARTURE_REMOVED = 1,
+    /**
+     * Its call's media ended.
+     */
+    SIPRAL_DEPARTURE_ENDED = 2,
+    /**
+     * Its call moved to a codec whose rate or frame the conference
+     * cannot mix.
+     */
+    SIPRAL_DEPARTURE_INCOMPATIBLE = 3,
 };
 
 /**
@@ -7366,6 +7459,41 @@ struct sipral_transport_failed_event {
 };
 
 /**
+ * What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` carries.
+ */
+struct sipral_local_conference_event {
+    /**
+     * The conference.
+     */
+    sipral_handle_t conference;
+    /**
+     * A sipral_local_conference_change_t.
+     */
+    uint32_t change;
+    /**
+     * A sipral_departure_t, for `SIPRAL_LOCAL_CONFERENCE_CHANGE_LEFT`.
+     */
+    uint32_t departure;
+    /**
+     * Who joined or left: a call, or the conference's own handle for
+     * this end. `SIPRAL_HANDLE_NONE` for the other changes.
+     */
+    sipral_handle_t member;
+    /**
+     * Members now, this end included.
+     */
+    uint32_t members;
+    /**
+     * Members talking now.
+     */
+    uint32_t talkers;
+    /**
+     * The loudest of them, or `SIPRAL_HANDLE_NONE`.
+     */
+    sipral_handle_t loudest;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -7466,6 +7594,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_TRANSPORT_FAILED.
      */
     sipral_transport_failed_event_t transport_failed;
+    /**
+     * For SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED.
+     */
+    sipral_local_conference_event_t local_conference;
 };
 
 /**
@@ -8327,6 +8459,126 @@ struct sipral_record_config {
      * How many bytes of it.
      */
     size_t far_end_len;
+};
+
+/**
+ * How `sipral_local_conference_create` makes a conference. Zero in
+ * every member but `size` is a conference of sixteen with this end in
+ * it at 16 kHz.
+ *
+ * Set `size` to `sizeof(sipral_local_conference_config_t)` before the
+ * call.
+ */
+struct sipral_local_conference_config {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * The most members it holds at once, this end included, or zero
+     * for sixteen. At most 1024.
+     */
+    uint32_t max_members;
+    /**
+     * A `SipralToggle`: whether this end takes part. On unless it is
+     * `SIPRAL_TOGGLE_OFF`; a conference without this end only bridges
+     * its calls.
+     */
+    uint32_t local;
+    /**
+     * The rate of this end's frames in application mode, in hertz —
+     * 8000, 16000, 32000 or 48000 — or zero for 16000. A tick's frame is
+     * twenty milliseconds of it. In device mode the audio engine
+     * converts the devices to it.
+     */
+    uint32_t sample_rate;
+};
+
+/**
+ * A conference as it stands: `sipral_local_conference_info`.
+ *
+ * Set `size` to `sizeof(sipral_local_conference_info_t)` before the
+ * call.
+ */
+struct sipral_local_conference_info {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * Members, this end included.
+     */
+    uint32_t members;
+    /**
+     * The most it holds.
+     */
+    uint32_t capacity;
+    /**
+     * Members talking in the last tick.
+     */
+    uint32_t talkers;
+    /**
+     * 1 when this end takes part.
+     */
+    uint32_t local;
+    /**
+     * The rate of this end's frames, in hertz.
+     */
+    uint32_t sample_rate;
+    /**
+     * Samples in one of this end's frames: twenty milliseconds.
+     */
+    uint32_t frame_samples;
+    /**
+     * 1 while the conference is being recorded.
+     */
+    uint32_t recording;
+    /**
+     * How much has been recorded, while it is.
+     */
+    uint64_t recorded_ms;
+    /**
+     * Packets dropped because nobody polled for them in time.
+     */
+    uint64_t packets_dropped;
+};
+
+/**
+ * One member of a conference: `sipral_local_conference_member_at`.
+ *
+ * Set `size` to `sizeof(sipral_local_conference_member_t)` before the
+ * call.
+ */
+struct sipral_local_conference_member {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * The call, or the conference's own handle for this end.
+     */
+    sipral_handle_t member;
+    /**
+     * 1 when it was talking in the last tick, muted or not.
+     */
+    uint32_t talking;
+    /**
+     * 1 when nobody hears it.
+     */
+    uint32_t muted_input;
+    /**
+     * 1 when it hears nothing.
+     */
+    uint32_t muted_output;
+    /**
+     * The level of what it says, in the steps `sipral_audio_set_gain`
+     * takes: 256 is unity.
+     */
+    uint32_t gain_input;
+    /**
+     * The level of what it hears, in the same steps.
+     */
+    uint32_t gain_output;
 };
 
 /**
@@ -11732,6 +11984,196 @@ sipral_status_t sipral_call_consent_tone(sipral_handle_t stack, sipral_handle_t 
  * it is.
  */
 sipral_status_t sipral_media_record_start_with(sipral_handle_t media, const char *path, size_t path_len, const sipral_recording_options_t *options);
+
+/**
+ * Make a local conference on this stack, empty but for this end when
+ * `config` says it takes part, and write its handle to
+ * `out_conference`.
+ *
+ * In device mode the audio engine starts carrying it at once, opening
+ * the devices under automatic activation as a call's media does.
+ *
+ * `SIPRAL_STATUS_CONFERENCE_REFUSED` for a rate that is not 8, 16, 32
+ * or 48 kHz and for more than 1024 members.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_local_conference_config_t` whose
+ * `size` member says how long it is, and `out_conference` at one
+ * `sipral_handle_t`.
+ */
+sipral_status_t sipral_local_conference_create(sipral_handle_t stack, const sipral_local_conference_config_t *config, sipral_handle_t *out_conference);
+
+/**
+ * End a conference. Every call still in it goes back to carrying its
+ * own audio — in device mode, the audio engine takes each up again —
+ * a recording running is finished, and the handle is stale.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_local_conference_destroy(sipral_handle_t conference);
+
+/**
+ * Add a call. It takes part from the next tick, at its own codec's rate,
+ * and its far end hears everybody in the conference but itself.
+ *
+ * The call needs media running, as for `sipral_call_media`.
+ * `SIPRAL_STATUS_CONFERENCE_REFUSED` when the conference is full, for a
+ * call already in this one or another or joined with
+ * `sipral_call_join`, and for a codec the conference cannot mix — a
+ * rate other than 8, 16, 32 or 48 kHz, or frames past 60 ms.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_local_conference_add(sipral_handle_t conference, sipral_handle_t call);
+
+/**
+ * Take a call out. From the next tick nobody in the conference hears it
+ * and it hears nobody; its media is the application's again — in device
+ * mode, the audio engine carries it as it carries any call.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` for a call that is not in it.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_local_conference_remove(sipral_handle_t conference, sipral_handle_t call);
+
+/**
+ * Mute or unmute one way of a member, from the next tick: its input,
+ * which everybody else stops hearing, or its output, which it stops
+ * hearing. `direction` is `SIPRAL_AUDIO_DIRECTION_INPUT` or
+ * `SIPRAL_AUDIO_DIRECTION_OUTPUT`; `member` is a call in the conference,
+ * or the conference's own handle for this end.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` for a member that is not in it.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_local_conference_set_muted(sipral_handle_t conference, sipral_handle_t member, uint32_t direction, uint32_t muted);
+
+/**
+ * Set the level of one way of a member, from the next tick, in the
+ * steps `sipral_audio_set_gain` takes: 256 is unity and 1024, four
+ * times, the most. Its input's level is what everybody else hears of
+ * it; its output's is what it hears.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_local_conference_set_gain(sipral_handle_t conference, sipral_handle_t member, uint32_t direction, uint32_t gain);
+
+/**
+ * How the conference stands.
+ *
+ * Safety
+ *
+ * `out_info` must point at a `sipral_local_conference_info_t` whose
+ * `size` member says how long it is.
+ */
+sipral_status_t sipral_local_conference_info(sipral_handle_t conference, sipral_local_conference_info_t *out_info);
+
+/**
+ * One member, by index: this end first when it takes part, then the
+ * calls in the order they joined. The index is stable until the next
+ * member joins or leaves.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last member.
+ *
+ * Safety
+ *
+ * `out_member` must point at a `sipral_local_conference_member_t` whose
+ * `size` member says how long it is.
+ */
+sipral_status_t sipral_local_conference_member_at(sipral_handle_t conference, size_t index, sipral_local_conference_member_t *out_member);
+
+/**
+ * Who was talking in the last tick, by rank: index zero is the
+ * loudest. A muted member is never listed.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last talker,
+ * which `sipral_local_conference_info_t::talkers` counts.
+ *
+ * Safety
+ *
+ * `out_member` must point at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_local_conference_talker_at(sipral_handle_t conference, size_t index, sipral_handle_t *out_member);
+
+/**
+ * Twenty milliseconds of conference, in application mode: `mic` is this
+ * end's frame, `sipral_local_conference_info_t::frame_samples` long,
+ * and `speaker` is filled with what this end hears, the same length,
+ * written to `out_written`. A conference without this end reads no
+ * microphone — `mic` may be null — and fills `speaker` with silence.
+ *
+ * Call it once every twenty milliseconds, from the thread that carries
+ * the audio, and then drain `sipral_local_conference_poll_transmit`.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` in device mode, where the audio engine
+ * ticks it; `SIPRAL_STATUS_INVALID_ARGUMENT` for a frame of any other
+ * length, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` for a speaker buffer
+ * shorter than a frame, with the length needed in `out_written`.
+ *
+ * Safety
+ *
+ * `mic` must be readable for `mic_count` `int16_t`, `speaker` writable
+ * for `capacity` `int16_t`, and `out_written` must point at one
+ * `size_t` or be null.
+ */
+sipral_status_t sipral_local_conference_tick(sipral_handle_t conference, uint64_t now_ms, const int16_t *mic, size_t mic_count, int16_t *speaker, size_t capacity, size_t *out_written);
+
+/**
+ * The oldest packet a member's call owes its far end, in application
+ * mode: `out_call` names the call, whose media socket sends it, and
+ * `out_packet` is filled as `sipral_media_capture` fills one. A `len`
+ * of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
+ * waiting. Drain it after every tick.
+ *
+ * Safety
+ *
+ * `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+ * `sipral_media_packet_t` as `sipral_media_capture` describes.
+ */
+sipral_status_t sipral_local_conference_poll_transmit(sipral_handle_t conference, sipral_handle_t *out_call, sipral_media_packet_t *out_packet);
+
+/**
+ * Record the whole conference to `path`: everybody it hears, each at
+ * its own level, in one channel, written as `options` say — WAV or Ogg
+ * Opus, at the conference's rate unless another is named.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` when it is already being recorded,
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for a stereo layout, for options no
+ * file can be written with and for a path the file system refuses, and
+ * `SIPRAL_STATUS_RECORDING_FAILED` when the file would not take its
+ * header.
+ *
+ * Safety
+ *
+ * `path` must be readable for `path_len` bytes, and `options` must point
+ * at a `sipral_recording_options_t` whose `size` member says how long
+ * it is.
+ */
+sipral_status_t sipral_local_conference_record_start(sipral_handle_t conference, const char *path, size_t path_len, const sipral_recording_options_t *options);
+
+/**
+ * Stop recording the conference, and finish the file.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` when nothing is being recorded.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_local_conference_record_stop(sipral_handle_t conference);
 
 """
 

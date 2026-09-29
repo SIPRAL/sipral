@@ -22,6 +22,10 @@ public typealias SipralHandle = sipral_handle_t
 ///
 /// The numbers are part of the ABI. A value keeps its meaning for the life of
 /// the ABI's major version, and a new one is only ever added at the end.
+///
+/// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
+/// statuses, and it stays reserved and never used, so no build returns
+/// it and `sipral_status_name` has no name for it.
 public enum SipralStatus: Int32, Sendable {
     /// The call did what it was asked to.
     case ok = 0
@@ -122,6 +126,11 @@ public enum SipralStatus: Int32, Sendable {
     /// reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
     /// the stack with `sipral_stack_transport_bind`, and ask again.
     case transportDown = 22
+    /// A local conference would not take the call (ABI 0.32): it is
+    /// full, the call is already in a conference or joined into a pair
+    /// with `sipral_call_join`, or its codec hears at a rate the
+    /// conference does not mix. The last error says which.
+    case conferenceRefused = 23
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -1126,6 +1135,17 @@ public enum SipralEventKind: UInt32, Sendable {
     /// meanwhile is `SIPRAL_STATUS_TRANSPORT_DOWN`. `account` and `call`
     /// are `SIPRAL_HANDLE_NONE`: a transport is neither.
     case transportFailed = 53
+    /// A local conference changed (ABI 0.32): a member joined or left, who
+    /// is talking changed, or its recording stopped by itself.
+    ///
+    /// `payload.local_conference` says which conference and what
+    /// happened: `member` is the call that joined or left — or the
+    /// conference's own handle for this end — `departure` why it left,
+    /// and `members`, `talkers` and `loudest` how the conference stands
+    /// now. The talkers themselves are read with
+    /// `sipral_local_conference_talker_at`. `account` and `call` are
+    /// `SIPRAL_HANDLE_NONE`: a conference is neither.
+    case localConferenceChanged = 54
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -2166,6 +2186,39 @@ public enum SipralPublishFailure: UInt32, Sendable {
     case unreachable = 5
 }
 
+/// What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` says happened.
+/// Names for `sipral_local_conference_event_t::change`.
+public enum SipralLocalConferenceChange: UInt32, Sendable {
+    /// Never written by this build.
+    case unknown = 0
+    /// `member` joined: a call added, or this end when the conference was
+    /// made with it.
+    case joined = 1
+    /// `member` left, for the reason `departure` gives.
+    case left = 2
+    /// Who is talking changed: `talkers` and `loudest` say who now, and
+    /// `sipral_local_conference_talker_at` lists them, loudest first.
+    case talkers = 3
+    /// The conference's recording stopped by itself: the file would not
+    /// take what was written. It holds the audio up to its last
+    /// checkpoint.
+    case recordingStopped = 4
+}
+
+/// Why a member left. Names for
+/// `sipral_local_conference_event_t::departure`.
+public enum SipralDeparture: UInt32, Sendable {
+    /// Nobody left.
+    case none = 0
+    /// `sipral_local_conference_remove` took it out.
+    case removed = 1
+    /// Its call's media ended.
+    case ended = 2
+    /// Its call moved to a codec whose rate or frame the conference
+    /// cannot mix.
+    case incompatible = 3
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -2540,6 +2593,36 @@ public extension sipral_record_config_t {
     }
 }
 
+public extension sipral_local_conference_config_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_local_conference_info_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_local_conference_member_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -2648,7 +2731,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 31
+    public static let abiVersionMinor: UInt32 = 32
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2864,6 +2947,12 @@ public enum Sipral {
     /// reduced-size RTCP (RFC 4585, RFC 5506): `feedback` on the call's
     /// configuration, and what it agreed in `sipral_media_info_t`.
     public static let featureRtcpFeedback: UInt32 = 8388608
+
+    /// See SIPRAL_FEATURE_DTMF. A local conference of any number of
+    /// calls, each on its own codec and rate, with or without this end
+    /// (ABI 0.32): `sipral_local_conference_create` and
+    /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
+    public static let featureLocalConference: UInt32 = 16777216
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -7247,6 +7336,246 @@ public enum Sipral {
                     sipral_media_record_start_with(media, p1.baseAddress, p1.count, &options)
                 }
             }
+        try check(status)
+    }
+
+    /// Make a local conference on this stack, empty but for this end when
+    /// `config` says it takes part, and write its handle to
+    /// `out_conference`.
+    ///
+    /// In device mode the audio engine starts carrying it at once, opening
+    /// the devices under automatic activation as a call's media does.
+    ///
+    /// `SIPRAL_STATUS_CONFERENCE_REFUSED` for a rate that is not 8, 16, 32
+    /// or 48 kHz and for more than 1024 members.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_local_conference_config_t` whose
+    /// `size` member says how long it is, and `out_conference` at one
+    /// `sipral_handle_t`.
+    public static func localConferenceCreate(stack: SipralHandle, config: sipral_local_conference_config_t) throws -> SipralHandle {
+        try ensureAbi()
+        var config = config
+        var conference = SipralHandle()
+        let status = sipral_local_conference_create(stack, &config, &conference)
+        try check(status)
+        return conference
+    }
+
+    /// End a conference. Every call still in it goes back to carrying its
+    /// own audio — in device mode, the audio engine takes each up again —
+    /// a recording running is finished, and the handle is stale.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func localConferenceDestroy(conference: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_local_conference_destroy(conference)
+        try check(status)
+    }
+
+    /// Add a call. It takes part from the next tick, at its own codec's rate,
+    /// and its far end hears everybody in the conference but itself.
+    ///
+    /// The call needs media running, as for `sipral_call_media`.
+    /// `SIPRAL_STATUS_CONFERENCE_REFUSED` when the conference is full, for a
+    /// call already in this one or another or joined with
+    /// `sipral_call_join`, and for a codec the conference cannot mix — a
+    /// rate other than 8, 16, 32 or 48 kHz, or frames past 60 ms.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    public static func localConferenceAdd(conference: SipralHandle, call: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_local_conference_add(conference, call)
+        try check(status)
+    }
+
+    /// Take a call out. From the next tick nobody in the conference hears it
+    /// and it hears nobody; its media is the application's again — in device
+    /// mode, the audio engine carries it as it carries any call.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call that is not in it.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    public static func localConferenceRemove(conference: SipralHandle, call: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_local_conference_remove(conference, call)
+        try check(status)
+    }
+
+    /// Mute or unmute one way of a member, from the next tick: its input,
+    /// which everybody else stops hearing, or its output, which it stops
+    /// hearing. `direction` is `SIPRAL_AUDIO_DIRECTION_INPUT` or
+    /// `SIPRAL_AUDIO_DIRECTION_OUTPUT`; `member` is a call in the conference,
+    /// or the conference's own handle for this end.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a member that is not in it.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    public static func localConferenceSetMuted(conference: SipralHandle, member: SipralHandle, direction: UInt32, muted: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_local_conference_set_muted(conference, member, direction, muted)
+        try check(status)
+    }
+
+    /// Set the level of one way of a member, from the next tick, in the
+    /// steps `sipral_audio_set_gain` takes: 256 is unity and 1024, four
+    /// times, the most. Its input's level is what everybody else hears of
+    /// it; its output's is what it hears.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    public static func localConferenceSetGain(conference: SipralHandle, member: SipralHandle, direction: UInt32, gain: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_local_conference_set_gain(conference, member, direction, gain)
+        try check(status)
+    }
+
+    /// How the conference stands.
+    ///
+    /// Safety
+    ///
+    /// `out_info` must point at a `sipral_local_conference_info_t` whose
+    /// `size` member says how long it is.
+    public static func localConferenceInfo(conference: SipralHandle) throws -> sipral_local_conference_info_t {
+        try ensureAbi()
+        var info = sipral_local_conference_info_t.sized()
+        let status = sipral_local_conference_info(conference, &info)
+        try check(status)
+        return info
+    }
+
+    /// One member, by index: this end first when it takes part, then the
+    /// calls in the order they joined. The index is stable until the next
+    /// member joins or leaves.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last member.
+    ///
+    /// Safety
+    ///
+    /// `out_member` must point at a `sipral_local_conference_member_t` whose
+    /// `size` member says how long it is.
+    public static func localConferenceMemberAt(conference: SipralHandle, index: Int) throws -> sipral_local_conference_member_t {
+        try ensureAbi()
+        var member = sipral_local_conference_member_t.sized()
+        let status = sipral_local_conference_member_at(conference, index, &member)
+        try check(status)
+        return member
+    }
+
+    /// Who was talking in the last tick, by rank: index zero is the
+    /// loudest. A muted member is never listed.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last talker,
+    /// which `sipral_local_conference_info_t::talkers` counts.
+    ///
+    /// Safety
+    ///
+    /// `out_member` must point at one `sipral_handle_t`.
+    public static func localConferenceTalkerAt(conference: SipralHandle, index: Int) throws -> SipralHandle {
+        try ensureAbi()
+        var member = SipralHandle()
+        let status = sipral_local_conference_talker_at(conference, index, &member)
+        try check(status)
+        return member
+    }
+
+    /// Twenty milliseconds of conference, in application mode: `mic` is this
+    /// end's frame, `sipral_local_conference_info_t::frame_samples` long,
+    /// and `speaker` is filled with what this end hears, the same length,
+    /// written to `out_written`. A conference without this end reads no
+    /// microphone — `mic` may be null — and fills `speaker` with silence.
+    ///
+    /// Call it once every twenty milliseconds, from the thread that carries
+    /// the audio, and then drain `sipral_local_conference_poll_transmit`.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` in device mode, where the audio engine
+    /// ticks it; `SIPRAL_STATUS_INVALID_ARGUMENT` for a frame of any other
+    /// length, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` for a speaker buffer
+    /// shorter than a frame, with the length needed in `out_written`.
+    ///
+    /// Safety
+    ///
+    /// `mic` must be readable for `mic_count` `int16_t`, `speaker` writable
+    /// for `capacity` `int16_t`, and `out_written` must point at one
+    /// `size_t` or be null.
+    public static func localConferenceTick(conference: SipralHandle, nowMs: UInt64, mic: [Int16], speaker: inout [Int16]) throws -> Int {
+        try ensureAbi()
+        var written = Int()
+        let status =
+            mic.withUnsafeBufferPointer { p2 in
+                speaker.withUnsafeMutableBufferPointer { p3 in
+                    sipral_local_conference_tick(conference, nowMs, p2.baseAddress, p2.count, p3.baseAddress, p3.count, &written)
+                }
+            }
+        try check(status)
+        return written
+    }
+
+    /// The oldest packet a member's call owes its far end, in application
+    /// mode: `out_call` names the call, whose media socket sends it, and
+    /// `out_packet` is filled as `sipral_media_capture` fills one. A `len`
+    /// of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
+    /// waiting. Drain it after every tick.
+    ///
+    /// Safety
+    ///
+    /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+    /// `sipral_media_packet_t` as `sipral_media_capture` describes.
+    public static func localConferencePollTransmit(conference: SipralHandle, outPacket: inout sipral_media_packet_t) throws -> SipralHandle {
+        try ensureAbi()
+        var call = SipralHandle()
+        let status = sipral_local_conference_poll_transmit(conference, &call, &outPacket)
+        try check(status)
+        return call
+    }
+
+    /// Record the whole conference to `path`: everybody it hears, each at
+    /// its own level, in one channel, written as `options` say — WAV or Ogg
+    /// Opus, at the conference's rate unless another is named.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when it is already being recorded,
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a stereo layout, for options no
+    /// file can be written with and for a path the file system refuses, and
+    /// `SIPRAL_STATUS_RECORDING_FAILED` when the file would not take its
+    /// header.
+    ///
+    /// Safety
+    ///
+    /// `path` must be readable for `path_len` bytes, and `options` must point
+    /// at a `sipral_recording_options_t` whose `size` member says how long
+    /// it is.
+    public static func localConferenceRecordStart(conference: SipralHandle, path: String, options: sipral_recording_options_t) throws {
+        try ensureAbi()
+        var options = options
+        let status =
+            Array(path.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_local_conference_record_start(conference, p1.baseAddress, p1.count, &options)
+                }
+            }
+        try check(status)
+    }
+
+    /// Stop recording the conference, and finish the file.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when nothing is being recorded.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func localConferenceRecordStop(conference: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_local_conference_record_stop(conference)
         try check(status)
     }
 

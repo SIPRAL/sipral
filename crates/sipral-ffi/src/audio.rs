@@ -988,9 +988,12 @@ pub(crate) mod tests {
 
     /// The packets the transmit callback was handed: which call, where to,
     /// and how many bytes.
-    type Packets = Arc<Mutex<Vec<(SipralHandle, String, usize)>>>;
+    pub(crate) type Packets = Arc<Mutex<Vec<(SipralHandle, String, usize)>>>;
 
-    unsafe extern "C" fn transmit(event: *const SipralAudioTransmit, user_data: *mut c_void) {
+    pub(crate) unsafe extern "C" fn transmit(
+        event: *const SipralAudioTransmit,
+        user_data: *mut c_void,
+    ) {
         let transmit = unsafe { &*event };
         let destination = unsafe {
             std::slice::from_raw_parts(transmit.destination.cast::<u8>(), transmit.destination_len)

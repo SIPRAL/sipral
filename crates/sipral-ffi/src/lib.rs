@@ -74,6 +74,7 @@ pub mod header;
 pub mod identity;
 pub mod inband;
 pub mod lifecycle;
+pub mod local_conference;
 /// Two hundred calls on one stack, driven from four threads: the shape of
 /// the locking, measured rather than asserted. Tests only — nothing here
 /// crosses the ABI.

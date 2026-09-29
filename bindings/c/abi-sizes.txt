@@ -22,6 +22,9 @@ sipral_conference_user_t 24 24
 sipral_consent_tone_t 32 32
 sipral_counters_t 152 232
 sipral_event_t - 384
+sipral_local_conference_config_t 24 24
+sipral_local_conference_info_t 56 56
+sipral_local_conference_member_t 40 40
 sipral_log_record_t - 64
 sipral_media_info_t 88 104
 sipral_media_packet_t 56 64

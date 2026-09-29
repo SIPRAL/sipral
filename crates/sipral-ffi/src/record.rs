@@ -132,7 +132,7 @@ unsafe impl Versioned for SipralRecordingOptions {
 }
 
 /// What a C recording's options ask for, or why they cannot be taken.
-fn options_of(options: &SipralRecordingOptions) -> Result<RecordingOptions, Fail> {
+pub(crate) fn options_of(options: &SipralRecordingOptions) -> Result<RecordingOptions, Fail> {
     let defaults = RecordingOptions::default();
     let format = match options.format {
         0 => RecordingFormat::Wav,

@@ -240,12 +240,19 @@ Rules for the ABI:
   was: 47 is `..._CALLER_VERIFICATION`, 48 and 49 are `..._IN_BAND_DIGIT`
   and `..._PROGRESS_DETECTED`, 50, 51 and 52 are `..._CONFERENCE_CHANGED`,
   `..._TEXT_RECEIVED` and `..._PRESENCE_CHANGED`, and 53 is
-  `..._TRANSPORT_FAILED`. The next free number is 54.
+  `..._TRANSPORT_FAILED`. ABI 0.32 took 54, at the end of the run, for
+  `..._LOCAL_CONFERENCE_CHANGED`. The next free number is 55.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
   value rather than deriving it, so a declaration that moved would disagree with
   a test that did not.
+
+  `SipralStatus` has one hole, and it is permanent: 17 was passed over when
+  ABI 0.31 numbered its statuses, and it stays reserved and never used — no
+  build returns it, `sipral_status_name` has no name for it, and the
+  enumeration's own documentation says so in every printed binding. 23,
+  `SIPRAL_STATUS_CONFERENCE_REFUSED`, came at ABI 0.32.
 
 ## Handles
 
@@ -1402,6 +1409,46 @@ together rather than one, is the order it locks them in: by handle value,
 never by which one the caller named first, so that two threads mixing the
 same pair with the arguments swapped wait for each other instead of
 deadlocking.
+
+**Any number of calls can be mixed in a local conference (ABI 0.32).** The
+pair above needs two calls at one rate; a local conference takes any number,
+each on its own codec, rate and frame — 8 to 48 kHz, 10 to 60 ms — with or
+without this end, and every member hears everybody but itself.
+`sipral_local_conference_create(stack, config, &conference)` makes one:
+`sipral_local_conference_config_t` says how many members it holds (this end
+included), whether this end takes part, and the rate of this end's frames.
+`sipral_local_conference_add` and `sipral_local_conference_remove` take a
+call in and out; a call already in a conference or joined into a pair, a
+full conference and a codec it cannot mix are all
+`SIPRAL_STATUS_CONFERENCE_REFUSED` (23), and `sipral_call_join` refuses a
+member the same way it refuses a call already paired. Where a member is
+named — a mute or a gain each way (`sipral_local_conference_set_muted`,
+`_set_gain`, in the audio engine's steps), `sipral_local_conference_member_at`,
+`sipral_local_conference_talker_at` and the event — a call is named by its
+call handle and this end by the conference's own handle. The whole mix is
+recorded with `sipral_local_conference_record_start`, one channel, in any of
+the call recorder's formats.
+
+Who drives it depends on the stack's mode. In device mode the audio engine
+carries the conference as one more entry: it lets go of each call as the
+call is added and takes it up again as it leaves, the microphone is this
+end's voice and the loudspeaker plays this end's share, and every packet a
+member owes its far end reaches `audio_transmit_callback` under that
+member's own call handle. In application mode the application ticks it every
+twenty milliseconds, from the thread that carries its audio:
+`sipral_local_conference_tick` takes this end's microphone frame and fills
+its loudspeaker frame, and `sipral_local_conference_poll_transmit` hands out
+the packets, each with the call whose socket sends it. Neither takes the
+stack's lock; a member's own `sipral_media_playback` and
+`sipral_media_capture` belong to the conference while it is in it, and its
+`sipral_media_receive`, RTCP and DTLS stay where they were. Who joined, who
+left and why (removed, its media ended, or a codec change the conference
+cannot follow), who is talking — loudest first, with hysteresis — and a
+recording that stopped by itself arrive as
+`SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` (54) from the stack's poll.
+`sipral_local_conference_destroy` hands every member back. The feature bit is
+`SIPRAL_FEATURE_LOCAL_CONFERENCE` (`1 << 24`), and `docs/05-media.md` has
+the mixer underneath.
 
 **A processor attached with `sipral_call_attach_processor` runs on the media
 path, not on the poll thread.** Unlike `sipral_event_callback_t`, which is

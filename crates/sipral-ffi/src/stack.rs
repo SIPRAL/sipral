@@ -1137,6 +1137,10 @@ pub(crate) struct StackState {
     /// Transports retired since the last poll, each raised by it as
     /// `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` before anything else it has.
     pub(crate) lost: Vec<crate::transport::Lost>,
+    /// The local conferences made on this stack, by handle: whose changes
+    /// each poll raises, and whose members no pair and no second conference
+    /// may take.
+    pub(crate) conferences: Vec<(SipralHandle, crate::local_conference::Shared)>,
 }
 
 // Safety: the user pointer is the caller's and is only ever handed back to
@@ -1736,6 +1740,7 @@ pub(crate) unsafe fn create_on(
         log: log.clone(),
         pseudonyms: pseudonyms.into_boxed_slice(),
         lost: Vec::new(),
+        conferences: Vec::new(),
     };
     // the main transport is the first signalling socket kept mapped; its
     // first request is waiting in `sipral_stack_poll_transmit` from here on
@@ -2090,6 +2095,11 @@ fn run(
                 crate::audio::event_of(event),
             )));
         }
+    }
+    // what the local conferences did since the last poll: members that
+    // joined and left, who is talking, a recording that stopped
+    for event in crate::local_conference::drain(state, stack) {
+        raised.push(Delivery::bare(event));
     }
 
     let deadline = [
@@ -2487,6 +2497,9 @@ pub(crate) mod tests {
         /// What every transport-failed event carried: transport, protocol,
         /// error, TLS reason and detail, in the order they arrived.
         pub(crate) transports_lost: Vec<(u32, u32, u32, u32, String)>,
+        /// What every local conference event carried, in the order they
+        /// arrived.
+        pub(crate) local_conferences: Vec<crate::local_conference::SipralLocalConferenceEvent>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -2868,6 +2881,11 @@ pub(crate) mod tests {
                 heard.reason,
                 heard.at_ms,
             ));
+        }
+        if event.kind == SipralEventKind::LocalConferenceChanged {
+            observed
+                .local_conferences
+                .push(unsafe { event.payload.local_conference });
         }
         if event.kind == SipralEventKind::TransportFailed {
             let lost = unsafe { event.payload.transport_failed };
