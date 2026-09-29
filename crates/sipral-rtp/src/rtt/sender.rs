@@ -209,6 +209,28 @@ impl TextSender {
         &self.config
     }
 
+    /// Send under `config` from the next packet on, as a later offer and
+    /// answer agreed: other payload type numbers, redundancy taken up or
+    /// dropped, another `cps`. What is typed and not yet sent stays queued,
+    /// and the source and its numbering carry on. Redundant copies kept for
+    /// a generation `config` no longer has are dropped, and the byte order
+    /// mark is not owed again.
+    ///
+    /// # Errors
+    /// [`ConfigError`] naming what in `config` the RFCs do not allow; the
+    /// sender is left as it was.
+    pub fn reconfigure(&mut self, config: SenderConfig) -> Result<(), ConfigError> {
+        config.check()?;
+        self.config = config;
+        let generations = self.generations();
+        while self.history.len() > usize::from(generations) {
+            self.history.pop_front();
+        }
+        self.owed = self.owed.min(generations);
+        self.credit = self.credit.min(Self::credit_cap(config));
+        Ok(())
+    }
+
     /// Characters typed and not yet sent.
     #[must_use]
     pub fn buffered(&self) -> usize {
@@ -486,6 +508,35 @@ mod tests {
         // copy of one that was (RFC 4103 §4.2)
         assert!(redundant.is_empty());
         assert_eq!(primary, "\u{FEFF}hi".as_bytes());
+    }
+
+    #[test]
+    fn a_sender_reconfigured_keeps_its_text_and_numbering_under_the_new_numbers() {
+        let mut tx = sender(SenderConfig::new(T140, RED));
+        tx.push("a").unwrap();
+        let first = tx.poll(ms(0)).unwrap();
+        tx.push("b").unwrap();
+        // renumbered, and redundancy dropped
+        let mut bare = SenderConfig::new(96, 97);
+        bare.redundancy = None;
+        tx.reconfigure(bare).unwrap();
+        let next = tx.poll(ms(300)).unwrap();
+        assert_eq!(
+            next.header.payload_type, 96,
+            "bare t140 under its new number"
+        );
+        assert_eq!(next.header.ssrc, SSRC);
+        assert_eq!(
+            next.header.sequence,
+            first.header.sequence.wrapping_add(1),
+            "the numbering carries on"
+        );
+        assert_eq!(next.payload, b"b", "what was queued is sent, alone");
+        assert_eq!(tx.next_poll(), None, "no redundancy owed any more");
+        // a configuration the RFCs forbid leaves the sender as it was
+        assert!(tx.reconfigure(SenderConfig::new(96, 96)).is_err());
+        assert_eq!(tx.config().t140_payload_type, 96);
+        assert_eq!(tx.config().redundancy, None);
     }
 
     #[test]

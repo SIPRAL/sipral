@@ -226,13 +226,38 @@ impl TextStream {
     }
 
     /// A later offer and answer agreed `plan`: the direction, the far end's
-    /// address and its numbers may have moved. Nothing typed and not yet sent
-    /// is lost; the numbering carries on.
-    pub(crate) fn update(&mut self, plan: TextPlan) {
+    /// address and either end's numbers may have moved. Nothing typed and
+    /// not yet sent is lost; the numbering carries on. A receiver whose
+    /// numbers moved starts afresh, after handing on what it had read.
+    ///
+    /// # Errors
+    /// [`MediaError::NoText`] for payload types the RTP header cannot carry;
+    /// the stream is left as it was.
+    pub(crate) fn update(&mut self, plan: TextPlan) -> Result<(), MediaError> {
+        let receiving = (plan.receive_t140, plan.receive_red);
+        let receiver = if receiving == (self.plan.receive_t140, self.plan.receive_red) {
+            None
+        } else {
+            Some(
+                TextReceiver::new(ReceiverConfig::new(plan.receive_t140, plan.receive_red))
+                    .map_err(|_| MediaError::NoText)?,
+            )
+        };
+        let sending = sender_config(&plan);
+        if sending != sender_config(&self.plan) {
+            self.sender
+                .reconfigure(sending)
+                .map_err(|_| MediaError::NoText)?;
+        }
+        if let Some(receiver) = receiver {
+            self.collect();
+            self.receiver = receiver;
+        }
         if plan.remote != self.plan.remote {
             self.latch = None;
         }
         self.plan = plan;
+        Ok(())
     }
 
     /// Queue typed text for the far end.
@@ -332,4 +357,68 @@ fn sender_config(plan: &TextPlan) -> SenderConfig {
     });
     config.cps = plan.cps.or(config.cps);
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use sipral_core::sdp::{SessionDescription, parse};
+    use sipral_rtp::RtpPacket;
+    use sipral_rtp::rtt::{RedPayload, SenderConfig, TextSender};
+
+    use super::{TextStream, plan};
+
+    /// A description at `host` whose text stream numbers t140 `t140` and
+    /// red `red`.
+    fn described(host: &str, port: u16, t140: u8, red: u8) -> SessionDescription {
+        let text = format!(
+            "v=0\r\no=- 1 1 IN IP4 {host}\r\ns=-\r\nc=IN IP4 {host}\r\nt=0 0\r\n\
+m=text {port} RTP/AVP {red} {t140}\r\na=rtpmap:{t140} t140/1000\r\n\
+a=rtpmap:{red} red/1000\r\na=fmtp:{red} {t140}/{t140}/{t140}\r\n"
+        );
+        parse(text.as_bytes()).expect("a description")
+    }
+
+    #[test]
+    fn a_re_offer_that_renumbers_the_text_is_sent_and_read_under_the_new_numbers() {
+        let now = Instant::now();
+        let first = plan(
+            &described("192.0.2.1", 41000, 98, 100),
+            &described("192.0.2.2", 41002, 98, 100),
+        )
+        .expect("text agreed");
+        let mut stream = TextStream::open(first, (7, 1, 1), now).expect("the stream");
+        // the far end offers again under other numbers, and the answer
+        // takes the offer's
+        let again = plan(
+            &described("192.0.2.1", 41000, 96, 97),
+            &described("192.0.2.2", 41002, 96, 97),
+        )
+        .expect("text agreed again");
+        stream.update(again).expect("the new numbers fit");
+
+        stream.send("hi").expect("queued");
+        let (_, datagram) = stream.poll_transmit(now).expect("a packet due");
+        let packet = RtpPacket::parse(&datagram).expect("RTP");
+        assert_eq!(packet.header().payload_type, 97, "red under its new number");
+        let red = RedPayload::parse(packet.payload()).expect("a red payload");
+        assert_eq!(red.primary_payload_type(), 96, "t140 under its new number");
+
+        let mut far = TextSender::new(SenderConfig::new(96, 97), 9, 1, 1).expect("a sender");
+        far.push("ok").expect("queued");
+        let arriving = far
+            .poll(Duration::ZERO)
+            .expect("a packet")
+            .to_datagram()
+            .expect("written");
+        assert!(
+            stream.receive(
+                &arriving,
+                "192.0.2.2:41002".parse().expect("an address"),
+                now
+            ),
+            "the far end's text under the numbers the answer gave"
+        );
+    }
 }

@@ -2268,7 +2268,12 @@ impl MediaSession {
     /// refused it.
     pub(crate) fn set_text(&mut self, plan: Option<crate::text::TextPlan>, now: Instant) {
         match (plan, self.text.as_mut()) {
-            (Some(plan), Some(running)) => running.update(plan),
+            (Some(plan), Some(running)) => {
+                if let Err(error) = running.update(plan) {
+                    self.text = None;
+                    self.events.push_back(MediaEvent::Failed(error));
+                }
+            }
             (Some(plan), None) => {
                 let numbers = (
                     self.draws.word(),
