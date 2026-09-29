@@ -873,6 +873,45 @@ mod tests {
     }
 
     #[test]
+    fn a_deviation_of_one_and_a_half_percent_and_two_hertz_is_accepted() {
+        // the CEPT column of Q.24 has a receiver operate within
+        // ±(1.5 % + 2 Hz), a little wider than the North American ±1.5 %
+        for rate in RATES {
+            for digit in Digit::ALL {
+                let (low, high) = digit.frequencies();
+                for (low_sign, high_sign) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                    let scale = |f: f64, sign: f64| 1.0 + sign * (0.015 + 2.0 / f);
+                    let scale = (scale(low, low_sign), scale(high, high_sign));
+                    let signal = digit_signal(rate, digit, scale, (-10.0, -10.0), 50.0, 60.0);
+                    assert_one(
+                        &listen(rate, &signal),
+                        digit,
+                        &format!("{rate:?} {digit:?} {scale:?}"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_loudest_pair_the_samples_carry_is_accepted_with_either_twist() {
+        // two tones at -3 dBm0 peak just under full scale together; louder,
+        // and the sum clips
+        for rate in RATES {
+            for digit in Digit::ALL {
+                for levels in [(-3.0, -3.0), (-7.0, -3.0), (-3.0, -11.0)] {
+                    let signal = digit_signal(rate, digit, (1.0, 1.0), levels, 50.0, 60.0);
+                    assert_one(
+                        &listen(rate, &signal),
+                        digit,
+                        &format!("{rate:?} {digit:?} {levels:?}"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_deviation_of_three_and_a_half_percent_on_either_tone_is_refused() {
         for rate in RATES {
             for digit in Digit::ALL {
@@ -1037,6 +1076,34 @@ mod tests {
                 );
                 let dirty = with_interferer(rate, digit, 2_200.0, 8.0);
                 assert!(listen(rate, &dirty).is_empty(), "{rate:?} {digit:?} 8 dB");
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_harmonic_beside_the_column_tone_is_measured_through_its_leak() {
+        // 2 x 697 Hz is 58 Hz from 1336 and 2 x 770 is 63 Hz from 1477: the
+        // column tone leaks into the harmonic's filter and the harmonic into
+        // the column's, and a harmonic 2.5 dB over the limit is refused only
+        // once what the two filters share is given back to it
+        for rate in RATES {
+            let hz = rate.hz();
+            for digit in [Digit::Two, Digit::Six] {
+                let (low, _) = digit.frequencies();
+                for (relative, accepted) in [(-12.5, false), (-17.0, true)] {
+                    let mut signal =
+                        digit_signal(rate, digit, (1.0, 1.0), (-10.0, -10.0), 50.0, 60.0);
+                    let amplitude = dbm0_to_peak(-10.0 + relative);
+                    let harmonic = sine(2.0 * low, amplitude, 0.7, hz, signal.len());
+                    mix(&mut signal, &harmonic);
+                    let events = listen(rate, &signal);
+                    let context = format!("{rate:?} {digit:?} at {relative} dB");
+                    if accepted {
+                        assert_one(&events, digit, &context);
+                    } else {
+                        assert!(events.is_empty(), "{context}: {events:?}");
+                    }
+                }
             }
         }
     }

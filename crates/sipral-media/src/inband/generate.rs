@@ -368,6 +368,77 @@ mod tests {
     }
 
     #[test]
+    fn an_oscillator_knocked_off_its_circle_returns_to_it() {
+        let mut oscillator = Oscillator::new(1_336.0, 1.0, SampleRate::Hz8000);
+        oscillator.re = 1.01;
+        for _ in 0..8 {
+            oscillator.next();
+        }
+        let length = oscillator.re.hypot(oscillator.im);
+        assert!((length - 1.0).abs() < 1e-12, "{length}");
+    }
+
+    /// Amplitude of the component of `samples` at `frequency`, by
+    /// correlation over a whole number of its periods or near enough.
+    fn amplitude_at(samples: &[i16], frequency: f64, rate: SampleRate) -> f64 {
+        let step = 2.0 * std::f64::consts::PI * frequency / f64::from(rate.hz());
+        let (mut re, mut im) = (0.0, 0.0);
+        for (n, &s) in samples.iter().enumerate() {
+            let phase = step * f64::from(u32::try_from(n).unwrap());
+            re += f64::from(s) * phase.cos();
+            im += f64::from(s) * phase.sin();
+        }
+        2.0 * re.hypot(im) / f64::from(u32::try_from(samples.len()).unwrap())
+    }
+
+    #[test]
+    fn each_tone_of_a_digit_sounds_at_its_own_level() {
+        use crate::inband::dbm0_to_peak;
+        for rate in RATES {
+            let mut generator = DtmfGenerator::with_tone(
+                rate,
+                DtmfTone {
+                    tone_ms: 100,
+                    pause_ms: 0,
+                    low_dbm0: -16.0,
+                    high_dbm0: -9.0,
+                },
+            );
+            generator.start(Digit::Nine);
+            let mut out = vec![0_i16; generator.remaining()];
+            generator.fill(&mut out);
+            let (low, high) = Digit::Nine.frequencies();
+            for (frequency, dbm0) in [(low, -16.0), (high, -9.0)] {
+                let heard = amplitude_at(&out, frequency, rate);
+                let error_db = 20.0 * (heard / dbm0_to_peak(dbm0)).log10();
+                assert!(error_db.abs() < 0.2, "{rate:?} {frequency}: {error_db} dB");
+            }
+        }
+    }
+
+    #[test]
+    fn a_continuous_tone_runs_on_across_the_seconds_it_is_played_in() {
+        use crate::inband::dbm0_to_peak;
+        use crate::inband::progress::{Cadence, ProgressTone, ToneSpec};
+        // a frequency that does not end a second on a whole cycle, so that
+        // an oscillator started over at the seam would jump
+        static ODD: ToneSpec = ToneSpec {
+            tone: ProgressTone::Dial,
+            frequencies: &[437.3],
+            cadence: Cadence::Continuous,
+        };
+        let rate = SampleRate::Hz8000;
+        let mut out = vec![0_i16; 16_000];
+        ToneGenerator::new(rate, &ODD, -13.0).fill(&mut out);
+        let amplitude = dbm0_to_peak(-13.0);
+        for (n, &s) in out.iter().enumerate() {
+            let t = f64::from(u32::try_from(n).unwrap()) / 8_000.0;
+            let expected = amplitude * (2.0 * std::f64::consts::PI * 437.3 * t).sin();
+            assert!((f64::from(s) - expected).abs() <= 1.5, "sample {n}: {s}");
+        }
+    }
+
+    #[test]
     fn a_digit_lasts_exactly_its_tone_and_pause_at_its_level() {
         for rate in RATES {
             let mut generator = DtmfGenerator::new(rate);

@@ -1339,6 +1339,26 @@ mod tests {
     }
 
     #[test]
+    fn a_cadence_broken_off_and_resumed_is_reported_again() {
+        for rate in RATES {
+            let tones = Region::Europe.tones();
+            let (dial, busy) = (&tones[0], &tones[2]);
+            let mut pcm = tone(rate, busy, -13.0, 3_000);
+            pcm.extend(vec![0_i16; rate.samples(1_000)]);
+            pcm.extend(tone(rate, dial, -13.0, 3_000));
+            pcm.extend(vec![0_i16; rate.samples(1_000)]);
+            pcm.extend(tone(rate, busy, -13.0, 3_000));
+            let heard: Vec<ProgressTone> =
+                listen(rate, tones, &pcm).iter().map(|e| e.tone).collect();
+            assert_eq!(
+                heard,
+                [ProgressTone::Busy, ProgressTone::Dial, ProgressTone::Busy],
+                "{rate:?}"
+            );
+        }
+    }
+
+    #[test]
     fn reset_forgets_a_cadence_half_heard() {
         let rate = SampleRate::Hz8000;
         let busy = &Region::Europe.tones()[2];
