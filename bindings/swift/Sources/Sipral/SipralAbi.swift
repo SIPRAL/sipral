@@ -1533,6 +1533,27 @@ public enum SipralSessionTimer: UInt32, Sendable {
     case interval = 2
 }
 
+/// How loud a log line is, for sipral_stack_log and
+/// sipral_log_record_t.level. Higher is more detailed: a stack logging
+/// at `SIPRAL_LOG_LEVEL_INFO` delivers errors, warnings and information.
+public enum SipralLogLevel: UInt32, Sendable {
+    /// Nothing: the log is off. What a stack starts with.
+    case off = 0
+    /// Something failed and the application is likely to see the effect.
+    case error = 1
+    /// Something went wrong that the stack worked around, or is about to
+    /// matter: a registration refused, audio that stopped arriving.
+    case warn = 2
+    /// What an operator wants in a log file: a registration granted, a
+    /// call arriving, confirmed or ending, media starting.
+    case info = 3
+    /// Every event the stack raises, every decision its diagnostic record
+    /// writes down, and every call into this ABI it refused.
+    case debug = 4
+    /// Every SIP message in and out, whole and redacted.
+    case trace = 5
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -1797,6 +1818,16 @@ public extension sipral_audio_transmit_t {
     }
 }
 
+public extension sipral_log_record_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -1901,7 +1932,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 29
+    public static let abiVersionMinor: UInt32 = 30
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2040,6 +2071,14 @@ public enum Sipral {
     /// `session_timer`.
     public static let featureCallerIdentity: UInt32 = 4096
 
+    /// See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
+    /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
+    /// snapshot of a stack's state for a crash report
+    /// (`sipral_stack_state`). Set in every build of this library, which
+    /// always carries the redaction both depend on; a bit so that a binding
+    /// asks before it shows a "send diagnostics" control.
+    public static let featureLogging: UInt32 = 16384
+
     /// The buffer a caller has to bring for one outgoing packet.
     ///
     /// Not a path MTU — RTP does not discover one — but the bound the session
@@ -2122,6 +2161,10 @@ public enum Sipral {
     /// `none`: no privacy, stated. Read only; an account asks for none by
     /// leaving every bit clear.
     public static let privacyNone: UInt32 = 32
+
+    /// The longest text sipral_stack_state writes, its NUL included: a
+    /// buffer of this many bytes always has room.
+    public static let stateTextMax: Int = 16384
 
     /// The calling thread's last error, or an empty string when it
     /// has none. Read the way C reads it: ask for the length, then
@@ -5721,6 +5764,103 @@ public enum Sipral {
         let status = sipral_audio_info(stack, &info)
         try check(status)
         return info
+    }
+
+    /// Send this stack's log to `callback`, at `level` and louder — or turn
+    /// it off with `SIPRAL_LOG_LEVEL_OFF` or a null callback.
+    ///
+    /// A stack is created with its log off, and a log that is off costs
+    /// nothing: no line is formatted for it. Calling this again replaces the
+    /// callback and the level, on this stack alone; lines already waiting go
+    /// to the new callback. Turning the log off drops what was waiting.
+    ///
+    /// What each level carries, how lines are rate-limited and how they are
+    /// redacted is in this module's documentation and in
+    /// `docs/17-observability.md`. A level above `SIPRAL_LOG_LEVEL_TRACE` is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing.
+    ///
+    /// Safety
+    ///
+    /// `callback`, when not null, is called from inside later calls into this
+    /// stack on whichever thread made them, once the stack has been let go
+    /// (see sipral_log_callback_t). `user_data` is handed back to it untouched
+    /// and must stay valid until the log is turned off or replaced and no
+    /// thread is inside this stack any more.
+    public static func stackLog(stack: SipralHandle, level: UInt32, callback: sipral_log_callback_t, userData: UnsafeMutableRawPointer) throws {
+        try ensureAbi()
+        let status = sipral_stack_log(stack, level, callback, userData)
+        try check(status)
+    }
+
+    /// Copy a snapshot of everything this stack is holding into `buffer`, as
+    /// text for a crash report: its accounts and their registrations, its
+    /// calls and their states, its transports, its media sessions, the last
+    /// calls into it that were refused, its queues, its RTP port range and
+    /// its counters — redacted, and never longer than
+    /// `SIPRAL_STATE_TEXT_MAX` bytes with the NUL, so a buffer that size
+    /// always has room.
+    ///
+    /// Safe from any thread, including one the stack is busy on, and never
+    /// waits. When no other thread is inside the stack the snapshot is taken
+    /// there and then; when one is, what comes back is the last snapshot a
+    /// poll kept — polls keep one at most once a second, and only when
+    /// something happened — and its first line says so and when it was
+    /// taken. A call's media session that a thread is in the middle of a
+    /// frame on is reported as busy rather than waited for.
+    ///
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_len`,
+    /// when it does not fit; `out_len` may be null.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    public static func stackState(stack: SipralHandle, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var len = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p1 in
+                sipral_stack_state(stack, p1.baseAddress, p1.count, &len)
+            }
+        try check(status)
+        return len
+    }
+
+    /// Reserve a free even port from this stack's RTP range, with the odd
+    /// port above it kept for RTCP, and write it to `out_port`.
+    ///
+    /// `SIPRAL_STATUS_EXHAUSTED` when every pair in the range is taken —
+    /// reserved, or described by a call this stack still holds — and the
+    /// last error says how many pairs the range has. Nothing is reserved
+    /// then. `SIPRAL_STATUS_WRONG_STATE` on a stack created without a range:
+    /// its ports are the application's to choose.
+    ///
+    /// Safety
+    ///
+    /// `out_port` must point at one `uint32_t`.
+    public static func stackRtpPortReserve(stack: SipralHandle) throws -> UInt32 {
+        try ensureAbi()
+        var port = UInt32()
+        let status = sipral_stack_rtp_port_reserve(stack, &port)
+        try check(status)
+        return port
+    }
+
+    /// Give back a port sipral_stack_rtp_port_reserve handed out that no
+    /// call is using: the socket could not be bound there, or the call was
+    /// refused. A port a call took comes back by itself when the call ends,
+    /// and needs no release.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a port that is not reserved,
+    /// which is also what a second release of the same port is.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func stackRtpPortRelease(stack: SipralHandle, port: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_stack_rtp_port_release(stack, port)
+        try check(status)
     }
 
 }

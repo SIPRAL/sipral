@@ -77,10 +77,12 @@ pub mod lifecycle;
 /// crosses the ABI.
 #[cfg(test)]
 mod load;
+pub mod log;
 pub mod media;
 pub mod message;
 mod names;
 pub mod nat;
+pub mod ports;
 pub mod record;
 pub mod resolve;
 pub mod screening;

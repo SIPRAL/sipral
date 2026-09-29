@@ -70,7 +70,9 @@ stun = ["sipral/stun"]
 # it stay because this crate drives the endpoint directly in places the facade
 # has no opinion about -- transport binding, timers, an in-dialog INFO -- and
 # they are the same crates the facade re-exports, so no type is duplicated.
-sipral = { path = "../sipral", version = "0.0.1", default-features = false }
+# `redaction` always: the log and the state snapshot redact what they write
+# (`crate::log`), and a build that could not would have to leave both out
+sipral = { path = "../sipral", version = "0.0.1", default-features = false, features = ["redaction"] }
 sipral-core.workspace = true
 sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
 # the built-in audio engine behind `sipral_stack_config_t::audio`: the

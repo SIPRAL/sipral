@@ -3,7 +3,7 @@ SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 Copyright (c) 2026 Tiberiu Balasea
 -->
 
-# Observability: counters and capabilities
+# Observability: counters, capabilities, the log and the state snapshot
 
 Two questions an operator and an application ask that neither a log file nor
 a single call's statistics answers. "Is this deployment healthy" is D3, and it
@@ -13,6 +13,14 @@ once, at start-up, instead of shipping a control and finding out from a
 support ticket that it does nothing. Both live in `crates/sipral/src/counters.rs`
 and `crates/sipral/src/capabilities.rs`, carried across the C ABI by
 `crates/sipral-ffi/src/counters.rs` and `crates/sipral-ffi/src/capabilities.rs`.
+
+Two more come after them, once something has already gone wrong in the field.
+"What was the stack doing" is the engine's log, handed to a callback the
+application installs; "what was it holding when it crashed" is one snapshot
+of its state, taken on demand from any thread. Both are in
+`crates/sipral/src/log.rs` and `crates/sipral/src/state.rs`, carried across the
+C ABI by `crates/sipral-ffi/src/log.rs`, and both are under "The engine's log"
+and "The state snapshot" below.
 
 D3, D8, B1, B2 and B5 are requirement ids from
 [13-client-requirements.md](13-client-requirements.md), which says what each
@@ -176,6 +184,122 @@ This is the case D8 exists for, and the rule outlives the example: two honest
 answers about two different surfaces of the same build beat one aspirational
 answer that is believed by whichever side turns out to be wrong. The next
 feature built below before it is built here gets the same treatment.
+
+## The engine's log
+
+A diagnostic record (`docs/14-diagnostics.md`) says what the stack decided
+about one call. The log says what the whole engine is doing, as it does it,
+for the application's own log file: `sipral::Log` in Rust, `sipral_stack_log`
+across the C ABI, `SIPRAL_FEATURE_LOGGING` (bit 14) in `sipral_capabilities`.
+
+| Level | Number | What it carries | Targets |
+|---|---|---|---|
+| error | 1 | Something failed and the application is likely to see the effect. | — |
+| warn | 2 | Something the stack worked around, or is about to matter: a registration refused, inbound audio that stopped arriving. | `registration`, `media` |
+| info | 3 | What an operator wants in a file: a registration granted or dropped, a call arriving, confirmed or ending, media starting, resuming and ending with its packet counts. | `registration`, `call`, `media` |
+| debug | 4 | Every other event the engine hands out, by name and not by content; every decision the diagnostic record writes down, with its reason code, sizes and addresses; and every call into the C ABI that was refused, with the sentence `sipral_last_error_message` gives. | `signalling`, `media`, `decision`, `api` |
+| trace | 5 | Every SIP message in and out, whole. | `sip` |
+
+A level includes every level below it. The target is a short fixed word,
+never data, so a sink can route on it.
+
+Four properties hold it up, each with a test in `crates/sipral/src/log.rs` and
+again across the C ABI in `crates/sipral-ffi/src/log.rs`:
+
+- **Off by default, and free when off.** A stack starts with no sink and no
+  level. Whether a level is on is one atomic load, and a line for a level
+  that is off is never formatted or redacted.
+- **A flood cannot stall the stack.** Lines pass a token bucket —
+  `sipral::BURST` (200) at once, then `sipral::PER_SECOND` (100) a second, on
+  the stack's own clock — and wait in a queue of at most
+  `sipral::QUEUE_CEILING` (1024). What either turns away is counted, never
+  waited for, and the next line delivered carries the count in `suppressed`.
+  Ten thousand refusals at one instant reach the sink as one burst and one
+  count.
+- **The sink is never called with a lock held that it could re-enter.**
+  Producing a line only queues it. `Log::flush` takes the queue out under the
+  log's own lock, lets it go, and only then calls the sink. The engine never
+  flushes — it runs inside its owner's locks — so its owner does: the C ABI
+  flushes at the end of every entry point, once the stack has been let go, on
+  the thread that made the call. A callback may therefore call back into the
+  library, this stack included, as an ordinary call. One flush delivers at a
+  time, so lines arrive in order and never on two threads at once.
+- **No line carries a secret or a person.** Every line goes through
+  `sipral_diag::redact_text` before it is queued, and a whole message at
+  trace through `sipral_diag::redact_message`: a URI's user part and every
+  IP literal become a pseudonym, and `Authorization`, `Proxy-Authorization`,
+  a digest and an SDES `inline:` key are dropped outright. The pseudonyms are
+  keyed HMAC-SHA256, so one value reads as one pseudonym for the life of the
+  log and a call can be followed through the file. Across the C ABI the key
+  is derived from the stack's `media_seed` under a label of its own — never
+  from `entropy`, which a replay recording carries in clear, so an address
+  pseudonym could otherwise be reversed by trying every address. Bytes the
+  parser cannot read are logged by their size only.
+
+The level is set at run time, as often as wanted: `Log::enable`,
+`Log::set_level` and `Log::disable` in Rust; in C, `sipral_stack_log(stack,
+level, callback, user_data)` again, with `SIPRAL_LOG_LEVEL_OFF` or a null
+callback to turn it off. Turning it off drops what was waiting. The bindings
+carry it as `setLog`/`SetLog`/`set_log` on each stack class
+(`docs/08-ffi.md`).
+
+## The state snapshot
+
+A crash report wants what the engine was holding at the moment it was
+written. `MediaEngine::state` answers with a `sipral::EngineState` — every
+account with its address of record and registration state, every call with
+its state and the local address its media is described at, every media
+session with its codec, destination and packet counts, and the D3 counters —
+and `EngineState::render` writes it as text with two promises: **bounded**,
+at most `sipral::LISTED` (32) rows a section with the rest counted, and the
+whole cut at the byte limit given, on a character boundary, with a line
+saying so; and **redacted**, through the same `redact_text` as the log.
+
+`sipral_stack_state(stack, buffer, capacity, &len)` is the C ABI's, and adds
+what only that layer holds: the transports bound, the last eight calls into
+the stack that were refused (when, with what status, and the sentence), the
+event and farewell queues, the RTP port range with how many pairs are
+reserved, and the log's own level and suppressed count. It is never longer
+than `SIPRAL_STATE_TEXT_MAX` (16384) bytes with its NUL, so a buffer that size
+always fits it, and it shares the log's pseudonym key, so an address reads the
+same in both.
+
+It is safe from any thread and never waits, which is the one thing a crash
+handler cannot do without. When no other thread is inside the stack the
+snapshot is taken there and then. When one is — or when it is asked from
+inside a callback the stack is running — what comes back is the last
+snapshot a poll kept, and its first line says so and when it was taken: a
+poll that raised anything keeps one, at most once a second. A media session a
+thread is in the middle of a frame on is listed as busy rather than waited
+for.
+
+## The RTP port range
+
+A deployment behind a firewall opens a range of UDP ports for media and
+needs every call inside it. The application owns every socket, so the range
+opens nothing: `sipral::RtpPorts` is the rule, `MediaEngine::reserve_rtp_port`
+hands ports out by it, and `sipral_stack_config_t`'s `rtp_port_min` and
+`rtp_port_max` set it across the C ABI (`sipral_stack_rtp_port_reserve`,
+`sipral_stack_rtp_port_release`; `docs/08-ffi.md`). RFC 3550 §11 as the stack
+uses it: RTP on an even port, RTCP on the odd port above it — where the stack
+sends and expects RTCP unless the far end said otherwise with `a=rtcp` — and
+the pair reserved whole even when this end offers `rtcp-mux`, because the far
+end may decline it. So an odd lower bound starts at the even port above it, an
+even upper bound is never handed out, and a range holding no such pair is
+refused when it is set.
+
+A port is free when it is neither reserved nor described by a call the engine
+still holds. A reservation a call takes stays taken while the call describes
+its media there and comes back by itself when the call ends or moves off it;
+one no call took — the bind failed, the call was refused — is handed back
+explicitly. Ports go round the range rather than lowest first, so a port just
+let go is the last reused while its stragglers may still arrive. With every
+pair in use the reservation is refused — `sipral::PortsExhausted` in Rust,
+`SIPRAL_STATUS_EXHAUSTED` in C with a last error naming how many pairs the
+range has — and nothing is reserved. With a range set, the C ABI refuses a
+call described at a port the range does not hand out, so a firewall rule and
+the ports in use cannot drift apart. The bindings bind their media sockets
+from the range themselves when a stack is created with one.
 
 ## B2, audited
 

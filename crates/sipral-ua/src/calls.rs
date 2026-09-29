@@ -645,6 +645,15 @@ impl UserAgent {
         }
     }
 
+    /// Every call this agent still holds, in handle order — for a report of
+    /// the whole agent, such as a crash report's state snapshot.
+    #[must_use]
+    pub fn calls(&self) -> Vec<CallHandle> {
+        let mut held: Vec<CallHandle> = self.calls.keys().copied().collect();
+        held.sort_unstable();
+        held
+    }
+
     /// Where a call is.
     #[must_use]
     pub fn call_state(&self, call: CallHandle) -> Option<CallState> {

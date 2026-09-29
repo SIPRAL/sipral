@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)29)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)30)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -238,6 +238,16 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_CALLER_IDENTITY ((uint32_t)4096)
 
 /**
+ * See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
+ * with levels, rate-limited and redacted (`sipral_stack_log`), and a
+ * snapshot of a stack's state for a crash report
+ * (`sipral_stack_state`). Set in every build of this library, which
+ * always carries the redaction both depend on; a bit so that a binding
+ * asks before it shows a "send diagnostics" control.
+ */
+#define SIPRAL_FEATURE_LOGGING ((uint32_t)16384)
+
+/**
  * The buffer a caller has to bring for one outgoing packet.
  *
  * Not a path MTU — RTP does not discover one — but the bound the session
@@ -344,6 +354,12 @@ typedef uint64_t sipral_handle_t;
  */
 #define SIPRAL_PRIVACY_NONE ((uint32_t)32)
 
+/**
+ * The longest text sipral_stack_state writes, its NUL included: a
+ * buffer of this many bytes always has room.
+ */
+#define SIPRAL_STATE_TEXT_MAX ((size_t)16384)
+
 /* Every record, named before any of them is defined, so that a
  * declaration never has to come before the one it mentions. */
 typedef struct sipral_abi_version sipral_abi_version_t;
@@ -388,6 +404,7 @@ typedef struct sipral_push_echo sipral_push_echo_t;
 typedef struct sipral_audio_device sipral_audio_device_t;
 typedef struct sipral_audio_info sipral_audio_info_t;
 typedef struct sipral_audio_transmit sipral_audio_transmit_t;
+typedef struct sipral_log_record sipral_log_record_t;
 
 /**
  * The result of a call across the C ABI.
@@ -2695,6 +2712,42 @@ enum {
 };
 
 /**
+ * How loud a log line is, for sipral_stack_log and
+ * sipral_log_record_t::level. Higher is more detailed: a stack logging
+ * at `SIPRAL_LOG_LEVEL_INFO` delivers errors, warnings and information.
+ */
+typedef uint32_t sipral_log_level_t;
+enum {
+    /**
+     * Nothing: the log is off. What a stack starts with.
+     */
+    SIPRAL_LOG_LEVEL_OFF = 0,
+    /**
+     * Something failed and the application is likely to see the effect.
+     */
+    SIPRAL_LOG_LEVEL_ERROR = 1,
+    /**
+     * Something went wrong that the stack worked around, or is about to
+     * matter: a registration refused, audio that stopped arriving.
+     */
+    SIPRAL_LOG_LEVEL_WARN = 2,
+    /**
+     * What an operator wants in a log file: a registration granted, a
+     * call arriving, confirmed or ending, media starting.
+     */
+    SIPRAL_LOG_LEVEL_INFO = 3,
+    /**
+     * Every event the stack raises, every decision its diagnostic record
+     * writes down, and every call into this ABI it refused.
+     */
+    SIPRAL_LOG_LEVEL_DEBUG = 4,
+    /**
+     * Every SIP message in and out, whole and redacted.
+     */
+    SIPRAL_LOG_LEVEL_TRACE = 5,
+};
+
+/**
  * The one callback a stack has.
  *
  * It is called from inside `sipral_stack_poll`, on the thread that called
@@ -2768,6 +2821,21 @@ typedef void (*sipral_processor_callback_t)(const sipral_processor_frame_t *fram
  * on the engine's thread with one `sipral_audio_transmit_t` per packet.
  */
 typedef void (*sipral_audio_transmit_callback_t)(const sipral_audio_transmit_t *transmit, void *user_data);
+
+/**
+ * Where a stack's log lines go. Installed with
+ * crate::log::sipral_stack_log.
+ *
+ * Called on whichever thread has just finished a call into this stack,
+ * after the stack has been let go and with nothing of the library held,
+ * so it may call back into the library — this stack included — as an
+ * ordinary call. One line at a time, and never on two threads at once.
+ * It must not unwind, for the reason nothing in this ABI may.
+ *
+ * `record` and everything it points at belong to the library and are
+ * valid for the duration of this one call and no longer.
+ */
+typedef void (*sipral_log_callback_t)(const sipral_log_record_t *record, void *user_data);
 
 /**
  * The version of the ABI this library provides.
@@ -3366,6 +3434,25 @@ struct sipral_stack_config {
      * taken at its word.
      */
     uint32_t audio_device_rate_hz;
+    /**
+     * The lowest port of the range this stack hands RTP ports out of
+     * (`sipral_stack_rtp_port_reserve`), or zero with `rtp_port_max`
+     * for no range: the application picks every media port itself.
+     *
+     * RTP takes an even port and its RTCP the odd one above it (RFC 3550
+     * §11), so an odd `rtp_port_min` starts at the port above it and an
+     * even `rtp_port_max` is never handed out. A range that holds no
+     * such pair, one given upside down, or one bound given without the
+     * other is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     *
+     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    uint32_t rtp_port_min;
+    /**
+     * The highest port of that range, or zero with `rtp_port_min`.
+     */
+    uint32_t rtp_port_max;
 };
 
 /**
@@ -3506,6 +3593,17 @@ struct sipral_stack_settings {
      * unmoved.
      */
     uint64_t registrar_keepalive_ms;
+    /**
+     * The RTP port range, as given; both zero for none.
+     *
+     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    uint32_t rtp_port_min;
+    /**
+     * See `rtp_port_min`.
+     */
+    uint32_t rtp_port_max;
 };
 
 /**
@@ -5900,6 +5998,53 @@ struct sipral_audio_transmit {
      * How many of them.
      */
     size_t payload_len;
+};
+
+/**
+ * One log line, as sipral_log_callback_t reads it.
+ *
+ * Filled by the library and handed over as a `const` pointer: read
+ * `size` before anything past it, and nothing once the callback has
+ * returned — the two strings are the library's and live for the call
+ * alone.
+ */
+struct sipral_log_record {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * The stack the line is about.
+     */
+    sipral_handle_t stack;
+    /**
+     * A `SipralLogLevel`, never `SIPRAL_LOG_LEVEL_OFF`.
+     */
+    uint32_t level;
+    /**
+     * Which part of the stack wrote it — `registration`, `call`,
+     * `media`, `decision`, `sip`, `api` — as UTF-8, not NUL-terminated.
+     */
+    const char *target;
+    /**
+     * How many bytes of it.
+     */
+    size_t target_len;
+    /**
+     * The line, already redacted, as UTF-8, not NUL-terminated. A
+     * `SIPRAL_LOG_LEVEL_TRACE` line holding a whole message has line
+     * breaks in it.
+     */
+    const char *message;
+    /**
+     * How many bytes of it.
+     */
+    size_t message_len;
+    /**
+     * How many lines the rate limit or the queue ceiling turned away
+     * since the line before this one. Zero almost always.
+     */
+    uint64_t suppressed;
 };
 
 /**
@@ -8768,6 +8913,88 @@ sipral_status_t sipral_audio_stop_ringing(sipral_handle_t stack);
  * says how long it is.
  */
 sipral_status_t sipral_audio_info(sipral_handle_t stack, sipral_audio_info_t *out_info);
+
+/**
+ * Send this stack's log to `callback`, at `level` and louder — or turn
+ * it off with `SIPRAL_LOG_LEVEL_OFF` or a null callback.
+ *
+ * A stack is created with its log off, and a log that is off costs
+ * nothing: no line is formatted for it. Calling this again replaces the
+ * callback and the level, on this stack alone; lines already waiting go
+ * to the new callback. Turning the log off drops what was waiting.
+ *
+ * What each level carries, how lines are rate-limited and how they are
+ * redacted is in this module's documentation and in
+ * `docs/17-observability.md`. A level above `SIPRAL_LOG_LEVEL_TRACE` is
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing.
+ *
+ * Safety
+ *
+ * `callback`, when not null, is called from inside later calls into this
+ * stack on whichever thread made them, once the stack has been let go
+ * (see sipral_log_callback_t). `user_data` is handed back to it untouched
+ * and must stay valid until the log is turned off or replaced and no
+ * thread is inside this stack any more.
+ */
+sipral_status_t sipral_stack_log(sipral_handle_t stack, uint32_t level, sipral_log_callback_t callback, void *user_data);
+
+/**
+ * Copy a snapshot of everything this stack is holding into `buffer`, as
+ * text for a crash report: its accounts and their registrations, its
+ * calls and their states, its transports, its media sessions, the last
+ * calls into it that were refused, its queues, its RTP port range and
+ * its counters — redacted, and never longer than
+ * `SIPRAL_STATE_TEXT_MAX` bytes with the NUL, so a buffer that size
+ * always has room.
+ *
+ * Safe from any thread, including one the stack is busy on, and never
+ * waits. When no other thread is inside the stack the snapshot is taken
+ * there and then; when one is, what comes back is the last snapshot a
+ * poll kept — polls keep one at most once a second, and only when
+ * something happened — and its first line says so and when it was
+ * taken. A call's media session that a thread is in the middle of a
+ * frame on is reported as busy rather than waited for.
+ *
+ * `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_len`,
+ * when it does not fit; `out_len` may be null.
+ *
+ * Safety
+ *
+ * `buffer` must be writable for `capacity` bytes or be null with a
+ * capacity of zero, and `out_len` must point at one `size_t` or be null.
+ */
+sipral_status_t sipral_stack_state(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_len);
+
+/**
+ * Reserve a free even port from this stack's RTP range, with the odd
+ * port above it kept for RTCP, and write it to `out_port`.
+ *
+ * `SIPRAL_STATUS_EXHAUSTED` when every pair in the range is taken —
+ * reserved, or described by a call this stack still holds — and the
+ * last error says how many pairs the range has. Nothing is reserved
+ * then. `SIPRAL_STATUS_WRONG_STATE` on a stack created without a range:
+ * its ports are the application's to choose.
+ *
+ * Safety
+ *
+ * `out_port` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_stack_rtp_port_reserve(sipral_handle_t stack, uint32_t *out_port);
+
+/**
+ * Give back a port sipral_stack_rtp_port_reserve handed out that no
+ * call is using: the socket could not be bound there, or the call was
+ * refused. A port a call took comes back by itself when the call ends,
+ * and needs no release.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for a port that is not reserved,
+ * which is also what a second release of the same port is.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_stack_rtp_port_release(sipral_handle_t stack, uint32_t port);
 
 #ifdef __cplusplus
 } /* extern "C" */

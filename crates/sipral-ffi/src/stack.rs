@@ -242,6 +242,22 @@ impl Transports {
         self.0.get(&id).copied()
     }
 
+    /// How many transports this stack has bound.
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Every transport bound, by number, lowest first.
+    pub(crate) fn listed(&self) -> Vec<(u32, TransportProtocol)> {
+        let mut listed: Vec<(u32, TransportProtocol)> = self
+            .0
+            .iter()
+            .map(|(id, protocol)| (*id, *protocol))
+            .collect();
+        listed.sort_unstable_by_key(|(id, _)| *id);
+        listed
+    }
+
     /// Record a transport as bound: the first time under a number, this is
     /// what mints the entry; every time after, the number already named this
     /// same protocol, so nothing here moves.
@@ -563,6 +579,21 @@ record! {
         /// this one, and a platform that answers with another rate is
         /// taken at its word.
         pub audio_device_rate_hz: u32,
+        /// The lowest port of the range this stack hands RTP ports out of
+        /// (`sipral_stack_rtp_port_reserve`), or zero with `rtp_port_max`
+        /// for no range: the application picks every media port itself.
+        ///
+        /// RTP takes an even port and its RTCP the odd one above it (RFC 3550
+        /// §11), so an odd `rtp_port_min` starts at the port above it and an
+        /// even `rtp_port_max` is never handed out. A range that holds no
+        /// such pair, one given upside down, or one bound given without the
+        /// other is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        ///
+        /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub rtp_port_min: u32,
+        /// The highest port of that range, or zero with `rtp_port_min`.
+        pub rtp_port_max: u32,
     }
 }
 
@@ -688,6 +719,13 @@ record! {
         /// Appended at the tail (task 8.7.4); the pinned `MIN_SIZE` is
         /// unmoved.
         pub registrar_keepalive_ms: u64,
+        /// The RTP port range, as given; both zero for none.
+        ///
+        /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub rtp_port_min: u32,
+        /// See `rtp_port_min`.
+        pub rtp_port_max: u32,
     }
 }
 
@@ -741,6 +779,13 @@ pub(crate) const FAREWELL_CEILING: usize = 256;
 struct StackEntry {
     state: Mutex<StackState>,
     outbox: Mutex<Outbox>,
+    /// Where the engine's log lines wait for the thread that lets the stack
+    /// go (`crate::log`). The same log the state and the engine hold.
+    log: sipral::Log,
+    /// What [`crate::log::sipral_stack_state`] reads when the stack is busy,
+    /// and the last refusals it reports, behind a lock of its own so that
+    /// reading them never waits on signalling.
+    watch: Mutex<crate::log::Watch>,
     /// The audio engine, reachable without the state's lock: a level meter
     /// polled from a window must not answer `SIPRAL_STATUS_BUSY` because
     /// signalling is busy.
@@ -799,6 +844,25 @@ impl StackEntry {
         // after this finds nobody delivering and delivers its own, and one that
         // posted before it is what this pass reports as left behind
         (delivered, !outbox.waiting.is_empty())
+    }
+
+    fn watch(&self) -> MutexGuard<'_, crate::log::Watch> {
+        // a queue of sentences and a copy of a text, whole between statements
+        self.watch.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// What every entry point does once it has let the stack go: remember a
+    /// refusal for the state snapshot and log it, then hand the log's queue
+    /// to its callback — with nothing held, which is the whole point of
+    /// doing it here.
+    fn let_go<R>(&self, done: &Result<R, Fail>, at_ms: u64, now: Instant) {
+        if let Err(failure) = done {
+            self.watch().refused(at_ms, failure);
+            self.log.line(sipral::LogLevel::Debug, "api", now, || {
+                format!("refused, {:?}: {}", failure.status, failure.message())
+            });
+        }
+        let _ = self.log.flush();
     }
 
     fn outbox(&self) -> MutexGuard<'_, Outbox> {
@@ -984,6 +1048,12 @@ pub(crate) struct StackState {
     /// The caller's clock as the engine's pump reads it: what
     /// `StackState::advance` writes on every poll.
     clock: Arc<crate::audio::Clock>,
+    /// This stack's log, shared with the engine and the entry: lines are
+    /// queued while the stack is held and delivered once it is not.
+    pub(crate) log: sipral::Log,
+    /// What the log's and the state snapshot's pseudonyms are keyed with
+    /// (`crate::log::pseudonym_key`).
+    pseudonyms: Box<[u8]>,
 }
 
 // Safety: the user pointer is the caller's and is only ever handed back to
@@ -1015,6 +1085,16 @@ impl StackState {
     /// that takes no clock of its own sets off.
     pub(crate) fn last_instant(&self) -> Instant {
         instant_at(self.origin, self.polled_at_ms).unwrap_or(self.origin)
+    }
+
+    /// The latest `now_ms` this stack has been told.
+    pub(crate) const fn polled_at_ms(&self) -> u64 {
+        self.polled_at_ms
+    }
+
+    /// The key this stack's pseudonyms are made with.
+    pub(crate) fn pseudonym_key(&self) -> &[u8] {
+        &self.pseudonyms
     }
 
     /// What `now_ms` of zero means on this stack, for a media handle that
@@ -1137,8 +1217,26 @@ pub(crate) fn with_stack<R>(
     act: impl FnOnce(&mut StackState) -> Result<R, Fail>,
 ) -> Result<R, Fail> {
     let entry = entry_of(stack)?;
-    let mut held = lock(&entry)?;
-    act(&mut held)
+    let (done, at_ms, now) = {
+        let mut held = lock(&entry)?;
+        let done = act(&mut held);
+        (done, held.polled_at_ms, held.last_instant())
+    };
+    entry.let_go(&done, at_ms, now);
+    done
+}
+
+/// The text [`crate::log::sipral_stack_state`] copies out: taken now when the
+/// stack is free, the last one a poll kept when it is not. Never waits.
+pub(crate) fn state_text(stack: SipralHandle) -> Result<String, Fail> {
+    let entry = STACKS.get(stack).map_err(handle_failed)?;
+    let held = match entry.state.try_lock() {
+        Ok(state) => Some(state),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    };
+    let mut watch = entry.watch();
+    Ok(crate::log::snapshot_of(stack, held.as_deref(), &mut watch))
 }
 
 /// The stack a handle names, for an entry point about to take its lock.
@@ -1442,6 +1540,7 @@ pub(crate) unsafe fn create_on(
 
     let timers = timers_for(speaks.protocol(), &config)?;
     let media = media_for(&config)?;
+    let rtp_ports = rtp_ports_of(&config)?;
     let stun_server = unsafe { crate::nat::configured(&config) }?;
     // borrowed from the caller until `Nat::start` below copies it into the
     // one place it is kept
@@ -1452,7 +1551,11 @@ pub(crate) unsafe fn create_on(
     let origin = Instant::now();
     let clock = crate::audio::Clock::new(origin);
     let audio = unsafe { crate::audio::configured(&config, &clock) }?;
-    let engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
+    let mut engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
+    engine.set_rtp_ports(rtp_ports);
+    let pseudonyms = crate::log::pseudonym_key(&media_seed);
+    let log = crate::log::log_for(&pseudonyms);
+    engine.set_log(log.clone());
     let mut agent = UserAgent::new(endpoint, seed)
         .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))?;
     agent_policy(&mut agent, &config, origin)?;
@@ -1515,6 +1618,8 @@ pub(crate) unsafe fn create_on(
         nat: crate::nat::Nat::default(),
         audio: audio.clone(),
         clock,
+        log: log.clone(),
+        pseudonyms: pseudonyms.into_boxed_slice(),
     };
     // the main transport is the first signalling socket kept mapped; its
     // first request is waiting in `sipral_stack_poll_transmit` from here on
@@ -1530,11 +1635,59 @@ pub(crate) unsafe fn create_on(
     let entry = StackEntry {
         state: Mutex::new(state),
         outbox: Mutex::new(Outbox::default()),
+        log,
+        watch: Mutex::new(crate::log::Watch::default()),
         audio,
     };
     STACKS
         .insert(stamp, entry)
         .map_err(|status| fail(status, "no room for another stack"))
+}
+
+/// The RTP port range a configuration names, or `None` for none.
+fn rtp_ports_of(config: &SipralStackConfig) -> Result<Option<sipral::RtpPorts>, Fail> {
+    let port = |value: u32, member: &str| {
+        u16::try_from(value).map_err(|_| {
+            fail(
+                SipralStatus::InvalidArgument,
+                format!("{member} is {value}, and a port is at most 65535"),
+            )
+        })
+    };
+    match (config.rtp_port_min, config.rtp_port_max) {
+        (0, 0) => Ok(None),
+        (0, _) | (_, 0) => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "rtp_port_min is {} and rtp_port_max is {}: a range needs both ends, or neither \
+                 for none",
+                config.rtp_port_min, config.rtp_port_max
+            ),
+        )),
+        (min, max) => sipral::RtpPorts::new(port(min, "rtp_port_min")?, port(max, "rtp_port_max")?)
+            .map(Some)
+            .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string())),
+    }
+}
+
+/// Refuse a call's media described at a port the stack's RTP range does not
+/// hand out: odd, or outside it. With no range, every port is the
+/// application's to choose.
+pub(crate) fn media_port_allowed(state: &StackState, local: SocketAddr) -> Result<(), Fail> {
+    match state.engine.rtp_ports() {
+        Some(range) if !range.holds(local.port()) => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "the media address's port is {}, and this stack's RTP range {}..{} hands out \
+                 only even ports with the odd port above them inside it; \
+                 sipral_stack_rtp_port_reserve gives one",
+                local.port(),
+                range.min(),
+                range.max()
+            ),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The signalling seed and the media seed a configuration hands over, each
@@ -1618,6 +1771,14 @@ entry! {
                 g729_annex_b: toggle_of(catalog.g729_annex_b()),
                 referrals: toggle_of(state.agent.allows_referrals()),
                 registrar_keepalive_ms: state.agent.registrar_keepalive().map_or(0, millis),
+                rtp_port_min: state
+                    .engine
+                    .rtp_ports()
+                    .map_or(0, |range| u32::from(range.min())),
+                rtp_port_max: state
+                    .engine
+                    .rtp_ports()
+                    .map_or(0, |range| u32::from(range.max())),
             })
         })?;
         unsafe { write_versioned(out_settings, settings) }?;
@@ -1714,6 +1875,11 @@ entry! {
             let now = state.advance(now_ms)?;
             let mut raised = Vec::new();
             let counted = run(stack, &mut state, now, &mut raised);
+            if !raised.is_empty() {
+                // something changed: what `sipral_stack_state` hands out
+                // while another thread holds the stack is brought up to date
+                entry.watch().refresh(stack, &state);
+            }
             // posted with the stack still held, so that a poll on another
             // thread cannot queue what it raised in front of this
             let (should_deliver, dropped) = entry.post(raised);
@@ -1737,6 +1903,8 @@ entry! {
                 counted.next_poll_in_ms = 0;
             }
         }
+        // the log's lines after the events, with nothing held
+        let _ = entry.log.flush();
 
         if !result.is_null() {
             unsafe { write_versioned(result, counted) }?;
@@ -2541,6 +2709,8 @@ pub(crate) mod tests {
             registrar_keepalive: 0,
             registrar_keepalive_ms: 0,
             turn_transport: 0,
+            rtp_port_min: 0,
+            rtp_port_max: 0,
         }
     }
 
@@ -2702,6 +2872,8 @@ pub(crate) mod tests {
             g729_annex_b: u32::MAX,
             referrals: u32::MAX,
             registrar_keepalive_ms: u64::MAX,
+            rtp_port_min: u32::MAX,
+            rtp_port_max: u32::MAX,
         }
     }
 

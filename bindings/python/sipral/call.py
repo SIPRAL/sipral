@@ -263,9 +263,7 @@ class Call:
         :meth:`restart_ice` moves instead, or one with a change already on
         its way.
         """
-        sock = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
-        sock.bind((media_host, media_port))
-        sock.setblocking(False)
+        sock = self.stack.open_media_socket(media_host, media_port)
         host, port = sock.getsockname()
         address = f"{host}:{port}".encode("utf-8")
         public = (public_address or "").encode("utf-8")
@@ -284,6 +282,7 @@ class Call:
             )
         except Exception:
             sock.close()
+            self.stack._give_back_port(port)
             raise
         old = self._media_socket
         self._media_socket = sock

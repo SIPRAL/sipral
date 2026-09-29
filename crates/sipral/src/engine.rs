@@ -90,6 +90,7 @@ use crate::event::{DigitSource, Event, MediaEvent};
 use crate::keying::SrtpPolicy;
 use crate::keying::{self, Shape};
 use crate::payloads::Payloads;
+use crate::ports::{PortsExhausted, RtpPorts};
 use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
 use crate::share::{self, Held, SessionGuard, SessionShare};
 
@@ -499,6 +500,25 @@ pub struct MediaEngine {
     /// [`MediaEngine::poll_turn_stream`].
     #[cfg(feature = "ice")]
     streamed: VecDeque<(CallHandle, crate::RelayDatagram)>,
+    /// The range [`MediaEngine::reserve_rtp_port`] hands ports out of, when
+    /// the deployment set one.
+    rtp_ports: Option<RtpPorts>,
+    /// The RTP ports handed out and not yet let go, each with whether a call
+    /// has since been seen describing its media there: a reservation a call
+    /// took and then stopped using — the call ended, or moved — is over.
+    reserved_ports: BTreeMap<u16, bool>,
+    /// Which pair of the range the next reservation starts looking at: round
+    /// the range rather than lowest first, so a port a call has just let go
+    /// is the last to be handed out again while its stragglers still arrive.
+    next_pair: u16,
+    /// Where this engine's log lines go, once the application installed one.
+    #[cfg(feature = "redaction")]
+    log: Option<crate::Log>,
+    /// How many decisions of each diagnostic record have already been
+    /// logged, by `Call-ID` (`None` for the endpoint's own record), so a
+    /// decision is logged once.
+    #[cfg(feature = "redaction")]
+    logged: BTreeMap<Option<Vec<u8>>, u64>,
 }
 
 /// The relay a description was handed, for as long as the description can
@@ -619,6 +639,13 @@ impl MediaEngine {
             fork_relays: BTreeMap::new(),
             #[cfg(feature = "ice")]
             streamed: VecDeque::new(),
+            rtp_ports: None,
+            reserved_ports: BTreeMap::new(),
+            next_pair: 0,
+            #[cfg(feature = "redaction")]
+            log: None,
+            #[cfg(feature = "redaction")]
+            logged: BTreeMap::new(),
         }
     }
 
@@ -2616,16 +2643,27 @@ impl MediaEngine {
     /// application that acts on [`UaEvent::CallConfirmed`] and then on
     /// [`MediaEvent::Started`] sees them in the order they happened.
     pub fn poll_event(&mut self, agent: &mut UserAgent, now: Instant) -> Option<Event> {
+        self.claim_ports();
         if let Some((call, event)) = self.events.pop_front() {
             self.counters.observe_media(&event);
+            #[cfg(feature = "redaction")]
+            self.log_media(call, &event, now);
             return Some(Event::Media { call, event });
         }
         if let Some((call, event)) = self.session_event() {
             self.counters.observe_media(&event);
+            #[cfg(feature = "redaction")]
+            self.log_media(call, &event, now);
             return Some(Event::Media { call, event });
         }
-        let signalling = agent.poll_event()?;
+        let Some(signalling) = agent.poll_event() else {
+            #[cfg(feature = "redaction")]
+            self.log_decisions(agent, now);
+            return None;
+        };
         self.counters.observe_signalling(&signalling);
+        #[cfg(feature = "redaction")]
+        self.log_signalling(&signalling, now);
         self.absorb(&signalling, agent, now);
         // folded into a media event by `absorb`, above, rather than forwarded
         // as this one: the next turn of this same loop returns what that just
@@ -4598,6 +4636,393 @@ const fn nibble(digit: u8) -> u8 {
 }
 
 // -- the two guards a two-stack harness cannot reach -------------------------
+
+// -- the RTP port range ------------------------------------------------------
+
+impl MediaEngine {
+    /// Hand RTP ports out of `ports` from now on, or stop with `None`.
+    ///
+    /// The application owns every socket, so the range opens nothing: it is
+    /// the rule [`MediaEngine::reserve_rtp_port`] follows, and the one a
+    /// firewall in front of the deployment is written to. Reservations already
+    /// held are kept.
+    pub const fn set_rtp_ports(&mut self, ports: Option<RtpPorts>) {
+        self.rtp_ports = ports;
+    }
+
+    /// The range ports are handed out of, when one was set.
+    #[must_use]
+    pub const fn rtp_ports(&self) -> Option<RtpPorts> {
+        self.rtp_ports
+    }
+
+    /// A free even port from the range for a call's RTP, with the odd port
+    /// above it kept for its RTCP; `None` when no range was set.
+    ///
+    /// Free means: not handed out already, and not the port a call this
+    /// engine holds describes its media at. The port is the caller's to bind
+    /// and to describe a call at, by [`MediaEngine::place`],
+    /// [`MediaEngine::ring`] or [`MediaEngine::answer`]; it stays reserved
+    /// for as long as that call describes its media there, and is free again
+    /// once the call ends or moves off it. One that no call ever took — the
+    /// bind failed, the call was refused — is handed back with
+    /// [`MediaEngine::release_rtp_port`].
+    ///
+    /// # Errors
+    /// [`PortsExhausted`] when every pair in the range is in use. Nothing is
+    /// reserved then, and the call that wanted a port cannot be given one
+    /// until another lets its go.
+    pub fn reserve_rtp_port(&mut self) -> Option<Result<u16, PortsExhausted>> {
+        let range = self.rtp_ports?;
+        self.claim_ports();
+        let in_use: std::collections::BTreeSet<u16> = self
+            .calls
+            .values()
+            .filter_map(|managed| managed.address.map(|address| address.port()))
+            .chain(self.reserved_ports.keys().copied())
+            .collect();
+        let pairs = range.pairs();
+        let start = self.next_pair % pairs;
+        for step in 0..pairs {
+            let index = (start + step) % pairs;
+            let port = range.pair(index);
+            if !in_use.contains(&port) && !in_use.contains(&port.saturating_add(1)) {
+                self.reserved_ports.insert(port, false);
+                self.next_pair = (index + 1) % pairs;
+                return Some(Ok(port));
+            }
+        }
+        Some(Err(PortsExhausted { range }))
+    }
+
+    /// Hand back a port [`MediaEngine::reserve_rtp_port`] gave out and no
+    /// call is using, and say whether it was one.
+    pub fn release_rtp_port(&mut self, port: u16) -> bool {
+        self.reserved_ports.remove(&port).is_some()
+    }
+
+    /// How many ports are reserved right now, a call's included.
+    #[must_use]
+    pub fn rtp_ports_reserved(&self) -> usize {
+        self.reserved_ports.len()
+    }
+
+    /// Mark every reservation a call now describes its media at as taken,
+    /// and let go of every one a call took and no call describes any more.
+    ///
+    /// Run at the top of every [`MediaEngine::poll_event`] — before this
+    /// engine can learn that a call ended — so a call that took a port is
+    /// seen holding it before the event that ends it is read, and the port
+    /// comes back when it should rather than staying reserved for good.
+    fn claim_ports(&mut self) {
+        if self.reserved_ports.is_empty() {
+            return;
+        }
+        let described: std::collections::BTreeSet<u16> = self
+            .calls
+            .values()
+            .filter_map(|managed| managed.address.map(|address| address.port()))
+            .collect();
+        self.reserved_ports.retain(|port, claimed| {
+            if described.contains(port) {
+                *claimed = true;
+                true
+            } else {
+                !*claimed
+            }
+        });
+    }
+}
+
+// -- the log and the state snapshot -----------------------------------------
+
+#[cfg(feature = "redaction")]
+impl MediaEngine {
+    /// Write this engine's lines to `log` from now on: every event
+    /// [`MediaEngine::poll_event`] hands out, and every decision the
+    /// diagnostic record writes down, at the levels `crate::log` gives them.
+    ///
+    /// The engine only queues lines. Whoever drives it calls
+    /// [`crate::Log::flush`] once it holds nothing the sink could need.
+    pub fn set_log(&mut self, log: crate::Log) {
+        self.log = Some(log);
+    }
+
+    /// The log this engine writes to, if one was set.
+    #[must_use]
+    pub const fn log(&self) -> Option<&crate::Log> {
+        self.log.as_ref()
+    }
+
+    fn log_line(
+        &self,
+        level: crate::LogLevel,
+        target: &'static str,
+        now: Instant,
+        line: impl FnOnce() -> String,
+    ) {
+        if let Some(log) = &self.log {
+            log.line(level, target, now, line);
+        }
+    }
+
+    fn log_signalling(&self, event: &UaEvent, now: Instant) {
+        use crate::LogLevel::{Debug, Info, Warn};
+        use core::fmt::Write as _;
+        let Some(log) = &self.log else {
+            return;
+        };
+        if !log.enabled(Warn) {
+            return;
+        }
+        match event {
+            UaEvent::Registered {
+                account,
+                expires,
+                refresh_in,
+                ..
+            } => self.log_line(Info, "registration", now, || {
+                format!(
+                    "account {}: registered for {} s, refreshing in {} s",
+                    number(account),
+                    expires.as_secs(),
+                    refresh_in.as_secs()
+                )
+            }),
+            UaEvent::RegistrationFailed {
+                account,
+                reason,
+                status,
+                retry_in,
+                ..
+            } => self.log_line(Warn, "registration", now, || {
+                let mut line = format!(
+                    "account {}: registration failed, {reason:?}",
+                    number(account)
+                );
+                if let Some(status) = status {
+                    let _ = write!(line, ", status {}", status.get());
+                }
+                match retry_in {
+                    Some(after) => {
+                        let _ = write!(line, ", retrying in {} s", after.as_secs());
+                    }
+                    None => line.push_str(", not retrying"),
+                }
+                line
+            }),
+            UaEvent::Unregistered { account, .. } => {
+                self.log_line(Info, "registration", now, || {
+                    format!("account {}: unregistered", number(account))
+                });
+            }
+            UaEvent::IncomingCall { call, account, .. } => self.log_line(Info, "call", now, || {
+                account.map_or_else(
+                    || format!("call {}: incoming", number(call)),
+                    |account| {
+                        format!(
+                            "call {}: incoming on account {}",
+                            number(call),
+                            number(account)
+                        )
+                    },
+                )
+            }),
+            UaEvent::CallConfirmed { call, .. } => self.log_line(Info, "call", now, || {
+                format!("call {}: confirmed", number(call))
+            }),
+            UaEvent::CallEnded {
+                call,
+                reason,
+                status,
+                ..
+            } => self.log_line(Info, "call", now, || {
+                let mut line = format!("call {}: ended, {reason:?}", number(call));
+                if let Some(status) = status {
+                    let _ = write!(line, ", status {}", status.get());
+                }
+                line
+            }),
+            other => self.log_line(Debug, "signalling", now, || variant(other)),
+        }
+    }
+
+    fn log_media(&self, call: CallHandle, event: &MediaEvent, now: Instant) {
+        use crate::LogLevel::{Debug, Info, Warn};
+        let Some(log) = &self.log else {
+            return;
+        };
+        if !log.enabled(Warn) {
+            return;
+        }
+        let call = number(call);
+        match event {
+            MediaEvent::Started { .. } => {
+                self.log_line(Info, "media", now, || format!("call {call}: media started"));
+            }
+            MediaEvent::Stalled { .. } => self.log_line(Warn, "media", now, || {
+                format!("call {call}: inbound audio stopped arriving")
+            }),
+            MediaEvent::Resumed { .. } => self.log_line(Info, "media", now, || {
+                format!("call {call}: inbound audio resumed")
+            }),
+            MediaEvent::Ended(statistics) => self.log_line(Info, "media", now, || {
+                format!(
+                    "call {call}: media ended, {}, sent {}, received {}, lost {}",
+                    statistics.codec,
+                    statistics.packets_sent,
+                    statistics.quality.received,
+                    statistics.quality.lost
+                )
+            }),
+            other => self.log_line(Debug, "media", now, || {
+                format!("call {call}: {}", variant(other))
+            }),
+        }
+    }
+
+    /// Every decision the diagnostic record has written since the last time
+    /// this looked, one debug line each — `docs/14-diagnostics.md`'s reason
+    /// code and the sizes and addresses it turned on.
+    fn log_decisions(&mut self, agent: &mut UserAgent, now: Instant) {
+        let Some(log) = self.log.clone() else {
+            return;
+        };
+        if !log.enabled(crate::LogLevel::Debug) {
+            self.logged.clear();
+            return;
+        }
+        let endpoint = agent.endpoint();
+        let mut records: Vec<(Option<Vec<u8>>, &sipral_core::diag::Record)> =
+            vec![(None, endpoint.endpoint_record())];
+        for call in endpoint.recorded_calls() {
+            if let Some(record) = endpoint.call_record(call) {
+                records.push((Some(call.as_bytes().to_vec()), record));
+            }
+        }
+        let mut seen = BTreeMap::new();
+        for (key, record) in records {
+            let written = record.dropped().saturating_add(record.len() as u64);
+            let before = self.logged.get(&key).copied().unwrap_or(0);
+            let fresh = usize::try_from(written.saturating_sub(before))
+                .unwrap_or(usize::MAX)
+                .min(record.len());
+            for decision in record.decisions().skip(record.len() - fresh) {
+                log.line(crate::LogLevel::Debug, "decision", now, || {
+                    decision_line(key.as_deref(), decision)
+                });
+            }
+            seen.insert(key, written);
+        }
+        // a record the endpoint evicted is forgotten here too
+        self.logged = seen;
+    }
+
+    /// What this engine and `agent` are holding right now, for a crash
+    /// report: see [`crate::EngineState`]. Never waits: a session another
+    /// thread is inside is reported as busy.
+    #[must_use]
+    pub fn state(&self, agent: &UserAgent, now: Instant) -> crate::EngineState {
+        use crate::state::{AccountState, CallSnapshot, MediaState, StreamState};
+        let accounts = agent
+            .accounts()
+            .into_iter()
+            .map(|account| AccountState {
+                account,
+                aor: agent
+                    .account(account)
+                    .map(|held| held.aor().to_string())
+                    .unwrap_or_default(),
+                registration: agent.registration_state(account),
+            })
+            .collect();
+        let calls = agent
+            .calls()
+            .into_iter()
+            .map(|call| CallSnapshot {
+                call,
+                state: agent.call_state(call),
+                media_address: self.calls.get(&call).and_then(|managed| managed.address),
+            })
+            .collect();
+        let media = self
+            .sessions
+            .iter()
+            .map(|(call, held)| MediaState {
+                call: *call,
+                stream: held.try_lock().ok().map(|slot| {
+                    let statistics = slot.session.statistics(now);
+                    StreamState {
+                        codec: statistics.codec,
+                        destination: slot.session.destination(),
+                        packets_sent: statistics.packets_sent,
+                        packets_received: statistics.quality.received,
+                        packets_lost: statistics.quality.lost,
+                    }
+                }),
+            })
+            .collect();
+        crate::EngineState::new(accounts, calls, media, self.counters)
+    }
+}
+
+/// A handle's number, without the type name `Debug` puts round it.
+#[cfg(feature = "redaction")]
+fn number(handle: impl core::fmt::Debug) -> String {
+    format!("{handle:?}")
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect()
+}
+
+/// The name of an enum variant, from its `Debug` form, and nothing it
+/// carries: an event's fields can hold whole messages, and a debug line
+/// names what happened without them.
+#[cfg(feature = "redaction")]
+fn variant(value: &impl core::fmt::Debug) -> String {
+    let written = format!("{value:?}");
+    written
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// One decision as a log line.
+#[cfg(feature = "redaction")]
+fn decision_line(call_id: Option<&[u8]>, decision: &sipral_core::diag::Decision) -> String {
+    use core::fmt::Write as _;
+    use sipral_core::diag::Wire;
+    let mut line = decision.reason.as_str().to_owned();
+    match call_id {
+        Some(call_id) => {
+            let _ = write!(line, " call-id {}", String::from_utf8_lossy(call_id));
+        }
+        None => line.push_str(" endpoint"),
+    }
+    if let Some(wire) = &decision.wire {
+        let _ = write!(line, " {}", wire.direction.as_str());
+        match &wire.message {
+            Wire::Request(method) => {
+                let _ = write!(line, " {}", method.as_str());
+            }
+            Wire::Response(status) => {
+                let _ = write!(line, " {}", status.get());
+            }
+        }
+        let _ = write!(line, " {} bytes", wire.bytes);
+    }
+    if let Some(address) = decision.address {
+        let _ = write!(line, " {address}");
+    }
+    if let Some(protocol) = decision.protocol {
+        let _ = write!(line, " {}", protocol.as_str());
+    }
+    if let Some(measure) = decision.measure {
+        let _ = write!(line, " size {} limit {}", measure.size, measure.limit);
+    }
+    line
+}
 
 #[cfg(test)]
 mod keying_guards {

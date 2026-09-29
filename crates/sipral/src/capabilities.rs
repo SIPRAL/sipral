@@ -211,6 +211,11 @@ pub struct Capabilities {
     /// (RFC 5373, `Alert-Info`), why a call ended (RFC 3326) and a 3xx
     /// redirect are all read and written.
     pub caller_identity: bool,
+    /// Whether the engine can write a log through a sink the application
+    /// installs ([`crate::Log`]) and take a snapshot of its state for a crash
+    /// report ([`crate::MediaEngine::state`]). Both redact what they write,
+    /// so both come with the `redaction` feature, on by default.
+    pub logging: bool,
 }
 
 impl Capabilities {
@@ -238,6 +243,7 @@ impl Capabilities {
             turn_streams: cfg!(feature = "ice"),
             call_readdress: true,
             caller_identity: true,
+            logging: cfg!(feature = "redaction"),
         }
     }
 }

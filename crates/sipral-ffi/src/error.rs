@@ -37,6 +37,11 @@ pub(crate) struct Fail {
 }
 
 impl Fail {
+    /// The sentence, as the last error will read.
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     /// The same failure, said about one element of a list the caller handed
     /// over: `headers[2]: ...` rather than a sentence that could be about any
     /// of them.

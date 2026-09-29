@@ -2316,6 +2316,42 @@ public enum SipralSessionTimer : uint
 }
 
 /// <summary>
+/// How loud a log line is, for sipral_stack_log and
+/// SipralLogRecord.Level. Higher is more detailed: a stack logging
+/// at `SIPRAL_LOG_LEVEL_INFO` delivers errors, warnings and information.
+/// </summary>
+public enum SipralLogLevel : uint
+{
+    /// <summary>
+    /// Nothing: the log is off. What a stack starts with.
+    /// </summary>
+    Off = 0,
+    /// <summary>
+    /// Something failed and the application is likely to see the effect.
+    /// </summary>
+    Error = 1,
+    /// <summary>
+    /// Something went wrong that the stack worked around, or is about to
+    /// matter: a registration refused, audio that stopped arriving.
+    /// </summary>
+    Warn = 2,
+    /// <summary>
+    /// What an operator wants in a log file: a registration granted, a
+    /// call arriving, confirmed or ending, media starting.
+    /// </summary>
+    Info = 3,
+    /// <summary>
+    /// Every event the stack raises, every decision its diagnostic record
+    /// writes down, and every call into this ABI it refused.
+    /// </summary>
+    Debug = 4,
+    /// <summary>
+    /// Every SIP message in and out, whole and redacted.
+    /// </summary>
+    Trace = 5,
+}
+
+/// <summary>
 /// The one callback a stack has.
 ///
 /// It is called from inside `sipral_stack_poll`, on the thread that called
@@ -2405,6 +2441,25 @@ public delegate void SipralProcessorCallback(IntPtr frame, IntPtr userData);
 /// </summary>
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 public delegate void SipralAudioTransmitCallback(IntPtr transmit, IntPtr userData);
+
+/// <summary>
+/// Where a stack's log lines go. Installed with
+/// crate::log::sipral_stack_log.
+///
+/// Called on whichever thread has just finished a call into this stack,
+/// after the stack has been let go and with nothing of the library held,
+/// so it may call back into the library — this stack included — as an
+/// ordinary call. One line at a time, and never on two threads at once.
+/// It must not unwind, for the reason nothing in this ABI may.
+///
+/// `record` and everything it points at belong to the library and are
+/// valid for the duration of this one call and no longer.
+///
+/// Hand it over as a function pointer: keep the delegate alive for as
+/// long as the stack is, and pass Marshal.GetFunctionPointerForDelegate.
+/// </summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate void SipralLogCallback(IntPtr record, IntPtr userData);
 
 /// <summary>
 /// The version of the ABI this library provides.
@@ -3038,6 +3093,25 @@ public struct SipralStackConfig
     /// taken at its word.
     /// </summary>
     public uint AudioDeviceRateHz;
+    /// <summary>
+    /// The lowest port of the range this stack hands RTP ports out of
+    /// (`sipral_stack_rtp_port_reserve`), or zero with `rtp_port_max`
+    /// for no range: the application picks every media port itself.
+    ///
+    /// RTP takes an even port and its RTCP the odd one above it (RFC 3550
+    /// §11), so an odd `rtp_port_min` starts at the port above it and an
+    /// even `rtp_port_max` is never handed out. A range that holds no
+    /// such pair, one given upside down, or one bound given without the
+    /// other is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    ///
+    /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public uint RtpPortMin;
+    /// <summary>
+    /// The highest port of that range, or zero with `rtp_port_min`.
+    /// </summary>
+    public uint RtpPortMax;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -3200,6 +3274,17 @@ public struct SipralStackSettings
     /// unmoved.
     /// </summary>
     public ulong RegistrarKeepaliveMs;
+    /// <summary>
+    /// The RTP port range, as given; both zero for none.
+    ///
+    /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public uint RtpPortMin;
+    /// <summary>
+    /// See `rtp_port_min`.
+    /// </summary>
+    public uint RtpPortMax;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -5864,6 +5949,64 @@ public struct SipralAudioTransmit
 }
 
 /// <summary>
+/// One log line, as SipralLogCallback reads it.
+///
+/// Filled by the library and handed over as a `const` pointer: read
+/// `size` before anything past it, and nothing once the callback has
+/// returned — the two strings are the library's and live for the call
+/// alone.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralLogRecord
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The stack the line is about.
+    /// </summary>
+    public ulong Stack;
+    /// <summary>
+    /// A `SipralLogLevel`, never `SIPRAL_LOG_LEVEL_OFF`.
+    /// </summary>
+    public uint Level;
+    /// <summary>
+    /// Which part of the stack wrote it — `registration`, `call`,
+    /// `media`, `decision`, `sip`, `api` — as UTF-8, not NUL-terminated.
+    /// </summary>
+    public IntPtr Target;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TargetLen;
+    /// <summary>
+    /// The line, already redacted, as UTF-8, not NUL-terminated. A
+    /// `SIPRAL_LOG_LEVEL_TRACE` line holding a whole message has line
+    /// breaks in it.
+    /// </summary>
+    public IntPtr Message;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint MessageLen;
+    /// <summary>
+    /// How many lines the rate limit or the queue ceiling turned away
+    /// since the line before this one. Zero almost always.
+    /// </summary>
+    public ulong Suppressed;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralLogRecord Sized()
+    {
+        var value = default(SipralLogRecord);
+        value.Size = (nuint)Marshal.SizeOf<SipralLogRecord>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -6392,6 +6535,18 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_audio_info(ulong stack, ref SipralAudioInfo outInfo);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_log(ulong stack, uint level, SipralLogCallback callback, IntPtr userData);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_state(ulong stack, sbyte[] buffer, nuint capacity, out nuint len);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_rtp_port_reserve(ulong stack, out uint port);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_rtp_port_release(ulong stack, uint port);
+
 }
 
 /// <summary>Everything the library does, with the C conventions read
@@ -6437,7 +6592,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 29;
+    public const uint AbiVersionMinor = 30;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -6617,6 +6772,16 @@ public static class Sipral
     public const uint FeatureCallerIdentity = 4096;
 
     /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
+    /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
+    /// snapshot of a stack's state for a crash report
+    /// (`sipral_stack_state`). Set in every build of this library, which
+    /// always carries the redaction both depend on; a bit so that a binding
+    /// asks before it shows a "send diagnostics" control.
+    /// </summary>
+    public const uint FeatureLogging = 16384;
+
+    /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
     ///
     /// Not a path MTU — RTP does not discover one — but the bound the session
@@ -6722,6 +6887,12 @@ public static class Sipral
     /// leaving every bit clear.
     /// </summary>
     public const uint PrivacyNone = 32;
+
+    /// <summary>
+    /// The longest text sipral_stack_state writes, its NUL included: a
+    /// buffer of this many bytes always has room.
+    /// </summary>
+    public static readonly nuint StateTextMax = 16384;
 
     /// <summary>The calling thread's last error, or an empty string
     /// when it has none. Read the way C reads it: ask for the
@@ -10213,6 +10384,102 @@ public static class Sipral
         var info = SipralAudioInfo.Sized();
         Check(NativeMethods.sipral_audio_info(stack, ref info));
         return info;
+    }
+
+    /// <summary>
+    /// Send this stack's log to `callback`, at `level` and louder — or turn
+    /// it off with `SIPRAL_LOG_LEVEL_OFF` or a null callback.
+    ///
+    /// A stack is created with its log off, and a log that is off costs
+    /// nothing: no line is formatted for it. Calling this again replaces the
+    /// callback and the level, on this stack alone; lines already waiting go
+    /// to the new callback. Turning the log off drops what was waiting.
+    ///
+    /// What each level carries, how lines are rate-limited and how they are
+    /// redacted is in this module's documentation and in
+    /// `docs/17-observability.md`. A level above `SIPRAL_LOG_LEVEL_TRACE` is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing.
+    ///
+    /// Safety
+    ///
+    /// `callback`, when not null, is called from inside later calls into this
+    /// stack on whichever thread made them, once the stack has been let go
+    /// (see SipralLogCallback). `user_data` is handed back to it untouched
+    /// and must stay valid until the log is turned off or replaced and no
+    /// thread is inside this stack any more.
+    /// </summary>
+    public static void StackLog(ulong stack, uint level, SipralLogCallback callback, IntPtr userData)
+    {
+        Check(NativeMethods.sipral_stack_log(stack, level, callback, userData));
+    }
+
+    /// <summary>
+    /// Copy a snapshot of everything this stack is holding into `buffer`, as
+    /// text for a crash report: its accounts and their registrations, its
+    /// calls and their states, its transports, its media sessions, the last
+    /// calls into it that were refused, its queues, its RTP port range and
+    /// its counters — redacted, and never longer than
+    /// `SIPRAL_STATE_TEXT_MAX` bytes with the NUL, so a buffer that size
+    /// always has room.
+    ///
+    /// Safe from any thread, including one the stack is busy on, and never
+    /// waits. When no other thread is inside the stack the snapshot is taken
+    /// there and then; when one is, what comes back is the last snapshot a
+    /// poll kept — polls keep one at most once a second, and only when
+    /// something happened — and its first line says so and when it was
+    /// taken. A call's media session that a thread is in the middle of a
+    /// frame on is reported as busy rather than waited for.
+    ///
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_len`,
+    /// when it does not fit; `out_len` may be null.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// </summary>
+    public static nuint StackState(ulong stack, sbyte[] buffer)
+    {
+        Check(NativeMethods.sipral_stack_state(stack, buffer, (nuint)buffer.Length, out var len));
+        return len;
+    }
+
+    /// <summary>
+    /// Reserve a free even port from this stack's RTP range, with the odd
+    /// port above it kept for RTCP, and write it to `out_port`.
+    ///
+    /// `SIPRAL_STATUS_EXHAUSTED` when every pair in the range is taken —
+    /// reserved, or described by a call this stack still holds — and the
+    /// last error says how many pairs the range has. Nothing is reserved
+    /// then. `SIPRAL_STATUS_WRONG_STATE` on a stack created without a range:
+    /// its ports are the application's to choose.
+    ///
+    /// Safety
+    ///
+    /// `out_port` must point at one `uint32_t`.
+    /// </summary>
+    public static uint StackRtpPortReserve(ulong stack)
+    {
+        Check(NativeMethods.sipral_stack_rtp_port_reserve(stack, out var port));
+        return port;
+    }
+
+    /// <summary>
+    /// Give back a port sipral_stack_rtp_port_reserve handed out that no
+    /// call is using: the socket could not be bound there, or the call was
+    /// refused. A port a call took comes back by itself when the call ends,
+    /// and needs no release.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a port that is not reserved,
+    /// which is also what a second release of the same port is.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void StackRtpPortRelease(ulong stack, uint port)
+    {
+        Check(NativeMethods.sipral_stack_rtp_port_release(stack, port));
     }
 
 }

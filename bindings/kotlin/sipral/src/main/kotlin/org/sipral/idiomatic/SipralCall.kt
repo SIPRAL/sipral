@@ -5,7 +5,6 @@ package org.sipral.idiomatic
 
 import java.net.DatagramPacket
 import java.net.DatagramSocket
-import java.net.InetAddress
 import java.net.InetSocketAddress
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
@@ -250,7 +249,7 @@ class SipralCall internal constructor(
         client.moving {
             val current = synchronized(mediaLock) { media }
                 ?: throw SipralException(SipralStatus.WRONG_STATE, "the call has no media to move yet")
-            val fresh = DatagramSocket(port, InetAddress.getByName(bindOn))
+            val fresh = client.openMediaSocket(bindOn, port)
             val local = formatAddress(fresh.localAddress.hostAddress, fresh.localPort)
             try {
                 val public = client.mapMovedSocket(fresh, local)

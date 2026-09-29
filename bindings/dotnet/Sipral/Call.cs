@@ -244,9 +244,7 @@ public sealed class Call : IDisposable
     /// </summary>
     public void Readdress(string mediaHost, int mediaPort = 0, string? publicAddress = null)
     {
-        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        socket.Bind(new IPEndPoint(IPAddress.Parse(mediaHost), mediaPort));
-        socket.Blocking = false;
+        var socket = _stack.OpenMediaSocket(mediaHost, mediaPort);
         var address = SipralStack.FormatAddress((IPEndPoint)socket.LocalEndPoint!);
         var addressBytes = ToSBytes(address);
         var publicBytes = publicAddress is null ? null : ToSBytes(publicAddress);
@@ -260,7 +258,9 @@ public sealed class Call : IDisposable
         }
         catch
         {
+            var port = ((IPEndPoint)socket.LocalEndPoint!).Port;
             socket.Dispose();
+            _stack.GiveBackPort(port);
             throw;
         }
         var old = _mediaSocket;

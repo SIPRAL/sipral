@@ -292,6 +292,13 @@ entry! {
                 // it has been taken out of the queue by now, and a message that
                 // failed on its way into a buffer is not one to lose
                 state.held = Some(pending);
+            } else {
+                state.log.sip_message(
+                    sipral::Travel::Sent,
+                    pending.destination,
+                    &pending.payload,
+                    state.last_instant(),
+                );
             }
             put
         })?;
@@ -464,6 +471,9 @@ entry! {
                 return Ok(());
             }
             state
+                .log
+                .sip_message(sipral::Travel::Received, remote, datagram, now);
+            state
                 .agent
                 .receive(
                     Input::Datagram {
@@ -506,6 +516,13 @@ entry! {
         let read = unsafe { arrived(data, len, "a read") }?;
         with_stack_at(stack, now_ms, |state, now| {
             let transport = named(state, transport)?;
+            state.log.line(sipral::LogLevel::Trace, "sip", now, || {
+                format!(
+                    "{} bytes read on transport {}, whole messages once framed",
+                    read.len(),
+                    transport.0
+                )
+            });
             state
                 .agent
                 .receive(Input::StreamData { transport, data: read }, now)

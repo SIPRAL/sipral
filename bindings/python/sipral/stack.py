@@ -28,7 +28,7 @@ from ._sipral_cffi import ffi, lib
 from .account import Account
 from .audio import Audio
 from .call import Call
-from .enums import AudioMode, Feature, Link, Recovery
+from .enums import AudioMode, Feature, Link, LogLevel, Recovery
 from .errors import call as _retry
 from .errors import check
 
@@ -132,6 +132,8 @@ class Stack:
         audio_activation: int = 0,
         audio_probe_ms: int = 0,
         audio_device_rate_hz: int = 0,
+        rtp_port_min: int = 0,
+        rtp_port_max: int = 0,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
 
@@ -205,6 +207,15 @@ class Stack:
         ``turn_tls_context``, or with the platform's default trust when none
         is given: a context built with ``cafile=`` trusts a private CA or a
         self-signed certificate, and nothing here ever turns checking off.
+
+        ``rtp_port_min`` and ``rtp_port_max`` are the range a firewall in
+        front of this machine was opened for: every media socket this class
+        opens without an explicit port then binds an even port from it,
+        reserved with `sipral_stack_rtp_port_reserve`, with the odd one above
+        it kept for RTCP (RFC 3550 Section 11), and a call is refused a port
+        outside it. Both ``0`` -- the default -- leaves the ports to the
+        operating system. Every pair taken raises
+        ``SIPRAL_STATUS_EXHAUSTED`` rather than binding outside the range.
         """
         self._loop = loop
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
@@ -351,6 +362,13 @@ class Stack:
             config.audio_transmit_callback = self._audio_transmit
         config.audio_probe_ms = audio_probe_ms
         config.audio_device_rate_hz = audio_device_rate_hz
+        config.rtp_port_min = rtp_port_min
+        config.rtp_port_max = rtp_port_max
+        #: The RTP port range media sockets are bound in, or ``None``.
+        self.rtp_ports = (rtp_port_min, rtp_port_max) if rtp_port_min or rtp_port_max else None
+        #: Every callback `sipral_stack_log` was given, kept alive here for
+        #: the reason the event callback is.
+        self._log_callbacks: list = []
 
         out_stack = ffi.new("sipral_handle_t *")
         try:
@@ -491,9 +509,7 @@ class Stack:
         `sipral_stack_nat_map`'s own doc comment requires: placing a call
         on the socket any sooner is `SIPRAL_STATUS_WRONG_STATE`.
         """
-        media_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        media_socket.bind((media_host, media_port))
-        media_socket.setblocking(False)
+        media_socket = self.open_media_socket(media_host, media_port)
         media_address = format_address(*media_socket.getsockname())
         self._map_media_socket(media_socket, media_address)
 
@@ -552,9 +568,7 @@ class Stack:
         thread until the socket's `SIPRAL_EVENT_KIND_NAT_MAPPING` arrives,
         the same wait :meth:`place_call` makes.
         """
-        media_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        media_socket.bind((media_host, media_port))
-        media_socket.setblocking(False)
+        media_socket = self.open_media_socket(media_host, media_port)
         media_address = format_address(*media_socket.getsockname())
         self._map_media_socket(media_socket, media_address)
 
@@ -568,6 +582,103 @@ class Stack:
             media_socket.close()
             raise
         return call
+
+    def open_media_socket(self, host: str, port: int = 0) -> socket.socket:
+        """A non-blocking UDP socket for a call's media, bound at ``host``.
+
+        At ``port`` when one is named. Otherwise, on a stack built with an
+        RTP port range, at an even port reserved from it
+        (`sipral_stack_rtp_port_reserve`) -- one another process already
+        holds is given back and the next tried, round the range -- and on a
+        stack without one wherever the operating system puts it.
+        ``SIPRAL_STATUS_EXHAUSTED`` once every pair is taken.
+        """
+        if port or self.rtp_ports is None:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind((host, port))
+            sock.setblocking(False)
+            return sock
+        low, high = self.rtp_ports
+        failure: OSError | None = None
+        for _ in range(max(1, (high - low + 1) // 2)):
+            reserved = ffi.new("uint32_t *")
+            _retry(
+                lambda: lib.sipral_stack_rtp_port_reserve(self.handle, reserved),
+                "sipral_stack_rtp_port_reserve",
+            )
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.bind((host, int(reserved[0])))
+            except OSError as error:
+                sock.close()
+                self._give_back_port(int(reserved[0]))
+                failure = error
+                continue
+            sock.setblocking(False)
+            return sock
+        assert failure is not None
+        raise failure
+
+    def _give_back_port(self, port: int) -> None:
+        """`sipral_stack_rtp_port_release` for a port no call took, on a
+        stack with a range; best effort, since a port a call did take comes
+        back by itself when the call ends."""
+        if self.rtp_ports is None:
+            return
+        try:
+            _retry(
+                lambda: lib.sipral_stack_rtp_port_release(self.handle, port),
+                "sipral_stack_rtp_port_release",
+            )
+        except Exception:  # noqa: BLE001 -- nothing reserved, nothing to give back
+            pass
+
+    def set_log(self, level: int, handler=None) -> None:
+        """Send this stack's log to ``handler`` at ``level`` and louder, a
+        :class:`sipral.enums.LogLevel`; ``LogLevel.OFF`` or no handler turns
+        it off (`sipral_stack_log`).
+
+        ``handler(level, target, message, suppressed)`` is called on
+        whichever thread has just finished a call into the stack -- the
+        poll thread, usually -- with the stack let go, so it may call back
+        into it. Every line is already redacted: no user part, number, IP
+        address or credential reaches it (`docs/17-observability.md`).
+        ``suppressed`` counts the lines a flood had turned away before this
+        one.
+        """
+        if handler is None or level == LogLevel.OFF:
+            _retry(
+                lambda: lib.sipral_stack_log(self.handle, LogLevel.OFF, ffi.NULL, ffi.NULL),
+                "sipral_stack_log",
+            )
+            return
+
+        def deliver(record, _user_data) -> None:
+            target = ffi.unpack(record.target, record.target_len).decode("utf-8")
+            message = ffi.unpack(record.message, record.message_len).decode("utf-8")
+            handler(LogLevel(record.level), target, message, int(record.suppressed))
+
+        callback = ffi.callback("void(const sipral_log_record_t *, void *)")(deliver)
+        _retry(
+            lambda: lib.sipral_stack_log(self.handle, int(level), callback, ffi.NULL),
+            "sipral_stack_log",
+        )
+        # every one is kept for the stack's life: the one this replaced may
+        # still be delivering a batch on the poll thread after this returns
+        self._log_callbacks.append(callback)
+
+    def state(self) -> str:
+        """Everything this stack is holding, as the redacted text
+        `sipral_stack_state` writes for a crash report: accounts, calls,
+        transports, media sessions, the last refused calls, the queues, the
+        RTP range and the counters. Safe from any thread, and never waits."""
+        buffer = ffi.new(f"char[{lib.SIPRAL_STATE_TEXT_MAX}]")
+        length = ffi.new("size_t *")
+        check(
+            lib.sipral_stack_state(self.handle, buffer, lib.SIPRAL_STATE_TEXT_MAX, length),
+            "sipral_stack_state",
+        )
+        return ffi.string(buffer, int(length[0]) - 1).decode("utf-8")
 
     def reject_call(self, event: _events.Event, code: int = 486) -> None:
         """`sipral_call_reject` for an incoming call nothing has answered,
@@ -599,9 +710,7 @@ class Stack:
         with a bill attached -- whoever sent it can make this line dial
         anything -- so it is never made on the application's behalf.
         """
-        media_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        media_socket.bind((media_host, media_port))
-        media_socket.setblocking(False)
+        media_socket = self.open_media_socket(media_host, media_port)
         media_address = format_address(*media_socket.getsockname())
         self._map_media_socket(media_socket, media_address)
 
@@ -1047,6 +1156,7 @@ class Stack:
         or the socket already reached `SIPRAL_EVENT_KIND_MEDIA_STARTED`
         and belongs to `Media` now).
         """
+        self._give_back_port(parse_address(address)[1])
         with self._nat_lock:
             mapped = address in self._stun_sockets
         if not mapped:

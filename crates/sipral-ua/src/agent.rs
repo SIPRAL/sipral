@@ -517,6 +517,15 @@ impl UserAgent {
         self.accounts.get(&account)
     }
 
+    /// Every account this agent holds, oldest first — for a report of the
+    /// whole agent, such as a crash report's state snapshot.
+    #[must_use]
+    pub fn accounts(&self) -> Vec<AccountId> {
+        let mut held: Vec<AccountId> = self.accounts.keys().copied().collect();
+        held.sort_unstable();
+        held
+    }
+
     /// Where an account's registration is.
     #[must_use]
     pub fn registration_state(&self, account: AccountId) -> Option<RegistrationState> {

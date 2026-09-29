@@ -248,7 +248,7 @@ public final class Call: @unchecked Sendable {
             guard let media else {
                 throw SipralError(status: .wrongState, message: "the call has no media to move yet")
             }
-            let fresh = try UDPSocket(host: host ?? stack.currentHost, port: port)
+            let fresh = try stack.openMediaSocket(host: host ?? stack.currentHost, port: port)
             do {
                 let publicAddress = try stack.mapMovedSocket(fresh)
                 try retryingBusy {

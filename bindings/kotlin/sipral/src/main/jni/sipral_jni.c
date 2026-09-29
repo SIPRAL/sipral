@@ -32,6 +32,8 @@ static jclass jni_processor_callback_class;
 static jmethodID jni_processor_callback_deliver;
 static jclass jni_audio_transmit_callback_class;
 static jmethodID jni_audio_transmit_callback_deliver;
+static jclass jni_log_callback_class;
+static jmethodID jni_log_callback_deliver;
 
 /* Whether the struct a callback was handed reaches as far as one of its
  * members: the library fills in no more of it than its size member says. */
@@ -107,6 +109,21 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
             return JNI_ERR;
         }
     }
+    {
+        jclass found = (*env)->FindClass(env, "org/sipral/SipralLogListeners");
+        if (found == NULL) {
+            return JNI_ERR;
+        }
+        jni_log_callback_class = (jclass)(*env)->NewGlobalRef(env, found);
+        (*env)->DeleteLocalRef(env, found);
+        if (jni_log_callback_class == NULL) {
+            return JNI_ERR;
+        }
+        jni_log_callback_deliver = (*env)->GetStaticMethodID(env, jni_log_callback_class, "deliver", "(JJJJ[B[BJ)V");
+        if (jni_log_callback_deliver == NULL) {
+            return JNI_ERR;
+        }
+    }
     jni_vm = vm;
     return JNI_VERSION_1_6;
 }
@@ -136,6 +153,10 @@ JNI_OnUnload(JavaVM *vm, void *reserved)
     if (jni_audio_transmit_callback_class != NULL) {
         (*env)->DeleteGlobalRef(env, jni_audio_transmit_callback_class);
         jni_audio_transmit_callback_class = NULL;
+    }
+    if (jni_log_callback_class != NULL) {
+        (*env)->DeleteGlobalRef(env, jni_log_callback_class);
+        jni_log_callback_class = NULL;
     }
 }
 
@@ -826,6 +847,71 @@ jni_audio_transmit_callback(const sipral_audio_transmit_t *transmit, void *user_
     }
 }
 
+/* Where a sipral_log_callback_t lands. The event is handed to
+ * SipralLogListeners.deliver under the key its user pointer carries, on a
+ * thread attached to the JVM for the length of the call when it was not
+ * attached already, and every local reference made here is deleted
+ * before it returns: a poll delivers all its events inside one native
+ * call, and nothing made here would be released until that call ended. */
+static void
+jni_log_callback(const sipral_log_record_t *record, void *user_data)
+{
+    JNIEnv *env = NULL;
+    int attached = 0;
+    int built = 1;
+    jint found;
+    jbyteArray target = NULL;
+    jbyteArray message = NULL;
+
+    if (jni_vm == NULL || record == NULL) {
+        return;
+    }
+    found = (*jni_vm)->GetEnv(jni_vm, (void *)&env, JNI_VERSION_1_6);
+    if (found == JNI_EDETACHED) {
+        if ((*jni_vm)->AttachCurrentThread(jni_vm, (void *)&env, NULL) != JNI_OK) {
+            return;
+        }
+        attached = 1;
+    } else if (found != JNI_OK) {
+        return;
+    }
+    if (built && JNI_REACHES(record, sipral_log_record_t, target_len) && record->target != NULL) {
+        target = (*env)->NewByteArray(env, (jsize)record->target_len);
+        if (target == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, target, 0, (jsize)record->target_len, (const jbyte *)record->target);
+        }
+    }
+    if (built && JNI_REACHES(record, sipral_log_record_t, message_len) && record->message != NULL) {
+        message = (*env)->NewByteArray(env, (jsize)record->message_len);
+        if (message == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, message, 0, (jsize)record->message_len, (const jbyte *)record->message);
+        }
+    }
+    if (built) {
+        (*env)->CallStaticVoidMethod(env, jni_log_callback_class, jni_log_callback_deliver, (jlong)(intptr_t)user_data, (jlong)record->size, JNI_REACHES(record, sipral_log_record_t, stack) ? (jlong)record->stack : 0, JNI_REACHES(record, sipral_log_record_t, level) ? (jlong)record->level : 0, target, message, JNI_REACHES(record, sipral_log_record_t, suppressed) ? (jlong)record->suppressed : 0);
+    }
+    /* deliver hands what a listener throws to the thread's own handler, so
+     * what is pending here is the JVM's -- an array it could not make --
+     * and a callback has no Java frame beneath it to throw into */
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+    if (target != NULL) {
+        (*env)->DeleteLocalRef(env, target);
+    }
+    if (message != NULL) {
+        (*env)->DeleteLocalRef(env, message);
+    }
+    if (attached) {
+        (*jni_vm)->DetachCurrentThread(jni_vm);
+    }
+}
+
 /* Throw a new exception of the class named. What is wrong with a list the
  * shim was handed is the JVM's to report: a status would be read as the
  * library's answer, and the library was never called. */
@@ -1052,7 +1138,7 @@ Java_org_sipral_SipralNative_sipral_1capabilities(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlong configRegistrarKeepalive, jlong configRegistrarKeepaliveMs, jlong configTurnTransport, jlong configAudio, jlong configAudioActivation, jlong configAudioTransmitCallback, jlong configAudioProbeMs, jlong configAudioDeviceRateHz, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlong configRegistrarKeepalive, jlong configRegistrarKeepaliveMs, jlong configTurnTransport, jlong configAudio, jlong configAudioActivation, jlong configAudioTransmitCallback, jlong configAudioProbeMs, jlong configAudioDeviceRateHz, jlong configRtpPortMin, jlong configRtpPortMax, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -1122,6 +1208,8 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     config_value.audio_transmit_user_data = (void *)(intptr_t)configAudioTransmitCallback;
     config_value.audio_probe_ms = (uint64_t)configAudioProbeMs;
     config_value.audio_device_rate_hz = (uint32_t)configAudioDeviceRateHz;
+    config_value.rtp_port_min = (uint32_t)configRtpPortMin;
+    config_value.rtp_port_max = (uint32_t)configRtpPortMax;
     sipral_handle_t stack_value = 0;
     sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
     if (configBindAddress) {
@@ -1168,7 +1256,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
     settings_value.size = sizeof settings_value;
     sipral_status_t status = sipral_stack_settings((sipral_handle_t)stack, &settings_value);
     {
-        jlong slots[15];
+        jlong slots[17];
         slots[0] = (jlong)settings_value.size;
         slots[1] = (jlong)settings_value.transport;
         slots[2] = (jlong)settings_value.retransmits;
@@ -1184,7 +1272,9 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
         slots[12] = (jlong)settings_value.g729_annex_b;
         slots[13] = (jlong)settings_value.referrals;
         slots[14] = (jlong)settings_value.registrar_keepalive_ms;
-        (*env)->SetLongArrayRegion(env, settings, 0, 15, slots);
+        slots[15] = (jlong)settings_value.rtp_port_min;
+        slots[16] = (jlong)settings_value.rtp_port_max;
+        (*env)->SetLongArrayRegion(env, settings, 0, 17, slots);
     }
     return (jint)status;
 }
@@ -3533,6 +3623,57 @@ Java_org_sipral_SipralNative_sipral_1audio_1info(JNIEnv *env, jobject self, jlon
         slots[8] = (jlong)info_value.ringer;
         (*env)->SetLongArrayRegion(env, info, 0, 9, slots);
     }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1log(JNIEnv *env, jobject self, jlong stack, jlong level, jlong callback)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_log((sipral_handle_t)stack, (uint32_t)level, callback != 0 ? jni_log_callback : NULL, (void *)(intptr_t)callback);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1state(JNIEnv *env, jobject self, jlong stack, jbyteArray buffer, jlongArray len)
+{
+    (void)env;
+    (void)self;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t len_value = 0;
+    sipral_status_t status = sipral_stack_state((sipral_handle_t)stack, (char *)buffer_data, (size_t)buffer_size, &len_value);
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)len_value;
+        (*env)->SetLongArrayRegion(env, len, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1rtp_1port_1reserve(JNIEnv *env, jobject self, jlong stack, jlongArray port)
+{
+    (void)env;
+    (void)self;
+    uint32_t port_value = 0;
+    sipral_status_t status = sipral_stack_rtp_port_reserve((sipral_handle_t)stack, &port_value);
+    {
+        jlong slot = (jlong)port_value;
+        (*env)->SetLongArrayRegion(env, port, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1rtp_1port_1release(JNIEnv *env, jobject self, jlong stack, jlong port)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_rtp_port_release((sipral_handle_t)stack, (uint32_t)port);
     return (jint)status;
 }
 

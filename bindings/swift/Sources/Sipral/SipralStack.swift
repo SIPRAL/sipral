@@ -112,7 +112,16 @@ public final class SipralStack: @unchecked Sendable {
     /// assignment.
     final class StackBox {
         weak var stack: SipralStack?
+        /// Where `setLog` sends lines, read by the log trampoline on
+        /// whichever thread has just let the stack go. Guarded by `logQueue`.
+        var logHandler: LogHandler?
+        let logQueue = DispatchQueue(label: "org.sipral.stack.log")
     }
+
+    /// What `setLog` hands each line to: its level, which part of the stack
+    /// wrote it, the line -- already redacted -- and how many lines a flood
+    /// had turned away before it.
+    public typealias LogHandler = @Sendable (SipralLogLevel, String, String, UInt64) -> Void
 
     /// The STUN server this stack asks where its sockets appear from, as
     /// `host:port`, or `nil` for a stack that asks nobody.
@@ -208,6 +217,14 @@ public final class SipralStack: @unchecked Sendable {
     /// `network` is the network the stack starts on, what the first
     /// `networkChanged(to:)` compares with: a wired link at `bindHost`, on no
     /// interface in particular, unless the application knows better.
+    ///
+    /// `rtpPortMin` and `rtpPortMax` are the range a firewall in front of
+    /// this machine was opened for: every media socket this class opens
+    /// without an explicit port then binds an even port from it, reserved
+    /// with `sipral_stack_rtp_port_reserve`, with the odd one above kept for
+    /// RTCP (RFC 3550 §11), and a call is refused a port outside it. Both
+    /// zero -- the default -- leave the ports to the operating system. Every
+    /// pair taken throws `.exhausted` rather than binding outside the range.
     public init(
         audio: AudioMode = .platformDefault,
         bindHost: String = "127.0.0.1",
@@ -226,8 +243,11 @@ public final class SipralStack: @unchecked Sendable {
         registrarKeepaliveMs: UInt64 = 0,
         audioProbeMs: UInt64 = 0,
         audioDeviceRateHz: UInt32 = 0,
+        rtpPortMin: UInt16 = 0,
+        rtpPortMax: UInt16 = 0,
         network: Network? = nil
     ) throws {
+        self.rtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? nil : (rtpPortMin, rtpPortMax)
         let socket = try UDPSocket(host: bindHost, port: bindPort)
         self.socket = socket
         self.audioMode = audio
@@ -279,6 +299,8 @@ public final class SipralStack: @unchecked Sendable {
                     config.audio_activation = activation
                     config.audio_probe_ms = audioProbeMs
                     config.audio_device_rate_hz = audioDeviceRateHz
+                    config.rtp_port_min = UInt32(rtpPortMin)
+                    config.rtp_port_max = UInt32(rtpPortMax)
                     if audio.isDevice {
                         config.audio_transmit_callback = sipralAudioTransmitTrampoline
                         config.audio_transmit_user_data = boxPointer
@@ -324,6 +346,75 @@ public final class SipralStack: @unchecked Sendable {
         var ts = timespec()
         clock_gettime(CLOCK_REALTIME, &ts)
         return UInt64(ts.tv_sec)
+    }
+
+    /// The RTP port range media sockets are bound in, or `nil` when the
+    /// operating system picks.
+    public let rtpPorts: (min: UInt16, max: UInt16)?
+
+    /// A UDP socket for a call's media at `host`: at `port` when one is
+    /// named, otherwise -- on a stack with an RTP range -- at an even port
+    /// reserved from it (`sipral_stack_rtp_port_reserve`), where one another
+    /// process already holds is given back and the next tried, and elsewhere
+    /// wherever the operating system puts it. `.exhausted` once every pair
+    /// is taken.
+    public func openMediaSocket(host: String, port: UInt16 = 0) throws -> UDPSocket {
+        guard port == 0, let range = rtpPorts else {
+            return try UDPSocket(host: host, port: port)
+        }
+        var failure: Error?
+        for _ in 0..<max(1, (Int(range.max) - Int(range.min) + 1) / 2) {
+            let reserved = try retryingBusy { try Sipral.stackRtpPortReserve(stack: handle) }
+            do {
+                return try UDPSocket(host: host, port: UInt16(reserved))
+            } catch {
+                giveBackPort(UInt16(reserved))
+                failure = error
+            }
+        }
+        throw failure ?? SipralError(status: .exhausted, message: "no RTP port could be bound")
+    }
+
+    /// `sipral_stack_rtp_port_release` for a port no call took, on a stack
+    /// with a range. Best effort: a port a call did take comes back by
+    /// itself when the call ends.
+    func giveBackPort(_ port: UInt16) {
+        guard rtpPorts != nil else { return }
+        try? retryingBusy { try Sipral.stackRtpPortRelease(stack: handle, port: UInt32(port)) }
+    }
+
+    /// Send this stack's log to `handler` at `level` and louder, or turn it
+    /// off with `.off` or a `nil` handler (`sipral_stack_log`). The handler
+    /// runs on whichever thread has just finished a call into the stack --
+    /// the poll thread, usually -- with the stack let go, so it may call back
+    /// into it. Every line is already redacted: no user part, number, IP
+    /// address or credential reaches it.
+    public func setLog(level: SipralLogLevel, handler: LogHandler?) throws {
+        let box = self.box
+        box.logQueue.sync { box.logHandler = level == .off ? nil : handler }
+        let on = level != .off && handler != nil
+        let boxPointer = Unmanaged.passUnretained(box).toOpaque()
+        try retryingBusy {
+            try Sipral.check(
+                sipral_stack_log(
+                    handle,
+                    on ? level.rawValue : SipralLogLevel.off.rawValue,
+                    on ? sipralLogTrampoline : nil,
+                    on ? boxPointer : nil
+                )
+            )
+        }
+    }
+
+    /// Everything this stack is holding, as the redacted text
+    /// `sipral_stack_state` writes for a crash report: accounts, calls,
+    /// transports, media sessions, the last refused calls, the queues, the
+    /// RTP range and the counters. Safe from any thread, and never waits.
+    public func state() throws -> String {
+        var buffer = [CChar](repeating: 0, count: Sipral.stateTextMax)
+        let length = try Sipral.stackState(stack: handle, buffer: &buffer)
+        let bytes = buffer.prefix(max(0, length - 1)).map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     /// Elapsed milliseconds since this stack was created -- what every entry
@@ -411,7 +502,7 @@ public final class SipralStack: @unchecked Sendable {
         ice: SipralIce? = nil,
         headers: [SipralHeader] = []
     ) throws -> Call {
-        let mediaSocket = try UDPSocket(host: mediaHost, port: mediaPort)
+        let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
         let stackHandle = handle
 
         let callHandle: SipralHandle
@@ -476,7 +567,7 @@ public final class SipralStack: @unchecked Sendable {
         mediaHost: String = "127.0.0.1",
         mediaPort: UInt16 = 0
     ) throws -> Call {
-        let mediaSocket = try UDPSocket(host: mediaHost, port: mediaPort)
+        let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
         do {
             try mapMediaSocket(mediaSocket)
         } catch {
@@ -559,7 +650,7 @@ public final class SipralStack: @unchecked Sendable {
         srtp: SipralSrtp? = nil,
         ice: SipralIce? = nil
     ) throws -> Call {
-        let mediaSocket = try UDPSocket(host: mediaHost, port: mediaPort)
+        let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
         let stackHandle = handle
         let placed: SipralHandle
         do {
@@ -690,6 +781,9 @@ public final class SipralStack: @unchecked Sendable {
     /// does that sent from the socket itself, and then the socket closed.
     func giveBackMediaSocket(_ socket: UDPSocket) {
         let local = socket.localAddress
+        if let port = local.split(separator: ":").last.flatMap({ UInt16($0) }) {
+            giveBackPort(port)
+        }
         let named = natQueue.sync { stunSockets[local] != nil }
         if named {
             try? retryingBusy { try Sipral.stackNatUnmap(stack: handle, local: local, nowMs: nowMs()) }
@@ -1199,6 +1293,28 @@ private func sipralStackEventTrampoline(
     guard let event, let userData else { return }
     let box = Unmanaged<SipralStack.StackBox>.fromOpaque(userData).takeUnretainedValue()
     box.stack?.handleEvent(event.pointee)
+}
+
+/// `sipral_stack_log`'s callback: runs on whichever thread has just let the
+/// stack go, with nothing of the library held, one line at a time.
+private func sipralLogTrampoline(
+    _ record: UnsafePointer<sipral_log_record_t>?, _ userData: UnsafeMutableRawPointer?
+) {
+    guard let record, let userData else { return }
+    let line = record.pointee
+    guard line.size >= MemoryLayout<sipral_log_record_t>.size else { return }
+    let text = { (pointer: UnsafePointer<CChar>?, count: Int) -> String in
+        guard let pointer else { return "" }
+        return String(decoding: UnsafeRawBufferPointer(start: pointer, count: count), as: UTF8.self)
+    }
+    let box = Unmanaged<SipralStack.StackBox>.fromOpaque(userData).takeUnretainedValue()
+    let handler = box.logQueue.sync { box.logHandler }
+    handler?(
+        SipralLogLevel(rawValue: line.level) ?? .debug,
+        text(line.target, line.target_len),
+        text(line.message, line.message_len),
+        line.suppressed
+    )
 }
 
 /// `audio_transmit_callback`: runs on the library's audio engine thread,
