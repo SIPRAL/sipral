@@ -4174,9 +4174,11 @@ impl MediaEngine {
                     .and_then(|body| sipral_core::sdp::parse(body).ok());
                 self.server_answered(*call, answer.as_ref());
                 self.send_metadata(*call, agent, now);
+                self.codec_owed(*call, agent, now);
             }
             UaEvent::SessionChangeFailed { call, .. } if self.recordings.contains_key(call) => {
                 self.send_metadata(*call, agent, now);
+                self.codec_owed(*call, agent, now);
             }
             UaEvent::SessionChanged { call, hold, .. } => {
                 let direction = match (!hold.remote, !hold.local) {
@@ -4329,6 +4331,16 @@ impl MediaEngine {
         }
         self.attach_tap(recording);
         self.send_metadata(recording, agent, now);
+        self.recorded_codec(call, agent, now);
+    }
+
+    /// A change of codec the recording session could not offer when the
+    /// recorded call moved, because another change was running in it: offer
+    /// it now that that change is over.
+    fn codec_owed(&mut self, recording: CallHandle, agent: &mut UserAgent, now: Instant) {
+        if let Some(recorded) = self.recordings.get(&recording).map(|held| held.recorded) {
+            self.recorded_codec(recorded, agent, now);
+        }
     }
 
     /// Send the server the metadata it is owed, now or once the change

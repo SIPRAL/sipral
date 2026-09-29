@@ -12745,6 +12745,66 @@ fn a_recorded_call_that_moves_codec_offers_the_server_the_new_one() {
     assert_eq!(sdp.media.len(), 2);
 }
 
+#[test]
+fn a_call_that_replaces_the_recorded_one_on_another_codec_is_recorded_on_that_codec() {
+    let (mut pair, mut server, call, _, _) = recorded_call_on(&["PCMU", "PCMA"]);
+    let invite = replacing_invite(&pair, call).replace("RTP/AVP 0\r\n", "RTP/AVP 8\r\n");
+    let now = pair.now;
+    pair.caller.deliver(invite.as_bytes(), callee_sip(), now);
+    pair.caller.drain(now, false);
+    let new = pair
+        .caller
+        .heard
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::IncomingCall { call: new, .. }) => Some(*new),
+            _ => None,
+        })
+        .expect("the replacing call arrived");
+    pair.caller
+        .engine
+        .answer(&mut pair.caller.agent, new, caller_media(), now)
+        .expect("the answer goes");
+    acknowledge_replacing(&mut pair, &mut server);
+    let reached = settle_with(&mut pair, &mut server);
+    let offered_pcma = reached
+        .iter()
+        .filter(|bytes| bytes.starts_with(b"INVITE "))
+        .any(|reoffer| {
+            let mut scratch = ParseScratch::new();
+            let message = sipral_core::msg::parse(reoffer, &mut scratch, ParseMode::Lenient)
+                .expect("a message");
+            let read = sipral_ua::siprec::read_recording_offer(&message).expect("SDP and metadata");
+            let sdp = parse(read.sdp).expect("the offer");
+            sdp.media.len() == 2 && sdp.media.iter().all(|stream| stream.formats == ["8"])
+        });
+    assert!(
+        offered_pcma,
+        "the server is offered the codec the replacing call runs on"
+    );
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    tone(&mut samples, 8_000, &mut phase);
+    let sent = pair
+        .caller
+        .engine
+        .session(new)
+        .expect("the replacing call's media")
+        .capture(&samples, pair.now)
+        .expect("it encodes")
+        .map(|datagram| datagram.payload.to_vec())
+        .expect("a frame");
+    assert_eq!(rtp_parts(&sent).0.payload_type, 8);
+    let out = copies(&mut pair, new);
+    assert_eq!(
+        out.len(),
+        1,
+        "the replacing call's audio reaches the server"
+    );
+    assert_eq!(rtp_parts(&out[0].2).0.payload_type, 8);
+}
+
 /// An INVITE from a new far end that replaces `call` (RFC 3891 §3): it names
 /// the dialog by its Call-ID, the caller's tag as the to-tag and the far
 /// end's as the from-tag.
