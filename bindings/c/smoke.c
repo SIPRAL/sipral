@@ -40,7 +40,8 @@
     X(sipral_path_candidate)                                                  \
     X(sipral_suspending) X(sipral_screen_request)                             \
     X(sipral_subscribe_config) X(sipral_watched_dialog) X(sipral_push_echo)   \
-    X(sipral_processor_frame)
+    X(sipral_processor_frame)                                                 \
+    X(sipral_audio_device) X(sipral_audio_info) X(sipral_audio_transmit)
 
 static int failures;
 
@@ -620,6 +621,35 @@ static sipral_status_t push_echo_at(struct fixture *fixture, size_t declared)
     return sipral_account_push_echo(fixture->stack, fixture->account, &echo);
 }
 
+/* The fixture's stack pumps its own frames, so it has no audio engine to
+ * describe, and the library says so only after it has read the length the
+ * caller declared: a length it refuses is UNSUPPORTED_VERSION, one it takes
+ * goes on to WRONG_STATE. The length is what is tested here, so that second
+ * answer is the length accepted -- which is what a stack with an engine
+ * would go on to fill, on a platform that has one and without opening any
+ * device on the machine that runs this. */
+static sipral_status_t length_taken(sipral_status_t status)
+{
+    return status == SIPRAL_STATUS_WRONG_STATE ? SIPRAL_STATUS_OK : status;
+}
+
+static sipral_status_t audio_device_at(struct fixture *fixture, size_t declared)
+{
+    sipral_audio_device_t device = { 0 };
+    device.size = declared;
+    char name[256];
+    size_t needed = 0;
+    return length_taken(
+        sipral_audio_device_at(fixture->stack, 0, &device, name, sizeof name, &needed));
+}
+
+static sipral_status_t audio_info_at(struct fixture *fixture, size_t declared)
+{
+    sipral_audio_info_t info = { 0 };
+    info.size = declared;
+    return length_taken(sipral_audio_info(fixture->stack, &info));
+}
+
 static sipral_subscribe_config_t fixture_subscribe_config(size_t declared)
 {
     sipral_subscribe_config_t config = { 0 };
@@ -902,6 +932,8 @@ static const struct {
     { "sipral_subscribe_config_t", subscribe_config_at },
     { "sipral_watched_dialog_t", watched_dialog_at },
     { "sipral_push_echo_t", push_echo_at },
+    { "sipral_audio_device_t", audio_device_at },
+    { "sipral_audio_info_t", audio_info_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])
