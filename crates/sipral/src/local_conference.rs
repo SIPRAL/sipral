@@ -1,65 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
-//! A local conference of any number of calls, with or without this end.
-//!
-//! [`MediaEngine::join`](crate::MediaEngine::join) pairs two calls that
-//! already agree on a rate and a frame. This is the general case:
-//! `sipral_media::nway`'s mixer behind calls that each keep their own codec,
-//! their own rate and their own frame, so a G.711 call, a G.722 call and an
-//! Opus call can be in one conference. Every member hears everybody but
-//! itself; nobody's own voice comes back to it.
-//!
-//! # Who is in it
-//!
-//! Calls, added with [`LocalConference::add`] and taken out with
-//! [`LocalConference::remove`], each reached through its [`SessionShare`] —
-//! the conference holds no engine and takes no engine lock, so the thread
-//! that runs it is the one that carries audio, as for a single call. And,
-//! when [`LocalConferenceConfig::local`] names a rate, this end: the
-//! microphone frame handed to [`LocalConference::tick`] is what this end
-//! says, and [`LocalConference::speaker`] is what it hears.
-//!
-//! A call in a conference is driven by it and by nothing else: its
-//! [`MediaSession::playback`](crate::MediaSession::playback) and
-//! [`MediaSession::capture`](crate::MediaSession::capture) are called from
-//! the tick, and a thread calling them on the same call as well would take
-//! every other frame out from under the conference. A call joined into a
-//! pair with [`MediaEngine::join`](crate::MediaEngine::join) is the same
-//! mistake; `sipral-ffi` refuses both, and a Rust application keeps to it.
-//!
-//! # The tick
-//!
-//! [`LocalConference::tick`] is twenty milliseconds of conference: every
-//! member's decoded audio taken off its session, one mix formed, and every
-//! member's share of it encoded and queued for
-//! [`LocalConference::poll_transmit`]. A call whose frame is 10 ms is read
-//! twice a tick; one whose frame is 40 or 60 ms every second or third tick,
-//! and one at 30 ms every tick and a half, so that each call keeps its own
-//! packetisation. A frame of more than three ticks is refused.
-//!
-//! # Hold, and calls that end
-//!
-//! Nothing about hold is special here, and that is the point: a member this
-//! end holds has nothing sent to it (its session answers `None` for a frame
-//! it may not send) and a member that holds this end sends nothing, so it
-//! is mixed as silence. Everybody else goes on hearing everybody else. A
-//! member whose call ends leaves the conference on the next tick, and its
-//! departure is reported like any other.
-//!
-//! # What changes are reported
-//!
-//! [`LocalConference::poll_change`] hands out, in order, who joined, who
-//! left and why, when the list of who is talking changed
-//! ([`LocalConference::talkers`], loudest first, with the hysteresis
-//! `sipral_media::nway::talker` describes), and a recording that stopped by
-//! itself.
-//!
-//! # Recording
-//!
-//! [`LocalConference::start_recording`] writes the whole mix — everybody
-//! the conference hears, at each member's own level — through the recorder
-//! a call's recording uses, in any of its formats, as one channel.
+//! A local conference of any number of calls, with or without this end:
+//! [`LocalConference`] says what it does and how it is driven.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -188,7 +131,65 @@ struct Seat {
     buffer: Vec<i16>,
 }
 
-/// A local conference: see the [module documentation](self).
+/// A local conference of any number of calls, with or without this end.
+///
+/// [`MediaEngine::join`](crate::MediaEngine::join) pairs two calls that
+/// already agree on a rate and a frame. This is the general case:
+/// `sipral_media::nway`'s mixer behind calls that each keep their own codec,
+/// their own rate and their own frame, so a G.711 call, a G.722 call and an
+/// Opus call can be in one conference. Every member hears everybody but
+/// itself; nobody's own voice comes back to it.
+///
+/// # Who is in it
+///
+/// Calls, added with [`LocalConference::add`] and taken out with
+/// [`LocalConference::remove`], each reached through its [`SessionShare`] —
+/// the conference holds no engine and takes no engine lock, so the thread
+/// that runs it is the one that carries audio, as for a single call. And,
+/// when [`LocalConferenceConfig::local`] names a rate, this end: the
+/// microphone frame handed to [`LocalConference::tick`] is what this end
+/// says, and [`LocalConference::speaker`] is what it hears.
+///
+/// A call in a conference is driven by it and by nothing else: its
+/// [`MediaSession::playback`](crate::MediaSession::playback) and
+/// [`MediaSession::capture`](crate::MediaSession::capture) are called from
+/// the tick, and a thread calling them on the same call as well would take
+/// every other frame out from under the conference. A call joined into a
+/// pair with [`MediaEngine::join`](crate::MediaEngine::join) is the same
+/// mistake; `sipral-ffi` refuses both, and a Rust application keeps to it.
+///
+/// # The tick
+///
+/// [`LocalConference::tick`] is twenty milliseconds of conference: every
+/// member's decoded audio taken off its session, one mix formed, and every
+/// member's share of it encoded and queued for
+/// [`LocalConference::poll_transmit`]. A call whose frame is 10 ms is read
+/// twice a tick; one whose frame is 40 or 60 ms every second or third tick,
+/// and one at 30 ms every tick and a half, so that each call keeps its own
+/// packetisation. A frame of more than three ticks is refused.
+///
+/// # Hold, and calls that end
+///
+/// Nothing about hold is special here, and that is the point: a member this
+/// end holds has nothing sent to it (its session answers `None` for a frame
+/// it may not send) and a member that holds this end sends nothing, so it
+/// is mixed as silence. Everybody else goes on hearing everybody else. A
+/// member whose call ends leaves the conference on the next tick, and its
+/// departure is reported like any other.
+///
+/// # What changes are reported
+///
+/// [`LocalConference::poll_change`] hands out, in order, who joined, who
+/// left and why, when the list of who is talking changed
+/// ([`LocalConference::talkers`], loudest first, with the hysteresis
+/// `sipral_media::nway::talker` describes), and a recording that stopped by
+/// itself.
+///
+/// # Recording
+///
+/// [`LocalConference::start_recording`] writes the whole mix — everybody
+/// the conference hears, at each member's own level — through the recorder
+/// a call's recording uses, in any of its formats, as one channel.
 pub struct LocalConference {
     mixer: Mixer,
     /// How many members it was made for, this end included.

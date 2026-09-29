@@ -1216,18 +1216,20 @@ mod tests {
 
     /// What the second half of a run gave: this end's loudness, how loud
     /// the packets to call a's and call b's far ends were, and how many
-    /// went to call b.
+    /// went to each.
     struct Heard {
         speaker: i64,
         to_a: f64,
         to_b: f64,
+        packets_a: usize,
         packets_b: usize,
     }
 
-    /// Ticks with call a's far end sending its square wave.
+    /// Ticks with call a's far end sending its square wave. Every packet
+    /// has to name call a or call b.
     fn run(
         conference: SipralHandle,
-        (call_a, media_a): (SipralHandle, SipralHandle),
+        (call_a, media_a, call_b): (SipralHandle, SipralHandle, SipralHandle),
         from_ms: u64,
         ticks: u16,
         first_sequence: u16,
@@ -1235,7 +1237,7 @@ mod tests {
         let frame = usize::try_from(info(conference).frame_samples).unwrap_or(0);
         let silent = vec![0_i16; frame];
         let (mut speaker, mut to_a, mut to_b) = (0, 0.0, 0.0);
-        let (mut counted, mut packets_b) = (0_u32, 0);
+        let (mut counted, mut packets_a, mut packets_b) = (0_u32, 0, 0);
         for n in 0..ticks {
             let now = from_ms + u64::from(n) * 20;
             let mut datagram = loud(first_sequence + n);
@@ -1248,7 +1250,9 @@ mod tests {
                     let share = loud_share(payload);
                     if *call == call_a {
                         to_a += share;
+                        packets_a += 1;
                     } else {
+                        assert_eq!(*call, call_b, "a packet named neither call");
                         to_b += share;
                         packets_b += 1;
                     }
@@ -1260,6 +1264,7 @@ mod tests {
             speaker: speaker / i64::from(counted),
             to_a: to_a / f64::from(counted),
             to_b: to_b / f64::from(counted),
+            packets_a,
             packets_b,
         }
     }
@@ -1276,18 +1281,26 @@ mod tests {
             .collect()
     }
 
-    /// The whole of application mode: two calls and this end, each hearing
-    /// the others and not itself, who is talking reported, a mute and a gain
-    /// taken, a member removed and a member whose call ended, and the
-    /// conference destroyed.
-    #[test]
-    fn two_calls_and_this_end_hear_each_other_over_the_abi() {
-        let mut observed = Observed::default();
-        let (stack, call_a, call_b) = media_call_pair(&mut observed);
+    /// Two calls on one stack, both in a conference of three at 8 kHz with
+    /// this end: the stack, the two calls, call a's media handle and the
+    /// conference.
+    fn two_calls_in_one(
+        observed: &mut Observed,
+    ) -> (SipralHandle, SipralHandle, SipralHandle, SipralHandle, SipralHandle) {
+        let (stack, call_a, call_b) = media_call_pair(observed);
         let media_a = media_of(stack, call_a);
         let conference = create(stack, &config(3, 8_000));
         assert_eq!(add(conference, call_a), SipralStatus::Ok, "{}", last_error_text());
         assert_eq!(add(conference, call_b), SipralStatus::Ok, "{}", last_error_text());
+        (stack, call_a, call_b, media_a, conference)
+    }
+
+    /// Application mode: two calls and this end, each hearing the others and
+    /// not itself, and who is talking reported.
+    #[test]
+    fn two_calls_and_this_end_hear_each_other_over_the_abi() {
+        let mut observed = Observed::default();
+        let (stack, call_a, call_b, media_a, conference) = two_calls_in_one(&mut observed);
         assert_eq!(
             add(conference, call_a),
             SipralStatus::ConferenceRefused,
@@ -1309,11 +1322,12 @@ mod tests {
         assert_eq!(member_at(conference, 2).member, call_b);
         assert_eq!(member_at(conference, 1).gain_input, 256);
 
-        let heard = run(conference, (call_a, media_a), 3_000, 40, 1);
+        let heard = run(conference, (call_a, media_a, call_b), 3_000, 40, 1);
         assert!(heard.speaker > 2_000, "this end did not hear call a: {}", heard.speaker);
         assert!(heard.to_b > 0.5, "call b's far end did not hear call a: {}", heard.to_b);
         assert!(heard.to_a < 0.05, "call a's far end heard itself: {}", heard.to_a);
         assert!(heard.packets_b >= 19, "call b was sent {} packets in 20 ticks", heard.packets_b);
+        assert!(heard.packets_a >= 19, "call a was sent {} packets in 20 ticks", heard.packets_a);
 
         poll(stack, 3_800);
         let mut talker = u64::MAX;
@@ -1341,13 +1355,28 @@ mod tests {
             "call a talking was never reported"
         );
 
+        release(media_a);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A mute and a gain taken, a member removed and a member whose call
+    /// ended, each reported, and the conference destroyed.
+    #[test]
+    fn members_are_muted_levelled_removed_and_let_go_over_the_abi() {
+        let mut observed = Observed::default();
+        let (stack, call_a, call_b, media_a, conference) = two_calls_in_one(&mut observed);
+        let _ = run(conference, (call_a, media_a, call_b), 3_000, 40, 1);
+
         // call a muted on the way in: nobody hears it
         assert_eq!(
             unsafe { sipral_local_conference_set_muted(conference, call_a, 1, 1) },
             SipralStatus::Ok
         );
         assert_eq!(member_at(conference, 1).muted_input, 1);
-        let heard = run(conference, (call_a, media_a), 3_800, 20, 41);
+        let heard = run(conference, (call_a, media_a, call_b), 3_800, 20, 41);
         assert!(heard.to_b < 0.05, "call b heard a muted call a: {}", heard.to_b);
         assert!(heard.speaker < 200, "this end heard a muted call a: {}", heard.speaker);
         assert_eq!(
@@ -1530,7 +1559,7 @@ mod tests {
             "{}",
             last_error_text()
         );
-        let _ = run(conference, (call_a, media_a), 3_000, 25, 1);
+        let _ = run(conference, (call_a, media_a, call_b), 3_000, 25, 1);
         let standing = info(conference);
         assert_eq!(standing.recording, 1);
         assert!(standing.recorded_ms >= 480, "{}", standing.recorded_ms);
