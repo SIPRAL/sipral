@@ -186,7 +186,7 @@ pub enum Malformed {
     /// The PASSporT header or claims are not a JSON object.
     Json,
     /// The PASSporT header lacks `typ: "passport"`, or its `alg` is not a
-    /// string (RFC 8225 §4).
+    /// string (RFC 8225 §4), or it is a SHAKEN header without `x5u`.
     Header,
     /// A claim is missing or ill-formed: `iat`, `orig.tn` and `dest` always
     /// (RFC 8225 §5), `attest` and `origid` for `shaken` (RFC 8588 §4, §5).

@@ -520,14 +520,33 @@ fn x5u_and_info_must_agree() {
         start_failure(&identity, None),
         Failure::BadInfo(InfoProblem::Mismatch)
     );
-    // a header without x5u takes the certificate from info alone
+    // a plain header without x5u takes the certificate from info alone
     let pki = Pki::new();
-    let bare = HEADER.replace(r#","x5u":"https://cert.example.org/passport.cer""#, "");
-    let identity = hand_made(&bare, CLAIMS, "");
+    let bare = r#"{"alg":"ES256","typ":"passport"}"#;
+    let identity = hand_made(bare, CLAIMS, "");
     assert!(matches!(
         verdict(&identity, &pki.chain(), &pki),
         Verdict::Valid(_)
     ));
+}
+
+#[test]
+fn a_shaken_passport_names_its_certificate_in_x5u() {
+    // without x5u, nothing signed says which certificate the signer meant,
+    // and info could be pointed at any other certificate for the same key
+    let bare = HEADER.replace(r#","x5u":"https://cert.example.org/passport.cer""#, "");
+    for params in ["", ";ppt=shaken"] {
+        assert_eq!(
+            start_failure(&hand_made(&bare, CLAIMS, params), None),
+            Failure::Malformed(Malformed::Header),
+            "{params}"
+        );
+    }
+    let null = HEADER.replace(r#""https://cert.example.org/passport.cer""#, "null");
+    assert_eq!(
+        start_failure(&hand_made(&null, CLAIMS, ""), None),
+        Failure::Malformed(Malformed::Header)
+    );
 }
 
 #[test]

@@ -422,6 +422,12 @@ impl Header {
             Some(Some(x5u)) => Some(x5u.to_owned()),
             Some(None) => return Err(header()),
         };
+        // ATIS-1000074 makes `x5u` one of the four header parameters of
+        // every SHAKEN PASSporT: it is what binds the signature to the
+        // certificate the Identity header field's unsigned `info` names
+        if shaken && x5u.is_none() {
+            return Err(header());
+        }
         Ok(Header { x5u, shaken })
     }
 }
@@ -564,10 +570,17 @@ mod tests {
             })
         );
         assert_eq!(
-            ok(r#"{"alg":"ES256","ppt":"shaken","typ":"passport"}"#),
+            ok(r#"{"alg":"ES256","ppt":"shaken","typ":"passport","x5u":"https://a.example/c"}"#),
+            Ok(Header {
+                x5u: Some("https://a.example/c".to_owned()),
+                shaken: true
+            })
+        );
+        assert_eq!(
+            ok(r#"{"alg":"ES256","typ":"passport"}"#),
             Ok(Header {
                 x5u: None,
-                shaken: true
+                shaken: false
             })
         );
         assert_eq!(
@@ -579,6 +592,10 @@ mod tests {
             Err(Failure::UnsupportedPpt)
         );
         let header = Err(Failure::Malformed(Malformed::Header));
+        assert_eq!(
+            ok(r#"{"alg":"ES256","ppt":"shaken","typ":"passport"}"#),
+            header
+        );
         assert_eq!(ok(r#"{"alg":"ES256"}"#), header);
         assert_eq!(ok(r#"{"alg":"ES256","typ":"JWT"}"#), header);
         assert_eq!(ok(r#"{"typ":"passport"}"#), header);
