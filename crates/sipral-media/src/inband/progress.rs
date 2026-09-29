@@ -467,13 +467,15 @@ impl ProgressDetector {
         let sit_bank = Analyzer::new(rate, SIT_WINDOW_MS, SIT_HOP_MS, &SIT_FREQUENCIES);
         let sit_hops = HopTracker::new(sit_bank.hops_per_window());
         let sit_hop_len = count_f64(sit_bank.hop());
-        let histories = vec![
-            History {
+        // one at a time: `vec![history; n]` would clone it, and a clone of a
+        // `VecDeque` does not keep the capacity reserved for it
+        let histories = signatures
+            .iter()
+            .map(|_| History {
                 spans: VecDeque::with_capacity(HISTORY + 1),
                 last_end: None,
-            };
-            signatures.len()
-        ];
+            })
+            .collect();
         let config = ProgressConfig {
             cycles: config.cycles.clamp(1, MAX_CYCLES),
             ..config
@@ -896,27 +898,35 @@ fn matches_cadence(
     config: &ProgressConfig,
     per_ms: f64,
 ) -> Option<f64> {
-    let pattern: Vec<f64> = bursts
-        .iter()
-        .flat_map(|b| [f64::from(b.on_ms), f64::from(b.off_ms)])
-        .collect();
-    let period = pattern.len();
-    let need = period * usize::try_from(config.cycles).unwrap_or(1) + 1;
+    // the cadence as alternating burst and silence lengths, read in place:
+    // this runs at the end of every burst, on the audio thread, and does
+    // not allocate
+    let nominal = |i: usize| {
+        bursts.get(i / 2).map(|b| {
+            f64::from(if i.is_multiple_of(2) {
+                b.on_ms
+            } else {
+                b.off_ms
+            })
+        })
+    };
+    let period = bursts.len().saturating_mul(2);
+    let need = period
+        .saturating_mul(usize::try_from(config.cycles).unwrap_or(1))
+        .saturating_add(1);
     if period == 0 || spans.len() < need {
         return None;
     }
-    let recent: Vec<Span> = spans.iter().skip(spans.len() - need).copied().collect();
+    let first = spans.len() - need;
     let slack = f64::from(config.cadence_slack_ms);
     (0..bursts.len()).find_map(|rotation| {
-        let fits = recent.iter().enumerate().all(|(i, span)| {
-            pattern
-                .get((2 * rotation + i) % period)
-                .is_some_and(|&nominal| {
-                    let allowed = (nominal * config.cadence_tolerance).max(slack);
-                    (span.length / per_ms - nominal).abs() <= allowed
-                })
+        let fits = spans.iter().skip(first).enumerate().all(|(i, span)| {
+            nominal((2 * rotation + i) % period).is_some_and(|nominal| {
+                let allowed = (nominal * config.cadence_tolerance).max(slack);
+                (span.length / per_ms - nominal).abs() <= allowed
+            })
         });
-        fits.then(|| recent.first().map_or(0.0, |s| s.start))
+        fits.then(|| spans.get(first).map_or(0.0, |s| s.start))
     })
 }
 
