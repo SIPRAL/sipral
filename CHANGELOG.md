@@ -2056,7 +2056,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `sipral_media_packet_t` grew `protocol`, both at the tail with `MIN_SIZE`
   unmoved, after `registrar_keepalive_ms`; event kind 42, status 12 and
   feature bit 1024 are spent, and a binding built against 0.28 is refused
-  (the Kotlin agent's jar is rebuilt). In Rust, `sipral_nat::ice::Transmit`,
+  (the Kotlin agent's jar is rebuilt). The same minor carries the built-in
+  audio engine and the caller-identity and moving-call surface: after
+  `turn_transport`, `sipral_stack_config_t` grew the `audio*` members;
+  `sipral_account_config_t` grew `session_timer`,
+  `session_interval_seconds`, `privacy` and `trusted_peers`, and
+  `sipral_call_event_t` the identity, cause and answer-mode members, all at
+  their tails; event kinds 43 (audio devices changed) and 45 (call address
+  wanted), statuses 13 to 15 and feature bits 2048, 4096 and 8192 are spent,
+  and 44 is held and spent unused. In Rust, `sipral_nat::ice::Transmit`,
   `Route` and `TurnServer`, `sipral::Datagram`, `RelayDatagram` and
   `MixOutcome` each grew a field saying what a message goes over, and
   `TurnError` a variant; a caller that builds one by its fields names the
