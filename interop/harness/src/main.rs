@@ -2202,8 +2202,11 @@ pub(crate) fn place_call(
     // a call handle is only minted by `place_with`, and the socket has to
     // exist before that call, so it is opened against a handle nothing has
     // been placed on yet and moved once the real one is known
-    let placeholder = Media::bind(now)?;
+    let mut placeholder = Media::bind(now)?;
     let port = placeholder.port()?;
+    if let Some((answered, shown)) = endpoint.renumber {
+        placeholder.rewrite_payload(shown, answered);
+    }
     let local = SocketAddr::new(route_to(remote), port);
     let call = endpoint
         .engine
