@@ -629,8 +629,9 @@ pub fn recording_session_body(
 }
 
 /// A `Contact` value with the SRC feature tag added (RFC 7866 §6.1), as in
-/// `<sip:src@192.0.2.1>;+sip.src`. A value that already has it is returned
-/// as it is.
+/// `<sip:src@192.0.2.1>;+sip.src`. A value that already names it is
+/// returned as it is, whatever value it gives it: a second would contradict
+/// the first.
 #[must_use]
 pub fn with_src_feature_tag(contact: &str) -> String {
     let already =
@@ -656,7 +657,10 @@ pub fn supports_siprec(message: &RawMessage<'_>) -> bool {
 }
 
 /// Whether the message's `Contact` carries the given feature tag,
-/// [`SRC_FEATURE_TAG`] or [`SRS_FEATURE_TAG`].
+/// [`SRC_FEATURE_TAG`] or [`SRS_FEATURE_TAG`], as true.
+///
+/// Both are boolean feature tags (RFC 3840): bare or `="TRUE"` they are
+/// true, and `="FALSE"` or `="!TRUE"` says the contact is not one.
 #[must_use]
 pub fn contact_has_feature_tag(message: &RawMessage<'_>, tag: &str) -> bool {
     let Ok(contacts) = message.contact() else {
@@ -666,7 +670,20 @@ pub fn contact_has_feature_tag(message: &RawMessage<'_>, tag: &str) -> bool {
         sipral_core::msg::Contacts::Star => false,
         sipral_core::msg::Contacts::Addrs(addrs) => addrs
             .into_iter()
-            .any(|addr| addr.is_ok_and(|addr| addr.params().has(tag))),
+            .any(|addr| addr.is_ok_and(|addr| boolean_feature(&addr.params(), tag))),
+    }
+}
+
+/// Whether a boolean feature parameter is present and true: `tag-value-list`
+/// holds `TRUE` or `!FALSE` (RFC 3840's `tag-value = ["!"] (... / boolean)`).
+fn boolean_feature(params: &sipral_core::msg::Params<'_>, tag: &str) -> bool {
+    match params.get(tag) {
+        None => false,
+        Some(value) if value.is_empty() => true,
+        Some(value) => value.split(|byte| *byte == b',').any(|item| {
+            let item = sipral_core::msg::trim(item);
+            item.eq_ignore_ascii_case(b"TRUE") || item.eq_ignore_ascii_case(b"!FALSE")
+        }),
     }
 }
 
@@ -1689,6 +1706,33 @@ Content-Length: {}\r\n\r\n",
         let offer = read_recording_offer(&message).expect("an offer");
         assert_eq!(offer.sdp, sdp);
         assert_eq!(offer.metadata, metadata);
+    }
+
+    #[test]
+    fn a_feature_tag_valued_false_is_not_the_feature() {
+        // RFC 3840: a boolean feature tag is TRUE bare or written "TRUE",
+        // and "FALSE" or "!TRUE" says the opposite
+        for (contact, src) in [
+            ("<sip:a@192.0.2.1>;+sip.src", true),
+            ("<sip:a@192.0.2.1>;+SIP.SRC=\"TRUE\"", true),
+            ("<sip:a@192.0.2.1>;+sip.src=\"!FALSE\"", true),
+            ("<sip:a@192.0.2.1>;+sip.src=\"FALSE\"", false),
+            ("<sip:a@192.0.2.1>;+sip.src=\"!TRUE\"", false),
+            ("<sip:a@192.0.2.1>;+sip.srcx", false),
+        ] {
+            let bytes = invite(
+                &format!("Contact: {contact}\r\n"),
+                "application/sdp",
+                b"v=0\r\n",
+            );
+            let mut scratch = ParseScratch::default();
+            let message = parse(&bytes, &mut scratch, ParseMode::Strict).expect("parses");
+            assert_eq!(
+                contact_has_feature_tag(&message, SRC_FEATURE_TAG),
+                src,
+                "{contact}"
+            );
+        }
     }
 
     #[test]
