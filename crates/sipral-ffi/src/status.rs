@@ -94,6 +94,12 @@ codes! {
         /// `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
         /// that ends makes room; raising the limit means a new stack.
         LimitReached = 16,
+        /// A recording's file would not take what was written to it: the disk
+        /// filled, the volume went away, the file was taken away underneath.
+        /// Not the path, which is `SIPRAL_STATUS_INVALID_ARGUMENT` before
+        /// anything is written. The recording has stopped; the file holds the
+        /// audio up to the last checkpoint it could write.
+        RecordingFailed = 19,
     }
 }
 
@@ -126,6 +132,7 @@ entry! {
             14 => c"device unusable".as_ptr(),
             15 => c"device timed out".as_ptr(),
             16 => c"limit reached".as_ptr(),
+            19 => c"recording failed".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -168,6 +175,7 @@ mod tests {
             SipralStatus::DeviceUnusable,
             SipralStatus::DeviceTimedOut,
             SipralStatus::LimitReached,
+            SipralStatus::RecordingFailed,
         ];
         for status in all {
             let code = status as i32;
@@ -178,7 +186,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in 0..=16 {
+        for code in (0..=16).chain([19]) {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -218,5 +226,6 @@ mod tests {
         assert_eq!(SipralStatus::DeviceUnusable as i32, 14);
         assert_eq!(SipralStatus::DeviceTimedOut as i32, 15);
         assert_eq!(SipralStatus::LimitReached as i32, 16);
+        assert_eq!(SipralStatus::RecordingFailed as i32, 19);
     }
 }

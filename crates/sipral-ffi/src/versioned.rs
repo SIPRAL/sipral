@@ -94,6 +94,12 @@ pub(crate) mod min_size {
     pub const PATH_CANDIDATE: usize = 88;
     /// `sipral_poll_result_t`
     pub const POLL_RESULT: usize = 48;
+    /// `sipral_progress_config_t`
+    pub const PROGRESS_CONFIG: usize = 72;
+    /// `sipral_consent_tone_t`
+    pub const CONSENT_TONE: usize = 32;
+    /// `sipral_recording_options_t`
+    pub const RECORDING_OPTIONS: usize = 32;
     /// `sipral_push_echo_t`
     pub const PUSH_ECHO: usize = 24;
     /// `sipral_stack_config_t`

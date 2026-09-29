@@ -63,7 +63,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR 30
+#define SIPRAL_ABI_VERSION_MINOR 31
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -264,6 +264,29 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_LOGGING 16384
 
 /**
+ * See SIPRAL_FEATURE_DTMF. What a call carries inside its audio:
+ * keypad digits heard in the far end's audio
+ * (`sipral_stack_config_t::dtmf_detection`,
+ * `sipral_call_dtmf_detection`, `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`) and
+ * written into this end's (`SIPRAL_DTMF_IN_BAND`, and `SIPRAL_DTMF_RTP`
+ * on a call with no telephone event), call-progress tones, who answered
+ * and the machine's beep (`sipral_call_detect_progress`,
+ * `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`), and the beep that says a call
+ * is recorded (`sipral_call_consent_tone`).
+ */
+#define SIPRAL_FEATURE_IN_BAND_SIGNALS 262144
+
+/**
+ * See SIPRAL_FEATURE_DTMF. A recording written as
+ * `sipral_recording_options_t` says (`sipral_media_record_start_with`):
+ * mixed or stereo, WAV growing into RF64, at a rate of its own and
+ * checkpointed against a crash, and Ogg Opus where
+ * SIPRAL_FEATURE_OPUS is set too. And L16 as a codec, at 8 and 16
+ * kHz, which `sipral_codec_at` lists.
+ */
+#define SIPRAL_FEATURE_RECORDING_FORMATS 524288
+
+/**
  * The buffer a caller has to bring for one outgoing packet.
  *
  * Not a path MTU — RTP does not discover one — but the bound the session
@@ -411,6 +434,7 @@ typedef struct sipral_referral_event sipral_referral_event_t;
 typedef struct sipral_turn_stream_event sipral_turn_stream_event_t;
 typedef struct sipral_audio_event sipral_audio_event_t;
 typedef struct sipral_stun_server_event sipral_stun_server_event_t;
+typedef struct sipral_progress_event sipral_progress_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -422,6 +446,9 @@ typedef struct sipral_audio_device sipral_audio_device_t;
 typedef struct sipral_audio_info sipral_audio_info_t;
 typedef struct sipral_audio_transmit sipral_audio_transmit_t;
 typedef struct sipral_log_record sipral_log_record_t;
+typedef struct sipral_progress_config sipral_progress_config_t;
+typedef struct sipral_consent_tone sipral_consent_tone_t;
+typedef struct sipral_recording_options sipral_recording_options_t;
 
 /**
  * The result of a call across the C ABI.
@@ -538,6 +565,14 @@ enum {
      * that ends makes room; raising the limit means a new stack.
      */
     SIPRAL_STATUS_LIMIT_REACHED = 16,
+    /**
+     * A recording's file would not take what was written to it: the disk
+     * filled, the volume went away, the file was taken away underneath.
+     * Not the path, which is `SIPRAL_STATUS_INVALID_ARGUMENT` before
+     * anything is written. The recording has stopped; the file holds the
+     * audio up to the last checkpoint it could write.
+     */
+    SIPRAL_STATUS_RECORDING_FAILED = 19,
 };
 
 /**
@@ -801,6 +836,17 @@ enum {
      * compression where both descriptions allow it.
      */
     SIPRAL_CODEC_G729 = 5,
+    /**
+     * L16 at 8 kHz, one channel: the samples themselves, on a dynamic
+     * payload type as `L16/8000`. In every build and in no default
+     * offer: a call offers it only when a codec order names `L16/8000`.
+     */
+    SIPRAL_CODEC_L16_NARROWBAND = 6,
+    /**
+     * L16 at 16 kHz, one channel, as `L16/16000`: wideband with nothing
+     * lost, offered only when a codec order names `L16/16000`.
+     */
+    SIPRAL_CODEC_L16_WIDEBAND = 7,
 };
 
 /**
@@ -1246,6 +1292,14 @@ enum {
      * character. Some switches take only this one.
      */
     SIPRAL_DTMF_INFO_PLAIN = 3,
+    /**
+     * In the media, as the two tones of each key written into the audio in
+     * place of the microphone, whatever the negotiation settled on: for
+     * the far end that negotiated a telephone event and then listens only
+     * to the audio. `SIPRAL_DTMF_RTP` does this by itself on a call that
+     * negotiated no telephone event.
+     */
+    SIPRAL_DTMF_IN_BAND = 4,
 };
 
 /**
@@ -1258,6 +1312,7 @@ enum {
  * Numbers already spent on features this build does not have:
  * - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
  * - 44: held for a second audio device event, which the audio engine did not need; spent all the same
+ * - 47: held for the verdict on a caller's verified identity (STIR/SHAKEN), which the same minor brings
  */
 typedef uint32_t sipral_event_kind_t;
 enum {
@@ -1735,6 +1790,30 @@ enum {
      * neither.
      */
     SIPRAL_EVENT_KIND_STUN_SERVER = 46,
+    /**
+     * A keypad digit heard in the far end's audio, as the two tones
+     * themselves, on a call listening for them:
+     * `sipral_stack_config_t::dtmf_detection` and
+     * `sipral_call_dtmf_detection` say when. One per press, reported as
+     * it ends; on a call that also negotiated named events, a press the
+     * far end sent both ways is reported once, as
+     * `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`, and one heard only in the audio
+     * waits a quarter of a second before it is reported here.
+     *
+     * `payload.media` carries it the way it carries every digit:
+     * `digit` is the key's character, `event_code` its RFC 4733 code,
+     * `held_ms` how long it sounded and `source`
+     * `SIPRAL_DIGIT_SOURCE_IN_BAND`.
+     */
+    SIPRAL_EVENT_KIND_IN_BAND_DIGIT = 48,
+    /**
+     * What was heard on a call told to listen with
+     * `sipral_call_detect_progress`: a call-progress tone of its network
+     * on early media, the special information tone, who answered, or
+     * the beep an answering machine plays before it records.
+     * `payload.progress` says which, and what was measured.
+     */
+    SIPRAL_EVENT_KIND_PROGRESS_DETECTED = 49,
 };
 
 /**
@@ -1917,9 +1996,9 @@ enum {
 };
 
 /**
- * Which of the two ways this stack accepts a digit reported the one
- * SIPRAL_EVENT_KIND_DIGIT_RECEIVED carries. Names for
- * `sipral_media_event_t::source`.
+ * Which of the ways this stack accepts a digit reported the one
+ * SIPRAL_EVENT_KIND_DIGIT_RECEIVED or SIPRAL_EVENT_KIND_IN_BAND_DIGIT
+ * carries. Names for `sipral_media_event_t::source`.
  */
 typedef uint32_t sipral_digit_source_t;
 enum {
@@ -1932,6 +2011,11 @@ enum {
      * or `application/dtmf`.
      */
     SIPRAL_DIGIT_SOURCE_INFO = 1,
+    /**
+     * The two tones themselves, heard in the far end's audio, for
+     * SIPRAL_EVENT_KIND_IN_BAND_DIGIT.
+     */
+    SIPRAL_DIGIT_SOURCE_IN_BAND = 2,
 };
 
 /**
@@ -2819,6 +2903,209 @@ enum {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_PROGRESS_DETECTED heard. Names for
+ * `sipral_progress_event_t::what`.
+ */
+typedef uint32_t sipral_progress_kind_t;
+enum {
+    /**
+     * Never written by this build.
+     */
+    SIPRAL_PROGRESS_KIND_UNKNOWN = 0,
+    /**
+     * A call-progress tone of the configured network: `tone` says which
+     * and `at_ms` when its first burst began, from the first frame
+     * listened to.
+     */
+    SIPRAL_PROGRESS_KIND_TONE = 1,
+    /**
+     * The special information tone: the call failed, and an
+     * announcement usually follows. `sit_hz_1` to `sit_hz_3` and
+     * `sit_ms_1` to `sit_ms_3` are what was measured, `at_ms` when the
+     * first of the three began.
+     */
+    SIPRAL_PROGRESS_KIND_SPECIAL_INFORMATION = 2,
+    /**
+     * Who answered: `verdict`, `reason`, `at_ms` after answer,
+     * `initial_silence_ms`, `greeting_ms` and `words`.
+     */
+    SIPRAL_PROGRESS_KIND_ANSWERED_BY = 3,
+    /**
+     * The beep a machine plays before it records: `frequency_hz`,
+     * `at_ms` when it ended after answer — when the machine starts
+     * recording — and `length_ms`.
+     */
+    SIPRAL_PROGRESS_KIND_BEEP = 4,
+};
+
+/**
+ * A call-progress tone. Names for `sipral_progress_event_t::tone`.
+ */
+typedef uint32_t sipral_progress_tone_t;
+enum {
+    /**
+     * Not a tone, or one this build has no name for.
+     */
+    SIPRAL_PROGRESS_TONE_UNKNOWN = 0,
+    /**
+     * The exchange is ready for digits.
+     */
+    SIPRAL_PROGRESS_TONE_DIAL = 1,
+    /**
+     * The far end is being alerted.
+     */
+    SIPRAL_PROGRESS_TONE_RINGBACK = 2,
+    /**
+     * The far end is busy.
+     */
+    SIPRAL_PROGRESS_TONE_BUSY = 3,
+    /**
+     * The network is congested: congestion, or reorder.
+     */
+    SIPRAL_PROGRESS_TONE_CONGESTION = 4,
+    /**
+     * A second call is waiting.
+     */
+    SIPRAL_PROGRESS_TONE_CALL_WAITING = 5,
+    /**
+     * The special information tone.
+     */
+    SIPRAL_PROGRESS_TONE_SPECIAL_INFORMATION = 6,
+};
+
+/**
+ * Who answered. Names for `sipral_progress_event_t::verdict`.
+ */
+typedef uint32_t sipral_amd_verdict_t;
+enum {
+    /**
+     * Not a verdict.
+     */
+    SIPRAL_AMD_VERDICT_UNKNOWN = 0,
+    /**
+     * A person.
+     */
+    SIPRAL_AMD_VERDICT_HUMAN = 1,
+    /**
+     * An answering machine or a voice mailbox.
+     */
+    SIPRAL_AMD_VERDICT_MACHINE = 2,
+    /**
+     * The evidence does not say.
+     */
+    SIPRAL_AMD_VERDICT_NOT_SURE = 3,
+};
+
+/**
+ * Which rule decided who answered. Names for
+ * `sipral_progress_event_t::reason`.
+ */
+typedef uint32_t sipral_amd_reason_t;
+enum {
+    /**
+     * Not a verdict.
+     */
+    SIPRAL_AMD_REASON_NONE = 0,
+    /**
+     * A short greeting, then silence: somebody said hello and waits.
+     */
+    SIPRAL_AMD_REASON_SHORT_GREETING = 1,
+    /**
+     * More words than a person answers with.
+     */
+    SIPRAL_AMD_REASON_TOO_MANY_WORDS = 2,
+    /**
+     * A greeting longer than a person gives.
+     */
+    SIPRAL_AMD_REASON_LONG_GREETING = 3,
+    /**
+     * Nobody spoke.
+     */
+    SIPRAL_AMD_REASON_INITIAL_SILENCE = 4,
+    /**
+     * No rule decided in the time allowed.
+     */
+    SIPRAL_AMD_REASON_TIMEOUT = 5,
+};
+
+/**
+ * When a call listens for keypad digits in the far end's audio. Names
+ * for `sipral_stack_config_t::dtmf_detection` and
+ * sipral_call_dtmf_detection's `mode`.
+ */
+typedef uint32_t sipral_dtmf_detection_t;
+enum {
+    /**
+     * On a call whose negotiation settled on no telephone event payload
+     * type: the far end then has no other way to send a digit. Zero, so
+     * that a stack that says nothing gets it.
+     */
+    SIPRAL_DTMF_DETECTION_AUTO = 0,
+    /**
+     * Never. Digits arrive only as RFC 4733 events or by INFO.
+     */
+    SIPRAL_DTMF_DETECTION_OFF = 1,
+    /**
+     * On every call. A press the far end sends both as an event and in
+     * the audio is reported once, as the event.
+     */
+    SIPRAL_DTMF_DETECTION_ALWAYS = 2,
+};
+
+/**
+ * Whose call-progress tones to listen for. Names for
+ * `sipral_progress_config_t::region`.
+ */
+typedef uint32_t sipral_tone_region_t;
+enum {
+    /**
+     * The 425 Hz tones common to the CEPT administrations.
+     */
+    SIPRAL_TONE_REGION_EUROPE = 0,
+    /**
+     * The United States and Canada.
+     */
+    SIPRAL_TONE_REGION_NORTH_AMERICA = 1,
+    /**
+     * The United Kingdom.
+     */
+    SIPRAL_TONE_REGION_UNITED_KINGDOM = 2,
+};
+
+/**
+ * The file format of a recording. Names for
+ * `sipral_recording_options_t::format`.
+ */
+typedef uint32_t sipral_recording_format_t;
+enum {
+    /**
+     * Sixteen-bit PCM in RIFF/WAVE, becoming RF64 past four gibibytes.
+     */
+    SIPRAL_RECORDING_FORMAT_WAV = 0,
+    /**
+     * Opus in Ogg (RFC 7845), where `SIPRAL_FEATURE_OPUS` says the build
+     * has the encoder; `SIPRAL_STATUS_NOT_SUPPORTED` where it does not.
+     */
+    SIPRAL_RECORDING_FORMAT_OGG_OPUS = 1,
+};
+
+/**
+ * How the two directions of a call share a recording. Names for
+ * `sipral_recording_options_t::layout`.
+ */
+typedef uint32_t sipral_recording_layout_t;
+enum {
+    /**
+     * One channel: both directions, each at half level, summed.
+     */
+    SIPRAL_RECORDING_LAYOUT_MIXED = 0,
+    /**
+     * Two channels: this end on the left, the far end on the right.
+     */
+    SIPRAL_RECORDING_LAYOUT_STEREO = 1,
+};
+
+/**
  * The one callback a stack has.
  *
  * It is called from inside `sipral_stack_poll`, on the thread that called
@@ -3620,6 +3907,17 @@ struct sipral_stack_config {
      * The highest port of that range, or zero with `rtp_port_min`.
      */
     uint32_t rtp_port_max;
+    /**
+     * When a call listens for keypad digits in the far end's audio, as a
+     * sipral_dtmf_detection_t: zero
+     * on exactly the calls that negotiated no telephone event, which is
+     * when such a far end has no other way to send one.
+     * `sipral_call_dtmf_detection` changes it for one call.
+     *
+     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    uint32_t dtmf_detection;
 };
 
 /**
@@ -5738,6 +6036,80 @@ struct sipral_stun_server_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_PROGRESS_DETECTED carries. `what` says
+ * which of the other members mean anything; the rest are zero.
+ */
+struct sipral_progress_event {
+    /**
+     * A sipral_progress_kind_t.
+     */
+    uint32_t what;
+    /**
+     * A sipral_progress_tone_t, for a tone.
+     */
+    uint32_t tone;
+    /**
+     * A sipral_amd_verdict_t, for who answered.
+     */
+    uint32_t verdict;
+    /**
+     * A sipral_amd_reason_t, for who answered.
+     */
+    uint32_t reason;
+    /**
+     * When, in milliseconds: a tone's first burst from the first frame
+     * listened to; the decision after answer; the beep's end after
+     * answer.
+     */
+    uint64_t at_ms;
+    /**
+     * How long after answer the first word began, or the silence if
+     * nobody spoke.
+     */
+    uint64_t initial_silence_ms;
+    /**
+     * From the first word's start to the last word's end.
+     */
+    uint64_t greeting_ms;
+    /**
+     * How many words were heard.
+     */
+    uint32_t words;
+    /**
+     * The beep's frequency, in hertz, as measured.
+     */
+    uint32_t frequency_hz;
+    /**
+     * How long the beep sounded.
+     */
+    uint64_t length_ms;
+    /**
+     * The special information tone's first frequency, as measured.
+     */
+    uint32_t sit_hz_1;
+    /**
+     * Its second.
+     */
+    uint32_t sit_hz_2;
+    /**
+     * Its third.
+     */
+    uint32_t sit_hz_3;
+    /**
+     * How long the first sounded.
+     */
+    uint32_t sit_ms_1;
+    /**
+     * The second.
+     */
+    uint32_t sit_ms_2;
+    /**
+     * The third.
+     */
+    uint32_t sit_ms_3;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -5814,6 +6186,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_STUN_SERVER.
      */
     sipral_stun_server_event_t stun_server;
+    /**
+     * For SIPRAL_EVENT_KIND_PROGRESS_DETECTED.
+     */
+    sipral_progress_event_t progress;
 };
 
 /**
@@ -6271,6 +6647,169 @@ struct sipral_log_record {
      * since the line before this one. Zero almost always.
      */
     uint64_t suppressed;
+};
+
+/**
+ * How sipral_call_detect_progress listens. Zero in any member but
+ * `size` is that member's default.
+ *
+ * Set `size` to `sizeof(sipral_progress_config_t)` before the call.
+ */
+struct sipral_progress_config {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * A `SipralToggle`: on (the default) listens with what follows,
+     * off stops listening and reads nothing else.
+     */
+    uint32_t listen;
+    /**
+     * A sipral_tone_region_t. Europe by default.
+     */
+    uint32_t region;
+    /**
+     * A `SipralToggle`: whether to decide who answered. On by default.
+     */
+    uint32_t answering_machine;
+    /**
+     * A `SipralToggle`: whether to listen for the beep after a verdict
+     * of a machine. On by default.
+     */
+    uint32_t beep;
+    /**
+     * How long after the verdict to listen for the beep. Thirty
+     * seconds by default.
+     */
+    uint32_t beep_window_ms;
+    /**
+     * The longest silence after answer before the verdict is not sure.
+     * 3000 by default.
+     */
+    uint32_t max_initial_silence_ms;
+    /**
+     * The longest greeting a person gives. 1600 by default.
+     */
+    uint32_t max_greeting_ms;
+    /**
+     * The silence after a greeting that says a person is waiting. 700
+     * by default.
+     */
+    uint32_t silence_after_greeting_ms;
+    /**
+     * The most words a person's greeting has. 4 by default.
+     */
+    uint32_t max_words;
+    /**
+     * The shortest run of speech that is a word. 120 by default.
+     */
+    uint32_t min_word_ms;
+    /**
+     * The shortest silence that separates two words. 60 by default.
+     */
+    uint32_t min_word_gap_ms;
+    /**
+     * The longest the decision may take, from answer. 6000 by default.
+     */
+    uint32_t max_decision_ms;
+    /**
+     * How far above the noise floor a frame must be to be speech, in
+     * dB. 6 by default.
+     */
+    uint32_t min_speech_above_floor_db;
+    /**
+     * The shortest beep. 120 by default.
+     */
+    uint32_t beep_min_ms;
+    /**
+     * The longest beep: anything held longer is a tone, not a beep.
+     * This build's own default unless set.
+     */
+    uint32_t beep_max_ms;
+    /**
+     * How many whole cycles of a repeating cadence are heard before the
+     * tone is reported, from one to four. One by default.
+     */
+    uint32_t tone_cycles;
+};
+
+/**
+ * The beep sipral_call_consent_tone plays while a call is recorded.
+ * Zero in any member but `size` is that member's default.
+ *
+ * Set `size` to `sizeof(sipral_consent_tone_t)` before the call.
+ */
+struct sipral_consent_tone {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * A `SipralToggle`: on (the default) beeps as what follows says,
+     * off plays no tone and reads nothing else.
+     */
+    uint32_t enabled;
+    /**
+     * Its frequency, from 300 to 3400 Hz. 1400 by default.
+     */
+    uint32_t frequency_hz;
+    /**
+     * How far below 0 dBm0 it sounds, from 3 to 40 dB: 18 is a beep at
+     * −18 dBm0, the default.
+     */
+    uint32_t attenuation_db;
+    /**
+     * How long each beep lasts, from 50 to 2000 ms. 200 by default.
+     */
+    uint32_t length_ms;
+    /**
+     * How often it repeats, start to start: longer than a beep and at
+     * most ten minutes. Fifteen seconds by default.
+     */
+    uint32_t interval_ms;
+    /**
+     * A `SipralToggle`: whether this end hears it too. On by default.
+     */
+    uint32_t local;
+};
+
+/**
+ * How sipral_media_record_start_with writes a recording. Zero in
+ * every member but `size` is sipral_media_record_start's file.
+ *
+ * Set `size` to `sizeof(sipral_recording_options_t)` before the call.
+ */
+struct sipral_recording_options {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * A sipral_recording_format_t.
+     */
+    uint32_t format;
+    /**
+     * A sipral_recording_layout_t.
+     */
+    uint32_t layout;
+    /**
+     * The rate the file is written at, in hertz, or zero for the rate the
+     * call's codec hears at when the recording starts (48 kHz for Ogg
+     * Opus on a call at a rate Opus does not take). WAV takes 8000 to
+     * 48000; Ogg Opus takes 8000, 12000, 16000, 24000 and 48000.
+     */
+    uint32_t sample_rate;
+    /**
+     * An Ogg Opus recording's bitrate in bits a second, all channels
+     * together, or zero for libopus's own choice. Not read for WAV.
+     */
+    uint32_t bitrate;
+    /**
+     * How often, in milliseconds, what has been written is made to
+     * survive a crash, or zero for every five seconds.
+     */
+    uint32_t checkpoint_ms;
 };
 
 /**
@@ -7392,10 +7931,12 @@ sipral_status_t sipral_call_reject_session(sipral_handle_t stack, sipral_handle_
  * the same as one with a character no keypad has, and nothing of it is
  * sent.
  *
- * `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
- * negotiation settled on no telephone event payload type: the key is a
- * real key and this call has nowhere in the media to put it. The INFO
- * forms need a dialog rather than a negotiation, and answer
+ * `SIPRAL_DTMF_RTP` on a call whose negotiation settled on no telephone
+ * event payload type writes the digits into the audio instead, as
+ * `SIPRAL_DTMF_IN_BAND` does on any call: the one way such a far end can
+ * hear a key. Both need the call's media, and answer
+ * `SIPRAL_STATUS_WRONG_STATE` before there is any. The INFO forms need a
+ * dialog rather than a negotiation, and answer
  * `SIPRAL_STATUS_WRONG_STATE` before there is one.
  *
  * Safety
@@ -7536,8 +8077,10 @@ sipral_status_t sipral_call_hold_state(sipral_handle_t stack, sipral_handle_t ca
  * number this build has no codec for.
  *
  * It is spelled as IANA registered it, which is also how it goes on an
- * `a=rtpmap` line. The string belongs to the library and lives as long as
- * it is loaded.
+ * `a=rtpmap` line — with the rate after it for L16, `L16/8000` and
+ * `L16/16000`, which is one encoding name at two rates and is named that
+ * way in a codec order. The string belongs to the library and lives as
+ * long as it is loaded.
  *
  * Safety
  *
@@ -9253,6 +9796,75 @@ sipral_status_t sipral_stack_rtp_port_reserve(sipral_handle_t stack, uint32_t *o
  * Safe to call with any handle value.
  */
 sipral_status_t sipral_stack_rtp_port_release(sipral_handle_t stack, uint32_t port);
+
+/**
+ * Listen for keypad digits in this call's far-end audio as `mode` says:
+ * a sipral_dtmf_detection_t. Before the call has media as well as
+ * after, for the rest of the call.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+ * not run.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_dtmf_detection(sipral_handle_t stack, sipral_handle_t call, uint32_t mode);
+
+/**
+ * Listen for call progress on this call and decide who answers it, as
+ * `config` says, or stop with `config.listen` off. Meant for a call this
+ * stack placed, straight after `sipral_call_place`: the tones are
+ * listened for from the first frame of early media, and who answered is
+ * decided from the 2xx on. Each thing heard is a
+ * `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+ * not run; `SIPRAL_STATUS_INVALID_ARGUMENT` for a value no detector
+ * takes, which changes nothing.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_progress_config_t` whose `size`
+ * member says how long it is.
+ */
+sipral_status_t sipral_call_detect_progress(sipral_handle_t stack, sipral_handle_t call, const sipral_progress_config_t *config);
+
+/**
+ * Beep on this call while it is recorded, as `tone` says, or play no
+ * tone with `tone.enabled` off. A recording already running starts
+ * beeping at once; one started later beeps from its first frame.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+ * not run; `SIPRAL_STATUS_INVALID_ARGUMENT`, naming the member, for a
+ * tone that is not a beep, which changes nothing.
+ *
+ * Safety
+ *
+ * `tone` must point at a `sipral_consent_tone_t` whose `size` member
+ * says how long it is.
+ */
+sipral_status_t sipral_call_consent_tone(sipral_handle_t stack, sipral_handle_t call, const sipral_consent_tone_t *tone);
+
+/**
+ * Start recording this call to `path`, written as `options` say: WAV or
+ * Ogg Opus, mixed or stereo with this end on the left, at a rate of the
+ * file's own. Everything else is sipral_media_record_start's,
+ * which is this with every option zero.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for options no file can be written
+ * with and for a path the file system refuses, and
+ * `SIPRAL_STATUS_NOT_SUPPORTED` for Ogg Opus in a build with no Opus.
+ * `SIPRAL_STATUS_RECORDING_FAILED` when the file was made and would not
+ * take its header.
+ *
+ * Safety
+ *
+ * `path` must be readable for `path_len` bytes, and `options` must point
+ * at a `sipral_recording_options_t` whose `size` member says how long
+ * it is.
+ */
+sipral_status_t sipral_media_record_start_with(sipral_handle_t media, const char *path, size_t path_len, const sipral_recording_options_t *options);
 
 """
 

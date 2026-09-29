@@ -376,6 +376,8 @@ pub struct Encoder {
     inner: libopus::Encoder,
     rate: SampleRate,
     frame: FrameDuration,
+    /// One for a call's stream, two for a stereo recording.
+    channels: u8,
 }
 
 impl Encoder {
@@ -392,7 +394,38 @@ impl Encoder {
             libopus::Application::Voip,
         )
         .map_err(|error| translate(&error, 0))?;
-        Ok(Self { inner, rate, frame })
+        Ok(Self {
+            inner,
+            rate,
+            frame,
+            channels: CHANNELS,
+        })
+    }
+
+    /// A two-channel encoder, for a file rather than a call: a recording
+    /// with the local side on the left and the remote side on the right.
+    ///
+    /// Nothing on a call's wire is stereo — [`CHANNELS`] says why — but a
+    /// recording kept in Opus is, and encoding the two sides as one stereo
+    /// stream keeps them in one file on one clock. Still the voice mode: the
+    /// two channels are two people talking.
+    ///
+    /// # Errors
+    ///
+    /// [`CodecError`] if libopus will not build the state.
+    pub fn stereo(rate: SampleRate, frame: FrameDuration) -> Result<Self, CodecError> {
+        let inner = libopus::Encoder::new(
+            rate.hertz(),
+            libopus::Channels::Stereo,
+            libopus::Application::Voip,
+        )
+        .map_err(|error| translate(&error, 0))?;
+        Ok(Self {
+            inner,
+            rate,
+            frame,
+            channels: 2,
+        })
     }
 
     /// The rate it was built at.
@@ -407,11 +440,55 @@ impl Encoder {
         self.frame
     }
 
-    /// How many samples one frame is, which is exactly what
-    /// [`encode`](Self::encode) takes.
+    /// How many samples one frame is in each channel.
+    /// [`encode`](Self::encode) takes exactly this many from a mono encoder,
+    /// and twice this many, interleaved, from a [`stereo`](Self::stereo) one.
     #[must_use]
     pub const fn frame_samples(&self) -> usize {
         self.frame.samples(self.rate)
+    }
+
+    /// One, or two for an encoder built with [`stereo`](Self::stereo).
+    #[must_use]
+    pub const fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    /// How far the encoder's output lags its input, in samples at the rate
+    /// it was built at: the delay libopus reports for the configuration it
+    /// is in, which is what a decoder has to discard from the front of the
+    /// stream to line the audio back up.
+    ///
+    /// Asked of libopus rather than assumed, because it is not one number:
+    /// it depends on the rate and on the mode the encoder was built in, and
+    /// a file that trims a guessed figure starts a few milliseconds early or
+    /// late.
+    ///
+    /// # Errors
+    ///
+    /// [`CodecError`] if libopus refuses the query.
+    pub fn lookahead(&mut self) -> Result<u32, CodecError> {
+        let samples = self
+            .inner
+            .get_lookahead()
+            .map_err(|error| translate(&error, 0))?;
+        u32::try_from(samples).map_err(|_| CodecError::Internal)
+    }
+
+    /// [`lookahead`](Self::lookahead) at 48 kHz, rounded up: the pre-skip an
+    /// Ogg Opus identification header carries for a stream this encoder
+    /// produced. RFC 7845 §4.2 counts it at 48 kHz whatever rate the input
+    /// was at.
+    ///
+    /// # Errors
+    ///
+    /// [`CodecError`] if libopus refuses the query, and
+    /// [`CodecError::Internal`] for a delay no sixteen-bit field holds.
+    pub fn pre_skip(&mut self) -> Result<u16, CodecError> {
+        let at_rate = u64::from(self.lookahead()?);
+        let rate = u64::from(self.rate.hertz());
+        let at_48k = (at_rate * u64::from(CLOCK_RATE)).div_ceil(rate);
+        u16::try_from(at_48k).map_err(|_| CodecError::Internal)
     }
 
     /// Aim for `bits_per_second`.
@@ -495,7 +572,8 @@ impl Encoder {
 
     /// Encode one frame into `packet`, returning how many octets it took.
     ///
-    /// `samples` must be exactly [`frame_samples`](Self::frame_samples) long.
+    /// `samples` must be exactly [`frame_samples`](Self::frame_samples) long
+    /// on a mono encoder, and that many interleaved pairs on a stereo one.
     /// `packet` should be [`FrameDuration::max_packet_bytes`] long: libopus
     /// treats a shorter one as a ceiling on the instant bitrate and quietly
     /// encodes worse rather than failing, so a buffer sized by guess is a
@@ -509,7 +587,7 @@ impl Encoder {
     /// [`CodecError::FrameLength`] for a frame of the wrong length, and
     /// [`CodecError::BufferTooSmall`] for a packet buffer with no room at all.
     pub fn encode(&mut self, samples: &[i16], packet: &mut [u8]) -> Result<usize, CodecError> {
-        let expected = self.frame_samples();
+        let expected = self.frame_samples() * usize::from(self.channels);
         if samples.len() != expected {
             return Err(CodecError::FrameLength {
                 expected,
@@ -547,6 +625,7 @@ impl fmt::Debug for Encoder {
             .debug_struct("Encoder")
             .field("rate", &self.rate)
             .field("frame", &self.frame)
+            .field("channels", &self.channels)
             .finish_non_exhaustive()
     }
 }
@@ -1240,6 +1319,73 @@ mod tests {
             decoder.decode(&packet[..written], &mut played).unwrap(),
             samples
         );
+    }
+
+    /// The pre-skip of a recording is the encoder's own delay, and that
+    /// delay is libopus's to report: at 48 kHz the two are the same number,
+    /// and at every other rate the pre-skip is the delay scaled to 48 kHz.
+    #[test]
+    fn the_pre_skip_is_the_lookahead_libopus_reports_counted_at_48_khz() {
+        for rate in RATES {
+            let mut encoder = Encoder::new(rate, FrameDuration::Micros20000).unwrap();
+            let lookahead = encoder.lookahead().unwrap();
+            let frame = u32::try_from(FrameDuration::Micros20000.samples(rate)).unwrap();
+            assert!(
+                lookahead > 0 && lookahead < frame,
+                "{rate:?}: a lookahead of {lookahead} samples"
+            );
+            let expected = (u64::from(lookahead) * 48_000).div_ceil(u64::from(rate.hertz()));
+            assert_eq!(u64::from(encoder.pre_skip().unwrap()), expected, "{rate:?}");
+        }
+        let mut fullband = Encoder::new(SampleRate::Fullband, FrameDuration::Micros20000).unwrap();
+        assert_eq!(
+            u32::from(fullband.pre_skip().unwrap()),
+            fullband.lookahead().unwrap()
+        );
+    }
+
+    /// A stereo encoder takes interleaved pairs and says so in every packet:
+    /// the `s` bit of the table-of-contents byte (RFC 6716 §3.1) is what a
+    /// decoder reads the channel count from.
+    #[test]
+    fn a_stereo_encoder_takes_pairs_and_marks_its_packets_stereo() {
+        let rate = SampleRate::Wideband;
+        let frame = FrameDuration::Micros20000;
+        let mut stereo = Encoder::stereo(rate, frame).unwrap();
+        assert_eq!(stereo.channels(), 2);
+        let samples = stereo.frame_samples();
+        let mut packet = vec![0_u8; frame.max_packet_bytes()];
+
+        assert_eq!(
+            stereo.encode(&vec![0; samples], &mut packet).unwrap_err(),
+            CodecError::FrameLength {
+                expected: samples * 2,
+                supplied: samples
+            },
+            "a mono frame handed to a stereo encoder"
+        );
+
+        let mut decoder = Decoder::new(rate, frame).unwrap();
+        let mut played = vec![0_i16; samples];
+        for n in 0..6 {
+            let left = frame_of(rate, frame, n);
+            let interleaved: Vec<i16> = left.iter().flat_map(|&l| [l, l / 3]).collect();
+            let written = stereo.encode(&interleaved, &mut packet).unwrap();
+            assert!(written > 2);
+            assert_ne!(packet[0] & 0x04, 0, "the TOC byte says mono");
+            // a mono decoder takes a stereo stream and downmixes it
+            assert_eq!(
+                decoder.decode(&packet[..written], &mut played).unwrap(),
+                samples
+            );
+        }
+        assert!(energy(&played) > 0);
+
+        let mut mono = Encoder::new(rate, frame).unwrap();
+        assert_eq!(mono.channels(), 1);
+        let written = mono.encode(&frame_of(rate, frame, 0), &mut packet).unwrap();
+        assert!(written > 0);
+        assert_eq!(packet[0] & 0x04, 0, "a mono encoder's TOC byte says stereo");
     }
 
     #[test]

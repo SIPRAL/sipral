@@ -357,6 +357,25 @@ impl<W: Write + Seek> Writer<W> {
         Ok(())
     }
 
+    /// Write the sizes the file has reached into the header without ending
+    /// it, and flush the sink.
+    ///
+    /// What makes a long recording survive the process that writes it: a
+    /// file checkpointed every few seconds and then abandoned — a crash, a
+    /// power cut — opens in any player with everything up to the last
+    /// checkpoint, where one that was only ever finished at the end says it
+    /// holds nothing. Samples written after it are still in the file, past
+    /// the length the header states.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] when the sink could not seek, be written or flush.
+    pub fn checkpoint(&mut self) -> Result<(), Error> {
+        self.write_header()?;
+        self.out.flush()?;
+        Ok(())
+    }
+
     /// Write the real sizes into the header, leave the sink positioned after
     /// the last sample, flush it and hand it back.
     ///
@@ -367,13 +386,20 @@ impl<W: Write + Seek> Writer<W> {
     ///
     /// [`Error::Io`] when the sink could not seek, be written or flush.
     pub fn finish(mut self) -> Result<W, Error> {
+        self.write_header()?;
+        self.out.flush()?;
+        Ok(self.out)
+    }
+
+    /// The header for the sizes so far, written over the one at the start,
+    /// with the sink left where the next sample goes.
+    fn write_header(&mut self) -> Result<(), Error> {
         let header = header(self.rate, self.channels, self.data_bytes)?;
         let end = self.out.stream_position()?;
         self.out.seek(SeekFrom::Start(self.start))?;
         self.out.write_all(&header)?;
         self.out.seek(SeekFrom::Start(end))?;
-        self.out.flush()?;
-        Ok(self.out)
+        Ok(())
     }
 }
 
@@ -533,6 +559,34 @@ mod tests {
         assert_eq!(&bytes[..6], b"prefix");
         assert_eq!(&bytes[6..86], &header(8_000, Channels::Mono, 6).unwrap());
         assert_eq!(bytes.last(), Some(&b'!'));
+    }
+
+    /// A checkpoint is a finish that keeps writing: the header states what
+    /// has been written so far, and the next samples land after the last
+    /// ones rather than over the header.
+    #[test]
+    fn a_checkpoint_states_the_sizes_so_far_and_writing_carries_on_after_it() {
+        let mut writer = Writer::new(Cursor::new(Vec::new()), 8_000, Channels::Stereo).unwrap();
+        writer.write_stereo(&[1, 2], &[3, 4]).unwrap();
+        writer.checkpoint().unwrap();
+        assert_eq!(
+            &writer.out.get_ref()[..HEADER_LEN],
+            &header(8_000, Channels::Stereo, 8).unwrap(),
+            "an abandoned file would open with the two frames in it"
+        );
+        writer.write_stereo(&[5], &[6]).unwrap();
+        assert_eq!(
+            u32_at(writer.out.get_ref(), 76),
+            8,
+            "the frame after the checkpoint is not stated until the next one"
+        );
+        let bytes = writer.finish().unwrap().into_inner();
+        assert_eq!(bytes.len(), HEADER_LEN + 12);
+        assert_eq!(
+            &bytes[..HEADER_LEN],
+            &header(8_000, Channels::Stereo, 12).unwrap()
+        );
+        assert_eq!(&bytes[HEADER_LEN + 8..], &[5, 0, 6, 0]);
     }
 
     #[test]

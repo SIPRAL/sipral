@@ -28,7 +28,7 @@ use std::time::Duration;
 
 #[cfg(feature = "dtls")]
 use sipral::SrtpSuite;
-use sipral::{DigitSource, MediaEvent};
+use sipral::{AmdReason, AmdVerdict, CallProgress, DigitSource, MediaEvent, ProgressTone};
 use sipral_core::endpoint::Event;
 use sipral_core::msg::HeaderName;
 use sipral_ua::{
@@ -576,6 +576,27 @@ event_kinds! {
         /// `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
         /// neither.
         46 = StunServer, c"stun server";
+        reserved 47 = "held for the verdict on a caller's verified identity (STIR/SHAKEN), which the same minor brings";
+        /// A keypad digit heard in the far end's audio, as the two tones
+        /// themselves, on a call listening for them:
+        /// `sipral_stack_config_t::dtmf_detection` and
+        /// `sipral_call_dtmf_detection` say when. One per press, reported as
+        /// it ends; on a call that also negotiated named events, a press the
+        /// far end sent both ways is reported once, as
+        /// `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`, and one heard only in the audio
+        /// waits a quarter of a second before it is reported here.
+        ///
+        /// `payload.media` carries it the way it carries every digit:
+        /// `digit` is the key's character, `event_code` its RFC 4733 code,
+        /// `held_ms` how long it sounded and `source`
+        /// `SIPRAL_DIGIT_SOURCE_IN_BAND`.
+        48 = InBandDigit, c"in-band digit";
+        /// What was heard on a call told to listen with
+        /// `sipral_call_detect_progress`: a call-progress tone of its network
+        /// on early media, the special information tone, who answered, or
+        /// the beep an answering machine plays before it records.
+        /// `payload.progress` says which, and what was measured.
+        49 = ProgressDetected, c"progress detected";
     }
 }
 
@@ -643,6 +664,8 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::AudioDevicesChanged, "audio"),
     (SipralEventKind::CallAddressWanted, "call"),
     (SipralEventKind::StunServer, "stun_server"),
+    (SipralEventKind::InBandDigit, "media"),
+    (SipralEventKind::ProgressDetected, "progress"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -780,9 +803,9 @@ codes! {
 }
 
 codes! {
-    /// Which of the two ways this stack accepts a digit reported the one
-    /// [`SipralEventKind::DigitReceived`] carries. Names for
-    /// `sipral_media_event_t::source`.
+    /// Which of the ways this stack accepts a digit reported the one
+    /// [`SipralEventKind::DigitReceived`] or [`SipralEventKind::InBandDigit`]
+    /// carries. Names for `sipral_media_event_t::source`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDigitSource: u32 {
         /// RFC 4733: a named telephone event in the RTP stream.
@@ -790,6 +813,91 @@ codes! {
         /// RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
         /// or `application/dtmf`.
         Info = 1,
+        /// The two tones themselves, heard in the far end's audio, for
+        /// [`SipralEventKind::InBandDigit`].
+        InBand = 2,
+    }
+}
+
+codes! {
+    /// What a [`SipralEventKind::ProgressDetected`] heard. Names for
+    /// `sipral_progress_event_t::what`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralProgressKind: u32 {
+        /// Never written by this build.
+        Unknown = 0,
+        /// A call-progress tone of the configured network: `tone` says which
+        /// and `at_ms` when its first burst began, from the first frame
+        /// listened to.
+        Tone = 1,
+        /// The special information tone: the call failed, and an
+        /// announcement usually follows. `sit_hz_1` to `sit_hz_3` and
+        /// `sit_ms_1` to `sit_ms_3` are what was measured, `at_ms` when the
+        /// first of the three began.
+        SpecialInformation = 2,
+        /// Who answered: `verdict`, `reason`, `at_ms` after answer,
+        /// `initial_silence_ms`, `greeting_ms` and `words`.
+        AnsweredBy = 3,
+        /// The beep a machine plays before it records: `frequency_hz`,
+        /// `at_ms` when it ended after answer — when the machine starts
+        /// recording — and `length_ms`.
+        Beep = 4,
+    }
+}
+
+codes! {
+    /// A call-progress tone. Names for `sipral_progress_event_t::tone`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralProgressTone: u32 {
+        /// Not a tone, or one this build has no name for.
+        Unknown = 0,
+        /// The exchange is ready for digits.
+        Dial = 1,
+        /// The far end is being alerted.
+        Ringback = 2,
+        /// The far end is busy.
+        Busy = 3,
+        /// The network is congested: congestion, or reorder.
+        Congestion = 4,
+        /// A second call is waiting.
+        CallWaiting = 5,
+        /// The special information tone.
+        SpecialInformation = 6,
+    }
+}
+
+codes! {
+    /// Who answered. Names for `sipral_progress_event_t::verdict`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralAmdVerdict: u32 {
+        /// Not a verdict.
+        Unknown = 0,
+        /// A person.
+        Human = 1,
+        /// An answering machine or a voice mailbox.
+        Machine = 2,
+        /// The evidence does not say.
+        NotSure = 3,
+    }
+}
+
+codes! {
+    /// Which rule decided who answered. Names for
+    /// `sipral_progress_event_t::reason`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralAmdReason: u32 {
+        /// Not a verdict.
+        None = 0,
+        /// A short greeting, then silence: somebody said hello and waits.
+        ShortGreeting = 1,
+        /// More words than a person answers with.
+        TooManyWords = 2,
+        /// A greeting longer than a person gives.
+        LongGreeting = 3,
+        /// Nobody spoke.
+        InitialSilence = 4,
+        /// No rule decided in the time allowed.
+        Timeout = 5,
     }
 }
 
@@ -1103,6 +1211,49 @@ record! {
 }
 
 record! {
+    /// What a [`SipralEventKind::ProgressDetected`] carries. `what` says
+    /// which of the other members mean anything; the rest are zero.
+    #[derive(Clone, Copy)]
+    pub struct SipralProgressEvent {
+        /// A [`SipralProgressKind`].
+        pub what: u32,
+        /// A [`SipralProgressTone`], for a tone.
+        pub tone: u32,
+        /// A [`SipralAmdVerdict`], for who answered.
+        pub verdict: u32,
+        /// A [`SipralAmdReason`], for who answered.
+        pub reason: u32,
+        /// When, in milliseconds: a tone's first burst from the first frame
+        /// listened to; the decision after answer; the beep's end after
+        /// answer.
+        pub at_ms: u64,
+        /// How long after answer the first word began, or the silence if
+        /// nobody spoke.
+        pub initial_silence_ms: u64,
+        /// From the first word's start to the last word's end.
+        pub greeting_ms: u64,
+        /// How many words were heard.
+        pub words: u32,
+        /// The beep's frequency, in hertz, as measured.
+        pub frequency_hz: u32,
+        /// How long the beep sounded.
+        pub length_ms: u64,
+        /// The special information tone's first frequency, as measured.
+        pub sit_hz_1: u32,
+        /// Its second.
+        pub sit_hz_2: u32,
+        /// Its third.
+        pub sit_hz_3: u32,
+        /// How long the first sounded.
+        pub sit_ms_1: u32,
+        /// The second.
+        pub sit_ms_2: u32,
+        /// The third.
+        pub sit_ms_3: u32,
+    }
+}
+
+record! {
     /// What a [`SipralEventKind::Recovery`] carries: the lifecycle machine
     /// settling, either by proving the path again or by giving the ladder up.
     #[derive(Clone, Copy)]
@@ -1345,6 +1496,8 @@ record! {
         pub audio: SipralAudioEvent,
         /// For [`SipralEventKind::StunServer`].
         pub stun_server: SipralStunServerEvent,
+        /// For [`SipralEventKind::ProgressDetected`].
+        pub progress: SipralProgressEvent,
     }
 }
 
@@ -2515,7 +2668,20 @@ pub(crate) fn media(
             // boundary, and `sipral_media_event_t::held_ms`'s own doc says so
             payload.held_ms = held.map_or(0, millis);
             payload.source = digit_source(source) as u32;
-            SipralEventKind::DigitReceived
+            if source == DigitSource::InBand {
+                SipralEventKind::InBandDigit
+            } else {
+                SipralEventKind::DigitReceived
+            }
+        }
+        MediaEvent::Progress(heard) => {
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::ProgressDetected,
+                payload!(progress: progress_of(heard)),
+            );
+            out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
+            return Some(out);
         }
         MediaEvent::RecordingStopped {
             ref reason,
@@ -2778,8 +2944,111 @@ fn end_reason(reason: CallEndReason) -> SipralCallEndReason {
 fn digit_source(source: DigitSource) -> SipralDigitSource {
     match source {
         DigitSource::Info => SipralDigitSource::Info,
+        DigitSource::InBand => SipralDigitSource::InBand,
         _ => SipralDigitSource::Rtp,
     }
+}
+
+/// What a progress detector heard, the way C reads it.
+fn progress_of(heard: CallProgress) -> SipralProgressEvent {
+    let mut out = SipralProgressEvent {
+        what: SipralProgressKind::Unknown as u32,
+        tone: SipralProgressTone::Unknown as u32,
+        verdict: SipralAmdVerdict::Unknown as u32,
+        reason: SipralAmdReason::None as u32,
+        at_ms: 0,
+        initial_silence_ms: 0,
+        greeting_ms: 0,
+        words: 0,
+        frequency_hz: 0,
+        length_ms: 0,
+        sit_hz_1: 0,
+        sit_hz_2: 0,
+        sit_hz_3: 0,
+        sit_ms_1: 0,
+        sit_ms_2: 0,
+        sit_ms_3: 0,
+    };
+    match heard {
+        CallProgress::Tone { tone, at } => {
+            out.what = SipralProgressKind::Tone as u32;
+            out.tone = progress_tone(tone) as u32;
+            out.at_ms = millis(at);
+        }
+        CallProgress::SpecialInformation {
+            frequencies,
+            durations,
+            at,
+        } => {
+            out.what = SipralProgressKind::SpecialInformation as u32;
+            out.tone = SipralProgressTone::SpecialInformation as u32;
+            out.at_ms = millis(at);
+            let [first, second, third] = frequencies.map(hertz);
+            let [one, two, three] =
+                durations.map(|span| u32::try_from(span.as_millis()).unwrap_or(u32::MAX));
+            (out.sit_hz_1, out.sit_hz_2, out.sit_hz_3) = (first, second, third);
+            (out.sit_ms_1, out.sit_ms_2, out.sit_ms_3) = (one, two, three);
+        }
+        CallProgress::AnsweredBy {
+            verdict,
+            reason,
+            after,
+            initial_silence,
+            greeting,
+            words,
+        } => {
+            out.what = SipralProgressKind::AnsweredBy as u32;
+            out.verdict = match verdict {
+                AmdVerdict::Human => SipralAmdVerdict::Human,
+                AmdVerdict::Machine => SipralAmdVerdict::Machine,
+                AmdVerdict::NotSure => SipralAmdVerdict::NotSure,
+            } as u32;
+            out.reason = match reason {
+                AmdReason::ShortGreeting => SipralAmdReason::ShortGreeting,
+                AmdReason::TooManyWords => SipralAmdReason::TooManyWords,
+                AmdReason::LongGreeting => SipralAmdReason::LongGreeting,
+                AmdReason::InitialSilence => SipralAmdReason::InitialSilence,
+                AmdReason::Timeout => SipralAmdReason::Timeout,
+            } as u32;
+            out.at_ms = millis(after);
+            out.initial_silence_ms = millis(initial_silence);
+            out.greeting_ms = millis(greeting);
+            out.words = words;
+        }
+        CallProgress::Beep {
+            frequency_hz,
+            ended,
+            length,
+        } => {
+            out.what = SipralProgressKind::Beep as u32;
+            out.frequency_hz = hertz(frequency_hz);
+            out.at_ms = millis(ended);
+            out.length_ms = millis(length);
+        }
+        // a report the facade has grown and this ABI has no word for yet
+        _ => {}
+    }
+    out
+}
+
+/// The name this ABI gives a call-progress tone.
+const fn progress_tone(tone: ProgressTone) -> SipralProgressTone {
+    match tone {
+        ProgressTone::Dial => SipralProgressTone::Dial,
+        ProgressTone::Ringback => SipralProgressTone::Ringback,
+        ProgressTone::Busy => SipralProgressTone::Busy,
+        ProgressTone::Congestion => SipralProgressTone::Congestion,
+        ProgressTone::CallWaiting => SipralProgressTone::CallWaiting,
+        ProgressTone::SpecialInformation => SipralProgressTone::SpecialInformation,
+    }
+}
+
+/// A measured frequency to the nearest hertz.
+fn hertz(frequency: f64) -> u32 {
+    // clamped into the range first, so the conversion cannot wrap
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rounded = frequency.round().clamp(0.0, f64::from(u32::MAX)) as u32;
+    rounded
 }
 
 #[cfg(test)]
@@ -3015,7 +3284,9 @@ mod tests {
         assert_eq!(SipralEventKind::AudioDevicesChanged as u32, 43);
         assert_eq!(SipralEventKind::CallAddressWanted as u32, 45);
         assert_eq!(SipralEventKind::StunServer as u32, 46);
-        assert_eq!(SipralEventKind::ALL.len(), 44, "and there are no others");
+        assert_eq!(SipralEventKind::InBandDigit as u32, 48);
+        assert_eq!(SipralEventKind::ProgressDetected as u32, 49);
+        assert_eq!(SipralEventKind::ALL.len(), 46, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were

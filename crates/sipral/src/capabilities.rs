@@ -216,6 +216,17 @@ pub struct Capabilities {
     /// report ([`crate::MediaEngine::state`]). Both redact what they write,
     /// so both come with the `redaction` feature, on by default.
     pub logging: bool,
+    /// Whether what a call carries inside its audio is heard and written:
+    /// keypad digits in the audio both ways ([`crate::DtmfDetection`],
+    /// [`crate::MediaSession::dial_in_band`]), call-progress tones and who
+    /// answered ([`crate::ProgressDetection`]), and the beep that says a call
+    /// is recorded ([`crate::ConsentTone`]).
+    pub in_band_signals: bool,
+    /// Whether a recording can be written as [`crate::RecordingOptions`]
+    /// says — mixed or stereo, WAV growing into RF64, at a rate of its own,
+    /// checkpointed against a crash — and in Ogg Opus where
+    /// [`Capabilities::opus`] is true too.
+    pub recording_formats: bool,
 }
 
 impl Capabilities {
@@ -244,6 +255,8 @@ impl Capabilities {
             call_readdress: true,
             caller_identity: true,
             logging: cfg!(feature = "redaction"),
+            in_band_signals: true,
+            recording_formats: true,
         }
     }
 }
@@ -291,6 +304,8 @@ mod tests {
         assert!(capabilities.media_stall_watchdog);
         assert!(capabilities.srtp);
         assert!(capabilities.subscriptions);
+        assert!(capabilities.in_band_signals);
+        assert!(capabilities.recording_formats);
     }
 
     /// The two ways of asking "does this build have Opus" have to agree,

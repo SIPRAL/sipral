@@ -121,6 +121,14 @@ enum class SipralStatus(val value: Int) {
      * that ends makes room; raising the limit means a new stack.
      */
     LIMIT_REACHED(16),
+    /**
+     * A recording's file would not take what was written to it: the disk
+     * filled, the volume went away, the file was taken away underneath.
+     * Not the path, which is `SIPRAL_STATUS_INVALID_ARGUMENT` before
+     * anything is written. The recording has stopped; the file holds the
+     * audio up to the last checkpoint it could write.
+     */
+    RECORDING_FAILED(19),
     ;
 
     companion object {
@@ -408,6 +416,17 @@ enum class SipralCodec(val value: Int) {
      * compression where both descriptions allow it.
      */
     G729(5),
+    /**
+     * L16 at 8 kHz, one channel: the samples themselves, on a dynamic
+     * payload type as `L16/8000`. In every build and in no default
+     * offer: a call offers it only when a codec order names `L16/8000`.
+     */
+    L16_NARROWBAND(6),
+    /**
+     * L16 at 16 kHz, one channel, as `L16/16000`: wideband with nothing
+     * lost, offered only when a codec order names `L16/16000`.
+     */
+    L16_WIDEBAND(7),
     ;
 
     companion object {
@@ -897,6 +916,14 @@ enum class SipralDtmf(val value: Int) {
      * character. Some switches take only this one.
      */
     INFO_PLAIN(3),
+    /**
+     * In the media, as the two tones of each key written into the audio in
+     * place of the microphone, whatever the negotiation settled on: for
+     * the far end that negotiated a telephone event and then listens only
+     * to the audio. `SIPRAL_DTMF_RTP` does this by itself on a call that
+     * negotiated no telephone event.
+     */
+    IN_BAND(4),
     ;
 
     companion object {
@@ -914,6 +941,7 @@ enum class SipralDtmf(val value: Int) {
  * Numbers already spent on features this build does not have:
  * - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
  * - 44: held for a second audio device event, which the audio engine did not need; spent all the same
+ * - 47: held for the verdict on a caller's verified identity (STIR/SHAKEN), which the same minor brings
  */
 enum class SipralEventKind(val value: Int) {
     /**
@@ -1390,6 +1418,30 @@ enum class SipralEventKind(val value: Int) {
      * neither.
      */
     STUN_SERVER(46),
+    /**
+     * A keypad digit heard in the far end's audio, as the two tones
+     * themselves, on a call listening for them:
+     * `sipral_stack_config_t::dtmf_detection` and
+     * `sipral_call_dtmf_detection` say when. One per press, reported as
+     * it ends; on a call that also negotiated named events, a press the
+     * far end sent both ways is reported once, as
+     * `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`, and one heard only in the audio
+     * waits a quarter of a second before it is reported here.
+     *
+     * `payload.media` carries it the way it carries every digit:
+     * `digit` is the key's character, `event_code` its RFC 4733 code,
+     * `held_ms` how long it sounded and `source`
+     * `SIPRAL_DIGIT_SOURCE_IN_BAND`.
+     */
+    IN_BAND_DIGIT(48),
+    /**
+     * What was heard on a call told to listen with
+     * `sipral_call_detect_progress`: a call-progress tone of its network
+     * on early media, the special information tone, who answered, or
+     * the beep an answering machine plays before it records.
+     * `payload.progress` says which, and what was measured.
+     */
+    PROGRESS_DETECTED(49),
     ;
 
     companion object {
@@ -1593,9 +1645,9 @@ enum class SipralCallEndReason(val value: Int) {
 }
 
 /**
- * Which of the two ways this stack accepts a digit reported the one
- * SipralEventKind.DIGIT_RECEIVED carries. Names for
- * `sipral_media_event_t::source`.
+ * Which of the ways this stack accepts a digit reported the one
+ * SipralEventKind.DIGIT_RECEIVED or SipralEventKind.IN_BAND_DIGIT
+ * carries. Names for `sipral_media_event_t::source`.
  */
 enum class SipralDigitSource(val value: Int) {
     /**
@@ -1607,6 +1659,11 @@ enum class SipralDigitSource(val value: Int) {
      * or `application/dtmf`.
      */
     INFO(1),
+    /**
+     * The two tones themselves, heard in the far end's audio, for
+     * SipralEventKind.IN_BAND_DIGIT.
+     */
+    IN_BAND(2),
     ;
 
     companion object {
@@ -2607,6 +2664,241 @@ enum class SipralLogLevel(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralLogLevel? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a SipralEventKind.PROGRESS_DETECTED heard. Names for
+ * `sipral_progress_event_t::what`.
+ */
+enum class SipralProgressKind(val value: Int) {
+    /**
+     * Never written by this build.
+     */
+    UNKNOWN(0),
+    /**
+     * A call-progress tone of the configured network: `tone` says which
+     * and `at_ms` when its first burst began, from the first frame
+     * listened to.
+     */
+    TONE(1),
+    /**
+     * The special information tone: the call failed, and an
+     * announcement usually follows. `sit_hz_1` to `sit_hz_3` and
+     * `sit_ms_1` to `sit_ms_3` are what was measured, `at_ms` when the
+     * first of the three began.
+     */
+    SPECIAL_INFORMATION(2),
+    /**
+     * Who answered: `verdict`, `reason`, `at_ms` after answer,
+     * `initial_silence_ms`, `greeting_ms` and `words`.
+     */
+    ANSWERED_BY(3),
+    /**
+     * The beep a machine plays before it records: `frequency_hz`,
+     * `at_ms` when it ended after answer — when the machine starts
+     * recording — and `length_ms`.
+     */
+    BEEP(4),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralProgressKind? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * A call-progress tone. Names for `sipral_progress_event_t::tone`.
+ */
+enum class SipralProgressTone(val value: Int) {
+    /**
+     * Not a tone, or one this build has no name for.
+     */
+    UNKNOWN(0),
+    /**
+     * The exchange is ready for digits.
+     */
+    DIAL(1),
+    /**
+     * The far end is being alerted.
+     */
+    RINGBACK(2),
+    /**
+     * The far end is busy.
+     */
+    BUSY(3),
+    /**
+     * The network is congested: congestion, or reorder.
+     */
+    CONGESTION(4),
+    /**
+     * A second call is waiting.
+     */
+    CALL_WAITING(5),
+    /**
+     * The special information tone.
+     */
+    SPECIAL_INFORMATION(6),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralProgressTone? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Who answered. Names for `sipral_progress_event_t::verdict`.
+ */
+enum class SipralAmdVerdict(val value: Int) {
+    /**
+     * Not a verdict.
+     */
+    UNKNOWN(0),
+    /**
+     * A person.
+     */
+    HUMAN(1),
+    /**
+     * An answering machine or a voice mailbox.
+     */
+    MACHINE(2),
+    /**
+     * The evidence does not say.
+     */
+    NOT_SURE(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAmdVerdict? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Which rule decided who answered. Names for
+ * `sipral_progress_event_t::reason`.
+ */
+enum class SipralAmdReason(val value: Int) {
+    /**
+     * Not a verdict.
+     */
+    NONE(0),
+    /**
+     * A short greeting, then silence: somebody said hello and waits.
+     */
+    SHORT_GREETING(1),
+    /**
+     * More words than a person answers with.
+     */
+    TOO_MANY_WORDS(2),
+    /**
+     * A greeting longer than a person gives.
+     */
+    LONG_GREETING(3),
+    /**
+     * Nobody spoke.
+     */
+    INITIAL_SILENCE(4),
+    /**
+     * No rule decided in the time allowed.
+     */
+    TIMEOUT(5),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAmdReason? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * When a call listens for keypad digits in the far end's audio. Names
+ * for `sipral_stack_config_t::dtmf_detection` and
+ * sipral_call_dtmf_detection's `mode`.
+ */
+enum class SipralDtmfDetection(val value: Int) {
+    /**
+     * On a call whose negotiation settled on no telephone event payload
+     * type: the far end then has no other way to send a digit. Zero, so
+     * that a stack that says nothing gets it.
+     */
+    AUTO(0),
+    /**
+     * Never. Digits arrive only as RFC 4733 events or by INFO.
+     */
+    OFF(1),
+    /**
+     * On every call. A press the far end sends both as an event and in
+     * the audio is reported once, as the event.
+     */
+    ALWAYS(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralDtmfDetection? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Whose call-progress tones to listen for. Names for
+ * `sipral_progress_config_t::region`.
+ */
+enum class SipralToneRegion(val value: Int) {
+    /**
+     * The 425 Hz tones common to the CEPT administrations.
+     */
+    EUROPE(0),
+    /**
+     * The United States and Canada.
+     */
+    NORTH_AMERICA(1),
+    /**
+     * The United Kingdom.
+     */
+    UNITED_KINGDOM(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralToneRegion? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * The file format of a recording. Names for
+ * `sipral_recording_options_t::format`.
+ */
+enum class SipralRecordingFormat(val value: Int) {
+    /**
+     * Sixteen-bit PCM in RIFF/WAVE, becoming RF64 past four gibibytes.
+     */
+    WAV(0),
+    /**
+     * Opus in Ogg (RFC 7845), where `SIPRAL_FEATURE_OPUS` says the build
+     * has the encoder; `SIPRAL_STATUS_NOT_SUPPORTED` where it does not.
+     */
+    OGG_OPUS(1),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralRecordingFormat? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * How the two directions of a call share a recording. Names for
+ * `sipral_recording_options_t::layout`.
+ */
+enum class SipralRecordingLayout(val value: Int) {
+    /**
+     * One channel: both directions, each at half level, summed.
+     */
+    MIXED(0),
+    /**
+     * Two channels: this end on the left, the far end on the right.
+     */
+    STEREO(1),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralRecordingLayout? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -4329,6 +4621,17 @@ class SipralStackConfig(
      * The highest port of that range, or zero with `rtp_port_min`.
      */
     val rtpPortMax: Long = 0,
+    /**
+     * When a call listens for keypad digits in the far end's audio, as a
+     * SipralDtmfDetection: zero
+     * on exactly the calls that negotiated no telephone event, which is
+     * when such a far end has no other way to send one.
+     * `sipral_call_dtmf_detection` changes it for one call.
+     *
+     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val dtmfDetection: Long = 0,
 )
 
 /**
@@ -4690,6 +4993,169 @@ class SipralSubscribeConfig(
      * `SIPRAL_STATUS_INVALID_ARGUMENT`.
      */
     val transport: Long = 0,
+)
+
+/**
+ * How sipral_call_detect_progress listens. Zero in any member but
+ * `size` is that member's default.
+ *
+ * Set `size` to `sizeof(sipral_progress_config_t)` before the call.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralProgressConfig(
+    /**
+     * A `SipralToggle`: on (the default) listens with what follows,
+     * off stops listening and reads nothing else.
+     */
+    val listen: Long = 0,
+    /**
+     * A SipralToneRegion. Europe by default.
+     */
+    val region: Long = 0,
+    /**
+     * A `SipralToggle`: whether to decide who answered. On by default.
+     */
+    val answeringMachine: Long = 0,
+    /**
+     * A `SipralToggle`: whether to listen for the beep after a verdict
+     * of a machine. On by default.
+     */
+    val beep: Long = 0,
+    /**
+     * How long after the verdict to listen for the beep. Thirty
+     * seconds by default.
+     */
+    val beepWindowMs: Long = 0,
+    /**
+     * The longest silence after answer before the verdict is not sure.
+     * 3000 by default.
+     */
+    val maxInitialSilenceMs: Long = 0,
+    /**
+     * The longest greeting a person gives. 1600 by default.
+     */
+    val maxGreetingMs: Long = 0,
+    /**
+     * The silence after a greeting that says a person is waiting. 700
+     * by default.
+     */
+    val silenceAfterGreetingMs: Long = 0,
+    /**
+     * The most words a person's greeting has. 4 by default.
+     */
+    val maxWords: Long = 0,
+    /**
+     * The shortest run of speech that is a word. 120 by default.
+     */
+    val minWordMs: Long = 0,
+    /**
+     * The shortest silence that separates two words. 60 by default.
+     */
+    val minWordGapMs: Long = 0,
+    /**
+     * The longest the decision may take, from answer. 6000 by default.
+     */
+    val maxDecisionMs: Long = 0,
+    /**
+     * How far above the noise floor a frame must be to be speech, in
+     * dB. 6 by default.
+     */
+    val minSpeechAboveFloorDb: Long = 0,
+    /**
+     * The shortest beep. 120 by default.
+     */
+    val beepMinMs: Long = 0,
+    /**
+     * The longest beep: anything held longer is a tone, not a beep.
+     * This build's own default unless set.
+     */
+    val beepMaxMs: Long = 0,
+    /**
+     * How many whole cycles of a repeating cadence are heard before the
+     * tone is reported, from one to four. One by default.
+     */
+    val toneCycles: Long = 0,
+)
+
+/**
+ * The beep sipral_call_consent_tone plays while a call is recorded.
+ * Zero in any member but `size` is that member's default.
+ *
+ * Set `size` to `sizeof(sipral_consent_tone_t)` before the call.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralConsentTone(
+    /**
+     * A `SipralToggle`: on (the default) beeps as what follows says,
+     * off plays no tone and reads nothing else.
+     */
+    val enabled: Long = 0,
+    /**
+     * Its frequency, from 300 to 3400 Hz. 1400 by default.
+     */
+    val frequencyHz: Long = 0,
+    /**
+     * How far below 0 dBm0 it sounds, from 3 to 40 dB: 18 is a beep at
+     * −18 dBm0, the default.
+     */
+    val attenuationDb: Long = 0,
+    /**
+     * How long each beep lasts, from 50 to 2000 ms. 200 by default.
+     */
+    val lengthMs: Long = 0,
+    /**
+     * How often it repeats, start to start: longer than a beep and at
+     * most ten minutes. Fifteen seconds by default.
+     */
+    val intervalMs: Long = 0,
+    /**
+     * A `SipralToggle`: whether this end hears it too. On by default.
+     */
+    val local: Long = 0,
+)
+
+/**
+ * How sipral_media_record_start_with writes a recording. Zero in
+ * every member but `size` is sipral_media_record_start's file.
+ *
+ * Set `size` to `sizeof(sipral_recording_options_t)` before the call.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralRecordingOptions(
+    /**
+     * A SipralRecordingFormat.
+     */
+    val format: Long = 0,
+    /**
+     * A SipralRecordingLayout.
+     */
+    val layout: Long = 0,
+    /**
+     * The rate the file is written at, in hertz, or zero for the rate the
+     * call's codec hears at when the recording starts (48 kHz for Ogg
+     * Opus on a call at a rate Opus does not take). WAV takes 8000 to
+     * 48000; Ogg Opus takes 8000, 12000, 16000, 24000 and 48000.
+     */
+    val sampleRate: Long = 0,
+    /**
+     * An Ogg Opus recording's bitrate in bits a second, all channels
+     * together, or zero for libopus's own choice. Not read for WAV.
+     */
+    val bitrate: Long = 0,
+    /**
+     * How often, in milliseconds, what has been written is made to
+     * survive a crash, or zero for every five seconds.
+     */
+    val checkpointMs: Long = 0,
 )
 
 /**
@@ -5460,6 +5926,80 @@ data class SipralStunServerEvent(
 )
 
 /**
+ * What a SipralEventKind.PROGRESS_DETECTED carries. `what` says
+ * which of the other members mean anything; the rest are zero.
+ */
+data class SipralProgressEvent(
+    /**
+     * A SipralProgressKind.
+     */
+    val what: Long,
+    /**
+     * A SipralProgressTone, for a tone.
+     */
+    val tone: Long,
+    /**
+     * A SipralAmdVerdict, for who answered.
+     */
+    val verdict: Long,
+    /**
+     * A SipralAmdReason, for who answered.
+     */
+    val reason: Long,
+    /**
+     * When, in milliseconds: a tone's first burst from the first frame
+     * listened to; the decision after answer; the beep's end after
+     * answer.
+     */
+    val atMs: Long,
+    /**
+     * How long after answer the first word began, or the silence if
+     * nobody spoke.
+     */
+    val initialSilenceMs: Long,
+    /**
+     * From the first word's start to the last word's end.
+     */
+    val greetingMs: Long,
+    /**
+     * How many words were heard.
+     */
+    val words: Long,
+    /**
+     * The beep's frequency, in hertz, as measured.
+     */
+    val frequencyHz: Long,
+    /**
+     * How long the beep sounded.
+     */
+    val lengthMs: Long,
+    /**
+     * The special information tone's first frequency, as measured.
+     */
+    val sitHz1: Long,
+    /**
+     * Its second.
+     */
+    val sitHz2: Long,
+    /**
+     * Its third.
+     */
+    val sitHz3: Long,
+    /**
+     * How long the first sounded.
+     */
+    val sitMs1: Long,
+    /**
+     * The second.
+     */
+    val sitMs2: Long,
+    /**
+     * The third.
+     */
+    val sitMs3: Long,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -5536,6 +6076,10 @@ class SipralEventPayload(
      * For SipralEventKind.STUN_SERVER.
      */
     val stunServer: SipralStunServerEvent,
+    /**
+     * For SipralEventKind.PROGRESS_DETECTED.
+     */
+    val progress: SipralProgressEvent,
 )
 
 class SipralEvent(
@@ -6179,6 +6723,73 @@ class SipralEvent(
      * Empty otherwise.
      */
     private val payloadStunServerPrevious: String? = null,
+    /**
+     * A SipralProgressKind.
+     */
+    private val payloadProgressWhat: Long = 0,
+    /**
+     * A SipralProgressTone, for a tone.
+     */
+    private val payloadProgressTone: Long = 0,
+    /**
+     * A SipralAmdVerdict, for who answered.
+     */
+    private val payloadProgressVerdict: Long = 0,
+    /**
+     * A SipralAmdReason, for who answered.
+     */
+    private val payloadProgressReason: Long = 0,
+    /**
+     * When, in milliseconds: a tone's first burst from the first frame
+     * listened to; the decision after answer; the beep's end after
+     * answer.
+     */
+    private val payloadProgressAtMs: Long = 0,
+    /**
+     * How long after answer the first word began, or the silence if
+     * nobody spoke.
+     */
+    private val payloadProgressInitialSilenceMs: Long = 0,
+    /**
+     * From the first word's start to the last word's end.
+     */
+    private val payloadProgressGreetingMs: Long = 0,
+    /**
+     * How many words were heard.
+     */
+    private val payloadProgressWords: Long = 0,
+    /**
+     * The beep's frequency, in hertz, as measured.
+     */
+    private val payloadProgressFrequencyHz: Long = 0,
+    /**
+     * How long the beep sounded.
+     */
+    private val payloadProgressLengthMs: Long = 0,
+    /**
+     * The special information tone's first frequency, as measured.
+     */
+    private val payloadProgressSitHz1: Long = 0,
+    /**
+     * Its second.
+     */
+    private val payloadProgressSitHz2: Long = 0,
+    /**
+     * Its third.
+     */
+    private val payloadProgressSitHz3: Long = 0,
+    /**
+     * How long the first sounded.
+     */
+    private val payloadProgressSitMs1: Long = 0,
+    /**
+     * The second.
+     */
+    private val payloadProgressSitMs2: Long = 0,
+    /**
+     * The third.
+     */
+    private val payloadProgressSitMs3: Long = 0,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -6199,6 +6810,7 @@ class SipralEvent(
             SipralTurnStreamEvent(payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal, payloadTurnStreamServer),
             SipralAudioEvent(payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice),
             SipralStunServerEvent(payloadStunServerState, payloadStunServerServer, payloadStunServerPrevious),
+            SipralProgressEvent(payloadProgressWhat, payloadProgressTone, payloadProgressVerdict, payloadProgressReason, payloadProgressAtMs, payloadProgressInitialSilenceMs, payloadProgressGreetingMs, payloadProgressWords, payloadProgressFrequencyHz, payloadProgressLengthMs, payloadProgressSitHz1, payloadProgressSitHz2, payloadProgressSitHz3, payloadProgressSitMs1, payloadProgressSitMs2, payloadProgressSitMs3),
         )
 }
 
@@ -6270,10 +6882,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long, payloadStunServerState: Long, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long, payloadStunServerState: Long, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadProgressWhat: Long, payloadProgressTone: Long, payloadProgressVerdict: Long, payloadProgressReason: Long, payloadProgressAtMs: Long, payloadProgressInitialSilenceMs: Long, payloadProgressGreetingMs: Long, payloadProgressWords: Long, payloadProgressFrequencyHz: Long, payloadProgressLengthMs: Long, payloadProgressSitHz1: Long, payloadProgressSitHz2: Long, payloadProgressSitHz3: Long, payloadProgressSitMs1: Long, payloadProgressSitMs2: Long, payloadProgressSitMs3: Long) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice, payloadStunServerState, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice, payloadStunServerState, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadProgressWhat, payloadProgressTone, payloadProgressVerdict, payloadProgressReason, payloadProgressAtMs, payloadProgressInitialSilenceMs, payloadProgressGreetingMs, payloadProgressWords, payloadProgressFrequencyHz, payloadProgressLengthMs, payloadProgressSitHz1, payloadProgressSitHz2, payloadProgressSitHz3, payloadProgressSitMs1, payloadProgressSitMs2, payloadProgressSitMs3))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -6816,7 +7428,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 30)
+        agree(0, 31)
     }
 
     /**
@@ -6840,7 +7452,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, configDtmfDetection: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -6974,6 +7586,10 @@ internal object SipralNative {
     external fun sipral_stack_state(stack: Long, buffer: ByteArray, len: LongArray): Int
     external fun sipral_stack_rtp_port_reserve(stack: Long, port: LongArray): Int
     external fun sipral_stack_rtp_port_release(stack: Long, port: Long): Int
+    external fun sipral_call_dtmf_detection(stack: Long, call: Long, mode: Long): Int
+    external fun sipral_call_detect_progress(stack: Long, call: Long, configListen: Long, configRegion: Long, configAnsweringMachine: Long, configBeep: Long, configBeepWindowMs: Long, configMaxInitialSilenceMs: Long, configMaxGreetingMs: Long, configSilenceAfterGreetingMs: Long, configMaxWords: Long, configMinWordMs: Long, configMinWordGapMs: Long, configMaxDecisionMs: Long, configMinSpeechAboveFloorDb: Long, configBeepMinMs: Long, configBeepMaxMs: Long, configToneCycles: Long): Int
+    external fun sipral_call_consent_tone(stack: Long, call: Long, toneEnabled: Long, toneFrequencyHz: Long, toneAttenuationDb: Long, toneLengthMs: Long, toneIntervalMs: Long, toneLocal: Long): Int
+    external fun sipral_media_record_start_with(media: Long, path: ByteArray, optionsFormat: Long, optionsLayout: Long, optionsSampleRate: Long, optionsBitrate: Long, optionsCheckpointMs: Long): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -6997,7 +7613,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 30
+    const val ABI_VERSION_MINOR: Long = 31
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -7196,6 +7812,29 @@ object Sipral {
      * asks before it shows a "send diagnostics" control.
      */
     const val FEATURE_LOGGING: Long = 16384
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. What a call carries inside its audio:
+     * keypad digits heard in the far end's audio
+     * (`sipral_stack_config_t::dtmf_detection`,
+     * `sipral_call_dtmf_detection`, `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`) and
+     * written into this end's (`SIPRAL_DTMF_IN_BAND`, and `SIPRAL_DTMF_RTP`
+     * on a call with no telephone event), call-progress tones, who answered
+     * and the machine's beep (`sipral_call_detect_progress`,
+     * `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`), and the beep that says a call
+     * is recorded (`sipral_call_consent_tone`).
+     */
+    const val FEATURE_IN_BAND_SIGNALS: Long = 262144
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. A recording written as
+     * `sipral_recording_options_t` says (`sipral_media_record_start_with`):
+     * mixed or stereo, WAV growing into RF64, at a rate of its own and
+     * checkpointed against a crash, and Ogg Opus where
+     * SIPRAL_FEATURE_OPUS is set too. And L16 as a codec, at 8 and 16
+     * kHz, which `sipral_codec_at` lists.
+     */
+    const val FEATURE_RECORDING_FORMATS: Long = 524288
 
     /**
      * The buffer a caller has to bring for one outgoing packet.
@@ -7482,7 +8121,7 @@ object Sipral {
         val configAudioTransmitCallback = SipralAudioTransmitListeners.register(config.audioTransmitListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, config.dtmfDetection, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
             SipralAudioTransmitListeners.made(configAudioTransmitCallback, status, stackSlot[0])
@@ -8651,10 +9290,12 @@ object Sipral {
      * the same as one with a character no keypad has, and nothing of it is
      * sent.
      *
-     * `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
-     * negotiation settled on no telephone event payload type: the key is a
-     * real key and this call has nowhere in the media to put it. The INFO
-     * forms need a dialog rather than a negotiation, and answer
+     * `SIPRAL_DTMF_RTP` on a call whose negotiation settled on no telephone
+     * event payload type writes the digits into the audio instead, as
+     * `SIPRAL_DTMF_IN_BAND` does on any call: the one way such a far end can
+     * hear a key. Both need the call's media, and answer
+     * `SIPRAL_STATUS_WRONG_STATE` before there is any. The INFO forms need a
+     * dialog rather than a negotiation, and answer
      * `SIPRAL_STATUS_WRONG_STATE` before there is one.
      *
      * Safety
@@ -8832,8 +9473,10 @@ object Sipral {
      * number this build has no codec for.
      *
      * It is spelled as IANA registered it, which is also how it goes on an
-     * `a=rtpmap` line. The string belongs to the library and lives as long as
-     * it is loaded.
+     * `a=rtpmap` line — with the rate after it for L16, `L16/8000` and
+     * `L16/16000`, which is one encoding name at two rates and is named that
+     * way in a codec order. The string belongs to the library and lives as
+     * long as it is loaded.
      *
      * Safety
      *
@@ -10843,6 +11486,84 @@ object Sipral {
      */
     fun stackRtpPortRelease(stack: Long, port: Long) {
         check(SipralNative.sipral_stack_rtp_port_release(stack, port))
+    }
+
+    /**
+     * Listen for keypad digits in this call's far-end audio as `mode` says:
+     * a SipralDtmfDetection. Before the call has media as well as
+     * after, for the rest of the call.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+     * not run.
+     *
+     * Safety
+     *
+     * Safe to call with any handle values.
+     */
+    fun callDtmfDetection(stack: Long, call: Long, mode: Long) {
+        check(SipralNative.sipral_call_dtmf_detection(stack, call, mode))
+    }
+
+    /**
+     * Listen for call progress on this call and decide who answers it, as
+     * `config` says, or stop with `config.listen` off. Meant for a call this
+     * stack placed, straight after `sipral_call_place`: the tones are
+     * listened for from the first frame of early media, and who answered is
+     * decided from the 2xx on. Each thing heard is a
+     * `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+     * not run; `SIPRAL_STATUS_INVALID_ARGUMENT` for a value no detector
+     * takes, which changes nothing.
+     *
+     * Safety
+     *
+     * `config` must point at a `sipral_progress_config_t` whose `size`
+     * member says how long it is.
+     */
+    fun callDetectProgress(stack: Long, call: Long, config: SipralProgressConfig) {
+        check(SipralNative.sipral_call_detect_progress(stack, call, config.listen, config.region, config.answeringMachine, config.beep, config.beepWindowMs, config.maxInitialSilenceMs, config.maxGreetingMs, config.silenceAfterGreetingMs, config.maxWords, config.minWordMs, config.minWordGapMs, config.maxDecisionMs, config.minSpeechAboveFloorDb, config.beepMinMs, config.beepMaxMs, config.toneCycles))
+    }
+
+    /**
+     * Beep on this call while it is recorded, as `tone` says, or play no
+     * tone with `tone.enabled` off. A recording already running starts
+     * beeping at once; one started later beeps from its first frame.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+     * not run; `SIPRAL_STATUS_INVALID_ARGUMENT`, naming the member, for a
+     * tone that is not a beep, which changes nothing.
+     *
+     * Safety
+     *
+     * `tone` must point at a `sipral_consent_tone_t` whose `size` member
+     * says how long it is.
+     */
+    fun callConsentTone(stack: Long, call: Long, tone: SipralConsentTone) {
+        check(SipralNative.sipral_call_consent_tone(stack, call, tone.enabled, tone.frequencyHz, tone.attenuationDb, tone.lengthMs, tone.intervalMs, tone.local))
+    }
+
+    /**
+     * Start recording this call to `path`, written as `options` say: WAV or
+     * Ogg Opus, mixed or stereo with this end on the left, at a rate of the
+     * file's own. Everything else is sipral_media_record_start's,
+     * which is this with every option zero.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for options no file can be written
+     * with and for a path the file system refuses, and
+     * `SIPRAL_STATUS_NOT_SUPPORTED` for Ogg Opus in a build with no Opus.
+     * `SIPRAL_STATUS_RECORDING_FAILED` when the file was made and would not
+     * take its header.
+     *
+     * Safety
+     *
+     * `path` must be readable for `path_len` bytes, and `options` must point
+     * at a `sipral_recording_options_t` whose `size` member says how long
+     * it is.
+     */
+    fun mediaRecordStartWith(media: Long, path: String, options: SipralRecordingOptions) {
+        val pathBytes = path.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_media_record_start_with(media, pathBytes, options.format, options.layout, options.sampleRate, options.bitrate, options.checkpointMs))
     }
 
 }

@@ -31,6 +31,7 @@ use sipral_ua::{CallHandle, UaEvent};
 
 use crate::codec::Codec;
 use crate::error::MediaError;
+use crate::inband::CallProgress;
 use crate::stats::StreamStatistics;
 
 /// Something the application has to know.
@@ -48,7 +49,7 @@ pub enum Event {
     },
 }
 
-/// Which of the two ways this stack accepts a digit carried the one
+/// Which of the three ways this stack accepts a digit carried the one
 /// [`MediaEvent::DigitReceived`] reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -58,6 +59,9 @@ pub enum DigitSource {
     /// RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
     /// or `application/dtmf` — see `docs/04-ua.md` for the two conventions.
     Info,
+    /// The two tones themselves, heard in the far end's audio (ITU-T Q.23),
+    /// as [`DtmfDetection`](crate::DtmfDetection) says when to listen.
+    InBand,
 }
 
 /// What one call's audio is doing.
@@ -135,23 +139,27 @@ pub enum MediaEvent {
     DigitReceived {
         /// The key, where the event names one. Event codes at and above 16
         /// are real events that no keypad has a key for. Always `Some` when
-        /// `source` is [`DigitSource::Info`]: an INFO never names anything
-        /// but a keypad character.
+        /// `source` is [`DigitSource::Info`] or [`DigitSource::InBand`]: an
+        /// INFO never names anything but a keypad character, and a pair of
+        /// tones is one of the sixteen keys.
         digit: Option<char>,
         /// The event code itself (§3.2), or the one that character names
-        /// when `source` is [`DigitSource::Info`] rather than an event RFC
-        /// 4733 actually carried.
+        /// when `source` is [`DigitSource::Info`] or [`DigitSource::InBand`]
+        /// rather than an event RFC 4733 actually carried.
         event: u8,
         /// How long the far end held it. `None` when nothing said: RFC
-        /// 4733 always carries a duration, but `application/dtmf`'s INFO
-        /// never does, and that is not the same fact as `Duration=0` on the
-        /// other form, which is `Some(Duration::ZERO)` — a peer that held a
-        /// key for no time at all still said so (8.3.11-ter).
+        /// 4733 always carries a duration, and so does a digit heard in the
+        /// audio, but `application/dtmf`'s INFO never does, and that is not
+        /// the same fact as `Duration=0` on the other form, which is
+        /// `Some(Duration::ZERO)` — a peer that held a key for no time at all
+        /// still said so (8.3.11-ter).
         held: Option<Duration>,
-        /// Which of the two ways this stack accepts a digit reported this
-        /// one.
+        /// Which of the ways this stack accepts a digit reported this one.
         source: DigitSource,
     },
+    /// What the far end's network played, or who answered: listened for on
+    /// a call given a [`ProgressDetection`](crate::ProgressDetection).
+    Progress(CallProgress),
     /// The handshake that keys this call finished, and audio can move.
     ///
     /// Only DTLS-SRTP produces this, and it is the moment the call becomes

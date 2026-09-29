@@ -274,12 +274,6 @@ pub enum MediaError {
         /// The longest this build keeps history for.
         most: std::time::Duration,
     },
-    /// A digit was asked for on a call that negotiated no telephone event
-    /// payload type.
-    ///
-    /// The far end never offered one, so there is nowhere in the media to put
-    /// it. The INFO form on the user agent is what is left.
-    NoDtmf,
     /// A digit shorter than legacy equipment recognises.
     DigitTooShort {
         /// What was asked for.
@@ -313,16 +307,22 @@ pub enum MediaError {
     /// A recording was asked for while one was already running. Two writers on
     /// one stream would interleave frames into both files.
     AlreadyRecording,
-    /// A re-negotiation moved the sample rate or the frame length under a
-    /// recording that was running.
-    ///
-    /// A WAVE header is written once, at the start, and names the rate the
-    /// file is to be played back at; audio taken at another rate written in
-    /// behind it plays at the wrong speed for the rest of the file. So the
-    /// recording is closed properly — the lengths patched, the file playable —
-    /// and the application is told, because it is the only one that can decide
-    /// whether to open a second file.
-    CodecChanged,
+    /// A recording was asked for at a sampling rate its format cannot be
+    /// written at: outside 8 to 48 kHz for WAV, or not one of Opus's five
+    /// rates for Ogg Opus.
+    RecordingRate {
+        /// What was asked for.
+        hertz: u32,
+    },
+    /// An Ogg Opus recording was asked for at a bitrate Opus is not defined
+    /// at.
+    RecordingBitrate {
+        /// What was asked for.
+        bits_per_second: u32,
+    },
+    /// A consent tone that no codec here carries, or that is not a beep:
+    /// the sentence names the field.
+    ConsentTone(&'static str),
     /// The user agent refused the request the media was for.
     Signalling(UaError),
     /// [`MediaEngine::join`](crate::MediaEngine::join) was asked to join a
@@ -501,7 +501,7 @@ impl fmt::Display for MediaError {
                     if index > 0 {
                         f.write_str(", ")?;
                     }
-                    f.write_str(codec.encoding_name())?;
+                    f.write_str(codec.name())?;
                 }
                 Ok(())
             }
@@ -545,7 +545,6 @@ impl fmt::Display for MediaError {
                 asked.as_millis(),
                 most.as_millis()
             ),
-            Self::NoDtmf => f.write_str("this call negotiated no telephone event payload type"),
             Self::DigitTooShort { asked, least } => write!(
                 f,
                 "a digit of {} ms; equipment recognises {} ms and up",
@@ -563,9 +562,17 @@ impl fmt::Display for MediaError {
             Self::Recording(kind) => write!(f, "recording: {kind}"),
             Self::NotRecording => f.write_str("nothing is being recorded on this call"),
             Self::AlreadyRecording => f.write_str("this call is already being recorded"),
-            Self::CodecChanged => {
-                f.write_str("the recording stopped: the call moved to a codec at another rate")
+            Self::RecordingRate { hertz } => {
+                write!(
+                    f,
+                    "a recording in this format cannot be written at {hertz} Hz"
+                )
             }
+            Self::RecordingBitrate { bits_per_second } => write!(
+                f,
+                "an Ogg Opus recording cannot be written at {bits_per_second} bit/s"
+            ),
+            Self::ConsentTone(what) => write!(f, "consent tone: {what}"),
             Self::Signalling(error) => write!(f, "user agent: {error}"),
             Self::SameCall => f.write_str("a call cannot be joined to itself"),
             Self::AlreadyJoined => f.write_str("this call is already joined to another"),
@@ -606,11 +613,12 @@ mod tests {
             MediaError::NoDtlsSrtp,
             MediaError::SrtpRequired,
             MediaError::UnusableKeying,
-            MediaError::NoDtmf,
             MediaError::TooManyDigits,
             MediaError::NotRecording,
             MediaError::AlreadyRecording,
-            MediaError::CodecChanged,
+            MediaError::RecordingRate { hertz: 44_100 },
+            MediaError::RecordingBitrate { bits_per_second: 1 },
+            MediaError::ConsentTone("frequency_hz is outside 300 to 3400"),
             MediaError::SameCall,
             MediaError::AlreadyJoined,
             MediaError::NotJoined,

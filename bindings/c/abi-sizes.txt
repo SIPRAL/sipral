@@ -17,6 +17,7 @@ sipral_call_config_t 80 128
 sipral_capabilities_t 24 24
 sipral_codec_candidate_t 24 24
 sipral_codec_info_t 32 32
+sipral_consent_tone_t 32 32
 sipral_counters_t 152 232
 sipral_event_t - 368
 sipral_log_record_t - 64
@@ -25,9 +26,11 @@ sipral_media_packet_t 56 64
 sipral_path_candidate_t 88 88
 sipral_poll_result_t 48 48
 sipral_processor_frame_t - 64
+sipral_progress_config_t 72 72
 sipral_push_echo_t 24 24
+sipral_recording_options_t 32 32
 sipral_screen_request_t - 48
-sipral_stack_config_t 176 368
+sipral_stack_config_t 176 376
 sipral_stack_settings_t 72 112
 sipral_stream_stats_t 152 264
 sipral_subscribe_config_t 88 88

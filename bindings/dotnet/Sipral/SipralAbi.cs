@@ -126,6 +126,14 @@ public enum SipralStatus : int
     /// that ends makes room; raising the limit means a new stack.
     /// </summary>
     LimitReached = 16,
+    /// <summary>
+    /// A recording's file would not take what was written to it: the disk
+    /// filled, the volume went away, the file was taken away underneath.
+    /// Not the path, which is `SIPRAL_STATUS_INVALID_ARGUMENT` before
+    /// anything is written. The recording has stopped; the file holds the
+    /// audio up to the last checkpoint it could write.
+    /// </summary>
+    RecordingFailed = 19,
 }
 
 /// <summary>
@@ -389,6 +397,17 @@ public enum SipralCodec : uint
     /// compression where both descriptions allow it.
     /// </summary>
     G729 = 5,
+    /// <summary>
+    /// L16 at 8 kHz, one channel: the samples themselves, on a dynamic
+    /// payload type as `L16/8000`. In every build and in no default
+    /// offer: a call offers it only when a codec order names `L16/8000`.
+    /// </summary>
+    L16Narrowband = 6,
+    /// <summary>
+    /// L16 at 16 kHz, one channel, as `L16/16000`: wideband with nothing
+    /// lost, offered only when a codec order names `L16/16000`.
+    /// </summary>
+    L16Wideband = 7,
 }
 
 /// <summary>
@@ -834,6 +853,14 @@ public enum SipralDtmf : uint
     /// character. Some switches take only this one.
     /// </summary>
     InfoPlain = 3,
+    /// <summary>
+    /// In the media, as the two tones of each key written into the audio in
+    /// place of the microphone, whatever the negotiation settled on: for
+    /// the far end that negotiated a telephone event and then listens only
+    /// to the audio. `SIPRAL_DTMF_RTP` does this by itself on a call that
+    /// negotiated no telephone event.
+    /// </summary>
+    InBand = 4,
 }
 
 /// <summary>
@@ -845,6 +872,7 @@ public enum SipralDtmf : uint
 /// Numbers already spent on features this build does not have:
 /// - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
 /// - 44: held for a second audio device event, which the audio engine did not need; spent all the same
+/// - 47: held for the verdict on a caller's verified identity (STIR/SHAKEN), which the same minor brings
 /// </summary>
 public enum SipralEventKind : uint
 {
@@ -1322,6 +1350,30 @@ public enum SipralEventKind : uint
     /// neither.
     /// </summary>
     StunServer = 46,
+    /// <summary>
+    /// A keypad digit heard in the far end's audio, as the two tones
+    /// themselves, on a call listening for them:
+    /// `sipral_stack_config_t::dtmf_detection` and
+    /// `sipral_call_dtmf_detection` say when. One per press, reported as
+    /// it ends; on a call that also negotiated named events, a press the
+    /// far end sent both ways is reported once, as
+    /// `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`, and one heard only in the audio
+    /// waits a quarter of a second before it is reported here.
+    ///
+    /// `payload.media` carries it the way it carries every digit:
+    /// `digit` is the key's character, `event_code` its RFC 4733 code,
+    /// `held_ms` how long it sounded and `source`
+    /// `SIPRAL_DIGIT_SOURCE_IN_BAND`.
+    /// </summary>
+    InBandDigit = 48,
+    /// <summary>
+    /// What was heard on a call told to listen with
+    /// `sipral_call_detect_progress`: a call-progress tone of its network
+    /// on early media, the special information tone, who answered, or
+    /// the beep an answering machine plays before it records.
+    /// `payload.progress` says which, and what was measured.
+    /// </summary>
+    ProgressDetected = 49,
 }
 
 /// <summary>
@@ -1504,9 +1556,9 @@ public enum SipralCallEndReason : uint
 }
 
 /// <summary>
-/// Which of the two ways this stack accepts a digit reported the one
-/// SipralEventKind.DigitReceived carries. Names for
-/// `sipral_media_event_t::source`.
+/// Which of the ways this stack accepts a digit reported the one
+/// SipralEventKind.DigitReceived or SipralEventKind.InBandDigit
+/// carries. Names for `sipral_media_event_t::source`.
 /// </summary>
 public enum SipralDigitSource : uint
 {
@@ -1519,6 +1571,11 @@ public enum SipralDigitSource : uint
     /// or `application/dtmf`.
     /// </summary>
     Info = 1,
+    /// <summary>
+    /// The two tones themselves, heard in the far end's audio, for
+    /// SipralEventKind.InBandDigit.
+    /// </summary>
+    InBand = 2,
 }
 
 /// <summary>
@@ -2406,6 +2463,209 @@ public enum SipralLogLevel : uint
 }
 
 /// <summary>
+/// What a SipralEventKind.ProgressDetected heard. Names for
+/// `sipral_progress_event_t::what`.
+/// </summary>
+public enum SipralProgressKind : uint
+{
+    /// <summary>
+    /// Never written by this build.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// A call-progress tone of the configured network: `tone` says which
+    /// and `at_ms` when its first burst began, from the first frame
+    /// listened to.
+    /// </summary>
+    Tone = 1,
+    /// <summary>
+    /// The special information tone: the call failed, and an
+    /// announcement usually follows. `sit_hz_1` to `sit_hz_3` and
+    /// `sit_ms_1` to `sit_ms_3` are what was measured, `at_ms` when the
+    /// first of the three began.
+    /// </summary>
+    SpecialInformation = 2,
+    /// <summary>
+    /// Who answered: `verdict`, `reason`, `at_ms` after answer,
+    /// `initial_silence_ms`, `greeting_ms` and `words`.
+    /// </summary>
+    AnsweredBy = 3,
+    /// <summary>
+    /// The beep a machine plays before it records: `frequency_hz`,
+    /// `at_ms` when it ended after answer — when the machine starts
+    /// recording — and `length_ms`.
+    /// </summary>
+    Beep = 4,
+}
+
+/// <summary>
+/// A call-progress tone. Names for `sipral_progress_event_t::tone`.
+/// </summary>
+public enum SipralProgressTone : uint
+{
+    /// <summary>
+    /// Not a tone, or one this build has no name for.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// The exchange is ready for digits.
+    /// </summary>
+    Dial = 1,
+    /// <summary>
+    /// The far end is being alerted.
+    /// </summary>
+    Ringback = 2,
+    /// <summary>
+    /// The far end is busy.
+    /// </summary>
+    Busy = 3,
+    /// <summary>
+    /// The network is congested: congestion, or reorder.
+    /// </summary>
+    Congestion = 4,
+    /// <summary>
+    /// A second call is waiting.
+    /// </summary>
+    CallWaiting = 5,
+    /// <summary>
+    /// The special information tone.
+    /// </summary>
+    SpecialInformation = 6,
+}
+
+/// <summary>
+/// Who answered. Names for `sipral_progress_event_t::verdict`.
+/// </summary>
+public enum SipralAmdVerdict : uint
+{
+    /// <summary>
+    /// Not a verdict.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// A person.
+    /// </summary>
+    Human = 1,
+    /// <summary>
+    /// An answering machine or a voice mailbox.
+    /// </summary>
+    Machine = 2,
+    /// <summary>
+    /// The evidence does not say.
+    /// </summary>
+    NotSure = 3,
+}
+
+/// <summary>
+/// Which rule decided who answered. Names for
+/// `sipral_progress_event_t::reason`.
+/// </summary>
+public enum SipralAmdReason : uint
+{
+    /// <summary>
+    /// Not a verdict.
+    /// </summary>
+    None = 0,
+    /// <summary>
+    /// A short greeting, then silence: somebody said hello and waits.
+    /// </summary>
+    ShortGreeting = 1,
+    /// <summary>
+    /// More words than a person answers with.
+    /// </summary>
+    TooManyWords = 2,
+    /// <summary>
+    /// A greeting longer than a person gives.
+    /// </summary>
+    LongGreeting = 3,
+    /// <summary>
+    /// Nobody spoke.
+    /// </summary>
+    InitialSilence = 4,
+    /// <summary>
+    /// No rule decided in the time allowed.
+    /// </summary>
+    Timeout = 5,
+}
+
+/// <summary>
+/// When a call listens for keypad digits in the far end's audio. Names
+/// for `sipral_stack_config_t::dtmf_detection` and
+/// sipral_call_dtmf_detection's `mode`.
+/// </summary>
+public enum SipralDtmfDetection : uint
+{
+    /// <summary>
+    /// On a call whose negotiation settled on no telephone event payload
+    /// type: the far end then has no other way to send a digit. Zero, so
+    /// that a stack that says nothing gets it.
+    /// </summary>
+    Auto = 0,
+    /// <summary>
+    /// Never. Digits arrive only as RFC 4733 events or by INFO.
+    /// </summary>
+    Off = 1,
+    /// <summary>
+    /// On every call. A press the far end sends both as an event and in
+    /// the audio is reported once, as the event.
+    /// </summary>
+    Always = 2,
+}
+
+/// <summary>
+/// Whose call-progress tones to listen for. Names for
+/// `sipral_progress_config_t::region`.
+/// </summary>
+public enum SipralToneRegion : uint
+{
+    /// <summary>
+    /// The 425 Hz tones common to the CEPT administrations.
+    /// </summary>
+    Europe = 0,
+    /// <summary>
+    /// The United States and Canada.
+    /// </summary>
+    NorthAmerica = 1,
+    /// <summary>
+    /// The United Kingdom.
+    /// </summary>
+    UnitedKingdom = 2,
+}
+
+/// <summary>
+/// The file format of a recording. Names for
+/// `sipral_recording_options_t::format`.
+/// </summary>
+public enum SipralRecordingFormat : uint
+{
+    /// <summary>
+    /// Sixteen-bit PCM in RIFF/WAVE, becoming RF64 past four gibibytes.
+    /// </summary>
+    Wav = 0,
+    /// <summary>
+    /// Opus in Ogg (RFC 7845), where `SIPRAL_FEATURE_OPUS` says the build
+    /// has the encoder; `SIPRAL_STATUS_NOT_SUPPORTED` where it does not.
+    /// </summary>
+    OggOpus = 1,
+}
+
+/// <summary>
+/// How the two directions of a call share a recording. Names for
+/// `sipral_recording_options_t::layout`.
+/// </summary>
+public enum SipralRecordingLayout : uint
+{
+    /// <summary>
+    /// One channel: both directions, each at half level, summed.
+    /// </summary>
+    Mixed = 0,
+    /// <summary>
+    /// Two channels: this end on the left, the far end on the right.
+    /// </summary>
+    Stereo = 1,
+}
+
+/// <summary>
 /// The one callback a stack has.
 ///
 /// It is called from inside `sipral_stack_poll`, on the thread that called
@@ -3262,6 +3522,17 @@ public struct SipralStackConfig
     /// The highest port of that range, or zero with `rtp_port_min`.
     /// </summary>
     public uint RtpPortMax;
+    /// <summary>
+    /// When a call listens for keypad digits in the far end's audio, as a
+    /// SipralDtmfDetection: zero
+    /// on exactly the calls that negotiated no telephone event, which is
+    /// when such a far end has no other way to send one.
+    /// `sipral_call_dtmf_detection` changes it for one call.
+    ///
+    /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public uint DtmfDetection;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -5555,6 +5826,82 @@ public struct SipralStunServerEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.ProgressDetected carries. `what` says
+/// which of the other members mean anything; the rest are zero.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralProgressEvent
+{
+    /// <summary>
+    /// A SipralProgressKind.
+    /// </summary>
+    public uint What;
+    /// <summary>
+    /// A SipralProgressTone, for a tone.
+    /// </summary>
+    public uint Tone;
+    /// <summary>
+    /// A SipralAmdVerdict, for who answered.
+    /// </summary>
+    public uint Verdict;
+    /// <summary>
+    /// A SipralAmdReason, for who answered.
+    /// </summary>
+    public uint Reason;
+    /// <summary>
+    /// When, in milliseconds: a tone's first burst from the first frame
+    /// listened to; the decision after answer; the beep's end after
+    /// answer.
+    /// </summary>
+    public ulong AtMs;
+    /// <summary>
+    /// How long after answer the first word began, or the silence if
+    /// nobody spoke.
+    /// </summary>
+    public ulong InitialSilenceMs;
+    /// <summary>
+    /// From the first word's start to the last word's end.
+    /// </summary>
+    public ulong GreetingMs;
+    /// <summary>
+    /// How many words were heard.
+    /// </summary>
+    public uint Words;
+    /// <summary>
+    /// The beep's frequency, in hertz, as measured.
+    /// </summary>
+    public uint FrequencyHz;
+    /// <summary>
+    /// How long the beep sounded.
+    /// </summary>
+    public ulong LengthMs;
+    /// <summary>
+    /// The special information tone's first frequency, as measured.
+    /// </summary>
+    public uint SitHz1;
+    /// <summary>
+    /// Its second.
+    /// </summary>
+    public uint SitHz2;
+    /// <summary>
+    /// Its third.
+    /// </summary>
+    public uint SitHz3;
+    /// <summary>
+    /// How long the first sounded.
+    /// </summary>
+    public uint SitMs1;
+    /// <summary>
+    /// The second.
+    /// </summary>
+    public uint SitMs2;
+    /// <summary>
+    /// The third.
+    /// </summary>
+    public uint SitMs3;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -5649,6 +5996,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralStunServerEvent StunServer;
+    /// <summary>
+    /// For SipralEventKind.ProgressDetected.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralProgressEvent Progress;
 }
 
 /// <summary>
@@ -6219,6 +6571,202 @@ public struct SipralLogRecord
 }
 
 /// <summary>
+/// How sipral_call_detect_progress listens. Zero in any member but
+/// `size` is that member's default.
+///
+/// Set `size` to `sizeof(sipral_progress_config_t)` before the call.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralProgressConfig
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// A `SipralToggle`: on (the default) listens with what follows,
+    /// off stops listening and reads nothing else.
+    /// </summary>
+    public uint Listen;
+    /// <summary>
+    /// A SipralToneRegion. Europe by default.
+    /// </summary>
+    public uint Region;
+    /// <summary>
+    /// A `SipralToggle`: whether to decide who answered. On by default.
+    /// </summary>
+    public uint AnsweringMachine;
+    /// <summary>
+    /// A `SipralToggle`: whether to listen for the beep after a verdict
+    /// of a machine. On by default.
+    /// </summary>
+    public uint Beep;
+    /// <summary>
+    /// How long after the verdict to listen for the beep. Thirty
+    /// seconds by default.
+    /// </summary>
+    public uint BeepWindowMs;
+    /// <summary>
+    /// The longest silence after answer before the verdict is not sure.
+    /// 3000 by default.
+    /// </summary>
+    public uint MaxInitialSilenceMs;
+    /// <summary>
+    /// The longest greeting a person gives. 1600 by default.
+    /// </summary>
+    public uint MaxGreetingMs;
+    /// <summary>
+    /// The silence after a greeting that says a person is waiting. 700
+    /// by default.
+    /// </summary>
+    public uint SilenceAfterGreetingMs;
+    /// <summary>
+    /// The most words a person's greeting has. 4 by default.
+    /// </summary>
+    public uint MaxWords;
+    /// <summary>
+    /// The shortest run of speech that is a word. 120 by default.
+    /// </summary>
+    public uint MinWordMs;
+    /// <summary>
+    /// The shortest silence that separates two words. 60 by default.
+    /// </summary>
+    public uint MinWordGapMs;
+    /// <summary>
+    /// The longest the decision may take, from answer. 6000 by default.
+    /// </summary>
+    public uint MaxDecisionMs;
+    /// <summary>
+    /// How far above the noise floor a frame must be to be speech, in
+    /// dB. 6 by default.
+    /// </summary>
+    public uint MinSpeechAboveFloorDb;
+    /// <summary>
+    /// The shortest beep. 120 by default.
+    /// </summary>
+    public uint BeepMinMs;
+    /// <summary>
+    /// The longest beep: anything held longer is a tone, not a beep.
+    /// This build's own default unless set.
+    /// </summary>
+    public uint BeepMaxMs;
+    /// <summary>
+    /// How many whole cycles of a repeating cadence are heard before the
+    /// tone is reported, from one to four. One by default.
+    /// </summary>
+    public uint ToneCycles;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralProgressConfig Sized()
+    {
+        var value = default(SipralProgressConfig);
+        value.Size = (nuint)Marshal.SizeOf<SipralProgressConfig>();
+        return value;
+    }
+}
+
+/// <summary>
+/// The beep sipral_call_consent_tone plays while a call is recorded.
+/// Zero in any member but `size` is that member's default.
+///
+/// Set `size` to `sizeof(sipral_consent_tone_t)` before the call.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralConsentTone
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// A `SipralToggle`: on (the default) beeps as what follows says,
+    /// off plays no tone and reads nothing else.
+    /// </summary>
+    public uint Enabled;
+    /// <summary>
+    /// Its frequency, from 300 to 3400 Hz. 1400 by default.
+    /// </summary>
+    public uint FrequencyHz;
+    /// <summary>
+    /// How far below 0 dBm0 it sounds, from 3 to 40 dB: 18 is a beep at
+    /// −18 dBm0, the default.
+    /// </summary>
+    public uint AttenuationDb;
+    /// <summary>
+    /// How long each beep lasts, from 50 to 2000 ms. 200 by default.
+    /// </summary>
+    public uint LengthMs;
+    /// <summary>
+    /// How often it repeats, start to start: longer than a beep and at
+    /// most ten minutes. Fifteen seconds by default.
+    /// </summary>
+    public uint IntervalMs;
+    /// <summary>
+    /// A `SipralToggle`: whether this end hears it too. On by default.
+    /// </summary>
+    public uint Local;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralConsentTone Sized()
+    {
+        var value = default(SipralConsentTone);
+        value.Size = (nuint)Marshal.SizeOf<SipralConsentTone>();
+        return value;
+    }
+}
+
+/// <summary>
+/// How sipral_media_record_start_with writes a recording. Zero in
+/// every member but `size` is sipral_media_record_start's file.
+///
+/// Set `size` to `sizeof(sipral_recording_options_t)` before the call.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralRecordingOptions
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// A SipralRecordingFormat.
+    /// </summary>
+    public uint Format;
+    /// <summary>
+    /// A SipralRecordingLayout.
+    /// </summary>
+    public uint Layout;
+    /// <summary>
+    /// The rate the file is written at, in hertz, or zero for the rate the
+    /// call's codec hears at when the recording starts (48 kHz for Ogg
+    /// Opus on a call at a rate Opus does not take). WAV takes 8000 to
+    /// 48000; Ogg Opus takes 8000, 12000, 16000, 24000 and 48000.
+    /// </summary>
+    public uint SampleRate;
+    /// <summary>
+    /// An Ogg Opus recording's bitrate in bits a second, all channels
+    /// together, or zero for libopus's own choice. Not read for WAV.
+    /// </summary>
+    public uint Bitrate;
+    /// <summary>
+    /// How often, in milliseconds, what has been written is made to
+    /// survive a crash, or zero for every five seconds.
+    /// </summary>
+    public uint CheckpointMs;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralRecordingOptions Sized()
+    {
+        var value = default(SipralRecordingOptions);
+        value.Size = (nuint)Marshal.SizeOf<SipralRecordingOptions>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -6762,6 +7310,18 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_rtp_port_release(ulong stack, uint port);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_dtmf_detection(ulong stack, ulong call, uint mode);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_detect_progress(ulong stack, ulong call, in SipralProgressConfig config);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_consent_tone(ulong stack, ulong call, in SipralConsentTone tone);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_record_start_with(ulong media, sbyte[] path, nuint pathLen, in SipralRecordingOptions options);
+
 }
 
 /// <summary>Everything the library does, with the C conventions read
@@ -6807,7 +7367,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 30;
+    public const uint AbiVersionMinor = 31;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -7006,6 +7566,29 @@ public static class Sipral
     /// asks before it shows a "send diagnostics" control.
     /// </summary>
     public const uint FeatureLogging = 16384;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. What a call carries inside its audio:
+    /// keypad digits heard in the far end's audio
+    /// (`sipral_stack_config_t::dtmf_detection`,
+    /// `sipral_call_dtmf_detection`, `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`) and
+    /// written into this end's (`SIPRAL_DTMF_IN_BAND`, and `SIPRAL_DTMF_RTP`
+    /// on a call with no telephone event), call-progress tones, who answered
+    /// and the machine's beep (`sipral_call_detect_progress`,
+    /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`), and the beep that says a call
+    /// is recorded (`sipral_call_consent_tone`).
+    /// </summary>
+    public const uint FeatureInBandSignals = 262144;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. A recording written as
+    /// `sipral_recording_options_t` says (`sipral_media_record_start_with`):
+    /// mixed or stereo, WAV growing into RF64, at a rate of its own and
+    /// checkpointed against a crash, and Ogg Opus where
+    /// SIPRAL_FEATURE_OPUS is set too. And L16 as a codec, at 8 and 16
+    /// kHz, which `sipral_codec_at` lists.
+    /// </summary>
+    public const uint FeatureRecordingFormats = 524288;
 
     /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
@@ -8477,10 +9060,12 @@ public static class Sipral
     /// the same as one with a character no keypad has, and nothing of it is
     /// sent.
     ///
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
-    /// negotiation settled on no telephone event payload type: the key is a
-    /// real key and this call has nowhere in the media to put it. The INFO
-    /// forms need a dialog rather than a negotiation, and answer
+    /// `SIPRAL_DTMF_RTP` on a call whose negotiation settled on no telephone
+    /// event payload type writes the digits into the audio instead, as
+    /// `SIPRAL_DTMF_IN_BAND` does on any call: the one way such a far end can
+    /// hear a key. Both need the call's media, and answer
+    /// `SIPRAL_STATUS_WRONG_STATE` before there is any. The INFO forms need a
+    /// dialog rather than a negotiation, and answer
     /// `SIPRAL_STATUS_WRONG_STATE` before there is one.
     ///
     /// Safety
@@ -8663,8 +9248,10 @@ public static class Sipral
     /// number this build has no codec for.
     ///
     /// It is spelled as IANA registered it, which is also how it goes on an
-    /// `a=rtpmap` line. The string belongs to the library and lives as long as
-    /// it is loaded.
+    /// `a=rtpmap` line — with the rate after it for L16, `L16/8000` and
+    /// `L16/16000`, which is one encoding name at two rates and is named that
+    /// way in a codec order. The string belongs to the library and lives as
+    /// long as it is loaded.
     ///
     /// Safety
     ///
@@ -10744,6 +11331,90 @@ public static class Sipral
     public static void StackRtpPortRelease(ulong stack, uint port)
     {
         Check(NativeMethods.sipral_stack_rtp_port_release(stack, port));
+    }
+
+    /// <summary>
+    /// Listen for keypad digits in this call's far-end audio as `mode` says:
+    /// a SipralDtmfDetection. Before the call has media as well as
+    /// after, for the rest of the call.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+    /// not run.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    /// </summary>
+    public static void CallDtmfDetection(ulong stack, ulong call, uint mode)
+    {
+        Check(NativeMethods.sipral_call_dtmf_detection(stack, call, mode));
+    }
+
+    /// <summary>
+    /// Listen for call progress on this call and decide who answers it, as
+    /// `config` says, or stop with `config.listen` off. Meant for a call this
+    /// stack placed, straight after `sipral_call_place`: the tones are
+    /// listened for from the first frame of early media, and who answered is
+    /// decided from the 2xx on. Each thing heard is a
+    /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+    /// not run; `SIPRAL_STATUS_INVALID_ARGUMENT` for a value no detector
+    /// takes, which changes nothing.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_progress_config_t` whose `size`
+    /// member says how long it is.
+    /// </summary>
+    public static void CallDetectProgress(ulong stack, ulong call, in SipralProgressConfig config)
+    {
+        Check(NativeMethods.sipral_call_detect_progress(stack, call, in config));
+    }
+
+    /// <summary>
+    /// Beep on this call while it is recorded, as `tone` says, or play no
+    /// tone with `tone.enabled` off. A recording already running starts
+    /// beeping at once; one started later beeps from its first frame.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
+    /// not run; `SIPRAL_STATUS_INVALID_ARGUMENT`, naming the member, for a
+    /// tone that is not a beep, which changes nothing.
+    ///
+    /// Safety
+    ///
+    /// `tone` must point at a `sipral_consent_tone_t` whose `size` member
+    /// says how long it is.
+    /// </summary>
+    public static void CallConsentTone(ulong stack, ulong call, in SipralConsentTone tone)
+    {
+        Check(NativeMethods.sipral_call_consent_tone(stack, call, in tone));
+    }
+
+    /// <summary>
+    /// Start recording this call to `path`, written as `options` say: WAV or
+    /// Ogg Opus, mixed or stereo with this end on the left, at a rate of the
+    /// file's own. Everything else is sipral_media_record_start's,
+    /// which is this with every option zero.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for options no file can be written
+    /// with and for a path the file system refuses, and
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for Ogg Opus in a build with no Opus.
+    /// `SIPRAL_STATUS_RECORDING_FAILED` when the file was made and would not
+    /// take its header.
+    ///
+    /// Safety
+    ///
+    /// `path` must be readable for `path_len` bytes, and `options` must point
+    /// at a `sipral_recording_options_t` whose `size` member says how long
+    /// it is.
+    /// </summary>
+    public static void MediaRecordStartWith(ulong media, string path, in SipralRecordingOptions options)
+    {
+        var pathBytes = Encoding.UTF8.GetBytes(path);
+        var pathSigned = new sbyte[pathBytes.Length];
+        Buffer.BlockCopy(pathBytes, 0, pathSigned, 0, pathBytes.Length);
+        Check(NativeMethods.sipral_media_record_start_with(media, pathSigned, (nuint)pathSigned.Length, in options));
     }
 
 }
