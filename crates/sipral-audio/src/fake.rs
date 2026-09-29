@@ -438,6 +438,7 @@ struct FakeCallState {
     ended: bool,
     destination: Option<std::net::SocketAddr>,
     render_delay: Option<Duration>,
+    pulls: usize,
 }
 
 /// The test's side of a [`FakeCall`].
@@ -460,6 +461,7 @@ impl FakeCallControl {
                 ended: false,
                 destination: Some(destination),
                 render_delay: None,
+                pulls: 0,
             })),
         }
     }
@@ -489,6 +491,23 @@ impl FakeCallControl {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .render_delay
+    }
+
+    /// How many frames the loudspeaker side has pulled from the call.
+    #[must_use]
+    pub fn pulls(&self) -> usize {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pulls
+    }
+
+    /// Move the call to another rate, twenty-millisecond frames, as a
+    /// re-negotiation onto another codec does under a live call.
+    pub fn set_rate(&self, rate_hz: u32) {
+        let mut state = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        state.rate_hz = rate_hz;
+        state.frame_samples = (rate_hz / 50) as usize;
     }
 
     /// End the call's media.
@@ -534,10 +553,11 @@ impl CallAudio for FakeCall {
     }
 
     fn playback(&mut self, out: &mut [i16]) -> Result<(), CallGone> {
-        let state = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
         if state.ended {
             return Err(CallGone::Ended);
         }
+        state.pulls += 1;
         out.fill(state.plays);
         Ok(())
     }

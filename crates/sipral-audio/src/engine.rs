@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use crate::device::{
     AudioEvent, Change, DeviceHandle, DeviceInfo, Direction, Origin, Role, SelectError, Selection,
 };
 use crate::probe::{DEFAULT_PROBE_WAIT, probe};
-use crate::pump::{Command, Pump, Report, Ring, Stream};
+use crate::pump::{Carried, Command, Finished, Pump, Report, Ring, Stream};
 
 /// When the devices are opened.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,6 +146,10 @@ pub struct Engine {
     transmit: Option<Box<dyn FnMut(CallId, Outgoing) + Send>>,
     now: Arc<dyn Fn() -> Instant + Send + Sync>,
     attached: Vec<CallId>,
+    /// The attached calls' audio while no pump runs to carry it: a call
+    /// attached before a manual activation, and every call across a
+    /// deactivation, handed to the next pump when it starts.
+    parked: Carried,
     ringing: bool,
     events: VecDeque<AudioEvent>,
 }
@@ -199,8 +203,9 @@ impl<T> PerDirection<T> {
     }
 }
 
-/// The pump's thread, returning the transmit function it was given.
-type PumpThread = JoinHandle<Box<dyn FnMut(CallId, Outgoing) + Send>>;
+/// The pump's thread, returning the transmit function it was given and the
+/// calls it was carrying.
+type PumpThread = JoinHandle<Finished>;
 
 /// The two halves of a call's audio, as a platform answered for them.
 type OpenedPair = (
@@ -235,6 +240,7 @@ impl Engine {
             transmit: Some(transmit),
             now,
             attached: Vec::new(),
+            parked: Vec::new(),
             ringing: false,
             events: VecDeque::new(),
         }
@@ -450,7 +456,8 @@ impl Engine {
 
     /// Carry this call's audio: its playback to the loudspeaker, the
     /// microphone into it. Under [`Activation::Automatic`] the first one
-    /// opens the devices.
+    /// opens the devices; under [`Activation::Manual`] a call attached
+    /// before [`Engine::activate`] is carried from the activation on.
     ///
     /// # Errors
     /// What opening the devices said, under automatic activation; the call
@@ -459,13 +466,17 @@ impl Engine {
         if !self.attached.contains(&id) {
             self.attached.push(id);
         }
+        self.parked.retain(|(parked, _)| *parked != id);
         let opened = if self.config.activation == Activation::Automatic && !self.is_active() {
             self.start()
         } else {
             Ok(())
         };
-        if let Some(pump) = self.pump.as_ref() {
-            let _ = pump.sender.send(Command::Attach(id, audio));
+        match self.pump.as_ref() {
+            Some(pump) => {
+                let _ = pump.sender.send(Command::Attach(id, audio));
+            }
+            None => self.parked.push((id, audio)),
         }
         opened
     }
@@ -474,6 +485,7 @@ impl Engine {
     /// the devices, unless a ring is playing.
     pub fn detach(&mut self, id: CallId) {
         self.attached.retain(|attached| *attached != id);
+        self.parked.retain(|(parked, _)| *parked != id);
         if let Some(pump) = self.pump.as_ref() {
             let _ = pump.sender.send(Command::Detach(id));
         }
@@ -609,6 +621,11 @@ impl Engine {
                 Change::Reopened(Role::Ringer),
             );
         }
+        if let Some(pump) = self.pump.as_ref() {
+            for (id, audio) in self.parked.drain(..) {
+                let _ = pump.sender.send(Command::Attach(id, audio));
+            }
+        }
         microphone.and(speaker)
     }
 
@@ -618,9 +635,10 @@ impl Engine {
         };
         let _ = pump.sender.send(Command::Quit);
         if let Some(thread) = pump.thread.take()
-            && let Ok(transmit) = thread.join()
+            && let Ok((transmit, carried)) = thread.join()
         {
             self.transmit = Some(transmit);
+            self.parked = carried;
         }
         self.running = PerRole::default();
     }
@@ -843,13 +861,13 @@ impl Engine {
     /// refreshed. Called from the application's own loop, a few times a
     /// second; every consequence comes out of [`Engine::poll_event`].
     pub fn service(&mut self) {
-        let notices = {
-            let mut backend = self.backend.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut notices = Vec::new();
-            while let Some(notice) = backend.poll_notice() {
-                notices.push(notice);
-            }
-            notices
+        let notices = match self.backend.try_lock() {
+            Ok(mut backend) => drain_notices(&mut **backend),
+            Err(TryLockError::Poisoned(poisoned)) => drain_notices(&mut **poisoned.into_inner()),
+            // a probe the engine walked away from is still inside the
+            // platform: what it announced waits for a later service, and
+            // the application's loop does not wait on the driver
+            Err(TryLockError::WouldBlock) => Vec::new(),
         };
         for notice in notices {
             match notice {
@@ -889,6 +907,7 @@ impl Engine {
         let report = Arc::clone(&pump.report);
         for id in report.take_ended() {
             self.attached.retain(|attached| *attached != id);
+            self.parked.retain(|(parked, _)| *parked != id);
         }
         if report.take_ring_done() {
             self.ringing = false;
@@ -935,6 +954,15 @@ impl Engine {
     pub fn ticks(&self) -> u64 {
         self.pump.as_ref().map_or(0, |pump| pump.report.ticks())
     }
+}
+
+/// Everything a platform announced since it was last asked.
+fn drain_notices(backend: &mut dyn Backend) -> Vec<Notice> {
+    let mut notices = Vec::new();
+    while let Some(notice) = backend.poll_notice() {
+        notices.push(notice);
+    }
+    notices
 }
 
 impl Drop for Engine {

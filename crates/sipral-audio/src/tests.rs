@@ -414,6 +414,128 @@ fn manual_activation_is_decoupled_from_the_calls() {
     assert!(!engine.is_active());
 }
 
+/// B7, the other half: a call whose media started before the platform said
+/// the audio was ours — CallKit answering, then activating the session — is
+/// carried from the moment the devices open, and again after a deactivation
+/// and a second activation.
+#[test]
+fn a_call_attached_before_a_manual_activation_is_carried_once_active() {
+    let fake = a_desk();
+    let (mut engine, sent) = engine_with(Activation::Manual, &fake);
+    engine.refresh().unwrap();
+    let call = FakeCallControl::new(8_000, 1_111, destination());
+    engine.attach(1, call.call()).unwrap();
+    engine.activate().unwrap();
+    wait_ticks(&engine, 2);
+    // a few frames, past the resampler's own delay
+    for _ in 0..3 {
+        fake.speak_into("builtin-mic", &[2_000; 960]);
+    }
+    wait_ticks(&engine, 3);
+    assert!(
+        !call.captured().is_empty(),
+        "the microphone reached the call"
+    );
+    assert!(
+        fake.played_by("builtin-out").contains(&1_111),
+        "the call reached the loudspeaker"
+    );
+    assert!(!sent.lock().unwrap().is_empty());
+    engine.deactivate();
+    let captured = call.captured().len();
+    engine.activate().unwrap();
+    wait_ticks(&engine, 2);
+    for _ in 0..3 {
+        fake.speak_into("builtin-mic", &[2_000; 960]);
+    }
+    wait_ticks(&engine, 3);
+    assert!(
+        call.captured().len() > captured,
+        "and again after the second activation"
+    );
+    engine.detach(1);
+    engine.deactivate();
+    engine.activate().unwrap();
+    wait_ticks(&engine, 3);
+    let pulls = call.pulls();
+    wait_ticks(&engine, 3);
+    assert_eq!(call.pulls(), pulls, "a detached call stays detached");
+}
+
+/// A direction with no device from the start is still carried at the
+/// call's own pace: one frame a tick each way, not a device frame's worth of
+/// call frames, which would send packets several times faster than real
+/// time and drain the far end's audio as fast.
+#[test]
+fn a_direction_with_no_device_is_carried_at_the_calls_own_pace() {
+    let fake = FakeControl::new(RATE);
+    let (mut engine, sent) = engine_with(Activation::Manual, &fake);
+    engine.refresh().unwrap();
+    assert_eq!(engine.activate(), Err(BackendError::NoDevice));
+    let call = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(1, call.call()).unwrap();
+    wait_ticks(&engine, 2);
+    let (ticks, captured, pulls) = (engine.ticks(), call.captured().len(), call.pulls());
+    wait_ticks(&engine, 10);
+    let ran = usize::try_from(engine.ticks() - ticks).unwrap();
+    let captured = call.captured().len() - captured;
+    let pulls = call.pulls() - pulls;
+    assert!(captured <= ran + 1, "{captured} frames in {ran} ticks");
+    assert!(pulls <= ran + 1, "{pulls} pulls in {ran} ticks");
+    assert!(captured >= ran.saturating_sub(1) && pulls >= ran.saturating_sub(1));
+    assert!(!sent.lock().unwrap().is_empty());
+}
+
+/// A call re-negotiated onto a codec at another rate under a live call is
+/// pumped at its new rate from then on.
+#[test]
+fn a_call_that_changes_rate_midway_is_pumped_at_its_new_rate() {
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    let call = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(1, call.call()).unwrap();
+    fake.speak_into("builtin-mic", &[1_000; 960]);
+    wait_ticks(&engine, 2);
+    assert!(call.captured().iter().all(|frame| frame.len() == 160));
+    call.set_rate(16_000);
+    wait_ticks(&engine, 1);
+    let before = call.captured().len();
+    for _ in 0..4 {
+        fake.speak_into("builtin-mic", &[1_000; 960]);
+    }
+    wait_ticks(&engine, 3);
+    let after = call.captured();
+    assert!(after.len() > before);
+    assert!(
+        after.iter().skip(before).all(|frame| frame.len() == 320),
+        "{:?}",
+        after.iter().skip(before).map(Vec::len).collect::<Vec<_>>()
+    );
+}
+
+/// A driver stuck inside a probe the engine walked away from does not hold
+/// up the servicing the application's loop does a few times a second.
+#[test]
+fn a_stuck_driver_does_not_hold_up_servicing() {
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Manual, &fake);
+    fake.hang();
+    assert_eq!(engine.refresh().map(|_| ()), Err(BackendError::TimedOut));
+    let releaser = {
+        let fake = fake.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            fake.release();
+        })
+    };
+    let started = Instant::now();
+    engine.service();
+    let took = started.elapsed();
+    releaser.join().unwrap();
+    assert!(took < Duration::from_secs(1), "service waited {took:?}");
+}
+
 /// And under automatic activation they do.
 #[test]
 fn automatic_activation_follows_the_calls() {
@@ -615,7 +737,10 @@ fn the_level_meter_reads_per_direction() {
     assert_eq!(engine.level(Direction::Input).peak(), 0);
     let call = FakeCallControl::new(8_000, 9_000, destination());
     engine.attach(1, call.call()).unwrap();
-    wait_ticks(&engine, 2);
+    // the resampler overshoots the step from silence to the call's
+    // constant, and the meter holds a peak for up to two windows of five
+    // frames: wait until the step has left both
+    wait_ticks(&engine, 8);
     fake.speak_into("builtin-mic", &[-12_000; 960]);
     wait_ticks(&engine, 3);
     assert_eq!(engine.level(Direction::Input).peak(), 12_000);

@@ -49,6 +49,14 @@ pub(crate) struct Ring {
     pub(crate) looped: bool,
 }
 
+/// Calls' audio by the engine's name for them: what a pump that finished
+/// hands back, and what the engine keeps while no pump runs.
+pub(crate) type Carried = Vec<(CallId, Box<dyn CallAudio>)>;
+
+/// What a pump's thread returns: the transmit function it was given and the
+/// calls it was still carrying.
+pub(crate) type Finished = (Box<dyn FnMut(CallId, Outgoing) + Send>, Carried);
+
 /// What the engine asks the pump to do.
 pub(crate) enum Command {
     /// Carry this call's audio from here on.
@@ -207,34 +215,54 @@ struct Call {
 }
 
 impl Call {
-    fn new(id: CallId, audio: Box<dyn CallAudio>) -> Option<Self> {
+    /// A call carried between a microphone at `microphone_hz` and a
+    /// loudspeaker at `speaker_hz`, or `None` for one whose media has
+    /// already ended.
+    fn new(
+        id: CallId,
+        audio: Box<dyn CallAudio>,
+        microphone_hz: u32,
+        speaker_hz: u32,
+    ) -> Option<Self> {
         let rate_hz = audio.sample_rate().ok()?;
         let frame_samples = audio.frame_samples().ok()?;
         Some(Self {
             id,
             audio,
             rate_hz,
-            up: Lane::between(rate_hz, rate_hz),
-            down: Lane::between(rate_hz, rate_hz),
-            up_from_hz: rate_hz,
-            down_to_hz: rate_hz,
+            up: Lane::between(microphone_hz, rate_hz),
+            down: Lane::between(rate_hz, speaker_hz),
+            up_from_hz: microphone_hz,
+            down_to_hz: speaker_hz,
             frame: vec![0; frame_samples],
         })
     }
 
-    fn lanes_for(&mut self, microphone_hz: Option<u32>, speaker_hz: Option<u32>) {
-        if let Some(hz) = microphone_hz
-            && hz != self.up_from_hz
-        {
-            self.up = Lane::between(hz, self.rate_hz);
-            self.up_from_hz = hz;
+    fn lanes_for(&mut self, microphone_hz: u32, speaker_hz: u32) {
+        if microphone_hz != self.up_from_hz {
+            self.up = Lane::between(microphone_hz, self.rate_hz);
+            self.up_from_hz = microphone_hz;
         }
-        if let Some(hz) = speaker_hz
-            && hz != self.down_to_hz
-        {
-            self.down = Lane::between(self.rate_hz, hz);
-            self.down_to_hz = hz;
+        if speaker_hz != self.down_to_hz {
+            self.down = Lane::between(self.rate_hz, speaker_hz);
+            self.down_to_hz = speaker_hz;
         }
+    }
+
+    /// Follow the call's own rate and frame length, which a re-negotiation
+    /// onto another codec moves under a live call.
+    fn follow_format(&mut self) -> Result<(), CallGone> {
+        let rate_hz = self.audio.sample_rate()?;
+        let frame_samples = self.audio.frame_samples()?;
+        if rate_hz != self.rate_hz {
+            self.rate_hz = rate_hz;
+            self.up = Lane::between(self.up_from_hz, rate_hz);
+            self.down = Lane::between(rate_hz, self.down_to_hz);
+        }
+        if frame_samples != self.frame.len() {
+            self.frame.resize(frame_samples, 0);
+        }
+        Ok(())
     }
 }
 
@@ -341,8 +369,9 @@ impl Pump {
         }
     }
 
-    /// Run until told to quit, one tick a frame.
-    pub(crate) fn run(mut self) -> Box<dyn FnMut(CallId, Outgoing) + Send> {
+    /// Run until told to quit, one tick a frame; then hand back the transmit
+    /// function and every call still carried, for the next pump to take up.
+    pub(crate) fn run(mut self) -> Finished {
         let mut next = Instant::now();
         while !self.quit {
             self.tick();
@@ -356,13 +385,19 @@ impl Pump {
                 next = now;
             }
         }
-        self.transmit
+        let calls = self
+            .calls
+            .into_iter()
+            .map(|call| (call.id, call.audio))
+            .collect();
+        (self.transmit, calls)
     }
 
     /// One frame's worth of work.
     pub(crate) fn tick(&mut self) {
         self.take_commands();
         self.check_lost();
+        self.follow_formats();
         self.capture();
         self.play();
         self.ring();
@@ -374,8 +409,9 @@ impl Pump {
             match self.commands.try_recv() {
                 Ok(Command::Attach(id, audio)) => {
                     self.calls.retain(|call| call.id != id);
-                    if let Some(mut call) = Call::new(id, audio) {
-                        call.lanes_for(self.microphone_hz(), self.speaker_hz());
+                    if let Some(mut call) =
+                        Call::new(id, audio, self.microphone_hz(), self.speaker_hz())
+                    {
                         call.audio.set_render_delay(self.render_delay());
                         self.calls.push(call);
                     } else {
@@ -430,16 +466,31 @@ impl Pump {
                 .map_or(Duration::ZERO, |stream| stream.latency())
     }
 
-    fn microphone_hz(&self) -> Option<u32> {
+    /// The rate the microphone side runs at: the stream's, or the device
+    /// rate the silence stands in at when there is no microphone.
+    fn microphone_hz(&self) -> u32 {
         self.microphone
             .as_ref()
-            .map(|stream| stream.format().sample_rate_hz)
+            .map_or(self.device_hz, |stream| stream.format().sample_rate_hz)
     }
 
-    fn speaker_hz(&self) -> Option<u32> {
+    /// The same for the loudspeaker side.
+    fn speaker_hz(&self) -> u32 {
         self.speaker
             .as_ref()
-            .map(|stream| stream.format().sample_rate_hz)
+            .map_or(self.device_hz, |stream| stream.format().sample_rate_hz)
+    }
+
+    /// Every call at its own current rate, and a call whose media ended let
+    /// go of.
+    fn follow_formats(&mut self) {
+        let mut ended = Vec::new();
+        for call in &mut self.calls {
+            if call.follow_format().is_err() {
+                ended.push(call.id);
+            }
+        }
+        self.let_go(&ended);
     }
 
     fn check_lost(&mut self) {
