@@ -7,10 +7,10 @@
 //!
 //! A reduced-size packet is told apart from a compound one by its first
 //! individual packet: a compound packet starts with SR or RR, a reduced-size
-//! one does not (RFC 5506 §3). Everything else A.2 of RFC 3550 checks still
-//! applies — version 2 throughout, padding only on the last packet, lengths
-//! that add up to the datagram — and so does the rule that only a session
-//! which negotiated `a=rtcp-rsize` sees one at all.
+//! one need not (RFC 5506 §3.4.2, §4.1). Everything else A.2 of RFC 3550
+//! checks still applies — version 2 throughout, padding only on the last
+//! packet, lengths that add up to the datagram — and so does the rule that
+//! only a session which negotiated `a=rtcp-rsize` sees one at all.
 
 use core::fmt;
 
@@ -31,7 +31,7 @@ const WORD_LEN: usize = 4;
 pub enum RtcpForm {
     /// SR or RR first, then SDES with a CNAME (RFC 3550 §6.1).
     Compound,
-    /// Anything else first: feedback on its own (RFC 5506 §3).
+    /// Anything else first: feedback on its own (RFC 5506 §4.1).
     ReducedSize,
 }
 
@@ -45,7 +45,7 @@ pub enum Slot {
     Early,
 }
 
-/// When reduced-size RTCP may be sent (RFC 5506 §3 and §5).
+/// When reduced-size RTCP may be sent (RFC 5506 §4 and §5).
 ///
 /// Reduced size is only ever a choice for an Early packet: every Regular
 /// packet stays compound, so the reports and the CNAME keep flowing at the
@@ -194,7 +194,7 @@ impl<'a> ReceivedRtcp<'a> {
     /// SR or RR first means compound, and the whole of RFC 3550's
     /// validation applies through [`CompoundPacket::parse`]. Anything else
     /// is reduced size, refused unless the session negotiated it; accepted,
-    /// it gets the checks RFC 5506 §3 keeps — version 2 in every packet,
+    /// it gets the checks RFC 5506 §3.4.2 keeps — version 2 in every packet,
     /// padding only on the last, lengths adding up exactly. Either way,
     /// every feedback message inside must itself parse.
     ///
@@ -263,7 +263,7 @@ impl<'a> ReceivedRtcp<'a> {
 }
 
 /// Writes a reduced-size RTCP packet: Generic NACKs and nothing else, the
-/// first of them where a compound packet's report would be (RFC 5506 §3).
+/// first of them where a compound packet's report would be (RFC 5506 §4.1).
 #[derive(Clone, Copy, Debug)]
 pub struct ReducedSizeBuilder<'a> {
     /// The NACKs to send, at least one.

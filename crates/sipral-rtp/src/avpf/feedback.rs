@@ -39,10 +39,10 @@ const BLP_BITS: u16 = 16;
 /// One Generic NACK entry (RFC 4585 §6.2.1): a lost packet and a bitmask of
 /// the sixteen that follow it.
 ///
-/// "If bit i of BLP is set to 1, the receiver has not received RTP packet
-/// number (PID+i) (modulo 2^16)", where the least significant bit is bit
-/// one. A clear bit says nothing: the sender "MUST NOT assume that a
-/// receiver has received a packet because its bit was set to 0".
+/// "bit i of the bit mask is set to 1 if the receiver has not received RTP
+/// packet number (PID+i) (modulo 2^16)", where the least significant bit is
+/// bit one. A clear bit says nothing: "the sender MUST NOT assume that a
+/// receiver has received a packet because its bit mask was set to 0".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct NackEntry {
     /// The sequence number of a lost packet.

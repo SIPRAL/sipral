@@ -14,8 +14,8 @@
 
 use std::time::Duration;
 
-/// `l` in `T_dither_max = l * T_rr` (RFC 4585 §3.4) for a session with more
-/// than two members.
+/// `l` in `T_dither_max = l * T_rr` (RFC 4585 §3.5.2, step 2b) for a
+/// session with more than two members.
 const DITHER_FRACTION: f64 = 0.5;
 
 /// A `unit_interval` sanitized into `[0, 1]`, so a hostile draw never
@@ -75,8 +75,8 @@ pub enum RegularPacket {
 }
 
 /// The per-session state of RFC 4585 §3.5: `tp`, `tn`, `T_rr`,
-/// `allow_early`, `T_rr_last` and `T_rr_current_interval`, plus the time an
-/// Early packet is waiting for, if one is.
+/// `allow_early` and `T_rr_last`, plus the time an Early packet is waiting
+/// for, if one is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AvpfTimer {
     config: AvpfConfig,
@@ -85,22 +85,15 @@ pub struct AvpfTimer {
     t_rr: Duration,
     allow_early: bool,
     t_rr_last: Option<Duration>,
-    t_rr_current: Duration,
     early_at: Option<Duration>,
 }
 
 impl AvpfTimer {
     /// Start a session at `now` (§3.5.1): `allow_early` set, no Regular
     /// packet sent yet, the first one due after `first_interval` — which the
-    /// caller computes by RFC 3550 §6.3 — and a first
-    /// `T_rr_current_interval` drawn from `unit_interval`.
+    /// caller computes by RFC 3550 §6.3.
     #[must_use]
-    pub fn new(
-        config: AvpfConfig,
-        now: Duration,
-        first_interval: Duration,
-        unit_interval: f64,
-    ) -> Self {
+    pub fn new(config: AvpfConfig, now: Duration, first_interval: Duration) -> Self {
         Self {
             config,
             tp: now,
@@ -108,7 +101,6 @@ impl AvpfTimer {
             t_rr: first_interval,
             allow_early: true,
             t_rr_last: None,
-            t_rr_current: current_interval(config.trr_interval, unit_interval),
             early_at: None,
         }
     }
@@ -131,8 +123,8 @@ impl AvpfTimer {
         self.allow_early
     }
 
-    /// `T_dither_max` (§3.4): zero point to point, half of `T_rr`
-    /// otherwise.
+    /// `T_dither_max` (§3.5.2, step 2b): zero point to point, half of
+    /// `T_rr` otherwise.
     #[must_use]
     pub fn dither_max(&self) -> Duration {
         if self.config.point_to_point {
@@ -148,18 +140,21 @@ impl AvpfTimer {
     ///
     /// In order: feedback joins an Early packet already waiting; rides the
     /// Regular packet if that is due within `T_dither_max` anyway; when
-    /// `allow_early` is clear, waits for the Regular packet or is discarded
-    /// if that is too late; and otherwise gets an Early packet of its own at
-    /// `t0 + RND * T_dither_max`, which clears `allow_early` and pushes the
-    /// next Regular packet out to `tp + 2 * T_rr`, so the Early packet costs
-    /// no more bandwidth than the Regular one it displaces.
+    /// `allow_early` is clear, waits for the Regular packet if `tn - t0` is
+    /// less than `T_max_fb_delay` and is discarded otherwise (step 4a); and
+    /// otherwise gets an Early packet of its own at
+    /// `t0 + RND * T_dither_max`, which clears `allow_early`, pushes the
+    /// next Regular packet out to `tp + 2 * T_rr` and moves `tp` to the
+    /// previous `tn` (step 6), so the Early packet costs no more bandwidth
+    /// than the Regular one it displaces.
     pub fn feedback(
         &mut self,
         t0: Duration,
         max_delay: Option<Duration>,
         unit_interval: f64,
     ) -> FeedbackTiming {
-        let useful_at = |at: Duration| max_delay.is_none_or(|max| at.saturating_sub(t0) <= max);
+        // step 4a: useful while "tn - t0 < T_max_fb_delay"
+        let useful_at = |at: Duration| max_delay.is_none_or(|max| at.saturating_sub(t0) < max);
         if let Some(te) = self.early_at {
             let te = te.max(t0);
             return if useful_at(te) {
@@ -179,7 +174,9 @@ impl AvpfTimer {
         let te = t0.saturating_add(scale(dither, unit(unit_interval)));
         self.early_at = Some(te);
         self.allow_early = false;
+        let previous = self.tn;
         self.tn = self.tp.saturating_add(self.t_rr.saturating_mul(2));
+        self.tp = previous;
         FeedbackTiming::Early(te)
     }
 
@@ -192,10 +189,12 @@ impl AvpfTimer {
     /// The Regular deadline `tn` arrived (§3.5.3). `feedback_pending` says
     /// whether feedback is waiting for this packet; `next_interval` is the
     /// Regular interval RFC 3550 computes for the one after it, and
-    /// `unit_interval` the draw for the next `T_rr_current_interval`.
+    /// `unit_interval` the draw for this deadline's `T_rr_current_interval`,
+    /// which §3.5.3 computes afresh at every deadline.
     ///
-    /// With `T_rr_interval` zero, or once `T_rr_last + T_rr_current_interval`
-    /// has passed, a full packet goes out and `T_rr_last` moves to `tn`.
+    /// With `T_rr_interval` zero, before any full packet, or once
+    /// `T_rr_last + T_rr_current_interval` has passed, a full packet goes
+    /// out and `T_rr_last` moves to `tn`.
     /// Otherwise the packet is minimal when feedback is pending and
     /// suppressed when not. Whatever was decided, `tp` moves to `tn`, the
     /// next deadline is `tn + next_interval`, `allow_early` is set again,
@@ -206,13 +205,13 @@ impl AvpfTimer {
         next_interval: Duration,
         unit_interval: f64,
     ) -> RegularPacket {
+        let current = current_interval(self.config.trr_interval, unit_interval);
         let full = self.config.trr_interval.is_zero()
             || self
                 .t_rr_last
-                .is_none_or(|last| last.saturating_add(self.t_rr_current) <= self.tn);
+                .is_none_or(|last| last.saturating_add(current) <= self.tn);
         let packet = if full {
             self.t_rr_last = Some(self.tn);
-            self.t_rr_current = current_interval(self.config.trr_interval, unit_interval);
             RegularPacket::Full
         } else if feedback_pending {
             RegularPacket::Minimal
@@ -229,8 +228,8 @@ impl AvpfTimer {
 }
 
 /// `T_rr_current_interval = RND * T_rr_interval`, `RND` uniform in
-/// `[0.5, 1.5]` (§3.4), so participants sharing a `trr-int` do not fall into
-/// step.
+/// `[0.5, 1.5]` (§3.5.3), so participants sharing a `trr-int` do not fall
+/// into step.
 fn current_interval(trr_interval: Duration, unit_interval: f64) -> Duration {
     scale(trr_interval, 0.5 + unit(unit_interval))
 }
@@ -253,7 +252,6 @@ mod tests {
             },
             Duration::ZERO,
             ms(1000),
-            0.5,
         )
     }
 
@@ -265,7 +263,6 @@ mod tests {
             },
             Duration::ZERO,
             ms(1000),
-            0.5,
         )
     }
 
@@ -311,12 +308,14 @@ mod tests {
         let mut timer = two_party(Duration::ZERO);
         let _ = timer.feedback(ms(300), None, 0.0);
         timer.early_sent();
+        // RFC 4585 §3.5.2 step 4a: still useful while tn - t0 is less than
+        // T_max_fb_delay, discarded once it is not
         assert_eq!(
-            timer.feedback(ms(400), Some(ms(1600)), 0.0),
+            timer.feedback(ms(400), Some(ms(1601)), 0.0),
             FeedbackTiming::Regular(ms(2000))
         );
         assert_eq!(
-            timer.feedback(ms(400), Some(ms(1599)), 0.0),
+            timer.feedback(ms(400), Some(ms(1600)), 0.0),
             FeedbackTiming::Discard
         );
     }
@@ -373,8 +372,8 @@ mod tests {
 
     #[test]
     fn trr_int_suppresses_regular_packets_between_full_ones() {
-        // T_rr_interval 1 s and a draw of 0.5, so T_rr_current_interval
-        // is exactly 1 s; Regular deadlines every 400 ms
+        // T_rr_interval 1 s and draws of 0.5, so T_rr_current_interval
+        // is exactly 1 s at every deadline; Regular deadlines every 400 ms
         let mut timer = AvpfTimer::new(
             AvpfConfig {
                 trr_interval: ms(1000),
@@ -382,7 +381,6 @@ mod tests {
             },
             Duration::ZERO,
             ms(400),
-            0.5,
         );
         let mut seen = Vec::new();
         for pending in [false, false, true, false, false, false] {
@@ -408,16 +406,20 @@ mod tests {
             trr_interval: ms(1000),
             point_to_point: true,
         };
-        let mut low = AvpfTimer::new(config, Duration::ZERO, ms(100), 0.0);
-        let _ = low.regular(false, ms(500), 0.0);
-        assert_eq!(low.regular(false, ms(500), 0.0), RegularPacket::Full);
-        let mut high = AvpfTimer::new(config, Duration::ZERO, ms(100), 0.0);
-        let _ = high.regular(false, ms(1000), 1.0);
+        // the first full packet at 100 ms, then deadlines 500 ms apart
+        let mut timer = AvpfTimer::new(config, Duration::ZERO, ms(100));
+        assert_eq!(timer.regular(false, ms(500), 0.5), RegularPacket::Full);
+        // 500 ms on: a draw of 0 makes T_rr_current_interval 500 ms, due
+        assert_eq!(timer.regular(false, ms(500), 0.0), RegularPacket::Full);
+        // 500 ms on again: a draw of 1 makes it 1.5 s, not yet
         assert_eq!(
-            high.regular(false, ms(1000), 0.0),
+            timer.regular(false, ms(500), 1.0),
             RegularPacket::Suppressed
         );
-        assert_eq!(high.regular(false, ms(1000), 0.0), RegularPacket::Full);
+        // §3.5.3 draws afresh at each deadline: 1 s since the last full
+        // packet, and a draw of 0.25 (750 ms) sends one where the 1.5 s drawn
+        // a deadline ago would not have
+        assert_eq!(timer.regular(false, ms(500), 0.25), RegularPacket::Full);
     }
 
     #[test]
@@ -426,7 +428,8 @@ mod tests {
             trr_interval: Duration::MAX,
             point_to_point: false,
         };
-        let mut timer = AvpfTimer::new(config, Duration::MAX, Duration::MAX, f64::NAN);
+        let mut timer = AvpfTimer::new(config, Duration::MAX, Duration::MAX);
+        let _ = timer.regular(false, Duration::MAX, f64::NAN);
         let _ = timer.feedback(Duration::MAX, Some(Duration::ZERO), f64::INFINITY);
         let _ = timer.regular(true, Duration::MAX, -1.0);
         let _ = timer.feedback(Duration::ZERO, None, f64::NEG_INFINITY);
