@@ -12379,3 +12379,976 @@ fn a_port_a_call_took_comes_back_when_the_call_ends() {
         "the ended call gave its port back"
     );
 }
+
+// -- RTCP feedback (RFC 4585, RFC 5506) ---------------------------------------
+
+fn feedback_catalog() -> CodecCatalog {
+    CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_feedback(true)
+}
+
+fn names(stream: &MediaDescription) -> Vec<String> {
+    stream
+        .attributes
+        .iter()
+        .map(|attribute| match attribute.value.as_deref() {
+            Some(value) => format!("{}:{value}", attribute.name),
+            None => attribute.name.clone(),
+        })
+        .collect()
+}
+
+fn agreed(
+    pair: &mut Pair,
+    call: CallHandle,
+    remote: CallHandle,
+) -> [Option<crate::FeedbackAgreed>; 2] {
+    let now = pair.now;
+    let placing = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .statistics(now)
+        .feedback;
+    let answering = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("the callee's media")
+        .statistics(now)
+        .feedback;
+    [placing, answering]
+}
+
+#[test]
+fn a_call_that_asks_for_feedback_runs_avpf_with_nacks_and_reduced_size() {
+    let mut pair = Pair::new(feedback_catalog());
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let offered = one_stream(&pair.callee.offer_received().expect("an offer"));
+    assert_eq!(offered.proto, "RTP/AVPF");
+    let lines = names(&offered);
+    assert!(lines.contains(&"rtcp-fb:* nack".to_owned()), "{lines:?}");
+    assert!(lines.contains(&"rtcp-rsize".to_owned()), "{lines:?}");
+    let answered = one_stream(&pair.caller.answer_received().expect("an answer"));
+    assert_eq!(
+        answered.proto, "RTP/AVPF",
+        "an answer keeps the offer's profile"
+    );
+    let lines = names(&answered);
+    assert!(lines.contains(&"rtcp-fb:* nack".to_owned()), "{lines:?}");
+    assert!(lines.contains(&"rtcp-rsize".to_owned()), "{lines:?}");
+
+    let both = crate::FeedbackAgreed {
+        generic_nack: true,
+        trr_interval: Duration::ZERO,
+        reduced_size: true,
+    };
+    assert_eq!(agreed(&mut pair, call, remote), [Some(both), Some(both)]);
+}
+
+#[test]
+fn an_answerer_that_does_not_ask_keeps_the_profile_and_agrees_to_nothing_more() {
+    let mut pair = Pair::asymmetric(
+        feedback_catalog(),
+        CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+    );
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let answered = one_stream(&pair.caller.answer_received().expect("an answer"));
+    assert_eq!(answered.proto, "RTP/AVPF");
+    assert!(
+        !names(&answered)
+            .iter()
+            .any(|line| line.starts_with("rtcp-fb") || line == "rtcp-rsize"),
+        "nothing it did not ask for"
+    );
+    let bare = crate::FeedbackAgreed::default();
+    assert_eq!(
+        agreed(&mut pair, call, remote),
+        [Some(bare), Some(bare)],
+        "RFC 4585's timing all the same: the profile is what was agreed"
+    );
+}
+
+#[test]
+fn a_call_that_does_not_ask_offers_no_feedback_and_runs_rfc_3550_alone() {
+    let mut pair = Pair::new(CodecCatalog::with_order(&["PCMU"]).expect("an order"));
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let offered = one_stream(&pair.callee.offer_received().expect("an offer"));
+    assert_eq!(offered.proto, "RTP/AVP");
+    assert_eq!(agreed(&mut pair, call, remote), [None, None]);
+}
+
+#[test]
+fn a_lost_packet_is_asked_for_and_the_sender_counts_it() {
+    let mut pair = Pair::new(feedback_catalog());
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    for tick in 0..40 {
+        tone(&mut samples, 8_000, &mut phase);
+        if tick == 20 {
+            // captured, and lost on the way
+            let _lost = pair
+                .caller
+                .engine
+                .session(call)
+                .expect("the caller's media")
+                .capture(&samples, pair.now)
+                .expect("the frame encodes")
+                .map(|datagram| datagram.payload.to_vec());
+        } else {
+            pair.exchange(call, remote, &samples);
+        }
+        pair.exchange_control(call, remote);
+        pair.advance();
+    }
+    let now = pair.now;
+    let sent = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("the callee's media")
+        .statistics(now)
+        .feedback_counts;
+    assert_eq!(sent.nacks_sent, 1, "{sent:?}");
+    assert_eq!(sent.packets_nacked, 1);
+    assert_eq!(sent.early_packets, 1, "at once, in an Early packet");
+    let heard = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .statistics(now)
+        .feedback_counts;
+    assert_eq!(heard.nacks_received, 1, "{heard:?}");
+    assert_eq!(heard.packets_asked_for, 1);
+}
+
+// -- real-time text (RFC 4103) ------------------------------------------------
+
+fn caller_text() -> SocketAddr {
+    "192.0.2.1:41000".parse().expect("an address")
+}
+
+fn callee_text() -> SocketAddr {
+    "192.0.2.2:41002".parse().expect("an address")
+}
+
+/// A call placed with a text socket, answered with one when `answering` is
+/// set, and taken as far as both sessions running.
+fn text_call(catalog: &CodecCatalog, answering: bool) -> (Pair, CallHandle, CallHandle) {
+    let mut pair = Pair::new(catalog.clone());
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let now = pair.now;
+    let call = pair
+        .caller
+        .engine
+        .place_with(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            CallMedia::new(catalog.clone(), MediaConfig::default()).text(caller_text()),
+            now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(now, false);
+    for datagram in pair.caller.outbound() {
+        pair.callee.deliver(&datagram, caller_sip(), now);
+    }
+    pair.callee.drain(now, false);
+    let remote = pair.callee.call().expect("the callee heard the INVITE");
+    let media = CallMedia::new(catalog.clone(), MediaConfig::default());
+    let media = if answering {
+        media.text(callee_text())
+    } else {
+        media
+    };
+    pair.callee
+        .engine
+        .answer_with(&mut pair.callee.agent, remote, callee_media(), media, now)
+        .expect("the answer goes");
+    pair.callee.drain(now, false);
+    pair.settle();
+    (pair, call, remote)
+}
+
+/// Move text between the two calls for `span`, a tick at a time, dropping
+/// the caller's packets whose index `lose` says to (counted from the start
+/// of this span), and say everything the callee has heard since the call
+/// began, and in how many places text was lost.
+fn carry_text(
+    pair: &mut Pair,
+    call: CallHandle,
+    remote: CallHandle,
+    span: Duration,
+    lose: impl Fn(usize) -> bool,
+) -> (String, u32) {
+    let mut sent = 0;
+    let mut heard = String::new();
+    let mut missing = 0;
+    let end = pair.now + span;
+    while pair.now < end {
+        let now = pair.now;
+        loop {
+            let packet = pair
+                .caller
+                .engine
+                .session(call)
+                .expect("the caller's media")
+                .poll_text(now)
+                .map(|datagram| (datagram.destination, datagram.payload.to_vec()));
+            let Some((destination, datagram)) = packet else {
+                break;
+            };
+            assert_eq!(
+                destination,
+                callee_text(),
+                "sent to the far end's text socket"
+            );
+            let index = sent;
+            sent += 1;
+            if lose(index) {
+                continue;
+            }
+            assert!(
+                pair.callee
+                    .engine
+                    .session(remote)
+                    .expect("the callee's media")
+                    .receive_text(&datagram, caller_text(), now),
+                "the callee took packet {index}"
+            );
+        }
+        pair.callee.engine.handle_timeout(now);
+        pair.callee.drain(now, false);
+        pair.advance();
+    }
+    for event in pair.callee.media_events() {
+        if let MediaEvent::TextReceived {
+            text,
+            missing: lost,
+        } = event
+        {
+            heard.push_str(text);
+            missing += lost;
+        }
+    }
+    (heard, missing)
+}
+
+#[test]
+fn a_call_given_a_text_socket_offers_rfc_4103s_stream_and_the_answer_takes_it() {
+    let (pair, _, _) = text_call(
+        &CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+        true,
+    );
+    let offer = pair.callee.offer_received().expect("an offer");
+    let text = offer
+        .media
+        .iter()
+        .find(|stream| stream.media == "text")
+        .expect("an m=text stream beside the audio");
+    assert_eq!(text.port, caller_text().port());
+    assert_eq!(text.proto, "RTP/AVP");
+    assert_eq!(text.formats, ["100", "98"], "red first, t140 beneath it");
+    let lines = names(text);
+    assert!(
+        lines.contains(&"rtpmap:98 t140/1000".to_owned()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"rtpmap:100 red/1000".to_owned()),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"fmtp:100 98/98/98".to_owned()), "{lines:?}");
+    assert_eq!(text.bandwidth, ["RS:0", "RR:0"], "no RTCP on it");
+    let answer = pair.caller.answer_received().expect("an answer");
+    let taken = answer
+        .media
+        .iter()
+        .find(|stream| stream.media == "text")
+        .expect("the answer's m=text");
+    assert_eq!(taken.port, callee_text().port());
+    assert_eq!(taken.formats, ["100", "98"]);
+    assert_eq!(taken.bandwidth, ["RS:0", "RR:0"]);
+}
+
+#[test]
+fn what_one_end_types_the_other_reads_in_order_with_erasures_and_new_lines() {
+    let (mut pair, call, remote) = text_call(
+        &CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+        true,
+    );
+    for side in [call, remote] {
+        let has = if side == call {
+            pair.caller.engine.session(side).map(|s| s.has_text())
+        } else {
+            pair.callee.engine.session(side).map(|s| s.has_text())
+        };
+        assert_eq!(has, Some(true));
+    }
+    pair.caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .send_text("hellp\u{8}o\r\nthere")
+        .expect("queued");
+    let (heard, missing) = carry_text(&mut pair, call, remote, Duration::from_secs(3), |_| false);
+    assert_eq!(heard, "hellp\u{8}o\u{2028}there");
+    assert_eq!(missing, 0);
+}
+
+#[test]
+fn a_lost_packet_is_recovered_from_redundancy_and_three_are_marked_lost() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let (mut pair, call, remote) = text_call(&catalog, true);
+    let type_slowly = |pair: &mut Pair, text: &str| {
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .send_text(text)
+            .expect("queued");
+    };
+    type_slowly(&mut pair, "ab");
+    // the first packet is lost; the two after it carry it again (RFC 4103 §4)
+    let (heard, missing) = carry_text(&mut pair, call, remote, Duration::from_secs(2), |index| {
+        index == 0
+    });
+    assert_eq!(heard, "ab");
+    assert_eq!(missing, 0);
+
+    let (mut pair, call, remote) = text_call(&catalog, true);
+    // the far end has to have heard the stream before a gap in it is a gap
+    type_slowly_on(&mut pair, call, "a");
+    let (before, _) = carry_text(&mut pair, call, remote, Duration::from_secs(1), |_| false);
+    assert_eq!(before, "a");
+    let typed = |pair: &mut Pair, text: &str| {
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .send_text(text)
+            .expect("queued");
+        carry_text(pair, call, remote, Duration::from_millis(300), |_| true)
+    };
+    // three packets in a row lost: past what two generations can repair
+    let _ = typed(&mut pair, "x");
+    let _ = typed(&mut pair, "y");
+    let _ = typed(&mut pair, "z");
+    pair.caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .send_text("!")
+        .expect("queued");
+    let (heard, missing) = carry_text(&mut pair, call, remote, Duration::from_secs(3), |_| false);
+    assert_eq!(missing, 1, "one block lost, marked once (RFC 4103 §5.3)");
+    assert_eq!(
+        heard, "a\u{FFFD}yz!",
+        "the block past two generations is lost, the two after it are not"
+    );
+}
+
+fn type_slowly_on(pair: &mut Pair, call: CallHandle, text: &str) {
+    pair.caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .send_text(text)
+        .expect("queued");
+}
+
+#[test]
+fn an_answerer_with_no_text_socket_refuses_the_stream_and_there_is_no_text() {
+    let (mut pair, call, _) = text_call(
+        &CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+        false,
+    );
+    let answer = pair.caller.answer_received().expect("an answer");
+    let refused = answer
+        .media
+        .iter()
+        .find(|stream| stream.media == "text")
+        .expect("the stream is answered in its place");
+    assert!(refused.is_rejected(), "port zero");
+    let mut session = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media");
+    assert!(!session.has_text());
+    assert_eq!(session.send_text("hi"), Err(MediaError::NoText));
+}
+
+#[test]
+fn a_call_that_keys_its_audio_offers_no_text() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered);
+    let (pair, _, _) = text_call(&catalog, true);
+    let offer = pair.callee.offer_received().expect("an offer");
+    assert!(
+        offer.media.iter().all(|stream| stream.media != "text"),
+        "typed text is not sent in the clear beside encrypted audio"
+    );
+}
+
+// -- recording to a recording server (RFC 7866) -------------------------------
+
+const TCP: TransportId = TransportId(2);
+
+fn server_sip() -> SocketAddr {
+    "192.0.2.3:5060".parse().expect("an address")
+}
+
+fn this_end_copy() -> SocketAddr {
+    "192.0.2.1:42000".parse().expect("an address")
+}
+
+fn far_end_copy() -> SocketAddr {
+    "192.0.2.1:42002".parse().expect("an address")
+}
+
+/// A recording server: a user agent over TCP that answers whatever
+/// recording session reaches it with two receive-only streams.
+struct Server {
+    agent: UserAgent,
+    call: Option<CallHandle>,
+    heard: Vec<UaEvent>,
+}
+
+impl Server {
+    fn new(now: Instant) -> Self {
+        let mut agent = UserAgent::new(EndpointConfig::default(), [33; 32]).expect("an agent");
+        agent.accept_recording_sessions(true);
+        agent
+            .receive(
+                Input::TransportBound {
+                    transport: TCP,
+                    protocol: TransportProtocol::Tcp,
+                    local: server_sip(),
+                    remote: Some(caller_sip()),
+                },
+                now,
+            )
+            .expect("binding TCP");
+        Self {
+            agent,
+            call: None,
+            heard: Vec::new(),
+        }
+    }
+
+    /// Take what the caller wrote to it, and answer a recording session that
+    /// is new. `true` when anything arrived.
+    fn take(&mut self, request: &[u8], now: Instant) {
+        self.agent
+            .receive(
+                Input::StreamData {
+                    transport: TCP,
+                    data: request,
+                },
+                now,
+            )
+            .expect("bytes on a stream");
+        while let Some(event) = self.agent.poll_event() {
+            if let UaEvent::IncomingCall { call, .. } = &event {
+                self.call = Some(*call);
+                let answer = "v=0\r\no=srs 7 7 IN IP4 192.0.2.3\r\ns=-\r\nc=IN IP4 192.0.2.3\r\n\
+t=0 0\r\nm=audio 30000 RTP/AVP 0\r\na=recvonly\r\nm=audio 30002 RTP/AVP 0\r\na=recvonly\r\n";
+                self.agent
+                    .answer(*call, Some(Arc::from(answer.as_bytes())), now)
+                    .expect("the server answers");
+            }
+            self.heard.push(event);
+        }
+    }
+}
+
+/// Move everything between the three until nothing more moves: the caller's
+/// messages to the server over TCP and to the callee over UDP, and back.
+/// Returns what reached the server.
+fn settle_with(pair: &mut Pair, server: &mut Server) -> Vec<Vec<u8>> {
+    let mut reached = Vec::new();
+    for _ in 0..16 {
+        let now = pair.now;
+        let mut moved = false;
+        while let Some(transmit) = pair.caller.agent.poll_transmit() {
+            moved = true;
+            if transmit.destination == server_sip() {
+                server.take(&transmit.payload, now);
+                reached.push(transmit.payload.to_vec());
+            } else {
+                pair.callee.deliver(&transmit.payload, caller_sip(), now);
+            }
+        }
+        for datagram in pair.callee.outbound() {
+            moved = true;
+            pair.caller.deliver(&datagram, callee_sip(), now);
+        }
+        while let Some(transmit) = server.agent.poll_transmit() {
+            moved = true;
+            pair.caller
+                .agent
+                .receive(
+                    Input::StreamData {
+                        transport: TCP,
+                        data: &transmit.payload,
+                    },
+                    now,
+                )
+                .expect("bytes on a stream");
+        }
+        pair.caller.drain(now, false);
+        pair.callee.drain(now, true);
+        if !moved {
+            break;
+        }
+    }
+    reached
+}
+
+/// A call up between the pair, recorded by `caller` to a server over TCP.
+fn recorded_call() -> (Pair, Server, CallHandle, CallHandle, CallHandle) {
+    recorded_call_on(&["PCMU"])
+}
+
+/// The same, on a call whose two ends offer `codecs`.
+fn recorded_call_on(codecs: &[&str]) -> (Pair, Server, CallHandle, CallHandle, CallHandle) {
+    let mut pair = Pair::new(CodecCatalog::with_order(codecs).expect("an order"));
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let now = pair.now;
+    pair.caller
+        .agent
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: caller_sip(),
+                remote: Some(server_sip()),
+            },
+            now,
+        )
+        .expect("binding TCP");
+    let mut server = Server::new(now);
+    let recording = pair
+        .caller
+        .engine
+        .record_to(
+            &mut pair.caller.agent,
+            call,
+            crate::RecordTo::new(uri("sip:srs@example.com"), this_end_copy(), far_end_copy())
+                .to_address(TCP, server_sip()),
+            now,
+        )
+        .expect("the recording session goes");
+    settle_with(&mut pair, &mut server);
+    (pair, server, call, remote, recording)
+}
+
+fn copies(pair: &mut Pair, call: CallHandle) -> Vec<(SocketAddr, SocketAddr, Vec<u8>)> {
+    let mut session = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media");
+    let mut out = Vec::new();
+    while let Some(copy) = session.poll_recording() {
+        // the role and the socket say the same thing, for a caller that
+        // keeps its two sockets by role
+        assert_eq!(copy.far_end, copy.from == far_end_copy());
+        assert_eq!(!copy.far_end, copy.from == this_end_copy());
+        out.push((copy.from, copy.destination, copy.payload.to_vec()));
+    }
+    out
+}
+
+#[test]
+fn a_recording_session_offers_one_labelled_stream_per_party_and_names_both() {
+    let (pair, server, call, _, recording) = recorded_call();
+    assert_eq!(pair.caller.engine.recording_of(call), Some(recording));
+    let request = server
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { request, .. } => Some(request.clone()),
+            _ => None,
+        })
+        .expect("the server heard the INVITE");
+    let raw = request.as_raw();
+    assert!(sipral_ua::siprec::requires_siprec(&raw));
+    assert!(sipral_ua::siprec::contact_has_feature_tag(
+        &raw,
+        sipral_ua::siprec::SRC_FEATURE_TAG
+    ));
+    let offer = sipral_ua::siprec::read_recording_offer(&raw).expect("a recording offer");
+    let sdp = parse(offer.sdp).expect("the offer");
+    assert_eq!(sdp.media.len(), 2);
+    for (stream, (socket, label)) in sdp
+        .media
+        .iter()
+        .zip([(this_end_copy(), "1"), (far_end_copy(), "2")])
+    {
+        assert_eq!(stream.port, socket.port());
+        assert_eq!(stream.formats, ["0"], "the codec the call runs on");
+        assert_eq!(stream.direction(), Some(Direction::SendOnly));
+        assert_eq!(
+            stream.attribute("label").and_then(|a| a.value.as_deref()),
+            Some(label)
+        );
+    }
+    let metadata = offer.metadata;
+    assert_eq!(metadata.participants.len(), 2);
+    assert_eq!(
+        metadata.participants[0].name_ids[0].aor,
+        "sip:alice@example.com"
+    );
+    assert_eq!(
+        metadata.participants[1].name_ids[0].aor,
+        "sip:bob@example.com"
+    );
+    assert_eq!(
+        metadata
+            .streams
+            .iter()
+            .map(|stream| stream.label.clone().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["1", "2"]
+    );
+    metadata
+        .check_labels(&sdp)
+        .expect("every label is in the offer");
+}
+
+#[test]
+fn both_directions_of_the_call_are_copied_to_the_server_as_they_went() {
+    let (mut pair, _server, call, remote, _) = recorded_call();
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    tone(&mut samples, 8_000, &mut phase);
+    let (sent, _) = pair.speak(call, remote, &samples);
+    let out = copies(&mut pair, call);
+    assert_eq!(out.len(), 1, "this end's frame, once");
+    let (from, destination, copy) = &out[0];
+    assert_eq!(*from, this_end_copy());
+    assert_eq!(*destination, "192.0.2.3:30000".parse().expect("an address"));
+    let original = rtp_parts(&sent);
+    let copied = rtp_parts(copy);
+    assert_eq!(copied.1, original.1, "the same payload");
+    assert_eq!(copied.0.payload_type, original.0.payload_type);
+    assert_ne!(copied.0.ssrc, original.0.ssrc, "a source of its own");
+
+    // and the far end's, as it arrived: two in a row, since RFC 3550 A.1
+    // believes a source on its second packet
+    let mut back = Vec::new();
+    for _ in 0..2 {
+        let frame = pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media")
+            .capture(&samples, pair.now)
+            .expect("it encodes")
+            .map(|datagram| datagram.payload.to_vec())
+            .expect("a frame");
+        let mut arriving = frame.clone();
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .receive(&mut arriving, callee_media(), pair.now);
+        back.push(frame);
+        pair.advance();
+    }
+    let out = copies(&mut pair, call);
+    let far: Vec<_> = out
+        .iter()
+        .filter(|(from, _, _)| *from == far_end_copy())
+        .collect();
+    assert_eq!(far.len(), 1, "the packet the caller took, copied: {out:?}");
+    assert_eq!(far[0].1, "192.0.2.3:30002".parse().expect("an address"));
+    assert_eq!(rtp_parts(&far[0].2).1, rtp_parts(&back[1]).1);
+}
+
+#[test]
+fn a_hold_tells_the_server_who_sends_and_the_end_of_the_call_ends_the_recording() {
+    let (mut pair, mut server, call, _, recording) = recorded_call();
+    pair.caller
+        .agent
+        .hold(call, pair.now)
+        .expect("the re-INVITE goes");
+    let requests = settle_with(&mut pair, &mut server);
+    let reinvite = requests
+        .iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("a re-offer to the server");
+    let metadata = {
+        let mut scratch = ParseScratch::new();
+        let message =
+            sipral_core::msg::parse(reinvite, &mut scratch, ParseMode::Lenient).expect("a message");
+        sipral_ua::siprec::read_recording_offer(&message)
+            .expect("the SDP and the metadata")
+            .metadata
+    };
+    let far_stream = metadata.streams[1].id.clone();
+    assert!(
+        metadata
+            .participant_streams
+            .iter()
+            .all(|association| !association.send.contains(&far_stream)
+                && !association.recv.contains(&far_stream)),
+        "the far end is on hold, and sends nothing to be recorded"
+    );
+
+    pair.caller.agent.hangup(call, pair.now).expect("the BYE");
+    pair.caller.drain(pair.now, false);
+    let requests = settle_with(&mut pair, &mut server);
+    assert!(
+        requests.iter().any(|bytes| bytes.starts_with(b"BYE ")),
+        "the recording session ends with the call"
+    );
+    assert_eq!(pair.caller.engine.recording_of(call), None);
+    assert!(
+        server.heard.iter().any(
+            |event| matches!(event, UaEvent::CallEnded { call, .. } if Some(*call) == server.call)
+        ),
+        "the server heard the recording end"
+    );
+    let _ = recording;
+}
+
+#[test]
+fn a_call_that_replaces_the_recorded_one_takes_the_recording_over() {
+    let (mut pair, mut server, call, _, recording) = recorded_call();
+    let invite = replacing_invite(&pair, call);
+    let now = pair.now;
+    pair.caller.deliver(invite.as_bytes(), callee_sip(), now);
+    pair.caller.drain(now, false);
+    let new = pair
+        .caller
+        .heard
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::IncomingCall { call: new, .. }) => Some(*new),
+            _ => None,
+        })
+        .expect("the replacing call arrived");
+    // answered, it replaces the recorded call (RFC 3891 §3)
+    pair.caller
+        .engine
+        .answer(&mut pair.caller.agent, new, caller_media(), now)
+        .expect("the answer goes");
+    acknowledge_replacing(&mut pair, &mut server);
+    let reached = settle_with(&mut pair, &mut server);
+    assert!(pair.caller.heard.iter().any(|event| matches!(
+        event,
+        Event::Signalling(UaEvent::CallReplaced { call: replacing, replaced })
+            if *replacing == new && *replaced == call
+    )));
+    assert_eq!(pair.caller.engine.recording_of(new), Some(recording));
+    assert!(
+        pair.caller
+            .engine
+            .session(new)
+            .is_some_and(|session| session.is_copied()),
+        "the copies move to the call that replaced it"
+    );
+    let reinvite = reached
+        .iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the server is told");
+    let metadata = {
+        let mut scratch = ParseScratch::new();
+        let message =
+            sipral_core::msg::parse(reinvite, &mut scratch, ParseMode::Lenient).expect("a message");
+        sipral_ua::siprec::read_recording_offer(&message)
+            .expect("the SDP and the metadata")
+            .metadata
+    };
+    assert_eq!(
+        metadata.participants[1].name_ids[0].aor, "sip:carol@example.com",
+        "the far end of the call that replaced it"
+    );
+}
+
+#[test]
+fn a_recorded_call_that_moves_codec_offers_the_server_the_new_one() {
+    let (mut pair, mut server, call, _, _) = recorded_call_on(&["PCMU", "PCMA"]);
+    let now = pair.now;
+    pair.caller
+        .engine
+        .change_codecs(&mut pair.caller.agent, call, &["PCMA"], now)
+        .expect("the re-INVITE goes");
+    let reached = settle_with(&mut pair, &mut server);
+    let reoffer = reached
+        .iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("a re-offer to the server");
+    let sdp = {
+        let mut scratch = ParseScratch::new();
+        let message =
+            sipral_core::msg::parse(reoffer, &mut scratch, ParseMode::Lenient).expect("a message");
+        let read = sipral_ua::siprec::read_recording_offer(&message).expect("SDP and metadata");
+        parse(read.sdp).expect("the offer")
+    };
+    assert!(
+        sdp.media.iter().all(|stream| stream.formats == ["8"]),
+        "both streams on the codec the call moved to"
+    );
+    assert_eq!(sdp.media.len(), 2);
+}
+
+#[test]
+fn a_call_that_replaces_the_recorded_one_on_another_codec_is_recorded_on_that_codec() {
+    let (mut pair, mut server, call, _, _) = recorded_call_on(&["PCMU", "PCMA"]);
+    let invite = replacing_invite(&pair, call).replace("RTP/AVP 0\r\n", "RTP/AVP 8\r\n");
+    let now = pair.now;
+    pair.caller.deliver(invite.as_bytes(), callee_sip(), now);
+    pair.caller.drain(now, false);
+    let new = pair
+        .caller
+        .heard
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::IncomingCall { call: new, .. }) => Some(*new),
+            _ => None,
+        })
+        .expect("the replacing call arrived");
+    pair.caller
+        .engine
+        .answer(&mut pair.caller.agent, new, caller_media(), now)
+        .expect("the answer goes");
+    acknowledge_replacing(&mut pair, &mut server);
+    let reached = settle_with(&mut pair, &mut server);
+    let offered_pcma = reached
+        .iter()
+        .filter(|bytes| bytes.starts_with(b"INVITE "))
+        .any(|reoffer| {
+            let mut scratch = ParseScratch::new();
+            let message = sipral_core::msg::parse(reoffer, &mut scratch, ParseMode::Lenient)
+                .expect("a message");
+            let read = sipral_ua::siprec::read_recording_offer(&message).expect("SDP and metadata");
+            let sdp = parse(read.sdp).expect("the offer");
+            sdp.media.len() == 2 && sdp.media.iter().all(|stream| stream.formats == ["8"])
+        });
+    assert!(
+        offered_pcma,
+        "the server is offered the codec the replacing call runs on"
+    );
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    tone(&mut samples, 8_000, &mut phase);
+    let sent = pair
+        .caller
+        .engine
+        .session(new)
+        .expect("the replacing call's media")
+        .capture(&samples, pair.now)
+        .expect("it encodes")
+        .map(|datagram| datagram.payload.to_vec())
+        .expect("a frame");
+    assert_eq!(rtp_parts(&sent).0.payload_type, 8);
+    let out = copies(&mut pair, new);
+    assert_eq!(
+        out.len(),
+        1,
+        "the replacing call's audio reaches the server"
+    );
+    assert_eq!(rtp_parts(&out[0].2).0.payload_type, 8);
+}
+
+/// An INVITE from a new far end that replaces `call` (RFC 3891 §3): it names
+/// the dialog by its Call-ID, the caller's tag as the to-tag and the far
+/// end's as the from-tag.
+fn replacing_invite(pair: &Pair, call: CallHandle) -> String {
+    let confirmed = pair
+        .caller
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::CallConfirmed {
+                call: confirmed,
+                response: Some(response),
+                ..
+            }) if *confirmed == call => Some(response.clone()),
+            _ => None,
+        })
+        .expect("the 200 that confirmed the call");
+    let (call_id, ours, theirs) = {
+        let raw = confirmed.as_raw();
+        let tag = |addr: Option<sipral_core::msg::NameAddrRef<'_>>| {
+            addr.and_then(|addr| addr.tag())
+                .map(|tag| String::from_utf8_lossy(&tag).into_owned())
+                .expect("a tag")
+        };
+        (
+            String::from_utf8_lossy(raw.call_id().expect("a Call-ID")).into_owned(),
+            tag(raw.from().ok()),
+            tag(raw.to().ok()),
+        )
+    };
+    let offer = "v=0\r\no=carol 1 1 IN IP4 192.0.2.7\r\ns=-\r\nc=IN IP4 192.0.2.7\r\n\
+t=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+    format!(
+        "INVITE sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bKreplacing\r\nMax-Forwards: 70\r\n\
+From: <sip:carol@example.com>;tag=carol1\r\nTo: <sip:alice@example.com>\r\n\
+Call-ID: replacing@example.com\r\nCSeq: 1 INVITE\r\nContact: <sip:carol@192.0.2.7>\r\n\
+Replaces: {call_id};to-tag={ours};from-tag={theirs}\r\n\
+Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{offer}",
+        offer.len()
+    )
+}
+
+/// The far end of the replacing call acknowledges the caller's 200, which the
+/// pair does not include; everything else the caller wrote goes where the
+/// pair and the server would have taken it.
+fn acknowledge_replacing(pair: &mut Pair, server: &mut Server) {
+    let now = pair.now;
+    let mut ok = None;
+    while let Some(transmit) = pair.caller.agent.poll_transmit() {
+        let text = String::from_utf8_lossy(&transmit.payload).into_owned();
+        if text.starts_with("SIP/2.0 200") && text.contains("replacing@example.com") {
+            ok = Some(text);
+        } else if transmit.destination == server_sip() {
+            server.take(&transmit.payload, now);
+        } else {
+            pair.callee.deliver(&transmit.payload, caller_sip(), now);
+        }
+    }
+    let ok = ok.expect("the 200 to the replacing INVITE");
+    let to = ok
+        .lines()
+        .find(|line| line.starts_with("To:"))
+        .expect("a To")
+        .trim_start_matches("To:")
+        .trim()
+        .to_owned();
+    let ack = format!(
+        "ACK sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bKreplacingack\r\nMax-Forwards: 70\r\n\
+From: <sip:carol@example.com>;tag=carol1\r\nTo: {to}\r\n\
+Call-ID: replacing@example.com\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n"
+    );
+    pair.caller.deliver(ack.as_bytes(), callee_sip(), now);
+    pair.caller.drain(now, false);
+}
+
+/// A packet's header and payload.
+fn rtp_parts(datagram: &[u8]) -> (sipral_rtp::RtpHeader, Vec<u8>) {
+    let packet = sipral_rtp::RtpPacket::parse(datagram).expect("an RTP packet");
+    (packet.header(), packet.payload().to_vec())
+}

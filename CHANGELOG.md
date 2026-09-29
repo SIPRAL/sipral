@@ -209,7 +209,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   call by `RecordedCall`, and checked against the SDP's `a=label` lines;
   and the pieces of a recording session's INVITE: the SDP and metadata
   body with `Content-Disposition: recording-session`, the `+sip.src`
-  feature tag and the `siprec` option tag. Not yet wired into calls. A
+  feature tag and the `siprec` option tag. A
   `multipart` fuzz target reads any body and requires what it reads to be
   written back the same.
 - **Conferences, presence documents and publishing, in `sipral-ua`.**
@@ -225,7 +225,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   sans-I/O machine here: initial publish, `SIP-ETag` refreshes at the
   registration margin, modify, remove, 412 republished afresh, 423 retried
   with `Min-Expires`, 489 surfaced. Both XML formats go through the
-  dialog-info reader and inherit its refusals. No C ABI yet.
+  dialog-info reader and inherit its refusals.
+- **The user agent keeps conferences, presence and publications itself.** A `conference` subscription merges every NOTIFY into its own `Conference` (`UserAgent::conference`), raises `UaEvent::ConferenceChanged`, refreshes by itself on a gap and unsubscribes when the conference is deleted; a `presence` subscription reads each PIDF into `UserAgent::presence` and `UaEvent::PresenceChanged`; `UserAgent::publish`, `publish_presence` (one per account), `republish`, `refresh_publication` and `unpublish` drive RFC 3903 over the endpoint, answering challenges with the account's credentials and reporting `UaEvent::Publication`. RFC 4579's `isfocus` is read from the far end's `Contact` (`call_conference`, `subscribe_call_conference`) and written by `OutgoingCall::focus` and `set_focus`; `OutgoingCall::recording_session` places an RFC 7866 recording session (`Require: siprec`, `+sip.src`, the offer and metadata as one `multipart/mixed` body).
 - **Call audio as files, and L16 on RTP.** `sipral_media::formats`
   (none of it needs the `opus` feature): `ogg` writes RFC 3533 pages
   (lacing, continued/BOS/EOS flags, granule positions, the CRC with
@@ -259,8 +260,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   is in both offer and answer and a compound packet has gone first
   (RFC 5506), and reads and writes `a=rtcp-fb` (`nack`, `trr-int`; the rest
   ignored) and the `RTP/AVPF` and `RTP/SAVPF` profile names through the
-  `sipral_core::sdp` model. Nothing is wired into `RtpSession` yet. New
-  fuzz target `rtcp_fb`.
+  `sipral_core::sdp` model. New fuzz target `rtcp_fb`.
+- **Calls negotiate RTP/AVPF and reduced-size RTCP, and run RFC 4585's RTCP when both ends do.** `CodecCatalog::with_feedback` offers `RTP/AVPF` (`RTP/SAVPF`, `UDP/TLS/RTP/SAVPF` when keyed) with `a=rtcp-fb:* nack` and `a=rtcp-rsize`, and answers an offer on a feedback profile with the lines this stack does; a stream whose offer and answer both name one runs `RtpSession::use_feedback`: AVPF's minimum interval, Early and Regular packets by RFC 4585 §3.5, `trr-int`, Generic NACKs for the packets it finds missing, and reduced-size Early packets once a compound one has gone (RFC 5506). Nothing is retransmitted; `StreamStatistics::feedback` and `feedback_counts` say what was agreed, sent and asked for.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when
@@ -1410,7 +1411,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   events. `TextFormat` writes the `m=text` section with `t140/1000`,
   `red/1000`, the red `fmtp` and `cps`, and reads the two `fmtp` values
   back. A new fuzz target, `rtt`, drives the receiver with arbitrary
-  datagrams. Not yet reachable through the C ABI.
+  datagrams.
+- **Calls are recorded to a recording server (SIPREC).** `MediaEngine::record_to` places an RFC 7866 recording session for a running call, from its account, with two labelled sendonly streams on the call's codec and RFC 7865 metadata naming both parties; once the server answers, every packet the call sends and every packet it accepts is copied to its stream as an RTP translator would (`MediaSession::poll_recording`, `MediaEngine::poll_recording`), a hold or a codec change is offered to the server with fresh metadata (`UserAgent::update_recording_metadata`), a call that replaces the recorded one takes the recording over, and the recording session is hung up with the call (`stop_recording_to` sooner). `UserAgent::accept_recording_sessions` lets an agent act as the server: `siprec` is understood and the offer is read out of the multipart body.
+- **Real-time text in calls.** `CallMedia::text` gives a call a second socket for RFC 4103 text: the offer carries RFC 4103 §7's `m=text` (`red/1000` over `t140/1000`, two generations, `b=RS:0`/`b=RR:0`), an offered text stream is answered on it, each end sends with the other's payload numbers and the far end's `cps`, and `MediaSession::send_text`, `poll_text` (or `MediaEngine::poll_text`) and `receive_text` carry it; `MediaEvent::TextReceived` says what was typed, erasures as U+0008, new lines as U+2028 and a U+FFFD for each block no redundant copy recovered. A call that keys its audio or uses ICE neither offers nor takes text.
+- **A text sender takes new numbers mid-call.** `sipral_rtp::rtt::TextSender::reconfigure` sends under another payload numbering, redundancy or `cps` without losing what is queued or restarting its numbering, and a call's text stream follows a re-offer that renumbers `t140` or `red` on either side.
+- **Conferences, presence, real-time text, RTCP feedback and SIPREC over the C ABI (0.31).** `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` (50) with `sipral_subscription_conference`, `_conference_user_at` and `_conference_text` read a conference subscription's picture; `sipral_call_conference_uri`, `sipral_call_subscribe_conference`, `sipral_call_set_focus` and `sipral_call_config_t::focus` cover RFC 4579's focus; `sipral_account_publish_presence` and `_unpublish_presence` publish PIDF with an RPID activity, and `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` (52) reports publications and watched presentities; `sipral_call_config_t::text_address`, `sipral_media_send_text`, `_poll_text`, `_receive_text` and `SIPRAL_EVENT_KIND_TEXT_RECEIVED` (51) carry RFC 4103 text; `sipral_call_config_t::feedback` offers RTP/AVPF, reported in `sipral_media_info_t` and `sipral_stream_stats_t`; `sipral_call_record_to`, `sipral_call_stop_recording_to` and `sipral_media_poll_recording` record a call to a recording server; `sipral_call_answer_with` answers with a call's own configuration. Feature bits 20 to 23, statuses `SIPRAL_STATUS_NOT_NEGOTIATED` (20) and `SIPRAL_STATUS_NOT_A_FOCUS` (21); every binding's generated layer carries it.
 
 ### Fixed
 

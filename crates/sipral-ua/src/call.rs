@@ -226,6 +226,11 @@ pub struct OutgoingCall {
     pub(crate) destination: Option<(TransportId, SocketAddr)>,
     pub(crate) forks: ForkPolicy,
     pub(crate) extra: Vec<Extra>,
+    /// Whether this end is the conference's focus ([`OutgoingCall::focus`]).
+    pub(crate) focus: bool,
+    /// The recording metadata of a recording session, written
+    /// ([`OutgoingCall::recording_session`]).
+    pub(crate) metadata: Option<Arc<str>>,
 }
 
 impl OutgoingCall {
@@ -245,7 +250,52 @@ impl OutgoingCall {
             destination: None,
             forks: ForkPolicy::KeepFirst,
             extra: Vec::new(),
+            focus: false,
+            metadata: None,
         }
+    }
+
+    /// Place it as a conference's focus: the `Contact` of the INVITE and of
+    /// every later request and response of the call carries `isfocus`, which
+    /// RFC 4579 §4.2 has a focus include ("unless the focus wishes to hide
+    /// the fact that it is a focus"), so that a conference-aware far end
+    /// knows the dialog belongs to a conference whose URI is that `Contact`.
+    #[must_use]
+    pub const fn focus(mut self) -> Self {
+        self.focus = true;
+        self
+    }
+
+    /// Place it as a recording session (RFC 7866 §6.1) to the recording
+    /// server at the target, with `metadata` describing what is recorded.
+    ///
+    /// The INVITE carries `Require: siprec` and a `Contact` with `+sip.src`,
+    /// and its body is `multipart/mixed`: the offer (which must be set with
+    /// [`OutgoingCall::offer`], sendonly, one `a=label` per recorded stream)
+    /// and the metadata, `Content-Disposition: recording-session` (§9.1).
+    ///
+    /// # Errors
+    /// [`UaError::Recording`] for metadata that cannot be written.
+    pub fn recording_session(
+        mut self,
+        metadata: &crate::siprec::RecordingMetadata,
+    ) -> Result<Self, crate::UaError> {
+        let written = metadata.to_xml().map_err(crate::UaError::Recording)?;
+        self.metadata = Some(Arc::from(written));
+        Ok(self)
+    }
+
+    /// The feature parameters the call's `Contact` carries (RFC 3840 §9).
+    pub(crate) fn contact_features(&self) -> Box<[u8]> {
+        let mut features = Vec::new();
+        if self.focus {
+            features.extend_from_slice(b";isfocus");
+        }
+        if self.metadata.is_some() {
+            features.extend_from_slice(b";");
+            features.extend_from_slice(crate::siprec::SRC_FEATURE_TAG.as_bytes());
+        }
+        features.into_boxed_slice()
     }
 
     /// The session description to offer.
@@ -433,6 +483,15 @@ pub(crate) struct Call {
     /// the call sends afterwards: a 422's retry asks again on the same
     /// call, and a PASSporT still fresh says the same thing.
     pub(crate) signed: Option<SignedHeaders>,
+    /// The URI of the far end's `Contact` — the dialog's remote target — when
+    /// it last carried `isfocus` (RFC 4579 §4.2): the call is part of a
+    /// conference, and that is its URI. Read again from every message that
+    /// can move the remote target.
+    pub(crate) remote_focus: Option<Uri>,
+    /// The recording metadata a recording session last sent (RFC 7866
+    /// §9.1), written: every offer the session makes carries it beside the
+    /// SDP whose labels it names. `None` on every other call.
+    pub(crate) recording: Option<Arc<str>>,
 }
 
 /// `Identity` (RFC 8224 §4), or `y` in its compact form (§13.1).
@@ -522,6 +581,11 @@ pub(crate) struct ContactContext {
     /// the registration goes with the account, so no GRUU is left to name,
     /// and an empty `Contact` is no address at all (RFC 3261 §12.2.1.1).
     pub(crate) plain: Box<[u8]>,
+    /// Feature parameters this call's `Contact` carries after the address
+    /// (RFC 3840 §9): `;isfocus` for a call this end hosts a conference on
+    /// (RFC 4579 §4.2), `;+sip.src` for a recording session this end sends
+    /// (RFC 7866 §6.1). Empty for every other call.
+    pub(crate) features: Box<[u8]>,
 }
 
 /// The branch [`ForkPolicy::KeepFirst`] kept out of one INVITE's fork, or the
@@ -621,6 +685,7 @@ impl Call {
                 anonymous,
                 destination,
                 plain,
+                features: Box::default(),
             },
             from,
             peer: None,
@@ -651,6 +716,8 @@ impl Call {
             ended_by: Box::default(),
             identity: None,
             signed: None,
+            remote_focus: None,
+            recording: None,
         }
     }
 
@@ -677,6 +744,7 @@ impl Call {
                 anonymous: false,
                 destination: None,
                 plain,
+                features: Box::default(),
             },
             from,
             peer: None,
@@ -707,6 +775,8 @@ impl Call {
             ended_by: Box::default(),
             identity: None,
             signed: None,
+            remote_focus: None,
+            recording: None,
         }
     }
 
@@ -758,6 +828,8 @@ impl Call {
             ended_by: Box::default(),
             identity: None,
             signed: None,
+            remote_focus: None,
+            recording: None,
         }
     }
 }

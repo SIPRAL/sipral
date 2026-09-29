@@ -637,6 +637,48 @@ pub enum UaEvent {
         /// Old ones flagged urgent.
         urgent_old: u32,
     },
+    /// A `conference` subscription's picture of the conference changed, or
+    /// the conference ended (RFC 4575 §4.6). The picture itself is
+    /// [`UserAgent::conference`](crate::UserAgent::conference).
+    ///
+    /// Only for a document that was merged. One that was late or repeated
+    /// changes nothing and says nothing; one that could not be merged — a
+    /// partial document whose predecessor never arrived — is answered here by
+    /// asking for full state again, and the picture stands as it was until
+    /// that arrives.
+    ConferenceChanged {
+        /// Which subscription.
+        subscription: SubscriptionHandle,
+        /// [`ConferenceUpdate::Applied`](crate::ConferenceUpdate::Applied),
+        /// or [`ConferenceUpdate::Ended`](crate::ConferenceUpdate::Ended),
+        /// after which the subscription is being given up (§4.6).
+        update: crate::ConferenceUpdate,
+    },
+    /// A `presence` subscription was told about the presentity (RFC 3856
+    /// §6.8), in a document this build could read.
+    PresenceChanged {
+        /// Which subscription.
+        subscription: SubscriptionHandle,
+        /// The document, whole: every notification of this package carries
+        /// the presentity's full state.
+        presence: Arc<crate::presence::Presence>,
+    },
+    /// Something happened to state this agent keeps at a compositor (RFC
+    /// 3903): it was published or refreshed, it lapsed, it was removed, or
+    /// the compositor refused.
+    ///
+    /// Never [`PublishEvent::Challenged`](crate::PublishEvent::Challenged):
+    /// the account's credentials answer a challenge, and one they cannot is
+    /// a [`PublishEvent::Failed`](crate::PublishEvent::Failed) with the 401
+    /// or 407 in it.
+    Publication {
+        /// Which publication.
+        publication: crate::PublicationHandle,
+        /// Whose.
+        account: AccountId,
+        /// What happened.
+        event: crate::PublishEvent,
+    },
     /// A call arrived carrying a `Replaces` that named one already up, and
     /// took it over (RFC 3891). The replaced call is being hung up.
     CallReplaced {

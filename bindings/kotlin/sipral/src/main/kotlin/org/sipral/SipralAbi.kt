@@ -138,6 +138,18 @@ enum class SipralStatus(val value: Int) {
      * audio up to the last checkpoint it could write.
      */
     RECORDING_FAILED(19),
+    /**
+     * The call never agreed on what this asks for: text sent on a call
+     * whose answer took no `m=text` stream, say. Nothing was done, and
+     * only a new offer that the far end accepts changes it.
+     */
+    NOT_NEGOTIATED(20),
+    /**
+     * The far end of this call is not a conference focus: its Contact
+     * never carried `isfocus` (RFC 4579 §4.1), so there is no
+     * conference to name or subscribe to.
+     */
+    NOT_AFOCUS(21),
     ;
 
     companion object {
@@ -969,6 +981,7 @@ enum class SipralDtmf(val value: Int) {
  * Numbers already spent on features this build does not have:
  * - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
  * - 44: held for a second audio device event, which the audio engine did not need; spent all the same
+ * - 53: held for a transport that failed, with the TLS reason when there is one (wave C, tls-layers)
  */
 enum class SipralEventKind(val value: Int) {
     /**
@@ -1487,6 +1500,51 @@ enum class SipralEventKind(val value: Int) {
      * `payload.progress` says which, and what was measured.
      */
     PROGRESS_DETECTED(49),
+    /**
+     * A `conference` subscription's picture of the conference changed,
+     * or the conference ended (RFC 4575 §4.6).
+     *
+     * `payload.conference` says which subscription and what happened:
+     * `SIPRAL_CONFERENCE_UPDATE_APPLIED` for a document merged into the
+     * picture, with the version it is at and how many users it holds,
+     * and `SIPRAL_CONFERENCE_UPDATE_ENDED` for a conference the focus
+     * deleted, after which the subscription is being given up. The
+     * picture itself is read with `sipral_subscription_conference` and
+     * `sipral_subscription_conference_user_at`. A document that was late
+     * or repeated raises nothing, and one that followed a lost one is
+     * answered by the stack asking for full state again. `account` and
+     * `call` are `SIPRAL_HANDLE_NONE`; the NOTIFY itself arrived just
+     * before, as `SIPRAL_EVENT_KIND_NOTIFIED`.
+     */
+    CONFERENCE_CHANGED(50),
+    /**
+     * The far end typed something on the call's real-time text stream
+     * (RFC 4103), in the order it typed it.
+     *
+     * `call` is the call; `payload.text` holds the text, UTF-8: an
+     * erasure of the last character as BACKSPACE (U+0008), a new line
+     * as LINE SEPARATOR (U+2028), an alert as BELL (U+0007), and a
+     * REPLACEMENT CHARACTER (U+FFFD) for each block of text that was
+     * lost and no redundant copy recovered (RFC 4103 §5.3), counted in
+     * `payload.text.missing`.
+     */
+    TEXT_RECEIVED(51),
+    /**
+     * Presence moved: a `presence` subscription was told about the
+     * presentity (RFC 3856), or the state this account publishes (RFC
+     * 3903) was published, refreshed, removed, lapsed or refused.
+     *
+     * `payload.presence.kind` says which. For a subscription,
+     * `payload.presence.subscription` names it and the rest is what the
+     * PIDF document said: open or closed, the first RPID activity, the
+     * first note and the entity; the NOTIFY itself arrived just before,
+     * as `SIPRAL_EVENT_KIND_NOTIFIED`. For a publication, `account`
+     * names the account and
+     * `payload.presence.publication_state` says what became of it, with
+     * the SIP status, the lifetime the compositor granted and when the
+     * stack refreshes it.
+     */
+    PRESENCE_CHANGED(52),
     ;
 
     companion object {
@@ -3215,6 +3273,288 @@ enum class SipralRecordingLayout(val value: Int) {
 }
 
 /**
+ * What one conference document did. Names for
+ * `sipral_conference_event_t::update`.
+ */
+enum class SipralConferenceUpdate(val value: Int) {
+    /**
+     * Never written by this build.
+     */
+    UNKNOWN(0),
+    /**
+     * It was merged into the picture.
+     */
+    APPLIED(1),
+    /**
+     * The focus deleted the conference: the picture is empty, and the
+     * subscription is being given up (RFC 4575 §4.6).
+     */
+    ENDED(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralConferenceUpdate? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Where one endpoint of a conference is (RFC 4575 §5.7.2). Names for
+ * `sipral_conference_user_t::status`.
+ */
+enum class SipralEndpointStatus(val value: Int) {
+    /**
+     * The focus did not say, or said something the schema does not
+     * list.
+     */
+    UNKNOWN(0),
+    /**
+     * `pending`: waiting for policy or for the focus.
+     */
+    PENDING(1),
+    /**
+     * `dialing-out`: the focus is calling it.
+     */
+    DIALING_OUT(2),
+    /**
+     * `dialing-in`: it is calling the focus.
+     */
+    DIALING_IN(3),
+    /**
+     * `alerting`: it is ringing.
+     */
+    ALERTING(4),
+    /**
+     * `on-hold`.
+     */
+    ON_HOLD(5),
+    /**
+     * `connected`: it is in the conference.
+     */
+    CONNECTED(6),
+    /**
+     * `muted-via-focus`: in, and muted by the focus.
+     */
+    MUTED_VIA_FOCUS(7),
+    /**
+     * `disconnecting`.
+     */
+    DISCONNECTING(8),
+    /**
+     * `disconnected`: it has left.
+     */
+    DISCONNECTED(9),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralEndpointStatus? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Which piece of text sipral_subscription_conference_text is being
+ * asked for. The first three are about the conference and ignore
+ * `index`; the rest are about the user at `index`.
+ *
+ * Every one of them is what the focus wrote.
+ */
+enum class SipralConferenceText(val value: Int) {
+    /**
+     * Never asked for.
+     */
+    UNKNOWN(0),
+    /**
+     * The conference's URI, the `entity` of `conference-info`.
+     */
+    ENTITY(1),
+    /**
+     * Its `subject`.
+     */
+    SUBJECT(2),
+    /**
+     * Its `display-text`.
+     */
+    DISPLAY_TEXT(3),
+    /**
+     * A user's `entity`: the address of record it takes part as.
+     */
+    USER_ENTITY(4),
+    /**
+     * A user's `display-text`.
+     */
+    USER_DISPLAY_TEXT(5),
+    /**
+     * The `entity` of a user's first endpoint: the device it is on.
+     */
+    USER_ENDPOINT(6),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralConferenceText? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a crate::event::SipralEventKind::PresenceChanged is about.
+ * Names for `sipral_presence_event_t::kind`.
+ */
+enum class SipralPresenceKind(val value: Int) {
+    /**
+     * Never written by this build.
+     */
+    UNKNOWN(0),
+    /**
+     * A `presence` subscription was told about the presentity.
+     */
+    WATCHED(1),
+    /**
+     * This account's own published presence moved.
+     */
+    PUBLICATION(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralPresenceKind? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Whether a presentity can be reached: PIDF's `basic` (RFC 3863
+ * §4.1.4). Names for `sipral_presence_t::basic` and
+ * `sipral_presence_event_t::basic`.
+ */
+enum class SipralBasic(val value: Int) {
+    /**
+     * Not said. A document published with this is refused, since
+     * §4.1.3 wants one.
+     */
+    UNKNOWN(0),
+    /**
+     * Reachable.
+     */
+    OPEN(1),
+    /**
+     * Not reachable.
+     */
+    CLOSED(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralBasic? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What the person behind a presentity is doing: the RPID activities
+ * (RFC 4480 §3.2) phones show. Names for `sipral_presence_t::activity`
+ * and `sipral_presence_event_t::activity`.
+ */
+enum class SipralActivity(val value: Int) {
+    /**
+     * None said. Published, the document carries no person at all.
+     */
+    NONE(0),
+    /**
+     * `away`.
+     */
+    AWAY(1),
+    /**
+     * `busy`.
+     */
+    BUSY(2),
+    /**
+     * `on-the-phone`.
+     */
+    ON_THE_PHONE(3),
+    /**
+     * `meeting`.
+     */
+    MEETING(4),
+    /**
+     * `vacation`.
+     */
+    VACATION(5),
+    /**
+     * Another activity, which this ABI has no number for.
+     */
+    OTHER(6),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralActivity? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What became of this account's published presence. Names for
+ * `sipral_presence_event_t::publication_state`.
+ */
+enum class SipralPublicationState(val value: Int) {
+    /**
+     * Not a publication event.
+     */
+    UNKNOWN(0),
+    /**
+     * The compositor holds it: published, modified or refreshed.
+     */
+    PUBLISHED(1),
+    /**
+     * It was taken away (`sipral_account_unpublish_presence`).
+     */
+    REMOVED(2),
+    /**
+     * Its lifetime ran out with no refresh; the next publish starts it
+     * afresh.
+     */
+    EXPIRED(3),
+    /**
+     * The compositor refused, or never answered.
+     */
+    FAILED(4),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralPublicationState? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Why a publication failed. Names for `sipral_presence_event_t::failure`.
+ */
+enum class SipralPublishFailure(val value: Int) {
+    /**
+     * Nothing failed.
+     */
+    NONE(0),
+    /**
+     * 489: the compositor does not know the `presence` package. Nothing
+     * more is sent.
+     */
+    BAD_EVENT(1),
+    /**
+     * 423 with no `Min-Expires` this stack could meet.
+     */
+    INTERVAL_TOO_BRIEF(2),
+    /**
+     * A 2xx without the `SIP-ETag` every one must carry.
+     */
+    NO_ENTITY_TAG(3),
+    /**
+     * Any other refusal, a challenge nothing could answer among them;
+     * `status_code` says which.
+     */
+    REFUSED(4),
+    /**
+     * No answer at all.
+     */
+    UNREACHABLE(5),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralPublishFailure? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * The version of the ABI this library provides.
  *
  * Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -3884,9 +4224,32 @@ data class SipralMediaInfo(
      * Whether the watchdog currently considers inbound audio stopped.
      */
     val stalled: Long,
+    /**
+     * Whether the call agreed a real-time text stream (RFC 4103), which
+     * `sipral_media_send_text` writes to.
+     *
+     * Appended at the tail (ABI 0.31), like the three below; a caller
+     * built before them never reads them.
+     */
+    val hasText: Long,
+    /**
+     * Whether the audio stream runs RTP/AVPF (RFC 4585): both ends named
+     * a feedback profile.
+     */
+    val feedback: Long,
+    /**
+     * Whether both ends agreed Generic NACKs (`a=rtcp-fb:* nack`), so
+     * that a gap in what arrives is asked for again.
+     */
+    val genericNack: Long,
+    /**
+     * Whether both ends agreed reduced-size RTCP (RFC 5506,
+     * `a=rtcp-rsize`).
+     */
+    val reducedSize: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 17
+        const val SLOTS: Int = 21
 
         fun of(slots: LongArray): SipralMediaInfo = SipralMediaInfo(
             slots[0],
@@ -3906,6 +4269,10 @@ data class SipralMediaInfo(
             slots[14],
             slots[15],
             slots[16],
+            slots[17],
+            slots[18],
+            slots[19],
+            slots[20],
         )
     }
 }
@@ -4124,9 +4491,51 @@ data class SipralStreamStats(
      * caller built before it existed never reads it.
      */
     val framesUnderrun: Long,
+    /**
+     * Whether the stream runs RTP/AVPF (RFC 4585). Every count below is
+     * zero while it does not.
+     *
+     * Appended at the tail (ABI 0.31), like everything below it.
+     */
+    val feedback: Long,
+    /**
+     * The `trr-int` both ends agreed: the least time between two
+     * regular reports, in milliseconds. Zero for none.
+     */
+    val trrIntervalMs: Long,
+    /**
+     * Generic NACKs this end sent, each asking for one or more packets.
+     */
+    val nacksSent: Long,
+    /**
+     * The packets those NACKs asked for.
+     */
+    val packetsNacked: Long,
+    /**
+     * Generic NACKs the far end sent.
+     */
+    val nacksReceived: Long,
+    /**
+     * The packets those asked this end for.
+     */
+    val packetsAskedFor: Long,
+    /**
+     * Early RTCP packets this end sent: feedback that could not wait for
+     * the next regular report.
+     */
+    val earlyPackets: Long,
+    /**
+     * Reduced-size RTCP packets this end sent (RFC 5506).
+     */
+    val reducedSizePackets: Long,
+    /**
+     * Feedback this end had to hold back, because the stream's RTCP
+     * bandwidth had none to spare.
+     */
+    val feedbackSuppressed: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 40
+        const val SLOTS: Int = 49
 
         fun of(slots: LongArray): SipralStreamStats = SipralStreamStats(
             slots[0],
@@ -4169,6 +4578,15 @@ data class SipralStreamStats(
             slots[37],
             slots[38],
             slots[39],
+            slots[40],
+            slots[41],
+            slots[42],
+            slots[43],
+            slots[44],
+            slots[45],
+            slots[46],
+            slots[47],
+            slots[48],
         )
     }
 }
@@ -4487,6 +4905,95 @@ data class SipralStreamEncryption(
             slots[4],
             slots[5],
             slots[6],
+        )
+    }
+}
+
+/**
+ * A conference as a `conference` subscription holds it, read with
+ * sipral_subscription_conference.
+ */
+data class SipralConference(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * The version of the last document merged.
+     */
+    val version: Long,
+    /**
+     * How many users the picture holds, which is what
+     * sipral_subscription_conference_user_at reads by index.
+     */
+    val users: Long,
+    /**
+     * Whether the focus said how many users it counts
+     * (`conference-state`'s `user-count`), which may differ from
+     * `users`: a focus need not list every one.
+     */
+    val hasUserCount: Long,
+    /**
+     * That count, when it said.
+     */
+    val userCount: Long,
+    /**
+     * `conference-state`'s `active`: one when the focus said it is, two
+     * when it said it is not, zero when it said nothing.
+     */
+    val active: Long,
+    /**
+     * Its `locked`, the same way.
+     */
+    val locked: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 7
+
+        fun of(slots: LongArray): SipralConference = SipralConference(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+            slots[4],
+            slots[5],
+            slots[6],
+        )
+    }
+}
+
+/**
+ * One user of a conference, read with
+ * sipral_subscription_conference_user_at; its text is read with
+ * sipral_subscription_conference_text.
+ */
+data class SipralConferenceUser(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * How many endpoints — devices — the user is in the conference
+     * from.
+     */
+    val endpoints: Long,
+    /**
+     * A SipralEndpointStatus: where the first of them is.
+     */
+    val status: Long,
+    /**
+     * How many media streams the first of them has.
+     */
+    val media: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 4
+
+        fun of(slots: LongArray): SipralConferenceUser = SipralConferenceUser(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
         )
     }
 }
@@ -5358,6 +5865,39 @@ class SipralCallConfig(
      * unmoved.
      */
     val ice: Long = 0,
+    /**
+     * Where this call's real-time text arrives (RFC 4103): a second
+     * socket the application bound, as an address and a port. Set, the
+     * offer or answer carries an `m=text` stream for T.140 with its
+     * redundancy, and once both ends agree it `sipral_media_send_text`,
+     * `sipral_media_poll_text` and `sipral_media_receive_text` carry
+     * it. Null for a call with no text. Not NUL-terminated.
+     *
+     * Read only with `media_address`, and not offered on a call keyed
+     * by SRTP or DTLS-SRTP or gathering ICE: the text stream has no key
+     * and no candidates of its own, and typed text sent in the clear
+     * beside encrypted audio is worse than none.
+     *
+     * Appended at the tail (ABI 0.31), like `feedback` and `focus`; the
+     * pinned `MIN_SIZE` is unmoved.
+     */
+    val textAddress: String? = null,
+    /**
+     * Whether this call asks for RTCP feedback: a `SipralToggle`. On
+     * offers RTP/AVPF (RFC 4585) with Generic NACKs and reduced-size
+     * RTCP (RFC 5506), and runs RFC 4585's timing when the answer takes
+     * it; zero leaves it off, as it is by default, because a far end
+     * that knows only RTP/AVP refuses a profile it does not know. Read
+     * only with `media_address`. An offer that asks for it is answered
+     * in kind whatever this says.
+     */
+    val feedback: Long = 0,
+    /**
+     * Nonzero to say this end is the focus of a conference (RFC 4579
+     * §3.3): `isfocus` goes on the Contact of every message this call
+     * sends from here on.
+     */
+    val focus: Long = 0,
 )
 
 /**
@@ -5622,6 +6162,75 @@ class SipralRecordingOptions(
      * survive a crash, or zero for every five seconds.
      */
     val checkpointMs: Long = 0,
+)
+
+/**
+ * This account's presence, as sipral_account_publish_presence takes
+ * it.
+ *
+ * Set `size` to `sizeof(sipral_presence_t)` and zero the rest before
+ * filling anything in.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralPresence(
+    /**
+     * A SipralBasic, open or closed. Required.
+     */
+    val basic: Long = 0,
+    /**
+     * A SipralActivity; SipralActivity.NONE publishes no
+     * person at all. SipralActivity.OTHER is refused: there is no
+     * name to publish it under.
+     */
+    val activity: Long = 0,
+    /**
+     * A note a buddy list shows beside the name, UTF-8 and not
+     * NUL-terminated, or null for none.
+     */
+    val note: String? = null,
+)
+
+/**
+ * Where a call is recorded, as sipral_call_record_to takes it.
+ *
+ * Set `size` to `sizeof(sipral_record_config_t)` and zero the rest
+ * before filling anything in.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralRecordConfig(
+    /**
+     * The recording server's URI, the INVITE's target. Required. Not
+     * NUL-terminated.
+     */
+    val server: String? = null,
+    /**
+     * Where to send the INVITE, as an address and a port, when not
+     * where the recorded call's account sends. Null for there.
+     */
+    val destination: String? = null,
+    /**
+     * The transport `destination` is reached over, as
+     * `sipral_call_config_t::transport` names one. Read only with
+     * `destination`.
+     */
+    val transport: Long = 0,
+    /**
+     * The socket the copy of this end's audio goes from, as an address
+     * and a port, and what the offer names for the stream labelled `1`.
+     * Required: a socket the application bound.
+     */
+    val thisEnd: String? = null,
+    /**
+     * The same for the far end's audio, labelled `2`. Required, and a
+     * socket of its own.
+     */
+    val farEnd: String? = null,
 )
 
 /**
@@ -6567,6 +7176,111 @@ data class SipralProgressEvent(
 )
 
 /**
+ * What a crate::event::SipralEventKind::ConferenceChanged carries.
+ */
+data class SipralConferenceEvent(
+    /**
+     * Which subscription.
+     */
+    val subscription: Long,
+    /**
+     * A SipralConferenceUpdate.
+     */
+    val update: Long,
+    /**
+     * The version of the document the picture is at now; zero once the
+     * conference ended.
+     */
+    val version: Long,
+    /**
+     * How many users the picture holds.
+     */
+    val users: Long,
+)
+
+/**
+ * What a crate::event::SipralEventKind::TextReceived carries.
+ *
+ * The text points into the event and is valid for as long as the
+ * callback is.
+ */
+data class SipralTextEvent(
+    /**
+     * What the far end typed, UTF-8, not NUL-terminated.
+     */
+    val text: String?,
+    /**
+     * How many blocks of text were lost with no redundant copy to
+     * recover them, each marked in `text` by a REPLACEMENT CHARACTER
+     * (U+FFFD) where it fell.
+     */
+    val missing: Long,
+)
+
+/**
+ * What a crate::event::SipralEventKind::PresenceChanged carries.
+ *
+ * The text points into the event and is valid for as long as the
+ * callback is.
+ */
+data class SipralPresenceEvent(
+    /**
+     * A SipralPresenceKind.
+     */
+    val kind: Long,
+    /**
+     * SipralPresenceKind.WATCHED: which subscription.
+     * `SIPRAL_HANDLE_NONE` for a publication, whose account is the
+     * event's `account`.
+     */
+    val subscription: Long,
+    /**
+     * SipralPresenceKind.WATCHED: a SipralBasic, open when any
+     * of the presentity's tuples is open.
+     */
+    val basic: Long,
+    /**
+     * SipralPresenceKind.WATCHED: a SipralActivity, the first
+     * the person listed.
+     */
+    val activity: Long,
+    /**
+     * SipralPresenceKind.WATCHED: the presentity, as the document
+     * named it. Not NUL-terminated.
+     */
+    val entity: String?,
+    /**
+     * SipralPresenceKind.WATCHED: the first note, the document's
+     * own or else a tuple's. Null when there is none.
+     */
+    val note: String?,
+    /**
+     * SipralPresenceKind.PUBLICATION: a SipralPublicationState.
+     */
+    val publicationState: Long,
+    /**
+     * SipralPresenceKind.PUBLICATION: a SipralPublishFailure
+     * when the state is SipralPublicationState.FAILED.
+     */
+    val failure: Long,
+    /**
+     * SipralPresenceKind.PUBLICATION: the status the compositor
+     * answered with, when one did.
+     */
+    val statusCode: Long,
+    /**
+     * SipralPresenceKind.PUBLICATION: the lifetime granted, in
+     * milliseconds, when it was published.
+     */
+    val expiresMs: Long,
+    /**
+     * SipralPresenceKind.PUBLICATION: how long until the stack
+     * refreshes it, in milliseconds.
+     */
+    val refreshInMs: Long,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -6651,6 +7365,18 @@ class SipralEventPayload(
      * For SipralEventKind.PROGRESS_DETECTED.
      */
     val progress: SipralProgressEvent,
+    /**
+     * For SipralEventKind.CONFERENCE_CHANGED.
+     */
+    val conference: SipralConferenceEvent,
+    /**
+     * For SipralEventKind.TEXT_RECEIVED.
+     */
+    val text: SipralTextEvent,
+    /**
+     * For SipralEventKind.PRESENCE_CHANGED.
+     */
+    val presence: SipralPresenceEvent,
 )
 
 class SipralEvent(
@@ -7455,6 +8181,87 @@ class SipralEvent(
      * The third.
      */
     private val payloadProgressSitMs3: Long = 0,
+    /**
+     * Which subscription.
+     */
+    private val payloadConferenceSubscription: Long = 0,
+    /**
+     * A SipralConferenceUpdate.
+     */
+    private val payloadConferenceUpdate: Long = 0,
+    /**
+     * The version of the document the picture is at now; zero once the
+     * conference ended.
+     */
+    private val payloadConferenceVersion: Long = 0,
+    /**
+     * How many users the picture holds.
+     */
+    private val payloadConferenceUsers: Long = 0,
+    /**
+     * What the far end typed, UTF-8, not NUL-terminated.
+     */
+    private val payloadTextText: String? = null,
+    /**
+     * How many blocks of text were lost with no redundant copy to
+     * recover them, each marked in `text` by a REPLACEMENT CHARACTER
+     * (U+FFFD) where it fell.
+     */
+    private val payloadTextMissing: Long = 0,
+    /**
+     * A SipralPresenceKind.
+     */
+    private val payloadPresenceKind: Long = 0,
+    /**
+     * SipralPresenceKind.WATCHED: which subscription.
+     * `SIPRAL_HANDLE_NONE` for a publication, whose account is the
+     * event's `account`.
+     */
+    private val payloadPresenceSubscription: Long = 0,
+    /**
+     * SipralPresenceKind.WATCHED: a SipralBasic, open when any
+     * of the presentity's tuples is open.
+     */
+    private val payloadPresenceBasic: Long = 0,
+    /**
+     * SipralPresenceKind.WATCHED: a SipralActivity, the first
+     * the person listed.
+     */
+    private val payloadPresenceActivity: Long = 0,
+    /**
+     * SipralPresenceKind.WATCHED: the presentity, as the document
+     * named it. Not NUL-terminated.
+     */
+    private val payloadPresenceEntity: String? = null,
+    /**
+     * SipralPresenceKind.WATCHED: the first note, the document's
+     * own or else a tuple's. Null when there is none.
+     */
+    private val payloadPresenceNote: String? = null,
+    /**
+     * SipralPresenceKind.PUBLICATION: a SipralPublicationState.
+     */
+    private val payloadPresencePublicationState: Long = 0,
+    /**
+     * SipralPresenceKind.PUBLICATION: a SipralPublishFailure
+     * when the state is SipralPublicationState.FAILED.
+     */
+    private val payloadPresenceFailure: Long = 0,
+    /**
+     * SipralPresenceKind.PUBLICATION: the status the compositor
+     * answered with, when one did.
+     */
+    private val payloadPresenceStatusCode: Long = 0,
+    /**
+     * SipralPresenceKind.PUBLICATION: the lifetime granted, in
+     * milliseconds, when it was published.
+     */
+    private val payloadPresenceExpiresMs: Long = 0,
+    /**
+     * SipralPresenceKind.PUBLICATION: how long until the stack
+     * refreshes it, in milliseconds.
+     */
+    private val payloadPresenceRefreshInMs: Long = 0,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -7477,6 +8284,9 @@ class SipralEvent(
             SipralStunServerEvent(payloadStunServerState, payloadStunServerServer, payloadStunServerPrevious),
             SipralVerificationEvent(payloadVerificationStage, payloadVerificationOutcome, payloadVerificationFailure, payloadVerificationAttestation, payloadVerificationVerstat, payloadVerificationResponseCode, payloadVerificationRefused, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail),
             SipralProgressEvent(payloadProgressWhat, payloadProgressTone, payloadProgressVerdict, payloadProgressReason, payloadProgressAtMs, payloadProgressInitialSilenceMs, payloadProgressGreetingMs, payloadProgressWords, payloadProgressFrequencyHz, payloadProgressLengthMs, payloadProgressSitHz1, payloadProgressSitHz2, payloadProgressSitHz3, payloadProgressSitMs1, payloadProgressSitMs2, payloadProgressSitMs3),
+            SipralConferenceEvent(payloadConferenceSubscription, payloadConferenceUpdate, payloadConferenceVersion, payloadConferenceUsers),
+            SipralTextEvent(payloadTextText, payloadTextMissing),
+            SipralPresenceEvent(payloadPresenceKind, payloadPresenceSubscription, payloadPresenceBasic, payloadPresenceActivity, payloadPresenceEntity, payloadPresenceNote, payloadPresencePublicationState, payloadPresenceFailure, payloadPresenceStatusCode, payloadPresenceExpiresMs, payloadPresenceRefreshInMs),
         )
 }
 
@@ -7548,10 +8358,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadCallVerification: Long, payloadCallAttestation: Long, payloadCallVerificationFailure: Long, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadMediaKeyExchange: Long, payloadMediaEncrypted: Long, payloadMediaAuthenticated: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long, payloadStunServerState: Long, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadVerificationStage: Long, payloadVerificationOutcome: Long, payloadVerificationFailure: Long, payloadVerificationAttestation: Long, payloadVerificationVerstat: Long, payloadVerificationResponseCode: Long, payloadVerificationRefused: Long, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadProgressWhat: Long, payloadProgressTone: Long, payloadProgressVerdict: Long, payloadProgressReason: Long, payloadProgressAtMs: Long, payloadProgressInitialSilenceMs: Long, payloadProgressGreetingMs: Long, payloadProgressWords: Long, payloadProgressFrequencyHz: Long, payloadProgressLengthMs: Long, payloadProgressSitHz1: Long, payloadProgressSitHz2: Long, payloadProgressSitHz3: Long, payloadProgressSitMs1: Long, payloadProgressSitMs2: Long, payloadProgressSitMs3: Long) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadCallVerification: Long, payloadCallAttestation: Long, payloadCallVerificationFailure: Long, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadMediaKeyExchange: Long, payloadMediaEncrypted: Long, payloadMediaAuthenticated: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long, payloadStunServerState: Long, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadVerificationStage: Long, payloadVerificationOutcome: Long, payloadVerificationFailure: Long, payloadVerificationAttestation: Long, payloadVerificationVerstat: Long, payloadVerificationResponseCode: Long, payloadVerificationRefused: Long, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadProgressWhat: Long, payloadProgressTone: Long, payloadProgressVerdict: Long, payloadProgressReason: Long, payloadProgressAtMs: Long, payloadProgressInitialSilenceMs: Long, payloadProgressGreetingMs: Long, payloadProgressWords: Long, payloadProgressFrequencyHz: Long, payloadProgressLengthMs: Long, payloadProgressSitHz1: Long, payloadProgressSitHz2: Long, payloadProgressSitHz3: Long, payloadProgressSitMs1: Long, payloadProgressSitMs2: Long, payloadProgressSitMs3: Long, payloadConferenceSubscription: Long, payloadConferenceUpdate: Long, payloadConferenceVersion: Long, payloadConferenceUsers: Long, payloadTextText: ByteArray?, payloadTextMissing: Long, payloadPresenceKind: Long, payloadPresenceSubscription: Long, payloadPresenceBasic: Long, payloadPresenceActivity: Long, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresencePublicationState: Long, payloadPresenceFailure: Long, payloadPresenceStatusCode: Long, payloadPresenceExpiresMs: Long, payloadPresenceRefreshInMs: Long) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadCallVerification, payloadCallAttestation, payloadCallVerificationFailure, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadMediaKeyExchange, payloadMediaEncrypted, payloadMediaAuthenticated, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice, payloadStunServerState, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadVerificationStage, payloadVerificationOutcome, payloadVerificationFailure, payloadVerificationAttestation, payloadVerificationVerstat, payloadVerificationResponseCode, payloadVerificationRefused, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadProgressWhat, payloadProgressTone, payloadProgressVerdict, payloadProgressReason, payloadProgressAtMs, payloadProgressInitialSilenceMs, payloadProgressGreetingMs, payloadProgressWords, payloadProgressFrequencyHz, payloadProgressLengthMs, payloadProgressSitHz1, payloadProgressSitHz2, payloadProgressSitHz3, payloadProgressSitMs1, payloadProgressSitMs2, payloadProgressSitMs3))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadCallVerification, payloadCallAttestation, payloadCallVerificationFailure, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadMediaKeyExchange, payloadMediaEncrypted, payloadMediaAuthenticated, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice, payloadStunServerState, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadVerificationStage, payloadVerificationOutcome, payloadVerificationFailure, payloadVerificationAttestation, payloadVerificationVerstat, payloadVerificationResponseCode, payloadVerificationRefused, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadProgressWhat, payloadProgressTone, payloadProgressVerdict, payloadProgressReason, payloadProgressAtMs, payloadProgressInitialSilenceMs, payloadProgressGreetingMs, payloadProgressWords, payloadProgressFrequencyHz, payloadProgressLengthMs, payloadProgressSitHz1, payloadProgressSitHz2, payloadProgressSitHz3, payloadProgressSitMs1, payloadProgressSitMs2, payloadProgressSitMs3, payloadConferenceSubscription, payloadConferenceUpdate, payloadConferenceVersion, payloadConferenceUsers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextMissing, payloadPresenceKind, payloadPresenceSubscription, payloadPresenceBasic, payloadPresenceActivity, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresencePublicationState, payloadPresenceFailure, payloadPresenceStatusCode, payloadPresenceExpiresMs, payloadPresenceRefreshInMs))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -8142,11 +8952,12 @@ internal object SipralNative {
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
-    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
-    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, nowMs: Long): Int
+    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
+    external fun sipral_call_answer_with(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, nowMs: Long): Int
     external fun sipral_call_reject(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_hangup(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_set_headers(stack: Long, call: Long, headersBytes: ByteArray?, headersLengths: LongArray?): Int
@@ -8165,9 +8976,9 @@ internal object SipralNative {
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, consultation: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
-    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, placed: LongArray, nowMs: Long): Int
+    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_state(stack: Long, call: Long, state: LongArray): Int
     external fun sipral_call_hold_state(stack: Long, call: Long, here: LongArray, there: LongArray): Int
@@ -8231,6 +9042,20 @@ internal object SipralNative {
     external fun sipral_account_retarget(stack: Long, account: Long, registrarAddress: ByteArray, nowMs: Long): Int
     external fun sipral_call_record_json(stack: Long, call: Long, buffer: ByteArray, len: LongArray): Int
     external fun sipral_stack_diagnostics_json(stack: Long, buffer: ByteArray, len: LongArray): Int
+    external fun sipral_subscription_conference(stack: Long, subscription: Long, conference: LongArray): Int
+    external fun sipral_subscription_conference_user_at(stack: Long, subscription: Long, index: Long, user: LongArray): Int
+    external fun sipral_subscription_conference_text(stack: Long, subscription: Long, index: Long, which: Long, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_call_set_focus(stack: Long, call: Long, focus: Long): Int
+    external fun sipral_call_conference_uri(stack: Long, call: Long, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_call_subscribe_conference(stack: Long, call: Long, subscription: LongArray, nowMs: Long): Int
+    external fun sipral_account_publish_presence(stack: Long, account: Long, presenceBasic: Long, presenceActivity: Long, presenceNote: ByteArray?, nowMs: Long): Int
+    external fun sipral_account_unpublish_presence(stack: Long, account: Long, nowMs: Long): Int
+    external fun sipral_media_send_text(media: Long, text: ByteArray): Int
+    external fun sipral_media_poll_text(media: Long, nowMs: Long, packet: Long): Int
+    external fun sipral_media_receive_text(media: Long, data: ByteArray, from: ByteArray, nowMs: Long, taken: LongArray): Int
+    external fun sipral_call_record_to(stack: Long, call: Long, configServer: ByteArray?, configDestination: ByteArray?, configTransport: Long, configThisEnd: ByteArray?, configFarEnd: ByteArray?, recording: LongArray, nowMs: Long): Int
+    external fun sipral_call_stop_recording_to(stack: Long, call: Long, nowMs: Long): Int
+    external fun sipral_media_poll_recording(media: Long, packet: Long, farEnd: LongArray): Int
     external fun sipral_stack_recording_start(stack: Long, note: ByteArray): Int
     external fun sipral_stack_recording_stop(stack: Long, buffer: ByteArray, len: LongArray): Int
     external fun sipral_audio_refresh(stack: Long, count: LongArray): Int
@@ -8526,6 +9351,37 @@ object Sipral {
      * kHz, which `sipral_codec_at` lists.
      */
     const val FEATURE_RECORDING_FORMATS: Long = 524288
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. A call recorded to a recording server
+     * (SIPREC, RFC 7866): `sipral_call_record_to` places the recording
+     * session, and `sipral_media_poll_recording` hands out the copies of
+     * the call's audio.
+     */
+    const val FEATURE_SIPREC: Long = 1048576
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. The conference package kept for the
+     * application (RFC 4575, `sipral_subscription_conference`), a focus
+     * known by its `isfocus` (RFC 4579, `sipral_call_conference_uri`), and
+     * presence published (RFC 3903, `sipral_account_publish_presence`) and
+     * watched (RFC 3856, `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`).
+     */
+    const val FEATURE_CONFERENCE: Long = 2097152
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. Real-time text in a call (RFC 4103):
+     * `text_address` on the call's configuration, `sipral_media_send_text`
+     * and `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+     */
+    const val FEATURE_REALTIME_TEXT: Long = 4194304
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. RTP/AVPF with Generic NACKs and
+     * reduced-size RTCP (RFC 4585, RFC 5506): `feedback` on the call's
+     * configuration, and what it agreed in `sipral_media_info_t`.
+     */
+    const val FEATURE_RTCP_FEEDBACK: Long = 8388608
 
     /**
      * The buffer a caller has to bring for one outgoing packet.
@@ -9446,8 +10302,9 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
+        val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
         val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, callSlot, nowMs))
+        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, callSlot, nowMs))
         return callSlot[0]
     }
 
@@ -9522,7 +10379,8 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, nowMs))
+        val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, nowMs))
     }
 
     /**
@@ -9566,6 +10424,35 @@ object Sipral {
     fun callAnswerMedia(stack: Long, call: Long, mediaAddress: String, nowMs: Long) {
         val mediaAddressBytes = mediaAddress.toByteArray(Charsets.UTF_8)
         check(SipralNative.sipral_call_answer_media(stack, call, mediaAddressBytes, nowMs))
+    }
+
+    /**
+     * Answer a call that came in with media this stack describes, from
+     * `config`: `sipral_call_answer_media` with the choices
+     * `sipral_call_ring_media` takes — `media_address`, `srtp`, `codecs`,
+     * `ice`, `text_address` for real-time text, `feedback` for RTP/AVPF
+     * and `focus` for a conference focus. Every other member names
+     * something only a call to place needs, and setting one is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+     *
+     * On a call `sipral_call_ring_media` already rang, the 183's
+     * description and session stand exactly as `sipral_call_answer_media`
+     * says, and nothing in `config` but `focus` changes them.
+     *
+     * Safety
+     *
+     * `config` must point at a `sipral_call_config_t` whose `size` member
+     * says how long it is, with every pointer in it readable for the length
+     * beside it.
+     */
+    fun callAnswerWith(stack: Long, call: Long, config: SipralCallConfig, nowMs: Long) {
+        val configTarget = config.target?.toByteArray(Charsets.UTF_8)
+        val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
+        val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
+        val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
+        val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
+        val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_call_answer_with(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, nowMs))
     }
 
     /**
@@ -10046,8 +10933,9 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
+        val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
         val consultationSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, consultationSlot, nowMs))
+        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, consultationSlot, nowMs))
         return consultationSlot[0]
     }
 
@@ -10111,8 +10999,9 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
+        val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
         val placedSlot = LongArray(1)
-        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, placedSlot, nowMs))
+        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, placedSlot, nowMs))
         return placedSlot[0]
     }
 
@@ -11775,6 +12664,285 @@ object Sipral {
         val lenSlot = LongArray(1)
         check(SipralNative.sipral_stack_diagnostics_json(stack, buffer, lenSlot))
         return lenSlot[0]
+    }
+
+    /**
+     * What a `conference` subscription holds about the conference as a
+     * whole (RFC 4575 §5.5).
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that holds no
+     * conference: one to another package, one no document has reached yet,
+     * or one that is not live.
+     *
+     * Safety
+     *
+     * `out_conference` must point at a `sipral_conference_t` whose `size`
+     * member says how long it is.
+     */
+    fun subscriptionConference(stack: Long, subscription: Long): SipralConference {
+        val conferenceSlots = LongArray(SipralConference.SLOTS)
+        check(SipralNative.sipral_subscription_conference(stack, subscription, conferenceSlots))
+        return SipralConference.of(conferenceSlots)
+    }
+
+    /**
+     * One user of the conference, by index, in the order the focus first
+     * named them. The index is stable only until the next
+     * `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`.
+     *
+     * Safety
+     *
+     * `out_user` must point at a `sipral_conference_user_t` whose `size`
+     * member says how long it is.
+     */
+    fun subscriptionConferenceUserAt(stack: Long, subscription: Long, index: Long): SipralConferenceUser {
+        val userSlots = LongArray(SipralConferenceUser.SLOTS)
+        check(SipralNative.sipral_subscription_conference_user_at(stack, subscription, index, userSlots))
+        return SipralConferenceUser.of(userSlots)
+    }
+
+    /**
+     * A piece of text about the conference or one of its users, copied into
+     * the caller's buffer the way `sipral_subscription_dialog_text` copies
+     * one: `out_needed` receives the bytes it needs including the NUL, a
+     * buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing
+     * written, and a piece the focus did not send is one byte, the NUL.
+     *
+     * `which` is a SipralConferenceText; `index` names the user for the
+     * pieces about one, and is ignored for the others.
+     *
+     * Safety
+     *
+     * `buffer` must be writable for `capacity` bytes, and `out_needed` must
+     * point at one `size_t`.
+     */
+    fun subscriptionConferenceText(stack: Long, subscription: Long, index: Long, which: Long, buffer: ByteArray): Long {
+        val neededSlot = LongArray(1)
+        check(SipralNative.sipral_subscription_conference_text(stack, subscription, index, which, buffer, neededSlot))
+        return neededSlot[0]
+    }
+
+    /**
+     * Say, or stop saying, that this end is the focus of a conference the
+     * call belongs to (RFC 4579 §4.2): `isfocus` on the `Contact` of every
+     * request and response the call sends from here on — the answer, for a
+     * call not answered yet, and the next re-INVITE or UPDATE for one that
+     * is up, which is how the far end learns it.
+     *
+     * `focus` is one to say it and zero to stop.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun callSetFocus(stack: Long, call: Long, focus: Long) {
+        check(SipralNative.sipral_call_set_focus(stack, call, focus))
+    }
+
+    /**
+     * The URI of the conference a call belongs to, when its far end said it
+     * is a focus (`isfocus` in its `Contact`, RFC 4579 §4.2), copied into
+     * the caller's buffer as `sipral_subscription_conference_text` copies.
+     *
+     * `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end said nothing of
+     * the kind.
+     *
+     * Safety
+     *
+     * `buffer` must be writable for `capacity` bytes, and `out_needed` must
+     * point at one `size_t`.
+     */
+    fun callConferenceUri(stack: Long, call: Long, buffer: ByteArray): Long {
+        val neededSlot = LongArray(1)
+        check(SipralNative.sipral_call_conference_uri(stack, call, buffer, neededSlot))
+        return neededSlot[0]
+    }
+
+    /**
+     * Subscribe to the conference package of the call's focus (RFC 4579
+     * §3.4), outside the call's dialog, from the call's own account, and
+     * write the subscription's handle. It is kept like any subscription and
+     * outlives the call; `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` says what it
+     * learns.
+     *
+     * `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end did not say it is
+     * a focus.
+     *
+     * Safety
+     *
+     * `out_subscription` must point at one `sipral_handle_t`.
+     */
+    fun callSubscribeConference(stack: Long, call: Long, nowMs: Long): Long {
+        val subscriptionSlot = LongArray(1)
+        check(SipralNative.sipral_call_subscribe_conference(stack, call, subscriptionSlot, nowMs))
+        return subscriptionSlot[0]
+    }
+
+    /**
+     * Publish this account's presence (RFC 3903, RFC 3856 §6.2): a PIDF
+     * document for its address of record, open or closed, with the activity
+     * and the note `presence` gives. The first call publishes it and every
+     * later one modifies the same publication; the stack keeps it refreshed
+     * until sipral_account_unpublish_presence.
+     *
+     * Nothing has happened when this returns: the PUBLISH is in the
+     * transmit queue, and `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with
+     * `SIPRAL_PRESENCE_KIND_PUBLICATION` says what the compositor did with
+     * it.
+     *
+     * Safety
+     *
+     * `presence` must point at a `sipral_presence_t` whose `size` member
+     * says how long it is, with its pointer readable for the length beside
+     * it.
+     */
+    fun accountPublishPresence(stack: Long, account: Long, presence: SipralPresence, nowMs: Long) {
+        val presenceNote = presence.note?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_account_publish_presence(stack, account, presence.basic, presence.activity, presenceNote, nowMs))
+    }
+
+    /**
+     * Take this account's published presence away (RFC 3903 §4.5):
+     * `SIPRAL_PUBLICATION_STATE_REMOVED` says when it is gone.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` for an account that has published none.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun accountUnpublishPresence(stack: Long, account: Long, nowMs: Long) {
+        check(SipralNative.sipral_account_unpublish_presence(stack, account, nowMs))
+    }
+
+    /**
+     * Queue text the user typed for the far end, UTF-8.
+     *
+     * It goes in the next transmission interval (300 ms), at no more
+     * characters a second than the far end said it takes, each block sent
+     * twice more as redundancy where both ends agreed `red`. A CR LF, a
+     * lone CR or a lone LF goes as a new line, and BACKSPACE (U+0008) erases
+     * the far end's last character.
+     *
+     * `SIPRAL_STATUS_NOT_NEGOTIATED` on a call that agreed no text stream,
+     * and `SIPRAL_STATUS_EXHAUSTED` when more is waiting unsent than a
+     * stream holds; nothing is queued then, and a later call finds room as
+     * the far end reads.
+     *
+     * Safety
+     *
+     * `text` must be readable for `text_len` bytes.
+     */
+    fun mediaSendText(media: Long, text: String) {
+        val textBytes = text.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_media_send_text(media, textBytes))
+    }
+
+    /**
+     * The next datagram due on the call's text socket.
+     *
+     * A `len` of zero in the packet means nothing is due; call it again at
+     * the deadline `sipral_stack_poll` names, or with every frame of audio.
+     * Send what it writes from the socket at `text_address`, never the
+     * audio one.
+     *
+     * `now_ms` is read as the stack reads it and moves nothing, as with
+     * every media entry point.
+     *
+     * Safety
+     *
+     * `packet` must point at a `sipral_media_packet_t` as
+     * `sipral_media_capture` describes.
+     */
+    fun mediaPollText(media: Long, nowMs: Long, packet: Long) {
+        check(SipralNative.sipral_media_poll_text(media, nowMs, packet))
+    }
+
+    /**
+     * Take a datagram off the call's text socket.
+     *
+     * `out_taken` is written with 1 when it was this call's text, and 0
+     * when it was not: not RTP, another payload type, from somewhere other
+     * than where the stream has latched, or on a call with no text. What it
+     * carried arrives as `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+     *
+     * Safety
+     *
+     * `data` must be readable for `len` bytes, `from` for `from_len`, and
+     * `out_taken` must point at one `uint32_t` or be null.
+     */
+    fun mediaReceiveText(media: Long, data: ByteArray, from: String, nowMs: Long): Long {
+        val fromBytes = from.toByteArray(Charsets.UTF_8)
+        val takenSlot = LongArray(1)
+        check(SipralNative.sipral_media_receive_text(media, data, fromBytes, nowMs, takenSlot))
+        return takenSlot[0]
+    }
+
+    /**
+     * Record a call to a recording server (RFC 7866), and write the
+     * recording session's handle to `out_recording`.
+     *
+     * The call must be one this stack runs the media of, with its audio
+     * started: `SIPRAL_STATUS_WRONG_STATE` before
+     * `SIPRAL_EVENT_KIND_MEDIA_STARTED`, and for a call already being
+     * recorded to a server. The recording session goes from the recorded
+     * call's account, over a stream transport when the INVITE, which
+     * carries the metadata beside the offer, is too large for UDP.
+     *
+     * Hanging the recording session up with
+     * sipral_call_stop_recording_to or `sipral_call_hangup` stops the
+     * recording; the server hanging it up does the same.
+     *
+     * Safety
+     *
+     * `config` must point at a `sipral_record_config_t` whose `size` member
+     * says how long it is, with every pointer in it readable for the length
+     * beside it, and `out_recording` at one `sipral_handle_t`.
+     */
+    fun callRecordTo(stack: Long, call: Long, config: SipralRecordConfig, nowMs: Long): Long {
+        val configServer = config.server?.toByteArray(Charsets.UTF_8)
+        val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
+        val configThisEnd = config.thisEnd?.toByteArray(Charsets.UTF_8)
+        val configFarEnd = config.farEnd?.toByteArray(Charsets.UTF_8)
+        val recordingSlot = LongArray(1)
+        check(SipralNative.sipral_call_record_to(stack, call, configServer, configDestination, config.transport, configThisEnd, configFarEnd, recordingSlot, nowMs))
+        return recordingSlot[0]
+    }
+
+    /**
+     * Stop recording a call to its recording server: the copies stop at
+     * once, and the recording session is hung up.
+     *
+     * `call` is the recorded call, not the recording session.
+     * `SIPRAL_STATUS_WRONG_STATE` for a call nothing records.
+     *
+     * Safety
+     *
+     * Safe to call with any handle values.
+     */
+    fun callStopRecordingTo(stack: Long, call: Long, nowMs: Long) {
+        check(SipralNative.sipral_call_stop_recording_to(stack, call, nowMs))
+    }
+
+    /**
+     * The next copy of this call's audio for its recording server.
+     *
+     * A `len` of zero in the packet means none is waiting. Otherwise
+     * `out_far_end` says which socket to send it from: 0 for `this_end`,
+     * the copy of what this end sent, and 1 for `far_end`, the copy of what
+     * it received. Collect them with every frame, in a loop to empty: a
+     * copy nobody collects for a second is dropped, the oldest first.
+     *
+     * Safety
+     *
+     * `packet` must point at a `sipral_media_packet_t` as
+     * `sipral_media_capture` describes, and `out_far_end` at one
+     * `uint32_t`.
+     */
+    fun mediaPollRecording(media: Long, packet: Long): Long {
+        val farEndSlot = LongArray(1)
+        check(SipralNative.sipral_media_poll_recording(media, packet, farEndSlot))
+        return farEndSlot[0]
     }
 
     /**

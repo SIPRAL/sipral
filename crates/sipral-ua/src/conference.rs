@@ -1486,8 +1486,13 @@ impl UserAgent {
     /// Subscribe to a conference (RFC 4575 §3), kept alive like any other
     /// subscription by [`UserAgent::subscribe`].
     ///
-    /// Every notification arrives as [`crate::UaEvent::Notified`]; feed its
-    /// `request` to [`Conference::apply_notify`].
+    /// Every notification arrives as [`crate::UaEvent::Notified`], and the
+    /// agent merges it into the subscription's own picture
+    /// ([`UserAgent::conference`]) by §4.6's rules: a change is
+    /// [`crate::UaEvent::ConferenceChanged`], a gap asks for full state by
+    /// itself, and a deleted conference ends the subscription. Any
+    /// subscription to the `conference` package is kept this way, however it
+    /// was asked for.
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`].
@@ -2491,16 +2496,19 @@ Content-Length: {}\r\n\r\n{body}",
             &notify(&subscribe, 2, "application/conference-info+xml", &gap),
             t0,
         );
-        sent(&mut agent);
+        // the agent asked for full state by itself, without a word to the
+        // application: the refresh is on the wire already
+        let refresh = only_subscribe(&sent(&mut agent));
         let requests = notified(&mut agent);
         assert_eq!(
             conference.apply_notify(&requests[0]),
             Ok(Some(ConferenceUpdate::Resubscribe))
         );
-        agent
-            .request_full_state(handle, t0)
-            .expect("the subscription is there");
-        let refresh = only_subscribe(&sent(&mut agent));
+        assert_eq!(
+            agent.conference(handle).map(|held| held.users().len()),
+            Some(2),
+            "the picture before the gap stands until full state arrives"
+        );
         assert_eq!(header(&refresh, HeaderName::Event), "conference");
         assert_eq!(header(&refresh, HeaderName::CSeq), "2 SUBSCRIBE");
         assert_eq!(
@@ -2540,6 +2548,123 @@ Content-Length: {}\r\n\r\n{body}",
         );
         assert_eq!(conference.apply_notify(&requests[1]), Ok(None));
         assert_eq!(conference.version(), None);
+    }
+
+    /// Every event the agent raised about a conference.
+    fn changes(agent: &mut UserAgent) -> Vec<ConferenceUpdate> {
+        let mut out = Vec::new();
+        while let Some(event) = agent.poll_event() {
+            if let UaEvent::ConferenceChanged { update, .. } = event {
+                out.push(update);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_agent_keeps_the_picture_and_says_when_it_changes() {
+        let t0 = Instant::now();
+        let (mut agent, account) = agent(t0);
+        let handle = agent
+            .subscribe_conference(account, uri("sips:conf233@example.com"), t0)
+            .expect("the SUBSCRIBE goes");
+        let subscribe = only_subscribe(&sent(&mut agent));
+        deliver(&mut agent, &accepted(&subscribe), t0);
+        assert!(
+            agent.conference(handle).is_none(),
+            "nothing is known before the first document"
+        );
+        deliver(
+            &mut agent,
+            &notify(&subscribe, 1, "application/conference-info+xml", FULL),
+            t0,
+        );
+        assert_eq!(changes(&mut agent), vec![ConferenceUpdate::Applied]);
+        let held = agent.conference(handle).expect("the picture");
+        assert_eq!(held.entity(), Some("sips:conf233@example.com"));
+        assert_eq!(held.users().len(), 2);
+
+        // the next version, in order: merged, and said
+        let next = partial(
+            2,
+            "<user entity=\"sip:bob@example.com\" state=\"deleted\"/>",
+        );
+        deliver(
+            &mut agent,
+            &notify(&subscribe, 2, "application/conference-info+xml", &next),
+            t0,
+        );
+        assert_eq!(changes(&mut agent), vec![ConferenceUpdate::Applied]);
+        assert_eq!(agent.conference(handle).map(|c| c.users().len()), Some(1));
+
+        // the same version again: nothing changed, and nothing is said
+        deliver(
+            &mut agent,
+            &notify(&subscribe, 3, "application/conference-info+xml", &next),
+            t0,
+        );
+        assert!(changes(&mut agent).is_empty());
+    }
+
+    #[test]
+    fn a_deleted_conference_is_said_once_and_the_subscription_given_up() {
+        let t0 = Instant::now();
+        let (mut agent, account) = agent(t0);
+        let handle = agent
+            .subscribe_conference(account, uri("sips:conf233@example.com"), t0)
+            .expect("the SUBSCRIBE goes");
+        let subscribe = only_subscribe(&sent(&mut agent));
+        deliver(&mut agent, &accepted(&subscribe), t0);
+        deliver(
+            &mut agent,
+            &notify(&subscribe, 1, "application/conference-info+xml", FULL),
+            t0,
+        );
+        sent(&mut agent);
+        changes(&mut agent);
+        let deleted = "<conference-info xmlns=\"urn:ietf:params:xml:ns:conference-info\" \
+entity=\"sips:conf233@example.com\" state=\"deleted\" version=\"2\"/>";
+        deliver(
+            &mut agent,
+            &notify(&subscribe, 2, "application/conference-info+xml", deleted),
+            t0,
+        );
+        assert_eq!(changes(&mut agent), vec![ConferenceUpdate::Ended]);
+        // RFC 4575 §4.6: the subscriber ends its subscription
+        let unsubscribe = only_subscribe(&sent(&mut agent));
+        assert_eq!(header(&unsubscribe, HeaderName::Expires), "0");
+        assert!(
+            agent
+                .conference(handle)
+                .is_none_or(|held| held.users().is_empty()),
+            "nothing of a deleted conference is kept"
+        );
+    }
+
+    #[test]
+    fn a_dialog_subscription_never_reads_a_conference() {
+        let t0 = Instant::now();
+        let (mut agent, account) = agent(t0);
+        let handle = agent
+            .subscribe(
+                account,
+                &crate::Subscribe::new(uri("sip:bob@example.com"), "dialog"),
+                t0,
+            )
+            .expect("the SUBSCRIBE goes");
+        let subscribe = only_subscribe(&sent(&mut agent));
+        deliver(&mut agent, &accepted(&subscribe), t0);
+        let text = String::from_utf8(notify(
+            &subscribe,
+            1,
+            "application/conference-info+xml",
+            FULL,
+        ))
+        .expect("text")
+        .replace("Event: conference", "Event: dialog");
+        deliver(&mut agent, text.as_bytes(), t0);
+        assert!(changes(&mut agent).is_empty());
+        assert!(agent.conference(handle).is_none());
     }
 
     #[test]

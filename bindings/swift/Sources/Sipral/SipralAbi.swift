@@ -109,6 +109,14 @@ public enum SipralStatus: Int32, Sendable {
     /// anything is written. The recording has stopped; the file holds the
     /// audio up to the last checkpoint it could write.
     case recordingFailed = 19
+    /// The call never agreed on what this asks for: text sent on a call
+    /// whose answer took no `m=text` stream, say. Nothing was done, and
+    /// only a new offer that the far end accepts changes it.
+    case notNegotiated = 20
+    /// The far end of this call is not a conference focus: its Contact
+    /// never carried `isfocus` (RFC 4579 §4.1), so there is no
+    /// conference to name or subscribe to.
+    case notAfocus = 21
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -607,6 +615,7 @@ public enum SipralDtmf: UInt32, Sendable {
 /// Numbers already spent on features this build does not have:
 /// - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
 /// - 44: held for a second audio device event, which the audio engine did not need; spent all the same
+/// - 53: held for a transport that failed, with the TLS reason when there is one (wave C, tls-layers)
 public enum SipralEventKind: UInt32, Sendable {
     /// The stack is running on this thread.
     ///
@@ -1030,6 +1039,45 @@ public enum SipralEventKind: UInt32, Sendable {
     /// the beep an answering machine plays before it records.
     /// `payload.progress` says which, and what was measured.
     case progressDetected = 49
+    /// A `conference` subscription's picture of the conference changed,
+    /// or the conference ended (RFC 4575 §4.6).
+    ///
+    /// `payload.conference` says which subscription and what happened:
+    /// `SIPRAL_CONFERENCE_UPDATE_APPLIED` for a document merged into the
+    /// picture, with the version it is at and how many users it holds,
+    /// and `SIPRAL_CONFERENCE_UPDATE_ENDED` for a conference the focus
+    /// deleted, after which the subscription is being given up. The
+    /// picture itself is read with `sipral_subscription_conference` and
+    /// `sipral_subscription_conference_user_at`. A document that was late
+    /// or repeated raises nothing, and one that followed a lost one is
+    /// answered by the stack asking for full state again. `account` and
+    /// `call` are `SIPRAL_HANDLE_NONE`; the NOTIFY itself arrived just
+    /// before, as `SIPRAL_EVENT_KIND_NOTIFIED`.
+    case conferenceChanged = 50
+    /// The far end typed something on the call's real-time text stream
+    /// (RFC 4103), in the order it typed it.
+    ///
+    /// `call` is the call; `payload.text` holds the text, UTF-8: an
+    /// erasure of the last character as BACKSPACE (U+0008), a new line
+    /// as LINE SEPARATOR (U+2028), an alert as BELL (U+0007), and a
+    /// REPLACEMENT CHARACTER (U+FFFD) for each block of text that was
+    /// lost and no redundant copy recovered (RFC 4103 §5.3), counted in
+    /// `payload.text.missing`.
+    case textReceived = 51
+    /// Presence moved: a `presence` subscription was told about the
+    /// presentity (RFC 3856), or the state this account publishes (RFC
+    /// 3903) was published, refreshed, removed, lapsed or refused.
+    ///
+    /// `payload.presence.kind` says which. For a subscription,
+    /// `payload.presence.subscription` names it and the rest is what the
+    /// PIDF document said: open or closed, the first RPID activity, the
+    /// first note and the entity; the NOTIFY itself arrived just before,
+    /// as `SIPRAL_EVENT_KIND_NOTIFIED`. For a publication, `account`
+    /// names the account and
+    /// `payload.presence.publication_state` says what became of it, with
+    /// the SIP status, the lifetime the compositor granted and when the
+    /// stack refreshes it.
+    case presenceChanged = 52
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1932,6 +1980,144 @@ public enum SipralRecordingLayout: UInt32, Sendable {
     case stereo = 1
 }
 
+/// What one conference document did. Names for
+/// `sipral_conference_event_t::update`.
+public enum SipralConferenceUpdate: UInt32, Sendable {
+    /// Never written by this build.
+    case unknown = 0
+    /// It was merged into the picture.
+    case applied = 1
+    /// The focus deleted the conference: the picture is empty, and the
+    /// subscription is being given up (RFC 4575 §4.6).
+    case ended = 2
+}
+
+/// Where one endpoint of a conference is (RFC 4575 §5.7.2). Names for
+/// `sipral_conference_user_t::status`.
+public enum SipralEndpointStatus: UInt32, Sendable {
+    /// The focus did not say, or said something the schema does not
+    /// list.
+    case unknown = 0
+    /// `pending`: waiting for policy or for the focus.
+    case pending = 1
+    /// `dialing-out`: the focus is calling it.
+    case dialingOut = 2
+    /// `dialing-in`: it is calling the focus.
+    case dialingIn = 3
+    /// `alerting`: it is ringing.
+    case alerting = 4
+    /// `on-hold`.
+    case onHold = 5
+    /// `connected`: it is in the conference.
+    case connected = 6
+    /// `muted-via-focus`: in, and muted by the focus.
+    case mutedViaFocus = 7
+    /// `disconnecting`.
+    case disconnecting = 8
+    /// `disconnected`: it has left.
+    case disconnected = 9
+}
+
+/// Which piece of text sipral_subscription_conference_text is being
+/// asked for. The first three are about the conference and ignore
+/// `index`; the rest are about the user at `index`.
+///
+/// Every one of them is what the focus wrote.
+public enum SipralConferenceText: UInt32, Sendable {
+    /// Never asked for.
+    case unknown = 0
+    /// The conference's URI, the `entity` of `conference-info`.
+    case entity = 1
+    /// Its `subject`.
+    case subject = 2
+    /// Its `display-text`.
+    case displayText = 3
+    /// A user's `entity`: the address of record it takes part as.
+    case userEntity = 4
+    /// A user's `display-text`.
+    case userDisplayText = 5
+    /// The `entity` of a user's first endpoint: the device it is on.
+    case userEndpoint = 6
+}
+
+/// What a crate::event::SipralEventKind::PresenceChanged is about.
+/// Names for `sipral_presence_event_t::kind`.
+public enum SipralPresenceKind: UInt32, Sendable {
+    /// Never written by this build.
+    case unknown = 0
+    /// A `presence` subscription was told about the presentity.
+    case watched = 1
+    /// This account's own published presence moved.
+    case publication = 2
+}
+
+/// Whether a presentity can be reached: PIDF's `basic` (RFC 3863
+/// §4.1.4). Names for `sipral_presence_t::basic` and
+/// `sipral_presence_event_t::basic`.
+public enum SipralBasic: UInt32, Sendable {
+    /// Not said. A document published with this is refused, since
+    /// §4.1.3 wants one.
+    case unknown = 0
+    /// Reachable.
+    case open = 1
+    /// Not reachable.
+    case closed = 2
+}
+
+/// What the person behind a presentity is doing: the RPID activities
+/// (RFC 4480 §3.2) phones show. Names for `sipral_presence_t::activity`
+/// and `sipral_presence_event_t::activity`.
+public enum SipralActivity: UInt32, Sendable {
+    /// None said. Published, the document carries no person at all.
+    case none = 0
+    /// `away`.
+    case away = 1
+    /// `busy`.
+    case busy = 2
+    /// `on-the-phone`.
+    case onThePhone = 3
+    /// `meeting`.
+    case meeting = 4
+    /// `vacation`.
+    case vacation = 5
+    /// Another activity, which this ABI has no number for.
+    case other = 6
+}
+
+/// What became of this account's published presence. Names for
+/// `sipral_presence_event_t::publication_state`.
+public enum SipralPublicationState: UInt32, Sendable {
+    /// Not a publication event.
+    case unknown = 0
+    /// The compositor holds it: published, modified or refreshed.
+    case published = 1
+    /// It was taken away (`sipral_account_unpublish_presence`).
+    case removed = 2
+    /// Its lifetime ran out with no refresh; the next publish starts it
+    /// afresh.
+    case expired = 3
+    /// The compositor refused, or never answered.
+    case failed = 4
+}
+
+/// Why a publication failed. Names for `sipral_presence_event_t::failure`.
+public enum SipralPublishFailure: UInt32, Sendable {
+    /// Nothing failed.
+    case none = 0
+    /// 489: the compositor does not know the `presence` package. Nothing
+    /// more is sent.
+    case badEvent = 1
+    /// 423 with no `Min-Expires` this stack could meet.
+    case intervalTooBrief = 2
+    /// A 2xx without the `SIP-ETag` every one must carry.
+    case noEntityTag = 3
+    /// Any other refusal, a challenge nothing could answer among them;
+    /// `status_code` says which.
+    case refused = 4
+    /// No answer at all.
+    case unreachable = 5
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -2256,6 +2442,46 @@ public extension sipral_recording_options_t {
     }
 }
 
+public extension sipral_conference_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_conference_user_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_presence_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_record_config_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -2551,6 +2777,29 @@ public enum Sipral {
     /// SIPRAL_FEATURE_OPUS is set too. And L16 as a codec, at 8 and 16
     /// kHz, which `sipral_codec_at` lists.
     public static let featureRecordingFormats: UInt32 = 524288
+
+    /// See SIPRAL_FEATURE_DTMF. A call recorded to a recording server
+    /// (SIPREC, RFC 7866): `sipral_call_record_to` places the recording
+    /// session, and `sipral_media_poll_recording` hands out the copies of
+    /// the call's audio.
+    public static let featureSiprec: UInt32 = 1048576
+
+    /// See SIPRAL_FEATURE_DTMF. The conference package kept for the
+    /// application (RFC 4575, `sipral_subscription_conference`), a focus
+    /// known by its `isfocus` (RFC 4579, `sipral_call_conference_uri`), and
+    /// presence published (RFC 3903, `sipral_account_publish_presence`) and
+    /// watched (RFC 3856, `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`).
+    public static let featureConference: UInt32 = 2097152
+
+    /// See SIPRAL_FEATURE_DTMF. Real-time text in a call (RFC 4103):
+    /// `text_address` on the call's configuration, `sipral_media_send_text`
+    /// and `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+    public static let featureRealtimeText: UInt32 = 4194304
+
+    /// See SIPRAL_FEATURE_DTMF. RTP/AVPF with Generic NACKs and
+    /// reduced-size RTCP (RFC 4585, RFC 5506): `feedback` on the call's
+    /// configuration, and what it agreed in `sipral_media_info_t`.
+    public static let featureRtcpFeedback: UInt32 = 8388608
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -3584,6 +3833,35 @@ public enum Sipral {
                 raw2.withMemoryRebound(to: CChar.self) { p2 in
                     sipral_call_answer_media(stack, call, p2.baseAddress, p2.count, nowMs)
                 }
+            }
+        try check(status)
+    }
+
+    /// Answer a call that came in with media this stack describes, from
+    /// `config`: `sipral_call_answer_media` with the choices
+    /// `sipral_call_ring_media` takes — `media_address`, `srtp`, `codecs`,
+    /// `ice`, `text_address` for real-time text, `feedback` for RTP/AVPF
+    /// and `focus` for a conference focus. Every other member names
+    /// something only a call to place needs, and setting one is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+    ///
+    /// On a call `sipral_call_ring_media` already rang, the 183's
+    /// description and session stand exactly as `sipral_call_answer_media`
+    /// says, and nothing in `config` but `focus` changes them.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_call_config_t` whose `size` member
+    /// says how long it is, with every pointer in it readable for the length
+    /// beside it.
+    public static func callAnswerWith(stack: SipralHandle, call: SipralHandle, config: sipral_call_config_t, configHeaders: [SipralHeader], nowMs: UInt64) throws {
+        try ensureAbi()
+        var config = config
+        let status =
+            SipralHeader.withUnsafeArray(configHeaders) { p2Headers -> sipral_status_t in
+                config.headers = p2Headers.baseAddress
+                config.headers_len = p2Headers.count
+                return sipral_call_answer_with(stack, call, &config, nowMs)
             }
         try check(status)
     }
@@ -5966,6 +6244,298 @@ public enum Sipral {
             }
         try check(status)
         return len
+    }
+
+    /// What a `conference` subscription holds about the conference as a
+    /// whole (RFC 4575 §5.5).
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that holds no
+    /// conference: one to another package, one no document has reached yet,
+    /// or one that is not live.
+    ///
+    /// Safety
+    ///
+    /// `out_conference` must point at a `sipral_conference_t` whose `size`
+    /// member says how long it is.
+    public static func subscriptionConference(stack: SipralHandle, subscription: SipralHandle) throws -> sipral_conference_t {
+        try ensureAbi()
+        var conference = sipral_conference_t.sized()
+        let status = sipral_subscription_conference(stack, subscription, &conference)
+        try check(status)
+        return conference
+    }
+
+    /// One user of the conference, by index, in the order the focus first
+    /// named them. The index is stable only until the next
+    /// `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`.
+    ///
+    /// Safety
+    ///
+    /// `out_user` must point at a `sipral_conference_user_t` whose `size`
+    /// member says how long it is.
+    public static func subscriptionConferenceUserAt(stack: SipralHandle, subscription: SipralHandle, index: Int) throws -> sipral_conference_user_t {
+        try ensureAbi()
+        var user = sipral_conference_user_t.sized()
+        let status = sipral_subscription_conference_user_at(stack, subscription, index, &user)
+        try check(status)
+        return user
+    }
+
+    /// A piece of text about the conference or one of its users, copied into
+    /// the caller's buffer the way `sipral_subscription_dialog_text` copies
+    /// one: `out_needed` receives the bytes it needs including the NUL, a
+    /// buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing
+    /// written, and a piece the focus did not send is one byte, the NUL.
+    ///
+    /// `which` is a SipralConferenceText; `index` names the user for the
+    /// pieces about one, and is ignored for the others.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
+    /// point at one `size_t`.
+    public static func subscriptionConferenceText(stack: SipralHandle, subscription: SipralHandle, index: Int, which: UInt32, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var needed = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p4 in
+                sipral_subscription_conference_text(stack, subscription, index, which, p4.baseAddress, p4.count, &needed)
+            }
+        try check(status)
+        return needed
+    }
+
+    /// Say, or stop saying, that this end is the focus of a conference the
+    /// call belongs to (RFC 4579 §4.2): `isfocus` on the `Contact` of every
+    /// request and response the call sends from here on — the answer, for a
+    /// call not answered yet, and the next re-INVITE or UPDATE for one that
+    /// is up, which is how the far end learns it.
+    ///
+    /// `focus` is one to say it and zero to stop.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func callSetFocus(stack: SipralHandle, call: SipralHandle, focus: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_call_set_focus(stack, call, focus)
+        try check(status)
+    }
+
+    /// The URI of the conference a call belongs to, when its far end said it
+    /// is a focus (`isfocus` in its `Contact`, RFC 4579 §4.2), copied into
+    /// the caller's buffer as `sipral_subscription_conference_text` copies.
+    ///
+    /// `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end said nothing of
+    /// the kind.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
+    /// point at one `size_t`.
+    public static func callConferenceUri(stack: SipralHandle, call: SipralHandle, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var needed = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p2 in
+                sipral_call_conference_uri(stack, call, p2.baseAddress, p2.count, &needed)
+            }
+        try check(status)
+        return needed
+    }
+
+    /// Subscribe to the conference package of the call's focus (RFC 4579
+    /// §3.4), outside the call's dialog, from the call's own account, and
+    /// write the subscription's handle. It is kept like any subscription and
+    /// outlives the call; `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` says what it
+    /// learns.
+    ///
+    /// `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end did not say it is
+    /// a focus.
+    ///
+    /// Safety
+    ///
+    /// `out_subscription` must point at one `sipral_handle_t`.
+    public static func callSubscribeConference(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws -> SipralHandle {
+        try ensureAbi()
+        var subscription = SipralHandle()
+        let status = sipral_call_subscribe_conference(stack, call, &subscription, nowMs)
+        try check(status)
+        return subscription
+    }
+
+    /// Publish this account's presence (RFC 3903, RFC 3856 §6.2): a PIDF
+    /// document for its address of record, open or closed, with the activity
+    /// and the note `presence` gives. The first call publishes it and every
+    /// later one modifies the same publication; the stack keeps it refreshed
+    /// until sipral_account_unpublish_presence.
+    ///
+    /// Nothing has happened when this returns: the PUBLISH is in the
+    /// transmit queue, and `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with
+    /// `SIPRAL_PRESENCE_KIND_PUBLICATION` says what the compositor did with
+    /// it.
+    ///
+    /// Safety
+    ///
+    /// `presence` must point at a `sipral_presence_t` whose `size` member
+    /// says how long it is, with its pointer readable for the length beside
+    /// it.
+    public static func accountPublishPresence(stack: SipralHandle, account: SipralHandle, presence: sipral_presence_t, nowMs: UInt64) throws {
+        try ensureAbi()
+        var presence = presence
+        let status = sipral_account_publish_presence(stack, account, &presence, nowMs)
+        try check(status)
+    }
+
+    /// Take this account's published presence away (RFC 3903 §4.5):
+    /// `SIPRAL_PUBLICATION_STATE_REMOVED` says when it is gone.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for an account that has published none.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func accountUnpublishPresence(stack: SipralHandle, account: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status = sipral_account_unpublish_presence(stack, account, nowMs)
+        try check(status)
+    }
+
+    /// Queue text the user typed for the far end, UTF-8.
+    ///
+    /// It goes in the next transmission interval (300 ms), at no more
+    /// characters a second than the far end said it takes, each block sent
+    /// twice more as redundancy where both ends agreed `red`. A CR LF, a
+    /// lone CR or a lone LF goes as a new line, and BACKSPACE (U+0008) erases
+    /// the far end's last character.
+    ///
+    /// `SIPRAL_STATUS_NOT_NEGOTIATED` on a call that agreed no text stream,
+    /// and `SIPRAL_STATUS_EXHAUSTED` when more is waiting unsent than a
+    /// stream holds; nothing is queued then, and a later call finds room as
+    /// the far end reads.
+    ///
+    /// Safety
+    ///
+    /// `text` must be readable for `text_len` bytes.
+    public static func mediaSendText(media: SipralHandle, text: String) throws {
+        try ensureAbi()
+        let status =
+            Array(text.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_media_send_text(media, p1.baseAddress, p1.count)
+                }
+            }
+        try check(status)
+    }
+
+    /// The next datagram due on the call's text socket.
+    ///
+    /// A `len` of zero in the packet means nothing is due; call it again at
+    /// the deadline `sipral_stack_poll` names, or with every frame of audio.
+    /// Send what it writes from the socket at `text_address`, never the
+    /// audio one.
+    ///
+    /// `now_ms` is read as the stack reads it and moves nothing, as with
+    /// every media entry point.
+    ///
+    /// Safety
+    ///
+    /// `packet` must point at a `sipral_media_packet_t` as
+    /// `sipral_media_capture` describes.
+    public static func mediaPollText(media: SipralHandle, nowMs: UInt64, packet: inout sipral_media_packet_t) throws {
+        try ensureAbi()
+        let status = sipral_media_poll_text(media, nowMs, &packet)
+        try check(status)
+    }
+
+    /// Take a datagram off the call's text socket.
+    ///
+    /// `out_taken` is written with 1 when it was this call's text, and 0
+    /// when it was not: not RTP, another payload type, from somewhere other
+    /// than where the stream has latched, or on a call with no text. What it
+    /// carried arrives as `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+    ///
+    /// Safety
+    ///
+    /// `data` must be readable for `len` bytes, `from` for `from_len`, and
+    /// `out_taken` must point at one `uint32_t` or be null.
+    public static func mediaReceiveText(media: SipralHandle, data: [UInt8], from: String, nowMs: UInt64) throws -> UInt32 {
+        try ensureAbi()
+        var taken = UInt32()
+        let status =
+            data.withUnsafeBufferPointer { p1 in
+                Array(from.utf8).withUnsafeBufferPointer { raw2 in
+                    raw2.withMemoryRebound(to: CChar.self) { p2 in
+                        sipral_media_receive_text(media, p1.baseAddress, p1.count, p2.baseAddress, p2.count, nowMs, &taken)
+                    }
+                }
+            }
+        try check(status)
+        return taken
+    }
+
+    /// Record a call to a recording server (RFC 7866), and write the
+    /// recording session's handle to `out_recording`.
+    ///
+    /// The call must be one this stack runs the media of, with its audio
+    /// started: `SIPRAL_STATUS_WRONG_STATE` before
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED`, and for a call already being
+    /// recorded to a server. The recording session goes from the recorded
+    /// call's account, over a stream transport when the INVITE, which
+    /// carries the metadata beside the offer, is too large for UDP.
+    ///
+    /// Hanging the recording session up with
+    /// sipral_call_stop_recording_to or `sipral_call_hangup` stops the
+    /// recording; the server hanging it up does the same.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_record_config_t` whose `size` member
+    /// says how long it is, with every pointer in it readable for the length
+    /// beside it, and `out_recording` at one `sipral_handle_t`.
+    public static func callRecordTo(stack: SipralHandle, call: SipralHandle, config: sipral_record_config_t, nowMs: UInt64) throws -> SipralHandle {
+        try ensureAbi()
+        var config = config
+        var recording = SipralHandle()
+        let status = sipral_call_record_to(stack, call, &config, &recording, nowMs)
+        try check(status)
+        return recording
+    }
+
+    /// Stop recording a call to its recording server: the copies stop at
+    /// once, and the recording session is hung up.
+    ///
+    /// `call` is the recorded call, not the recording session.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call nothing records.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    public static func callStopRecordingTo(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status = sipral_call_stop_recording_to(stack, call, nowMs)
+        try check(status)
+    }
+
+    /// The next copy of this call's audio for its recording server.
+    ///
+    /// A `len` of zero in the packet means none is waiting. Otherwise
+    /// `out_far_end` says which socket to send it from: 0 for `this_end`,
+    /// the copy of what this end sent, and 1 for `far_end`, the copy of what
+    /// it received. Collect them with every frame, in a loop to empty: a
+    /// copy nobody collects for a second is dropped, the oldest first.
+    ///
+    /// Safety
+    ///
+    /// `packet` must point at a `sipral_media_packet_t` as
+    /// `sipral_media_capture` describes, and `out_far_end` at one
+    /// `uint32_t`.
+    public static func mediaPollRecording(media: SipralHandle, packet: inout sipral_media_packet_t) throws -> UInt32 {
+        try ensureAbi()
+        var farEnd = UInt32()
+        let status = sipral_media_poll_recording(media, &packet, &farEnd)
+        try check(status)
+        return farEnd
     }
 
     /// Start recording the signalling this stack is fed from here on

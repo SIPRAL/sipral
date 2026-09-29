@@ -624,6 +624,11 @@ pub fn recording_session_body(
     metadata: &RecordingMetadata,
 ) -> Result<BuiltMultipart, SiprecError> {
     let xml = metadata.to_xml()?;
+    written_session_body(sdp, &xml)
+}
+
+/// [`recording_session_body`] for metadata already written.
+pub(crate) fn written_session_body(sdp: &[u8], xml: &str) -> Result<BuiltMultipart, SiprecError> {
     Ok(MultipartBuilder::mixed()
         .part(Part::new("application/sdp", sdp))
         .part(
@@ -694,6 +699,15 @@ fn boolean_feature(params: &sipral_core::msg::Params<'_>, tag: &str) -> bool {
             item.eq_ignore_ascii_case(b"TRUE") || item.eq_ignore_ascii_case(b"!FALSE")
         }),
     }
+}
+
+/// The session description of a recording session's request — an INVITE, or
+/// a re-INVITE or UPDATE carrying new metadata — when its body is the
+/// `multipart/mixed` of RFC 7866 §9.1 with both parts readable: what an
+/// agent taking recording sessions ([`crate::UserAgent::accept_recording_sessions`])
+/// reads as the offer, where it would otherwise refuse the body 415.
+pub(crate) fn session_part<'a>(message: &RawMessage<'a>) -> Option<&'a [u8]> {
+    read_recording_offer(message).ok().map(|offer| offer.sdp)
 }
 
 /// What a recording session's INVITE offers: the SDP and the metadata.

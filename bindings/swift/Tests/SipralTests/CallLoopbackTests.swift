@@ -161,8 +161,14 @@ final class CallLoopbackTests: XCTestCase {
         let after = try Sipral.mediaStatistics(media: media.handle, nowMs: 0).frames_underrun
         XCTAssertLessThanOrEqual(before, read)
         XCTAssertLessThanOrEqual(read, after)
+        // each member appended after the ones before it, the newest at the
+        // tail, where a caller built before it never reads
+        XCTAssertLessThan(
+            try XCTUnwrap(Self.offset(of: \.frames_underrun, in: stats)),
+            try XCTUnwrap(Self.offset(of: \.feedback, in: stats))
+        )
         XCTAssertEqual(
-            Self.offset(of: \.frames_underrun, in: stats),
+            Self.offset(of: \.feedback_suppressed, in: stats),
             MemoryLayout.size(ofValue: stats) - MemoryLayout<UInt64>.size,
             "appended at the tail, where a caller built before it never reads"
         )

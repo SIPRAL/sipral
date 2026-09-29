@@ -546,6 +546,16 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
     // `Versioned` impl pins its `MIN_SIZE` at — see the comment there for why
     // it is not `crate::versioned::min_size::SUSPENDING` beside the rest.
     ("SipralSuspending", 32),
+    ("SipralConference", crate::versioned::min_size::CONFERENCE),
+    (
+        "SipralConferenceUser",
+        crate::versioned::min_size::CONFERENCE_USER,
+    ),
+    ("SipralPresence", crate::versioned::min_size::PRESENCE),
+    (
+        "SipralRecordConfig",
+        crate::versioned::min_size::RECORD_CONFIG,
+    ),
 ];
 
 /// The versioned-shaped structs with no pinned length, and why.
@@ -652,6 +662,14 @@ pub const SURFACE: Surface = Surface {
         crate::inband::SipralToneRegion::ABI,
         crate::record::SipralRecordingFormat::ABI,
         crate::record::SipralRecordingLayout::ABI,
+        crate::conference::SipralConferenceUpdate::ABI,
+        crate::conference::SipralEndpointStatus::ABI,
+        crate::conference::SipralConferenceText::ABI,
+        crate::presence::SipralPresenceKind::ABI,
+        crate::presence::SipralBasic::ABI,
+        crate::presence::SipralActivity::ABI,
+        crate::presence::SipralPublicationState::ABI,
+        crate::presence::SipralPublishFailure::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -689,6 +707,9 @@ pub const SURFACE: Surface = Surface {
         crate::nat::SipralStunServerEvent::ABI,
         crate::event::SipralVerificationEvent::ABI,
         crate::event::SipralProgressEvent::ABI,
+        crate::conference::SipralConferenceEvent::ABI,
+        crate::realtime_text::SipralTextEvent::ABI,
+        crate::presence::SipralPresenceEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -705,6 +726,10 @@ pub const SURFACE: Surface = Surface {
         crate::inband::SipralProgressConfig::ABI,
         crate::inband::SipralConsentTone::ABI,
         crate::record::SipralRecordingOptions::ABI,
+        crate::conference::SipralConference::ABI,
+        crate::conference::SipralConferenceUser::ABI,
+        crate::presence::SipralPresence::ABI,
+        crate::siprec::SipralRecordConfig::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -753,6 +778,7 @@ pub const SURFACE: Surface = Surface {
         crate::call::sipral_call_ring_media::ABI,
         crate::call::sipral_call_answer::ABI,
         crate::call::sipral_call_answer_media::ABI,
+        crate::call::sipral_call_answer_with::ABI,
         crate::call::sipral_call_reject::ABI,
         crate::call::sipral_call_hangup::ABI,
         crate::call::sipral_call_set_headers::ABI,
@@ -837,6 +863,20 @@ pub const SURFACE: Surface = Surface {
         crate::resolve::sipral_account_retarget::ABI,
         crate::diagnostics::sipral_call_record_json::ABI,
         crate::diagnostics::sipral_stack_diagnostics_json::ABI,
+        crate::conference::sipral_subscription_conference::ABI,
+        crate::conference::sipral_subscription_conference_user_at::ABI,
+        crate::conference::sipral_subscription_conference_text::ABI,
+        crate::conference::sipral_call_set_focus::ABI,
+        crate::conference::sipral_call_conference_uri::ABI,
+        crate::conference::sipral_call_subscribe_conference::ABI,
+        crate::presence::sipral_account_publish_presence::ABI,
+        crate::presence::sipral_account_unpublish_presence::ABI,
+        crate::realtime_text::sipral_media_send_text::ABI,
+        crate::realtime_text::sipral_media_poll_text::ABI,
+        crate::realtime_text::sipral_media_receive_text::ABI,
+        crate::siprec::sipral_call_record_to::ABI,
+        crate::siprec::sipral_call_stop_recording_to::ABI,
+        crate::siprec::sipral_media_poll_recording::ABI,
         crate::diagnostics::sipral_stack_recording_start::ABI,
         crate::diagnostics::sipral_stack_recording_stop::ABI,
         crate::audio::sipral_audio_refresh::ABI,
@@ -1050,6 +1090,9 @@ mod tests {
             "SipralStunServerEvent",
             "SipralVerificationEvent",
             "SipralProgressEvent",
+            "SipralConferenceEvent",
+            "SipralTextEvent",
+            "SipralPresenceEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

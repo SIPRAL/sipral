@@ -107,6 +107,14 @@ codes! {
         /// anything is written. The recording has stopped; the file holds the
         /// audio up to the last checkpoint it could write.
         RecordingFailed = 19,
+        /// The call never agreed on what this asks for: text sent on a call
+        /// whose answer took no `m=text` stream, say. Nothing was done, and
+        /// only a new offer that the far end accepts changes it.
+        NotNegotiated = 20,
+        /// The far end of this call is not a conference focus: its Contact
+        /// never carried `isfocus` (RFC 4579 §4.1), so there is no
+        /// conference to name or subscribe to.
+        NotAFocus = 21,
     }
 }
 
@@ -141,6 +149,8 @@ entry! {
             16 => c"limit reached".as_ptr(),
             18 => c"refused by security policy".as_ptr(),
             19 => c"recording failed".as_ptr(),
+            20 => c"not negotiated".as_ptr(),
+            21 => c"not a focus".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -185,6 +195,8 @@ mod tests {
             SipralStatus::LimitReached,
             SipralStatus::SecurityPolicy,
             SipralStatus::RecordingFailed,
+            SipralStatus::NotNegotiated,
+            SipralStatus::NotAFocus,
         ];
         for status in all {
             let code = status as i32;
@@ -195,7 +207,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in (0..=16).chain([18, 19]) {
+        for code in (0..=16).chain(18..=21) {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -207,7 +219,7 @@ mod tests {
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
         assert!(name(17).is_none());
-        assert!(name(20).is_none());
+        assert!(name(22).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -238,5 +250,7 @@ mod tests {
         assert_eq!(SipralStatus::LimitReached as i32, 16);
         assert_eq!(SipralStatus::SecurityPolicy as i32, 18);
         assert_eq!(SipralStatus::RecordingFailed as i32, 19);
+        assert_eq!(SipralStatus::NotNegotiated as i32, 20);
+        assert_eq!(SipralStatus::NotAFocus as i32, 21);
     }
 }

@@ -7,6 +7,11 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::avpf::feedback::{FeedbackBuildError, GenericNackBuilder, NackEntry};
+use crate::avpf::rsize::{
+    ReceivedRtcp, ReducedSizeBuilder, RtcpForm, write_compound_with_feedback,
+};
+use crate::avpf::session::{FeedbackCounts, FeedbackState, Negotiated, Send as FeedbackSend};
 use crate::dtmf::{EVENT_LEN, EventSender, HALF_CLOCK, Outgoing};
 use crate::emodel::{self, BurstRatio, CodecQualityModel, EModelInputs};
 use crate::playout::{Activity, BufferConfig, Insert, JitterBuffer, Pull, Quality, clock_ticks};
@@ -172,6 +177,24 @@ pub enum RtcpReceived<'a> {
     /// the size, which §6.3.3 would otherwise fold into this session's own
     /// report interval.
     NotKeyed,
+    /// A reduced-size packet (RFC 5506) on a stream that negotiated it:
+    /// feedback alone, counted in [`RtpSession::feedback`], with no report
+    /// in it to fold in.
+    Feedback,
+}
+
+/// A feedback packet that could not be written, in the terms a report's own
+/// failure is given in. Only a buffer too small and the compound half's own
+/// refusal can happen here: every NACK list written is non-empty, and bounded
+/// far below what a length field can count.
+fn feedback_failed(error: FeedbackBuildError, need: usize, got: usize) -> RtcpBuildError {
+    match error {
+        FeedbackBuildError::Compound(error) => error,
+        FeedbackBuildError::Short { need, got } => RtcpBuildError::Short { need, got },
+        FeedbackBuildError::NoEntries
+        | FeedbackBuildError::TooManyEntries(_)
+        | FeedbackBuildError::Empty => RtcpBuildError::Short { need, got },
+    }
 }
 
 /// A [`Duration`] into the whole-millisecond field every RFC 3611 §4.7.3
@@ -218,6 +241,10 @@ pub struct RtpSession {
     /// after building, verify before believing — is not something a caller
     /// can get wrong.
     security: Protection,
+    /// RTP/AVPF, once [`RtpSession::use_feedback`] turned it on: the
+    /// feedback schedule, the losses not yet reported and what was counted.
+    /// Boxed because most streams never have it.
+    feedback: Option<Box<FeedbackState>>,
 }
 
 /// Whether this stream is secured, and whether it can be yet.
@@ -414,7 +441,41 @@ impl RtpSession {
             round_trip: None,
             far_voip_metrics: None,
             security: Protection::Clear,
+            feedback: None,
         }
+    }
+
+    /// Run this stream's RTCP as RTP/AVPF (RFC 4585) from `now` on, with what
+    /// the offer and the answer settled; or take what a later exchange
+    /// settled, for a stream already running it.
+    ///
+    /// From here on RTCP is scheduled by RFC 4585 §3.5 over RFC 3550's
+    /// interval with AVPF's minimum (one second before the first report, none
+    /// after): packets this stream finds missing are reported in Generic
+    /// NACKs when `negotiated` agreed them, at once in an Early packet while
+    /// the rules allow one and otherwise in the next Regular one; `trr-int`
+    /// thins Regular packets out; and an Early packet is sent in reduced size
+    /// (RFC 5506) once a compound one has gone, when both ends said
+    /// `a=rtcp-rsize`. A reduced-size packet arriving is read only then.
+    ///
+    /// `unit_interval` is a fresh draw on `[0, 1)`, for the first interval
+    /// under the new minimum.
+    pub fn use_feedback(&mut self, negotiated: Negotiated, now: Duration, unit_interval: f64) {
+        if let Some(running) = self.feedback.as_mut() {
+            running.renegotiated(negotiated);
+        } else {
+            let first = self.timer.use_feedback_minimum(unit_interval);
+            self.feedback = Some(Box::new(FeedbackState::new(negotiated, now, first)));
+        }
+    }
+
+    /// What this stream's feedback negotiated and has done, when it runs
+    /// RTP/AVPF.
+    #[must_use]
+    pub fn feedback(&self) -> Option<(Negotiated, FeedbackCounts)> {
+        self.feedback
+            .as_ref()
+            .map(|state| (state.negotiated(), state.counts()))
     }
 
     /// The same stream, with SRTP over it.
@@ -674,6 +735,9 @@ impl RtpSession {
                 // longer exists once the far end has restarted, the same
                 // reasoning `SequenceState::rebase` already applies to itself
                 self.inbound.rtcp.restart();
+                if let Some(feedback) = self.feedback.as_mut() {
+                    feedback.restarted();
+                }
             }
             SeqUpdate::InOrder | SeqUpdate::Misordered => {}
         }
@@ -699,6 +763,11 @@ impl RtpSession {
                 // not move it
                 if self.inbound.following {
                     self.inbound.latch = Some(from);
+                }
+                // RFC 4585 §3.4 f: a loss this packet reveals is detected
+                // now, at t0
+                if let Some(feedback) = self.feedback.as_mut() {
+                    feedback.arrived(header.sequence, now);
                 }
                 Received::Queued
             }
@@ -1094,8 +1163,15 @@ impl RtpSession {
     ///
     /// `unit_interval` is a fresh random draw on `[0, 1)`, independent of
     /// any other this session has been given (§6.3.1 point 4).
+    ///
+    /// On a stream running RTP/AVPF ([`RtpSession::use_feedback`]) it is RFC
+    /// 4585 §3.5's schedule that answers: an Early packet waiting, or the
+    /// next Regular one.
     pub fn rtcp_due(&mut self, now: Duration, unit_interval: f64) -> Due {
-        self.timer.due(now, unit_interval)
+        match self.feedback.as_mut() {
+            Some(feedback) => feedback.due(now),
+            None => self.timer.due(now, unit_interval),
+        }
     }
 
     /// This stream's VoIP Metrics Report Block (RFC 3611 §4.7), from what
@@ -1195,9 +1271,19 @@ impl RtpSession {
     /// ([`StreamConfig::voip_metrics_xr`]); a stream that did not never
     /// builds the block at all, let alone spends bytes sending it.
     ///
+    /// On a stream running RTP/AVPF ([`RtpSession::use_feedback`]) the packet
+    /// is what RFC 4585 §3.5 makes the slot that is due: a Regular one full,
+    /// minimal under `trr-int`, or nothing at all when `trr-int` suppressed it
+    /// with no feedback to carry; an Early one the missing packets as Generic
+    /// NACKs, in reduced size where RFC 5506 allows it, or nothing when every
+    /// packet it was for turned up after all. Nothing written is zero octets
+    /// with the next deadline, and there is nothing to send.
+    ///
     /// # Errors
-    /// [`RtcpBuildError`], for a buffer too small. Nothing is scheduled and
-    /// nothing is sent when this returns an error.
+    /// [`RtcpBuildError`], for a buffer too small. Nothing is sent when this
+    /// returns an error, and on a stream without feedback nothing is
+    /// scheduled either; with feedback the slot is spent, since RFC 4585's
+    /// schedule moves on whether or not a packet fitted.
     pub fn build_report(
         &mut self,
         out: &mut [u8],
@@ -1209,15 +1295,30 @@ impl RtpSession {
         if self.awaiting_keys() {
             return Err(RtcpBuildError::NotKeyed);
         }
+        let interval = self.timer.calculated_after_report(unit_interval);
+        let plan = self
+            .feedback
+            .as_mut()
+            .map(|feedback| feedback.next_packet(interval, unit_interval));
+        let (full, regular, nacks) = match plan {
+            None => (true, true, Vec::new()),
+            Some(FeedbackSend::Nothing) => return Ok((0, self.next_rtcp_deadline())),
+            Some(FeedbackSend::ReducedSize(nacks)) => return self.send_reduced_size(out, &nacks),
+            Some(FeedbackSend::Compound {
+                full,
+                regular,
+                nacks,
+            }) => (full, regular, nacks),
+        };
         let sequence = self.inbound.sequence;
         let block = self
             .inbound
             .source
             .map(|ssrc| self.inbound.rtcp.block(ssrc, &sequence, ntp));
         let reports: &[ReportBlock] = block.as_slice();
-        let voip_metrics = self
-            .inbound
-            .voip_metrics_xr
+        // a minimal compound packet carries "only the mandatory information"
+        // (RFC 4585 §3.1), which the extended reports are not
+        let voip_metrics = (full && self.inbound.voip_metrics_xr)
             .then(|| self.voip_metrics(codec))
             .flatten();
 
@@ -1256,16 +1357,73 @@ impl RtpSession {
                 voip_metrics: Some(voip_metrics),
             });
         }
+        let nack = [GenericNackBuilder {
+            sender_ssrc: self.outbound.ssrc,
+            media_ssrc: self.inbound.source.unwrap_or_default(),
+            entries: &nacks,
+        }];
+        let feedback: &[GenericNackBuilder<'_>] = if nacks.is_empty() { &[] } else { &nack };
         let overhead = self.rtcp_overhead();
-        let need = compound.encoded_len() + overhead;
+        let need = feedback
+            .iter()
+            .map(GenericNackBuilder::encoded_len)
+            .fold(compound.encoded_len(), usize::saturating_add)
+            + overhead;
         let offered = out.len();
         let room =
             Self::room(out, need, overhead).ok_or(RtcpBuildError::Short { need, got: offered })?;
-        let built = compound.write(room)?;
+        let built = if feedback.is_empty() {
+            compound.write(room)?
+        } else {
+            write_compound_with_feedback(&compound, feedback, room)
+                .map_err(|error| feedback_failed(error, need, offered))?
+        };
         let written = self.protect_rtcp(out, built)?;
-        self.outbound.sent_since_report = false;
-        // §6.3.3 counts what goes on the wire, which is the protected packet
-        let next = self.timer.sent(now, written, unit_interval);
+        // §6.3.3 counts what goes on the wire, which is the protected packet;
+        // an Early packet is counted and moves nothing RFC 3550 schedules
+        let mut next = if regular {
+            self.outbound.sent_since_report = false;
+            self.timer.sent(now, written, unit_interval)
+        } else {
+            self.timer.observe(written);
+            self.timer.next_deadline()
+        };
+        if let Some(state) = self.feedback.as_mut() {
+            state.sent(RtcpForm::Compound, &nacks);
+            next = state.next_deadline();
+        }
+        Ok((written, next))
+    }
+
+    /// A reduced-size packet (RFC 5506 §4.1): the Generic NACKs alone.
+    fn send_reduced_size(
+        &mut self,
+        out: &mut [u8],
+        nacks: &[NackEntry],
+    ) -> Result<(usize, Duration), RtcpBuildError> {
+        let nack = [GenericNackBuilder {
+            sender_ssrc: self.outbound.ssrc,
+            media_ssrc: self.inbound.source.unwrap_or_default(),
+            entries: nacks,
+        }];
+        let packet = ReducedSizeBuilder { nacks: &nack };
+        let overhead = self.rtcp_overhead();
+        let need = packet.encoded_len() + overhead;
+        let offered = out.len();
+        let room =
+            Self::room(out, need, overhead).ok_or(RtcpBuildError::Short { need, got: offered })?;
+        let built = packet
+            .write(room)
+            .map_err(|error| feedback_failed(error, need, offered))?;
+        let written = self.protect_rtcp(out, built)?;
+        self.timer.observe(written);
+        let next = match self.feedback.as_mut() {
+            Some(state) => {
+                state.sent(RtcpForm::ReducedSize, nacks);
+                state.next_deadline()
+            }
+            None => self.timer.next_deadline(),
+        };
         Ok((written, next))
     }
 
@@ -1383,12 +1541,33 @@ impl RtpSession {
             Protection::Clear => wire,
         };
         let datagram = datagram.get(..plain).unwrap_or_default();
+        // a stream running RTP/AVPF reads the feedback in whatever arrives,
+        // and a reduced-size datagram — feedback with no report in front of
+        // it — only where RFC 5506 §5 says both ends agreed to it
+        // (a compound one is read below like any other, and its feedback is
+        // counted once its origin has been believed)
+        if let Some(policy) = self.feedback.as_ref().map(|state| *state.reduced_size())
+            && let Ok(received) = ReceivedRtcp::parse(datagram, &policy)
+            && received.form() == RtcpForm::ReducedSize
+        {
+            if !self.rtcp_origin_accepted(from) {
+                return RtcpReceived::ForeignAddress;
+            }
+            self.timer.observe(wire);
+            self.take_feedback(&received);
+            return RtcpReceived::Feedback;
+        }
         let compound = match CompoundPacket::parse(datagram) {
             Ok(compound) => compound,
             Err(error) => return RtcpReceived::Malformed(error),
         };
         if !self.rtcp_origin_accepted(from) {
             return RtcpReceived::ForeignAddress;
+        }
+        if let Some(policy) = self.feedback.as_ref().map(|state| *state.reduced_size())
+            && let Ok(received) = ReceivedRtcp::parse(datagram, &policy)
+        {
+            self.take_feedback(&received);
         }
         // §6.3.3 folds in the size of "each compound RTCP packet received",
         // which is this one and not a datagram that failed to be one:
@@ -1488,6 +1667,22 @@ impl RtpSession {
         }
     }
 
+    /// Count the Generic NACKs in a datagram that name this session's own
+    /// stream: what the far end found missing of what it was sent.
+    fn take_feedback(&mut self, received: &ReceivedRtcp<'_>) {
+        let ours = self.outbound.ssrc;
+        let Some(state) = self.feedback.as_mut() else {
+            return;
+        };
+        for message in received.feedback() {
+            if let crate::avpf::FeedbackPacket::GenericNack(nack) = message
+                && nack.media_ssrc() == ours
+            {
+                state.nack_received(nack.lost().count());
+            }
+        }
+    }
+
     /// Whether RTCP from `from` belongs to this call, latching onto the
     /// first sender that does.
     ///
@@ -1577,8 +1772,11 @@ impl RtpSession {
     /// effect [`RtpSession::rtcp_due`] has of updating `pmembers` — for a
     /// caller that only wants to know, such as arming a wakeup timer.
     #[must_use]
-    pub const fn next_rtcp_deadline(&self) -> Duration {
-        self.timer.next_deadline()
+    pub fn next_rtcp_deadline(&self) -> Duration {
+        match self.feedback.as_ref() {
+            Some(feedback) => feedback.next_deadline(),
+            None => self.timer.next_deadline(),
+        }
     }
 
     /// Whether §6.3.7's BYE backoff would apply if this session left the
@@ -3912,5 +4110,250 @@ mod tests {
         let len = session.send(b"eight ok", 160, &mut wire).expect("room");
         assert_eq!(len, 20);
         assert_eq!(wire.get(12..20), Some(&b"eight ok"[..]));
+    }
+
+    // -- RTP/AVPF (RFC 4585) and reduced-size RTCP (RFC 5506) ----------------
+
+    use crate::avpf::{FeedbackPacket, Negotiated, RTPFB, ReceivedRtcp, ReducedSize, RtcpForm};
+
+    const FAR: u32 = 0x0a0b_0c0d;
+
+    fn nack_only() -> Negotiated {
+        Negotiated {
+            generic_nack: true,
+            trr_interval: Duration::ZERO,
+            reduced_size: false,
+        }
+    }
+
+    /// A session running feedback, with the far end's stream established at
+    /// 100 and 101.
+    fn with_feedback(negotiated: Negotiated) -> RtpSession {
+        let mut session = session();
+        session.use_feedback(negotiated, Duration::ZERO, 0.5);
+        establish(&mut session, FAR, addr(PEER));
+        session
+    }
+
+    fn arrive(session: &mut RtpSession, sequence: u16, at: Duration) {
+        assert_eq!(
+            session.receive(&mut datagram(FAR, sequence, 8), addr(PEER), at),
+            Received::Queued
+        );
+    }
+
+    /// Every sequence number the Generic NACKs of one datagram ask for, read
+    /// the way the far end reads them.
+    fn nacked(datagram: &[u8], reduced_size: bool) -> Vec<u16> {
+        let received = ReceivedRtcp::parse(datagram, &ReducedSize::new(reduced_size))
+            .expect("a datagram the far end accepts");
+        received
+            .feedback()
+            .flat_map(|message| match message {
+                FeedbackPacket::GenericNack(nack) => {
+                    assert_eq!(nack.media_ssrc(), FAR, "about the far end's stream");
+                    assert_eq!(nack.sender_ssrc(), 0x0102_0304);
+                    nack.lost().collect::<Vec<_>>()
+                }
+                FeedbackPacket::Other { .. } => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_gap_is_reported_at_once_in_an_early_compound_packet() {
+        let mut session = with_feedback(nack_only());
+        let loss = Duration::from_millis(300);
+        arrive(&mut session, 104, loss);
+        assert_eq!(
+            session.rtcp_due(loss, 0.5),
+            Due::Send,
+            "two members: no dither, the Early packet goes at t0"
+        );
+        let mut out = [0_u8; 512];
+        let (len, next) = session
+            .build_report(&mut out, loss, 0, 0.5, None)
+            .expect("room");
+        let wire = out.get(..len).unwrap_or_default();
+        assert!(
+            CompoundPacket::parse(wire).is_ok(),
+            "compound: no report has gone yet"
+        );
+        assert_eq!(nacked(wire, false), vec![102, 103]);
+        assert!(next > loss);
+        let (_, counts) = session.feedback().expect("feedback runs");
+        assert_eq!(counts.nacks_sent, 1);
+        assert_eq!(counts.packets_nacked, 2);
+        assert_eq!(counts.early_packets, 1);
+    }
+
+    #[test]
+    fn a_packet_that_turns_up_before_its_nack_goes_is_not_asked_for() {
+        let mut session = with_feedback(nack_only());
+        let loss = Duration::from_millis(300);
+        arrive(&mut session, 104, loss);
+        arrive(&mut session, 102, loss);
+        assert_eq!(session.rtcp_due(loss, 0.5), Due::Send);
+        let mut out = [0_u8; 512];
+        let (len, _) = session
+            .build_report(&mut out, loss, 0, 0.5, None)
+            .expect("room");
+        assert_eq!(nacked(out.get(..len).unwrap_or_default(), false), vec![103]);
+    }
+
+    #[test]
+    fn after_an_early_packet_the_next_loss_waits_for_the_regular_one() {
+        let mut session = with_feedback(nack_only());
+        let first = Duration::from_millis(300);
+        arrive(&mut session, 104, first);
+        assert_eq!(session.rtcp_due(first, 0.5), Due::Send);
+        let mut out = [0_u8; 512];
+        let (_, regular) = session
+            .build_report(&mut out, first, 0, 0.5, None)
+            .expect("room");
+        let second = Duration::from_millis(400);
+        arrive(&mut session, 107, second);
+        assert_eq!(
+            session.rtcp_due(second, 0.5),
+            Due::Wait(regular),
+            "allow_early is spent until the next Regular packet (RFC 4585 §3.5.2)"
+        );
+        assert_eq!(session.rtcp_due(regular, 0.5), Due::Send);
+        let (len, _) = session
+            .build_report(&mut out, regular, 0, 0.5, None)
+            .expect("room");
+        assert_eq!(
+            nacked(out.get(..len).unwrap_or_default(), false),
+            vec![105, 106]
+        );
+    }
+
+    #[test]
+    fn an_early_packet_goes_in_reduced_size_once_a_compound_one_has() {
+        let mut session = with_feedback(Negotiated {
+            reduced_size: true,
+            ..nack_only()
+        });
+        let Due::Wait(regular) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing due yet");
+        };
+        assert_eq!(session.rtcp_due(regular, 0.5), Due::Send);
+        let mut out = [0_u8; 512];
+        let (len, _) = session
+            .build_report(&mut out, regular, 0, 0.5, None)
+            .expect("room");
+        assert!(
+            CompoundPacket::parse(out.get(..len).unwrap_or_default()).is_ok(),
+            "the first packet is compound, whatever was negotiated (RFC 5506 §4.3)"
+        );
+        let loss = regular + Duration::from_millis(100);
+        arrive(&mut session, 105, loss);
+        assert_eq!(session.rtcp_due(loss, 0.5), Due::Send);
+        let (len, _) = session
+            .build_report(&mut out, loss, 0, 0.5, None)
+            .expect("room");
+        let wire = out.get(..len).unwrap_or_default();
+        assert_eq!(wire.get(1), Some(&RTPFB), "the NACK comes first");
+        assert_eq!(
+            ReceivedRtcp::parse(wire, &ReducedSize::new(true)).map(|received| received.form()),
+            Ok(RtcpForm::ReducedSize)
+        );
+        assert_eq!(nacked(wire, true), vec![102, 103, 104]);
+        let (_, counts) = session.feedback().expect("feedback runs");
+        assert_eq!(counts.reduced_size_packets, 1);
+    }
+
+    #[test]
+    fn a_reduced_size_packet_is_read_only_where_it_was_negotiated() {
+        let negotiated = Negotiated {
+            reduced_size: true,
+            ..nack_only()
+        };
+        // the far end: its stream is established here, and it sends a NACK
+        // about this session's own SSRC in reduced size
+        let packet = {
+            let entries = [crate::avpf::NackEntry { pid: 7, blp: 1 }];
+            let nack = [crate::avpf::GenericNackBuilder {
+                sender_ssrc: FAR,
+                media_ssrc: 0x0102_0304,
+                entries: &entries,
+            }];
+            let mut out = [0_u8; 64];
+            let len = crate::avpf::ReducedSizeBuilder { nacks: &nack }
+                .write(&mut out)
+                .expect("room");
+            out.get(..len).unwrap_or_default().to_vec()
+        };
+
+        let mut agreed = with_feedback(negotiated);
+        assert_eq!(
+            agreed.rtcp_receive(&mut packet.clone(), addr(PEER), Duration::ZERO, 0),
+            RtcpReceived::Feedback
+        );
+        let (_, counts) = agreed.feedback().expect("feedback runs");
+        assert_eq!(counts.nacks_received, 1);
+        assert_eq!(counts.packets_asked_for, 2);
+
+        let mut without = with_feedback(nack_only());
+        assert!(matches!(
+            without.rtcp_receive(&mut packet.clone(), addr(PEER), Duration::ZERO, 0),
+            RtcpReceived::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn after_the_first_report_avpf_leaves_rfc_3550s_five_seconds_behind() {
+        let mut plain = session();
+        let mut fed = session();
+        fed.use_feedback(nack_only(), Duration::ZERO, 0.5);
+        let mut out = [0_u8; 512];
+        let mut gap = |session: &mut RtpSession| {
+            let Due::Wait(first) = session.rtcp_due(Duration::ZERO, 0.5) else {
+                panic!("nothing due yet");
+            };
+            assert_eq!(session.rtcp_due(first, 0.5), Due::Send);
+            let (_, next) = session
+                .build_report(&mut out, first, 0, 0.5, None)
+                .expect("room");
+            (first, next.saturating_sub(first))
+        };
+        let (plain_first, plain_gap) = gap(&mut plain);
+        let (fed_first, fed_gap) = gap(&mut fed);
+        assert!(plain_gap >= Duration::from_secs(4), "{plain_gap:?}");
+        // an empty report of about sixty octets in 800 octets a second
+        // shared out by §6.2: a tenth of a second, not RFC 3550's five nor
+        // AVPF's own initial one
+        assert!(
+            fed_gap < Duration::from_millis(500),
+            "Tmin is zero after the first packet (RFC 4585 §3.4 d): {fed_gap:?}"
+        );
+        assert!(
+            fed_first < plain_first,
+            "and one second, not two and a half, before it"
+        );
+    }
+
+    #[test]
+    fn trr_int_suppresses_a_regular_packet_with_nothing_to_carry() {
+        let mut session = with_feedback(Negotiated {
+            trr_interval: Duration::from_secs(10),
+            ..nack_only()
+        });
+        let mut out = [0_u8; 512];
+        let Due::Wait(first) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing due yet");
+        };
+        assert_eq!(session.rtcp_due(first, 0.5), Due::Send);
+        let (len, second) = session
+            .build_report(&mut out, first, 0, 0.5, None)
+            .expect("room");
+        assert!(len > 0, "the first Regular packet is full");
+        assert_eq!(session.rtcp_due(second, 0.5), Due::Send);
+        let (len, _) = session
+            .build_report(&mut out, second, 0, 0.5, None)
+            .expect("room");
+        assert_eq!(len, 0, "within trr-int and nothing to say: suppressed");
+        let (_, counts) = session.feedback().expect("feedback runs");
+        assert_eq!(counts.suppressed, 1);
     }
 }

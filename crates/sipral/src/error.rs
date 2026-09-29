@@ -359,6 +359,16 @@ pub enum MediaError {
     /// ones it decodes out of the other — which two codecs only agree on
     /// when they cut a frame the same way.
     JoinIncompatible,
+    /// Text was asked for on a call that negotiated no real-time text stream
+    /// (RFC 4103): it was given no text socket
+    /// ([`CallMedia::text`](crate::CallMedia::text)), the far end refused or
+    /// never offered one, or the call keys its audio.
+    NoText,
+    /// More text than the call holds unsent; none of it was queued.
+    TextBufferFull {
+        /// Characters there is still room for.
+        room: usize,
+    },
 }
 
 impl MediaError {
@@ -592,6 +602,11 @@ impl fmt::Display for MediaError {
             Self::JoinIncompatible => f.write_str(
                 "the two calls decode at different sample rates, or cut audio into frames of \
                  different lengths, so they cannot be mixed without resampling",
+            ),
+            Self::NoText => f.write_str("the call negotiated no real-time text stream"),
+            Self::TextBufferFull { room } => write!(
+                f,
+                "the text does not fit: there is room for {room} more characters unsent"
             ),
             // every refusal about how a call is secured and how its path is
             // chosen, which `about_the_path` holds because the match here had

@@ -64,6 +64,7 @@ pub mod announce;
 pub mod audio;
 pub mod call;
 pub mod capabilities;
+pub mod conference;
 pub mod counters;
 pub mod diagnostics;
 pub mod error;
@@ -84,6 +85,8 @@ pub mod message;
 mod names;
 pub mod nat;
 pub mod ports;
+pub mod presence;
+pub mod realtime_text;
 pub mod record;
 pub mod resolve;
 #[cfg(test)]
@@ -92,6 +95,7 @@ pub mod screening;
 pub mod security;
 #[cfg(all(test, feature = "stir"))]
 mod security_tests;
+pub mod siprec;
 pub mod stack;
 pub mod status;
 pub mod subscription;

@@ -755,6 +755,21 @@ record! {
         pub recorded_ms: u64,
         /// Whether the watchdog currently considers inbound audio stopped.
         pub stalled: u32,
+        /// Whether the call agreed a real-time text stream (RFC 4103), which
+        /// `sipral_media_send_text` writes to.
+        ///
+        /// Appended at the tail (ABI 0.31), like the three below; a caller
+        /// built before them never reads them.
+        pub has_text: u32,
+        /// Whether the audio stream runs RTP/AVPF (RFC 4585): both ends named
+        /// a feedback profile.
+        pub feedback: u32,
+        /// Whether both ends agreed Generic NACKs (`a=rtcp-fb:* nack`), so
+        /// that a gap in what arrives is asked for again.
+        pub generic_nack: u32,
+        /// Whether both ends agreed reduced-size RTCP (RFC 5506,
+        /// `a=rtcp-rsize`).
+        pub reduced_size: u32,
     }
 }
 
@@ -903,6 +918,30 @@ record! {
         /// Appended at the tail; the pinned `MIN_SIZE` is unmoved, and a
         /// caller built before it existed never reads it.
         pub frames_underrun: u64,
+        /// Whether the stream runs RTP/AVPF (RFC 4585). Every count below is
+        /// zero while it does not.
+        ///
+        /// Appended at the tail (ABI 0.31), like everything below it.
+        pub feedback: u32,
+        /// The `trr-int` both ends agreed: the least time between two
+        /// regular reports, in milliseconds. Zero for none.
+        pub trr_interval_ms: u32,
+        /// Generic NACKs this end sent, each asking for one or more packets.
+        pub nacks_sent: u64,
+        /// The packets those NACKs asked for.
+        pub packets_nacked: u64,
+        /// Generic NACKs the far end sent.
+        pub nacks_received: u64,
+        /// The packets those asked this end for.
+        pub packets_asked_for: u64,
+        /// Early RTCP packets this end sent: feedback that could not wait for
+        /// the next regular report.
+        pub early_packets: u64,
+        /// Reduced-size RTCP packets this end sent (RFC 5506).
+        pub reduced_size_packets: u64,
+        /// Feedback this end had to hold back, because the stream's RTCP
+        /// bandwidth had none to spare.
+        pub feedback_suppressed: u64,
     }
 }
 
@@ -1088,7 +1127,11 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::SameCall => SipralStatus::InvalidArgument,
         // the numbers a session can bind ran out, which a corrected value
         // does not fix and a different build does not either
-        MediaError::TooManyDigits | MediaError::NoPayloadType => SipralStatus::Exhausted,
+        // and the text still waiting to go is as much as a stream holds,
+        // which drains at the rate the far end reads
+        MediaError::TooManyDigits
+        | MediaError::NoPayloadType
+        | MediaError::TextBufferFull { .. } => SipralStatus::Exhausted,
         MediaError::NoSuchCall
         | MediaError::NoDescription
         | MediaError::NotRecording
@@ -1101,6 +1144,7 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         MediaError::PacketTooLong { .. } => SipralStatus::BufferTooSmall,
         // the call was refused, with 488, by the policy it was answered under
         MediaError::SrtpRequired => SipralStatus::SecurityPolicy,
+        MediaError::NoText => SipralStatus::NotNegotiated,
         MediaError::Signalling(ref refused) => return crate::call::ua_failed(refused),
         _ => SipralStatus::NotSent,
     };
@@ -1111,6 +1155,7 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
 pub(crate) fn stream_stats(record: &StreamStatistics) -> SipralStreamStats {
     let quality = record.quality;
     let voip = record.voip_metrics;
+    let counts = record.feedback_counts;
     SipralStreamStats {
         size: size_of::<SipralStreamStats>(),
         codec: named_codec(record.codec) as u32,
@@ -1152,6 +1197,17 @@ pub(crate) fn stream_stats(record: &StreamStatistics) -> SipralStreamStats {
         has_voip_mos_cq: u32::from(voip.is_some_and(|block| block.mos_cq != UNAVAILABLE)),
         voip_mos_cq_x10: voip.map_or(0, |block| u32::from(block.mos_cq)),
         frames_underrun: quality.underruns,
+        feedback: u32::from(record.feedback.is_some()),
+        trr_interval_ms: record.feedback.map_or(0, |agreed| {
+            u32::try_from(agreed.trr_interval.as_millis()).unwrap_or(u32::MAX)
+        }),
+        nacks_sent: counts.nacks_sent,
+        packets_nacked: counts.packets_nacked,
+        nacks_received: counts.nacks_received,
+        packets_asked_for: counts.packets_asked_for,
+        early_packets: counts.early_packets,
+        reduced_size_packets: counts.reduced_size_packets,
+        feedback_suppressed: counts.suppressed,
     }
 }
 
@@ -1381,7 +1437,7 @@ impl MediaEntry {
     /// it: a media entry point runs on a thread that reads the clock apart
     /// from the one that polls, and a reading a millisecond behind the last
     /// poll is not a caller bug.
-    fn instant(&self, now_ms: u64) -> Result<Instant, Fail> {
+    pub(crate) fn instant(&self, now_ms: u64) -> Result<Instant, Fail> {
         instant_at(self.origin, now_ms)
     }
 }
@@ -1967,6 +2023,7 @@ fn candidate_of(candidate: &CodecCandidate) -> SipralCodecCandidate {
 
 fn media_info(session: &MediaSession) -> SipralMediaInfo {
     let plan = session.plan();
+    let feedback = session.feedback();
     SipralMediaInfo {
         size: size_of::<SipralMediaInfo>(),
         codec: named_codec(session.codec()) as u32,
@@ -1985,6 +2042,10 @@ fn media_info(session: &MediaSession) -> SipralMediaInfo {
         recording: u32::from(session.is_recording()),
         recorded_ms: session.recorded().map_or(0, millis),
         stalled: u32::from(session.is_stalled()),
+        has_text: u32::from(session.has_text()),
+        feedback: u32::from(feedback.is_some()),
+        generic_nack: u32::from(feedback.is_some_and(|agreed| agreed.generic_nack)),
+        reduced_size: u32::from(feedback.is_some_and(|agreed| agreed.reduced_size)),
     }
 }
 
@@ -2720,7 +2781,7 @@ entry! {
 /// the same reason the buffers are checked here: they are the library's to
 /// write, and whatever the caller left in them must never read as a packet that
 /// was produced.
-fn prepare(packet: &mut SipralMediaPacket) -> Result<(), Fail> {
+pub(crate) fn prepare(packet: &mut SipralMediaPacket) -> Result<(), Fail> {
     packet.len = 0;
     packet.destination_len = 0;
     packet.protocol = crate::stack::SipralTransport::Udp as u32;
@@ -2753,7 +2814,7 @@ fn prepare(packet: &mut SipralMediaPacket) -> Result<(), Fail> {
 /// # Safety
 ///
 /// As [`put`].
-unsafe fn put_datagram(
+pub(crate) unsafe fn put_datagram(
     packet: &mut SipralMediaPacket,
     datagram: &sipral::Datagram<'_>,
 ) -> Result<(), Fail> {
@@ -2770,7 +2831,7 @@ unsafe fn put_datagram(
 ///
 /// The buffers in `packet` must be writable for the capacities beside them,
 /// which [`prepare`] has already been asked about.
-unsafe fn put(
+pub(crate) unsafe fn put(
     packet: &mut SipralMediaPacket,
     destination: SocketAddr,
     payload: &[u8],
@@ -2969,7 +3030,7 @@ a=sendrecv\r\n";
 
     /// One RTP packet of mu-law from the far end: version two, payload type
     /// zero, and a source of its own.
-    fn rtp(sequence: u16, timestamp: u32) -> Vec<u8> {
+    pub(crate) fn rtp(sequence: u16, timestamp: u32) -> Vec<u8> {
         let mut out = vec![0x80, 0x00];
         out.extend_from_slice(&sequence.to_be_bytes());
         out.extend_from_slice(&timestamp.to_be_bytes());
@@ -2999,6 +3060,10 @@ a=sendrecv\r\n";
             recording: u32::MAX,
             recorded_ms: u64::MAX,
             stalled: u32::MAX,
+            has_text: u32::MAX,
+            feedback: u32::MAX,
+            generic_nack: u32::MAX,
+            reduced_size: u32::MAX,
         }
     }
 
@@ -3151,6 +3216,15 @@ a=sendrecv\r\n";
             has_voip_mos_cq: u32::MAX,
             voip_mos_cq_x10: u32::MAX,
             frames_underrun: u64::MAX,
+            feedback: u32::MAX,
+            trr_interval_ms: u32::MAX,
+            nacks_sent: u64::MAX,
+            packets_nacked: u64::MAX,
+            nacks_received: u64::MAX,
+            packets_asked_for: u64::MAX,
+            early_packets: u64::MAX,
+            reduced_size_packets: u64::MAX,
+            feedback_suppressed: u64::MAX,
         }
     }
 
@@ -5316,6 +5390,106 @@ a=sendrecv\r\n";
         let status =
             unsafe { sipral_stack_poll_farewell(handle, ptr::null_mut(), &raw mut packet) };
         assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    // -- RTCP feedback (RFC 4585, RFC 5506) ----------------------------------
+
+    /// What the far end answers an offer of feedback with when it takes it
+    /// all: RTP/AVPF, Generic NACKs and reduced-size RTCP.
+    const FEEDBACK_ANSWER: &[u8] = b"v=0\r\n\
+o=bob 1 1 IN IP4 203.0.113.5\r\n\
+s=-\r\n\
+c=IN IP4 203.0.113.5\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVPF 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtcp-fb:* nack\r\n\
+a=rtcp-rsize\r\n\
+a=sendrecv\r\n";
+
+    /// A call placed with `feedback` set as given, answered with `answer`;
+    /// hands back the stack, the call and the offer.
+    fn feedback_call(
+        observed: &mut Observed,
+        feedback: u32,
+        answer: &[u8],
+    ) -> (SipralHandle, SipralHandle, String) {
+        let (handle, account) = media_line(observed, |_| {});
+        let mut config = managed_config();
+        config.feedback = feedback;
+        let (status, call) = place(handle, account, &config, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, answer, true), 1_100);
+        crate::stack::tests::poll(handle, 1_100);
+        let _ = sent(handle);
+        let offer = String::from_utf8_lossy(&invite).into_owned();
+        (handle, call, offer)
+    }
+
+    #[test]
+    fn a_call_that_asks_for_feedback_offers_avpf_and_reports_what_was_agreed() {
+        let mut observed = Observed::default();
+        let (handle, call, offer) =
+            feedback_call(&mut observed, SipralToggle::On as u32, FEEDBACK_ANSWER);
+        assert!(offer.contains("m=audio 40000 RTP/AVPF 0"), "{offer}");
+        assert!(offer.contains("a=rtcp-fb:* nack"), "{offer}");
+        assert!(offer.contains("a=rtcp-rsize"), "{offer}");
+        let media = media_of(handle, call);
+        let info = media_info(media);
+        assert_eq!(
+            (info.feedback, info.generic_nack, info.reduced_size),
+            (1, 1, 1)
+        );
+        let stats = statistics(media, 1_200);
+        assert_eq!(stats.feedback, 1);
+        assert_eq!(stats.nacks_sent, 0);
+        assert_eq!(stats.feedback_suppressed, 0);
+        release(media);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_call_that_does_not_ask_offers_plain_rtp_and_runs_no_feedback() {
+        for feedback in [SipralToggle::Default as u32, SipralToggle::Off as u32] {
+            let mut observed = Observed::default();
+            let (handle, call, offer) = feedback_call(&mut observed, feedback, ANSWER);
+            assert!(offer.contains("m=audio 40000 RTP/AVP 0"), "{offer}");
+            assert!(!offer.contains("rtcp-fb"), "{offer}");
+            let media = media_of(handle, call);
+            let info = media_info(media);
+            assert_eq!(
+                (info.feedback, info.generic_nack, info.reduced_size),
+                (0, 0, 0)
+            );
+            let stats = statistics(media, 1_200);
+            assert_eq!((stats.feedback, stats.trr_interval_ms), (0, 0));
+            release(media);
+            assert_eq!(
+                unsafe { crate::stack::sipral_stack_destroy(handle) },
+                SipralStatus::Ok
+            );
+        }
+    }
+
+    #[test]
+    fn a_feedback_setting_that_is_not_one_is_refused() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let mut config = managed_config();
+        config.feedback = 3;
+        assert_eq!(
+            place(handle, account, &config, 1_000).0,
+            SipralStatus::InvalidArgument
+        );
+        assert!(sent(handle).is_empty(), "nothing went out");
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(handle) },
             SipralStatus::Ok

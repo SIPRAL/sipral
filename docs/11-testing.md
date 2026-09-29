@@ -957,6 +957,12 @@ harness: `a_call_still_connects_against_a_peer_that_keeps_only_a_law` and
 sockets can — a call placed and answered, audio measured, and a codec change
 carried, all over loopback `UdpSocket`s rather than delivered byte for byte —
 since the real lab is not reachable from every machine this runs on.
+`interop/harness/src/protocols.rs` does the same for what no lab server
+takes part in: real-time text and RTCP feedback on a call between two of the
+harness's endpoints, text carried each way on sockets of its own, and a call
+recorded to a third endpoint that takes recording sessions, the recording
+session on a real TCP connection and both parties' copies counted on the
+recorder's two sockets.
 
 ## Tooling
 

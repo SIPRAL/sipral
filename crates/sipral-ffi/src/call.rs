@@ -161,6 +161,35 @@ record! {
         /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
         /// unmoved.
         pub ice: u32,
+        /// Where this call's real-time text arrives (RFC 4103): a second
+        /// socket the application bound, as an address and a port. Set, the
+        /// offer or answer carries an `m=text` stream for T.140 with its
+        /// redundancy, and once both ends agree it `sipral_media_send_text`,
+        /// `sipral_media_poll_text` and `sipral_media_receive_text` carry
+        /// it. Null for a call with no text. Not NUL-terminated.
+        ///
+        /// Read only with `media_address`, and not offered on a call keyed
+        /// by SRTP or DTLS-SRTP or gathering ICE: the text stream has no key
+        /// and no candidates of its own, and typed text sent in the clear
+        /// beside encrypted audio is worse than none.
+        ///
+        /// Appended at the tail (ABI 0.31), like `feedback` and `focus`; the
+        /// pinned `MIN_SIZE` is unmoved.
+        pub text_address: *const c_char,
+        /// How many bytes of it.
+        pub text_address_len: usize,
+        /// Whether this call asks for RTCP feedback: a `SipralToggle`. On
+        /// offers RTP/AVPF (RFC 4585) with Generic NACKs and reduced-size
+        /// RTCP (RFC 5506), and runs RFC 4585's timing when the answer takes
+        /// it; zero leaves it off, as it is by default, because a far end
+        /// that knows only RTP/AVP refuses a profile it does not know. Read
+        /// only with `media_address`. An offer that asks for it is answered
+        /// in kind whatever this says.
+        pub feedback: u32,
+        /// Nonzero to say this end is the focus of a conference (RFC 4579
+        /// §3.3): `isfocus` goes on the Contact of every message this call
+        /// sends from here on.
+        pub focus: u32,
     }
 }
 
@@ -181,7 +210,15 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
     let status = match *error {
         // the handle was live here, so the layer below disagreeing means what
         // it named has just gone
-        UaError::NoSuchAccount | UaError::NoSuchCall => SipralStatus::StaleHandle,
+        UaError::NoSuchAccount | UaError::NoSuchCall | UaError::NoSuchPublication => {
+            SipralStatus::StaleHandle
+        }
+        UaError::NotAFocus => SipralStatus::NotAFocus,
+        // a document that cannot be written and metadata that does not fit a
+        // recording session are both values that would be taken corrected
+        UaError::Publish(sipral_ua::PublishError::Unwritable(_)) | UaError::Recording(_) => {
+            SipralStatus::InvalidArgument
+        }
         // `NoWallClock` among them: an account that signs, on a stack that
         // was never told the time, is a moment wrong rather than a value,
         // and `sipral_stack_stir` or `media_clock_unix_seconds` is the way
@@ -190,7 +227,8 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         | UaError::NoSession
         | UaError::ChangeInProgress
         | UaError::CannotRenegotiate
-        | UaError::NoWallClock => SipralStatus::WrongState,
+        | UaError::NoWallClock
+        | UaError::Publish(sipral_ua::PublishError::NothingPublished) => SipralStatus::WrongState,
         // an account configured without a registrar is the wrong account to
         // register rather than the wrong moment: a corrected configuration
         // would be taken, and no amount of waiting will change this one
@@ -296,8 +334,8 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
         fail(
             SipralStatus::InvalidArgument,
             format!(
-                "{member} is not read here: sipral_call_ring_media names a call that already \
-                 exists, and only media_address, srtp and codecs apply to one"
+                "{member} is not read here: the call already exists, and only media_address, \
+                 srtp, codecs, ice, text_address, feedback and focus apply to one"
             ),
         )
     }
@@ -378,8 +416,7 @@ unsafe fn codec_order(config: &SipralCallConfig) -> Result<Option<Vec<&str>>, Fa
 fn call_catalog(
     base: &CodecCatalog,
     floor: Option<SrtpPolicy>,
-    srtp: Option<SrtpPolicy>,
-    ice: Option<IcePolicy>,
+    (srtp, ice, feedback): (Option<SrtpPolicy>, Option<IcePolicy>, bool),
     codecs: Option<&[&str]>,
 ) -> Result<Option<CodecCatalog>, Fail> {
     if let (Some(policy), Some(floor)) = (srtp, floor)
@@ -393,7 +430,7 @@ fn call_catalog(
             ),
         ));
     }
-    if srtp.is_none() && ice.is_none() && codecs.is_none() {
+    if srtp.is_none() && ice.is_none() && !feedback && codecs.is_none() {
         return Ok(None);
     }
     let mut catalog = base.clone();
@@ -407,6 +444,9 @@ fn call_catalog(
     }
     if let Some(policy) = ice {
         catalog = catalog.with_ice(policy);
+    }
+    if feedback {
+        catalog = catalog.with_feedback(true);
     }
     Ok(Some(catalog))
 }
@@ -435,15 +475,70 @@ fn call_media(
     base: &CodecCatalog,
     catalog: Option<CodecCatalog>,
     (public, relay): (Option<SocketAddr>, crate::nat::HeldRelay),
+    text: Option<SocketAddr>,
 ) -> Option<CallMedia> {
-    if catalog.is_none() && public.is_none() && relay.is_none() {
+    if catalog.is_none() && public.is_none() && relay.is_none() && text.is_none() {
         return None;
     }
     let catalog = catalog.unwrap_or_else(|| base.clone());
-    Some(dressed(
+    let media = dressed(
         CallMedia::new(catalog, state.media_config()),
         (public, relay),
-    ))
+    );
+    Some(match text {
+        Some(address) => media.text(address),
+        None => media,
+    })
+}
+
+/// What a call's configuration says about its media beyond the codecs:
+/// SRTP, ICE and feedback, checked before the stack is locked.
+fn media_choices(
+    config: &SipralCallConfig,
+) -> Result<(Option<SrtpPolicy>, Option<IcePolicy>, bool), Fail> {
+    let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
+    let ice = crate::media::ice_policy(config.ice, "ice")?;
+    let feedback = crate::media::toggled(config.feedback, "feedback", false)?;
+    Ok((srtp, ice, feedback))
+}
+
+/// Where the call's real-time text arrives, when its configuration names
+/// a socket for it.
+///
+/// # Safety
+///
+/// `config.text_address` must be readable for `config.text_address_len`
+/// bytes.
+unsafe fn text_address(
+    config: &SipralCallConfig,
+    managed: bool,
+) -> Result<Option<SocketAddr>, Fail> {
+    if config.text_address.is_null() && config.text_address_len == 0 {
+        return Ok(None);
+    }
+    if !managed {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "text_address is set without media_address: the text stream goes in a description \
+             this stack writes, and a call described by the application carries whatever text \
+             stream its own sdp names",
+        ));
+    }
+    Ok(Some(unsafe {
+        address(config.text_address, config.text_address_len, "text_address")
+    }?))
+}
+
+/// Whether the configuration says this end is a conference focus.
+fn focus_of(config: &SipralCallConfig) -> Result<bool, Fail> {
+    match config.focus {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!("focus is {other}, and it is 0 or 1"),
+        )),
+    }
 }
 
 /// `media`, described by the public address and given the relay the stack
@@ -609,19 +704,23 @@ entry! {
         let media = unsafe { managed_media(&config) }?;
         // checked here, before the account is even looked up, so a bad value
         // never reaches the point of building anything
-        let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
-        let ice = crate::media::ice_policy(config.ice, "ice")?;
+        let choices = media_choices(&config)?;
         let codecs = unsafe { codec_order(&config) }?;
+        let text = unsafe { text_address(&config, media.is_some()) }?;
+        let focus = focus_of(&config)?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.accounts.get(account).map_err(handle_failed)?;
-            let outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
+            let mut outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
+            if focus {
+                outgoing = outgoing.focus();
+            }
             let placed = match media {
                 Some(local) => {
                     let base = state.engine.account_catalog(id);
                     let floor = floor_of(state, Some(id));
-                    let catalog = call_catalog(&base, floor, srtp, ice, codecs.as_deref())?;
+                    let catalog = call_catalog(&base, floor, choices, codecs.as_deref())?;
                     let outside = outside(state, local)?;
-                    let placed = match call_media(state, &base, catalog, outside) {
+                    let placed = match call_media(state, &base, catalog, outside, text) {
                         // the stack's own catalogue, untouched: this is what
                         // `srtp` and `codecs` both unspecified on the call
                         // have to mean
@@ -746,38 +845,85 @@ entry! {
         config: *const SipralCallConfig,
         now_ms: u64,
     ) {
-        let config = unsafe { read_versioned(config) }?;
-        let local = unsafe { ring_media_address(&config) }?;
-        let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
-        let ice = crate::media::ice_policy(config.ice, "ice")?;
-        let codecs = unsafe { codec_order(&config) }?;
-        with_stack_at(stack, now_ms, |state, now| {
-            let id = state.calls.get(call).map_err(handle_failed)?;
-            let base = state
-                .engine
-                .call_catalog(id)
-                .cloned()
-                .unwrap_or_else(|| state.engine.catalog().clone());
-            let floor = floor_of(state, state.agent.call_account(id));
-            let catalog = call_catalog(&base, floor, srtp, ice, codecs.as_deref())?;
-            let outside = outside(state, local)?;
-            let rung = match call_media(state, &base, catalog, outside) {
-                // the stack's own catalogue, untouched: this is what `srtp`
-                // and `codecs` both unspecified on the call have to mean
-                None => state.engine.ring(&mut state.agent, id, local, now),
-                Some(media) => state
-                    .engine
-                    .ring_with(&mut state.agent, id, local, media, now),
-            };
-            // a ring refused — twice on one call, an INVITE with no offer —
-            // hands the socket's relay back for the next try
-            crate::nat::Nat::take_back(state, now);
-            rung.map_err(|error| media_failed(&error))?;
-            crate::nat::Nat::spent(state, local, now);
-            state.manage(id);
-            Ok(())
-        })
+        unsafe { described(stack, call, config, now_ms, Reply::Ring) }
     }
+}
+
+/// Which response [`described`] sends.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reply {
+    Ring,
+    Answer,
+}
+
+/// Ring or answer a call that came in, with media this stack describes from
+/// what `config` says.
+///
+/// # Safety
+///
+/// As [`sipral_call_ring_media`].
+unsafe fn described(
+    stack: SipralHandle,
+    call: SipralHandle,
+    config: *const SipralCallConfig,
+    now_ms: u64,
+    reply: Reply,
+) -> Result<(), Fail> {
+    let config = unsafe { read_versioned(config) }?;
+    let local = unsafe { ring_media_address(&config) }?;
+    let choices = media_choices(&config)?;
+    let codecs = unsafe { codec_order(&config) }?;
+    let text = unsafe { text_address(&config, true) }?;
+    let focus = focus_of(&config)?;
+    with_stack_at(stack, now_ms, |state, now| {
+        let id = state.calls.get(call).map_err(handle_failed)?;
+        let base = state
+            .engine
+            .call_catalog(id)
+            .cloned()
+            .unwrap_or_else(|| state.engine.catalog().clone());
+        let floor = floor_of(state, state.agent.call_account(id));
+        let catalog = call_catalog(&base, floor, choices, codecs.as_deref())?;
+        if focus {
+            state
+                .agent
+                .set_focus(id, true)
+                .map_err(|error| ua_failed(&error))?;
+        }
+        // a call already rung with media keeps the description its 183
+        // carried, and its socket's mapping is not asked about again
+        let (public, relay) = if reply == Reply::Answer && state.agent.has_described(id) {
+            (None, None)
+        } else {
+            outside(state, local)?
+        };
+        let sent = match (
+            call_media(state, &base, catalog, (public, relay), text),
+            reply,
+        ) {
+            // the stack's own catalogue, untouched: this is what `srtp`
+            // and `codecs` both unspecified on the call have to mean
+            (None, Reply::Ring) => state.engine.ring(&mut state.agent, id, local, now),
+            (Some(media), Reply::Ring) => {
+                state
+                    .engine
+                    .ring_with(&mut state.agent, id, local, media, now)
+            }
+            (None, Reply::Answer) => state.engine.answer(&mut state.agent, id, local, now),
+            (Some(media), Reply::Answer) => {
+                state
+                    .engine
+                    .answer_with(&mut state.agent, id, local, media, now)
+            }
+        };
+        // a response refused — twice on one call, an INVITE with no offer —
+        // hands the socket's relay back for the next try
+        crate::nat::Nat::take_back(state, now);
+        sent.map_err(|error| media_failed(&error))?;
+        crate::nat::Nat::spent(state, local, now);
+        state.manage(id);
+        Ok(())
+    })
 }
 
 entry! {
@@ -874,6 +1020,34 @@ entry! {
             state.manage(id);
             Ok(())
         })
+    }
+}
+
+entry! {
+    /// Answer a call that came in with media this stack describes, from
+    /// `config`: `sipral_call_answer_media` with the choices
+    /// `sipral_call_ring_media` takes — `media_address`, `srtp`, `codecs`,
+    /// `ice`, `text_address` for real-time text, `feedback` for RTP/AVPF
+    /// and `focus` for a conference focus. Every other member names
+    /// something only a call to place needs, and setting one is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+    ///
+    /// On a call `sipral_call_ring_media` already rang, the 183's
+    /// description and session stand exactly as `sipral_call_answer_media`
+    /// says, and nothing in `config` but `focus` changes them.
+    ///
+    /// # Safety
+    ///
+    /// `config` must point at a `sipral_call_config_t` whose `size` member
+    /// says how long it is, with every pointer in it readable for the length
+    /// beside it.
+    fn sipral_call_answer_with(
+        stack: SipralHandle,
+        call: SipralHandle,
+        config: *const SipralCallConfig,
+        now_ms: u64,
+    ) {
+        unsafe { described(stack, call, config, now_ms, Reply::Answer) }
     }
 }
 
@@ -1610,12 +1784,16 @@ entry! {
         // no catalogue here to apply either of them to, but the same refusals
         // as `sipral_call_place` for a value this ABI names nothing for and
         // for a codec this build has no encoder for
-        crate::media::srtp_policy(config.srtp, "srtp")?;
-        crate::media::ice_policy(config.ice, "ice")?;
+        media_choices(&config)?;
         unsafe { codec_order(&config) }?;
+        unsafe { text_address(&config, false) }?;
+        let focus = focus_of(&config)?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            let outgoing = unsafe { outgoing_from(state, &config, false) }?;
+            let mut outgoing = unsafe { outgoing_from(state, &config, false) }?;
+            if focus {
+                outgoing = outgoing.focus();
+            }
             let placed = state
                 .agent
                 .consult(id, &outgoing, now)
@@ -1718,9 +1896,16 @@ entry! {
             ));
         }
         let media = unsafe { managed_media(&config) }?;
-        let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
-        let ice = crate::media::ice_policy(config.ice, "ice")?;
+        let choices = media_choices(&config)?;
         let codecs = unsafe { codec_order(&config) }?;
+        let text = unsafe { text_address(&config, media.is_some()) }?;
+        if focus_of(&config)? {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "focus is not read here: a transferred call is placed to the target the far end \
+                 named, and a focus says so on a call it places itself",
+            ));
+        }
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             // a referral answered is spent, however the call it asked for
@@ -1750,7 +1935,7 @@ entry! {
             let outside = match media {
                 Some(local) => {
                     let floor = floor_of(state, state.agent.call_account(id));
-                    let catalog = call_catalog(&base, floor, srtp, ice, codecs.as_deref())?;
+                    let catalog = call_catalog(&base, floor, choices, codecs.as_deref())?;
                     Some((catalog, outside(state, local)?))
                 }
                 None => None,
@@ -1766,7 +1951,7 @@ entry! {
                 headers: &headers,
             };
             let placed = if let (Some(local), Some((catalog, outside))) = (media, outside) {
-                let placed = match call_media(state, &base, catalog, outside) {
+                let placed = match call_media(state, &base, catalog, outside, text) {
                     // the stack's own catalogue, untouched: this is what
                     // `srtp` and `codecs` both unspecified on the call have
                     // to mean
@@ -2123,6 +2308,10 @@ a=recvonly\r\n";
             codecs: ptr::null(),
             codecs_len: 0,
             ice: 0,
+            text_address: ptr::null(),
+            text_address_len: 0,
+            feedback: 0,
+            focus: 0,
         }
     }
 
@@ -2181,6 +2370,10 @@ a=recvonly\r\n";
             codecs: ptr::null(),
             codecs_len: 0,
             ice: 0,
+            text_address: ptr::null(),
+            text_address_len: 0,
+            feedback: 0,
+            focus: 0,
         }
     }
 
@@ -2207,7 +2400,7 @@ a=recvonly\r\n";
     }
 
     /// A stack with one account, ready to place a call.
-    fn line(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
+    pub(crate) fn line(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
         let handle = stack(observed);
         (handle, account_on(handle))
     }
@@ -2241,7 +2434,7 @@ a=recvonly\r\n";
         (status, call)
     }
 
-    fn state_of(stack: SipralHandle, call: SipralHandle) -> u32 {
+    pub(crate) fn state_of(stack: SipralHandle, call: SipralHandle) -> u32 {
         let mut state = u32::MAX;
         let status = unsafe { sipral_call_state(stack, call, &raw mut state) };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
@@ -2269,14 +2462,14 @@ a=recvonly\r\n";
         all.pop().unwrap_or_default()
     }
 
-    fn field(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
+    pub(crate) fn field(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
         let mut scratch = ParseScratch::new();
         let message = parse(bytes, &mut scratch, ParseMode::Lenient).expect("a message");
         message.header(name).unwrap_or_default().to_vec()
     }
 
     /// The body of a message, whatever it holds — empty when there is none.
-    fn body(bytes: &[u8]) -> Vec<u8> {
+    pub(crate) fn body(bytes: &[u8]) -> Vec<u8> {
         let mut scratch = ParseScratch::new();
         let message = parse(bytes, &mut scratch, ParseMode::Lenient).expect("a message");
         message.body().to_vec()
@@ -2549,7 +2742,7 @@ a=sendrecv\r\n";
 
     /// One call placed on a line that is ready, answered with `answer`, and
     /// up with audio on it.
-    fn up(
+    pub(crate) fn up(
         observed: &Observed,
         handle: SipralHandle,
         account: SipralHandle,
@@ -2694,7 +2887,7 @@ Content-Type: application/sdp\r\n"
 
     /// The same message with an extra header field, inserted right after the
     /// start line.
-    fn insert_header(message: &[u8], extra: &str) -> Vec<u8> {
+    pub(crate) fn insert_header(message: &[u8], extra: &str) -> Vec<u8> {
         let head = message
             .iter()
             .position(|byte| *byte == b'\n')

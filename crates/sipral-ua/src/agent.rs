@@ -149,6 +149,8 @@ pub struct UserAgent {
     pub(crate) messages: HashMap<MessageHandle, SentMessage>,
     /// The MESSAGE transaction each one has in flight.
     pub(crate) by_message: HashMap<AnyTransactionId, MessageHandle>,
+    /// The event state this agent keeps at a compositor (RFC 3903).
+    pub(crate) publications: crate::publishing::Publications,
     /// What this layer sends inside a dialog by itself and RFC 3261 §18.1.1
     /// would not let out over a datagram, waiting for a stream.
     pub(crate) parked: Vec<Parked>,
@@ -163,6 +165,10 @@ pub struct UserAgent {
     /// unanswered ([`UserAgent::hand_over_info`]) rather than being answered
     /// here.
     pub(crate) info_handed_over: bool,
+    /// Whether this agent takes recording sessions, which is what makes the
+    /// `siprec` option tag one it understands
+    /// ([`UserAgent::accept_recording_sessions`]).
+    pub(crate) recording_server: bool,
     /// The registrar flows kept open through a NAT ([`crate::keepalive`]).
     pub(crate) keepalives: crate::keepalive::Keepalives,
     /// 64·T1, read off the configuration once. RFC 6665 §4.1.2.4's Timer N is
@@ -280,11 +286,13 @@ impl UserAgent {
             by_subscribe: HashMap::new(),
             messages: HashMap::new(),
             by_message: HashMap::new(),
+            publications: crate::publishing::Publications::default(),
             parked: Vec::new(),
             events: VecDeque::new(),
             guard: Guard::default(),
             referrals: Referrals::default(),
             info_handed_over: false,
+            recording_server: false,
             keepalives: crate::keepalive::Keepalives::default(),
             timer_n,
             sdp_limits,
@@ -370,6 +378,7 @@ impl UserAgent {
         self.fire_keepalives(now);
         #[cfg(feature = "stir")]
         self.fire_stir_timers(now);
+        self.fire_publication_timers(now);
         self.drain(now);
     }
 
@@ -469,6 +478,7 @@ impl UserAgent {
             .chain(self.announce_deadline())
             .chain(self.keepalive_deadline())
             .chain(self.verification_deadline())
+            .chain(self.publication_deadline())
             .min();
         match (self.endpoint.poll_timeout(), mine) {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -588,6 +598,7 @@ impl UserAgent {
         self.registrations.remove(&account);
         self.owners.retain(|_, owner| *owner != account);
         self.forget_keepalive(account);
+        self.forget_publications(account);
     }
 
     /// What was configured, read back.
@@ -898,6 +909,7 @@ impl UserAgent {
         self.settle_offer_challenges();
         self.settle_subscription_challenges(now);
         self.settle_message_challenges();
+        self.settle_publication_challenges(now);
         self.settle_announcements(now);
         self.settle_unanswered_changes(now);
         // last, so that every change this round finished — answered, refused,
@@ -954,6 +966,9 @@ impl UserAgent {
         // in or out of any dialog, and everything above has already taken
         // what is its own
         let event = self.on_message_event(event, now)?;
+        // a PUBLISH of ours is claimed by its transaction, like a MESSAGE's
+        // answer, and nothing else sends one that is kept
+        let event = self.on_publication_event(event, now)?;
         let event = self.on_session_event(event, now)?;
         // last: a request outside a dialog that every handler above passed
         // over is one this agent does not implement there, and §8.2.1 says

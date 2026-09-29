@@ -237,6 +237,19 @@ pub struct Capabilities {
     /// checkpointed against a crash — and in Ogg Opus where
     /// [`Capabilities::opus`] is true too.
     pub recording_formats: bool,
+    /// Whether a call can be recorded to a recording server (SIPREC, RFC
+    /// 7866): [`crate::MediaEngine::record_to`].
+    pub siprec: bool,
+    /// Whether the conference package (RFC 4575) is kept by the agent,
+    /// `isfocus` read and written (RFC 4579), and presence published (RFC
+    /// 3903) and watched (RFC 3856).
+    pub conference_and_presence: bool,
+    /// Whether a call can carry real-time text (RFC 4103):
+    /// [`crate::CallMedia::text`].
+    pub realtime_text: bool,
+    /// Whether a call can negotiate RTP/AVPF and reduced-size RTCP (RFC
+    /// 4585, RFC 5506): [`crate::CodecCatalog::with_feedback`].
+    pub rtcp_feedback: bool,
 }
 
 impl Capabilities {
@@ -269,6 +282,10 @@ impl Capabilities {
             srtp_per_account: true,
             in_band_signals: true,
             recording_formats: true,
+            siprec: true,
+            conference_and_presence: true,
+            realtime_text: true,
+            rtcp_feedback: true,
         }
     }
 }

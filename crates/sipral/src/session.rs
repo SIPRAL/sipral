@@ -428,6 +428,15 @@ pub struct MediaSession {
     /// frame in it ([`MediaSession::receive_stream`]).
     #[cfg(feature = "ice")]
     stream_in: Vec<u8>,
+    /// The call's real-time text stream (RFC 4103), when both descriptions
+    /// agreed one: see [`crate::text`].
+    text: Option<crate::text::TextStream>,
+    /// One text datagram, held rather than allocated, for the borrow
+    /// [`MediaSession::poll_text`] hands back.
+    text_out: Vec<u8>,
+    /// What this call's audio is copied to, while a recording server is
+    /// recording it: see [`crate::siprec`].
+    tap: Option<crate::siprec::Tap>,
 }
 
 /// Which of this session's own buffers a datagram was built in.
@@ -635,6 +644,9 @@ impl MediaSession {
             ice,
             #[cfg(feature = "ice")]
             stream_in: Vec::new(),
+            text: None,
+            text_out: Vec::new(),
+            tap: None,
         })
     }
 
@@ -819,6 +831,7 @@ impl MediaSession {
     /// nothing in this crate is allowed to ask a clock what the present is.
     #[must_use]
     pub fn statistics(&self, now: Instant) -> StreamStatistics {
+        let feedback = self.rtp.feedback();
         StreamStatistics {
             codec: self.codec(),
             quality: self.rtp.quality(),
@@ -827,7 +840,25 @@ impl MediaSession {
             octets_sent: self.octets_sent,
             silent_for: now.saturating_duration_since(self.last_inbound),
             voip_metrics: self.rtp.voip_metrics(self.codec().quality_model()),
+            feedback: feedback.map(|(negotiated, _)| negotiated),
+            feedback_counts: feedback.map(|(_, counts)| counts).unwrap_or_default(),
         }
+    }
+
+    /// What RTP/AVPF feedback this stream agreed (RFC 4585, RFC 5506), or
+    /// `None` for one running plain RTP/AVP.
+    #[must_use]
+    pub fn feedback(&self) -> Option<sipral_rtp::avpf::Negotiated> {
+        self.rtp.feedback().map(|(negotiated, _)| negotiated)
+    }
+
+    /// Run this stream's RTCP as RTP/AVPF from `now` on, with what the two
+    /// descriptions agreed (RFC 4585, RFC 5506), or take what a later
+    /// exchange agreed for one already running it.
+    pub(crate) fn use_feedback(&mut self, agreed: sipral_rtp::avpf::Negotiated, now: Instant) {
+        let elapsed = self.elapsed(now);
+        let draw = self.draws.unit();
+        self.rtp.use_feedback(agreed, elapsed, draw);
     }
 
     /// The RFC 6035 quality report `sipral_ua::UserAgent::send_quality_report`
@@ -1076,6 +1107,12 @@ impl MediaSession {
         match self.rtp.receive(datagram, from, elapsed) {
             Received::Queued => {
                 self.note_arrival(now);
+                // verified and opened in place: what is left in front of
+                // the tag SRTP carried is the packet the far end sent
+                if let Some(tap) = self.tap.as_mut() {
+                    let plain = datagram.len().saturating_sub(self.rtp.rtp_overhead());
+                    tap.received(datagram.get(..plain).unwrap_or_default());
+                }
                 Arrival::Queued
             }
             Received::Dropped(Discard::NotKeyed) => Arrival::NotKeyed,
@@ -1519,7 +1556,9 @@ impl MediaSession {
         let elapsed = self.elapsed(now);
         let ntp = self.clock.at(now);
         match self.rtp.rtcp_receive(datagram, from, elapsed, ntp) {
-            RtcpReceived::Report => {
+            // a reduced-size packet is the far end all the same: feedback
+            // alone, which RFC 5506 lets it send between its reports
+            RtcpReceived::Report | RtcpReceived::Feedback => {
                 self.last_control = now;
                 Arrival::Control
             }
@@ -1829,6 +1868,9 @@ impl MediaSession {
         self.octets_sent = self
             .octets_sent
             .saturating_add(u64::try_from(written).unwrap_or(0));
+        if let Some(tap) = self.tap.as_mut() {
+            tap.sent(self.rtp_out.get(..length).unwrap_or_default(), payload);
+        }
         Ok(Some(length))
     }
 
@@ -1920,6 +1962,11 @@ impl MediaSession {
             .rtp
             .build_report(&mut self.rtcp_out, elapsed, ntp, draw, codec)
             .ok()?;
+        // RTP/AVPF can spend a slot on nothing: a Regular packet `trr-int`
+        // suppressed, or an Early one whose loss turned up after all
+        if length == 0 {
+            return None;
+        }
         #[cfg(feature = "ice")]
         {
             self.on_path(Built::Rtcp, length, destination, now)
@@ -2051,7 +2098,14 @@ impl MediaSession {
         let ice = self.ice.as_ref().and_then(crate::ice::Ice::deadline);
         #[cfg(not(feature = "ice"))]
         let ice = None;
-        [rtcp, stall, handshake, ice].into_iter().flatten().min()
+        let text = self
+            .text
+            .as_ref()
+            .and_then(crate::text::TextStream::deadline);
+        [rtcp, stall, handshake, ice, text]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Time has passed. The only thing this decides is whether the stream has
@@ -2079,6 +2133,11 @@ impl MediaSession {
             ice.top_up();
             ice.handle_timeout(now);
             self.drain_ice(now);
+        }
+        // and the text stream's gaps, which are given up on its own clock
+        if let Some(text) = self.text.as_mut() {
+            text.handle_timeout(now);
+            self.report_text();
         }
         let Some(after) = self.stall_after else {
             return;
@@ -2280,6 +2339,134 @@ impl MediaSession {
     /// This session's own timeline, which is what `sipral-rtp` counts in.
     fn elapsed(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.origin)
+    }
+}
+
+// -- real-time text (RFC 4103) -----------------------------------------------
+
+impl MediaSession {
+    /// Whether the call negotiated a real-time text stream.
+    #[must_use]
+    pub const fn has_text(&self) -> bool {
+        self.text.is_some()
+    }
+
+    /// Queue typed text for the far end: sent in the next transmission
+    /// interval (300 ms), at no more characters a second than the far end
+    /// said it takes, each block carried twice more as redundancy where both
+    /// ends agreed `red` (RFC 4103 §4, §5).
+    ///
+    /// A CR LF, a lone CR or a lone LF goes as the LINE SEPARATOR T.140 uses
+    /// for a new line, and BACKSPACE (U+0008) erases the last character at
+    /// the far end.
+    ///
+    /// # Errors
+    /// [`MediaError::NoText`] on a call that negotiated no text stream, and
+    /// [`MediaError::TextBufferFull`] for more than it holds unsent.
+    pub fn send_text(&mut self, text: &str) -> Result<(), MediaError> {
+        self.text.as_mut().ok_or(MediaError::NoText)?.send(text)
+    }
+
+    /// The next text datagram due, to send from the call's text socket.
+    ///
+    /// Call it whenever [`MediaSession::poll_timeout`] says to, or with every
+    /// frame of audio: `None` until a packet is due.
+    #[must_use]
+    pub fn poll_text(&mut self, now: Instant) -> Option<Datagram<'_>> {
+        let (destination, packet) = self.text.as_mut()?.poll_transmit(now)?;
+        self.text_out = packet;
+        Some(Datagram {
+            destination,
+            payload: &self.text_out,
+            #[cfg(feature = "ice")]
+            transport: crate::TurnTransport::Udp,
+        })
+    }
+
+    /// Take a datagram off the call's text socket. `false` when it was not
+    /// this call's text: not RTP, another payload type, from somewhere other
+    /// than where the stream has latched, or on a call with no text.
+    ///
+    /// What was typed arrives as [`MediaEvent::TextReceived`].
+    pub fn receive_text(&mut self, datagram: &[u8], from: SocketAddr, now: Instant) -> bool {
+        let Some(text) = self.text.as_mut() else {
+            return false;
+        };
+        let taken = text.receive(datagram, from, now);
+        self.report_text();
+        taken
+    }
+
+    /// What two descriptions agreed about text, taken up: the stream opened
+    /// on the first agreement, moved by a later one, and closed by one that
+    /// refused it.
+    pub(crate) fn set_text(&mut self, plan: Option<crate::text::TextPlan>, now: Instant) {
+        match (plan, self.text.as_mut()) {
+            (Some(plan), Some(running)) => {
+                if let Err(error) = running.update(plan) {
+                    self.text = None;
+                    self.events.push_back(MediaEvent::Failed(error));
+                }
+            }
+            (Some(plan), None) => {
+                let numbers = (
+                    self.draws.word(),
+                    u16::try_from(self.draws.word() & 0x7fff).unwrap_or(0),
+                    self.draws.word(),
+                );
+                match crate::text::TextStream::open(plan, numbers, now) {
+                    Ok(stream) => self.text = Some(stream),
+                    Err(error) => self.events.push_back(MediaEvent::Failed(error)),
+                }
+            }
+            (None, _) => self.text = None,
+        }
+    }
+
+    /// Raise what the text stream received, if it received anything.
+    fn report_text(&mut self) {
+        if let Some(heard) = self
+            .text
+            .as_mut()
+            .and_then(crate::text::TextStream::take_heard)
+        {
+            self.events.push_back(MediaEvent::TextReceived {
+                text: heard.text,
+                missing: heard.missing,
+            });
+        }
+    }
+}
+
+// -- copies for a recording server (RFC 7866) ---------------------------------
+
+impl MediaSession {
+    /// The next copy of this call's audio for the recording server recording
+    /// it ([`crate::MediaEngine::record_to`]), to send from the socket it
+    /// names. `None` while there is none, which is always on a call nothing
+    /// records.
+    ///
+    /// Collect it with every frame: a copy nobody collects for a second is
+    /// dropped, the oldest first.
+    #[must_use]
+    pub fn poll_recording(&mut self) -> Option<crate::siprec::RecordingDatagram<'_>> {
+        self.tap.as_mut()?.poll()
+    }
+
+    /// Whether this call's audio is being copied to a recording server.
+    #[must_use]
+    pub const fn is_copied(&self) -> bool {
+        self.tap.is_some()
+    }
+
+    /// Start copying this call's audio as `tap` says, or stop.
+    pub(crate) fn tap_to(&mut self, tap: Option<crate::siprec::Tap>) {
+        self.tap = tap;
+    }
+
+    /// The copies running, to point them somewhere else.
+    pub(crate) const fn tap(&mut self) -> Option<&mut crate::siprec::Tap> {
+        self.tap.as_mut()
     }
 }
 
@@ -2991,7 +3178,7 @@ impl MediaSession {
         if self.recorder.is_some() {
             return Err(MediaError::AlreadyRecording);
         }
-        let serial = self.draws.next_u32();
+        let serial = self.draws.word();
         let recorder = Recorder::start(sink, options, self.sample_rate(), serial)?;
         self.recorder = Some(recorder);
         self.signals.recording_started();
@@ -3142,27 +3329,22 @@ impl Draws {
         Self { state: seed }
     }
 
-    /// One draw of thirty-two bits: an Ogg stream's serial number, which
-    /// RFC 3533 §4 has "created randomly", so that streams chained or
-    /// multiplexed into one file keep the unique numbers it requires.
-    fn next_u32(&mut self) -> u32 {
-        u32::try_from(self.next() >> 32).unwrap_or(0)
+    /// One draw, uniform on `[0, 1)`.
+    fn unit(&mut self) -> f64 {
+        // the top thirty-two bits over two to the thirty-two: exactly
+        // representable, and short of one by construction
+        f64::from(self.word()) / 4_294_967_296.0
     }
 
-    /// The generator's next sixty-four bits.
-    const fn next(&mut self) -> u64 {
+    /// One draw of thirty-two bits, the top half of the next output: also
+    /// the numbers RFC 3550 §5.1 asks a second stream of the same call to
+    /// start from.
+    fn word(&mut self) -> u32 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// One draw, uniform on `[0, 1)`.
-    fn unit(&mut self) -> f64 {
-        let z = self.next();
-        // the top thirty-two bits over two to the thirty-two: exactly
-        // representable, and short of one by construction
-        f64::from(u32::try_from(z >> 32).unwrap_or(0)) / 4_294_967_296.0
+        z ^= z >> 31;
+        u32::try_from(z >> 32).unwrap_or(0)
     }
 }

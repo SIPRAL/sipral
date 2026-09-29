@@ -417,6 +417,8 @@ mod tests {
             octets_sent: 0,
             silent_for: Duration::ZERO,
             voip_metrics: None,
+            feedback: None,
+            feedback_counts: sipral_rtp::avpf::FeedbackCounts::default(),
         }
     }
 

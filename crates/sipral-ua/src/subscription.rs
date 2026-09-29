@@ -71,11 +71,13 @@ use sipral_core::transaction::{AnyTransactionId, DialogId, NonInviteClient, Tran
 
 use crate::account::{Account, AccountId, Extra};
 use crate::agent::UserAgent;
+use crate::conference::{Conference, ConferenceUpdate};
 use crate::dialoginfo::{Applied, DialogInfo, DialogInfoTable};
 use crate::error::UaError;
 use crate::event::UaEvent;
 use crate::mwi::MessageSummary;
 use crate::parked::{Parked, call_needs_a_stream};
+use crate::presence::Presence;
 use crate::registration::{
     RegistrarInfo, anonymous, backoff_delay, dialog_contact, refresh_after, retry_after,
 };
@@ -428,6 +430,13 @@ pub(crate) struct Subscription {
     /// every time — §3.5 defines no version and no partial state — so
     /// nothing here merges; a fresh document simply replaces it.
     summary: Option<Arc<MessageSummary>>,
+    /// What a `conference` subscription has been told, merged (RFC 4575
+    /// §4.6). Started afresh with every attempt, because `version` numbers
+    /// the documents of one subscription and not of the next.
+    conference: Conference,
+    /// The last `application/pidf+xml` document a `presence` subscription
+    /// was told (RFC 3856 §6.8): full state every time, so replaced whole.
+    presence: Option<Arc<Presence>>,
 }
 
 impl Subscription {
@@ -451,6 +460,8 @@ impl Subscription {
             waiting_for_stream: None,
             table: DialogInfoTable::default(),
             summary: None,
+            conference: Conference::new(),
+            presence: None,
         }
     }
 
@@ -480,6 +491,8 @@ impl Subscription {
             waiting_for_stream: None,
             table: DialogInfoTable::default(),
             summary: None,
+            conference: Conference::new(),
+            presence: None,
         }
     }
 
@@ -656,6 +669,32 @@ impl UserAgent {
             .then_some(held.summary.as_deref())
             .flatten()
     }
+
+    /// What a `conference` subscription has been told, merged into one
+    /// picture (RFC 4575 §4.6).
+    ///
+    /// `None` while the subscription is not live, for the reason
+    /// [`UserAgent::dialog_info`] gives, and while no document has named the
+    /// conference yet.
+    #[must_use]
+    pub fn conference(&self, subscription: SubscriptionHandle) -> Option<&Conference> {
+        let held = self.subscriptions.get(&subscription)?;
+        (held.state.is_live() && held.conference.entity().is_some()).then_some(&held.conference)
+    }
+
+    /// The last presence document a `presence` subscription was told (RFC
+    /// 3856 §6.8).
+    ///
+    /// `None` while the subscription is not live, for the reason
+    /// [`UserAgent::dialog_info`] gives.
+    #[must_use]
+    pub fn presence(&self, subscription: SubscriptionHandle) -> Option<&Presence> {
+        let held = self.subscriptions.get(&subscription)?;
+        held.state
+            .is_live()
+            .then_some(held.presence.as_deref())
+            .flatten()
+    }
 }
 
 // -- sending -----------------------------------------------------------------
@@ -708,6 +747,8 @@ impl UserAgent {
         held.lapses_at = None;
         held.table = DialogInfoTable::default();
         held.summary = None;
+        held.conference = Conference::new();
+        held.presence = None;
         // §4.1.2.4: "a subscriber starts a Timer N, set to 64*T1, when it
         // sends a SUBSCRIBE request", and the same window is the one a fork
         // may still arrive in
@@ -1355,6 +1396,10 @@ impl UserAgent {
             request: request.clone(),
             info,
         });
+        // after the notification itself, so that an application reading the
+        // raw NOTIFY and the typed news in order meets them in that order
+        self.merge_conference(subscription, request, now);
+        self.merge_presence(subscription, request);
     }
 
     /// Take the granted duration and schedule the refresh against it.
@@ -1522,6 +1567,100 @@ impl UserAgent {
             urgent_new: voice.as_ref().map_or(0, |class| class.new_urgent),
             urgent_old: voice.as_ref().map_or(0, |class| class.old_urgent),
         });
+    }
+
+    /// Merge an `application/conference-info+xml` body into the
+    /// subscription's picture of the conference (RFC 4575 §4.6), and act on
+    /// what the merge says.
+    ///
+    /// A gap asks for full state with a refresh — what §4.6 has a subscriber
+    /// do, and what RFC 6665 §4.2.1 makes the answer carry — and a deleted
+    /// conference gives the subscription up, as §4.6 asks: "the subscriber
+    /// SHOULD terminate the subscription". A body that will not read leaves
+    /// the picture as it was, for the reason `merge_dialog_info` gives.
+    fn merge_conference(
+        &mut self,
+        subscription: SubscriptionHandle,
+        request: &OwnedMessage,
+        now: Instant,
+    ) {
+        if !self.package_is(subscription, crate::conference::CONFERENCE_EVENT) {
+            return;
+        }
+        let Some(held) = self.subscriptions.get_mut(&subscription) else {
+            return;
+        };
+        let Ok(Some(update)) = held.conference.apply_notify(request) else {
+            return;
+        };
+        match update {
+            ConferenceUpdate::Applied => {
+                self.events.push_back(UaEvent::ConferenceChanged {
+                    subscription,
+                    update,
+                });
+            }
+            ConferenceUpdate::Ended => {
+                self.events.push_back(UaEvent::ConferenceChanged {
+                    subscription,
+                    update,
+                });
+                // the unsubscribe answers only for a subscription that is
+                // still held, which this one is: it was just notified
+                self.unsubscribe(subscription, now).ok();
+            }
+            ConferenceUpdate::Resubscribe => self.ask_for_full_state(subscription, now),
+            // late, repeated, or held off while full state is on its way
+            _ => {}
+        }
+    }
+
+    /// Read an `application/pidf+xml` body of a `presence` subscription and
+    /// raise [`UaEvent::PresenceChanged`] for it (RFC 3856 §6.8).
+    ///
+    /// Every notification of this package carries the presentity's whole
+    /// state, so there is nothing to merge: the last readable document is
+    /// the picture, and one that will not read leaves the last one standing.
+    fn merge_presence(&mut self, subscription: SubscriptionHandle, request: &OwnedMessage) {
+        if !self.package_is(subscription, crate::publishing::PRESENCE_EVENT) {
+            return;
+        }
+        let raw = request.as_raw();
+        let body = raw.body();
+        if body.is_empty()
+            || !raw
+                .content_type()
+                .is_ok_and(|kind| kind.is("application", "pidf+xml"))
+        {
+            return;
+        }
+        let Ok(document) = Presence::parse(body) else {
+            return;
+        };
+        let presence = Arc::new(document);
+        let Some(held) = self.subscriptions.get_mut(&subscription) else {
+            return;
+        };
+        held.presence = Some(Arc::clone(&presence));
+        self.events.push_back(UaEvent::PresenceChanged {
+            subscription,
+            presence,
+        });
+    }
+
+    /// Whether the subscription asked for `package`, compared as §8.2.1
+    /// compares event packages.
+    fn package_is(&self, subscription: SubscriptionHandle, package: &str) -> bool {
+        let Some(held) = self.subscriptions.get(&subscription) else {
+            return false;
+        };
+        let (Ok(ours), Ok(wanted)) = (
+            EventRef::parse(&held.wanted.package),
+            EventRef::parse(package.as_bytes()),
+        ) else {
+            return false;
+        };
+        ours.matches(&wanted)
     }
 }
 
@@ -1866,6 +2005,8 @@ impl UserAgent {
         // `dialog_info` and `message_summary` are for
         held.table = DialogInfoTable::default();
         held.summary = None;
+        held.conference = Conference::new();
+        held.presence = None;
         self.forget_subscription_dialog(subscription, dialog);
         self.events.push_back(UaEvent::SubscriptionEnded {
             subscription,

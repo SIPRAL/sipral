@@ -49,7 +49,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sipral_core::endpoint::{Event, OutgoingInDialogRequest, OutgoingResponse};
-use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode};
+use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode, Uri};
 use sipral_core::sdp::{self, SessionDescription};
 use sipral_core::transaction::{
     AnyTransactionId, DialogId, NonInviteServerState, ProvisionalResponseId,
@@ -421,6 +421,56 @@ impl UserAgent {
         self.send_offer(call, offer, asked, &fields, now)
     }
 
+    /// Give a recording session's recording server new metadata (RFC 7866
+    /// §9.1: "The SRC SHOULD send metadata as soon as it becomes available
+    /// and whenever it changes").
+    ///
+    /// It goes in an offer — a re-INVITE, or an UPDATE on a session not up
+    /// yet — that repeats the session as it stands, because the metadata's
+    /// streams name the SDP labels and §9.1 has "the request containing the
+    /// metadata ... also contain an SDP offer that defines those labels".
+    /// Every offer the session makes after this carries it too.
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchCall`]; [`UaError::WrongState`] for a call that is
+    /// not a recording session ([`crate::OutgoingCall::recording_session`]);
+    /// [`UaError::Recording`] for metadata that cannot be written;
+    /// [`UaError::ChangeInProgress`] while another change is running in the
+    /// call, after which the metadata is kept for the next offer and the
+    /// caller asks again once that change is reported; and what
+    /// [`UserAgent::hold`] answers when nothing can carry an offer.
+    pub fn update_recording_metadata(
+        &mut self,
+        call: CallHandle,
+        metadata: &crate::siprec::RecordingMetadata,
+        now: Instant,
+    ) -> Result<(), UaError> {
+        let written = metadata.to_xml().map_err(UaError::Recording)?;
+        let recording = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
+        if recording.recording.is_none() {
+            return Err(UaError::WrongState(recording.state));
+        }
+        recording.recording = Some(Arc::from(written));
+        if recording.changing() {
+            return Err(UaError::ChangeInProgress);
+        }
+        // the session as it stands, held as it is held
+        let as_held = recording.session.hold.local;
+        self.carrier(call)?;
+        let offer = self
+            .calls
+            .get_mut(&call)
+            .and_then(|call_state| call_state.session.offer(as_held))
+            .ok_or(UaError::NoSession)?;
+        let fields = self.application_headers(call);
+        let asked = Asked {
+            held: as_held,
+            retried: false,
+            author: Author::Session,
+        };
+        self.send_offer(call, offer, asked, &fields, now)
+    }
+
     /// The request that would carry an offer in this call now, and the dialog
     /// it goes in — or why none can.
     ///
@@ -486,7 +536,24 @@ impl UserAgent {
         let (method, dialog) = self.carrier(call)?;
 
         let contact = self.current_contact(call, now);
-        let body: Arc<[u8]> = Arc::from(offer.to_bytes());
+        let sdp = offer.to_bytes();
+        // a recording session's offer goes with its metadata, whose streams
+        // name the labels the offer defines (RFC 7866 §9.1)
+        let recording = self
+            .calls
+            .get(&call)
+            .and_then(|held| held.recording.clone());
+        let (content_type, body): (Vec<u8>, Arc<[u8]>) = match recording {
+            Some(metadata) => {
+                let built = crate::siprec::written_session_body(&sdp, &metadata)
+                    .map_err(UaError::Recording)?;
+                (
+                    built.content_type().as_bytes().to_vec(),
+                    Arc::from(built.into_body()),
+                )
+            }
+            None => (b"application/sdp".to_vec(), Arc::from(sdp)),
+        };
         // §8.1.1.8 makes Contact a MUST on anything that can refresh a target,
         // and both of these can
         let mut request = onto_request(
@@ -495,7 +562,7 @@ impl UserAgent {
                 .header(HeaderName::Allow, ALLOW),
             fields,
         )
-        .body(b"application/sdp", body);
+        .body(&content_type, body);
         if method == Method::Invite && self.wants_gruu(call) {
             // RFC 5627 §4.4 SHOULD, on a re-INVITE as on the INVITE that
             // opened the call: "a UA SHOULD include a Supported header field
@@ -691,6 +758,36 @@ impl UserAgent {
         }
         if let Some(held) = self.calls.get_mut(&call) {
             held.update_allowed = true;
+        }
+    }
+
+    /// What a message that can set or move the dialog's remote target says
+    /// about the far end: whether it takes UPDATE, and whether it is a
+    /// conference focus.
+    pub(crate) fn note_far_end(&mut self, call: CallHandle, message: &RawMessage<'_>) {
+        self.note_allow(call, message);
+        self.note_focus(call, message);
+    }
+
+    /// Whether the far end's `Contact` says it is a conference focus (RFC
+    /// 4579 §4.2), and the conference's URI when it does: "the resulting
+    /// dialog belongs to a conference, identified by the URI in the Contact
+    /// header field". A message with no `Contact` moves nothing, and leaves
+    /// what was known.
+    fn note_focus(&mut self, call: CallHandle, message: &RawMessage<'_>) {
+        let Ok(sipral_core::msg::Contacts::Addrs(addrs)) = message.contact() else {
+            return;
+        };
+        let Some(Ok(first)) = addrs.into_iter().next() else {
+            return;
+        };
+        let conference = first
+            .params()
+            .has("isfocus")
+            .then(|| Uri::parse(first.uri_bytes()).ok())
+            .flatten();
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.remote_focus = conference;
         }
     }
 
@@ -1103,15 +1200,29 @@ impl UserAgent {
         // `Accept` that says what it can, and a refused request refreshed
         // nothing: RFC 4028 §9 times the session from "the most recent 2xx
         // response to a session refresh request"
-        if let Some(refusal) = crate::admission::body_refusal(&raw) {
+        // new metadata for a recording session this agent takes arrives
+        // beside the offer that defines its labels (RFC 7866 §9.1)
+        let recorded = self
+            .recording_server
+            .then(|| crate::siprec::session_part(&raw))
+            .flatten();
+        if recorded.is_none()
+            && let Some(refusal) = crate::admission::body_refusal(&raw)
+        {
             self.answer_with(call, transaction, &refusal, now).ok();
             return;
         }
-        self.note_allow(call, &raw);
+        self.note_far_end(call, &raw);
         // RFC 4028 §7.4: any request inside the dialog that carries a
         // Session-Expires is a refresh, whatever else it is doing
         self.on_refresh_in(call, &raw, now);
-        let arriving = arriving(&raw, self.sdp_limits);
+        let arriving = match recorded {
+            Some(described) => sdp::parse_with_limits(described, self.sdp_limits)
+                .map_or(Arriving::Unreadable, |offer| {
+                    Arriving::Offer(Box::new(offer))
+                }),
+            None => arriving(&raw, self.sdp_limits),
+        };
         let invite = matches!(transaction, AnyTransactionId::InviteServer(_));
 
         // an UPDATE with no description only refreshes the target: there is

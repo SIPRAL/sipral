@@ -83,15 +83,18 @@ pub(crate) struct Unacknowledged {
 /// The option tags a request demands that this agent does not implement.
 ///
 /// `gruu` is understood too when `gruu` is `true` -- the caller's job to
-/// decide, since it depends on which account the request is addressed to.
-pub(crate) fn unsupported(request: &RawMessage<'_>, gruu: bool) -> Vec<Vec<u8>> {
+/// decide, since it depends on which account the request is addressed to --
+/// and `siprec` when `siprec` is, which the application decides by taking
+/// recording sessions ([`UserAgent::accept_recording_sessions`]).
+pub(crate) fn unsupported(request: &RawMessage<'_>, gruu: bool, siprec: bool) -> Vec<Vec<u8>> {
     request
         .require()
         .filter(|token| {
             let known = UNDERSTOOD
                 .iter()
                 .any(|known| known.eq_ignore_ascii_case(token))
-                || (gruu && token.eq_ignore_ascii_case(b"gruu"));
+                || (gruu && token.eq_ignore_ascii_case(b"gruu"))
+                || (siprec && token.eq_ignore_ascii_case(crate::siprec::OPTION_TAG.as_bytes()));
             !known
         })
         .map(<[u8]>::to_vec)
@@ -407,11 +410,11 @@ impl UserAgent {
                 ..
             } => {
                 let gruu = self.account_wants_gruu(&request.as_raw(), Some(dialog));
-                unsupported(&request.as_raw(), gruu)
+                unsupported(&request.as_raw(), gruu, self.recording_server)
             }
             Event::IncomingOutOfDialog { ref request, .. } => {
                 let gruu = self.account_wants_gruu(&request.as_raw(), None);
-                unsupported(&request.as_raw(), gruu)
+                unsupported(&request.as_raw(), gruu, self.recording_server)
             }
             // a PRACK is a request inside the dialog like any other (RFC 3262
             // §3: "the UAS core processes it according to the procedures of
@@ -422,7 +425,7 @@ impl UserAgent {
                 ..
             } => {
                 let gruu = self.account_wants_gruu(&request.as_raw(), Some(provisional.dialog()));
-                unsupported(&request.as_raw(), gruu)
+                unsupported(&request.as_raw(), gruu, self.recording_server)
             }
             _ => return Some(event),
         };

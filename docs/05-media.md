@@ -258,6 +258,47 @@ places, plainly:
    report clears `Outbound::sent_since_report`: a stream that falls silent
    sends RRs one interval sooner than §6.4 says.
 
+### RTCP feedback: RTP/AVPF and reduced size
+
+**Asked for per call, and agreed by the profile.** `CodecCatalog::with_feedback`
+(off by default) makes an offer name the feedback profile beside the one it
+would have named — `RTP/AVPF`, `RTP/SAVPF` under SDES, `UDP/TLS/RTP/SAVPF`
+under DTLS — with `a=rtcp-fb:* nack` and `a=rtcp-rsize`. It is off for the
+reason multiplexing is: the profile is on the `m=` line, RFC 4585 §4.1 gives an
+answerer no way to take such a stream on RTP/AVP, and a peer that knows only
+RTP/AVP refuses it. An offer that arrives naming a feedback profile is answered
+on it whatever the catalogue says, since the answer keeps the offer's
+transport; with the flag on, the answer also keeps the `nack` and `trr-int`
+lines this stack does and `a=rtcp-rsize` when it was offered (RFC 4585 §4.2,
+`sipral::feedback`). **A stream whose offer and answer both name a feedback
+profile runs RFC 4585's RTCP** from its first report, whether or not a single
+`a=rtcp-fb` line was agreed (`RtpSession::use_feedback`): Generic NACKs when
+both named `nack` for the codec or `*`, a `trr-int` when either did (the longer
+of the two when both), reduced size when both said `a=rtcp-rsize`.
+
+**The schedule.** RFC 3550's interval is computed as before but with AVPF's
+minimum — one second before the first report, none after it (RFC 4585 §3.4 d)
+— and `avpf::AvpfTimer` owns the deadlines: the Regular packet at `tn`, full,
+minimal while `trr-int` has not elapsed and feedback is waiting, or suppressed
+while it has not and nothing is; and the Early packet (§3.5.2). A packet that
+arrives more than one ahead of the highest seen leaves the ones between it
+missing (at most sixty-four, and a jump past sixty-four is a restart rather
+than a loss); with NACKs agreed they are reported at once in an Early packet
+while `allow_early` holds — a call has two members, so `T_dither_max` is zero —
+and otherwise in the next Regular packet. One that turns up before its NACK
+goes is taken off the list. An Early packet is sent in reduced size once a
+compound one has gone and both ends said `a=rtcp-rsize` (RFC 5506 §4); every
+Regular packet stays compound. A reduced-size packet arriving is read only on a
+stream that agreed to it, and refused as malformed on any other.
+
+**Nothing is sent again.** A NACK asks for packets back, and retransmitting
+them belongs to a payload format of its own (RFC 4588) that a voice call does
+not negotiate; resending a packet under its own sequence number is not
+something RFC 4585 asks of a sender either. What each side found missing is
+counted instead — `StreamStatistics::feedback` says what was agreed and
+`feedback_counts` what was sent and received — which is what a quality monitor
+reads.
+
 ### RTCP XR and voice quality reports
 
 RFC 3611 defines the Extended Report packet type (§2, `rtcp::XR` = 207 in
@@ -2463,6 +2504,93 @@ decides it ends (`IceAgent::pair_report`, `IceAgent::relay_report`), so the
 list survives the checklist it describes; a restart (RFC 8445 §9) starts it
 again with the new session. A call not using ICE has one path, the address
 its description named, and an empty list.
+
+## Real-time text in a call
+
+RFC 4103 puts T.140 on an RTP session of its own, so a call's text has a port
+of its own: `CallMedia::text(address)` gives a call the second socket the
+application bound for it, on `place_with`, `ring_with`, `answer_with` or
+`accept_transfer_with`. The offer then carries RFC 4103 §7's own stream beside
+the audio — `m=text <port> RTP/AVP 100 98`, `t140/1000` on 98 inside
+`red/1000` on 100 with `a=fmtp:100 98/98/98` (two redundant generations, which
+§4 recommends because a lost packet loses what was typed rather than a few
+milliseconds of sound) — and an offered `m=text` is answered on it, with `red`
+kept only where the offer carried it over `t140`. Each end sends with the
+payload numbers the other's description gave (RFC 3264 §5.1) and receives
+under its own, and holds its characters a second to the far end's `cps`. The
+stream says `b=RS:0` and `b=RR:0` (RFC 3556 §2): it sends no RTCP and ignores
+what arrives, since the call's audio stream already reports on the path.
+
+`MediaSession::send_text` queues what is typed — a CR LF, CR or LF becomes the
+LINE SEPARATOR T.140 uses, and BACKSPACE erases at the far end — and the
+sender in `sipral_rtp::rtt` gathers it into one block every 300 ms.
+`MediaSession::poll_text` (or `MediaEngine::poll_text` for every call at once)
+hands out what is due, to send from the text socket, and
+`MediaSession::receive_text` takes what arrives on it; like the audio, the
+stream latches onto where the far end's text comes from and sends there from
+then on. What was typed arrives as `MediaEvent::TextReceived`, in order:
+characters as they are, an erasure as U+0008, a new line as U+2028, an alert
+as U+0007, and one U+FFFD for each block that no redundant copy recovered once
+the receiver has waited a second for it (RFC 4103 §5.3) — so a single lost
+packet costs nothing, and three in a row cost one block. A re-offer that
+refuses the stream closes it; one that holds the call stops the sending the
+way it stops the audio.
+
+**Not on a keyed call, nor with ICE.** The stream is plain `RTP/AVP` and has
+no candidates, so a call whose catalogue offers SRTP or ICE does not offer it,
+and an offer whose audio is keyed is answered without it: typed text is
+exactly what an encrypted call is encrypted to hide, and a stream no
+candidate describes would not reach a peer behind a NAT that ICE is there for.
+The text socket is described by the call's own `c=` with its own port, so a
+call described by a public address (`CallMedia::public_address`) needs the
+text socket reachable at that address's host too.
+
+## Recording a call to a recorder
+
+SIPREC (RFC 7866) records a call on a recording server (an SRS) rather than
+on this machine. `MediaEngine::record_to(agent, call, RecordTo::new(server,
+this_end, far_end), now)` places the recording session for a call whose audio
+is running: a call of its own to the server, from the call's account, whose
+INVITE carries `Require: siprec`, `+sip.src` and RFC 7865 metadata beside the
+offer (`docs/04-ua.md`, "Recording sessions"). The offer has two sendonly
+streams on the codec the call is using, labelled `1` for this end's audio and
+`2` for the far end's (§7.1.1), each on a socket of its own the application
+bound — `this_end` and `far_end` — and the metadata names the call, its two
+parties by address of record and display name, and which stream each sends.
+The INVITE is too large for a datagram (RFC 3261 §18.1.1), so
+`RecordTo::to_address` names a stream transport to the server; recorders
+listen on TCP or TLS for the same reason.
+
+**The audio is copied, not re-encoded.** Once the server has answered, every
+packet this end sends is copied to the first stream and every packet it takes
+from the far end — after SRTP has verified and opened it — to the second, the
+SRC as a forwarding translator (§8.2.1.1): the same payload, payload type,
+marker and timing, under a source and a numbering of each stream's own, offset
+once so that loss, reordering and pauses in the original stay where they were.
+Named events and comfort noise are not offered to the server and are not
+copied. `MediaSession::poll_recording` (or `MediaEngine::poll_recording` for
+every call) hands out each copy with the socket to send it from, whether it
+is the far end's (`RecordingDatagram::far_end`) and the server's address for
+its stream; one nobody collects for a second is dropped,
+the oldest first. A stream the server refused gets nothing.
+
+**The recording follows the call.** A hold changes who sends, and the server
+is told in fresh metadata (§7.1.1.1: "Media stream direction changes in the CS
+are conveyed in the metadata"): a party that is not sending is listed as
+sending nothing, and nobody as receiving from it. A call that replaces the
+recorded one (RFC 3891, `UaEvent::CallReplaced`) takes the recording over: its
+far end becomes the second party under a new identifier, the server is told,
+and the copies move to its audio as soon as its session runs. When the
+recorded call ends the recording session is hung up, `stop_recording_to` hangs
+it up earlier, and when the server hangs up the copies stop. The recording
+session's own answer, refusal and end are `UaEvent`s on the handle
+`record_to` returned, like any call's.
+
+A codec change in the recorded call is offered to the server on both streams
+(§7.1.1.1 changes a recorded stream with a new offer) and the copies follow
+it. The streams are plain `RTP/AVP`: a call keyed with SRTP is copied in the
+clear, to a server the application chose to trust with it, over whatever path
+it put between the two.
 
 ## A local conference of two calls
 

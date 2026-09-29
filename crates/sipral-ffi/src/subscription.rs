@@ -794,7 +794,7 @@ entry! {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         SipralDialogEnded, SipralDialogPhase, SipralDialogText, SipralSubscribeConfig,
         SipralSubscriptionEnd, SipralSubscriptionState, SipralWatchedDialog,
@@ -813,12 +813,12 @@ mod tests {
     use std::ptr;
 
     /// A pointer and a length, as a caller hands text over.
-    fn as_text(text: &str) -> (*const c_char, usize) {
+    pub(crate) fn as_text(text: &str) -> (*const c_char, usize) {
         (text.as_ptr().cast::<c_char>(), text.len())
     }
 
     /// One header field of a message, for building the answer to it.
-    fn field(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
+    pub(crate) fn field(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
         let mut scratch = ParseScratch::new();
         let message = parse(bytes, &mut scratch, ParseMode::Lenient).expect("a message");
         message.header(name).unwrap_or_default().to_vec()
@@ -826,7 +826,7 @@ mod tests {
 
     /// The config a test subscribes with: the busy lamp field on one
     /// extension, which is what A1 is for.
-    fn watch(target: &str) -> SipralSubscribeConfig {
+    pub(crate) fn watch(target: &str) -> SipralSubscribeConfig {
         let mut config = SipralSubscribeConfig {
             size: size_of::<SipralSubscribeConfig>(),
             target: ptr::null(),
@@ -866,7 +866,7 @@ mod tests {
     }
 
     /// The notifier's 200, granting what it chose rather than what was asked.
-    fn granted(subscribe: &[u8], seconds: u32) -> Vec<u8> {
+    pub(crate) fn granted(subscribe: &[u8], seconds: u32) -> Vec<u8> {
         let mut out = b"SIP/2.0 200 OK\r\n".to_vec();
         for (name, value) in [
             ("Via", field(subscribe, HeaderName::Via)),

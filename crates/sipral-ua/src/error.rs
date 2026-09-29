@@ -92,6 +92,18 @@ pub enum UaError {
     /// made: a target too long for an `Identity` header field. Nothing was
     /// sent.
     Signing,
+    /// The handle names a publication whose state was removed, or never
+    /// existed.
+    NoSuchPublication,
+    /// A publication cannot do this as it stands: see
+    /// [`PublishError`](crate::PublishError).
+    Publish(crate::PublishError),
+    /// The call's far end has not said it is a conference focus (RFC 4579
+    /// §4.2): its `Contact` carried no `isfocus`.
+    NotAFocus,
+    /// A recording session could not be written: see
+    /// [`SiprecError`](crate::siprec::SiprecError).
+    Recording(crate::siprec::SiprecError),
 }
 
 impl fmt::Display for UaError {
@@ -141,6 +153,12 @@ impl fmt::Display for UaError {
                  PASSporT has to carry",
             ),
             Self::Signing => f.write_str("the PASSporT for this call could not be signed"),
+            Self::NoSuchPublication => f.write_str("no such publication"),
+            Self::Publish(ref error) => write!(f, "cannot publish it: {error}"),
+            Self::NotAFocus => {
+                f.write_str("the far end of the call did not say it is a conference focus")
+            }
+            Self::Recording(ref error) => write!(f, "cannot record the call: {error}"),
         }
     }
 }

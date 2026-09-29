@@ -26,6 +26,10 @@ const RECEIVER_SHARE: f64 = 1.0 - SENDER_SHARE;
 /// (§6.2, A.7 `RTCP_MIN_TIME`).
 const MIN_INTERVAL_SECS: f64 = 5.0;
 
+/// RTP/AVPF's minimum before the first report: "the initial Tmin is set to 1
+/// second" (RFC 4585 §3.4 d). After it, AVPF's minimum is zero.
+const FEEDBACK_INITIAL_MIN_SECS: f64 = 1.0;
+
 /// §6.3.1 point 5: "the resulting value of T is divided by e-3/2=1.21828 to
 /// compensate for the fact that the timer reconsideration algorithm
 /// converges to a value of the RTCP bandwidth below the intended average".
@@ -96,6 +100,18 @@ pub(crate) struct IntervalTimer {
     /// received BYE falls under, since §6.3.4's own text excludes this
     /// case from the removal it otherwise describes.
     departing: bool,
+    /// Which profile's minimum applies.
+    minimum: Minimum,
+}
+
+/// Whose `Tmin` the calculated interval is held to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Minimum {
+    /// RFC 3550 §6.2's five seconds, halved before the first report.
+    Rfc3550,
+    /// RTP/AVPF's: one second before the first report and none after it
+    /// (RFC 4585 §3.4 d).
+    Avpf,
 }
 
 impl IntervalTimer {
@@ -116,9 +132,40 @@ impl IntervalTimer {
             avg_packet_size: as_size(first_packet_size),
             initial: true,
             departing: false,
+            minimum: Minimum::Rfc3550,
         };
         timer.tn = timer.interval(unit_interval);
         timer
+    }
+
+    /// Run the session under RTP/AVPF's minimum from here on (RFC 4585
+    /// §3.4 d): "Unlike in [RFC 3550], the initial Tmin is set to 1 second
+    /// to allow for some group size sampling before sending the first RTCP
+    /// packet. After the first RTCP packet is sent, Tmin is set to 0."
+    ///
+    /// The first deadline is drawn again when no report has gone out yet,
+    /// since it was drawn under the other minimum. Returns the calculated
+    /// interval that deadline is `tp` plus.
+    pub(crate) fn use_feedback_minimum(&mut self, unit_interval: f64) -> Duration {
+        self.minimum = Minimum::Avpf;
+        let interval = self.interval(unit_interval);
+        if self.initial {
+            self.tn = self.tp.saturating_add(interval);
+        }
+        interval
+    }
+
+    /// §6.3.1's calculated interval T for the report after the one about to
+    /// go, drawn with `unit_interval`, without moving anything: what RFC
+    /// 4585 §3.4 e calls `T_rr`, the Regular RTCP interval AVPF schedules
+    /// against. Worked out as it will stand once a report has gone, which is
+    /// when §3.4 d drops AVPF's minimum to zero.
+    pub(crate) fn calculated_after_report(&self, unit_interval: f64) -> Duration {
+        Self {
+            initial: false,
+            ..*self
+        }
+        .interval(unit_interval)
     }
 
     /// A new participant was heard from, by RTP or RTCP (§6.3.3).
@@ -180,10 +227,12 @@ impl IntervalTimer {
     /// §6.3.1's deterministic-then-randomized calculated interval T, ending
     /// with A.7's compensation for reconsideration's own bias.
     fn interval(&self, unit_interval: f64) -> Duration {
-        let mut minimum = MIN_INTERVAL_SECS;
-        if self.initial {
-            minimum /= 2.0;
-        }
+        let minimum = match (self.minimum, self.initial) {
+            (Minimum::Avpf, true) => FEEDBACK_INITIAL_MIN_SECS,
+            (Minimum::Avpf, false) => 0.0,
+            (Minimum::Rfc3550, true) => MIN_INTERVAL_SECS / 2.0,
+            (Minimum::Rfc3550, false) => MIN_INTERVAL_SECS,
+        };
 
         let (n, share) = if as_f64(self.senders) <= as_f64(self.members) * SENDER_SHARE {
             if self.we_sent {

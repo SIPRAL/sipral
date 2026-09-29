@@ -80,6 +80,10 @@ pub(crate) mod min_size {
     pub const CALL_CONFIG: usize = 80;
     /// `sipral_capabilities_t`
     pub const CAPABILITIES: usize = 24;
+    /// `sipral_conference_t`
+    pub const CONFERENCE: usize = 32;
+    /// `sipral_conference_user_t`
+    pub const CONFERENCE_USER: usize = 24;
     /// `sipral_codec_candidate_t`
     pub const CODEC_CANDIDATE: usize = 24;
     /// `sipral_codec_info_t`
@@ -100,8 +104,12 @@ pub(crate) mod min_size {
     pub const CONSENT_TONE: usize = 32;
     /// `sipral_recording_options_t`
     pub const RECORDING_OPTIONS: usize = 32;
+    /// `sipral_presence_t`
+    pub const PRESENCE: usize = 32;
     /// `sipral_push_echo_t`
     pub const PUSH_ECHO: usize = 24;
+    /// `sipral_record_config_t`
+    pub const RECORD_CONFIG: usize = 80;
     /// `sipral_stack_config_t`
     pub const STACK_CONFIG: usize = 176;
     /// `sipral_stack_settings_t`

@@ -38,6 +38,7 @@ use sipral_ua::{
 
 use crate::abi::{alias, codes, record};
 use crate::audio::SipralAudioEvent;
+use crate::conference::SipralConferenceEvent;
 use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
@@ -45,6 +46,8 @@ use crate::names::Names;
 use crate::nat::{
     SipralNatEvent, SipralNatRelayEvent, SipralStunServerEvent, SipralTurnStreamEvent,
 };
+use crate::presence::SipralPresenceEvent;
+use crate::realtime_text::SipralTextEvent;
 use crate::subscription::{SipralSubscriptionState, named_end, named_state};
 
 /// Declare the event number space, once.
@@ -612,6 +615,46 @@ event_kinds! {
         /// the beep an answering machine plays before it records.
         /// `payload.progress` says which, and what was measured.
         49 = ProgressDetected, c"progress detected";
+        /// A `conference` subscription's picture of the conference changed,
+        /// or the conference ended (RFC 4575 §4.6).
+        ///
+        /// `payload.conference` says which subscription and what happened:
+        /// `SIPRAL_CONFERENCE_UPDATE_APPLIED` for a document merged into the
+        /// picture, with the version it is at and how many users it holds,
+        /// and `SIPRAL_CONFERENCE_UPDATE_ENDED` for a conference the focus
+        /// deleted, after which the subscription is being given up. The
+        /// picture itself is read with `sipral_subscription_conference` and
+        /// `sipral_subscription_conference_user_at`. A document that was late
+        /// or repeated raises nothing, and one that followed a lost one is
+        /// answered by the stack asking for full state again. `account` and
+        /// `call` are `SIPRAL_HANDLE_NONE`; the NOTIFY itself arrived just
+        /// before, as `SIPRAL_EVENT_KIND_NOTIFIED`.
+        50 = ConferenceChanged, c"conference changed";
+        /// The far end typed something on the call's real-time text stream
+        /// (RFC 4103), in the order it typed it.
+        ///
+        /// `call` is the call; `payload.text` holds the text, UTF-8: an
+        /// erasure of the last character as BACKSPACE (U+0008), a new line
+        /// as LINE SEPARATOR (U+2028), an alert as BELL (U+0007), and a
+        /// REPLACEMENT CHARACTER (U+FFFD) for each block of text that was
+        /// lost and no redundant copy recovered (RFC 4103 §5.3), counted in
+        /// `payload.text.missing`.
+        51 = TextReceived, c"text received";
+        /// Presence moved: a `presence` subscription was told about the
+        /// presentity (RFC 3856), or the state this account publishes (RFC
+        /// 3903) was published, refreshed, removed, lapsed or refused.
+        ///
+        /// `payload.presence.kind` says which. For a subscription,
+        /// `payload.presence.subscription` names it and the rest is what the
+        /// PIDF document said: open or closed, the first RPID activity, the
+        /// first note and the entity; the NOTIFY itself arrived just before,
+        /// as `SIPRAL_EVENT_KIND_NOTIFIED`. For a publication, `account`
+        /// names the account and
+        /// `payload.presence.publication_state` says what became of it, with
+        /// the SIP status, the lifetime the compositor granted and when the
+        /// stack refreshes it.
+        52 = PresenceChanged, c"presence changed";
+        reserved 53 = "held for a transport that failed, with the TLS reason when there is one (wave C, tls-layers)";
     }
 }
 
@@ -682,6 +725,9 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::CallerVerification, "verification"),
     (SipralEventKind::InBandDigit, "media"),
     (SipralEventKind::ProgressDetected, "progress"),
+    (SipralEventKind::ConferenceChanged, "conference"),
+    (SipralEventKind::TextReceived, "text"),
+    (SipralEventKind::PresenceChanged, "presence"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1592,6 +1638,12 @@ record! {
         pub verification: SipralVerificationEvent,
         /// For [`SipralEventKind::ProgressDetected`].
         pub progress: SipralProgressEvent,
+        /// For [`SipralEventKind::ConferenceChanged`].
+        pub conference: SipralConferenceEvent,
+        /// For [`SipralEventKind::TextReceived`].
+        pub text: SipralTextEvent,
+        /// For [`SipralEventKind::PresenceChanged`].
+        pub presence: SipralPresenceEvent,
     }
 }
 
@@ -1900,6 +1952,9 @@ pub(crate) fn translate(
     if let Some(out) = about_a_resolve(known, event, transport) {
         return Some(out);
     }
+    if let Some(out) = about_conference_or_presence(known, event) {
+        return Some(out);
+    }
     about_lifecycle(known, event)
 }
 
@@ -1985,6 +2040,56 @@ fn about_a_verification(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
         attach(&mut out, Some(request));
     }
     Some(out)
+}
+
+/// A conference's picture, a presentity's document, or this account's own
+/// published presence.
+fn about_conference_or_presence(
+    known: &mut Vocabulary<'_>,
+    event: &UaEvent,
+) -> Option<SipralEvent> {
+    match *event {
+        UaEvent::ConferenceChanged {
+            subscription,
+            update,
+        } => {
+            let named = subscription_named(known, subscription);
+            let payload = crate::conference::changed(known.agent, named, subscription, update);
+            Some(SipralEvent::of(
+                known.stack,
+                SipralEventKind::ConferenceChanged,
+                payload!(conference: payload),
+            ))
+        }
+        UaEvent::PresenceChanged {
+            subscription,
+            ref presence,
+        } => {
+            let named = subscription_named(known, subscription);
+            let payload = crate::presence::watched(named, presence);
+            Some(SipralEvent::of(
+                known.stack,
+                SipralEventKind::PresenceChanged,
+                payload!(presence: payload),
+            ))
+        }
+        UaEvent::Publication {
+            account, ref event, ..
+        } => {
+            let payload = crate::presence::published(event);
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::PresenceChanged,
+                payload!(presence: payload),
+            );
+            out.account = known
+                .accounts
+                .name_of(account)
+                .unwrap_or(SIPRAL_HANDLE_NONE);
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
 /// A call a push announced: the INVITE that answered it, or the silence that
@@ -2808,6 +2913,26 @@ pub(crate) fn media(
     statistics: Option<&SipralStreamStats>,
     encryption: Option<&sipral::StreamEncryption>,
 ) -> Option<SipralEvent> {
+    // text has an arm of its own: `reason` is the text itself, which is what
+    // `media_reason` built it to be
+    if let MediaEvent::TextReceived { missing, .. } = *event {
+        let mut payload = SipralTextEvent {
+            text: std::ptr::null(),
+            text_len: 0,
+            missing,
+        };
+        if let Some(text) = reason {
+            payload.text = text.as_ptr().cast::<c_char>();
+            payload.text_len = text.len();
+        }
+        let mut out = SipralEvent::of(
+            known.stack,
+            SipralEventKind::TextReceived,
+            payload!(text: payload),
+        );
+        out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
+        return Some(out);
+    }
     let mut payload = SipralMediaEvent::empty();
     if let Some(stream) = encryption.filter(|_| reports_encryption(event)) {
         payload.key_exchange = crate::security::key_exchange_code(stream.key_exchange) as u32;
@@ -2931,6 +3056,9 @@ pub(crate) fn media_reason(event: &MediaEvent) -> Option<String> {
     match *event {
         MediaEvent::Failed(ref error) => Some(error.to_string()),
         MediaEvent::RecordingStopped { ref reason, .. } => Some(reason.to_string()),
+        // not a sentence, but the same need: bytes C reads after the borrow
+        // of the event has gone
+        MediaEvent::TextReceived { ref text, .. } => Some(text.clone()),
         _ => None,
     }
 }
@@ -3504,7 +3632,10 @@ mod tests {
         assert_eq!(SipralEventKind::CallerVerification as u32, 47);
         assert_eq!(SipralEventKind::InBandDigit as u32, 48);
         assert_eq!(SipralEventKind::ProgressDetected as u32, 49);
-        assert_eq!(SipralEventKind::ALL.len(), 47, "and there are no others");
+        assert_eq!(SipralEventKind::ConferenceChanged as u32, 50);
+        assert_eq!(SipralEventKind::TextReceived as u32, 51);
+        assert_eq!(SipralEventKind::PresenceChanged as u32, 52);
+        assert_eq!(SipralEventKind::ALL.len(), 50, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -3594,12 +3725,17 @@ mod tests {
             "47 is live"
         );
         assert_eq!(name(48).as_deref(), Some("in-band digit"), "48 is live");
+        assert_eq!(name(49).as_deref(), Some("progress detected"), "49 is live");
+        // 53 is held for the transport half of the same wave
+        assert_eq!(name(53), None, "53 is reserved, not live");
         assert_eq!(
-            name(49).as_deref(),
-            Some("progress detected"),
-            "49 is live"
+            name(50).as_deref(),
+            Some("conference changed"),
+            "50 is live"
         );
-        assert_eq!(name(50), None, "past the last kind");
+        assert_eq!(name(51).as_deref(), Some("text received"), "51 is live");
+        assert_eq!(name(52).as_deref(), Some("presence changed"), "52 is live");
+        assert_eq!(name(54), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }
