@@ -24,7 +24,12 @@ sipral-headless = { path = "../../crates/sipral-headless", version = "0.0.1" }
 sipral-media = { path = "../../crates/sipral-media", version = "0.0.1" }
 sipral-nat = { path = "../../crates/sipral-nat", version = "0.0.1" }
 sipral-rtp = { path = "../../crates/sipral-rtp", version = "0.0.1" }
+sipral-stir = { path = "../../crates/sipral-stir", version = "0.0.1" }
 sipral-ua = { path = "../../crates/sipral-ua", version = "0.0.1" }
+# the stir_identity seeds carry a certificate chain, and its signatures are
+# P-256 like the PASSporT's: the same crate, at the same version, that
+# sipral-stir verifies them with
+p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
 
 [lints]
 workspace = true

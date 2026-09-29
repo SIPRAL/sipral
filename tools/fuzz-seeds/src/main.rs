@@ -71,6 +71,10 @@ use sipral_rtp::{
     RtpPacket, RxConfig, SdesItem, SenderInfo, SenderOrReceiver, SenderReportBuilder,
     SourceDescriptionBuilder, UNAVAILABLE, VoipMetricsBlock, XrPacketBuilder,
 };
+use sipral_stir::{
+    Attest, Claims, Dest, OrigId, Shaken, Signer, Tn, TnAuthList, TnEntry, TrustAnchors, Verdict,
+    Verifier,
+};
 use sipral_ua::dtmf::parse_info;
 use sipral_ua::siprec::{RecordedCall, RecordedParty, RecordedStream, RecordingMetadata};
 use sipral_ua::{DialogInfo, MessageSummary};
@@ -768,6 +772,242 @@ fn dialoginfo_seeds() -> Result<Vec<Seed>, Wrong> {
         DialogInfo::parse(document.as_bytes())
             .map_err(|why| Wrong(format!("the {name} seed does not parse: {why:?}")))?;
         out.push((name, document.as_bytes().to_vec()));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------- STIR
+
+/// The time the `stir_identity` target verifies at, 2026-09-21: its `NOW`.
+const STIR_NOW: u64 = 1_790_000_000;
+
+/// DER, as X.690 §8.1 lays an element out: tag, the shortest length, contents.
+fn der(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let length = contents.len();
+    if length < 0x80 {
+        out.push(u8::try_from(length).unwrap_or_default());
+    } else if length < 0x100 {
+        out.extend([0x81, u8::try_from(length).unwrap_or_default()]);
+    } else {
+        out.push(0x82);
+        out.extend(u16::try_from(length).unwrap_or(u16::MAX).to_be_bytes());
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+/// `ecdsa-with-SHA256`, 1.2.840.10045.4.3.2 (RFC 5758 §3.2), parameters absent.
+const ECDSA_WITH_SHA256: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+/// `id-ecPublicKey` and `prime256v1` (RFC 5480 §2.1.1).
+const EC_PUBLIC_KEY: &[u8] = &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+const PRIME256V1: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+/// `id-at-commonName`, `id-ce-basicConstraints`, `id-ce-keyUsage`.
+const COMMON_NAME: &[u8] = &[0x06, 0x03, 0x55, 0x04, 0x03];
+const BASIC_CONSTRAINTS: &[u8] = &[0x06, 0x03, 0x55, 0x1d, 0x13];
+const KEY_USAGE: &[u8] = &[0x06, 0x03, 0x55, 0x1d, 0x0f];
+/// `id-pe-TNAuthList`, 1.3.6.1.5.5.7.1.26 (RFC 8226 §9).
+const TN_AUTH_LIST: &[u8] = &[0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x1a];
+
+/// What a certificate of the seeds' chain is for.
+enum CertRole {
+    Issuer { path_len: Option<u8> },
+    Signing,
+}
+
+/// One certificate of the seeds' chain.
+struct CertSpec<'a> {
+    subject: &'a str,
+    issuer: &'a str,
+    key: &'a p256::ecdsa::SigningKey,
+    /// An issuer, with its `pathLenConstraint`, or the signing certificate.
+    role: CertRole,
+    tn_auth_list: Option<Vec<u8>>,
+}
+
+/// A certificate as RFC 5280 §4.1 lays one out, signed by `issuer_key`.
+fn certificate(spec: &CertSpec<'_>, issuer_key: &p256::ecdsa::SigningKey) -> Vec<u8> {
+    use p256::ecdsa::Signature;
+    use p256::ecdsa::signature::Signer as _;
+
+    let name = |common: &str| {
+        let attribute = [COMMON_NAME, &der(0x0c, common.as_bytes())].concat();
+        der(0x30, &der(0x31, &der(0x30, &attribute)))
+    };
+    let extension = |id: &[u8], critical: bool, value: &[u8]| {
+        let critical: &[u8] = if critical { &[0x01, 0x01, 0xff] } else { &[] };
+        der(0x30, &[id, critical, &der(0x04, value)].concat())
+    };
+    let mut point = vec![0];
+    point.extend_from_slice(spec.key.verifying_key().to_sec1_point(false).as_bytes());
+    let spki = der(
+        0x30,
+        &[
+            der(0x30, &[EC_PUBLIC_KEY, PRIME256V1].concat()),
+            der(0x03, &point),
+        ]
+        .concat(),
+    );
+    let mut extensions = Vec::new();
+    match spec.role {
+        CertRole::Issuer { path_len } => {
+            let mut constraints = vec![0x01, 0x01, 0xff];
+            if let Some(path_len) = path_len {
+                constraints.extend(der(0x02, &[path_len]));
+            }
+            extensions.extend(extension(BASIC_CONSTRAINTS, true, &der(0x30, &constraints)));
+            // keyCertSign and cRLSign, one unused bit
+            extensions.extend(extension(KEY_USAGE, true, &[0x03, 0x02, 0x01, 0x06]));
+        }
+        // digitalSignature, seven unused bits
+        CertRole::Signing => {
+            extensions.extend(extension(KEY_USAGE, true, &[0x03, 0x02, 0x07, 0x80]));
+        }
+    }
+    if let Some(list) = &spec.tn_auth_list {
+        extensions.extend(extension(TN_AUTH_LIST, false, list));
+    }
+    let validity = [der(0x17, b"250101000000Z"), der(0x17, b"300101000000Z")].concat();
+    let tbs = der(
+        0x30,
+        &[
+            der(0xa0, &der(0x02, &[2])),
+            der(0x02, &[0x01, 0x23]),
+            der(0x30, ECDSA_WITH_SHA256),
+            name(spec.issuer),
+            der(0x30, &validity),
+            name(spec.subject),
+            spki,
+            der(0xa3, &der(0x30, &extensions)),
+        ]
+        .concat(),
+    );
+    let signature: Signature = issuer_key.sign(&tbs);
+    let mut bits = vec![0];
+    bits.extend_from_slice(signature.to_der().as_bytes());
+    der(
+        0x30,
+        &[tbs, der(0x30, ECDSA_WITH_SHA256), der(0x03, &bits)].concat(),
+    )
+}
+
+/// A certificate as a PEM block (RFC 7468 §5.1), sixty-four characters a line.
+fn pem(der: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut body = String::new();
+    for chunk in der.chunks(3) {
+        let bytes = [
+            chunk.first().copied().unwrap_or_default(),
+            chunk.get(1).copied().unwrap_or_default(),
+            chunk.get(2).copied().unwrap_or_default(),
+        ];
+        let group = u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]);
+        for index in 0..4 {
+            if index <= chunk.len() {
+                let six = usize::try_from((group >> (18 - 6 * index)) & 0x3f).unwrap_or_default();
+                body.push(char::from(ALPHABET.get(six).copied().unwrap_or(b'=')));
+            } else {
+                body.push('=');
+            }
+        }
+    }
+    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in body.as_bytes().chunks(64) {
+        out.push_str(&String::from_utf8_lossy(line));
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
+}
+
+/// The `stir_identity` target reads an Identity header field value, a zero
+/// octet, and the certificate chain its `info` names, which it also takes
+/// as the trust anchors. A seed is a SHAKEN PASSporT signed by `Signer` over
+/// the target's own claims, in the full form and in the compact one, with
+/// the chain from signing certificate to root, as DER and as PEM: each one
+/// verifies, so a run starts past every check rather than at the first.
+fn stir_identity_seeds() -> Result<Vec<Seed>, Wrong> {
+    let wrong = |what: &str, why: &dyn std::fmt::Display| Wrong(format!("the {what}: {why}"));
+    let key = |scalar: u8| {
+        p256::ecdsa::SigningKey::from_slice(&[scalar; 32]).map_err(|why| wrong("test key", &why))
+    };
+    let (root_key, intermediate_key, leaf_key) = (key(0x11)?, key(0x22)?, key(0x33)?);
+    let orig = "12155551212";
+    let list = TnAuthList::new(vec![TnEntry::One(orig.to_owned())])
+        .map_err(|why| wrong("TNAuthList", &why))?;
+    let (root_name, intermediate_name) = ("Sipral Seed STI Root", "Sipral Seed STI Intermediate");
+    let root = certificate(
+        &CertSpec {
+            subject: root_name,
+            issuer: root_name,
+            key: &root_key,
+            role: CertRole::Issuer { path_len: None },
+            tn_auth_list: None,
+        },
+        &root_key,
+    );
+    let intermediate = certificate(
+        &CertSpec {
+            subject: intermediate_name,
+            issuer: root_name,
+            key: &intermediate_key,
+            role: CertRole::Issuer { path_len: Some(0) },
+            tn_auth_list: None,
+        },
+        &root_key,
+    );
+    let leaf = certificate(
+        &CertSpec {
+            subject: "Sipral Seed STI Signer",
+            issuer: intermediate_name,
+            key: &leaf_key,
+            role: CertRole::Signing,
+            tn_auth_list: Some(list.to_der()),
+        },
+        &intermediate_key,
+    );
+    let der_chain = [leaf.as_slice(), &intermediate, &root].concat();
+    let pem_chain = [pem(&leaf), pem(&intermediate), pem(&root)].concat();
+
+    // the claims the target rebuilds a compact form from
+    let claims = Claims {
+        orig: Tn::new(orig).map_err(|why| wrong("originating number", &why))?,
+        dest: Dest::tn(Tn::new("12125551213").map_err(|why| wrong("destination", &why))?),
+        iat: STIR_NOW,
+        shaken: Some(Shaken {
+            attest: Attest::A,
+            origid: OrigId::from_bytes([0x5a; 16]),
+        }),
+    };
+    let signer = Signer::new(&[0x33; 32], "https://cert.example.com/sti.pem")
+        .map_err(|why| wrong("signer", &why))?;
+    let full = signer
+        .identity(&claims)
+        .map_err(|why| wrong("full form", &why))?;
+    let compact = signer
+        .identity_compact(&claims)
+        .map_err(|why| wrong("compact form", &why))?;
+
+    let mut out = Vec::new();
+    for (name, header, chain) in [
+        ("full-form-der-chain", &full, der_chain.as_slice()),
+        ("full-form-pem-chain", &full, pem_chain.as_bytes()),
+        ("compact-form-der-chain", &compact, der_chain.as_slice()),
+    ] {
+        let mut anchors = TrustAnchors::new();
+        anchors
+            .add(chain)
+            .map_err(|why| wrong(&format!("{name} seed's anchors"), &why))?;
+        let pending = Verifier::default()
+            .start(header, Some(&claims))
+            .map_err(|why| wrong(&format!("{name} seed's header"), &why))?;
+        if let Verdict::Invalid(why) = pending.verify(chain, &anchors, STIR_NOW) {
+            return Err(wrong(&format!("{name} seed"), &why));
+        }
+        let mut seed = header.as_bytes().to_vec();
+        seed.push(0);
+        seed.extend_from_slice(chain);
+        out.push((name, seed));
     }
     Ok(out)
 }
@@ -2885,6 +3125,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("rtt", rtt_seeds()?),
         ("sdp", sdp_seeds()?),
         ("srtp_unprotect", srtp_seeds()?),
+        ("stir_identity", stir_identity_seeds()?),
         ("stun", stun_seeds()?),
         ("turn", turn_seeds()?),
         ("turn_client", turn_client_seeds()?),

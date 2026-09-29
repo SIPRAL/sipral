@@ -966,6 +966,7 @@ dependencies = [
 name = "sipral-fuzz-seeds"
 version = "0.0.1"
 dependencies = [
+ "p256",
  "sipral",
  "sipral-core",
  "sipral-dtls",
@@ -973,6 +974,7 @@ dependencies = [
  "sipral-media",
  "sipral-nat",
  "sipral-rtp",
+ "sipral-stir",
  "sipral-ua",
 ]
 
