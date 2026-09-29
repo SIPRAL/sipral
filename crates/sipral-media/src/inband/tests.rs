@@ -10,7 +10,10 @@ use super::amd::{AnsweringMachineDetector, Verdict};
 use super::beep::{Beep, BeepDetector};
 use super::dtmf::{DtmfDetector, DtmfEvent};
 use super::progress::{ProgressDetector, ProgressEvent, Region};
-use super::signals::{Rng, mix, pink, span, speech, syllable, to_pcm, white};
+use super::signals::{
+    Rng, digit_vowels, glottal_speech, mix, music, pink, span, speech, sweeps, syllable, to_pcm,
+    white,
+};
 
 const RATES: [SampleRate; 2] = [SampleRate::Hz8000, SampleRate::Hz16000];
 
@@ -66,6 +69,92 @@ fn a_minute_of_white_or_pink_noise_dials_nothing() {
         }
         let events = digits_in(rate, &to_pcm(&signal));
         assert!(events.is_empty(), "{rate:?} pink: {events:?}");
+    }
+}
+
+/// One part of the talk-off corpus: a name, and `seconds` of it at `rate`
+/// from `seed`.
+type Part = (&'static str, fn(&mut Rng, u32, f64) -> Vec<f64>);
+
+/// What a digit receiver hears that is not a digit, in kinds chosen to
+/// catch it out: talkers of every pitch, vowels built to sit on a row and a
+/// column, music, two sweeps crossing the band, and noise.
+const TALK_OFF: [Part; 7] = [
+    ("glottal speech", |rng, rate, s| {
+        let mut out = Vec::new();
+        for level in [-26.0, -18.0, -10.0] {
+            out.extend(glottal_speech(rng, rate, s / 3.0, level));
+        }
+        out
+    }),
+    ("harmonic speech", |rng, rate, s| {
+        let mut out = Vec::new();
+        for level in [-24.0, -16.0, -8.0] {
+            out.extend(speech(rng, rate, s / 3.0, level));
+        }
+        out
+    }),
+    ("vowels on digit pairs", |rng, rate, s| {
+        digit_vowels(rng, rate, s, -16.0)
+    }),
+    ("music", |rng, rate, s| music(rng, rate, s, -14.0)),
+    ("two sweeps", |rng, rate, s| sweeps(rng, rate, s, -14.0)),
+    ("white noise", |rng, rate, s| {
+        white(rng, -18.0, span(rate, s * 1_000.0))
+    }),
+    ("pink noise", |rng, rate, s| {
+        pink(rng, -18.0, span(rate, s * 1_000.0))
+    }),
+];
+
+/// Digits a detector at `rate` starts over `seconds` of `part` of the
+/// corpus, generated from `seed`.
+fn talk_off(rate: SampleRate, part: &Part, seconds: f64, seed: u64) -> usize {
+    let mut rng = Rng::new(seed);
+    let pcm = to_pcm(&(part.1)(&mut rng, rate.hz(), seconds));
+    digits_in(rate, &pcm)
+        .iter()
+        .filter(|e| matches!(e, DtmfEvent::Start { .. }))
+        .count()
+}
+
+#[test]
+fn talkers_of_every_pitch_and_music_dial_nothing() {
+    for rate in RATES {
+        for part in TALK_OFF
+            .iter()
+            .filter(|p| ["glottal speech", "music"].contains(&p.0))
+        {
+            let starts = talk_off(rate, part, 30.0, 0x5EED);
+            assert_eq!(starts, 0, "{rate:?} {}", part.0);
+        }
+    }
+}
+
+/// The false-digit rate over the whole corpus, a quarter of an hour of
+/// each part at each rate, per hour of audio. Run with
+/// `cargo test -p sipral-media --release -- --ignored --nocapture talk_off_rate`.
+///
+/// Speech, music and noise dial nothing. What does dial is what is built
+/// to: vowels whose formants and harmonics sit on a row and a column are
+/// two steady tones, and so is a pair of sweeps slow enough to stay inside
+/// both bands for a digit's length.
+#[test]
+#[ignore = "a measurement over three and a half hours of audio"]
+fn talk_off_rate() {
+    let seconds = 900.0;
+    for rate in RATES {
+        let mut total = 0;
+        for part in &TALK_OFF {
+            let starts = talk_off(rate, part, seconds, 0x7A1C);
+            println!("{rate:?} {:>22}: {starts} in {seconds} s", part.0);
+            total += starts;
+        }
+        let hours = seconds * 7.0 / 3_600.0;
+        println!(
+            "{rate:?}: {total} false digits in {hours:.2} h, {:.1} an hour",
+            f64::from(u32::try_from(total).unwrap()) / hours
+        );
     }
 }
 

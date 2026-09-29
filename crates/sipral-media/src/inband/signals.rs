@@ -208,6 +208,275 @@ pub(crate) fn syllable(rng: &mut Rng, rate: u32, ms: f64, dbm0: f64) -> Vec<f64>
     out
 }
 
+/// Rosenberg's glottal flow over one period, at `t` from 0 to 1: a
+/// raised-cosine opening over 40 % of the period, a quarter-cosine closing
+/// over 16 %, and the glottis shut for the rest.
+fn glottal_flow(t: f64) -> f64 {
+    const OPEN: f64 = 0.4;
+    const CLOSE: f64 = 0.16;
+    if t < OPEN {
+        0.5 * (1.0 - (PI * t / OPEN).cos())
+    } else if t < OPEN + CLOSE {
+        (0.5 * PI * (t - OPEN) / CLOSE).cos()
+    } else {
+        0.0
+    }
+}
+
+/// How a [`voiced`] sound is spoken: pitch from `f0.0` to `f0.1` in hertz,
+/// four formants moving from `from` to `to`, each with its bandwidth.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Articulation {
+    pub(crate) f0: (f64, f64),
+    pub(crate) from: [f64; 4],
+    pub(crate) to: [f64; 4],
+    pub(crate) bandwidths: [f64; 4],
+}
+
+/// A voiced sound as a vocal tract makes it: a glottal pulse train whose
+/// pitch glides and wavers, differentiated for the lips' radiation, through
+/// a cascade of four two-pole formant resonators that move over the sound,
+/// rising and falling at its edges, at `dbm0`.
+pub(crate) fn voiced(
+    rng: &mut Rng,
+    rate: u32,
+    ms: f64,
+    articulation: Articulation,
+    dbm0: f64,
+) -> Vec<f64> {
+    let fs = f64::from(rate);
+    let len = span(rate, ms).max(2);
+    let vibrato_hz = rng.range(4.0, 6.5);
+    let vibrato_depth = rng.range(0.0, 0.015);
+    let mut period_jitter = 1.0;
+    let mut phase = rng.uniform();
+    let mut previous_flow = 0.0;
+    let mut states = [(0.0_f64, 0.0_f64); 4];
+    let mut out = Vec::with_capacity(len);
+    for n in 0..len {
+        let t = count_f64(n) / count_f64(len);
+        let glide = articulation.f0.0 + (articulation.f0.1 - articulation.f0.0) * t;
+        let f0 = glide
+            * period_jitter
+            * (1.0 + vibrato_depth * (2.0 * PI * vibrato_hz * count_f64(n) / fs).sin());
+        phase += f0 / fs;
+        if phase >= 1.0 {
+            phase -= 1.0;
+            // a percent or so of jitter from one period to the next
+            period_jitter = 1.0 + 0.01 * rng.gaussian();
+        }
+        let flow = glottal_flow(phase);
+        let mut value = flow - previous_flow;
+        previous_flow = flow;
+        for (i, state) in states.iter_mut().enumerate() {
+            let centre = articulation.from[i] + (articulation.to[i] - articulation.from[i]) * t;
+            if centre >= 0.48 * fs {
+                continue;
+            }
+            let radius = (-PI * articulation.bandwidths[i] / fs).exp();
+            let feedback = 2.0 * radius * (2.0 * PI * centre / fs).cos();
+            let decay = -radius * radius;
+            let next = (1.0 - feedback - decay) * value + feedback * state.0 + decay * state.1;
+            *state = (next, state.0);
+            value = next;
+        }
+        out.push(value);
+    }
+    let edge = span(rate, 20.0).max(1);
+    for (n, x) in out.iter_mut().enumerate() {
+        let from_edge = n.min(len - 1 - n);
+        if from_edge < edge {
+            *x *= count_f64(from_edge) / count_f64(edge);
+        }
+    }
+    scale_to(&mut out, dbm0);
+    out
+}
+
+/// Formants F1–F4 of vowels spoken by men, women and children, after
+/// Peterson and Barney's averages, with F4 filled in where they give none.
+const SPEAKER_VOWELS: [[f64; 4]; 15] = [
+    [270.0, 2_290.0, 3_010.0, 3_500.0],
+    [390.0, 1_990.0, 2_550.0, 3_500.0],
+    [530.0, 1_840.0, 2_480.0, 3_500.0],
+    [660.0, 1_720.0, 2_410.0, 3_500.0],
+    [730.0, 1_090.0, 2_440.0, 3_500.0],
+    [570.0, 840.0, 2_410.0, 3_500.0],
+    [440.0, 1_020.0, 2_240.0, 3_500.0],
+    [300.0, 870.0, 2_240.0, 3_500.0],
+    [640.0, 1_190.0, 2_390.0, 3_500.0],
+    [490.0, 1_350.0, 1_690.0, 3_500.0],
+    [310.0, 2_790.0, 3_310.0, 3_900.0],
+    [610.0, 2_330.0, 2_990.0, 3_900.0],
+    [850.0, 1_220.0, 2_810.0, 3_900.0],
+    [590.0, 920.0, 2_710.0, 3_900.0],
+    [760.0, 1_400.0, 2_780.0, 3_900.0],
+];
+
+/// Pitch ranges, in hertz, of a man's, a woman's and a child's voice.
+const PITCH: [(f64, f64); 3] = [(80.0, 160.0), (160.0, 260.0), (240.0, 350.0)];
+
+/// Talk-off speech: a talker, man, woman or child at random, saying
+/// syllables of [`voiced`] from vowel to vowel, with fricatives before some
+/// and pauses between them, the level varying around `dbm0`.
+pub(crate) fn glottal_speech(rng: &mut Rng, rate: u32, seconds: f64, dbm0: f64) -> Vec<f64> {
+    let total = span(rate, seconds * 1_000.0);
+    let mut out = Vec::with_capacity(total);
+    let pick = |rng: &mut Rng| {
+        SPEAKER_VOWELS
+            .get(usize::try_from(rng.next_u64() % 15).unwrap_or(0))
+            .copied()
+            .unwrap_or([500.0, 1_500.0, 2_500.0, 3_500.0])
+    };
+    while out.len() < total {
+        let (low, high) = PITCH
+            .get(usize::try_from(rng.next_u64() % 3).unwrap_or(0))
+            .copied()
+            .unwrap_or((100.0, 200.0));
+        // a phrase from one talker
+        for _ in 0..(3 + rng.next_u64() % 8) {
+            if rng.uniform() < 0.3 {
+                let len = span(rate, rng.range(30.0, 110.0));
+                let level = dbm0 - rng.range(6.0, 16.0);
+                out.extend(white(rng, level, len));
+            }
+            let start = rng.range(low, high);
+            let articulation = Articulation {
+                f0: (
+                    start,
+                    (start * rng.range(0.75, 1.3)).clamp(0.8 * low, 1.2 * high),
+                ),
+                from: pick(rng),
+                to: pick(rng),
+                bandwidths: [
+                    rng.range(50.0, 110.0),
+                    rng.range(60.0, 130.0),
+                    rng.range(100.0, 200.0),
+                    rng.range(150.0, 300.0),
+                ],
+            };
+            let ms = rng.range(80.0, 450.0);
+            let level = dbm0 + rng.range(-6.0, 6.0);
+            out.extend(voiced(rng, rate, ms, articulation, level));
+            out.extend(silence(span(rate, rng.range(20.0, 200.0))));
+        }
+        out.extend(silence(span(rate, rng.range(200.0, 900.0))));
+    }
+    out.truncate(total);
+    out
+}
+
+/// The hardest vowels a voice can make for a digit receiver: the first
+/// formant on a row frequency and the second on a column frequency, each
+/// within 2 % and narrow, and the pitch a submultiple of the row frequency
+/// so that a harmonic sits on it, gliding a little or not at all.
+pub(crate) fn digit_vowels(rng: &mut Rng, rate: u32, seconds: f64, dbm0: f64) -> Vec<f64> {
+    use super::dtmf::{HIGH_GROUP, LOW_GROUP};
+    let total = span(rate, seconds * 1_000.0);
+    let mut out = Vec::with_capacity(total);
+    while out.len() < total {
+        let row = LOW_GROUP
+            .get(usize::try_from(rng.next_u64() % 4).unwrap_or(0))
+            .copied()
+            .unwrap_or(697.0);
+        let column = HIGH_GROUP
+            .get(usize::try_from(rng.next_u64() % 4).unwrap_or(0))
+            .copied()
+            .unwrap_or(1_209.0);
+        let divisor = count_f64(usize::try_from(2 + rng.next_u64() % 6).unwrap_or(2));
+        let f0 = row / divisor * rng.range(0.99, 1.01);
+        let f1 = row * rng.range(0.98, 1.02);
+        let f2 = column * rng.range(0.98, 1.02);
+        let formants = [f1, f2, rng.range(2_300.0, 2_900.0), 3_500.0];
+        let articulation = Articulation {
+            f0: (f0, f0 * rng.range(0.97, 1.03)),
+            from: formants,
+            to: formants,
+            bandwidths: [
+                rng.range(40.0, 90.0),
+                rng.range(50.0, 110.0),
+                rng.range(100.0, 200.0),
+                rng.range(150.0, 300.0),
+            ],
+        };
+        let ms = rng.range(150.0, 700.0);
+        let level = dbm0 + rng.range(-8.0, 8.0);
+        out.extend(voiced(rng, rate, ms, articulation, level));
+        out.extend(silence(span(rate, rng.range(50.0, 300.0))));
+    }
+    out.truncate(total);
+    out
+}
+
+/// Music-like audio: chords of one to three notes of the equal-tempered
+/// scale between G3 and C7, each note a harmonic series whose partials fall
+/// off as `1/k^p` for a timbre `p` between 0.8 and 2.2, with vibrato and a
+/// short attack and release, the chords following one another.
+pub(crate) fn music(rng: &mut Rng, rate: u32, seconds: f64, dbm0: f64) -> Vec<f64> {
+    let fs = f64::from(rate);
+    let total = span(rate, seconds * 1_000.0);
+    let mut out = Vec::with_capacity(total);
+    while out.len() < total {
+        let len = span(rate, rng.range(120.0, 700.0)).max(2);
+        let mut chord = vec![0.0; len];
+        let notes = 1 + rng.next_u64() % 3;
+        for _ in 0..notes {
+            let midi = 55.0 + count_f64(usize::try_from(rng.next_u64() % 42).unwrap_or(0));
+            let f = 440.0 * 2f64.powf((midi - 69.0) / 12.0);
+            let timbre = rng.range(0.8, 2.2);
+            let vibrato = rng.range(0.0, 0.006);
+            let vibrato_hz = rng.range(4.5, 6.5);
+            let mut phase = rng.range(0.0, 2.0 * PI);
+            for (n, x) in chord.iter_mut().enumerate() {
+                let t = count_f64(n) / fs;
+                phase += 2.0 * PI * f * (1.0 + vibrato * (2.0 * PI * vibrato_hz * t).sin()) / fs;
+                let mut k = 1.0;
+                while k * f < 0.45 * fs && k <= 12.0 {
+                    *x += (k * phase).sin() / k.powf(timbre);
+                    k += 1.0;
+                }
+            }
+        }
+        let attack = span(rate, 10.0).max(1);
+        let release = span(rate, 30.0).max(1);
+        for (n, x) in chord.iter_mut().enumerate() {
+            let rising = count_f64(n.min(attack)) / count_f64(attack);
+            let falling = count_f64((len - 1 - n).min(release)) / count_f64(release);
+            *x *= rising.min(falling);
+        }
+        scale_to(&mut chord, dbm0 + rng.range(-6.0, 6.0));
+        out.extend(chord);
+        out.extend(silence(span(rate, rng.range(0.0, 150.0))));
+    }
+    out.truncate(total);
+    out
+}
+
+/// Two sines sweeping at once, each between random ends somewhere in the
+/// voice band, over sweeps of 0.3 to 2 s.
+pub(crate) fn sweeps(rng: &mut Rng, rate: u32, seconds: f64, dbm0: f64) -> Vec<f64> {
+    let fs = f64::from(rate);
+    let total = span(rate, seconds * 1_000.0);
+    let mut out = Vec::with_capacity(total);
+    while out.len() < total {
+        let len = span(rate, rng.range(300.0, 2_000.0)).max(2);
+        let mut sweep = vec![0.0; len];
+        for _ in 0..2 {
+            let (from, to) = (rng.range(300.0, 3_400.0), rng.range(300.0, 3_400.0));
+            let mut phase = 0.0;
+            for (n, x) in sweep.iter_mut().enumerate() {
+                let f = from + (to - from) * count_f64(n) / count_f64(len);
+                phase += 2.0 * PI * f / fs;
+                *x += phase.sin();
+            }
+        }
+        scale_to(&mut sweep, dbm0);
+        out.extend(sweep);
+    }
+    out.truncate(total);
+    out
+}
+
 /// Speech-like audio: syllables of [`syllable`], with noisy consonants
 /// before some of them and pauses of varied length between them. Levels
 /// vary by syllable around `dbm0`.
