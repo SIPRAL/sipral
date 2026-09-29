@@ -51,38 +51,38 @@ const PREFERRED: Codec = Codec::ALL[0];
 const TICK: Duration = Duration::from_millis(20);
 
 /// Where the two stacks are.
-fn caller_sip() -> SocketAddr {
+pub(crate) fn caller_sip() -> SocketAddr {
     "192.0.2.1:5060".parse().expect("an address")
 }
 
-fn callee_sip() -> SocketAddr {
+pub(crate) fn callee_sip() -> SocketAddr {
     "192.0.2.2:5060".parse().expect("an address")
 }
 
-fn caller_media() -> SocketAddr {
+pub(crate) fn caller_media() -> SocketAddr {
     "192.0.2.1:40000".parse().expect("an address")
 }
 
-fn callee_media() -> SocketAddr {
+pub(crate) fn callee_media() -> SocketAddr {
     "192.0.2.2:40002".parse().expect("an address")
 }
 
-fn uri(text: &str) -> Uri {
+pub(crate) fn uri(text: &str) -> Uri {
     Uri::parse_str(text).expect("a URI")
 }
 
 /// One side: a user agent, its media engine, and everything the test has heard
 /// from it.
-struct Stack {
-    agent: UserAgent,
-    engine: MediaEngine,
+pub(crate) struct Stack {
+    pub(crate) agent: UserAgent,
+    pub(crate) engine: MediaEngine,
     local: SocketAddr,
     media: SocketAddr,
-    heard: Vec<Event>,
+    pub(crate) heard: Vec<Event>,
 }
 
 impl Stack {
-    fn new(
+    pub(crate) fn new(
         seed: u8,
         local: SocketAddr,
         media: SocketAddr,
@@ -118,7 +118,7 @@ impl Stack {
         }
     }
 
-    fn account(&mut self, user: &str, registrar: SocketAddr) -> AccountId {
+    pub(crate) fn account(&mut self, user: &str, registrar: SocketAddr) -> AccountId {
         let account = Account::new(
             uri(&format!("sip:{user}@example.com")),
             uri("sip:example.com"),
@@ -131,7 +131,7 @@ impl Stack {
 
     /// Drain the engine, keeping everything for the assertions and answering
     /// anything that has to be answered to keep the call moving.
-    fn drain(&mut self, now: Instant, answer: bool) {
+    pub(crate) fn drain(&mut self, now: Instant, answer: bool) {
         while let Some(event) = self.engine.poll_event(&mut self.agent, now) {
             if answer && let Event::Signalling(UaEvent::IncomingCall { call, .. }) = &event {
                 let call = *call;
@@ -144,7 +144,7 @@ impl Stack {
     }
 
     /// Everything the agent wanted to write.
-    fn outbound(&mut self) -> Vec<Vec<u8>> {
+    pub(crate) fn outbound(&mut self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
         while let Some(transmit) = self.agent.poll_transmit() {
             out.push(transmit.payload.to_vec());
@@ -152,7 +152,7 @@ impl Stack {
         out
     }
 
-    fn deliver(&mut self, datagram: &[u8], from: SocketAddr, now: Instant) {
+    pub(crate) fn deliver(&mut self, datagram: &[u8], from: SocketAddr, now: Instant) {
         self.agent
             .receive(
                 Input::Datagram {
@@ -170,7 +170,7 @@ impl Stack {
     ///
     /// Read out of the message rather than off the engine, because what is
     /// being asserted about is what went on the wire.
-    fn offer_received(&self) -> Option<SessionDescription> {
+    pub(crate) fn offer_received(&self) -> Option<SessionDescription> {
         self.heard.iter().rev().find_map(|event| match event {
             Event::Signalling(UaEvent::IncomingCall { request, .. }) => {
                 parse(request.as_raw().body()).ok()
@@ -180,7 +180,7 @@ impl Stack {
     }
 
     /// The same for the description in the response that confirmed the call.
-    fn answer_received(&self) -> Option<SessionDescription> {
+    pub(crate) fn answer_received(&self) -> Option<SessionDescription> {
         self.heard.iter().rev().find_map(|event| match event {
             Event::Signalling(UaEvent::CallConfirmed {
                 response: Some(response),
@@ -190,7 +190,7 @@ impl Stack {
         })
     }
 
-    fn media_events(&self) -> Vec<&MediaEvent> {
+    pub(crate) fn media_events(&self) -> Vec<&MediaEvent> {
         self.heard
             .iter()
             .filter_map(|event| match event {
@@ -200,7 +200,7 @@ impl Stack {
             .collect()
     }
 
-    fn call(&self) -> Option<CallHandle> {
+    pub(crate) fn call(&self) -> Option<CallHandle> {
         self.heard.iter().find_map(|event| match event {
             Event::Signalling(
                 UaEvent::IncomingCall { call, .. } | UaEvent::CallConfirmed { call, .. },
@@ -228,14 +228,14 @@ impl Stack {
 }
 
 /// The two stacks, wired to each other.
-struct Pair {
-    caller: Stack,
-    callee: Stack,
-    now: Instant,
+pub(crate) struct Pair {
+    pub(crate) caller: Stack,
+    pub(crate) callee: Stack,
+    pub(crate) now: Instant,
 }
 
 impl Pair {
-    fn new(catalog: CodecCatalog) -> Self {
+    pub(crate) fn new(catalog: CodecCatalog) -> Self {
         let now = Instant::now();
         Self {
             caller: Stack::new(11, caller_sip(), caller_media(), catalog.clone(), now),
@@ -247,7 +247,7 @@ impl Pair {
     /// The same, with a different catalogue on each side — D5's three
     /// outcomes only all show up when the two ends do not agree on
     /// everything.
-    fn asymmetric(placing: CodecCatalog, answering: CodecCatalog) -> Self {
+    pub(crate) fn asymmetric(placing: CodecCatalog, answering: CodecCatalog) -> Self {
         let now = Instant::now();
         Self {
             caller: Stack::new(11, caller_sip(), caller_media(), placing, now),
@@ -258,7 +258,7 @@ impl Pair {
 
     /// Move everything one side wants to write to the other, drain both, and
     /// keep going until nothing more happens.
-    fn settle(&mut self) {
+    pub(crate) fn settle(&mut self) {
         for _ in 0..12 {
             let dialled = self.caller.outbound();
             let answered = self.callee.outbound();
@@ -277,7 +277,7 @@ impl Pair {
     }
 
     /// Place a call and take it all the way to confirmed.
-    fn connect(&mut self) -> CallHandle {
+    pub(crate) fn connect(&mut self) -> CallHandle {
         let account = self.caller.account("alice", callee_sip());
         let _ = self.callee.account("bob", caller_sip());
         let placed = self
@@ -298,7 +298,7 @@ impl Pair {
 
     /// Place a call and take it as far as the callee hearing about it,
     /// without answering — what a test about the answer itself needs.
-    fn ring(&mut self) -> CallHandle {
+    pub(crate) fn ring(&mut self) -> CallHandle {
         let account = self.caller.account("alice", callee_sip());
         let _ = self.callee.account("bob", caller_sip());
         self.caller
@@ -326,7 +326,12 @@ impl Pair {
     /// decrypted where it lies, so delivering the buffer that was captured
     /// would hand a test back the plaintext it is trying to prove is not on
     /// the wire.
-    fn speak(&mut self, call: CallHandle, remote: CallHandle, tone: &[i16]) -> (Vec<u8>, Vec<i16>) {
+    pub(crate) fn speak(
+        &mut self,
+        call: CallHandle,
+        remote: CallHandle,
+        tone: &[i16],
+    ) -> (Vec<u8>, Vec<i16>) {
         let sent = self
             .caller
             .engine
@@ -349,7 +354,12 @@ impl Pair {
     }
 
     /// One frame of audio each way, and the frame the far end played.
-    fn exchange(&mut self, call: CallHandle, remote: CallHandle, tone: &[i16]) -> Vec<i16> {
+    pub(crate) fn exchange(
+        &mut self,
+        call: CallHandle,
+        remote: CallHandle,
+        tone: &[i16],
+    ) -> Vec<i16> {
         let outbound = {
             let mut session = self
                 .caller
@@ -421,7 +431,7 @@ impl Pair {
         (sent, outcome, played)
     }
 
-    fn advance(&mut self) {
+    pub(crate) fn advance(&mut self) {
         self.now += TICK;
     }
 
@@ -433,7 +443,7 @@ impl Pair {
     /// again. A driver that skips any of those three is a driver whose calls
     /// come up silent, which is what this reproduces if it is got wrong.
     #[cfg(feature = "dtls")]
-    fn shake_hands(&mut self, call: CallHandle, remote: CallHandle) -> usize {
+    pub(crate) fn shake_hands(&mut self, call: CallHandle, remote: CallHandle) -> usize {
         let mut crossed = 0;
         for _ in 0..64 {
             let mut moved = false;
@@ -525,7 +535,7 @@ impl Pair {
 
 /// Roughly 440 Hz at any rate, square so that nothing about the signal itself
 /// can be blamed for what comes back.
-fn tone(samples: &mut [i16], rate: u32, phase: &mut u32) {
+pub(crate) fn tone(samples: &mut [i16], rate: u32, phase: &mut u32) {
     let period = (rate / 444).max(2);
     for slot in samples.iter_mut() {
         *slot = if *phase % period < period / 2 {
@@ -537,7 +547,7 @@ fn tone(samples: &mut [i16], rate: u32, phase: &mut u32) {
     }
 }
 
-fn loudness(samples: &[i16]) -> i64 {
+pub(crate) fn loudness(samples: &[i16]) -> i64 {
     if samples.is_empty() {
         return 0;
     }
@@ -1327,7 +1337,7 @@ struct Spoken {
     encrypted: bool,
 }
 
-fn one_stream(description: &SessionDescription) -> MediaDescription {
+pub(crate) fn one_stream(description: &SessionDescription) -> MediaDescription {
     description
         .media
         .first()
@@ -1335,7 +1345,7 @@ fn one_stream(description: &SessionDescription) -> MediaDescription {
         .expect("one audio stream")
 }
 
-fn crypto_line(stream: &MediaDescription) -> Option<Crypto> {
+pub(crate) fn crypto_line(stream: &MediaDescription) -> Option<Crypto> {
     Crypto::parse(stream.attribute("crypto")?.value.as_deref()?)
 }
 
@@ -1901,9 +1911,15 @@ fn a_call_that_requires_srtp_refuses_to_answer_a_plain_invite() {
         .engine
         .answer(&mut pair.callee.agent, call, callee_media(), pair.now);
     assert_eq!(refused, Err(MediaError::SrtpRequired));
+    // 8.10: refused by the call's own policy, with the answer to an offer
+    // whose terms this end cannot take, rather than left ringing for the
+    // application to refuse
+    let sent = pair.callee.outbound();
+    assert_eq!(sent.len(), 1, "one final answer: {sent:?}");
     assert!(
-        pair.callee.outbound().is_empty(),
-        "a refused answer must not have gone out anyway"
+        sent[0].starts_with(b"SIP/2.0 488 "),
+        "{}",
+        String::from_utf8_lossy(&sent[0])
     );
     assert!(
         pair.callee.engine.session(call).is_none(),

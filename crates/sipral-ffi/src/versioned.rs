@@ -102,6 +102,10 @@ pub(crate) mod min_size {
     pub const STACK_SETTINGS: usize = 72;
     /// `sipral_stream_stats_t`
     pub const STREAM_STATS: usize = 152;
+    /// `sipral_stir_config_t`
+    pub const STIR_CONFIG: usize = 48;
+    /// `sipral_stream_encryption_t`
+    pub const STREAM_ENCRYPTION: usize = 32;
     /// `sipral_subscribe_config_t`
     pub const SUBSCRIBE_CONFIG: usize = 88;
     /// `sipral_transmit_t`

@@ -96,6 +96,13 @@ public enum SipralStatus: Int32, Sendable {
     /// `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
     /// that ends makes room; raising the limit means a new stack.
     case limitReached = 16
+    /// Refused by the account's security policy (ABI 0.31): a call that
+    /// would carry audio unencrypted where its account, or its own
+    /// configuration, requires SRTP, or that names a policy weaker than
+    /// its account's. An INVITE refused this way has been answered with
+    /// 488 Not Acceptable Here; a call being placed never left. The last
+    /// error says which.
+    case securityPolicy = 18
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -192,6 +199,16 @@ public enum SipralSrtp: UInt32, Sendable {
     /// `a=crypto` included, since that key travelled in a body this
     /// policy exists to avoid trusting.
     case dtlsRequired = 5
+    /// SrtpPolicy::DtlsOrSdes: DTLS-SRTP, falling back to SDES for a
+    /// peer that has no DTLS, and never unencrypted. The offer is one
+    /// `RTP/SAVP` stream carrying both the fingerprint and the crypto
+    /// lines, and the answer decides which keys the call; an offer that
+    /// arrives is answered the way it was keyed, and a plain one is
+    /// refused with 488. ABI 0.31.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+    /// `SIPRAL_FEATURE_DTLS_SRTP`.
+    case dtlsOrSdes = 6
 }
 
 /// What a call or a stack says about ICE. Names for
@@ -456,6 +473,11 @@ public enum SipralMediaFault: UInt32, Sendable {
     /// changed is only that no path could be checked. A deployment with a
     /// non-ICE profile to fall back to falls back here.
     case ice = 9
+    /// The call's SRTP policy refused what the far end described: a plain
+    /// answer to a call that requires SRTP, which this end then hangs up
+    /// with a `Reason` of 488, or a plain re-offer inside one, refused
+    /// with 488 and the call left on the keys it had. ABI 0.31.
+    case securityPolicy = 10
 }
 
 /// What a datagram handed to sipral_media_receive turned out to be.
@@ -953,6 +975,22 @@ public enum SipralEventKind: UInt32, Sendable {
     /// `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
     /// neither.
     case stunServer = 46
+    /// Who is calling, as a signature says (RFC 8224, RFC 8588): the
+    /// stack's verification service at work on an INVITE for an account
+    /// that verifies its callers. ABI 0.31.
+    ///
+    /// `payload.verification.stage` says which half.
+    /// `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`: the certificate at
+    /// `certificate_url` is needed; fetch it and hand it to
+    /// `sipral_call_stir_certificate`, or hand over nothing if it cannot
+    /// be had. The call waits, and the application has not been told of
+    /// it yet — `call` names it all the same, for the answer.
+    /// `SIPRAL_VERIFICATION_STAGE_VERIFIED`: the verdict, queued just
+    /// before the `SIPRAL_EVENT_KIND_INCOMING_CALL` naming the same call,
+    /// whose call events carry it too; or, with `refused` set, before the
+    /// `SIPRAL_EVENT_KIND_CALL_ENDED` of a call its strict account
+    /// refused with `response_code`. `message` is the INVITE.
+    case callerVerification = 47
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1563,6 +1601,17 @@ public enum SipralIdentityText: UInt32, Sendable {
     case alertInfo = 10
     /// Every `info=` value on `Alert-Info`.
     case alertName = 11
+    /// The calling number this stack's verification found a valid
+    /// PASSporT signed for (RFC 8224 §6.2), canonical: one entry, or none
+    /// when nothing verified. ABI 0.31.
+    case verifiedOrig = 12
+    /// Its origination identifier (RFC 8588 §5), a UUID.
+    case verifiedOrigid = 13
+    /// The URL of the certificate it was verified against, or that could
+    /// not be had.
+    case verificationCertificate = 14
+    /// Why it did not verify, in words, for a log.
+    case verificationDetail = 15
 }
 
 /// How an account's calls ask for a session timer (RFC 4028). Names for
@@ -1595,6 +1644,135 @@ public enum SipralLogLevel: UInt32, Sendable {
     case debug = 4
     /// Every SIP message in and out, whole and redacted.
     case trace = 5
+}
+
+/// How a stream's SRTP keys were exchanged. Names for
+/// `sipral_stream_encryption_t::key_exchange` and
+/// `sipral_media_event_t::key_exchange`.
+public enum SipralKeyExchange: UInt32, Sendable {
+    /// None: the stream was never meant to be encrypted, or the event is
+    /// not about one.
+    case none = 0
+    /// In the session description (RFC 4568's `a=crypto`): as protected
+    /// as the signalling transport that carried it.
+    case sdes = 1
+    /// By a DTLS handshake on the media path (RFC 5764), the far end's
+    /// certificate checked against the fingerprint its signalling named.
+    case dtls = 2
+}
+
+/// What a stream carries. Names for `sipral_stream_encryption_t::media`.
+public enum SipralMediaKind: UInt32, Sendable {
+    /// Something this ABI has no word for.
+    case unknown = 0
+    /// `m=audio`.
+    case audio = 1
+}
+
+/// What an account does with the `Identity` header fields of the calls
+/// it receives (RFC 8224 §6.2). Names for
+/// `sipral_account_config_t::stir_verification`.
+public enum SipralStirVerification: UInt32, Sendable {
+    /// This build's default, which is `REPORT`.
+    case `default` = 0
+    /// Verify nothing.
+    case off = 1
+    /// Verify, report the verdict on the call, and deliver every call
+    /// whatever it says. In force once the stack has trust anchors
+    /// (`sipral_stack_stir`); without any, nothing is fetched or
+    /// verified.
+    case report = 2
+    /// Verify, and refuse a call that does not verify with the response
+    /// RFC 8224 §6.2.2 prescribes: 428 with no `Identity`, 436 for a
+    /// certificate that cannot be had, 437 for one nobody trusted, 438
+    /// for a signature that does not hold, 403 "Stale Date". In force
+    /// with or without trust anchors: with none, nothing verifies.
+    case strict = 3
+}
+
+/// The attestation level of a SHAKEN PASSporT (RFC 8588 §4). Names for
+/// `sipral_account_config_t::stir_attestation`,
+/// `sipral_verification_event_t::attestation` and
+/// `sipral_call_event_t::attestation`.
+public enum SipralAttestation: UInt32, Sendable {
+    /// None said: on an account, full attestation; on a verdict, a
+    /// PASSporT with no SHAKEN claims, or no valid one.
+    case none = 0
+    /// Full: the signer knows the caller and that the number is theirs.
+    case a = 1
+    /// Partial: the signer knows the caller, not the number.
+    case b = 2
+    /// Gateway: the signer knows only where the call entered its
+    /// network.
+    case c = 3
+}
+
+/// What a verification came to. Names for
+/// `sipral_verification_event_t::outcome` and
+/// `sipral_call_event_t::verification`.
+public enum SipralVerificationOutcome: UInt32, Sendable {
+    /// Nothing was verified: the account does not verify, or the stack
+    /// has no trust anchors and the account only reports.
+    case none = 0
+    /// A PASSporT signed by a certificate with authority over the calling
+    /// number, fresh, for the numbers the request names.
+    case valid = 1
+    /// One was there and does not hold: `failure` says why.
+    case invalid = 2
+    /// Nothing this end could verify: no `Identity`, or only ones naming
+    /// a PASSporT extension it does not support.
+    case absent = 3
+}
+
+/// Why a verification did not hold. Names for
+/// `sipral_verification_event_t::failure` and
+/// `sipral_call_event_t::verification_failure`.
+public enum SipralVerificationFailure: UInt32, Sendable {
+    /// Nothing failed.
+    case none = 0
+    /// No `Identity` header field.
+    case noIdentity = 1
+    /// Only ones naming a `ppt` this end does not support.
+    case unsupportedPpt = 2
+    /// The header field or its PASSporT is not well formed.
+    case malformed = 3
+    /// Signed with an algorithm other than ES256.
+    case unsupportedAlgorithm = 4
+    /// `iat` outside the freshness window.
+    case stale = 5
+    /// The certificate could not be fetched, or did not arrive in time.
+    case certificateUnavailable = 6
+    /// What the `info` URL yielded is not a chain this end can read.
+    case certificateUnreadable = 7
+    /// The chain leads to no trust anchor.
+    case untrusted = 8
+    /// A certificate in it is outside its validity period.
+    case expired = 9
+    /// The chain breaks a rule of path validation.
+    case invalidChain = 10
+    /// The signature does not verify.
+    case badSignature = 11
+    /// The certificate has no authority over the calling number.
+    case numberNotCovered = 12
+    /// Signed for another calling number than the request names.
+    case origMismatch = 13
+    /// Signed for another called number.
+    case destMismatch = 14
+}
+
+/// Which half of a caller's verification an event reports. Names for
+/// `sipral_verification_event_t::stage`.
+public enum SipralVerificationStage: UInt32, Sendable {
+    /// Never sent.
+    case unknown = 0
+    /// The certificate at `certificate_url` is wanted: fetch it and hand
+    /// it to `sipral_call_stir_certificate`, or hand over nothing to say
+    /// it could not be had. The call waits, unannounced, until then or
+    /// until `certificate_wait_ms` runs out.
+    case certificateWanted = 1
+    /// The verdict is in. `SIPRAL_EVENT_KIND_INCOMING_CALL` follows, or,
+    /// when `refused` is set, `SIPRAL_EVENT_KIND_CALL_ENDED`.
+    case verified = 2
 }
 
 /// What a call across the boundary answered, when it did not answer
@@ -1871,6 +2049,26 @@ public extension sipral_log_record_t {
     }
 }
 
+public extension sipral_stir_config_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_stream_encryption_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -1975,7 +2173,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 30
+    public static let abiVersionMinor: UInt32 = 31
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2130,6 +2328,23 @@ public enum Sipral {
     /// always carries the redaction both depend on; a bit so that a binding
     /// asks before it shows a "send diagnostics" control.
     public static let featureLogging: UInt32 = 16384
+
+    /// See SIPRAL_FEATURE_DTMF. STIR/SHAKEN (RFC 8224, RFC 8588): an
+    /// account given a key and a certificate URL signs every call it places
+    /// (`stir_key`, `stir_certificate_url` in `sipral_account_config_t`), and
+    /// a stack given trust anchors (`sipral_stack_stir`) verifies who is
+    /// calling before the phone rings — `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
+    /// `sipral_call_stir_certificate`, and the verdict on every call event.
+    /// Behind a compile-time feature, on by default. ABI 0.31.
+    public static let featureStir: UInt32 = 65536
+
+    /// See SIPRAL_FEATURE_DTMF. An SRTP policy and suites per account
+    /// (`srtp`, `srtp_suites` in `sipral_account_config_t`), the policy that
+    /// falls back from DTLS-SRTP to SDES (`SIPRAL_SRTP_DTLS_OR_SDES`), calls
+    /// refused by it with `SIPRAL_STATUS_SECURITY_POLICY`, and the
+    /// encryption report of every call (`sipral_media_encryption_at`). ABI
+    /// 0.31.
+    public static let featureSrtpPolicy: UInt32 = 131072
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -5952,6 +6167,88 @@ public enum Sipral {
         try ensureAbi()
         let status = sipral_stack_rtp_port_release(stack, port)
         try check(status)
+    }
+
+    /// Verify the callers of the calls this stack's accounts receive, against
+    /// `config`'s trust anchors, from now on (RFC 8224 §6.2).
+    ///
+    /// Replaces whatever an earlier call set. Every account that reports —
+    /// the default — verifies once there is at least one anchor, and none
+    /// does with none; an account set to `SIPRAL_STIR_VERIFICATION_STRICT`
+    /// verifies either way. `config.unix_seconds`, when set, is the wall
+    /// clock at `now_ms`, and the stack signs and verifies by it from here
+    /// on; without it the stack must have been created with
+    /// `media_clock_unix_seconds`, or this is `SIPRAL_STATUS_WRONG_STATE`.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anchors that are not
+    /// certificates, or whose key is not P-256; `SIPRAL_STATUS_NOT_SUPPORTED`
+    /// in a build without `SIPRAL_FEATURE_STIR`.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_stir_config_t` whose `size` member
+    /// says how long it is, with `anchors` readable for `anchors_len` bytes.
+    public static func stackStir(stack: SipralHandle, config: sipral_stir_config_t, nowMs: UInt64) throws {
+        try ensureAbi()
+        var config = config
+        let status = sipral_stack_stir(stack, &config, nowMs)
+        try check(status)
+    }
+
+    /// The certificate chain a call's `Identity` named, as fetched from the
+    /// URL `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` gave with
+    /// `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED` — PEM or DER, the
+    /// signing certificate first — or null and zero for one that could not
+    /// be fetched.
+    ///
+    /// The call's verdict is reached here and reported, and the call
+    /// delivered or refused, before this returns; the events come out of the
+    /// next `sipral_stack_poll`. `SIPRAL_STATUS_STALE_HANDLE` for a call no
+    /// longer waiting: it was already answered, its wait ran out, or the
+    /// caller gave up.
+    ///
+    /// Safety
+    ///
+    /// `chain` must be readable for `chain_len` bytes, or null with a length
+    /// of zero.
+    public static func callStirCertificate(stack: SipralHandle, call: SipralHandle, chain: [UInt8], nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            chain.withUnsafeBufferPointer { p2 in
+                sipral_call_stir_certificate(stack, call, p2.baseAddress, p2.count, nowMs)
+            }
+        try check(status)
+    }
+
+    /// How many streams one call's encryption report has: one per stream
+    /// the call carries, which for this library is its one audio stream.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    public static func mediaEncryptionCount(media: SipralHandle) throws -> Int {
+        try ensureAbi()
+        var count = Int()
+        let status = sipral_media_encryption_count(media, &count)
+        try check(status)
+        return count
+    }
+
+    /// How one stream of a call is protected, now: whether it is encrypted,
+    /// how its keys were exchanged, which suite it runs, and whether the
+    /// exchange authenticated the far end. An index past the end is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    ///
+    /// Safety
+    ///
+    /// `out_stream` must point at a `sipral_stream_encryption_t` whose `size`
+    /// member says how long it is.
+    public static func mediaEncryptionAt(media: SipralHandle, index: Int) throws -> sipral_stream_encryption_t {
+        try ensureAbi()
+        var stream = sipral_stream_encryption_t.sized()
+        let status = sipral_media_encryption_at(media, index, &stream)
+        try check(status)
+        return stream
     }
 
 }

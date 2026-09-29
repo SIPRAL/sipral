@@ -166,6 +166,16 @@ codes! {
         /// `a=crypto` included, since that key travelled in a body this
         /// policy exists to avoid trusting.
         DtlsRequired = 5,
+        /// [`SrtpPolicy::DtlsOrSdes`]: DTLS-SRTP, falling back to SDES for a
+        /// peer that has no DTLS, and never unencrypted. The offer is one
+        /// `RTP/SAVP` stream carrying both the fingerprint and the crypto
+        /// lines, and the answer decides which keys the call; an offer that
+        /// arrives is answered the way it was keyed, and a plain one is
+        /// refused with 488. ABI 0.31.
+        ///
+        /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+        /// `SIPRAL_FEATURE_DTLS_SRTP`.
+        DtlsOrSdes = 6,
     }
 }
 
@@ -457,6 +467,11 @@ codes! {
         /// changed is only that no path could be checked. A deployment with a
         /// non-ICE profile to fall back to falls back here.
         Ice = 9,
+        /// The call's SRTP policy refused what the far end described: a plain
+        /// answer to a call that requires SRTP, which this end then hangs up
+        /// with a `Reason` of 488, or a plain re-offer inside one, refused
+        /// with 488 and the call left on the keys it had. ABI 0.31.
+        SecurityPolicy = 10,
     }
 }
 
@@ -1023,6 +1038,7 @@ pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
         | MediaError::IceRequired
         | MediaError::IceNeedsRtcpMux
         | MediaError::IcePathLost => SipralMediaFault::Ice,
+        MediaError::SrtpRequired => SipralMediaFault::SecurityPolicy,
         _ => SipralMediaFault::Other,
     }
 }
@@ -1056,6 +1072,7 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::DigitTooLong { .. }
         | MediaError::UnknownDigit { .. }
         | MediaError::RenderDelayTooLong { .. }
+        | MediaError::NoSrtpSuite
         | MediaError::SameCall => SipralStatus::InvalidArgument,
         // the numbers a session can bind ran out, which a corrected value
         // does not fix and a different build does not either
@@ -1071,6 +1088,8 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::NotJoined
         | MediaError::JoinIncompatible => SipralStatus::WrongState,
         MediaError::PacketTooLong { .. } => SipralStatus::BufferTooSmall,
+        // the call was refused, with 488, by the policy it was answered under
+        MediaError::SrtpRequired => SipralStatus::SecurityPolicy,
         MediaError::Signalling(ref refused) => return crate::call::ua_failed(refused),
         _ => SipralStatus::NotSent,
     };
@@ -1182,8 +1201,10 @@ pub(crate) fn srtp_policy(value: u32, name: &'static str) -> Result<Option<SrtpP
         4 => Ok(Some(SrtpPolicy::DtlsOffered)),
         #[cfg(feature = "dtls")]
         5 => Ok(Some(SrtpPolicy::DtlsRequired)),
+        #[cfg(feature = "dtls")]
+        6 => Ok(Some(SrtpPolicy::DtlsOrSdes)),
         #[cfg(not(feature = "dtls"))]
-        4 | 5 => Err(fail(
+        4..=6 => Err(fail(
             SipralStatus::NotSupported,
             format!(
                 "{name} names DTLS-SRTP and this build has none: SIPRAL_FEATURE_DTLS_SRTP is \
@@ -1194,7 +1215,8 @@ pub(crate) fn srtp_policy(value: u32, name: &'static str) -> Result<Option<SrtpP
             SipralStatus::InvalidArgument,
             format!(
                 "{name} is {other}, and srtp is 0 to leave it unspecified, 1 for not offered, 2 \
-                 for offered, 3 for required, 4 for DTLS-SRTP or 5 for DTLS-SRTP required"
+                 for offered, 3 for required, 4 for DTLS-SRTP, 5 for DTLS-SRTP required or 6 \
+                 for DTLS-SRTP falling back to SDES"
             ),
         )),
     }
@@ -3389,7 +3411,7 @@ a=sendrecv\r\n";
 
     #[test]
     fn srtp_policy_refuses_anything_else() {
-        let refused = srtp_policy(6, "srtp").expect_err("6 names no policy");
+        let refused = srtp_policy(7, "srtp").expect_err("7 names no policy");
         assert_eq!(refused.status, SipralStatus::InvalidArgument);
     }
 

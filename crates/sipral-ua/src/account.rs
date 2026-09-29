@@ -246,6 +246,13 @@ pub struct Account {
     /// The peers inside this account's trust domain (RFC 3325 §2.3), by
     /// address. See [`Account::trust`].
     pub(crate) trusted: Vec<IpAddr>,
+    /// What this account does with the `Identity` header fields of the calls
+    /// it receives (RFC 8224 §6.2). See [`Account::stir_verification`].
+    pub(crate) stir_verification: crate::StirVerification,
+    /// What it signs the calls it places with (RFC 8224 §6.1), if anything.
+    /// See [`Account::stir_signing`].
+    #[cfg(feature = "stir")]
+    pub(crate) stir_signing: Option<crate::StirSigning>,
 }
 
 impl Account {
@@ -318,6 +325,9 @@ impl Account {
             quality_report_uri: None,
             privacy: Privacy::default(),
             trusted: Vec::new(),
+            stir_verification: crate::StirVerification::default(),
+            #[cfg(feature = "stir")]
+            stir_signing: None,
         }
     }
 
@@ -463,6 +473,33 @@ impl Account {
         if !self.trusted.contains(&address) {
             self.trusted.push(address);
         }
+        self
+    }
+
+    /// What to do with the `Identity` header fields of the calls this account
+    /// receives (RFC 8224 §6.2): verify and report, the default, verify and
+    /// refuse what does not verify, or verify nothing. See
+    /// [`StirVerification`](crate::StirVerification).
+    #[must_use]
+    pub const fn stir_verification(mut self, verification: crate::StirVerification) -> Self {
+        self.stir_verification = verification;
+        self
+    }
+
+    /// Sign every call this account places (RFC 8224 §6.1, with RFC 8588's
+    /// SHAKEN claims): a full-form PASSporT in an `Identity` header field,
+    /// and the `Date` it is dated by.
+    ///
+    /// The agent must know the time ([`UserAgent::set_wall_clock`]); a call
+    /// placed before it does is refused with
+    /// [`UaError::NoWallClock`](crate::UaError::NoWallClock) rather than
+    /// sent unsigned.
+    ///
+    /// [`UserAgent::set_wall_clock`]: crate::UserAgent::set_wall_clock
+    #[cfg(feature = "stir")]
+    #[must_use]
+    pub fn stir_signing(mut self, signing: crate::StirSigning) -> Self {
+        self.stir_signing = Some(signing);
         self
     }
 

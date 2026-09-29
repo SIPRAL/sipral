@@ -83,6 +83,15 @@ pub enum UaError {
     /// A redirect was asked for with a status outside 300 to 399, or one
     /// other than 380 with nowhere to redirect to (RFC 3261 §21.3).
     NotARedirection(sipral_core::msg::StatusCode),
+    /// The account signs its calls (RFC 8224 §6.1) and the agent was never
+    /// told the time, which a PASSporT has to carry:
+    /// [`UserAgent::set_wall_clock`](crate::UserAgent::set_wall_clock).
+    /// Nothing was sent.
+    NoWallClock,
+    /// The account signs its calls and this one's PASSporT could not be
+    /// made: a target too long for an `Identity` header field. Nothing was
+    /// sent.
+    Signing,
 }
 
 impl fmt::Display for UaError {
@@ -127,6 +136,11 @@ impl fmt::Display for UaError {
                 "a {} is not a redirection: those are 300 to 399",
                 status.get()
             ),
+            Self::NoWallClock => f.write_str(
+                "this account signs its calls, and the agent has not been told the time a \
+                 PASSporT has to carry",
+            ),
+            Self::Signing => f.write_str("the PASSporT for this call could not be signed"),
         }
     }
 }

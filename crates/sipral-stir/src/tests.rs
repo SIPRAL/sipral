@@ -137,6 +137,71 @@ fn a_shaken_passport_round_trips() {
     assert_eq!(verdict.sip_response(), None);
 }
 
+/// The key a deployment keeps is PEM more often than a bare scalar: a
+/// signer made from it signs what the one made from the scalar signs.
+#[test]
+fn a_signer_takes_its_key_in_the_form_it_is_kept() {
+    let scalar = [0x33; 32];
+    // RFC 5915 §3: version 1, the key, the curve
+    let mut sec1 = crate::der::write(0x02, &[1]);
+    sec1.extend(crate::der::write(0x04, &scalar));
+    sec1.extend(crate::der::write(
+        0xa0,
+        &crate::der::write(0x06, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
+    ));
+    let sec1 = crate::der::write(0x30, &sec1);
+    let pem = format!(
+        "-----BEGIN EC PRIVATE KEY-----\n{}\n-----END EC PRIVATE KEY-----\n",
+        base64::encode_standard(&sec1)
+    );
+    let from_pem = Signer::from_key(pem.as_bytes(), X5U).unwrap();
+    assert_eq!(from_pem.public_key(), signer().public_key());
+    assert_eq!(from_pem.certificate_url(), X5U);
+    let pki = Pki::new();
+    let identity = from_pem.identity(&claims(NOW)).unwrap();
+    assert!(matches!(
+        verdict(&identity, &pki.chain(), &pki),
+        Verdict::Valid(_)
+    ));
+    assert_eq!(
+        Signer::from_key(b"-----BEGIN PRIVATE KEY-----", X5U).unwrap_err(),
+        SignError::InvalidKey
+    );
+    assert_eq!(
+        Signer::from_key(&[0u8; 32], X5U).unwrap_err(),
+        SignError::InvalidKey,
+        "zero is not a scalar"
+    );
+}
+
+/// RFC 8224 §8.3's first step: the `+` and the visual separators go, and a
+/// letter means the user part was never a number.
+#[test]
+fn numbers_are_canonicalised_as_rfc_8224_section_8_3_says() {
+    assert_eq!(
+        Tn::canonical("+1 (215) 555-1212").unwrap().as_str(),
+        "12155551212"
+    );
+    assert_eq!(
+        Tn::canonical("1.215.555.1212").unwrap().as_str(),
+        "12155551212"
+    );
+    assert_eq!(Tn::canonical("*67#").unwrap().as_str(), "*67#");
+    assert_eq!(Tn::canonical("alice"), Err(passport::InvalidTn));
+    assert_eq!(Tn::canonical("+"), Err(passport::InvalidTn));
+    assert_eq!(Tn::canonical("*#"), Err(passport::InvalidTn), "no digit");
+    assert_eq!(
+        Tn::canonical("1234567890123456"),
+        Err(passport::InvalidTn),
+        "sixteen"
+    );
+    assert_eq!(
+        Tn::canonical("12+34"),
+        Err(passport::InvalidTn),
+        "a + inside"
+    );
+}
+
 #[test]
 fn a_pem_chain_verifies_too() {
     let pki = Pki::new();

@@ -228,6 +228,14 @@ pub struct UserAgent {
     /// asked about (rejected before answer, cancelled) would otherwise sit
     /// here for the rest of the process's life.
     pub(crate) quality_report_order: VecDeque<CallHandle>,
+    /// What the wall clock read at a known instant ([`UserAgent::set_wall_clock`]):
+    /// the one number signing and verifying a PASSporT need that a monotonic
+    /// instant cannot give.
+    pub(crate) wall_clock: Option<(Instant, u64)>,
+    /// The verification service and the calls waiting on it
+    /// ([`crate::stir`]).
+    #[cfg(feature = "stir")]
+    pub(crate) stir: crate::stir::Service,
 }
 
 impl UserAgent {
@@ -292,7 +300,37 @@ impl UserAgent {
             next_message: 0,
             quality_report_snapshots: HashMap::new(),
             quality_report_order: VecDeque::new(),
+            wall_clock: None,
+            #[cfg(feature = "stir")]
+            stir: crate::stir::Service::default(),
         })
+    }
+
+    /// What the wall clock read at the instant `at`, as seconds since 1
+    /// January 1970.
+    ///
+    /// Nothing here reads a clock, and a PASSporT carries the time it was
+    /// signed (RFC 8225 §5.1.1) and is judged against the time it is
+    /// verified at, so signing and verifying one take the time from here:
+    /// `unix_seconds` at `at`, and the monotonic distance from `at` after
+    /// it. Set it again whenever the platform says its clock was stepped.
+    pub fn set_wall_clock(&mut self, at: Instant, unix_seconds: u64) {
+        self.wall_clock = Some((at, unix_seconds));
+    }
+
+    /// Whether [`UserAgent::set_wall_clock`] has been called: what an
+    /// account that signs its calls, and a verifier, need.
+    #[must_use]
+    pub const fn knows_the_time(&self) -> bool {
+        self.wall_clock.is_some()
+    }
+
+    /// The wall clock at `now`, in whole seconds since 1970, once it has
+    /// been set. An instant before the one it was set at reads as that one.
+    #[cfg_attr(not(feature = "stir"), allow(dead_code))]
+    pub(crate) fn unix_at(&self, now: Instant) -> Option<u64> {
+        self.wall_clock
+            .map(|(at, unix)| unix.saturating_add(now.saturating_duration_since(at).as_secs()))
     }
 
     /// Bytes, or news about a transport.
@@ -330,6 +368,8 @@ impl UserAgent {
         self.fire_lifecycle_timers(now);
         self.fire_announce_timers(now);
         self.fire_keepalives(now);
+        #[cfg(feature = "stir")]
+        self.fire_stir_timers(now);
         self.drain(now);
     }
 
@@ -428,11 +468,25 @@ impl UserAgent {
             .chain(self.lifecycle_deadline())
             .chain(self.announce_deadline())
             .chain(self.keepalive_deadline())
+            .chain(self.verification_deadline())
             .min();
         match (self.endpoint.poll_timeout(), mine) {
             (Some(left), Some(right)) => Some(left.min(right)),
             (left, right) => left.or(right),
         }
+    }
+
+    /// When the next call waiting for its certificate stops waiting.
+    #[cfg(feature = "stir")]
+    fn verification_deadline(&self) -> Option<Instant> {
+        self.stir_deadline()
+    }
+
+    /// Without the feature no call ever waits for one.
+    #[cfg(not(feature = "stir"))]
+    #[allow(clippy::unused_self)]
+    const fn verification_deadline(&self) -> Option<Instant> {
+        None
     }
 
     /// The endpoint underneath, for what this layer has no policy for yet.
@@ -489,6 +543,23 @@ impl UserAgent {
     /// Take an account. Nothing is sent until [`UserAgent::register`], and
     /// nothing ever is for an account that has no registrar.
     pub fn add_account(&mut self, account: Account) -> AccountId {
+        // RFC 8588 §5's origination identifier, drawn once for an account
+        // that signs and named none, so every call it places names the same
+        #[cfg(feature = "stir")]
+        let account = {
+            let mut account = account;
+            if account
+                .stir_signing
+                .as_ref()
+                .is_some_and(|signing| signing.origid.is_none())
+            {
+                let drawn = self.draw_origid();
+                if let Some(signing) = account.stir_signing.as_mut() {
+                    signing.origid = Some(drawn);
+                }
+            }
+            account
+        };
         let id = AccountId(self.next_account);
         self.next_account = self.next_account.wrapping_add(1);
         // §10.2.4: one Call-ID for every registration of a boot cycle, so the

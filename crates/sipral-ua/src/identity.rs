@@ -303,6 +303,14 @@ pub struct CallerIdentity {
     pub diversions: Box<[Diversion]>,
     /// `History-Info`, in the order written.
     pub history: Box<[HistoryEntry]>,
+    /// This end's own verdict on the caller (RFC 8224 §6.2), for an account
+    /// whose verification is in force
+    /// ([`Account::stir_verification`](crate::Account::stir_verification)).
+    /// `None` when nothing was verified. Unlike `verstat`, which is what a
+    /// network before this end concluded, this is what this end checked
+    /// itself, and it is not behind the trust gate: a signature is its own
+    /// proof.
+    pub verification: Option<crate::CallerVerification>,
 }
 
 impl CallerIdentity {
@@ -354,6 +362,7 @@ impl CallerIdentity {
                 .field_values(HISTORY)
                 .filter_map(history_of)
                 .collect(),
+            verification: None,
         }
     }
 

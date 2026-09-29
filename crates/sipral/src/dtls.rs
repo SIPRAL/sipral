@@ -277,6 +277,10 @@ pub(crate) struct Handshake {
     /// randomness.
     identity: Arc<Identity>,
     peers: Vec<Fingerprint>,
+    /// The protection profiles this call offers or accepts, most preferred
+    /// first: the call's own suites ([`profiles`]), kept for a new
+    /// association to be held to the same.
+    profiles: Vec<SrtpProtectionProfile>,
     keys: KeySource,
 }
 
@@ -335,6 +339,7 @@ impl Handshake {
         keying: &Keying,
         party: Party,
         ours: Setup,
+        profiles: Vec<SrtpProtectionProfile>,
         keys: &mut KeySource,
         now: Instant,
     ) -> Result<Option<Self>, MediaError> {
@@ -372,6 +377,7 @@ impl Handshake {
             Arc::clone(identity),
             peers,
             role,
+            profiles,
             KeySource::new(*seed),
             now,
         )
@@ -389,6 +395,7 @@ impl Handshake {
         identity: Arc<Identity>,
         peers: Vec<Fingerprint>,
         role: Role,
+        profiles: Vec<SrtpProtectionProfile>,
         mut keys: KeySource,
         now: Instant,
     ) -> Result<Self, MediaError> {
@@ -400,6 +407,7 @@ impl Handshake {
             peers.clone(),
         );
         config.retransmission = schedule;
+        config.srtp_profiles.clone_from(&profiles);
         let mut source = Source::new(&mut keys);
         let connection =
             Connection::new(config, &mut source, now).map_err(|_| MediaError::DtlsHandshake)?;
@@ -414,6 +422,7 @@ impl Handshake {
             expired: false,
             identity,
             peers,
+            profiles,
             keys,
         };
         // a client's ClientHello is already waiting, and a server's outbox is
@@ -446,6 +455,7 @@ impl Handshake {
             Arc::clone(&self.identity),
             self.peers.clone(),
             self.role(),
+            self.profiles.clone(),
             KeySource::new(*seed),
             now,
         )
@@ -611,6 +621,40 @@ pub(crate) fn begins_an_association(datagram: &[u8]) -> bool {
         && datagram.get(17..19) == Some(&[0, 0][..])
 }
 
+/// The protection profiles a call with `suites` offers and accepts, in that
+/// order: the four there are keys for, strongest first, when it named none
+/// — the two AEAD profiles of RFC 7714 §14.2, then the two AES-CM ones of
+/// RFC 5764 §4.1.2 — and otherwise the ones among its suites that a
+/// profile exists for, in its order.
+///
+/// # Errors
+/// [`MediaError::DtlsProfile`] when `suites` names none of those four: a
+/// call that allowed only suites SDES alone can carry has nothing to offer a
+/// handshake.
+pub(crate) fn profiles(suites: Option<&[Suite]>) -> Result<Vec<SrtpProtectionProfile>, MediaError> {
+    const STRONGEST_FIRST: [Suite; 4] = [
+        Suite::AeadAes256Gcm,
+        Suite::AeadAes128Gcm,
+        Suite::AesCm80,
+        Suite::AesCm32,
+    ];
+    let named = suites.unwrap_or(&STRONGEST_FIRST);
+    let profiles: Vec<SrtpProtectionProfile> = named
+        .iter()
+        .filter_map(|suite| match suite {
+            Suite::AesCm80 => Some(SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80),
+            Suite::AesCm32 => Some(SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32),
+            Suite::AeadAes128Gcm => Some(SrtpProtectionProfile::AEAD_AES_128_GCM),
+            Suite::AeadAes256Gcm => Some(SrtpProtectionProfile::AEAD_AES_256_GCM),
+            Suite::AesF8 | Suite::Aes256Cm80 | Suite::Aes256Cm32 => None,
+        })
+        .collect();
+    if profiles.is_empty() {
+        return Err(MediaError::DtlsProfile);
+    }
+    Ok(profiles)
+}
+
 /// The transform a DTLS-SRTP protection profile names, on the media side of
 /// the boundary.
 ///
@@ -740,8 +784,8 @@ pub(crate) fn role_after(ours: Setup, theirs: Option<Setup>) -> Result<Option<Ro
 #[cfg(test)]
 mod tests {
     use super::{
-        Handshake, Identity, MOST, Source, budget, role_after, same_fingerprints, setup_to_keep,
-        setup_to_write, suite_of,
+        Handshake, Identity, MOST, Source, budget, profiles, role_after, same_fingerprints,
+        setup_to_keep, setup_to_write, suite_of,
     };
     use sipral_core::auth::KeySource;
     use sipral_core::sdp::Keying;
@@ -1041,6 +1085,7 @@ mod tests {
             &dialling_sees,
             Party::Offerer,
             Setup::ActPass,
+            every(),
             &mut dialling_keys,
             now,
         )
@@ -1051,6 +1096,7 @@ mod tests {
             &answering_sees,
             Party::Answerer,
             Setup::Active,
+            every(),
             &mut answering_keys,
             now,
         )
@@ -1074,6 +1120,100 @@ mod tests {
         assert!(
             answering.take_outcome().expect("an outcome").is_ok(),
             "the answerer got no keys"
+        );
+    }
+
+    /// Every profile there are keys for, strongest first: what a call that
+    /// named no suites of its own offers and accepts.
+    fn every() -> Vec<SrtpProtectionProfile> {
+        profiles(None).expect("four profiles")
+    }
+
+    /// The suite a handshake between an offerer holding `dialling` and an
+    /// answerer holding `answering` settles on. The answerer is the client
+    /// here, so its order is the one offered and the offerer, the server,
+    /// chooses among it in its own (RFC 5764 §4.1.1).
+    fn settled_on(
+        dialling: Vec<SrtpProtectionProfile>,
+        answering: Vec<SrtpProtectionProfile>,
+    ) -> Suite {
+        let now = Instant::now();
+        let (dialling_identity, mut dialling_keys) = identity(41);
+        let (answering_identity, mut answering_keys) = identity(42);
+        let dialling_sees = Keying::Dtls {
+            fingerprints: vec![answering_identity.fingerprint().to_owned()],
+            setup: Some("active".to_owned()),
+        };
+        let answering_sees = Keying::Dtls {
+            fingerprints: vec![dialling_identity.fingerprint().to_owned()],
+            setup: Some("actpass".to_owned()),
+        };
+        let mut server = Handshake::start(
+            &dialling_identity,
+            &dialling_sees,
+            Party::Offerer,
+            Setup::ActPass,
+            dialling,
+            &mut dialling_keys,
+            now,
+        )
+        .expect("a handshake")
+        .expect("one that runs");
+        let mut client = Handshake::start(
+            &answering_identity,
+            &answering_sees,
+            Party::Answerer,
+            Setup::Active,
+            answering,
+            &mut answering_keys,
+            now,
+        )
+        .expect("a handshake")
+        .expect("one that runs");
+        let (finished, answered) = shake_hands(&mut server, &mut client, now);
+        assert!(finished && answered, "the handshake never finished");
+        let suite = server
+            .take_outcome()
+            .expect("an outcome")
+            .expect("keys")
+            .suite;
+        assert_eq!(
+            client
+                .take_outcome()
+                .expect("an outcome")
+                .expect("keys")
+                .suite,
+            suite
+        );
+        suite
+    }
+
+    /// 8.10: the GCM profiles are the account's to allow and to order. The
+    /// default puts them first; a call that names only AES-CM gets AES-CM
+    /// from a peer that would have preferred GCM, and the server's own order
+    /// decides among what the client offered.
+    #[test]
+    fn the_profiles_a_call_names_are_the_ones_its_handshake_offers_in_its_order() {
+        assert_eq!(settled_on(every(), every()), Suite::AeadAes256Gcm);
+        let aes_cm = profiles(Some(&[Suite::AesCm80])).expect("one profile");
+        assert_eq!(settled_on(every(), aes_cm.clone()), Suite::AesCm80);
+        assert_eq!(settled_on(aes_cm, every()), Suite::AesCm80);
+        let gcm_128_first =
+            profiles(Some(&[Suite::AeadAes128Gcm, Suite::AeadAes256Gcm])).expect("two");
+        assert_eq!(
+            settled_on(gcm_128_first.clone(), every()),
+            Suite::AeadAes128Gcm,
+            "the server's own preference among what was offered"
+        );
+        assert_eq!(
+            settled_on(every(), gcm_128_first),
+            Suite::AeadAes256Gcm,
+            "the client's order is its offer, and the server still chooses"
+        );
+        assert_eq!(
+            profiles(Some(&[Suite::AesF8, Suite::Aes256Cm80])),
+            Err(MediaError::DtlsProfile),
+            "suites no DTLS-SRTP profile names leave a handshake nothing to offer"
         );
     }
 
@@ -1102,6 +1242,7 @@ mod tests {
             &dialling_sees,
             Party::Offerer,
             Setup::ActPass,
+            every(),
             &mut dialling_keys,
             now,
         )
@@ -1112,6 +1253,7 @@ mod tests {
             &answering_sees,
             Party::Answerer,
             Setup::Active,
+            every(),
             &mut answering_keys,
             now,
         )
@@ -1134,9 +1276,16 @@ mod tests {
             fingerprints: vec![own.fingerprint().to_owned()],
             setup: Some("holdconn".to_owned()),
         };
-        let handshake =
-            Handshake::start(&own, &seen, Party::Offerer, Setup::ActPass, &mut keys, now)
-                .expect("no error");
+        let handshake = Handshake::start(
+            &own,
+            &seen,
+            Party::Offerer,
+            Setup::ActPass,
+            every(),
+            &mut keys,
+            now,
+        )
+        .expect("no error");
         assert!(handshake.is_none());
     }
 
@@ -1153,7 +1302,16 @@ mod tests {
             setup: Some("actpass".to_owned()),
         };
         assert_eq!(
-            Handshake::start(&own, &seen, Party::Offerer, Setup::ActPass, &mut keys, now).err(),
+            Handshake::start(
+                &own,
+                &seen,
+                Party::Offerer,
+                Setup::ActPass,
+                every(),
+                &mut keys,
+                now
+            )
+            .err(),
             Some(MediaError::DtlsRole)
         );
     }
@@ -1173,7 +1331,16 @@ mod tests {
                 setup: Some("active".to_owned()),
             };
             assert_eq!(
-                Handshake::start(&own, &seen, Party::Offerer, Setup::ActPass, &mut keys, now).err(),
+                Handshake::start(
+                    &own,
+                    &seen,
+                    Party::Offerer,
+                    Setup::ActPass,
+                    every(),
+                    &mut keys,
+                    now
+                )
+                .err(),
                 Some(MediaError::DtlsFingerprint),
                 "{written}"
             );
@@ -1197,9 +1364,17 @@ mod tests {
             ),
         };
         assert!(
-            Handshake::start(&own, &sdes, Party::Offerer, Setup::ActPass, &mut keys, now,)
-                .expect("no error")
-                .is_none()
+            Handshake::start(
+                &own,
+                &sdes,
+                Party::Offerer,
+                Setup::ActPass,
+                every(),
+                &mut keys,
+                now,
+            )
+            .expect("no error")
+            .is_none()
         );
     }
 
@@ -1221,6 +1396,7 @@ mod tests {
             &dialling_sees,
             Party::Offerer,
             Setup::ActPass,
+            every(),
             &mut dialling_keys,
             now,
         )
@@ -1231,6 +1407,7 @@ mod tests {
             &answering_sees,
             Party::Answerer,
             Setup::Active,
+            every(),
             &mut answering_keys,
             now,
         )
@@ -1258,10 +1435,17 @@ mod tests {
             // the peer answered `active`, so this end listens
             setup: Some("active".to_owned()),
         };
-        let mut handshake =
-            Handshake::start(&own, &seen, Party::Offerer, Setup::ActPass, &mut keys, now)
-                .expect("a handshake")
-                .expect("one that runs");
+        let mut handshake = Handshake::start(
+            &own,
+            &seen,
+            Party::Offerer,
+            Setup::ActPass,
+            every(),
+            &mut keys,
+            now,
+        )
+        .expect("a handshake")
+        .expect("one that runs");
         assert!(
             handshake.take_outbound().is_none(),
             "a server sent a flight"

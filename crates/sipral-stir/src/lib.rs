@@ -93,13 +93,25 @@ pub mod cert;
 mod der;
 pub mod identity;
 mod json;
+mod key;
 pub mod passport;
 mod sign;
 pub mod tnauthlist;
 mod verdict;
 mod verify;
 
-#[cfg(test)]
+#[cfg(feature = "testing")]
+pub mod testing;
+// a test PKI is test code wherever it is built, and holds to the tests' own
+// discipline rather than the library's
+#[cfg(any(test, feature = "testing"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    dead_code
+)]
 mod testpki;
 #[cfg(test)]
 mod tests;

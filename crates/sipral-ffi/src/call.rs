@@ -182,10 +182,15 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         // the handle was live here, so the layer below disagreeing means what
         // it named has just gone
         UaError::NoSuchAccount | UaError::NoSuchCall => SipralStatus::StaleHandle,
+        // `NoWallClock` among them: an account that signs, on a stack that
+        // was never told the time, is a moment wrong rather than a value,
+        // and `sipral_stack_stir` or `media_clock_unix_seconds` is the way
+        // out
         UaError::WrongState(_)
         | UaError::NoSession
         | UaError::ChangeInProgress
-        | UaError::CannotRenegotiate => SipralStatus::WrongState,
+        | UaError::CannotRenegotiate
+        | UaError::NoWallClock => SipralStatus::WrongState,
         // an account configured without a registrar is the wrong account to
         // register rather than the wrong moment: a corrected configuration
         // would be taken, and no amount of waiting will change this one
@@ -195,6 +200,7 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         | UaError::InvalidDtmf(_)
         | UaError::InvalidKeepalive(_)
         | UaError::NotARedirection(_)
+        | UaError::Signing
         | UaError::MessageTooLarge { .. } => SipralStatus::InvalidArgument,
         // an out-of-dialog MESSAGE to this target is already in flight; the
         // object this call is about is busy with a request of its own, the
@@ -358,16 +364,39 @@ unsafe fn codec_order(config: &SipralCallConfig) -> Result<Option<Vec<&str>>, Fa
 /// Worked out before the socket's relay is taken ([`outside`]), since it is
 /// the half that can still be refused: a relay taken and then dropped with
 /// the refusal would be lost to the socket with nothing sent to its server.
+///
+/// `base` is what the call starts from: its account's catalogue for a call
+/// being placed — the stack's, with the account's own SRTP policy and suites
+/// laid over it — and the one an incoming call arrived with for one being
+/// rung. `floor` is the SRTP policy the call's account named for itself
+/// (`sipral_account_config_t::srtp`), when it named one: a call that asks for
+/// one that would carry audio the account's refuses — plain, where the
+/// account requires SRTP — is refused here with
+/// `SIPRAL_STATUS_SECURITY_POLICY`, before anything is built. A call may
+/// tighten its account's policy and never loosen it; the stack's own policy
+/// stays a default a call overrides.
 fn call_catalog(
-    state: &StackState,
+    base: &CodecCatalog,
+    floor: Option<SrtpPolicy>,
     srtp: Option<SrtpPolicy>,
     ice: Option<IcePolicy>,
     codecs: Option<&[&str]>,
 ) -> Result<Option<CodecCatalog>, Fail> {
+    if let (Some(policy), Some(floor)) = (srtp, floor)
+        && !policy.at_least(floor)
+    {
+        return Err(fail(
+            SipralStatus::SecurityPolicy,
+            format!(
+                "this call asked for {policy:?}, and its account requires SRTP ({floor:?}): a \
+                 call may ask for more than its account and never for less"
+            ),
+        ));
+    }
     if srtp.is_none() && ice.is_none() && codecs.is_none() {
         return Ok(None);
     }
-    let mut catalog = state.engine.catalog().clone();
+    let mut catalog = base.clone();
     if let Some(names) = codecs {
         catalog = catalog
             .with_codecs(names)
@@ -380,6 +409,14 @@ fn call_catalog(
         catalog = catalog.with_ice(policy);
     }
     Ok(Some(catalog))
+}
+
+/// The SRTP policy `account` named for itself, which no call of it may
+/// loosen ([`call_catalog`]).
+fn floor_of(state: &StackState, account: Option<sipral_ua::AccountId>) -> Option<SrtpPolicy> {
+    account
+        .and_then(|account| state.engine.account_srtp(account))
+        .and_then(|srtp| srtp.policy)
 }
 
 /// The catalogue and settings one call runs its media with, or `None` for the
@@ -395,13 +432,14 @@ fn call_catalog(
 /// stack names one ([`crate::nat`]): the call's relayed ICE candidate.
 fn call_media(
     state: &StackState,
+    base: &CodecCatalog,
     catalog: Option<CodecCatalog>,
     (public, relay): (Option<SocketAddr>, crate::nat::HeldRelay),
 ) -> Option<CallMedia> {
     if catalog.is_none() && public.is_none() && relay.is_none() {
         return None;
     }
-    let catalog = catalog.unwrap_or_else(|| state.engine.catalog().clone());
+    let catalog = catalog.unwrap_or_else(|| base.clone());
     Some(dressed(
         CallMedia::new(catalog, state.media_config()),
         (public, relay),
@@ -579,9 +617,11 @@ entry! {
             let outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
             let placed = match media {
                 Some(local) => {
-                    let catalog = call_catalog(state, srtp, ice, codecs.as_deref())?;
+                    let base = state.engine.account_catalog(id);
+                    let floor = floor_of(state, Some(id));
+                    let catalog = call_catalog(&base, floor, srtp, ice, codecs.as_deref())?;
                     let outside = outside(state, local)?;
-                    let placed = match call_media(state, catalog, outside) {
+                    let placed = match call_media(state, &base, catalog, outside) {
                         // the stack's own catalogue, untouched: this is what
                         // `srtp` and `codecs` both unspecified on the call
                         // have to mean
@@ -713,9 +753,15 @@ entry! {
         let codecs = unsafe { codec_order(&config) }?;
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            let catalog = call_catalog(state, srtp, ice, codecs.as_deref())?;
+            let base = state
+                .engine
+                .call_catalog(id)
+                .cloned()
+                .unwrap_or_else(|| state.engine.catalog().clone());
+            let floor = floor_of(state, state.agent.call_account(id));
+            let catalog = call_catalog(&base, floor, srtp, ice, codecs.as_deref())?;
             let outside = outside(state, local)?;
-            let rung = match call_media(state, catalog, outside) {
+            let rung = match call_media(state, &base, catalog, outside) {
                 // the stack's own catalogue, untouched: this is what `srtp`
                 // and `codecs` both unspecified on the call have to mean
                 None => state.engine.ring(&mut state.agent, id, local, now),
@@ -1686,9 +1732,14 @@ entry! {
             // below borrow the stack's own User-Agent, since taking one is a
             // change to the stack: a transfer refused for its configuration
             // is still there to take, and so is the relay
+            let base = state.agent.call_account(id).map_or_else(
+                || state.engine.catalog().clone(),
+                |account| state.engine.account_catalog(account),
+            );
             let outside = match media {
                 Some(local) => {
-                    let catalog = call_catalog(state, srtp, ice, codecs.as_deref())?;
+                    let floor = floor_of(state, state.agent.call_account(id));
+                    let catalog = call_catalog(&base, floor, srtp, ice, codecs.as_deref())?;
                     Some((catalog, outside(state, local)?))
                 }
                 None => None,
@@ -1704,7 +1755,7 @@ entry! {
                 headers: &headers,
             };
             let placed = if let (Some(local), Some((catalog, outside))) = (media, outside) {
-                let placed = match call_media(state, catalog, outside) {
+                let placed = match call_media(state, &base, catalog, outside) {
                     // the stack's own catalogue, untouched: this is what
                     // `srtp` and `codecs` both unspecified on the call have
                     // to mean
@@ -2025,6 +2076,19 @@ a=recvonly\r\n";
             privacy: 0,
             trusted_peers: ptr::null(),
             trusted_peers_len: 0,
+            srtp: 0,
+            srtp_suites: ptr::null(),
+            srtp_suites_len: 0,
+            stir_verification: 0,
+            stir_key: ptr::null(),
+            stir_key_len: 0,
+            stir_certificate_url: ptr::null(),
+            stir_certificate_url_len: 0,
+            stir_orig: ptr::null(),
+            stir_orig_len: 0,
+            stir_origid: ptr::null(),
+            stir_origid_len: 0,
+            stir_attestation: 0,
         }
     }
 
@@ -5669,7 +5733,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         let mut observed = Observed::default();
         let (handle, account) = media_line(&mut observed, |_| {});
         let mut call_config = managed_config();
-        call_config.srtp = 6;
+        call_config.srtp = 7;
         let (status, call) = place(handle, account, &call_config, 1_000);
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert_eq!(call, SIPRAL_HANDLE_NONE);
@@ -5687,7 +5751,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         let (handle, first) = connected(&mut observed);
         let _ = sent(handle);
         let mut config = call_config();
-        config.srtp = 6;
+        config.srtp = 7;
         let mut second = SIPRAL_HANDLE_NONE;
         let status = unsafe {
             sipral_call_consult(
@@ -5749,19 +5813,20 @@ Alert-Info: <urn:alert:source:external>\r\n";
         let status = unsafe {
             sipral_call_answer_media(handle, call, media_address, media_address_len, 1_100)
         };
-        assert_ne!(
-            status,
-            SipralStatus::Ok,
-            "a plain offer under REQUIRED was answered"
-        );
-        assert!(
-            sent(handle).is_empty(),
-            "nothing is sent for a refused answer"
-        );
+        // 8.10: refused by the policy it was answered under, with the
+        // answer to an offer whose terms this end cannot take, and said so
         assert_eq!(
+            status,
+            SipralStatus::SecurityPolicy,
+            "a plain offer under REQUIRED was answered: {}",
+            last_error_text()
+        );
+        let refused = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(refused.starts_with("SIP/2.0 488 "), "{refused}");
+        assert_ne!(
             state_of(handle, call),
             SipralCallState::Incoming as u32,
-            "the call is still the application's to reject"
+            "the call was refused, not left ringing"
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
@@ -6101,19 +6166,18 @@ Alert-Info: <urn:alert:source:external>\r\n";
         let mut config = ring_media_config();
         config.srtp = SipralSrtp::Required as u32;
         let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) };
-        assert_ne!(
-            status,
-            SipralStatus::Ok,
-            "a plain offer under REQUIRED was rung"
-        );
-        assert!(
-            sent(handle).is_empty(),
-            "nothing is sent for a refused ring"
-        );
         assert_eq!(
+            status,
+            SipralStatus::SecurityPolicy,
+            "a plain offer under REQUIRED was rung: {}",
+            last_error_text()
+        );
+        let refused = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(refused.starts_with("SIP/2.0 488 "), "{refused}");
+        assert_ne!(
             state_of(handle, call),
             SipralCallState::Incoming as u32,
-            "the call is still the application's to reject"
+            "the call was refused, not left ringing"
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }

@@ -17,9 +17,18 @@ publish.workspace = true
 # sockets, which nothing else in this workspace does, and it resolves names
 # with what the standard library gives rather than with RFC 3263's SRV.
 reference-loop = []
+# STIR/SHAKEN in calls (`crate::stir`): the INVITEs an account places signed,
+# the ones it receives verified. Off here, on in the facade's default: it
+# brings `sipral-stir`, and with it P-256 and an X.509 reader, into a build
+# that may never sign or verify anything.
+stir = ["dep:sipral-stir"]
 
 [dependencies]
 sipral-core.workspace = true
+sipral-stir = { path = "../sipral-stir", version = "0.0.1", optional = true }
+
+[dev-dependencies]
+sipral-stir = { path = "../sipral-stir", version = "0.0.1", features = ["testing"] }
 
 [lints]
 workspace = true

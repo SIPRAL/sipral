@@ -12,6 +12,40 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **STIR/SHAKEN in calls.** An account given a P-256 key and the URL of its
+  certificate signs every call it places (RFC 8224 §6.1, full-form PASSporT
+  with RFC 8588's `attest` and `origid`, and the `Date` it is dated by):
+  `Account::stir_signing`, or `stir_key` and `stir_certificate_url` in
+  `sipral_account_config_t`. An agent given trust anchors
+  (`UserAgent::set_stir`, `sipral_stack_stir`) verifies the caller of every
+  INVITE for an account that verifies — reporting by default, refusing with
+  RFC 8224 §6.2.2's response under `StirVerification::Strict` — before the
+  phone rings: the certificate is the application's to fetch when
+  `UaEvent::CertificateWanted` / `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` (47)
+  asks, and to hand over with `stir_certificate`; the verdict (attestation,
+  `verstat`, the reason on failure) is announced just before the call and
+  rides on its typed identity (`CallerIdentity::verification`, and
+  `verification`, `attestation` and `verification_failure` on every C call
+  event). `SIPRAL_FEATURE_STIR` (`1 << 16`). A signer's key is read as the
+  bare scalar, SEC1 or PKCS #8, DER or PEM (`Signer::from_key`).
+- **An SRTP policy per account.** `MediaEngine::set_account_srtp` /
+  `srtp` in `sipral_account_config_t` holds every call of one account to a
+  policy of its own, over the stack's; through the C ABI a call may ask for
+  more than its account and never for less (`SIPRAL_STATUS_SECURITY_POLICY`,
+  18). The suites it runs are the account's to name and order
+  (`CodecCatalog::with_srtp_suites`, `srtp_suites`): the SDES lines offered
+  and accepted, and the DTLS-SRTP profiles, RFC 7714's GCM ones among them
+  only if named. `SIPRAL_FEATURE_SRTP_POLICY` (`1 << 17`), ABI 0.31.
+- **DTLS-SRTP falling back to SDES.** `SrtpPolicy::DtlsOrSdes` /
+  `SIPRAL_SRTP_DTLS_OR_SDES` offers one `RTP/SAVP` stream with both the
+  fingerprint and the crypto lines, so a DTLS-SRTP peer keys the call by the
+  handshake and an SDES-only one by a crypto line; a plain offer is refused.
+- **The encryption report.** `MediaSession::encryption` /
+  `MediaEngine::encryption` and `sipral_media_encryption_at` say, per
+  stream, whether it is encrypted, by SDES or DTLS-SRTP, with which suite, and
+  whether the exchange authenticated the far end; `sipral_media_event_t`
+  carries the same on media started, changed and secured.
+
 - **The four idiomatic layers carry the rest of ABI 0.30.** Each stack
   class reads its counters (`counters()` / `Counters()`, the retransmission
   and limit counters among them), replaces its STUN servers while running
@@ -2305,6 +2339,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `SIPRAL_EVENT_KIND_MEDIA_UNJOINED`, naming the surviving call.
 
 ### Changed
+
+- **A call that cannot meet a required SRTP policy is refused by the stack.**
+  An INVITE whose offer a `Required`, `DtlsRequired` or `DtlsOrSdes` call
+  will not carry audio on is answered 488 by `MediaEngine::answer` and
+  `ring`, which still return `MediaError::SrtpRequired`
+  (`SIPRAL_STATUS_SECURITY_POLICY` in C), instead of being left ringing for
+  the application to refuse; a call this end placed and the far end answered
+  in the clear is hung up with `Reason: SIP;cause=488`.
+  `SIPRAL_MEDIA_FAULT_SECURITY_POLICY` (10) names the media failure.
 
 - **`max_dialogs` holds the calls this end places too.** A call counts
   from its INVITE on, and one placed at the ceiling is

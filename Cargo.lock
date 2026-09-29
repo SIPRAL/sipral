@@ -896,6 +896,7 @@ dependencies = [
  "sipral-media",
  "sipral-nat",
  "sipral-rtp",
+ "sipral-stir",
  "sipral-ua",
  "zeroize",
 ]
@@ -961,6 +962,7 @@ dependencies = [
  "sipral-audio",
  "sipral-core",
  "sipral-nat",
+ "sipral-stir",
  "sipral-ua",
 ]
 
@@ -1059,6 +1061,7 @@ version = "0.0.1"
 dependencies = [
  "p256",
  "x509-cert",
+ "zeroize",
 ]
 
 [[package]]
@@ -1066,6 +1069,7 @@ name = "sipral-ua"
 version = "0.0.1"
 dependencies = [
  "sipral-core",
+ "sipral-stir",
 ]
 
 [[package]]

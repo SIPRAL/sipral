@@ -105,11 +105,16 @@ mod signalling_tests;
 /// INVITE that offers a recording session, grouped under its own path: its
 /// model has a `Session` and a `Stream` of its own.
 pub mod siprec;
+#[cfg(feature = "stir")]
+mod stir;
+#[cfg(all(test, feature = "stir"))]
+mod stir_tests;
 mod subscription;
 #[cfg(test)]
 mod tests;
 mod timers;
 mod transfer;
+mod verification;
 
 pub use account::{Account, AccountId, Push};
 pub use agent::UserAgent;
@@ -148,8 +153,13 @@ pub use registration::{PushEcho, RegistrarInfo, SnapshotError};
 pub use runtime::{Control, Handler, Runtime};
 pub use screening::{Incoming, Rate, RateError, Refusals, Replacing, Screen, Screening};
 pub use session::Hold;
+#[cfg(feature = "stir")]
+pub use stir::{DEFAULT_CERTIFICATE_WAIT, StirConfig, StirSigning};
 pub use subscription::{
     DEFAULT_EXPIRES, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState,
+};
+pub use verification::{
+    Attestation, CallerVerification, StirVerification, VerificationFailure, VerificationOutcome,
 };
 
 /// What a caller needs from the layer below to drive this one, re-exported so

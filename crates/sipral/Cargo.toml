@@ -74,7 +74,14 @@ publish = true
 # facade; `sipral-ffi` takes no default feature and has no C entry point for
 # it, so the C ABI, and every binding and platform package built over it,
 # links none of it.
-default = ["opus", "dtls", "ice", "stun", "redaction"]
+# `stir` is STIR/SHAKEN in calls (RFC 8224, RFC 8588): an account that
+# signs the INVITEs it places, and one that verifies the callers of the ones
+# it receives against the application's trust anchors. It brings
+# `sipral-stir`, and P-256 and an X.509 reader with it, which is why it is a
+# feature: the same flash argument `dtls` makes, and a build with neither
+# links neither. On by default, since what it defaults *to* costs nothing
+# until an account names a key or the agent is given trust anchors.
+default = ["opus", "dtls", "ice", "stun", "redaction", "stir"]
 opus = ["sipral-media/opus"]
 dtls = ["dep:sipral-dtls", "dep:sipral-nat"]
 ice = ["dep:sipral-nat"]
@@ -94,6 +101,7 @@ example-tls = ["dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
 # only this feature's edge exists, and only in this manifest.
 headless = ["dep:sipral-headless"]
 redaction = ["dep:sipral-diag"]
+stir = ["sipral-ua/stir", "dep:sipral-stir"]
 
 # with `opus` off there is no `Codec::Opus` and the enumeration is three long,
 # so docs.rs is told to build the whole surface rather than whichever half a
@@ -123,6 +131,9 @@ sipral-nat = { path = "../sipral-nat", version = "0.0.1", optional = true }
 # marks as an exception, and only in this manifest — see the feature's own
 # comment above.
 sipral-headless = { path = "../sipral-headless", version = "0.0.1", optional = true }
+# behind `stir`, re-exported whole as `sipral::stir`: the signer, the trust
+# anchors and the verdicts an application builds and reads
+sipral-stir = { path = "../sipral-stir", version = "0.0.1", optional = true }
 # already a dependency of `sipral-rtp` and `sipral-dtls`, pinned to the same
 # version here: wiping the SRTP master key and salt draw_key hands out (8.2.9)
 # needs a write the optimiser is not allowed to remove, and that needs
@@ -160,6 +171,9 @@ rustls-pki-types = { version = "1.15.1", optional = true }
 # `example-tls` or `--no-default-features`.
 [dev-dependencies]
 rcgen = "0.14.10"
+# the throwaway STIR PKI a signed call between two stacks is verified
+# against, built in memory from fixed keys; tests only
+sipral-stir = { path = "../sipral-stir", version = "0.0.1", features = ["testing"] }
 # the examples' seeds, from the operating system's entropy. The library draws
 # no randomness of its own and takes its seeds from the application, which is
 # what an example has to show being done; a constant there would give every

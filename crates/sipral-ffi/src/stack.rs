@@ -1490,6 +1490,12 @@ fn agent_policy(
     now: Instant,
 ) -> Result<(), Fail> {
     agent.allow_referrals(toggled(config.referrals, "referrals", false)?);
+    // the one wall clock a stack is given, which a PASSporT is signed and
+    // judged by as well as the RTCP reports it was named for; zero is the
+    // epoch there, and here no clock at all
+    if config.media_clock_unix_seconds != 0 {
+        agent.set_wall_clock(now, config.media_clock_unix_seconds);
+    }
     agent
         .keep_registrar_flows_alive(registrar_keepalive(config)?, now)
         .map_err(|error| {
@@ -2305,6 +2311,12 @@ fn media(
     // and both travel with the delivery because they are read after this poll
     // has let the stack go
     let reason = crate::event::media_reason(said);
+    // the call's stream as its encryption report has it now, for the kinds
+    // that carry it; read before the vocabulary borrows the stack
+    let encryption = state
+        .engine
+        .encryption(call)
+        .and_then(|report| report.first().copied());
     let record = match *said {
         MediaEvent::Ended(ref cost) => Some(Arc::new(stream_stats(cost))),
         _ => None,
@@ -2321,9 +2333,14 @@ fn media(
         identities: &state.identities,
         raised_identity: None,
     };
-    let Some(event) =
-        crate::event::media(&mut known, call, said, reason.as_deref(), record.as_deref())
-    else {
+    let Some(event) = crate::event::media(
+        &mut known,
+        call,
+        said,
+        reason.as_deref(),
+        record.as_deref(),
+        encryption.as_ref(),
+    ) else {
         *unclaimed = unclaimed.saturating_add(1);
         return;
     };
@@ -3308,6 +3325,7 @@ pub(crate) mod tests {
             crate::media::SipralSrtp::NotOffered as u32,
             crate::media::SipralSrtp::Offered as u32,
             crate::media::SipralSrtp::Required as u32,
+            crate::media::SipralSrtp::DtlsOrSdes as u32,
         ] {
             let mut observed = Observed::default();
             let mut config = config(record, &mut observed);
@@ -3319,7 +3337,7 @@ pub(crate) mod tests {
 
         let mut observed = Observed::default();
         let mut config = config(record, &mut observed);
-        config.srtp = 6;
+        config.srtp = 7;
         let (status, handle) = create(&config);
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert_eq!(handle, SIPRAL_HANDLE_NONE, "nothing was built");

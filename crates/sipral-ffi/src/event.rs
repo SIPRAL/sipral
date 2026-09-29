@@ -576,6 +576,22 @@ event_kinds! {
         /// `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
         /// neither.
         46 = StunServer, c"stun server";
+        /// Who is calling, as a signature says (RFC 8224, RFC 8588): the
+        /// stack's verification service at work on an INVITE for an account
+        /// that verifies its callers. ABI 0.31.
+        ///
+        /// `payload.verification.stage` says which half.
+        /// `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`: the certificate at
+        /// `certificate_url` is needed; fetch it and hand it to
+        /// `sipral_call_stir_certificate`, or hand over nothing if it cannot
+        /// be had. The call waits, and the application has not been told of
+        /// it yet — `call` names it all the same, for the answer.
+        /// `SIPRAL_VERIFICATION_STAGE_VERIFIED`: the verdict, queued just
+        /// before the `SIPRAL_EVENT_KIND_INCOMING_CALL` naming the same call,
+        /// whose call events carry it too; or, with `refused` set, before the
+        /// `SIPRAL_EVENT_KIND_CALL_ENDED` of a call its strict account
+        /// refused with `response_code`. `message` is the INVITE.
+        47 = CallerVerification, c"caller verification";
     }
 }
 
@@ -643,6 +659,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::AudioDevicesChanged, "audio"),
     (SipralEventKind::CallAddressWanted, "call"),
     (SipralEventKind::StunServer, "stun_server"),
+    (SipralEventKind::CallerVerification, "verification"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1001,6 +1018,19 @@ record! {
         pub alert_info: *const u8,
         /// How many bytes of it.
         pub alert_info_len: usize,
+        /// A [`SipralVerificationOutcome`](crate::security::SipralVerificationOutcome):
+        /// this stack's own verdict on the caller (RFC 8224 §6.2), for an
+        /// account that verifies; zero when nothing was verified. Unlike
+        /// `verstat`, which is what a network before this end concluded,
+        /// this is what this end checked itself. ABI 0.31.
+        pub verification: u32,
+        /// A [`SipralAttestation`](crate::security::SipralAttestation): the
+        /// level a valid SHAKEN PASSporT claimed.
+        pub attestation: u32,
+        /// A [`SipralVerificationFailure`](crate::security::SipralVerificationFailure):
+        /// why the verdict did not hold. `sipral_call_identity_text` reads
+        /// the number it was signed for, its `origid` and its certificate URL.
+        pub verification_failure: u32,
     }
 }
 
@@ -1099,6 +1129,21 @@ record! {
         /// [`SipralEventKind::QualityReportSent`] and zero on every other
         /// kind. Not whether a collector accepted it.
         pub quality_report_sent: u32,
+        /// A [`SipralKeyExchange`](crate::security::SipralKeyExchange): how
+        /// the call's keys were exchanged, for
+        /// [`SipralEventKind::MediaStarted`], [`SipralEventKind::MediaChanged`]
+        /// and [`SipralEventKind::MediaSecured`], which carry the encryption
+        /// report of the call's stream: this, `encrypted`, `authenticated`,
+        /// and `suite` from then on. ABI 0.31.
+        pub key_exchange: u32,
+        /// Whether the stream is encrypted, now. Zero at the start of a
+        /// DTLS-SRTP call, whose keys arrive with
+        /// [`SipralEventKind::MediaSecured`].
+        pub encrypted: u32,
+        /// Whether the key exchange authenticated the far end: a DTLS-SRTP
+        /// handshake that checked its certificate against the signalled
+        /// fingerprint. Never for SDES.
+        pub authenticated: u32,
     }
 }
 
@@ -1301,6 +1346,54 @@ record! {
 }
 
 record! {
+    /// What a [`SipralEventKind::CallerVerification`] carries: one half of
+    /// the verification of who is calling (RFC 8224 §6.2).
+    #[derive(Clone, Copy)]
+    pub struct SipralVerificationEvent {
+        /// A [`SipralVerificationStage`](crate::security::SipralVerificationStage):
+        /// the certificate is wanted, or the verdict is in.
+        pub stage: u32,
+        /// A [`SipralVerificationOutcome`](crate::security::SipralVerificationOutcome),
+        /// for a verdict.
+        pub outcome: u32,
+        /// A [`SipralVerificationFailure`](crate::security::SipralVerificationFailure):
+        /// why it did not hold.
+        pub failure: u32,
+        /// A [`SipralAttestation`](crate::security::SipralAttestation): the
+        /// level a valid SHAKEN PASSporT claimed.
+        pub attestation: u32,
+        /// A [`SipralVerstat`](crate::identity::SipralVerstat): the `verstat`
+        /// this verdict comes to (3GPP TS 24.229).
+        pub verstat: u32,
+        /// The response RFC 8224 §6.2.2 prescribes for the failure, zero for
+        /// a valid one. Sent only when `refused` is set.
+        pub response_code: u32,
+        /// Whether the call was refused with it, which only a strict account
+        /// does.
+        pub refused: u32,
+        /// The URL of the certificate: the one to fetch, or the one that was
+        /// verified. UTF-8, not NUL-terminated; null and zero when there is
+        /// none.
+        pub certificate_url: *const c_char,
+        /// How many bytes of it.
+        pub certificate_url_len: usize,
+        /// The calling number a valid PASSporT was signed for, canonical.
+        pub orig: *const c_char,
+        /// How many bytes of it.
+        pub orig_len: usize,
+        /// The origination identifier a valid SHAKEN PASSporT claimed (RFC
+        /// 8588 §5), a UUID.
+        pub origid: *const c_char,
+        /// How many bytes of it.
+        pub origid_len: usize,
+        /// Why it did not hold, in more words than `failure`, for a log.
+        pub detail: *const c_char,
+        /// How many bytes of it.
+        pub detail_len: usize,
+    }
+}
+
+record! {
     /// The arm of an event that its kind names.
     ///
     /// Reading any other arm reads bytes the library did not write for it.
@@ -1345,6 +1438,8 @@ record! {
         pub audio: SipralAudioEvent,
         /// For [`SipralEventKind::StunServer`].
         pub stun_server: SipralStunServerEvent,
+        /// For [`SipralEventKind::CallerVerification`].
+        pub verification: SipralVerificationEvent,
     }
 }
 
@@ -1462,6 +1557,9 @@ impl SipralMediaEvent {
             suite: 0,
             source: SipralDigitSource::Rtp as u32,
             quality_report_sent: 0,
+            key_exchange: 0,
+            encrypted: 0,
+            authenticated: 0,
         }
     }
 }
@@ -1516,6 +1614,9 @@ impl SipralCallEvent {
             ring_source: 0,
             alert_info: std::ptr::null(),
             alert_info_len: 0,
+            verification: 0,
+            attestation: 0,
+            verification_failure: 0,
         }
     }
 }
@@ -1641,10 +1742,97 @@ pub(crate) fn translate(
     if let Some(out) = about_an_announcement(known, event) {
         return Some(out);
     }
+    if let Some(out) = about_a_verification(known, event) {
+        return Some(out);
+    }
     if let Some(out) = about_a_resolve(known, event, transport) {
         return Some(out);
     }
     about_lifecycle(known, event)
+}
+
+/// Who is calling, as a signature says: the certificate the verification
+/// service wants, or its verdict. Every pointer borrows from `event`.
+fn about_a_verification(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
+    use crate::security::{SipralVerificationStage, text_of};
+    let (call, payload) = match *event {
+        UaEvent::CertificateWanted { call, ref url } => {
+            let (certificate_url, certificate_url_len) = text_of(Some(url));
+            (
+                call,
+                SipralVerificationEvent {
+                    stage: SipralVerificationStage::CertificateWanted as u32,
+                    outcome: 0,
+                    failure: 0,
+                    attestation: 0,
+                    verstat: 0,
+                    response_code: 0,
+                    refused: 0,
+                    certificate_url,
+                    certificate_url_len,
+                    orig: std::ptr::null(),
+                    orig_len: 0,
+                    origid: std::ptr::null(),
+                    origid_len: 0,
+                    detail: std::ptr::null(),
+                    detail_len: 0,
+                },
+            )
+        }
+        UaEvent::CallerVerified {
+            call,
+            ref verification,
+            ..
+        } => {
+            let (certificate_url, certificate_url_len) =
+                text_of(verification.certificate_url.as_deref());
+            let (orig, orig_len) = text_of(verification.orig.as_deref());
+            let (origid, origid_len) = text_of(verification.origid.as_deref());
+            let (detail, detail_len) = text_of(verification.detail.as_deref());
+            (
+                call,
+                SipralVerificationEvent {
+                    stage: SipralVerificationStage::Verified as u32,
+                    outcome: crate::security::outcome_code(Some(verification)) as u32,
+                    failure: crate::security::failure_code(verification.failure) as u32,
+                    attestation: crate::security::attestation_code(verification.attestation) as u32,
+                    verstat: crate::identity::verstat_code(Some(&verification.verstat())) as u32,
+                    response_code: verification
+                        .response
+                        .as_ref()
+                        .map_or(0, |(code, _)| u32::from(*code)),
+                    refused: u32::from(verification.refused),
+                    certificate_url,
+                    certificate_url_len,
+                    orig,
+                    orig_len,
+                    origid,
+                    origid_len,
+                    detail,
+                    detail_len,
+                },
+            )
+        }
+        _ => return None,
+    };
+    let mut out = SipralEvent::of(
+        known.stack,
+        SipralEventKind::CallerVerification,
+        payload!(verification: payload),
+    );
+    out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
+    if let UaEvent::CallerVerified {
+        account,
+        ref request,
+        ..
+    } = *event
+    {
+        out.account = account
+            .and_then(|id| known.accounts.name_of(id).ok())
+            .unwrap_or(SIPRAL_HANDLE_NONE);
+        attach(&mut out, Some(request));
+    }
+    Some(out)
 }
 
 /// A call a push announced: the INVITE that answered it, or the silence that
@@ -2456,14 +2644,27 @@ const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
 /// duration of one delivery and neither can be borrowed from the event itself:
 /// a `MediaError` is a Rust value with no C shape, and the statistics have to
 /// be converted before they have one.
+///
+/// `encryption` is the call's stream as its encryption report has it at the
+/// moment of the event, which the kinds that start, change or secure a call's
+/// media carry.
 pub(crate) fn media(
     known: &mut Vocabulary<'_>,
     call: CallHandle,
     event: &MediaEvent,
     reason: Option<&str>,
     statistics: Option<&SipralStreamStats>,
+    encryption: Option<&sipral::StreamEncryption>,
 ) -> Option<SipralEvent> {
     let mut payload = SipralMediaEvent::empty();
+    if let Some(stream) = encryption.filter(|_| reports_encryption(event)) {
+        payload.key_exchange = crate::security::key_exchange_code(stream.key_exchange) as u32;
+        payload.encrypted = u32::from(stream.encrypted);
+        payload.authenticated = u32::from(stream.authenticated);
+        payload.suite = stream
+            .suite
+            .map_or(0, |suite| crate::security::suite_code(suite) as u32);
+    }
     let kind = match *event {
         MediaEvent::Started { codec, direction } => {
             payload.codec = named_codec(codec) as u32;
@@ -2543,6 +2744,17 @@ pub(crate) fn media(
     let mut out = SipralEvent::of(known.stack, kind, payload!(media: payload));
     out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
     Some(out)
+}
+
+/// Whether a media event is one of the kinds that carry the encryption
+/// report: the call's media started, changed, or was secured.
+const fn reports_encryption(event: &MediaEvent) -> bool {
+    match event {
+        MediaEvent::Started { .. } | MediaEvent::Changed { .. } => true,
+        #[cfg(feature = "dtls")]
+        MediaEvent::Secured { .. } => true,
+        _ => false,
+    }
 }
 
 /// The sentence a media event carries, for the kinds that have one to say.
@@ -2663,6 +2875,12 @@ fn who_and_how(payload: &mut SipralCallEvent, identity: &CallIdentity) {
         payload.alert_info = first.as_ptr();
         payload.alert_info_len = first.len();
     }
+    let verified = caller.verification.as_ref();
+    payload.verification = crate::security::outcome_code(verified) as u32;
+    payload.attestation =
+        crate::security::attestation_code(verified.and_then(|verdict| verdict.attestation)) as u32;
+    payload.verification_failure =
+        crate::security::failure_code(verified.and_then(|verdict| verdict.failure)) as u32;
 }
 
 // moved into the event whole, the way `SipralEvent::of` takes its union
@@ -3015,7 +3233,8 @@ mod tests {
         assert_eq!(SipralEventKind::AudioDevicesChanged as u32, 43);
         assert_eq!(SipralEventKind::CallAddressWanted as u32, 45);
         assert_eq!(SipralEventKind::StunServer as u32, 46);
-        assert_eq!(SipralEventKind::ALL.len(), 44, "and there are no others");
+        assert_eq!(SipralEventKind::CallerVerification as u32, 47);
+        assert_eq!(SipralEventKind::ALL.len(), 45, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -3099,7 +3318,12 @@ mod tests {
             "45 is live"
         );
         assert_eq!(name(46).as_deref(), Some("stun server"), "46 is live");
-        assert_eq!(name(47), None, "past the last kind");
+        assert_eq!(
+            name(47).as_deref(),
+            Some("caller verification"),
+            "47 is live"
+        );
+        assert_eq!(name(48), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

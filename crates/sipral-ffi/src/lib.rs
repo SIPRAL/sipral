@@ -88,6 +88,9 @@ pub mod resolve;
 #[cfg(test)]
 mod robust;
 pub mod screening;
+pub mod security;
+#[cfg(all(test, feature = "stir"))]
+mod security_tests;
 pub mod stack;
 pub mod status;
 pub mod subscription;

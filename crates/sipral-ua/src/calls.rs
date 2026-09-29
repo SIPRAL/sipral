@@ -130,6 +130,16 @@ impl UserAgent {
         {
             call.session.set_local(described);
         }
+        // RFC 8224 §6.1, once, before anything is kept: a call that cannot
+        // be signed as its account asks is not placed unsigned
+        #[cfg(feature = "stir")]
+        {
+            let own_date = outgoing
+                .extra
+                .iter()
+                .any(|extra| extra.name.eq_ignore_ascii_case(b"Date"));
+            call.signed = self.sign_for(account, &outgoing.target, own_date, now)?;
+        }
         let handle = self.keep(call);
         self.dial(account, outgoing, handle, now)?;
         self.drain(now);
@@ -157,9 +167,9 @@ impl UserAgent {
         // §4.4 forbids naming a GRUU once the registration that issued it is
         // gone), which is why a 422 asked again on the same handle still comes
         // through here rather than repeating a value from the first attempt
-        let (call_id, cseq, asked) = {
+        let (call_id, cseq, asked, signed) = {
             let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
-            (held.id.clone(), held.cseq, held.asked)
+            (held.id.clone(), held.cseq, held.asked, held.signed.clone())
         };
         let contact = self.current_contact(call, now);
         let mut request =
@@ -192,6 +202,14 @@ impl UserAgent {
         }
         for (name, value) in &identifying.added {
             request = request.header(*name, value);
+        }
+        // RFC 8224 §6.1 Steps 3 and 4: the Date the PASSporT is dated by,
+        // and the Identity carrying it
+        if let Some(signed) = signed {
+            if let Some(date) = signed.date.as_deref() {
+                request = request.header(HeaderName::Date, date);
+            }
+            request = request.header(crate::call::IDENTITY, &signed.identity);
         }
         for extra in &outgoing.extra {
             if identifying.withheld(&extra.name) {
@@ -227,6 +245,7 @@ impl UserAgent {
         early: Option<Arc<[u8]>>,
         now: Instant,
     ) -> Result<(), UaError> {
+        self.not_verifying(call)?;
         let transaction = self.answerable(call)?;
         let limits = self.sdp_limits;
         let status = if early.is_some() {
@@ -300,6 +319,7 @@ impl UserAgent {
         // §7.1, Accepted), and a second 2xx through it would be sent, and would
         // put a call that is up back to waiting for an ACK that already came:
         // a call answered once is refused here, not answered again
+        self.not_verifying(call)?;
         if let Some(held) = self.calls.get(&call)
             && (held.awaiting_ack.is_some() || held.acknowledged)
         {
@@ -701,6 +721,20 @@ impl UserAgent {
     /// carrying its own copy.
     #[must_use]
     pub fn call_identity(&self, call: CallHandle) -> Option<CallIdentity> {
+        self.identity_now(call)
+    }
+
+    /// The account a call belongs to: the one it was placed from, or the one
+    /// the INVITE was addressed to when that could be told. `None` for a
+    /// call that has ended, or one that came in for no account this agent
+    /// has.
+    #[must_use]
+    pub fn call_account(&self, call: CallHandle) -> Option<AccountId> {
+        self.calls.get(&call).and_then(|held| held.account)
+    }
+
+    /// [`UserAgent::call_identity`], read.
+    fn identity_now(&self, call: CallHandle) -> Option<CallIdentity> {
         let held = self.calls.get(&call)?;
         match held.direction {
             Direction::Incoming => match held.identity.as_deref() {
@@ -794,8 +828,27 @@ impl UserAgent {
         handle
     }
 
+    /// Refuse to ring or answer a call held back for its verdict
+    /// ([`crate::stir`]): the application has not been told about it yet,
+    /// and a call it answers before its verdict is in is one whose caller
+    /// it answered unchecked. Refusing and hanging up are still allowed.
+    #[cfg(feature = "stir")]
+    fn not_verifying(&self, call: CallHandle) -> Result<(), UaError> {
+        if self.verifying(call) {
+            return Err(UaError::WrongState(CallState::Incoming));
+        }
+        Ok(())
+    }
+
+    /// Without the feature no call is ever held back.
+    #[cfg(not(feature = "stir"))]
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    const fn not_verifying(&self, _call: CallHandle) -> Result<(), UaError> {
+        Ok(())
+    }
+
     /// The server transaction of a call that can still be answered.
-    fn answerable(
+    pub(crate) fn answerable(
         &self,
         call: CallHandle,
     ) -> Result<TransactionId<sipral_core::transaction::InviteServer>, UaError> {
@@ -869,7 +922,7 @@ impl UserAgent {
     }
 
     /// The call is over: say so once, and let the handle go stale.
-    fn finish(
+    pub(crate) fn finish(
         &mut self,
         call: CallHandle,
         reason: CallEndReason,
@@ -937,6 +990,9 @@ impl UserAgent {
     }
 
     fn forget(&mut self, call: CallHandle) {
+        // a caller that gave up while its certificate was being fetched
+        #[cfg(feature = "stir")]
+        self.stop_verifying(call);
         for other in self.calls.values_mut() {
             if other.consulting == Some(call) {
                 other.consulting = None;
@@ -1492,12 +1548,7 @@ impl UserAgent {
                 {
                     held.session.set_remote(offer);
                 }
-                self.events.push_back(UaEvent::IncomingCall {
-                    call,
-                    account,
-                    request: request.clone(),
-                    identity,
-                });
+                self.deliver_incoming(call, account, request, identity, now);
                 None
             }
             Event::IncomingCancel {
@@ -1549,6 +1600,38 @@ impl UserAgent {
             }
             other => Some(other),
         }
+    }
+
+    /// Tell the application a call has arrived: at once, or once its
+    /// verdict is in where its account verifies callers (`crate::stir`).
+    #[cfg(feature = "stir")]
+    fn deliver_incoming(
+        &mut self,
+        call: CallHandle,
+        account: Option<AccountId>,
+        request: &OwnedMessage,
+        identity: Option<Arc<CallIdentity>>,
+        now: Instant,
+    ) {
+        self.screen_identity(call, account, request, identity, now);
+    }
+
+    /// Without the feature, always at once.
+    #[cfg(not(feature = "stir"))]
+    fn deliver_incoming(
+        &mut self,
+        call: CallHandle,
+        account: Option<AccountId>,
+        request: &OwnedMessage,
+        identity: Option<Arc<CallIdentity>>,
+        _now: Instant,
+    ) {
+        self.events.push_back(UaEvent::IncomingCall {
+            call,
+            account,
+            request: request.clone(),
+            identity,
+        });
     }
 
     /// The far end hung up.

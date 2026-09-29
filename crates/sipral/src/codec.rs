@@ -48,6 +48,7 @@ use sipral_core::sdp::{
 #[cfg(feature = "opus")]
 use sipral_media::opus;
 use sipral_media::{g711, g722, g729};
+use sipral_rtp::srtp::Suite;
 
 use crate::error::MediaError;
 use crate::ice::IcePolicy;
@@ -436,6 +437,10 @@ pub struct CodecCatalog {
     dtmf: bool,
     rtcp_mux: bool,
     srtp: SrtpPolicy,
+    /// The SRTP transforms this call will run, most preferred first, when
+    /// something named them ([`CodecCatalog::with_srtp_suites`]); `None`
+    /// for this build's own choice in each place a suite is chosen.
+    srtp_suites: Option<Vec<Suite>>,
     ice: IcePolicy,
     annex_b: bool,
 }
@@ -463,6 +468,7 @@ impl CodecCatalog {
             dtmf: true,
             rtcp_mux: false,
             srtp: SrtpPolicy::NotOffered,
+            srtp_suites: None,
             ice: IcePolicy::Off,
             annex_b: true,
         }
@@ -575,6 +581,48 @@ impl CodecCatalog {
     #[must_use]
     pub const fn srtp(&self) -> SrtpPolicy {
         self.srtp
+    }
+
+    /// Run only these SRTP transforms, most preferred first, wherever a
+    /// suite is chosen: the `a=crypto` lines an SDES offer carries, in this
+    /// order and one each; the offered lines an SDES answer will take, still
+    /// in the offerer's order (RFC 4568 §5.1.2) but only among these; and
+    /// the protection profiles a DTLS-SRTP handshake offers and accepts, in
+    /// this order, of the four there are profiles for — `AEAD_AES_256_GCM`
+    /// and `AEAD_AES_128_GCM` (RFC 7714 §14.2) and the two AES-CM ones (RFC
+    /// 5764 §4.1.2). Leaving the two GCM suites out is how an account turns
+    /// them off, and naming them first is how it asks for them first.
+    ///
+    /// Unset, an SDES offer names `AEAD_AES_256_GCM` then
+    /// `AES_CM_128_HMAC_SHA1_80`, an answer takes any of the seven, and a
+    /// handshake the four strongest first. Every line is in the INVITE, so
+    /// a long list costs octets RFC 3261 §18.1.1 counts against a datagram:
+    /// past two or three suites an offer over UDP needs a stream.
+    ///
+    /// # Errors
+    /// [`MediaError::NoSrtpSuite`] for an empty list or one naming a suite
+    /// twice.
+    pub fn with_srtp_suites(mut self, suites: &[Suite]) -> Result<Self, MediaError> {
+        let repeated = suites
+            .iter()
+            .enumerate()
+            .any(|(at, suite)| suites.iter().take(at).any(|earlier| earlier == suite));
+        if suites.is_empty() || repeated {
+            return Err(MediaError::NoSrtpSuite);
+        }
+        self.srtp_suites = Some(suites.to_vec());
+        Ok(self)
+    }
+
+    /// The SRTP transforms this call is held to, when something named them.
+    #[must_use]
+    pub fn srtp_suites(&self) -> Option<&[Suite]> {
+        self.srtp_suites.as_deref()
+    }
+
+    /// The suites an SDES offer from this catalogue names, in order.
+    pub(crate) fn sdes_offered(&self) -> Vec<sipral_core::sdp::CryptoSuite> {
+        keying::sdes_suites(self.srtp_suites())
     }
 
     /// Say what this call does about ICE.
@@ -702,8 +750,9 @@ impl CodecCatalog {
 
     /// The same, with the keying a description under this policy carries.
     ///
-    /// `keys` is one master key and salt per suite `keying::OFFERED` names,
-    /// each already drawn for the description being written, and `dtls` is
+    /// `keys` is one master key and salt per suite
+    /// [`CodecCatalog::sdes_offered`] names, each already drawn for the
+    /// description being written and paired with its suite, and `dtls` is
     /// the fingerprint of this stack's certificate with the `a=setup` that
     /// goes beside it. A policy that does not offer, or a description with
     /// neither to write, leaves the offer on `RTP/AVP` with nothing in the
@@ -713,12 +762,27 @@ impl CodecCatalog {
     /// says, because RFC 5764 §4.2 puts a second handshake on a separate RTCP
     /// port and this stack runs one; asking here is what keeps that from
     /// becoming a refusal later.
+    ///
+    /// Under [`SrtpPolicy::DtlsOrSdes`] the offer is the SDES one, on
+    /// `RTP/SAVP` and asking for `a=rtcp-mux`; the engine adds the
+    /// fingerprint and `a=setup` beside its crypto lines once it is written,
+    /// since [`SrtpSupport`] names one way to key a stream and this offer
+    /// names two.
     pub(crate) fn offering(
         &self,
-        keys: Option<[KeySalt; keying::OFFERED.len()]>,
+        keys: Option<Vec<(sipral_core::sdp::CryptoSuite, KeySalt)>>,
         dtls: Option<Keyed<'_>>,
     ) -> MediaCapabilities {
         let capabilities = self.capabilities();
+        #[cfg(feature = "dtls")]
+        if self.srtp.falls_back() {
+            return match keys {
+                Some(keys) => capabilities
+                    .with_rtcp_mux(true)
+                    .with_srtp(SrtpSupport::Sdes(keying::offer_lines(keys))),
+                None => capabilities,
+            };
+        }
         #[cfg(feature = "dtls")]
         if let Some(keyed) = dtls.filter(|_| self.srtp.offers()) {
             return capabilities

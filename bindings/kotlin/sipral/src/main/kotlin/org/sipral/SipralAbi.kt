@@ -121,6 +121,15 @@ enum class SipralStatus(val value: Int) {
      * that ends makes room; raising the limit means a new stack.
      */
     LIMIT_REACHED(16),
+    /**
+     * Refused by the account's security policy (ABI 0.31): a call that
+     * would carry audio unencrypted where its account, or its own
+     * configuration, requires SRTP, or that names a policy weaker than
+     * its account's. An INVITE refused this way has been answered with
+     * 488 Not Acceptable Here; a call being placed never left. The last
+     * error says which.
+     */
+    SECURITY_POLICY(18),
     ;
 
     companion object {
@@ -283,6 +292,18 @@ enum class SipralSrtp(val value: Int) {
      * policy exists to avoid trusting.
      */
     DTLS_REQUIRED(5),
+    /**
+     * SrtpPolicy::DtlsOrSdes: DTLS-SRTP, falling back to SDES for a
+     * peer that has no DTLS, and never unencrypted. The offer is one
+     * `RTP/SAVP` stream carrying both the fingerprint and the crypto
+     * lines, and the answer decides which keys the call; an offer that
+     * arrives is answered the way it was keyed, and a plain one is
+     * refused with 488. ABI 0.31.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+     * `SIPRAL_FEATURE_DTLS_SRTP`.
+     */
+    DTLS_OR_SDES(6),
     ;
 
     companion object {
@@ -722,6 +743,13 @@ enum class SipralMediaFault(val value: Int) {
      * non-ICE profile to fall back to falls back here.
      */
     ICE(9),
+    /**
+     * The call's SRTP policy refused what the far end described: a plain
+     * answer to a call that requires SRTP, which this end then hangs up
+     * with a `Reason` of 488, or a plain re-offer inside one, refused
+     * with 488 and the call left on the keys it had. ABI 0.31.
+     */
+    SECURITY_POLICY(10),
     ;
 
     companion object {
@@ -1390,6 +1418,24 @@ enum class SipralEventKind(val value: Int) {
      * neither.
      */
     STUN_SERVER(46),
+    /**
+     * Who is calling, as a signature says (RFC 8224, RFC 8588): the
+     * stack's verification service at work on an INVITE for an account
+     * that verifies its callers. ABI 0.31.
+     *
+     * `payload.verification.stage` says which half.
+     * `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`: the certificate at
+     * `certificate_url` is needed; fetch it and hand it to
+     * `sipral_call_stir_certificate`, or hand over nothing if it cannot
+     * be had. The call waits, and the application has not been told of
+     * it yet — `call` names it all the same, for the answer.
+     * `SIPRAL_VERIFICATION_STAGE_VERIFIED`: the verdict, queued just
+     * before the `SIPRAL_EVENT_KIND_INCOMING_CALL` naming the same call,
+     * whose call events carry it too; or, with `refused` set, before the
+     * `SIPRAL_EVENT_KIND_CALL_ENDED` of a call its strict account
+     * refused with `response_code`. `message` is the INVITE.
+     */
+    CALLER_VERIFICATION(47),
     ;
 
     companion object {
@@ -2539,6 +2585,25 @@ enum class SipralIdentityText(val value: Int) {
      * Every `info=` value on `Alert-Info`.
      */
     ALERT_NAME(11),
+    /**
+     * The calling number this stack's verification found a valid
+     * PASSporT signed for (RFC 8224 §6.2), canonical: one entry, or none
+     * when nothing verified. ABI 0.31.
+     */
+    VERIFIED_ORIG(12),
+    /**
+     * Its origination identifier (RFC 8588 §5), a UUID.
+     */
+    VERIFIED_ORIGID(13),
+    /**
+     * The URL of the certificate it was verified against, or that could
+     * not be had.
+     */
+    VERIFICATION_CERTIFICATE(14),
+    /**
+     * Why it did not verify, in words, for a log.
+     */
+    VERIFICATION_DETAIL(15),
     ;
 
     companion object {
@@ -2607,6 +2672,254 @@ enum class SipralLogLevel(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralLogLevel? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * How a stream's SRTP keys were exchanged. Names for
+ * `sipral_stream_encryption_t::key_exchange` and
+ * `sipral_media_event_t::key_exchange`.
+ */
+enum class SipralKeyExchange(val value: Int) {
+    /**
+     * None: the stream was never meant to be encrypted, or the event is
+     * not about one.
+     */
+    NONE(0),
+    /**
+     * In the session description (RFC 4568's `a=crypto`): as protected
+     * as the signalling transport that carried it.
+     */
+    SDES(1),
+    /**
+     * By a DTLS handshake on the media path (RFC 5764), the far end's
+     * certificate checked against the fingerprint its signalling named.
+     */
+    DTLS(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralKeyExchange? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a stream carries. Names for `sipral_stream_encryption_t::media`.
+ */
+enum class SipralMediaKind(val value: Int) {
+    /**
+     * Something this ABI has no word for.
+     */
+    UNKNOWN(0),
+    /**
+     * `m=audio`.
+     */
+    AUDIO(1),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralMediaKind? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What an account does with the `Identity` header fields of the calls
+ * it receives (RFC 8224 §6.2). Names for
+ * `sipral_account_config_t::stir_verification`.
+ */
+enum class SipralStirVerification(val value: Int) {
+    /**
+     * This build's default, which is `REPORT`.
+     */
+    DEFAULT(0),
+    /**
+     * Verify nothing.
+     */
+    OFF(1),
+    /**
+     * Verify, report the verdict on the call, and deliver every call
+     * whatever it says. In force once the stack has trust anchors
+     * (`sipral_stack_stir`); without any, nothing is fetched or
+     * verified.
+     */
+    REPORT(2),
+    /**
+     * Verify, and refuse a call that does not verify with the response
+     * RFC 8224 §6.2.2 prescribes: 428 with no `Identity`, 436 for a
+     * certificate that cannot be had, 437 for one nobody trusted, 438
+     * for a signature that does not hold, 403 "Stale Date". In force
+     * with or without trust anchors: with none, nothing verifies.
+     */
+    STRICT(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralStirVerification? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * The attestation level of a SHAKEN PASSporT (RFC 8588 §4). Names for
+ * `sipral_account_config_t::stir_attestation`,
+ * `sipral_verification_event_t::attestation` and
+ * `sipral_call_event_t::attestation`.
+ */
+enum class SipralAttestation(val value: Int) {
+    /**
+     * None said: on an account, full attestation; on a verdict, a
+     * PASSporT with no SHAKEN claims, or no valid one.
+     */
+    NONE(0),
+    /**
+     * Full: the signer knows the caller and that the number is theirs.
+     */
+    A(1),
+    /**
+     * Partial: the signer knows the caller, not the number.
+     */
+    B(2),
+    /**
+     * Gateway: the signer knows only where the call entered its
+     * network.
+     */
+    C(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralAttestation? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a verification came to. Names for
+ * `sipral_verification_event_t::outcome` and
+ * `sipral_call_event_t::verification`.
+ */
+enum class SipralVerificationOutcome(val value: Int) {
+    /**
+     * Nothing was verified: the account does not verify, or the stack
+     * has no trust anchors and the account only reports.
+     */
+    NONE(0),
+    /**
+     * A PASSporT signed by a certificate with authority over the calling
+     * number, fresh, for the numbers the request names.
+     */
+    VALID(1),
+    /**
+     * One was there and does not hold: `failure` says why.
+     */
+    INVALID(2),
+    /**
+     * Nothing this end could verify: no `Identity`, or only ones naming
+     * a PASSporT extension it does not support.
+     */
+    ABSENT(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralVerificationOutcome? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Why a verification did not hold. Names for
+ * `sipral_verification_event_t::failure` and
+ * `sipral_call_event_t::verification_failure`.
+ */
+enum class SipralVerificationFailure(val value: Int) {
+    /**
+     * Nothing failed.
+     */
+    NONE(0),
+    /**
+     * No `Identity` header field.
+     */
+    NO_IDENTITY(1),
+    /**
+     * Only ones naming a `ppt` this end does not support.
+     */
+    UNSUPPORTED_PPT(2),
+    /**
+     * The header field or its PASSporT is not well formed.
+     */
+    MALFORMED(3),
+    /**
+     * Signed with an algorithm other than ES256.
+     */
+    UNSUPPORTED_ALGORITHM(4),
+    /**
+     * `iat` outside the freshness window.
+     */
+    STALE(5),
+    /**
+     * The certificate could not be fetched, or did not arrive in time.
+     */
+    CERTIFICATE_UNAVAILABLE(6),
+    /**
+     * What the `info` URL yielded is not a chain this end can read.
+     */
+    CERTIFICATE_UNREADABLE(7),
+    /**
+     * The chain leads to no trust anchor.
+     */
+    UNTRUSTED(8),
+    /**
+     * A certificate in it is outside its validity period.
+     */
+    EXPIRED(9),
+    /**
+     * The chain breaks a rule of path validation.
+     */
+    INVALID_CHAIN(10),
+    /**
+     * The signature does not verify.
+     */
+    BAD_SIGNATURE(11),
+    /**
+     * The certificate has no authority over the calling number.
+     */
+    NUMBER_NOT_COVERED(12),
+    /**
+     * Signed for another calling number than the request names.
+     */
+    ORIG_MISMATCH(13),
+    /**
+     * Signed for another called number.
+     */
+    DEST_MISMATCH(14),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralVerificationFailure? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Which half of a caller's verification an event reports. Names for
+ * `sipral_verification_event_t::stage`.
+ */
+enum class SipralVerificationStage(val value: Int) {
+    /**
+     * Never sent.
+     */
+    UNKNOWN(0),
+    /**
+     * The certificate at `certificate_url` is wanted: fetch it and hand
+     * it to `sipral_call_stir_certificate`, or hand over nothing to say
+     * it could not be had. The call waits, unannounced, until then or
+     * until `certificate_wait_ms` runs out.
+     */
+    CERTIFICATE_WANTED(1),
+    /**
+     * The verdict is in. `SIPRAL_EVENT_KIND_INCOMING_CALL` follows, or,
+     * when `refused` is set, `SIPRAL_EVENT_KIND_CALL_ENDED`.
+     */
+    VERIFIED(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralVerificationStage? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -3830,6 +4143,64 @@ data class SipralAudioInfo(
 }
 
 /**
+ * How one stream of a call is protected: one entry of the encryption
+ * report.
+ *
+ * Set `size` to `sizeof(sipral_stream_encryption_t)` before the call.
+ */
+data class SipralStreamEncryption(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * A SipralMediaKind: what the stream carries.
+     */
+    val media: Long,
+    /**
+     * Whether what it sends is encrypted and what it takes
+     * authenticated, now. Zero while it waits for the handshake that
+     * keys it.
+     */
+    val encrypted: Long,
+    /**
+     * A SipralKeyExchange: how its keys were exchanged.
+     */
+    val keyExchange: Long,
+    /**
+     * A SipralSrtpSuite: the transform it runs, once it runs one.
+     */
+    val suite: Long,
+    /**
+     * Whether the key exchange authenticated the far end: set for a
+     * DTLS-SRTP stream once its handshake finished, the far end's
+     * certificate having matched its signalled fingerprint; never for
+     * SDES, whose key is exactly as authentic as the signalling
+     * transport, which this library cannot see.
+     */
+    val authenticated: Long,
+    /**
+     * Whether it agreed to be encrypted and is still waiting for its
+     * keys.
+     */
+    val awaitingKeys: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 7
+
+        fun of(slots: LongArray): SipralStreamEncryption = SipralStreamEncryption(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+            slots[4],
+            slots[5],
+            slots[6],
+        )
+    }
+}
+
+/**
  * One header field an application hands over: a name and a value, UTF-8,
  * neither NUL-terminated.
  *
@@ -4503,6 +4874,62 @@ class SipralAccountConfig(
      * whoever wrote it. Null and zero trusts nobody.
      */
     val trustedPeers: String? = null,
+    /**
+     * A `SipralSrtp`: what this account's calls do about SRTP, over the
+     * stack's own `srtp` — offered, required, DTLS-SRTP, or DTLS-SRTP
+     * falling back to SDES — or zero for the stack's. A call placed from
+     * it may name a stricter policy of its own and never a looser one
+     * (`SIPRAL_STATUS_SECURITY_POLICY`), and an INVITE it cannot answer
+     * under it is refused with 488. ABI 0.31, like every member below.
+     */
+    val srtp: Long = 0,
+    /**
+     * The SRTP suites this account's calls run, most preferred first,
+     * as RFC 4568 §6.2 and RFC 7714 §14.2 name them and separated by
+     * commas: `AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80`. The `a=crypto`
+     * lines an SDES offer carries, the lines an SDES answer takes, and
+     * the DTLS-SRTP profiles a handshake offers and accepts — GCM among
+     * them only if named. Null for this build's own. Every line is in
+     * the INVITE: past two or three over UDP it needs a stream.
+     */
+    val srtpSuites: String? = null,
+    /**
+     * A `SipralStirVerification`: what this account does with the
+     * `Identity` header fields of the calls it receives (RFC 8224 §6.2).
+     * Zero reports, once `sipral_stack_stir` has given the stack trust
+     * anchors.
+     */
+    val stirVerification: Long = 0,
+    /**
+     * The P-256 private key this account signs its calls with (RFC 8224
+     * §6.1): the bare 32-octet scalar, or an `EC PRIVATE KEY` or
+     * `PRIVATE KEY` in DER or PEM. Null and zero signs nothing. Needs the
+     * stack's wall clock (`media_clock_unix_seconds`, or `unix_seconds`
+     * in `sipral_stack_stir`); `SIPRAL_STATUS_WRONG_STATE` without it.
+     */
+    val stirKey: ByteArray? = null,
+    /**
+     * Where the certificate chain for `stir_key` is published: the
+     * `x5u` and `info` of every PASSporT this account signs. Required
+     * with `stir_key`, and only with it.
+     */
+    val stirCertificateUrl: String? = null,
+    /**
+     * The telephone number this account signs as, canonicalised by
+     * RFC 8224 §8.3's first step, or null for the number in `aor`'s user
+     * part.
+     */
+    val stirOrig: String? = null,
+    /**
+     * The origination identifier every call it signs claims (RFC 8588
+     * §5), a UUID, or null for one the stack draws for the account.
+     */
+    val stirOrigid: String? = null,
+    /**
+     * A `SipralAttestation`: the level it claims (RFC 8588 §4), zero for
+     * full attestation, `A`.
+     */
+    val stirAttestation: Long = 0,
 )
 
 /**
@@ -4690,6 +5117,44 @@ class SipralSubscribeConfig(
      * `SIPRAL_STATUS_INVALID_ARGUMENT`.
      */
     val transport: Long = 0,
+)
+
+/**
+ * How a stack verifies the callers of the calls its accounts receive.
+ *
+ * Set `size` to `sizeof(sipral_stir_config_t)` and zero the rest before
+ * filling anything in.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralStirConfig(
+    /**
+     * The trust anchors — the STI-PA's approved roots in a SHAKEN
+     * deployment — as PEM or DER certificates, one after another. Null
+     * and zero for none, which turns verification off for every account
+     * that only reports.
+     */
+    val anchors: ByteArray? = null,
+    /**
+     * How far a PASSporT's `iat` may be from now, either way, in
+     * seconds; zero for RFC 8224 §6.2's sixty.
+     */
+    val freshnessSeconds: Long = 0,
+    /**
+     * How long a call waits for `sipral_call_stir_certificate` before
+     * its certificate counts as one that could not be had, in
+     * milliseconds; zero for four seconds.
+     */
+    val certificateWaitMs: Long = 0,
+    /**
+     * The wall clock at `now_ms`, in seconds since 1970, or zero to keep
+     * the one the stack was created with
+     * (`sipral_stack_config_t::media_clock_unix_seconds`). A PASSporT is
+     * judged against the time, so a stack that has neither is refused.
+     */
+    val unixSeconds: Long = 0,
 )
 
 /**
@@ -4912,6 +5377,25 @@ data class SipralCallEvent(
      * zero when none. `sipral_call_identity_text` reads the rest.
      */
     val alertInfo: ByteArray?,
+    /**
+     * A SipralVerificationOutcome:
+     * this stack's own verdict on the caller (RFC 8224 §6.2), for an
+     * account that verifies; zero when nothing was verified. Unlike
+     * `verstat`, which is what a network before this end concluded,
+     * this is what this end checked itself. ABI 0.31.
+     */
+    val verification: Long,
+    /**
+     * A SipralAttestation: the
+     * level a valid SHAKEN PASSporT claimed.
+     */
+    val attestation: Long,
+    /**
+     * A SipralVerificationFailure:
+     * why the verdict did not hold. `sipral_call_identity_text` reads
+     * the number it was signed for, its `origid` and its certificate URL.
+     */
+    val verificationFailure: Long,
 )
 
 /**
@@ -5008,6 +5492,27 @@ data class SipralMediaEvent(
      * kind. Not whether a collector accepted it.
      */
     val qualityReportSent: Long,
+    /**
+     * A SipralKeyExchange: how
+     * the call's keys were exchanged, for
+     * SipralEventKind.MEDIA_STARTED, SipralEventKind.MEDIA_CHANGED
+     * and SipralEventKind.MEDIA_SECURED, which carry the encryption
+     * report of the call's stream: this, `encrypted`, `authenticated`,
+     * and `suite` from then on. ABI 0.31.
+     */
+    val keyExchange: Long,
+    /**
+     * Whether the stream is encrypted, now. Zero at the start of a
+     * DTLS-SRTP call, whose keys arrive with
+     * SipralEventKind.MEDIA_SECURED.
+     */
+    val encrypted: Long,
+    /**
+     * Whether the key exchange authenticated the far end: a DTLS-SRTP
+     * handshake that checked its certificate against the signalled
+     * fingerprint. Never for SDES.
+     */
+    val authenticated: Long,
 )
 
 /**
@@ -5460,6 +5965,67 @@ data class SipralStunServerEvent(
 )
 
 /**
+ * What a SipralEventKind.CALLER_VERIFICATION carries: one half of
+ * the verification of who is calling (RFC 8224 §6.2).
+ */
+data class SipralVerificationEvent(
+    /**
+     * A SipralVerificationStage:
+     * the certificate is wanted, or the verdict is in.
+     */
+    val stage: Long,
+    /**
+     * A SipralVerificationOutcome,
+     * for a verdict.
+     */
+    val outcome: Long,
+    /**
+     * A SipralVerificationFailure:
+     * why it did not hold.
+     */
+    val failure: Long,
+    /**
+     * A SipralAttestation: the
+     * level a valid SHAKEN PASSporT claimed.
+     */
+    val attestation: Long,
+    /**
+     * A SipralVerstat: the `verstat`
+     * this verdict comes to (3GPP TS 24.229).
+     */
+    val verstat: Long,
+    /**
+     * The response RFC 8224 §6.2.2 prescribes for the failure, zero for
+     * a valid one. Sent only when `refused` is set.
+     */
+    val responseCode: Long,
+    /**
+     * Whether the call was refused with it, which only a strict account
+     * does.
+     */
+    val refused: Long,
+    /**
+     * The URL of the certificate: the one to fetch, or the one that was
+     * verified. UTF-8, not NUL-terminated; null and zero when there is
+     * none.
+     */
+    val certificateUrl: String?,
+    /**
+     * The calling number a valid PASSporT was signed for, canonical.
+     */
+    val orig: String?,
+    /**
+     * The origination identifier a valid SHAKEN PASSporT claimed (RFC
+     * 8588 §5), a UUID.
+     */
+    val origid: String?,
+    /**
+     * Why it did not hold, in more words than `failure`, for a log.
+     */
+    val detail: String?,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -5536,6 +6102,10 @@ class SipralEventPayload(
      * For SipralEventKind.STUN_SERVER.
      */
     val stunServer: SipralStunServerEvent,
+    /**
+     * For SipralEventKind.CALLER_VERIFICATION.
+     */
+    val verification: SipralVerificationEvent,
 )
 
 class SipralEvent(
@@ -5761,6 +6331,25 @@ class SipralEvent(
      */
     private val payloadCallAlertInfo: ByteArray? = null,
     /**
+     * A SipralVerificationOutcome:
+     * this stack's own verdict on the caller (RFC 8224 §6.2), for an
+     * account that verifies; zero when nothing was verified. Unlike
+     * `verstat`, which is what a network before this end concluded,
+     * this is what this end checked itself. ABI 0.31.
+     */
+    private val payloadCallVerification: Long = 0,
+    /**
+     * A SipralAttestation: the
+     * level a valid SHAKEN PASSporT claimed.
+     */
+    private val payloadCallAttestation: Long = 0,
+    /**
+     * A SipralVerificationFailure:
+     * why the verdict did not hold. `sipral_call_identity_text` reads
+     * the number it was signed for, its `origid` and its certificate URL.
+     */
+    private val payloadCallVerificationFailure: Long = 0,
+    /**
      * What the far end's own call is doing, or zero.
      */
     private val payloadTransferStatusCode: Long = 0,
@@ -5841,6 +6430,27 @@ class SipralEvent(
      * kind. Not whether a collector accepted it.
      */
     private val payloadMediaQualityReportSent: Long = 0,
+    /**
+     * A SipralKeyExchange: how
+     * the call's keys were exchanged, for
+     * SipralEventKind.MEDIA_STARTED, SipralEventKind.MEDIA_CHANGED
+     * and SipralEventKind.MEDIA_SECURED, which carry the encryption
+     * report of the call's stream: this, `encrypted`, `authenticated`,
+     * and `suite` from then on. ABI 0.31.
+     */
+    private val payloadMediaKeyExchange: Long = 0,
+    /**
+     * Whether the stream is encrypted, now. Zero at the start of a
+     * DTLS-SRTP call, whose keys arrive with
+     * SipralEventKind.MEDIA_SECURED.
+     */
+    private val payloadMediaEncrypted: Long = 0,
+    /**
+     * Whether the key exchange authenticated the far end: a DTLS-SRTP
+     * handshake that checked its certificate against the signalled
+     * fingerprint. Never for SDES.
+     */
+    private val payloadMediaAuthenticated: Long = 0,
     /**
      * A SipralRecoveryOutcome.
      */
@@ -6179,14 +6789,68 @@ class SipralEvent(
      * Empty otherwise.
      */
     private val payloadStunServerPrevious: String? = null,
+    /**
+     * A SipralVerificationStage:
+     * the certificate is wanted, or the verdict is in.
+     */
+    private val payloadVerificationStage: Long = 0,
+    /**
+     * A SipralVerificationOutcome,
+     * for a verdict.
+     */
+    private val payloadVerificationOutcome: Long = 0,
+    /**
+     * A SipralVerificationFailure:
+     * why it did not hold.
+     */
+    private val payloadVerificationFailure: Long = 0,
+    /**
+     * A SipralAttestation: the
+     * level a valid SHAKEN PASSporT claimed.
+     */
+    private val payloadVerificationAttestation: Long = 0,
+    /**
+     * A SipralVerstat: the `verstat`
+     * this verdict comes to (3GPP TS 24.229).
+     */
+    private val payloadVerificationVerstat: Long = 0,
+    /**
+     * The response RFC 8224 §6.2.2 prescribes for the failure, zero for
+     * a valid one. Sent only when `refused` is set.
+     */
+    private val payloadVerificationResponseCode: Long = 0,
+    /**
+     * Whether the call was refused with it, which only a strict account
+     * does.
+     */
+    private val payloadVerificationRefused: Long = 0,
+    /**
+     * The URL of the certificate: the one to fetch, or the one that was
+     * verified. UTF-8, not NUL-terminated; null and zero when there is
+     * none.
+     */
+    private val payloadVerificationCertificateUrl: String? = null,
+    /**
+     * The calling number a valid PASSporT was signed for, canonical.
+     */
+    private val payloadVerificationOrig: String? = null,
+    /**
+     * The origination identifier a valid SHAKEN PASSporT claimed (RFC
+     * 8588 §5), a UUID.
+     */
+    private val payloadVerificationOrigid: String? = null,
+    /**
+     * Why it did not hold, in more words than `failure`, for a log.
+     */
+    private val payloadVerificationDetail: String? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
         get() = SipralEventPayload(
             SipralRegistrationEvent(payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs),
-            SipralCallEvent(payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo),
+            SipralCallEvent(payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadCallVerification, payloadCallAttestation, payloadCallVerificationFailure),
             SipralTransferEvent(payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget),
-            SipralMediaEvent(payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason, payloadMediaStatistics?.let { SipralStreamStats.of(it) }, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent),
+            SipralMediaEvent(payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason, payloadMediaStatistics?.let { SipralStreamStats.of(it) }, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadMediaKeyExchange, payloadMediaEncrypted, payloadMediaAuthenticated),
             SipralRecoveryEvent(payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified),
             SipralTransportWantedEvent(payloadTransportWantedProtocol, payloadTransportWantedDestination, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes),
             SipralSubscriptionEvent(payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom),
@@ -6199,6 +6863,7 @@ class SipralEvent(
             SipralTurnStreamEvent(payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal, payloadTurnStreamServer),
             SipralAudioEvent(payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice),
             SipralStunServerEvent(payloadStunServerState, payloadStunServerServer, payloadStunServerPrevious),
+            SipralVerificationEvent(payloadVerificationStage, payloadVerificationOutcome, payloadVerificationFailure, payloadVerificationAttestation, payloadVerificationVerstat, payloadVerificationResponseCode, payloadVerificationRefused, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail),
         )
 }
 
@@ -6270,10 +6935,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long, payloadStunServerState: Long, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadCallVerification: Long, payloadCallAttestation: Long, payloadCallVerificationFailure: Long, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadMediaKeyExchange: Long, payloadMediaEncrypted: Long, payloadMediaAuthenticated: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long, payloadStunServerState: Long, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadVerificationStage: Long, payloadVerificationOutcome: Long, payloadVerificationFailure: Long, payloadVerificationAttestation: Long, payloadVerificationVerstat: Long, payloadVerificationResponseCode: Long, payloadVerificationRefused: Long, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice, payloadStunServerState, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadCallVerification, payloadCallAttestation, payloadCallVerificationFailure, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadMediaKeyExchange, payloadMediaEncrypted, payloadMediaAuthenticated, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice, payloadStunServerState, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadVerificationStage, payloadVerificationOutcome, payloadVerificationFailure, payloadVerificationAttestation, payloadVerificationVerstat, payloadVerificationResponseCode, payloadVerificationRefused, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -6816,7 +7481,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 30)
+        agree(0, 31)
     }
 
     /**
@@ -6859,7 +7524,7 @@ internal object SipralNative {
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
@@ -6974,6 +7639,10 @@ internal object SipralNative {
     external fun sipral_stack_state(stack: Long, buffer: ByteArray, len: LongArray): Int
     external fun sipral_stack_rtp_port_reserve(stack: Long, port: LongArray): Int
     external fun sipral_stack_rtp_port_release(stack: Long, port: Long): Int
+    external fun sipral_stack_stir(stack: Long, configAnchors: ByteArray?, configFreshnessSeconds: Long, configCertificateWaitMs: Long, configUnixSeconds: Long, nowMs: Long): Int
+    external fun sipral_call_stir_certificate(stack: Long, call: Long, chain: ByteArray, nowMs: Long): Int
+    external fun sipral_media_encryption_count(media: Long, count: LongArray): Int
+    external fun sipral_media_encryption_at(media: Long, index: Long, stream: LongArray): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -6997,7 +7666,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 30
+    const val ABI_VERSION_MINOR: Long = 31
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -7196,6 +7865,27 @@ object Sipral {
      * asks before it shows a "send diagnostics" control.
      */
     const val FEATURE_LOGGING: Long = 16384
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. STIR/SHAKEN (RFC 8224, RFC 8588): an
+     * account given a key and a certificate URL signs every call it places
+     * (`stir_key`, `stir_certificate_url` in `sipral_account_config_t`), and
+     * a stack given trust anchors (`sipral_stack_stir`) verifies who is
+     * calling before the phone rings — `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
+     * `sipral_call_stir_certificate`, and the verdict on every call event.
+     * Behind a compile-time feature, on by default. ABI 0.31.
+     */
+    const val FEATURE_STIR: Long = 65536
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. An SRTP policy and suites per account
+     * (`srtp`, `srtp_suites` in `sipral_account_config_t`), the policy that
+     * falls back from DTLS-SRTP to SDES (`SIPRAL_SRTP_DTLS_OR_SDES`), calls
+     * refused by it with `SIPRAL_STATUS_SECURITY_POLICY`, and the
+     * encryption report of every call (`sipral_media_encryption_at`). ABI
+     * 0.31.
+     */
+    const val FEATURE_SRTP_POLICY: Long = 131072
 
     /**
      * The buffer a caller has to bring for one outgoing packet.
@@ -8012,8 +8702,12 @@ object Sipral {
         val configPushParam = config.pushParam?.toByteArray(Charsets.UTF_8)
         val configQualityReportUri = config.qualityReportUri?.toByteArray(Charsets.UTF_8)
         val configTrustedPeers = config.trustedPeers?.toByteArray(Charsets.UTF_8)
+        val configSrtpSuites = config.srtpSuites?.toByteArray(Charsets.UTF_8)
+        val configStirCertificateUrl = config.stirCertificateUrl?.toByteArray(Charsets.UTF_8)
+        val configStirOrig = config.stirOrig?.toByteArray(Charsets.UTF_8)
+        val configStirOrigid = config.stirOrigid?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, accountSlot))
         return accountSlot[0]
     }
 
@@ -10843,6 +11537,84 @@ object Sipral {
      */
     fun stackRtpPortRelease(stack: Long, port: Long) {
         check(SipralNative.sipral_stack_rtp_port_release(stack, port))
+    }
+
+    /**
+     * Verify the callers of the calls this stack's accounts receive, against
+     * `config`'s trust anchors, from now on (RFC 8224 §6.2).
+     *
+     * Replaces whatever an earlier call set. Every account that reports —
+     * the default — verifies once there is at least one anchor, and none
+     * does with none; an account set to `SIPRAL_STIR_VERIFICATION_STRICT`
+     * verifies either way. `config.unix_seconds`, when set, is the wall
+     * clock at `now_ms`, and the stack signs and verifies by it from here
+     * on; without it the stack must have been created with
+     * `media_clock_unix_seconds`, or this is `SIPRAL_STATUS_WRONG_STATE`.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for anchors that are not
+     * certificates, or whose key is not P-256; `SIPRAL_STATUS_NOT_SUPPORTED`
+     * in a build without `SIPRAL_FEATURE_STIR`.
+     *
+     * Safety
+     *
+     * `config` must point at a `sipral_stir_config_t` whose `size` member
+     * says how long it is, with `anchors` readable for `anchors_len` bytes.
+     */
+    fun stackStir(stack: Long, config: SipralStirConfig, nowMs: Long) {
+        check(SipralNative.sipral_stack_stir(stack, config.anchors, config.freshnessSeconds, config.certificateWaitMs, config.unixSeconds, nowMs))
+    }
+
+    /**
+     * The certificate chain a call's `Identity` named, as fetched from the
+     * URL `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` gave with
+     * `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED` — PEM or DER, the
+     * signing certificate first — or null and zero for one that could not
+     * be fetched.
+     *
+     * The call's verdict is reached here and reported, and the call
+     * delivered or refused, before this returns; the events come out of the
+     * next `sipral_stack_poll`. `SIPRAL_STATUS_STALE_HANDLE` for a call no
+     * longer waiting: it was already answered, its wait ran out, or the
+     * caller gave up.
+     *
+     * Safety
+     *
+     * `chain` must be readable for `chain_len` bytes, or null with a length
+     * of zero.
+     */
+    fun callStirCertificate(stack: Long, call: Long, chain: ByteArray, nowMs: Long) {
+        check(SipralNative.sipral_call_stir_certificate(stack, call, chain, nowMs))
+    }
+
+    /**
+     * How many streams one call's encryption report has: one per stream
+     * the call carries, which for this library is its one audio stream.
+     *
+     * Safety
+     *
+     * `out_count` must point at one `size_t`.
+     */
+    fun mediaEncryptionCount(media: Long): Long {
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_media_encryption_count(media, countSlot))
+        return countSlot[0]
+    }
+
+    /**
+     * How one stream of a call is protected, now: whether it is encrypted,
+     * how its keys were exchanged, which suite it runs, and whether the
+     * exchange authenticated the far end. An index past the end is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     *
+     * Safety
+     *
+     * `out_stream` must point at a `sipral_stream_encryption_t` whose `size`
+     * member says how long it is.
+     */
+    fun mediaEncryptionAt(media: Long, index: Long): SipralStreamEncryption {
+        val streamSlots = LongArray(SipralStreamEncryption.SLOTS)
+        check(SipralNative.sipral_media_encryption_at(media, index, streamSlots))
+        return SipralStreamEncryption.of(streamSlots)
     }
 
 }

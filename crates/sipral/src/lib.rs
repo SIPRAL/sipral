@@ -170,9 +170,13 @@ mod record;
 mod relay;
 mod session;
 mod share;
+#[cfg(test)]
+mod srtp_policy_tests;
 #[cfg(feature = "redaction")]
 mod state;
 mod stats;
+#[cfg(all(test, feature = "stir"))]
+mod stir_tests;
 #[cfg(test)]
 mod tests;
 
@@ -200,7 +204,7 @@ pub use ice::IcePolicy;
 #[cfg(feature = "ice")]
 pub use ice::{CandidateKind, PathCandidate, PathKind, PathOutcome};
 pub use join::{MixOutcome, mix_two};
-pub use keying::SrtpPolicy;
+pub use keying::{AccountSrtp, SrtpPolicy};
 #[cfg(feature = "redaction")]
 pub use log::{BURST, Log, LogLevel, LogRecord, LogSink, PER_SECOND, QUEUE_CEILING, Travel};
 #[cfg(feature = "stun")]
@@ -209,7 +213,7 @@ pub use ports::{PortsExhausted, RtpPorts, RtpPortsError};
 pub use record::RecordingSink;
 #[cfg(feature = "ice")]
 pub use relay::{Relay, RelayDatagram, RelayEvent, Relays};
-pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback};
+pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback, StreamEncryption};
 pub use share::{SessionGuard, SessionShare, SessionUnavailable};
 /// Why a STUN transaction ended without an address, as
 /// [`MappingEvent::Unanswered`] reports it.
@@ -252,6 +256,11 @@ pub use sipral_media::processor::{NoProcessor, Processor};
 /// is.
 pub use sipral_rtp::srtp::Suite as SrtpSuite;
 pub use sipral_rtp::{Discard, Quality, UNAVAILABLE, VoipMetricsBlock};
+/// The STIR/SHAKEN crate itself: [`stir::Signer`], [`stir::TrustAnchors`],
+/// [`stir::Tn`], and the PASSporT underneath, for an application that signs
+/// or verifies outside a call as well.
+#[cfg(feature = "stir")]
+pub use sipral_stir as stir;
 /// Which end placed a call, renamed on the way through: `sipral-ua` and
 /// `sipral-core::sdp` both have a `Direction` and they are about different
 /// things, so the one an application meets less often gets the longer name.
@@ -279,6 +288,15 @@ pub use sipral_ua::{
     AnswerMode, AnswerModeField, Answering, CallIdentity, CallerIdentity, Diversion, HistoryEntry,
     Party, Privacy, Reason, ReasonProtocol, Redirect, RemoteParty, Retarget, RingSource, Verstat,
 };
+/// This end's own verdict on who is calling (RFC 8224 §6.2), and what an
+/// account asks its verification service to do with it.
+pub use sipral_ua::{
+    Attestation, CallerVerification, StirVerification, VerificationFailure, VerificationOutcome,
+};
+/// STIR/SHAKEN in calls: what an account signs with, and what the agent
+/// verifies against — [`UserAgent::set_stir`], [`Account::stir_signing`].
+#[cfg(feature = "stir")]
+pub use sipral_ua::{DEFAULT_CERTIFICATE_WAIT, StirConfig, StirSigning};
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

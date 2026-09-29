@@ -168,6 +168,21 @@ constants! {
     /// always carries the redaction both depend on; a bit so that a binding
     /// asks before it shows a "send diagnostics" control.
     pub const SIPRAL_FEATURE_LOGGING: u32 = 1 << 14;
+    /// See [`SIPRAL_FEATURE_DTMF`]. STIR/SHAKEN (RFC 8224, RFC 8588): an
+    /// account given a key and a certificate URL signs every call it places
+    /// (`stir_key`, `stir_certificate_url` in `sipral_account_config_t`), and
+    /// a stack given trust anchors (`sipral_stack_stir`) verifies who is
+    /// calling before the phone rings — `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
+    /// `sipral_call_stir_certificate`, and the verdict on every call event.
+    /// Behind a compile-time feature, on by default. ABI 0.31.
+    pub const SIPRAL_FEATURE_STIR: u32 = 1 << 16;
+    /// See [`SIPRAL_FEATURE_DTMF`]. An SRTP policy and suites per account
+    /// (`srtp`, `srtp_suites` in `sipral_account_config_t`), the policy that
+    /// falls back from DTLS-SRTP to SDES (`SIPRAL_SRTP_DTLS_OR_SDES`), calls
+    /// refused by it with `SIPRAL_STATUS_SECURITY_POLICY`, and the
+    /// encryption report of every call (`sipral_media_encryption_at`). ABI
+    /// 0.31.
+    pub const SIPRAL_FEATURE_SRTP_POLICY: u32 = 1 << 17;
 }
 
 record! {
@@ -292,6 +307,12 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.logging {
         features |= SIPRAL_FEATURE_LOGGING;
     }
+    if capabilities.stir {
+        features |= SIPRAL_FEATURE_STIR;
+    }
+    if capabilities.srtp_per_account {
+        features |= SIPRAL_FEATURE_SRTP_POLICY;
+    }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -327,10 +348,10 @@ mod tests {
         SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_CALL_READDRESS, SIPRAL_FEATURE_CALLER_IDENTITY,
         SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_LIMITS, SIPRAL_FEATURE_LOGGING,
         SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING,
-        SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS,
-        SIPRAL_FEATURE_TURN_STREAM, SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS,
-        SIPRAL_TRANSPORT_BIT_UDP, SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS,
-        SipralCapabilities, sipral_capabilities,
+        SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SRTP_POLICY,
+        SIPRAL_FEATURE_STIR, SIPRAL_FEATURE_SUBSCRIPTIONS, SIPRAL_FEATURE_TURN_STREAM,
+        SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS, SIPRAL_TRANSPORT_BIT_UDP,
+        SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS, SipralCapabilities, sipral_capabilities,
     };
     use crate::error::last_error_text;
     use crate::status::SipralStatus;
@@ -500,6 +521,21 @@ mod tests {
     fn every_build_has_the_limits_and_their_counters() {
         assert_ne!(read().features & SIPRAL_FEATURE_LIMITS, 0);
         assert_eq!(SIPRAL_FEATURE_LIMITS, 1 << 15);
+    }
+
+    /// STIR/SHAKEN is the facade's answer, behind its feature; the SRTP
+    /// policy per account and the encryption report are in every build.
+    #[test]
+    fn stir_and_the_srtp_policy_read_present_exactly_when_the_facade_says() {
+        let features = read().features;
+        assert_eq!(
+            features & SIPRAL_FEATURE_STIR != 0,
+            Capabilities::of_this_build().stir
+        );
+        assert_eq!(features & SIPRAL_FEATURE_STIR != 0, cfg!(feature = "stir"));
+        assert_ne!(features & SIPRAL_FEATURE_SRTP_POLICY, 0);
+        assert_eq!(SIPRAL_FEATURE_STIR, 1 << 16);
+        assert_eq!(SIPRAL_FEATURE_SRTP_POLICY, 1 << 17);
     }
 
     #[test]

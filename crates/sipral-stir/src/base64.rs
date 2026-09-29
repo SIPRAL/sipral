@@ -15,7 +15,7 @@
 const URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// The standard alphabet of RFC 4648 §4.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// The input is not the unpadded or padded Base64 it has to be.
@@ -28,7 +28,7 @@ pub(crate) fn encode_url(input: &[u8]) -> String {
 }
 
 /// `input` in the standard alphabet, padded, as PEM carries it.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn encode_standard(input: &[u8]) -> String {
     encode(input, STANDARD, true)
 }

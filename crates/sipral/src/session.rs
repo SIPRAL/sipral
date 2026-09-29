@@ -47,7 +47,7 @@ use sipral_media::comfort_noise::{ComfortNoise, Generator, PAYLOAD_TYPE as COMFO
 use sipral_media::g711::Law;
 use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
-use sipral_rtp::srtp::{Master, Policy, Rekeyed};
+use sipral_rtp::srtp::{Master, Policy, Rekeyed, Suite};
 use sipral_rtp::{
     Activity, BufferConfig, BuildError, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
     PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpSession, StreamConfig, StreamFormat,
@@ -55,6 +55,7 @@ use sipral_rtp::{
 };
 use sipral_ua::{QualityReportMetrics, RemoteQualityMetrics};
 
+use crate::capabilities::SrtpKeying;
 use crate::clock::WallClock;
 use crate::codec::{Codec, CodecCandidate};
 use crate::dtmf::{self, DIGIT_GAP, Dialling, Digit, Due, LONGEST_DIGIT, SHORTEST_DIGIT};
@@ -292,6 +293,34 @@ pub(crate) struct Start {
     pub(crate) now: Instant,
 }
 
+/// How one stream of a call is protected: one entry of
+/// [`MediaSession::encryption`], the encryption report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StreamEncryption {
+    /// What the stream carries, as its `m=` line names it: `audio`.
+    pub media: &'static str,
+    /// Whether what it sends is encrypted and what it takes is
+    /// authenticated, now. False for a stream still waiting for the
+    /// handshake that keys it.
+    pub encrypted: bool,
+    /// How its keys were exchanged: in the SDP (RFC 4568) or by a DTLS
+    /// handshake on the media path (RFC 5764). `None` for a stream that was
+    /// never meant to be encrypted.
+    pub key_exchange: Option<SrtpKeying>,
+    /// The transform it runs, once it runs one.
+    pub suite: Option<Suite>,
+    /// Whether the key exchange authenticated the far end: true for a
+    /// DTLS-SRTP stream once its handshake finished, since the far end's
+    /// certificate had to match the fingerprint its signalling carried
+    /// (RFC 8122 §5.1). An SDES key is exactly as authentic as the
+    /// signalling transport that carried it, which this layer cannot see,
+    /// so it is false for one.
+    pub authenticated: bool,
+    /// Whether it agreed to be encrypted and is still waiting for its keys.
+    pub awaiting_keys: bool,
+}
+
 /// One call's media.
 #[derive(Debug)]
 pub struct MediaSession {
@@ -345,6 +374,10 @@ pub struct MediaSession {
     events: Outbox,
     /// D5: what became of every codec this call's catalogue could have used.
     codec_candidates: Vec<CodecCandidate>,
+    /// The transform the last DTLS-SRTP handshake on this stream agreed,
+    /// once one has: the signalling does not say (RFC 5764 §4.1.2), so the
+    /// encryption report reads it here. An SDES stream's is in its plan.
+    handshake_suite: Option<Suite>,
     /// A2, D6: which device this call's audio is on, carried rather than
     /// interpreted. See [`MediaConfig::device`].
     device: Option<String>,
@@ -558,6 +591,7 @@ impl MediaSession {
             heard: plan.dtmf.map(EventReceiver::new),
             events: Outbox::default(),
             codec_candidates: candidates,
+            handshake_suite: None,
             device: config.device.clone(),
             #[cfg(feature = "dtls")]
             dtls: handshake.map(|handshake| Dtls {
@@ -621,6 +655,41 @@ impl MediaSession {
     #[must_use]
     pub const fn is_encrypted(&self) -> bool {
         self.rtp.is_protected()
+    }
+
+    /// How each of this call's streams is protected, at this moment: the
+    /// encryption report.
+    ///
+    /// One entry per stream the call carries, which for this stack is its
+    /// one audio stream. [`MediaEvent::Secured`] is the moment a DTLS-SRTP
+    /// stream's entry becomes encrypted; an SDES stream's is encrypted from
+    /// the moment its session opens.
+    #[must_use]
+    pub fn encryption(&self) -> Vec<StreamEncryption> {
+        let (key_exchange, suite, authenticated) = match &self.plan.keying {
+            None => (None, None, false),
+            Some(Keying::Sdes { local, .. }) => (
+                Some(SrtpKeying::Sdes),
+                Some(keying::transform(local.suite)),
+                false,
+            ),
+            // the handshake refuses a certificate the signalling's
+            // fingerprint does not name before any key is exported, so a
+            // stream it keyed is one whose far end was authenticated
+            Some(Keying::Dtls { .. }) => (
+                Some(SrtpKeying::Dtls),
+                self.handshake_suite,
+                self.is_encrypted(),
+            ),
+        };
+        vec![StreamEncryption {
+            media: "audio",
+            encrypted: self.is_encrypted(),
+            key_exchange,
+            suite: suite.filter(|_| self.is_encrypted()),
+            authenticated,
+            awaiting_keys: self.is_awaiting_keys(),
+        }]
     }
 
     /// Whether this call agreed to be encrypted and is still waiting for the
@@ -1270,6 +1339,7 @@ impl MediaSession {
                 // (RFC 3711 §9.1)
                 Some(Ok(exported)) => {
                     let suite = exported.suite;
+                    self.handshake_suite = Some(suite);
                     self.rtp
                         .rekey_local(exported.policy, exported.local, Rekeyed::Key);
                     self.rtp
@@ -1299,6 +1369,7 @@ impl MediaSession {
                 // goes out with the keys or not at all
                 let installed = self.rtp.keyed(exported.into_security());
                 if installed {
+                    self.handshake_suite = Some(suite);
                     self.events.push_back(MediaEvent::Secured { suite, peer });
                 }
             }

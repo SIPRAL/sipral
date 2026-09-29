@@ -270,12 +270,13 @@ is read with the RustCrypto `x509-cert` crate: the structure is large, it is
 where a hand-written reader would most likely be wrong, and `der`, the DER
 layer it is built on, is already in the tree beneath `p256`.
 
-The crate names two dependencies, `p256` and `x509-cert`; the rest arrive
-through them. Nothing in the protocol crates depends on it, and the facade
-does not either, so none of the components below is in a binary that does
-not name `sipral-stir` itself. Every licence below was read from the
-component's own manifest, and every component ships its licence files
-beside it.
+The crate names three dependencies, `p256`, `x509-cert` and `zeroize` (the
+last already under `p256`, at the version `sipral-rtp` pins); the rest arrive
+through them. `sipral-ua` reaches it behind its `stir` feature, and the
+facade and the C ABI turn that feature on by default, so the components
+below are in every default build of `sipral` and `sipral-ffi` and in none
+built without `stir`. Every licence below was read from the component's own
+manifest, and every component ships its licence files beside it.
 
 | Component | What it is | Licence |
 |---|---|---|
@@ -297,8 +298,8 @@ All but `flagset` are dual-licensed like the rest, and the one MIT notice
 covers them. `flagset` is Apache-2.0 alone; it ships no NOTICE file, so what
 section 4 of that licence asks of a binary is a copy of the licence itself.
 `THIRD-PARTY-LICENSES.txt` is generated from the graphs of `sipral` and
-`sipral-ffi`, which do not reach this crate, so an application that links
-`sipral-stir` carries these components' licences beside that file itself.
+`sipral-ffi`, which reach this crate by default, and carries every one of
+these components' licences.
 
 ### PipeWire
 

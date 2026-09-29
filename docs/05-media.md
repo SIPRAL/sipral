@@ -841,8 +841,11 @@ agree with the call it stands in for.
 | `SrtpPolicy` | The offer this end writes | A plain offer arriving | An offer arriving on `RTP/SAVP` |
 |---|---|---|---|
 | `NotOffered` — **the default** | `RTP/AVP`, no key in the body | answered plainly | answered, with a key of our own |
-| `Offered` | `RTP/SAVP`, one `a=crypto` | answered plainly | answered, with a key of our own |
-| `Required` | `RTP/SAVP`, one `a=crypto` | **not answered at all** | answered, with a key of our own |
+| `Offered` | `RTP/SAVP`, one `a=crypto` per suite | answered plainly | answered, with a key of our own |
+| `Required` | `RTP/SAVP`, one `a=crypto` per suite | **refused, 488** | answered, with a key of our own |
+| `DtlsOffered` | `UDP/TLS/RTP/SAVP`, `a=fingerprint` | answered plainly | answered with our fingerprint |
+| `DtlsRequired` | `UDP/TLS/RTP/SAVP`, `a=fingerprint` | **refused, 488** | answered with our fingerprint |
+| `DtlsOrSdes` | `RTP/SAVP`, `a=fingerprint` **and** the `a=crypto` lines | **refused, 488** | answered the way it was keyed: a fingerprint with ours, crypto lines alone with SDES |
 
 **Why the default is off.** `a=crypto` carries the master key in the SDP body,
 so over plain UDP or TCP it travels in the clear and anyone on the path can
@@ -869,11 +872,66 @@ this stack does not follow a refusal with a plain re-offer. They differ in one
 place, and it is the place where a downgrade would otherwise be silent: an
 offer that arrives without keys. Under `Offered` it is answered, and a caller
 who would rather have a plain call than none gets one. Under `Required` it is
-not: `MediaEngine::answer` returns `MediaError::SrtpRequired` without sending
-anything, so the call is still ringing and the application picks the status
-code; and a plain re-offer inside a live call is rejected with 488 rather than
-accepted, which is the case that matters, because the alternative is a call
-that started encrypted, stopped being encrypted, and told nobody.
+not: `MediaEngine::answer` refuses the INVITE with 488 Not Acceptable Here
+(RFC 3261 §21.4.26) and returns `MediaError::SrtpRequired`, which the C ABI
+answers `SIPRAL_STATUS_SECURITY_POLICY`; and a plain re-offer inside a live
+call is rejected with 488 rather than accepted, which is the case that
+matters, because the alternative is a call that started encrypted, stopped
+being encrypted, and told nobody. A call this end placed under `Required`
+and answered in the clear by a far end that wrote its own description is
+acknowledged and then hung up (RFC 3261 §13.2.2.4), its BYE carrying
+`Reason: SIP;cause=488` (RFC 3326), after `MediaEvent::Failed` with the same
+error. Until 29 September 2026 the INVITE was left ringing for the
+application to refuse, which put the one decision the policy exists to make
+back in the application's hands.
+
+**DTLS-SRTP falling back to SDES.** `DtlsOrSdes` is for the deployment that
+wants the handshake's keys wherever the far end can do it and still wants
+encryption where it cannot. The offer is one `RTP/SAVP` stream carrying both
+the fingerprint and `a=setup:actpass` and the crypto lines, asking for
+`a=rtcp-mux` for the DTLS half (RFC 5764 §4.2): a peer that does DTLS-SRTP
+answers with its own fingerprint and the call is keyed by the handshake, and a
+peer that knows only SDES ignores the fingerprint and answers a crypto line,
+as RFC 4568 has it answer any. `RTP/SAVP` rather than RFC 5764 §8's
+`UDP/TLS/RTP/SAVP`, because the SDES-only peer this exists for refuses a
+stream on a profile it does not know, and every DTLS-SRTP peer the lab runs
+reads the fingerprint on either. Answering, it follows the offer: a
+fingerprint is answered with ours, crypto lines alone with SDES, and a plain
+offer is refused as under `Required`. The calls that fall back carry what SDES
+costs over a signalling transport somebody else can read (RFC 4568 §7).
+
+**The policy per account, and the suites it allows.**
+`MediaEngine::set_account_srtp` lays an `AccountSrtp` — a policy, a list of
+suites, or both — over the engine's catalogue for every call of one account:
+the offer a call placed from it writes, and the answer an INVITE addressed to
+it gets. A call placed with a catalogue of its own says the rest for itself;
+through the C ABI a call may name a stricter policy than its account's and
+never a looser one (`SIPRAL_STATUS_SECURITY_POLICY`), while the stack's own
+policy stays a default a call overrides. `CodecCatalog::with_srtp_suites`
+names the transforms a call runs, most preferred first, in the three places a
+suite is chosen: the `a=crypto` lines an SDES offer carries, one each and in
+that order; the offered lines an SDES answer takes, still in the offerer's
+order (RFC 4568 §5.1.2) but only among these; and the protection profiles a
+DTLS-SRTP handshake offers as a client and chooses among as a server (RFC 5764
+§4.1.1), of the four there are profiles for. That is how an account turns
+RFC 7714's GCM profiles off, or asks for them first: unset, an SDES offer names
+`AEAD_AES_256_GCM` then `AES_CM_128_HMAC_SHA1_80` and a handshake offers all
+four strongest first. A list naming none of the four DTLS-capable suites is
+refused before a DTLS policy writes a fingerprint (`MediaError::DtlsProfile`).
+Every crypto line is in the INVITE, so a long list costs octets RFC 3261
+§18.1.1 counts against a datagram.
+
+**The encryption report.** `MediaSession::encryption` — and
+`MediaEngine::encryption` for a call — says for each stream whether it is
+encrypted now, how its keys were exchanged (`SrtpKeying::Sdes` or `Dtls`),
+which suite it runs, and whether the exchange authenticated the far end. A
+DTLS-SRTP stream is authenticated once its handshake finishes, because the far
+end's certificate had to match the fingerprint its signalling carried (RFC
+8122 §5.1); an SDES stream never is, because its key is exactly as authentic
+as the signalling transport that carried it, which this layer cannot see. The
+C ABI carries the same facts on `SIPRAL_EVENT_KIND_MEDIA_STARTED`,
+`_MEDIA_CHANGED` and `_MEDIA_SECURED`, and answers
+`sipral_media_encryption_at` at any time.
 
 **Where the key comes from.** The engine's own seed, and not the endpoint's.
 `MediaEngine::new` takes thirty-two bytes of its own; each key is one block of
