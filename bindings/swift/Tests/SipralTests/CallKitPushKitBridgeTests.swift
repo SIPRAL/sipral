@@ -93,8 +93,8 @@ final class CallKitBridgeTests: XCTestCase {
     /// deactivates the session, and the call hung up when CallKit's own
     /// service resets under it.
     func testCallKitsHoldMuteAndSessionReachTheAttachedCallsAudio() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
         let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
         defer { aliceCall.close(); bobCall.close() }
@@ -140,6 +140,39 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertNotNil(hungUp, "a call CallKit forgot was left up")
     }
 
+    /// With the library running the devices, CallKit's audio session opens
+    /// and closes the engine as a whole: nothing before `didActivate`, the
+    /// devices at once when the session is already active, closed at
+    /// `didDeactivate` and at a provider reset, and CallKit's mute on the
+    /// engine's microphone.
+    func testCallKitsSessionAndMuteDriveTheLibrarysEngine() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
+        defer { aliceCall.close(); bobCall.close() }
+        let bridge = CallKitBridge(provider: RecordingProvider())
+        let uuid = UUID()
+        bridge.bind(uuid: uuid, to: bobCall)
+
+        let engine = RecordingEngine()
+        try bridge.drive(engine)
+        XCTAssertEqual(engine.said, [], "the devices opened before CallKit activated the session")
+        bridge.audioSessionActivated()
+        XCTAssertEqual(engine.said, ["activate"])
+        try bridge.handleMute(uuid: uuid, muted: true)
+        XCTAssertEqual(engine.said.last, "mute input true")
+        bridge.audioSessionDeactivated()
+        XCTAssertEqual(engine.said.last, "deactivate")
+
+        bridge.audioSessionActivated()
+        let late = RecordingEngine()
+        try bridge.drive(late)
+        XCTAssertEqual(late.said, ["activate"], "an engine handed over mid-session stayed shut")
+        bridge.providerDidReset()
+        XCTAssertEqual(late.said, ["activate", "deactivate"])
+    }
+
     /// Alice calls Bob over loopback; Bob's call is left ringing, as a call
     /// shown to a person is, with a reader on Bob's stack taken first.
     private func ringingCall(from alice: SipralStack, to bob: SipralStack) async throws -> (Call, Call) {
@@ -159,8 +192,8 @@ final class CallKitBridgeTests: XCTestCase {
     /// connected and ended, and the application's own reader sees the
     /// confirmation and the end too.
     func testBridgeAndApplicationBothSeeEveryEventOfABoundCall() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
         let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
         defer { aliceCall.close(); bobCall.close() }
@@ -192,8 +225,8 @@ final class CallKitBridgeTests: XCTestCase {
     /// ended once it is: its stream hands the bridge the end it missed,
     /// rather than leaving the call screen ringing.
     func testBindingACallThatAlreadyEndedReportsItEnded() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
         let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
         defer { aliceCall.close(); bobCall.close() }
@@ -221,8 +254,8 @@ final class CallKitBridgeTests: XCTestCase {
     /// -- only the bridge is watching -- so the bridge is the only thing
     /// that can be left holding a call CallKit still thinks is live.
     func testBridgeStillReportsEndedWhenTheApplicationHangsUpAndClosesWithoutReadingEvents() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
         let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
         defer { aliceCall.close() }
@@ -260,7 +293,7 @@ private extension RecordingProvider {
 /// is the same `RecordingProvider` above.
 final class PushKitBridgeTests: XCTestCase {
     func testHandlePushReportsToCallKitThenAnnouncesThenRefreshesBinding() async throws {
-        let stack = try SipralStack()
+        let stack = try SipralStack(audio: .application)
         defer { stack.close() }
         // No registrar: `Account.announce` and `refreshBinding` both refuse
         // outright on a no-op account with `SIPRAL_STATUS_INVALID_ARGUMENT`
@@ -286,7 +319,7 @@ final class PushKitBridgeTests: XCTestCase {
     }
 
     func testMatchIncomingCallResolvesPendingByCallerId() async throws {
-        let stack = try SipralStack()
+        let stack = try SipralStack(audio: .application)
         defer { stack.close() }
         let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
 
@@ -313,13 +346,41 @@ final class PushKitBridgeTests: XCTestCase {
                 stateRaw: SipralCallState.incoming.rawValue, state: .incoming,
                 endReasonRaw: 0, endReason: nil, statusCode: 0, other: Sipral.handleNone,
                 heldHere: false, heldThere: false, localSdp: nil, remoteSdp: nil, retryInMs: 0,
-                fromUri: "sip:alice@sipral.invalid", fromDisplay: nil, toUri: nil, callId: nil, digit: 0
+                fromUri: "sip:alice@sipral.invalid", fromDisplay: nil, toUri: nil, callId: nil, digit: 0,
+                endCause: nil, identityTrusted: false, assertedUri: nil, assertedDisplay: nil, verstat: nil,
+                privacy: [], divertedFrom: nil, diversionReason: nil, diversionCount: 0, historyCount: 0,
+                answerMode: nil, answerModeRequired: false, privAnswerMode: nil, privAnswerModeRequired: false,
+                answerAfterMs: nil, ringSource: nil, alertInfo: nil
             ),
             mediaData: nil, registrationData: nil, announceData: nil, natData: nil, relayData: nil,
-            referralData: nil, turnStreamData: nil
+            referralData: nil, turnStreamData: nil, audioData: nil
         )
 
         pushKit.matchIncomingCall(event, on: stack)
         XCTAssertEqual(pending.matchedCallHandle, 424242)
+    }
+}
+
+/// A `CallAudioSessionEngine` that records what it was told, in order.
+final class RecordingEngine: CallAudioSessionEngine, @unchecked Sendable {
+    private let lock = NSLock()
+    private var told: [String] = []
+
+    var said: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return told
+    }
+
+    private func note(_ what: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        told.append(what)
+    }
+
+    func activate() throws { note("activate") }
+    func deactivate() throws { note("deactivate") }
+    func setMuted(_ muted: Bool, for direction: SipralAudioDirection) throws {
+        note("mute \(direction == .input ? "input" : "output") \(muted)")
     }
 }

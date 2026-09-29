@@ -96,7 +96,7 @@ final class HostPeerCallTests: XCTestCase {
         let setup = try Setup(environment)
         let target = environment["SIPRAL_TARGET"].flatMap { $0.isEmpty ? nil : $0 }
 
-        let stack = try SipralStack(bindHost: setup.localHost)
+        let stack = try SipralStack(audio: .application, bindHost: setup.localHost)
         defer { stack.close() }
         let stackEvents = Recorder(stack.events())
         let account = try await setup.account(on: stack, stackEvents: stackEvents)
@@ -143,7 +143,7 @@ final class HostPeerCallTests: XCTestCase {
             )
         }
 
-        let stack = try SipralStack(bindHost: setup.localHost)
+        let stack = try SipralStack(audio: .application, bindHost: setup.localHost)
         defer { stack.close() }
         let stackEvents = Recorder(stack.events())
         _ = try await setup.account(on: stack, stackEvents: stackEvents)

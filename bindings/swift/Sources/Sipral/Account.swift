@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Tiberiu Balasea
 
 import CSipral
+import Dispatch
 
 /// `sipral_account_add`, and the entry points that take its handle.
 ///
@@ -14,11 +15,67 @@ public final class Account: @unchecked Sendable {
     public unowned let stack: SipralStack
     public let handle: SipralHandle
     public let aor: String
+    /// Where the account's requests go, `host:port`.
+    public let registrarAddress: String
 
-    init(stack: SipralStack, handle: SipralHandle, aor: String) {
+    private let stateQueue = DispatchQueue(label: "org.sipral.account.state")
+    /// The `Contact` the application wrote, or `nil` when the account's is
+    /// the one this layer derives from the signalling socket.
+    private let givenContact: String?
+    private var _contact: String
+
+    /// Where this account says it can be reached, as its `Contact` carries
+    /// it now: after `SipralStack.networkChanged(to:)`, the new address.
+    public var contact: String { stateQueue.sync { _contact } }
+
+    init(stack: SipralStack, handle: SipralHandle, aor: String, registrarAddress: String, contact: String, given: String?) {
         self.stack = stack
         self.handle = handle
         self.aor = aor
+        self.registrarAddress = registrarAddress
+        self._contact = contact
+        self.givenContact = given
+    }
+
+    /// `sipral_account_rebind` onto the signalling socket the stack bound
+    /// after a network change: a derived `Contact` names the new socket; one
+    /// the application wrote has the old address, wherever it names it,
+    /// replaced by the new one, and is otherwise left as written.
+    func rebind(from socket: UDPSocket, previous: String?) throws {
+        let now = socket.localAddress
+        let next: String
+        if givenContact == nil {
+            next = Self.defaultContact(aor: aor, bindAddress: now)
+        } else if let previous, !previous.isEmpty {
+            next = Self.replacing(previous, with: UDPSocket.parse(now).host, in: contact)
+        } else {
+            next = contact
+        }
+        try retryingBusy {
+            try Sipral.accountRebind(
+                stack: stack.handle, account: handle, transport: Sipral.transportMain,
+                remote: registrarAddress, contact: next, nowMs: stack.nowMs()
+            )
+        }
+        stateQueue.sync { _contact = next }
+    }
+
+    /// `text` with every `old` in it made `new`: the standard library's own
+    /// `replacing(_:with:)` needs iOS 16 and macOS 13, and this package
+    /// builds for older ones.
+    private static func replacing(_ old: String, with new: String, in text: String) -> String {
+        var result = ""
+        var index = text.startIndex
+        while index < text.endIndex {
+            if text[index...].hasPrefix(old) {
+                result += new
+                index = text.index(index, offsetBy: old.count)
+            } else {
+                result.append(text[index])
+                index = text.index(after: index)
+            }
+        }
+        return result
     }
 
     /// Where this account can actually be reached, for a caller who gave no
@@ -44,11 +101,16 @@ public final class Account: @unchecked Sendable {
         displayName: String?,
         authUser: String?,
         authPassword: String?,
-        expiresSeconds: UInt64
+        expiresSeconds: UInt64,
+        sessionTimer: SessionTimer,
+        privacy: Privacy,
+        trustedPeers: [String]
     ) throws -> Account {
+        let given = contact
         let contact = contact ?? defaultContact(aor: aor, bindAddress: stack.bindAddress)
+        let peers = trustedPeers.isEmpty ? nil : trustedPeers.joined(separator: ",")
         let handle: SipralHandle = try CStrings.with(
-            [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword]
+            [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers]
         ) { parts in
             var config = sipral_account_config_t.sized()
             config.aor = parts[0].pointer
@@ -74,11 +136,21 @@ public final class Account: @unchecked Sendable {
                 config.auth_password_len = parts[6].count
             }
             config.expires_seconds = expiresSeconds
+            let (timer, seconds) = sessionTimer.raw
+            config.session_timer = timer
+            config.session_interval_seconds = seconds
+            config.privacy = privacy.rawValue
+            if let peersPointer = parts[7].pointer {
+                config.trusted_peers = peersPointer
+                config.trusted_peers_len = parts[7].count
+            }
             return try retryingBusy {
                 try Sipral.accountAdd(stack: stack.handle, config: config, configHeaders: [])
             }
         }
-        return Account(stack: stack, handle: handle, aor: aor)
+        return Account(
+            stack: stack, handle: handle, aor: aor, registrarAddress: registrarAddress, contact: contact, given: given
+        )
     }
 
     /// `sipral_account_register`. A no-op account (no registrar) refuses this.
@@ -106,6 +178,7 @@ public final class Account: @unchecked Sendable {
     /// `sipral_account_remove`. Every call this account placed ends.
     public func remove() throws {
         try Sipral.accountRemove(stack: stack.handle, account: handle)
+        stack.forgetAccount(handle)
     }
 
     /// `sipral_account_announce` (`docs/15-mobile.md`, "C2"): what a

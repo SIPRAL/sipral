@@ -18,7 +18,7 @@ final class ReferralTests: XCTestCase {
     func testAStackThatWasNotToldToTakeThemRefusesThem403() async throws {
         let referrer = try UDPSocket(host: "127.0.0.1", port: 0)
         defer { referrer.close() }
-        let bob = try SipralStack()
+        let bob = try SipralStack(audio: .application)
         defer { bob.close() }
         _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: referrer.localAddress)
 
@@ -31,8 +31,8 @@ final class ReferralTests: XCTestCase {
     func testAReferralTakenPlacesTheCallAndReportsItToTheReferrer() async throws {
         let referrer = try UDPSocket(host: "127.0.0.1", port: 0)
         defer { referrer.close() }
-        let carol = try SipralStack()
-        let bob = try SipralStack(referrals: true)
+        let carol = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application, referrals: true)
         defer { bob.close(); carol.close() }
         _ = try carol.addAccount(aor: "sip:carol@sipral.invalid", registrarAddress: bob.bindAddress)
         _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: carol.bindAddress)

@@ -42,6 +42,7 @@ public final class CallKitBridge: @unchecked Sendable {
     private var watchTasks: [UUID: Task<Void, Never>] = [:]
     private var audiosByUuid: [UUID: CallAudio] = [:]
     private var sessionActive = false
+    private var engine: (any CallAudioSessionEngine)?
 
     public init(provider: any CallKitProviding) {
         self.provider = provider
@@ -182,10 +183,12 @@ public final class CallKitBridge: @unchecked Sendable {
         }
     }
 
-    /// `CXSetMutedCallAction`: the far end is sent silence while muted.
+    /// `CXSetMutedCallAction`: the far end is sent silence while muted --
+    /// through the call's `CallAudio`, or the engine's microphone.
     public func handleMute(uuid: UUID, muted: Bool) throws {
         guard call(for: uuid) != nil else { throw CallKitBridgeError.unknownCall(uuid) }
         audio(for: uuid)?.setMuted(muted)
+        try stateQueue.sync { engine }?.setMuted(muted, for: .input)
     }
 
     // MARK: - the call's audio
@@ -214,27 +217,51 @@ public final class CallKitBridge: @unchecked Sendable {
         stateQueue.sync { audiosByUuid[uuid] }
     }
 
+    /// Hand the audio session to the library's own engine: a stack created
+    /// with `AudioMode.device(activation: .manual)` gives its
+    /// `SipralStack.audio` here, and from then on CallKit's `didActivate`
+    /// opens the devices for every call at once, `didDeactivate` and a
+    /// provider reset close them -- the calls stay attached and are heard
+    /// again at the next activation -- and `CXSetMutedCallAction` mutes the
+    /// microphone. The application attaches no `CallAudio` of its own then:
+    /// the engine is every call's audio. When the session is already active
+    /// the devices open here.
+    public func drive(_ engine: any CallAudioSessionEngine) throws {
+        let active = stateQueue.sync { () -> Bool in
+            self.engine = engine
+            return sessionActive
+        }
+        if active {
+            try engine.activate()
+        }
+    }
+
     /// `CXProviderDelegate.provider(_:didActivate:)`: the session is the
-    /// calls' now, and every attached call's device is taken back.
+    /// calls' now, and every attached call's device is taken back -- or the
+    /// engine `drive(_:)` was given opens the devices.
     public func audioSessionActivated() {
-        stateQueue.sync {
+        let engine = stateQueue.sync { () -> (any CallAudioSessionEngine)? in
             sessionActive = true
             for audio in audiosByUuid.values {
                 audio.resume(.sessionInactive)
             }
+            return self.engine
         }
+        try? engine?.activate()
     }
 
     /// `CXProviderDelegate.provider(_:didDeactivate:)`: the system took the
     /// session back -- another call, the calls ending -- and every attached
-    /// call's device is let go.
+    /// call's device is let go, or the engine's devices closed.
     public func audioSessionDeactivated() {
-        stateQueue.sync {
+        let engine = stateQueue.sync { () -> (any CallAudioSessionEngine)? in
             sessionActive = false
             for audio in audiosByUuid.values {
                 audio.pause(.sessionInactive)
             }
+            return self.engine
         }
+        try? engine?.deactivate()
     }
 
     /// `CXProviderDelegate.providerDidReset(_:)`: the system's call service
@@ -242,13 +269,14 @@ public final class CallKitBridge: @unchecked Sendable {
     /// ended here too -- hung up, its device let go -- rather than left
     /// running with no call screen and no audio session.
     public func providerDidReset() {
-        let (calls, audios) = stateQueue.sync { () -> ([Call], [CallAudio]) in
+        let (calls, audios, engine) = stateQueue.sync { () -> ([Call], [CallAudio], (any CallAudioSessionEngine)?) in
             sessionActive = false
-            return (Array(callsByUuid.values), Array(audiosByUuid.values))
+            return (Array(callsByUuid.values), Array(audiosByUuid.values), self.engine)
         }
         for audio in audios {
             audio.pause(.sessionInactive)
         }
+        try? engine?.deactivate()
         for call in calls {
             try? call.hangup()
         }

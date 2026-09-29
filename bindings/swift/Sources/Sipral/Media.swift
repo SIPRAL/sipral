@@ -42,14 +42,29 @@ public struct PathCandidate: Sendable, Equatable {
 ///
 /// Not built directly: `Call` mints one from its own
 /// `SipralEventKind.mediaStarted` and hands it over as `call.media`.
+///
+/// On a stack in `AudioMode.device` the library's engine takes the far
+/// end's audio and gives the microphone's, so this thread carries only the
+/// packets: `frames(bufferingNewest:)` hands out nothing and `sendAudio` is
+/// not read (`pumpsFrames` says which). Statistics, the ICE paths and the
+/// socket are the same in both modes.
 public final class Media: @unchecked Sendable {
     public let handle: SipralHandle
     public let sampleRate: Int
     public let frameSamples: Int
     private let frameSeconds: Double
 
+    /// Whether this media carries the call's frames through `frames()` and
+    /// `sendAudio` -- `AudioMode.application` -- or the library's engine does.
+    public let pumpsFrames: Bool
+
     private let stack: SipralStack
-    private let socket: UDPSocket
+    /// The call's socket, guarded by `ioQueue` -- as is every send and
+    /// receive on it -- since `Call.moveMedia` puts another in its place
+    /// and the engine's thread sends on it in device mode.
+    private var socket: UDPSocket
+    private var socketClosed = false
+    private let ioQueue = DispatchQueue(label: "org.sipral.media.io")
 
     private let stateQueue = DispatchQueue(label: "org.sipral.media.state")
     private var _remoteAddress: String?
@@ -87,9 +102,10 @@ public final class Media: @unchecked Sendable {
     private var closed = false
     private let closeQueue = DispatchQueue(label: "org.sipral.media.close")
 
-    init(stack: SipralStack, callHandle: SipralHandle, socket: UDPSocket) throws {
+    init(stack: SipralStack, callHandle: SipralHandle, socket: UDPSocket, pumpsFrames: Bool) throws {
         self.stack = stack
         self.socket = socket
+        self.pumpsFrames = pumpsFrames
         self.handle = try retryingBusy { try Sipral.callMedia(stack: stack.handle, call: callHandle) }
 
         let info = try Sipral.mediaInfo(media: handle)
@@ -149,8 +165,10 @@ public final class Media: @unchecked Sendable {
     /// padded with what the next call adds) across as many capture calls as
     /// it takes. Thread-safe: called from whatever thread the application
     /// runs its own audio loop or voice-agent callback on, never from the
-    /// media thread itself.
+    /// media thread itself. In `AudioMode.device` the microphone is the
+    /// engine's and this is dropped: nothing would ever read it.
     public func sendAudio(_ samples: [Int16]) {
+        guard pumpsFrames else { return }
         outgoing.sync { toSend.append(samples) }
     }
 
@@ -168,8 +186,37 @@ public final class Media: @unchecked Sendable {
         }
     }
 
+    /// This call's media socket, as `host:port`: where it is offered now.
+    public var localAddress: String {
+        ioQueue.sync { socket.localAddress }
+    }
+
+    /// Put `fresh` in the place of the call's socket, and close the old one:
+    /// `Call.moveMedia` once the call has been offered at the new one.
+    func replaceSocket(with fresh: UDPSocket) {
+        ioQueue.sync {
+            let old = socket
+            socket = fresh
+            old.close()
+        }
+    }
+
+    /// One datagram out of the call's socket, unless it is closed: what the
+    /// library's engine hands `SipralStack` to send in device mode, and a
+    /// farewell after the call.
+    func sendDatagram(_ payload: [UInt8], to destination: String) {
+        ioQueue.sync {
+            guard !socketClosed else { return }
+            socket.send(payload, to: destination)
+        }
+    }
+
+    private func receiveOne() -> (data: [UInt8], from: String)? {
+        ioQueue.sync { socketClosed ? nil : socket.receive(capacity: 2048) }
+    }
+
     private func drainReceive() {
-        while let (receivedData, from) = socket.receive(capacity: 2048) {
+        while let (receivedData, from) = receiveOne() {
             stateQueue.sync { _remoteAddress = from }
             var mutableData = receivedData
             _ = try? Sipral.mediaReceive(media: handle, data: &mutableData, from: from, nowMs: stack.nowMs())
@@ -226,9 +273,9 @@ public final class Media: @unchecked Sendable {
     /// server, which the stack holds.
     private func send(_ payload: [UInt8], to destination: String, over protocolRaw: UInt32) {
         if protocolRaw == SipralTransport.tcp.rawValue || protocolRaw == SipralTransport.tls.rawValue {
-            stack.writeTurn(socket.localAddress, payload)
+            stack.writeTurn(localAddress, payload)
         } else {
-            socket.send(payload, to: destination)
+            sendDatagram(payload, to: destination)
         }
     }
 
@@ -238,7 +285,24 @@ public final class Media: @unchecked Sendable {
             let started = DispatchTime.now()
             drainReceive()
 
-            if active {
+            if active && !pumpsFrames {
+                // the engine plays and captures; what is left here is the
+                // packets it does not carry: RTCP, and ICE's and DTLS's
+                do {
+                    _ = try Sipral.mediaInfo(media: handle)
+                } catch let error as SipralError where error.status != .busy {
+                    active = false
+                    frameBroadcast.finish()
+                } catch {
+                    // re-entry, as below
+                }
+                drainPacket { packet in
+                    try Sipral.mediaPollRtcp(media: self.handle, nowMs: self.stack.nowMs(), packet: &packet)
+                }
+                drainPacket { packet in
+                    try Sipral.mediaPollTransmit(media: self.handle, nowMs: self.stack.nowMs(), packet: &packet)
+                }
+            } else if active {
                 var samples = [Int16](repeating: 0, count: frameSamples)
                 do {
                     let (written, _) = try Sipral.mediaPlayback(media: handle, samples: &samples)
@@ -290,7 +354,10 @@ public final class Media: @unchecked Sendable {
         guard !wasClosed else { return }
         _ = closedSemaphore.wait(timeout: .now() + 5)
         try? Sipral.mediaRelease(media: handle)
-        socket.close()
+        ioQueue.sync {
+            socketClosed = true
+            socket.close()
+        }
         frameBroadcast.finish()
     }
 

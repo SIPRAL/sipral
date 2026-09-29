@@ -4,10 +4,9 @@
 import SwiftUI
 
 /// A skeleton macOS sample for the Swift layer over `sipral.h`: not a
-/// product, and not run against the network from this Mac -- new binaries
-/// reaching out wait on a network-filter popup nobody answers here, so this
-/// is built and read, never launched against a real registrar from this
-/// machine.
+/// product. The library runs its audio -- `AppModel` holds no audio code --
+/// and the first call asks the system for the microphone, on behalf of
+/// whatever launched the sample (a Terminal, for `swift run`).
 @main
 struct SipralSampleApp: App {
     @State private var model = AppModel()

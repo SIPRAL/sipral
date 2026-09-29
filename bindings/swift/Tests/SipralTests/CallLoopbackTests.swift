@@ -56,8 +56,8 @@ final class CallLoopbackTests: XCTestCase {
     }
 
     func testCallReachesConfirmedWithMediaBothWays() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
@@ -75,8 +75,8 @@ final class CallLoopbackTests: XCTestCase {
     }
 
     func testAudioCrossesInBothDirections() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
@@ -107,8 +107,8 @@ final class CallLoopbackTests: XCTestCase {
     }
 
     func testHoldResumeDtmfAndStatistics() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
@@ -178,8 +178,8 @@ final class CallLoopbackTests: XCTestCase {
     /// application's own loop over that call both rely on. A single
     /// `AsyncStream` read from two places splits its events between them.
     func testTwoConcurrentReadersBothSeeEveryEventOfARealCall() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let aliceAccount = try alice.addAccount(
@@ -259,8 +259,8 @@ final class CallLoopbackTests: XCTestCase {
     /// time, the one that left is forgotten, and the one never read still
     /// holds everything when it is finally drained.
     func testAReaderThatStopsEarlyDoesNotHoldUpTheOthers() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
@@ -303,8 +303,8 @@ final class CallLoopbackTests: XCTestCase {
 
     /// Frames go to every reader too, and a slow one keeps only its newest.
     func testEveryFrameReaderHearsTheFarEnd() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
@@ -341,8 +341,8 @@ final class CallLoopbackTests: XCTestCase {
     /// `close()` needed; one taken after the end is handed that end and
     /// finished at once, and a digit stream taken then is empty.
     func testEveryStreamFinishesWhenTheCallEnds() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
@@ -374,7 +374,7 @@ final class CallLoopbackTests: XCTestCase {
     /// A stack's stream finishes when the stack closes, and one taken after
     /// that is finished from the start.
     func testStackStreamsFinishWhenTheStackCloses() async throws {
-        let stack = try SipralStack()
+        let stack = try SipralStack(audio: .application)
         let first = Recorder(stack.events())
         let second = Recorder(stack.events())
 
@@ -387,8 +387,8 @@ final class CallLoopbackTests: XCTestCase {
     }
 
     func testHandlesReleaseWithNoUseAfterFreeWhilePendingEventsExist() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
@@ -413,8 +413,8 @@ final class CallLoopbackTests: XCTestCase {
     /// Reproduces `intern/rapoarte/2026-09-25-review-day.json`'s "swift"
     /// finding on `SipralStack.takeIncomingCall`.
     func testTakeIncomingCallOnAHandleThatEndedBeforeItWasTakenThrowsAndCleansUp() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let aliceAccount = try alice.addAccount(
@@ -453,8 +453,8 @@ final class CallLoopbackTests: XCTestCase {
     /// never started (so the only thing a non-idempotent `close()` would do
     /// twice is close the raw `mediaSocket` descriptor) must not hang.
     func testCloseFromManyConcurrentCallersDoesNotHang() throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let aliceAccount = try alice.addAccount(
@@ -485,8 +485,8 @@ final class CallLoopbackTests: XCTestCase {
     /// must not reach past its own guard to close that unrelated socket's
     /// descriptor out from under it.
     func testSecondCloseDoesNotStealAReusedDescriptor() throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
 
         let aliceAccount = try alice.addAccount(

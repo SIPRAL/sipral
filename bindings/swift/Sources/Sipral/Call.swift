@@ -85,11 +85,19 @@ public final class Call: @unchecked Sendable {
         stateQueue.sync { _ended }
     }
 
+    /// The socket the call was placed or answered on: until `media` exists it
+    /// is the call's, and from then on `Media` owns it -- and whichever
+    /// socket `moveMedia` puts in its place.
     private let mediaSocket: UDPSocket
+    private var _mediaAddress: String
     /// The call's media socket, as `host:port`: the name
     /// `sipral_stack_nat_map` gave it, and so of its connection to a TURN
-    /// server reached over TCP or TLS.
-    let mediaAddress: String
+    /// server reached over TCP or TLS; after `moveMedia`, the new one.
+    var mediaAddress: String { stateQueue.sync { _mediaAddress } }
+
+    /// The `.incomingCall` this call was taken from, for `identity()` and
+    /// `answering()`; `nil` for a call this end placed.
+    private let incoming: CallEventData?
 
     /// The raw descriptor `close()` releases on the no-media path -- `internal`
     /// rather than `private` only so `SipralTests` can watch it directly, the
@@ -97,18 +105,24 @@ public final class Call: @unchecked Sendable {
     /// reads it, so the public surface this package exposes is unchanged.
     var debugMediaSocketDescriptor: Int32 { mediaSocket.fd }
 
-    init(stack: SipralStack, handle: SipralHandle, mediaSocket: UDPSocket) {
+    init(stack: SipralStack, handle: SipralHandle, mediaSocket: UDPSocket, incoming: CallEventData? = nil) {
         self.stack = stack
         self.handle = handle
         self.mediaSocket = mediaSocket
-        self.mediaAddress = mediaSocket.localAddress
+        self._mediaAddress = mediaSocket.localAddress
+        self.incoming = incoming
     }
 
-    /// Writes straight to this call's own media socket -- used by
-    /// `SipralStack` for what `sipral_stack_poll_farewell` hands back once
-    /// signalling has already ended.
+    /// Writes to this call's media socket -- used by `SipralStack` for what
+    /// `sipral_stack_poll_farewell` hands back once signalling has already
+    /// ended, and for the packets the library's engine encodes in device
+    /// mode. Through `media` once it exists, which owns the socket then.
     func sendOnMediaSocket(_ payload: [UInt8], to address: String) {
-        mediaSocket.send(payload, to: address)
+        if let media {
+            media.sendDatagram(payload, to: address)
+        } else {
+            mediaSocket.send(payload, to: address)
+        }
     }
 
     /// Called by `SipralStack` on its own poll thread.
@@ -123,7 +137,9 @@ public final class Call: @unchecked Sendable {
             // Behind a NAT the poll thread has been reading this socket for
             // the stack until now; from the media handle on, `Media` does.
             stack.mediaSocketTaken(mediaAddress)
-            if let minted = try? Media(stack: stack, callHandle: handle, socket: mediaSocket) {
+            if let minted = try? Media(
+                stack: stack, callHandle: handle, socket: mediaSocket, pumpsFrames: !stack.audioMode.isDevice
+            ) {
                 setMedia(minted)
             }
         }
@@ -173,6 +189,83 @@ public final class Call: @unchecked Sendable {
     public func hangup() throws {
         try retryingBusy {
             try Sipral.callHangup(stack: stack.handle, call: handle, nowMs: stack.nowMs())
+        }
+    }
+
+    /// `sipral_call_hangup_for`: end the call as `hangup()` does, and say
+    /// why with a `Reason` (RFC 3326) on the BYE, or on the CANCEL a call
+    /// still ringing turns into. A call that came in and was never answered
+    /// is refused with only the Q.850 value (RFC 6432): a SIP one would
+    /// repeat the refusal's own status.
+    public func hangup(reason: HangupReason) throws {
+        try retryingBusy {
+            try Sipral.callHangupFor(
+                stack: stack.handle, call: handle, sipCause: reason.sipCause ?? 0,
+                q850Cause: reason.q850Cause ?? 0, text: reason.text ?? "", nowMs: stack.nowMs()
+            )
+        }
+    }
+
+    /// `sipral_call_redirect`: answer a call that came in, and is still
+    /// ringing, with a 3xx (RFC 3261 §21.3) naming where to try instead, in
+    /// order of preference -- 302 is call forwarding. `reason` -- `no-answer`,
+    /// `user-busy`, `unconditional`, `deflection`, `do-not-disturb` or any
+    /// other token -- adds a `Diversion` (RFC 5806) naming the address that
+    /// was called.
+    public func redirect(to targets: [String], status: UInt32 = 302, reason: String? = nil) throws {
+        try stack.redirect(call: handle, to: targets, status: status, reason: reason)
+    }
+
+    /// Who is calling, beyond the `From`: for a call that came in, what the
+    /// network asserted behind the account's trust gate, the caller's
+    /// `Privacy` and where the call was diverted from. Empty for a call this
+    /// end placed.
+    public func identity() throws -> CallerIdentity {
+        try IdentityReader.identity(stack: stack, call: handle, data: incoming)
+    }
+
+    /// How a call that came in asked to be answered (RFC 5373) and rung
+    /// (`Alert-Info`).
+    public func answering() throws -> Answering {
+        try IdentityReader.answering(stack: stack, call: handle, data: incoming)
+    }
+
+    /// Offer this call at a socket on the network the device is on now:
+    /// what `SipralEventKind.callAddressWanted` asks for once
+    /// `SipralStack.networkChanged(to:)` has said the old one is gone.
+    ///
+    /// A socket is bound at `host` -- the new network's address,
+    /// `SipralStack.networkChanged(to:)`'s own by default -- asked where it
+    /// appears from when the stack has a STUN server, and the call offered
+    /// there with `sipral_call_media_readdress`: a re-INVITE with only `c=`
+    /// and the port moved (RFC 3264 §8.3.1), carrying the account's new
+    /// `Contact`. The new socket carries the call from then on, whatever the
+    /// far end answers; the answer arrives as `.sessionChanged`, a refusal as
+    /// `.sessionChangeFailed`. A call under ICE is refused with
+    /// `.wrongState`: `restartIce()` moves it.
+    public func moveMedia(host: String? = nil, port: UInt16 = 0) throws {
+        try stack.moving {
+            guard let media else {
+                throw SipralError(status: .wrongState, message: "the call has no media to move yet")
+            }
+            let fresh = try UDPSocket(host: host ?? stack.currentHost, port: port)
+            do {
+                let publicAddress = try stack.mapMovedSocket(fresh)
+                try retryingBusy {
+                    try Sipral.callMediaReaddress(
+                        stack: stack.handle, call: handle, mediaAddress: fresh.localAddress,
+                        publicAddress: publicAddress ?? "", nowMs: stack.nowMs()
+                    )
+                }
+            } catch {
+                stack.giveBackMediaSocket(fresh)
+                throw error
+            }
+            let old = media.localAddress
+            stack.mediaSocketTaken(fresh.localAddress)
+            stack.forgetMapping(old)
+            media.replaceSocket(with: fresh)
+            stateQueue.sync { _mediaAddress = fresh.localAddress }
         }
     }
 

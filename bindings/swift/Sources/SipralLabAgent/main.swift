@@ -363,7 +363,7 @@ func runDirectCall() async -> Bool {
     let account: Account
     let call: Call
     do {
-        stack = try SipralStack(bindHost: host, ice: ice, stunServer: stunServer, turn: turn)
+        stack = try SipralStack(audio: .application, bindHost: host, ice: ice, stunServer: stunServer, turn: turn)
         account = try stack.addAccount(aor: "sip:caller@\(stack.bindAddress)", registrarAddress: peer)
         print("dialling sip:\(peerUser)@\(peer) from \(stack.bindAddress)")
         call = try stack.placeCall(account: account, target: "sip:\(peerUser)@\(peer)", mediaHost: host, destination: peer, ice: ice)
@@ -415,7 +415,7 @@ if environmentValue("SIPRAL_PEER_HOST") != nil {
 
 let registrarAddress = environmentValue("SIPRAL_REGISTRAR_ADDRESS") ?? "127.0.0.1:5060"
 let bindHost = routeTo(registrarAddress)
-let stack = try SipralStack(bindHost: bindHost)
+let stack = try SipralStack(audio: .application, bindHost: bindHost)
 let account = try stack.addAccount(
     aor: environmentValue("SIPRAL_AOR") ?? "sip:agent@example.invalid",
     registrarAddress: registrarAddress,

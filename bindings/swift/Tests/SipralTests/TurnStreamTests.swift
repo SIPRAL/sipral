@@ -211,8 +211,8 @@ final class TurnStreamTests: XCTestCase {
         through turn: TurnServer, stun: FakeStunServer
     ) async throws -> (RelayEventData, SipralStack, SipralStack, Call, Call) {
         let host = try hostAddress()
-        let alice = try SipralStack(bindHost: host, ice: .offered, stunServer: stun.address, turn: turn)
-        let bob = try SipralStack(bindHost: host)
+        let alice = try SipralStack(audio: .application, bindHost: host, ice: .offered, stunServer: stun.address, turn: turn)
+        let bob = try SipralStack(audio: .application, bindHost: host)
         let events = alice.events()
         let bobEvents = bob.events()
         let account = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)

@@ -27,7 +27,7 @@ final class DialogFlowTests: XCTestCase {
             audio.close()
         }
 
-        let stack = try SipralStack()
+        let stack = try SipralStack(audio: .application)
         defer { stack.close() }
         let account = try stack.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: server.localAddress)
         let call = try stack.placeCall(account: account, target: "sip:bob@\(server.localAddress)")

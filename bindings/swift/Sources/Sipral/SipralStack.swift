@@ -35,7 +35,20 @@ import Dispatch
 /// "Signalling on one stack is one thread at a time").
 public final class SipralStack: @unchecked Sendable {
     public let handle: SipralHandle
-    public let bindAddress: String
+
+    /// The signalling socket's address, `host:port`: where it was bound, and
+    /// after `networkChanged(to:)` where it is bound now.
+    public var bindAddress: String {
+        signallingQueue.sync { socket.localAddress }
+    }
+
+    /// Who runs this stack's audio, as it was created.
+    public let audioMode: AudioMode
+
+    /// The library's audio engine -- the devices, their gain, mute and
+    /// level, the ring and when they are open -- in `AudioMode.device`, and
+    /// `nil` in `.application`, where the application runs the audio itself.
+    public private(set) var audio: AudioDevices?
 
     private let eventBroadcast = Broadcast<SipralEvent>(
         label: "org.sipral.stack.events", policy: .bufferingNewest(Call.eventBuffer)
@@ -60,8 +73,24 @@ public final class SipralStack: @unchecked Sendable {
         eventBroadcast.stream()
     }
 
-    private let socket: UDPSocket
+    /// The signalling socket, guarded by `signallingQueue`: the poll thread
+    /// reads and writes it, and `networkChanged(to:)` puts another in its
+    /// place.
+    private var socket: UDPSocket
+    private let signallingQueue = DispatchQueue(label: "org.sipral.stack.signalling")
     private let origin: DispatchTime
+
+    /// Every account this stack added and has not removed, for
+    /// `networkChanged(to:)` to point at the new address.
+    private var accounts: [SipralHandle: Account] = [:]
+
+    /// Serialises a network change with the calls it moves: the accounts are
+    /// pointed at the new address before any call is offered there, so each
+    /// re-INVITE carries the new `Contact`. Also guards `accounts`.
+    private let movingQueue = DispatchQueue(label: "org.sipral.stack.moving")
+    /// The network the stack was last told it is on, guarded by `stateQueue`.
+    private var network: Network
+
     private let callsQueue = DispatchQueue(label: "org.sipral.stack.calls")
     private var calls: [SipralHandle: Call] = [:]
     private let box: StackBox
@@ -120,6 +149,8 @@ public final class SipralStack: @unchecked Sendable {
     private final class NatWaiter {
         let done = DispatchSemaphore(value: 0)
         var mapped = false
+        /// Where the STUN server saw the socket from.
+        var publicAddress: String?
         var relayed: Bool
         init(needsRelay: Bool) { relayed = !needsRelay }
     }
@@ -161,7 +192,24 @@ public final class SipralStack: @unchecked Sendable {
     /// port still lets the registrar's INVITE in minutes after the REGISTER.
     /// On by default; `false` turns it off, and an interval with it off is
     /// refused. Nothing is sent while the stack is suspended.
+    ///
+    /// `audio` says who runs the calls' audio: `AudioMode.platformDefault`,
+    /// the library's own engine wherever this build has one for the platform,
+    /// unless the application pumps the frames itself with `.application`.
+    /// With `.device(activation: .manual)` the devices open only between
+    /// `AudioDevices.activate()` and `deactivate()` -- CallKit's
+    /// `didActivate` and `didDeactivate` -- rather than with the first call's
+    /// media and the last call's end. `audioProbeMs` bounds how long a
+    /// platform call about the devices may block before it is reported as
+    /// `.deviceTimedOut` (zero for three seconds), and `audioDeviceRateHz` is
+    /// the rate the devices are asked to run at (zero for 48 000); every call
+    /// is resampled between its own rate and theirs.
+    ///
+    /// `network` is the network the stack starts on, what the first
+    /// `networkChanged(to:)` compares with: a wired link at `bindHost`, on no
+    /// interface in particular, unless the application knows better.
     public init(
+        audio: AudioMode = .platformDefault,
         bindHost: String = "127.0.0.1",
         bindPort: UInt16 = 0,
         userAgent: String? = nil,
@@ -175,11 +223,15 @@ public final class SipralStack: @unchecked Sendable {
         g729AnnexB: Bool? = nil,
         referrals: Bool? = nil,
         registrarKeepalive: Bool? = nil,
-        registrarKeepaliveMs: UInt64 = 0
+        registrarKeepaliveMs: UInt64 = 0,
+        audioProbeMs: UInt64 = 0,
+        audioDeviceRateHz: UInt32 = 0,
+        network: Network? = nil
     ) throws {
         let socket = try UDPSocket(host: bindHost, port: bindPort)
         self.socket = socket
-        self.bindAddress = socket.localAddress
+        self.audioMode = audio
+        self.network = network ?? Network(link: .wired, address: bindHost)
         self.stunServer = stunServer
         self.turnServer = turn?.address
         self.turn = turn
@@ -222,6 +274,15 @@ public final class SipralStack: @unchecked Sendable {
                     config.referrals = SipralStack.toggle(referrals)
                     config.registrar_keepalive = SipralStack.toggle(registrarKeepalive)
                     config.registrar_keepalive_ms = registrarKeepaliveMs
+                    let (mode, activation) = audio.raw
+                    config.audio = mode
+                    config.audio_activation = activation
+                    config.audio_probe_ms = audioProbeMs
+                    config.audio_device_rate_hz = audioDeviceRateHz
+                    if audio.isDevice {
+                        config.audio_transmit_callback = sipralAudioTransmitTrampoline
+                        config.audio_transmit_user_data = boxPointer
+                    }
                     if let stunPointer = parts[3].pointer {
                         config.nat = SipralNat.stun.rawValue
                         config.stun_server = stunPointer
@@ -242,6 +303,9 @@ public final class SipralStack: @unchecked Sendable {
         }
 
         box.stack = self
+        if audio.isDevice {
+            self.audio = AudioDevices(stack: self)
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.run() }
     }
 
@@ -270,6 +334,19 @@ public final class SipralStack: @unchecked Sendable {
 
     // MARK: - accounts and calls
 
+    /// `sipral_account_add`.
+    ///
+    /// `sessionTimer` is how the account's calls ask for a session timer
+    /// (RFC 4028): thirty minutes by default. `privacy` places every call
+    /// anonymously (RFC 3323): `[.id]` is "withhold my number" -- `From`
+    /// becomes `"Anonymous" <sip:anonymous@anonymous.invalid>`, `Privacy`
+    /// carries the values, and the account's own identity goes in
+    /// `P-Asserted-Identity` only toward a trusted peer. `trustedPeers` are
+    /// the IP addresses of the peers this account trusts -- usually the
+    /// registrar or the trunk -- RFC 3325's trust domain: a call from one of
+    /// them has its asserted identity read (`CallerIdentity`), from anywhere
+    /// else it is left out, and once any are named no identity field leaves
+    /// toward any other peer.
     public func addAccount(
         aor: String,
         registrarAddress: String,
@@ -278,9 +355,12 @@ public final class SipralStack: @unchecked Sendable {
         displayName: String? = nil,
         authUser: String? = nil,
         authPassword: String? = nil,
-        expiresSeconds: UInt64 = 0
+        expiresSeconds: UInt64 = 0,
+        sessionTimer: SessionTimer = .default,
+        privacy: Privacy = [],
+        trustedPeers: [String] = []
     ) throws -> Account {
-        try Account.add(
+        let account = try Account.add(
             stack: self,
             aor: aor,
             registrarAddress: registrarAddress,
@@ -289,8 +369,17 @@ public final class SipralStack: @unchecked Sendable {
             displayName: displayName,
             authUser: authUser,
             authPassword: authPassword,
-            expiresSeconds: expiresSeconds
+            expiresSeconds: expiresSeconds,
+            sessionTimer: sessionTimer,
+            privacy: privacy,
+            trustedPeers: trustedPeers
         )
+        movingQueue.sync { accounts[account.handle] = account }
+        return account
+    }
+
+    func forgetAccount(_ account: SipralHandle) {
+        movingQueue.sync { _ = accounts.removeValue(forKey: account) }
     }
 
     /// `sipral_call_place`, with this stack running the call's audio.
@@ -309,7 +398,9 @@ public final class SipralStack: @unchecked Sendable {
     /// from, and this returns once the server has answered -- or has not,
     /// five and a half seconds on; with a TURN server, once the relay is
     /// allocated or refused as well. `takeIncomingCall` waits the same way.
-    /// `ice` overrides the stack's own ICE policy for this call.
+    /// `ice` overrides the stack's own ICE policy for this call. `headers`
+    /// go on the INVITE as written -- an `Alert-Info` asking for a
+    /// distinctive ring, an `Answer-Mode` asking an intercom to pick up.
     public func placeCall(
         account: Account,
         target: String,
@@ -317,7 +408,8 @@ public final class SipralStack: @unchecked Sendable {
         mediaPort: UInt16 = 0,
         destination: String? = nil,
         srtp: SipralSrtp? = nil,
-        ice: SipralIce? = nil
+        ice: SipralIce? = nil,
+        headers: [SipralHeader] = []
     ) throws -> Call {
         let mediaSocket = try UDPSocket(host: mediaHost, port: mediaPort)
         let stackHandle = handle
@@ -340,7 +432,7 @@ public final class SipralStack: @unchecked Sendable {
                 }
                 return try retryingBusy {
                     try Sipral.callPlace(
-                        stack: stackHandle, account: account.handle, config: config, configHeaders: [], nowMs: now
+                        stack: stackHandle, account: account.handle, config: config, configHeaders: headers, nowMs: now
                     )
                 }
             }
@@ -391,7 +483,7 @@ public final class SipralStack: @unchecked Sendable {
             giveBackMediaSocket(mediaSocket)
             throw error
         }
-        let call = Call(stack: self, handle: event.call, mediaSocket: mediaSocket)
+        let call = Call(stack: self, handle: event.call, mediaSocket: mediaSocket, incoming: event.callData)
         registerCall(call)
 
         // The caller can have given up (CANCEL) between the poll thread
@@ -417,6 +509,36 @@ public final class SipralStack: @unchecked Sendable {
         try retryingBusy {
             try Sipral.callReject(stack: handle, call: event.call, code: code, nowMs: nowMs())
         }
+    }
+
+    /// Answer the `.incomingCall` `event` names with a 3xx instead of taking
+    /// it: `Call.redirect(to:status:reason:)` for a call nothing has taken,
+    /// which needs no media socket. 302 is call forwarding; `targets` are
+    /// where to try, in order of preference; `reason` adds a `Diversion`.
+    public func redirectCall(
+        _ event: SipralEvent, to targets: [String], status: UInt32 = 302, reason: String? = nil
+    ) throws {
+        try redirect(call: event.call, to: targets, status: status, reason: reason)
+    }
+
+    func redirect(call: SipralHandle, to targets: [String], status: UInt32, reason: String?) throws {
+        try retryingBusy {
+            try Sipral.callRedirect(
+                stack: handle, call: call, statusCode: status, targets: targets.joined(separator: ","),
+                reason: reason ?? "", nowMs: nowMs()
+            )
+        }
+    }
+
+    /// Who is calling, beyond the `From`, for the `.incomingCall` `event`
+    /// names -- read before deciding whether to answer. See `CallerIdentity`.
+    public func callerIdentity(of event: SipralEvent) throws -> CallerIdentity {
+        try IdentityReader.identity(stack: self, call: event.call, data: event.callData)
+    }
+
+    /// How the `.incomingCall` `event` names asked to be answered and rung.
+    public func answering(of event: SipralEvent) throws -> Answering {
+        try IdentityReader.answering(stack: self, call: event.call, data: event.callData)
     }
 
     /// Take a REFER outside any dialog and place the call it asks for:
@@ -502,8 +624,9 @@ public final class SipralStack: @unchecked Sendable {
     /// `SIPRAL_STATUS_WRONG_STATE`. The socket is read by the poll thread
     /// from here until its call's media handle exists. Nothing at all on a
     /// stack without a STUN server.
-    private func mapMediaSocket(_ socket: UDPSocket) throws {
-        guard stunServer != nil else { return }
+    @discardableResult
+    private func mapMediaSocket(_ socket: UDPSocket) throws -> String? {
+        guard stunServer != nil else { return nil }
         let local = socket.localAddress
         let waiter = NatWaiter(needsRelay: turnServer != nil)
         natQueue.sync {
@@ -513,6 +636,22 @@ public final class SipralStack: @unchecked Sendable {
         defer { natQueue.sync { _ = natWaiters.removeValue(forKey: local) } }
         try retryingBusy { try Sipral.stackNatMap(stack: handle, local: local, nowMs: nowMs()) }
         _ = waiter.done.wait(timeout: .now() + natPatience)
+        return natQueue.sync { waiter.publicAddress }
+    }
+
+    /// `mapMediaSocket` for the socket `Call.moveMedia` binds: where the
+    /// STUN server sees it from, which the call is offered at, or `nil` on a
+    /// stack without one.
+    func mapMovedSocket(_ socket: UDPSocket) throws -> String? {
+        try mapMediaSocket(socket)
+    }
+
+    /// The call's old socket is gone: `sipral_stack_nat_unmap`, so the stack
+    /// stops refreshing a mapping nothing uses. Nothing on a stack without a
+    /// STUN server.
+    func forgetMapping(_ local: String) {
+        guard stunServer != nil else { return }
+        try? retryingBusy { try Sipral.stackNatUnmap(stack: handle, local: local, nowMs: nowMs()) }
     }
 
     /// The poll thread's half of `mapMediaSocket`'s wait.
@@ -527,7 +666,12 @@ public final class SipralStack: @unchecked Sendable {
         }
         natQueue.sync {
             guard let waiter = natWaiters[local] else { return }
-            if event.natData != nil { waiter.mapped = true } else { waiter.relayed = true }
+            if let nat = event.natData {
+                waiter.mapped = true
+                waiter.publicAddress = nat.mapped
+            } else {
+                waiter.relayed = true
+            }
             if waiter.mapped && waiter.relayed { waiter.done.signal() }
         }
     }
@@ -724,6 +868,126 @@ public final class SipralStack: @unchecked Sendable {
         natQueue.sync { stunSockets.values.map(\.fd) }
     }
 
+    // MARK: - the network changing under the stack
+
+    /// The network the device is on, in as much detail as the stack's
+    /// decision needs (`sipral_stack_network_changed`): the kind of link, the
+    /// local address -- an IPv4 literal, no port -- the platform's own name
+    /// for the interface, never parsed, and whether names resolve there.
+    public struct Network: Sendable, Equatable {
+        public var link: SipralLink
+        public var address: String?
+        public var interface: String?
+        public var resolves: Bool
+
+        public init(link: SipralLink, address: String? = nil, interface: String? = nil, resolves: Bool = true) {
+            self.link = link
+            self.address = address
+            self.interface = interface
+            self.resolves = resolves
+        }
+    }
+
+    /// The address the stack's sockets are bound on now: the bind host, and
+    /// after `networkChanged(to:)` the new network's.
+    var currentHost: String {
+        stateQueue.sync { network.address } ?? UDPSocket.parse(bindAddress).host
+    }
+
+    /// The platform said the network changed: `sipral_stack_network_changed`,
+    /// and what its answer asks of the stack's own sockets.
+    ///
+    /// When the address or the interface changed -- `SipralRecovery.rebuild`
+    /// -- the signalling socket is bound again at `to.address` and handed to
+    /// the stack as its transport, and every account is pointed at it
+    /// (`sipral_account_rebind`), so the REGISTER that follows names where
+    /// this end is now. Every call up at the time then raises
+    /// `SipralEventKind.callAddressWanted`: the far end is still sending its
+    /// audio to the old address, and `Call.moveMedia()` offers it the new
+    /// one. Anything less -- a roam that keeps the address -- only
+    /// re-registers or re-proves, and moves nothing. Safe to call as often as
+    /// the platform notifies; `.nothing` is most of the answers.
+    @discardableResult
+    public func networkChanged(to next: Network) throws -> SipralRecovery {
+        try movingQueue.sync {
+            let previous = stateQueue.sync { network }
+            let moves = next.link != .down && (next.address != previous.address || next.interface != previous.interface)
+            var rebound: UDPSocket?
+            if moves {
+                let host = next.address ?? UDPSocket.parse(bindAddress).host
+                let fresh = try UDPSocket(host: host, port: 0)
+                do {
+                    // called directly: a datagram transport has no remote,
+                    // which only a null pointer says, and the generated
+                    // wrapper hands an empty string over as a real one
+                    let local = fresh.localAddress
+                    try retryingBusy {
+                        var bound: UInt32 = 0
+                        let status = local.withCString {
+                            sipral_stack_transport_bind(
+                                handle, Sipral.transportMain, 0, $0, local.utf8.count, nil, 0, nowMs(), &bound
+                            )
+                        }
+                        try Sipral.check(status)
+                    }
+                } catch {
+                    fresh.close()
+                    throw error
+                }
+                let old = signallingQueue.sync { () -> UDPSocket in
+                    let old = socket
+                    socket = fresh
+                    return old
+                }
+                signallingQueue.sync { old.close() }
+                rebound = fresh
+            }
+            let raw = try retryingBusy {
+                try Sipral.stackNetworkChanged(
+                    stack: handle,
+                    fromLink: previous.link.rawValue, fromAddress: previous.address ?? "",
+                    fromInterface: previous.interface ?? "", fromResolves: previous.resolves ? 1 : 0,
+                    toLink: next.link.rawValue, toAddress: next.address ?? "",
+                    toInterface: next.interface ?? "", toResolves: next.resolves ? 1 : 0,
+                    nowMs: nowMs()
+                )
+            }
+            stateQueue.sync {
+                network = Network(
+                    link: next.link, address: next.address ?? previous.address,
+                    interface: next.interface, resolves: next.resolves
+                )
+            }
+            let recovery = SipralRecovery(rawValue: raw) ?? .unknown
+            if let rebound {
+                for account in accounts.values {
+                    try account.rebind(from: rebound, previous: previous.address)
+                }
+            }
+            return recovery
+        }
+    }
+
+    /// Runs `body` with no network change half done: what `Call.moveMedia`
+    /// holds while it binds and offers.
+    func moving<T>(_ body: () throws -> T) throws -> T {
+        try movingQueue.sync(execute: body)
+    }
+
+    // MARK: - the library's own audio engine
+
+    /// A packet the engine encoded from the microphone, for `call`: sent from
+    /// the call's media socket, or on its connection to a TURN server. On the
+    /// engine's thread, which must not call back into the audio engine.
+    fileprivate func transmitAudio(call: SipralHandle, payload: [UInt8], destination: String, protocolRaw: UInt32) {
+        guard let target = callFor(call) else { return }
+        if Self.overStream(protocolRaw) {
+            writeTurn(target.mediaAddress, payload)
+        } else {
+            target.sendOnMediaSocket(payload, to: destination)
+        }
+    }
+
     // MARK: - the poll thread
 
     /// Every event goes to its call, if it has one, and to `events`.
@@ -765,7 +1029,7 @@ public final class SipralStack: @unchecked Sendable {
             let destination = transmitDestination.withMemoryRebound(to: UInt8.self, capacity: transmit.destination_len) {
                 String(decoding: UnsafeBufferPointer(start: $0, count: transmit.destination_len), as: UTF8.self)
             }
-            socket.send(payload, to: destination)
+            signallingQueue.sync { _ = socket.send(payload, to: destination) }
         }
     }
 
@@ -815,14 +1079,18 @@ public final class SipralStack: @unchecked Sendable {
         while !isClosed {
             // The signalling socket first, then every media socket still
             // waiting for its call's media handle.
-            var pfds = [pollfd(fd: socket.fd, events: Int16(POLLIN), revents: 0)]
+            let signalling = signallingQueue.sync { socket }
+            var pfds = [pollfd(fd: signalling.fd, events: Int16(POLLIN), revents: 0)]
             pfds += stunDescriptors.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
             _ = pfds.withUnsafeMutableBufferPointer { poll($0.baseAddress, nfds_t($0.count), 50) }
             if pfds.dropFirst().contains(where: { $0.revents & Int16(POLLIN) != 0 }) {
                 receiveStun()
             }
             if pfds[0].revents & Int16(POLLIN) != 0 {
-                while let (data, from) = socket.receive() {
+                let local = signalling.localAddress
+                while let (data, from) = signallingQueue.sync(execute: {
+                    socket === signalling ? signalling.receive() : nil
+                }) {
                     // `to` is "the address the datagram arrived on"
                     // (`docs/08-ffi.md`) and null/empty is meant to mean
                     // this stack's own bind address, for "a socket bound to
@@ -840,7 +1108,7 @@ public final class SipralStack: @unchecked Sendable {
                     // not fatal to the poll loop.
                     try? Sipral.stackReceiveDatagram(
                         stack: handle, transport: Sipral.transportMain, data: data, from: from,
-                        to: bindAddress, nowMs: nowMs()
+                        to: local, nowMs: nowMs()
                     )
                 }
             }
@@ -901,7 +1169,7 @@ public final class SipralStack: @unchecked Sendable {
         }
         try? Sipral.stackDestroy(stack: handle)
         eventBroadcast.finish()
-        socket.close()
+        signallingQueue.sync { socket.close() }
     }
 }
 
@@ -931,4 +1199,22 @@ private func sipralStackEventTrampoline(
     guard let event, let userData else { return }
     let box = Unmanaged<SipralStack.StackBox>.fromOpaque(userData).takeUnretainedValue()
     box.stack?.handleEvent(event.pointee)
+}
+
+/// `audio_transmit_callback`: runs on the library's audio engine thread,
+/// once per packet per call, with the packet valid only until it returns --
+/// so it is copied out here, and nothing in it calls the audio engine back.
+private func sipralAudioTransmitTrampoline(
+    _ transmit: UnsafePointer<sipral_audio_transmit_t>?, _ userData: UnsafeMutableRawPointer?
+) {
+    guard let transmit, let userData else { return }
+    let packet = transmit.pointee
+    guard packet.size >= MemoryLayout<sipral_audio_transmit_t>.size,
+          let payload = packet.payload, packet.payload_len > 0 else { return }
+    let bytes = Array(UnsafeBufferPointer(start: payload, count: packet.payload_len))
+    let destination = packet.destination.map {
+        String(decoding: UnsafeRawBufferPointer(start: $0, count: packet.destination_len), as: UTF8.self)
+    } ?? ""
+    let box = Unmanaged<SipralStack.StackBox>.fromOpaque(userData).takeUnretainedValue()
+    box.stack?.transmitAudio(call: packet.call, payload: bytes, destination: destination, protocolRaw: packet.protocol)
 }

@@ -300,7 +300,7 @@ final class NatTests: XCTestCase {
         let stun = try FakeStunServer()
         defer { stun.stop() }
         stun.open = true
-        let stack = try SipralStack()
+        let stack = try SipralStack(audio: .application)
         defer { stack.close() }
         XCTAssertNil(stack.stunServer)
         usleep(300_000)
@@ -313,7 +313,7 @@ final class NatTests: XCTestCase {
         let peer = try UDPSocket(host: "127.0.0.1", port: 0)
         defer { peer.close() }
 
-        let alice = try SipralStack(stunServer: stun.address)
+        let alice = try SipralStack(audio: .application, stunServer: stun.address)
         defer { alice.close() }
         let events = alice.events()
         let account = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: peer.localAddress)
@@ -356,6 +356,7 @@ final class NatTests: XCTestCase {
             let registrar = try UDPSocket(host: "127.0.0.1", port: 0)
             defer { registrar.close() }
             let alice = try SipralStack(
+                audio: .application,
                 stunServer: stun.address,
                 registrarKeepalive: keepalive,
                 registrarKeepaliveMs: keepalive ? 1_000 : 0
@@ -398,6 +399,7 @@ final class NatTests: XCTestCase {
         defer { peer.close() }
 
         let alice = try SipralStack(
+            audio: .application,
             bindHost: host, ice: .offered, stunServer: stun.address,
             turn: TurnServer(address: stun.address, username: "alice-turn", password: password)
         )
@@ -439,8 +441,8 @@ final class NatTests: XCTestCase {
 
     func testTwoStacksRequiringIceCarryAudioBothWays() async throws {
         let host = try hostAddress()
-        let alice = try SipralStack(bindHost: host, ice: .required)
-        let bob = try SipralStack(bindHost: host, ice: .required)
+        let alice = try SipralStack(audio: .application, bindHost: host, ice: .required)
+        let bob = try SipralStack(audio: .application, bindHost: host, ice: .required)
         defer { alice.close(); bob.close() }
         try await assertIceCarriesAudio(alice, bob, host: host)
     }
@@ -450,8 +452,8 @@ final class NatTests: XCTestCase {
     /// checks, the full end nominates, and audio crosses the pair both ways.
     func testALiteStackAnsweringAFullOneCarriesAudioBothWays() async throws {
         let host = try hostAddress()
-        let alice = try SipralStack(bindHost: host, ice: .required)
-        let bob = try SipralStack(bindHost: host, ice: .lite)
+        let alice = try SipralStack(audio: .application, bindHost: host, ice: .required)
+        let bob = try SipralStack(audio: .application, bindHost: host, ice: .lite)
         defer { alice.close(); bob.close() }
         try await assertIceCarriesAudio(alice, bob, host: host)
     }
@@ -467,8 +469,8 @@ final class NatTests: XCTestCase {
         let stun = try FakeStunServer(host: host, publicHost: host)
         defer { stun.stop() }
         stun.open = true
-        let alice = try SipralStack(bindHost: host, ice: .required, stunServer: stun.address)
-        let bob = try SipralStack(bindHost: host, ice: .required, stunServer: stun.address)
+        let alice = try SipralStack(audio: .application, bindHost: host, ice: .required, stunServer: stun.address)
+        let bob = try SipralStack(audio: .application, bindHost: host, ice: .required, stunServer: stun.address)
         defer { alice.close(); bob.close() }
         try await assertIceCarriesAudio(alice, bob, host: host)
         XCTAssertTrue(stun.requests.contains { $0.method == 0x0001 && $0.from != alice.bindAddress
@@ -499,10 +501,11 @@ final class NatTests: XCTestCase {
         defer { stun.stop() }
 
         let alice = try SipralStack(
+            audio: .application,
             bindHost: host, ice: .offered, stunServer: stun.address,
             turn: TurnServer(address: stun.address, username: "alice-turn", password: password)
         )
-        let bob = try SipralStack(bindHost: host)
+        let bob = try SipralStack(audio: .application, bindHost: host)
         defer { alice.close(); bob.close() }
         let events = alice.events()
         let bobEvents = bob.events()
@@ -545,8 +548,8 @@ final class NatTests: XCTestCase {
     /// until a second path is chosen.
     func testAnIceCallSaysWhichPathsItTriedAndRestartsItsIce() async throws {
         let host = try hostAddress()
-        let alice = try SipralStack(bindHost: host, ice: .required)
-        let bob = try SipralStack(bindHost: host, ice: .required)
+        let alice = try SipralStack(audio: .application, bindHost: host, ice: .required)
+        let bob = try SipralStack(audio: .application, bindHost: host, ice: .required)
         defer { alice.close(); bob.close() }
         try await assertIceCarriesAudio(alice, bob, host: host) { aliceCall, aliceMedia in
             let paths = try aliceMedia.pathCandidates()

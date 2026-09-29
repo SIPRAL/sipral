@@ -1430,10 +1430,16 @@ and again through this ABI (`crates/sipral-ffi/src/audio.rs`):
   tells every managed call that delay itself, again after every device
   change.
 
-The .NET and Python layers choose device mode by default wherever
+All four idiomatic layers choose device mode by default wherever
 `SIPRAL_FEATURE_AUDIO_DEVICE` is set and application mode elsewhere, and
-keep application mode for the caller that asks for it; their own sections
-below say how each carries the rest.
+keep application mode for the caller that asks for it. The .NET and Python
+sections below say how each carries the rest. The Swift and Kotlin layers
+name that default `AudioMode.platformDefault` and
+`SipralAudioMode.platformDefault`, with the engine behind
+`SipralStack.audio` and `SipralClient.audio` and the transmit callback
+sending from each call's own socket; on Android, whose devices the library
+does not open, the Kotlin telecom helper's `SipralCallAudios` runs every
+call's `AudioRecord`/`AudioTrack` instead.
 
 ## One declaration, and every printed file (the header, the four bindings and the JNI shim)
 
@@ -1696,10 +1702,12 @@ framework at all; `CallKitAdapter.swift`/`PushKitAdapter.swift` are the real
 frameworks actually work (`canImport(CallKit) && os(iOS)` — the module is
 importable on plain macOS too, but every type in it is marked
 `API_UNAVAILABLE(macos)`, so `canImport` alone is not enough to keep this
-module building there). `AVAudioSession` category and interruption handling,
-and the macOS sample's own microphone/speaker bridge (`AudioBridge.swift`,
-`SipralSampleMac`), are the remaining platform work an application still
-owns. `SipralStack`'s initialiser takes `ice`, `stunServer`, `turn` and
+module building there). The devices are the library's: `SipralStack(audio:)`
+is in device mode wherever the library has an engine for the platform, the
+layer sends from each call's socket what `audio_transmit_callback` hands it,
+and `stack.audio` lists, chooses and meters the devices; `CallKitBridge.drive`
+opens and closes them with CallKit's audio session under manual activation.
+The macOS sample has no audio code of its own. `SipralStack`'s initialiser takes `ice`, `stunServer`, `turn` and
 `g729AnnexB`, and with a STUN server it runs the media-socket loop "Behind a
 NAT" describes on its own poll thread; `SipralEvent.natData` and `relayData`
 carry the two events that loop waits for. It takes `referrals` too, off by

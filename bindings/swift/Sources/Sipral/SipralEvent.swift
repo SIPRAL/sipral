@@ -37,6 +37,8 @@ public struct SipralEvent: Sendable {
     public let referralData: ReferralEventData?
     /// `payload.turn_stream`, for `SipralEventKind.turnStream` only.
     public let turnStreamData: TurnStreamEventData?
+    /// `payload.audio`, for `SipralEventKind.audioDevicesChanged` only.
+    public let audioData: AudioEventData?
 }
 
 /// A media socket's connection to a TURN server reached over TCP or TLS
@@ -117,6 +119,41 @@ public struct CallEventData: Sendable {
     public let toUri: String?
     public let callId: String?
     public let digit: UInt32
+    /// Why the far end ended the call, on `SipralEventKind.callEnded`: the
+    /// `Reason` (RFC 3326) of its BYE, its CANCEL or its refusal, or `nil`
+    /// when it gave none.
+    public let endCause: EndCause?
+    /// Whether an incoming call arrived from a peer its account trusts; when
+    /// it did not, `assertedUri`, `assertedDisplay` and `verstat` say nothing.
+    public let identityTrusted: Bool
+    /// Who the network says is calling -- the first `P-Asserted-Identity`,
+    /// or a calling `Remote-Party-ID` -- from a trusted peer only.
+    public let assertedUri: String?
+    public let assertedDisplay: String?
+    /// What the network concluded about the caller's number.
+    public let verstat: SipralVerstat?
+    /// What the caller's `Privacy` asked for.
+    public let privacy: Privacy
+    /// The top-most `Diversion`, and its reason; `diversionCount` and
+    /// `historyCount` say how many entries `SipralStack.callerIdentity(of:)`
+    /// will read.
+    public let divertedFrom: String?
+    public let diversionReason: String?
+    public let diversionCount: UInt32
+    public let historyCount: UInt32
+    /// `Answer-Mode` and `Priv-Answer-Mode` (RFC 5373), and whether each said
+    /// `;require`.
+    public let answerMode: SipralAnswerMode?
+    public let answerModeRequired: Bool
+    public let privAnswerMode: SipralAnswerMode?
+    public let privAnswerModeRequired: Bool
+    /// After how long the call asked to be answered without the person, or
+    /// `nil` when it did not ask.
+    public let answerAfterMs: UInt64?
+    /// Whether the ring says the caller is internal or external.
+    public let ringSource: SipralRingSource?
+    /// The first `Alert-Info` URI.
+    public let alertInfo: String?
 }
 
 public struct MediaEventData: Sendable {
@@ -134,6 +171,11 @@ public struct MediaEventData: Sendable {
     public let suite: UInt32
     public let sourceRaw: UInt32
     public let source: SipralDigitSource?
+
+    /// Which SRTP suite keys the call, on `SipralEventKind.mediaSecured`:
+    /// RFC 4568's AES-CM, RFC 6188's AES-256 and RFC 7714's AES-GCM each have
+    /// a name of their own; `nil` for a number newer than this package.
+    public var srtpSuite: SipralSrtpSuite? { SipralSrtpSuite(rawValue: suite) }
 }
 
 public struct RegistrationEventData: Sendable {
@@ -165,6 +207,7 @@ enum SipralEventDecoder {
         SipralEventKind.callReplaced.rawValue,
         SipralEventKind.callEnded.rawValue,
         SipralEventKind.dtmfSent.rawValue,
+        SipralEventKind.callAddressWanted.rawValue,
     ]
 
     // Kinds whose payload lives in `payload.media` (`sipral_media_event_t`).
@@ -213,7 +256,46 @@ enum SipralEventDecoder {
             fromDisplay: text(call.from_display, call.from_display_len),
             toUri: text(call.to_uri, call.to_uri_len),
             callId: text(call.call_id, call.call_id_len),
-            digit: call.digit
+            digit: call.digit,
+            endCause: endCause(call),
+            identityTrusted: call.identity_trusted != 0,
+            assertedUri: text(call.asserted_uri, call.asserted_uri_len),
+            assertedDisplay: text(call.asserted_display, call.asserted_display_len),
+            verstat: SipralVerstat(rawValue: call.verstat),
+            privacy: Privacy(rawValue: call.privacy),
+            divertedFrom: text(call.diverted_from, call.diverted_from_len),
+            diversionReason: text(call.diversion_reason, call.diversion_reason_len),
+            diversionCount: call.diversion_count,
+            historyCount: call.history_count,
+            answerMode: SipralAnswerMode(rawValue: call.answer_mode),
+            answerModeRequired: call.answer_mode_required != 0,
+            privAnswerMode: SipralAnswerMode(rawValue: call.priv_answer_mode),
+            privAnswerModeRequired: call.priv_answer_mode_required != 0,
+            answerAfterMs: call.has_answer_after != 0 ? call.answer_after_ms : nil,
+            ringSource: SipralRingSource(rawValue: call.ring_source),
+            alertInfo: text(call.alert_info, call.alert_info_len)
+        )
+    }
+
+    private static func endCause(_ call: sipral_call_event_t) -> EndCause? {
+        let text = text(call.cause_text, call.cause_text_len)
+        guard call.cause_sip != 0 || call.cause_q850 != 0 || text != nil else { return nil }
+        return EndCause(
+            sip: call.cause_sip == 0 ? nil : call.cause_sip,
+            q850: call.cause_q850 == 0 ? nil : call.cause_q850,
+            text: text
+        )
+    }
+
+    private static func audioData(_ audio: sipral_audio_event_t) -> AudioEventData {
+        AudioEventData(
+            changeRaw: audio.change,
+            change: SipralAudioChange(rawValue: audio.change),
+            originRaw: audio.origin,
+            origin: SipralAudioOrigin(rawValue: audio.origin),
+            role: SipralAudioRole(rawValue: audio.role),
+            direction: SipralAudioDirection(rawValue: audio.direction),
+            device: audio.device == 0 ? nil : audio.device
         )
     }
 
@@ -316,8 +398,11 @@ enum SipralEventDecoder {
         var relayData: RelayEventData?
         var referralData: ReferralEventData?
         var turnStreamData: TurnStreamEventData?
+        var audioData: AudioEventData?
 
-        if kindRaw == SipralEventKind.turnStream.rawValue {
+        if kindRaw == SipralEventKind.audioDevicesChanged.rawValue {
+            audioData = self.audioData(raw.payload.audio)
+        } else if kindRaw == SipralEventKind.turnStream.rawValue {
             turnStreamData = self.turnStreamData(raw.payload.turn_stream)
         } else if kindRaw == SipralEventKind.natMapping.rawValue {
             natData = self.natData(raw.payload.nat)
@@ -351,7 +436,8 @@ enum SipralEventDecoder {
             natData: natData,
             relayData: relayData,
             referralData: referralData,
-            turnStreamData: turnStreamData
+            turnStreamData: turnStreamData,
+            audioData: audioData
         )
     }
 }

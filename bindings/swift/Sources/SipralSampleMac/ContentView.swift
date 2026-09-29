@@ -5,7 +5,7 @@ import SwiftUI
 import Sipral
 
 /// A skeleton, not a product: registration, a call, hold, DTMF, devices --
-/// the five things `THE TASK` asks the sample to show, in one window.
+/// in one window.
 struct ContentView: View {
     @Bindable var model: AppModel
 
@@ -36,6 +36,18 @@ struct ContentView: View {
                     if let state = model.callState {
                         Text("state: \(String(describing: state))")
                     }
+                    if let incoming = model.incoming {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text("\(incoming.caller) is calling").bold()
+                                if !incoming.detail.isEmpty {
+                                    Text(incoming.detail).font(.footnote)
+                                }
+                            }
+                            Button("Answer") { model.answer() }
+                            Button("Decline") { model.decline() }
+                        }
+                    }
                 }
             }
 
@@ -48,9 +60,27 @@ struct ContentView: View {
             }
 
             GroupBox("Devices") {
-                Text("Microphone and speaker are the system default input/output, bridged through AVAudioEngine (AudioBridge.swift). Choosing a device is macOS's own Sound settings in this skeleton.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading) {
+                    Picker("Speaker", selection: speakerBinding) {
+                        Text("System output").tag(UInt32?.none)
+                        ForEach(model.devices.filter { $0.outputChannels > 0 }) { device in
+                            Text(device.isPresent ? device.name : "\(device.name) (unplugged)").tag(UInt32?.some(device.id))
+                        }
+                    }
+                    Text("The microphone is the system input and the ring plays on the speaker: on macOS the call's voice-processing unit holds both halves, and cancels the speaker's echo\(model.echoCancelled ? " (on)" : "").")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Toggle("Mute microphone", isOn: microphoneMutedBinding)
+                        Slider(value: microphoneGainBinding, in: 0...2) { Text("Mic gain") }
+                        ProgressView(value: model.inputLevel).frame(width: 80)
+                    }
+                    HStack {
+                        Toggle("Mute speaker", isOn: speakerMutedBinding)
+                        Slider(value: speakerVolumeBinding, in: 0...2) { Text("Volume") }
+                        ProgressView(value: model.outputLevel).frame(width: 80)
+                    }
+                }
             }
 
             GroupBox("Log") {
@@ -65,8 +95,28 @@ struct ContentView: View {
             }
         }
         .padding()
-        .frame(minWidth: 420, minHeight: 560)
+        .frame(minWidth: 480, minHeight: 640)
         .onAppear { model.start() }
+    }
+
+    private var speakerBinding: Binding<UInt32?> {
+        Binding(get: { model.speaker }, set: { model.selectSpeaker($0) })
+    }
+
+    private var microphoneMutedBinding: Binding<Bool> {
+        Binding(get: { model.microphoneMuted }, set: { model.setMicrophoneMuted($0) })
+    }
+
+    private var speakerMutedBinding: Binding<Bool> {
+        Binding(get: { model.speakerMuted }, set: { model.setSpeakerMuted($0) })
+    }
+
+    private var microphoneGainBinding: Binding<Double> {
+        Binding(get: { model.microphoneGain }, set: { model.setMicrophoneGain($0) })
+    }
+
+    private var speakerVolumeBinding: Binding<Double> {
+        Binding(get: { model.speakerVolume }, set: { model.setSpeakerVolume($0) })
     }
 
     private var statusText: String {

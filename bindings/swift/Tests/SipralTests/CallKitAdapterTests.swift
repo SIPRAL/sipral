@@ -61,8 +61,8 @@ final class RecordingEnd: CXEndCallAction, @unchecked Sendable {
 /// (`docs/15-mobile.md`, "The Swift package on iOS").
 final class CallKitAdapterTests: XCTestCase {
     func testActionsFromCallKitDriveARingingCall() async throws {
-        let alice = try SipralStack()
-        let bob = try SipralStack()
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
         defer { alice.close(); bob.close() }
         let bobEvents = Recorder(bob.events())
 

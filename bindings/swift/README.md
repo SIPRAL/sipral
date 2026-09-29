@@ -16,12 +16,13 @@ Two layers, the way every binding here is two layers:
   struct the library fills in whole is what the call returns. Regenerated
   by `cargo run -p sipral-abi-gen`, never edited by hand.
 - `Sources/Sipral/SipralStack.swift`, `Account.swift`, `Call.swift`,
-  `Media.swift`, `SipralEvent.swift`, `UDPSocket.swift`, `CStrings.swift`,
+  `Media.swift`, `SipralEvent.swift`, `AudioDevices.swift`,
+  `CallerIdentity.swift`, `UDPSocket.swift`, `CStrings.swift`,
   `CallKitBridge.swift`, `CallKitAdapter.swift`, `PushKitBridge.swift`,
   `PushKitAdapter.swift` — written by hand against the printed layer
   directly, the way `bindings/python/sipral/stack.py` is written against
   `ffi`/`lib`. `SipralStack`, `Account`, `Call` and `Media` are what an
-  application reaches for.
+  application reaches for; `stack.audio` is the library's own audio engine.
 
 ## The idiomatic layer
 
@@ -46,13 +47,17 @@ call's streams finish right after its `callEnded`.
 
 `Account` (`stack.addAccount`) registers and carries `sipral_account_announce`/
 `refreshBinding` for `docs/15-mobile.md`'s C2 push sequence. `Call`
-(`stack.placeCall`, `stack.answerCall`) answers, rejects, holds, resumes,
-sends DTMF and hangs up; `Call.media` mints a `Media` once
-`SipralEventKind.mediaStarted` says the session is up. `Media` runs on a
-thread of its own, paced at the call's own frame rate (`docs/08-ffi.md`, "A
-call's media has a handle of its own"): `sendAudio([Int16])` queues 16-bit
-mono PCM out, `media.frames()` is an `AsyncStream<[Int16]>` of what came back,
-and `media.statistics()` is `sipral_stream_stats_t`.
+(`stack.placeCall`, `stack.answerCall`) answers, rejects, redirects, holds,
+resumes, sends DTMF, moves to a new network and hangs up, with a reason or
+without; `Call.media` mints a `Media` once `SipralEventKind.mediaStarted`
+says the session is up. `Media` runs on a thread of its own, paced at the
+call's own frame rate (`docs/08-ffi.md`, "A call's media has a handle of its
+own"), and carries the call's packets. Who carries its audio is the stack's
+`AudioMode`: the library, opening the devices itself (`.device`, the default
+wherever the library has an engine for the platform), or the application
+(`.application`), for which `sendAudio([Int16])` queues 16-bit mono PCM out
+and `media.frames()` is an `AsyncStream<[Int16]>` of what came back.
+`media.statistics()` is `sipral_stream_stats_t` either way.
 
 `CallKitBridge` and `PushKitBridge` run `docs/15-mobile.md`'s "C2" sequence —
 push, report to CallKit, announce, refresh the binding, match the INVITE,
@@ -92,6 +97,19 @@ pending (`Tests/SipralTests/CallLoopbackTests.swift`), plus
 `CallKitBridge`/`PushKitBridge`'s own "C2" sequence against a recording
 `CallKitProviding`, with no device involved
 (`Tests/SipralTests/CallKitPushKitBridgeTests.swift`).
+
+`Tests/SipralTests/AudioDeviceModeTests.swift` runs the library's engine on
+this machine's real devices. Listing, choosing, gain and mute ask the
+platform without opening anything and always run; what opens the devices —
+activation, the ring, a call in device mode — runs the voice-processing
+unit, which on macOS needs the microphone granted to the process running the
+tests: without it the unit fails inside the framework and takes the test
+process with it. Those run only when asked, from a Terminal the system has
+asked about the microphone once:
+
+```sh
+SIPRAL_AUDIO_DEVICES=1 xcrun --toolchain default swift test --filter AudioDeviceModeTests
+```
 
 `scripts/check.sh` runs both steps from `bindings/` — `swift build` then,
 only if the release library is there to link against, `swift test` — and
@@ -146,19 +164,114 @@ let events = call.events()                 // take it at once: nothing earlier i
 for await event in events {
     if event.kind == .mediaStarted { break }
 }
+// the microphone and the loudspeaker are the library's from here on: the
+// stack is in device mode, and the call is heard without a line of audio code
+
+try call.hold()
+try call.resume()
+try call.sendDtmf("123#")
+try call.hangup(reason: .normalClearing)   // or hangup(), with no Reason
+call.close()
+```
+
+An application that runs its own audio -- a voice agent, a recorder -- makes
+the stack in application mode, and pumps each call's frames:
+
+```swift
+let stack = try SipralStack(audio: .application, bindHost: "192.0.2.10")
+// ... placed as above ...
 let media = call.media!
 let frames = media.frames()                // before sending, so the first reply is not missed
 media.sendAudio(pcmSamples)                // 16-bit mono, one call at a time
 for await frame in frames {
     // the far end's own audio, one frame per item
 }
-
-try call.hold()
-try call.resume()
-try call.sendDtmf("123#")
-try call.hangup()
-call.close()
 ```
+
+### The library runs the audio
+
+`SipralStack(audio:)` takes an `AudioMode`. `.device(activation: .automatic)`
+-- `AudioMode.platformDefault` wherever this build of the library has an
+engine for the platform, macOS and iOS among them -- has the library open the
+voice-processing unit with the first call's media or the first ring and close
+it with the last: every call is resampled to the device's rate and mixed into
+the loudspeaker, the microphone goes into every call, and the platform's own
+echo cancellation sits behind it. Each packet the engine encodes is handed
+back to this layer, which sends it from the call's own socket (or on its
+connection to a TURN server); received packets go in as before. Where there
+is no engine -- Linux -- `.platformDefault` is `.application`.
+
+`stack.audio` is the engine: `refresh()` and `devices()` list the devices
+with their channel counts under ids that survive a refresh and an unplug,
+`select(_:for:)` puts the `.microphone`, the `.speaker` or the `.ringer` on
+one (or back on the system's route with `nil`), refused by status before
+anything opens (`.noSuchDevice`, `.deviceUnusable`, and `.notSupported`
+where the platform cannot: on macOS and iOS the microphone and the
+loudspeaker are one unit, so the microphone follows the system's input and
+the ring plays on the loudspeaker), `selection(for:)` says what was asked and
+what runs while a chosen device is unplugged, `setGain(_:for:)` (1 is unity,
+the input direction is the microphone's gain) and `setMuted(_:for:)` belong
+to the direction and survive a change of device, `level(for:)` is the meter,
+0 to 1, `ring(_:sampleRate:looped:)` and `stopRinging()` play a tone on the
+ringer, and `status()` says whether the devices are open, the render delay
+and whether the system cancels the echo. `SipralEventKind.audioDevicesChanged`
+carries `event.audioData`: what changed, and whether the `.system` or the
+`.engine` changed it -- an application re-applies nothing on the second.
+
+`.device(activation: .manual)` opens the devices only between
+`audio.activate()` and `audio.deactivate()`, which is CallKit's rule:
+`CallKitBridge.drive(stack.audio!)` opens them at `didActivate`, closes them
+at `didDeactivate` and at a provider reset -- the calls stay attached and are
+heard again at the next activation -- and mutes the microphone on
+`CXSetMutedCallAction`.
+
+### Who is calling, why a call ended, and where it goes
+
+```swift
+for await event in stack.events() where event.kind == .incomingCall {
+    let identity = try stack.callerIdentity(of: event)   // before answering
+    let name = identity.asserted?.displayName ?? event.callData?.fromDisplay
+    if identity.privacy.contains(.id) { /* number withheld */ }
+    let answering = try stack.answering(of: event)
+    if let after = answering.answerAfterMs { /* the caller asked to be answered without the person */ }
+    try stack.redirectCall(event, to: ["sip:desk@example.invalid"], reason: "no-answer")  // a 302
+}
+```
+
+`CallerIdentity` is what the network asserted -- `P-Asserted-Identity`, a
+calling `Remote-Party-ID`, `verstat` -- read only from a peer the account
+trusts (`trustedPeers`, RFC 3325 §8; `trusted` says whether it was), the
+caller's `Privacy`, every `Diversion` (RFC 5806) and `History-Info` entry
+(RFC 7044). `Answering` is `Answer-Mode`/`Priv-Answer-Mode` (RFC 5373),
+`answer-after` and every `Alert-Info` with the ring source it names.
+`Call.identity()` and `Call.answering()` read the same for a call taken.
+`Call.hangup(reason:)` writes a `Reason` (RFC 3326) on the BYE or the CANCEL
+-- `.completedElsewhere` is the one a phone that lost a fork race is told --
+and `callEnded`'s `callData.endCause` is the far end's. `Call.redirect(to:)`
+answers a ringing call with a 3xx.
+
+### The account's options
+
+```swift
+let account = try stack.addAccount(
+    aor: "sip:alice@example.invalid",
+    registrarAddress: "203.0.113.10:5060",
+    sessionTimer: .interval(seconds: 600),  // or .off; thirty minutes by default
+    privacy: [.id],                         // withhold my number
+    trustedPeers: ["203.0.113.10"]          // whose asserted identity is believed
+)
+```
+
+### A call on the move
+
+`stack.networkChanged(to: SipralStack.Network(link: .wifi, address: "10.0.0.7", interface: "en0"))`
+tells the stack the platform moved it. When the address or the interface
+changed (`SipralRecovery.rebuild`) the signalling socket is bound again there,
+every account is pointed at it, and every call up raises
+`SipralEventKind.callAddressWanted`: `call.moveMedia()` binds a socket on the
+new network and offers the call there with a re-INVITE that moves only `c=`
+and the port (RFC 3264 §8.3.1). A call under ICE moves with `restartIce()`
+instead.
 
 An incoming call has no `Call` until the application decides what to do
 with it: read `SipralEventKind.incomingCall` off `stack.events()` and call
@@ -171,8 +284,9 @@ answers it.
 
 ### The call's audio
 
-`CallAudio` keeps one call's microphone and speaker through what iOS does to
-them mid-call -- C4 of `docs/13-client-requirements.md` -- over a
+For an application in application mode, `CallAudio` keeps one call's
+microphone and speaker through what iOS does to them mid-call -- C4 of
+`docs/13-client-requirements.md` -- over a
 `CallAudioDevice`; `VoiceProcessingAudioDevice` is one over `AVAudioEngine`
 with the system's voice processing, a new engine on every open:
 
@@ -278,11 +392,25 @@ It is both a runnable example of the layer above and the agent
 `scripts/lab.sh` runs in the lab, headless, as `labuser-agent-swift`.
 
 `Sources/SipralSampleMac` — a SwiftUI skeleton (not a product) macOS app:
-registration, a call, hold/resume, DTMF, and `AudioBridge.swift` wiring the
-device's own microphone and speaker through `AVAudioEngine` into
-`Call.media`. `swift build` compiles it, since it is a target in the same
-package, but nothing launches it headlessly; `scripts/check.sh` covers the
-layer it sits on through `swift test` instead.
+registration, a call, hold/resume, DTMF, an incoming call shown with who the
+network says it is and rung on the library's ringer, a speaker picker,
+volume, microphone gain, mute and meters, and a call moved when the Mac
+changes network. It has no audio code of its own: the stack is in device
+mode. It binds where the Mac reaches the registrar from, and every field can
+come from the environment for a run from a Terminal (`AppModel.swift` names
+them; `SIPRAL_SAMPLE_CALL=1` places the call as it opens):
+
+```sh
+SIPRAL_SAMPLE_REGISTRAR_ADDRESS=192.0.2.20:5060 SIPRAL_SAMPLE_AOR=sip:labuser@192.0.2.20 \
+SIPRAL_SAMPLE_AUTH_USER=labuser SIPRAL_SAMPLE_AUTH_PASSWORD=... \
+SIPRAL_SAMPLE_TARGET=sip:9002@192.0.2.20:5060 SIPRAL_SAMPLE_CALL=1 \
+    xcrun --toolchain default swift run SipralSampleMac
+```
+
+The first call asks the system for the microphone on behalf of whatever
+launched the sample, and a firewall that asks about new programs asks about
+this one. `swift build` compiles it; `scripts/check.sh` covers the layer it
+sits on through `swift test`.
 
 ## What is not here
 
