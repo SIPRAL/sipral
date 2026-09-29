@@ -43,7 +43,7 @@ use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sipral_core::msg::{
     HeaderName, Method, ParseMode, ParseScratch, RequestBuilder, ResponseBuilder, StatusCode,
@@ -63,12 +63,13 @@ use sipral_nat::stun::{
     AttributeType, Class, Message, MessageBuilder, Method as StunMethod, TransactionId,
 };
 use sipral_nat::turn::{ChannelData, ChannelNumber, StreamFraming, Transport};
+use sipral_rtp::rtt::{ReceiverConfig, SenderConfig, TextEvent, TextReceiver, TextSender};
 use sipral_rtp::srtp::{Master, Policy, Protector, SrtpError, Suite, Unprotector};
 use sipral_rtp::{
-    CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder, JitterBufferAdaptive,
-    PacketBuilder, PacketLossConcealment, ReceiverReportBuilder, RtpHeader, RtpPacket, RxConfig,
-    SdesItem, SenderInfo, SenderOrReceiver, SenderReportBuilder, SourceDescriptionBuilder,
-    UNAVAILABLE, VoipMetricsBlock, XrPacketBuilder,
+    CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, Frame, GoodbyeBuilder,
+    JitterBufferAdaptive, PacketBuilder, PacketLossConcealment, ReceiverReportBuilder, RtpHeader,
+    RtpPacket, RxConfig, SdesItem, SenderInfo, SenderOrReceiver, SenderReportBuilder,
+    SourceDescriptionBuilder, UNAVAILABLE, VoipMetricsBlock, XrPacketBuilder,
 };
 use sipral_ua::dtmf::parse_info;
 use sipral_ua::{DialogInfo, MessageSummary};
@@ -926,6 +927,103 @@ fn push_datagram(out: &mut Vec<u8>, datagram: &[u8]) -> Result<(), Wrong> {
     out.push(len);
     out.extend_from_slice(datagram);
     Ok(())
+}
+
+/// The payload types the `rtt` target's receiver was negotiated with.
+const RTT_T140: u8 = 98;
+const RTT_RED: u8 = 100;
+
+/// The `rtt` target reads one-octet-length-prefixed datagrams too, each
+/// arriving a tenth of a second after the one before. A seed is a short
+/// conversation as `TextSender` sends it -- three words, erasures and a new
+/// line in them, then the redundancy flush -- whole, with one packet lost
+/// for the redundancy to cover, and with three lost so a gap is given up.
+fn rtt_seeds() -> Result<Vec<Seed>, Wrong> {
+    let config = SenderConfig::new(RTT_T140, RTT_RED);
+    let mut sender = TextSender::new(config, SSRC, 4000, 90_000)
+        .map_err(|why| Wrong(format!("the rtt sender does not build: {why}")))?;
+    let mut packets = Vec::new();
+    let mut now = Duration::ZERO;
+    for word in ["Hi", " thre\u{8}ee", "\r\n\u{20AC}5"] {
+        sender
+            .push(word)
+            .map_err(|why| Wrong(format!("the rtt sender refuses text: {why}")))?;
+        packets.extend(sender.poll(now));
+        now += Duration::from_millis(300);
+    }
+    while sender.next_poll().is_some() {
+        packets.extend(sender.poll(now));
+        now += Duration::from_millis(300);
+    }
+    let mut datagrams_sent = Vec::new();
+    for packet in &packets {
+        let datagram = packet
+            .to_datagram()
+            .map_err(|why| Wrong(format!("an rtt packet does not write: {why:?}")))?;
+        datagrams_sent.push(datagram);
+    }
+    let run = |skip: &[usize]| -> Result<Vec<u8>, Wrong> {
+        let mut out = Vec::new();
+        for (index, datagram) in datagrams_sent.iter().enumerate() {
+            if !skip.contains(&index) {
+                push_datagram(&mut out, datagram)?;
+            }
+        }
+        Ok(out)
+    };
+    let out = vec![
+        ("conversation", run(&[])?),
+        ("one-lost", run(&[1])?),
+        ("three-lost", run(&[1, 2, 3])?),
+    ];
+    // each run through a receiver the way the target drives one: what
+    // comes out has to be the conversation, or a gap where it must be
+    for ((name, bytes), expected) in out.iter().zip([
+        "Hi three\u{2028}\u{20AC}5",
+        "Hi three\u{2028}\u{20AC}5",
+        "Hi\u{FFFD}\u{2028}\u{20AC}5",
+    ]) {
+        let mut receiver = TextReceiver::new(ReceiverConfig::new(RTT_T140, Some(RTT_RED)))
+            .map_err(|why| Wrong(format!("the rtt receiver does not build: {why}")))?;
+        let mut clock = Duration::ZERO;
+        let mut events = Vec::new();
+        for datagram in datagrams(bytes) {
+            clock += Duration::from_millis(100);
+            let packet = RtpPacket::parse(datagram).map_err(|why| {
+                Wrong(format!(
+                    "a datagram of the {name} seed does not parse: {why:?}"
+                ))
+            })?;
+            let header = packet.header();
+            let frame = Frame {
+                sequence: header.sequence,
+                timestamp: header.timestamp,
+                payload_type: header.payload_type,
+                marker: header.marker,
+                payload: packet.payload(),
+            };
+            let _ = receiver.receive(frame, clock);
+            receiver.poll(clock);
+            events.extend(receiver.events());
+        }
+        receiver.poll(clock + Duration::from_secs(3600));
+        events.extend(receiver.events());
+        let mut text = String::new();
+        for event in events {
+            match event {
+                TextEvent::Erase => {
+                    text.pop();
+                }
+                event => text.push(event.as_char()),
+            }
+        }
+        if text != expected {
+            return Err(Wrong(format!(
+                "the {name} seed reads as {text:?} and it is meant to be {expected:?}"
+            )));
+        }
+    }
+    Ok(out)
 }
 
 fn rtcp_seeds() -> Result<Vec<Seed>, Wrong> {
@@ -2691,6 +2789,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("replay", replay_seeds()?),
         ("rtcp", rtcp_seeds()?),
         ("rtp_dtmf", rtp_dtmf_seeds()?),
+        ("rtt", rtt_seeds()?),
         ("sdp", sdp_seeds()?),
         ("srtp_unprotect", srtp_seeds()?),
         ("stun", stun_seeds()?),

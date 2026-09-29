@@ -1162,6 +1162,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   step in `scripts/check.sh`. Measured against a synthetic echo
   (`crates/sipral-aec-webrtc/examples/erle.rs`): 36.1 dB of echo return
   loss enhancement once AEC3 has adapted, in `docs/05-media.md`.
+- **Real-time text, RFC 4103, in `sipral_rtp::rtt`.** T.140 text over RTP,
+  sans-I/O like the rest of the crate. `TextSender` gathers typed text into
+  one T140block per transmission interval (300 ms by default, never under
+  100 ms), sends it inside RFC 2198 redundancy with two generations by
+  default on the 1000 Hz clock, keeps sending empty-primary packets only
+  while copies of the last text are owed, sets the marker bit after a
+  silence, opens with the byte order mark, sends new lines as LINE
+  SEPARATOR and holds characters back to the peer's `cps`. `TextReceiver`
+  places every block by sequence number, takes whichever copy arrives
+  first, waits a bounded time for a late packet, marks each span no copy
+  could recover with one U+FFFD, reassembles UTF-8 split across blocks,
+  bounds what it holds, and hands out erase, new-line, alert and character
+  events. `TextFormat` writes the `m=text` section with `t140/1000`,
+  `red/1000`, the red `fmtp` and `cps`, and reads the two `fmtp` values
+  back. A new fuzz target, `rtt`, drives the receiver with arbitrary
+  datagrams. Not yet reachable through the C ABI.
 
 ### Fixed
 
