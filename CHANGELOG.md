@@ -66,8 +66,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   entry points, `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` (43) with its
   origin, `SIPRAL_STATUS_NO_SUCH_DEVICE` (13), `_DEVICE_UNUSABLE` (14) and
   `_DEVICE_TIMED_OUT` (15), and `SIPRAL_FEATURE_AUDIO_DEVICE` (2048). A
-  zeroed configuration is application mode, so nothing changes for a caller
-  that pumps its own frames, the four idiomatic layers included. The gate
+  zeroed configuration is application mode, so nothing changes for a C
+  caller that pumps its own frames; the four idiomatic layers default to
+  device mode where the platform has an engine (see above). The gate
   refuses a `target-cpu` or `target-feature` anywhere in the tree, so the
   packaged library needs no instruction beyond its target's baseline.
 - **Who is calling, how the call asks to be answered, why it ended, and
