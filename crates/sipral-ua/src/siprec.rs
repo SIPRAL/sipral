@@ -1172,7 +1172,7 @@ mod tests {
     <associate-time>2010-12-16T23:41:07Z</associate-time>
     <!-- Standardized extension -->
     <call-center xmlns='urn:ietf:params:xml:ns:callcenter'>
-      <supervisor>sip:alice@atlanta.com</supervisor>
+      <supervisor>sip:alice@atlanta.example.com</supervisor>
     </call-center>
     <mydata xmlns='http://example.com/my'>
       <structure>structure!</structure>
@@ -1190,7 +1190,7 @@ mod tests {
     </mydata>
   </session>
   <participant participant_id="srfBElmCRp2QB23b7Mpk0w==">
-    <nameID aor="sip:alice@atlanta.com">
+    <nameID aor="sip:alice@atlanta.example.com">
       <name xml:lang="it">Alice</name>
     </nameID>
     <!-- Standardized extension -->
@@ -1200,7 +1200,7 @@ mod tests {
     </mydata>
   </participant>
   <participant participant_id="zSfPoSvdSDCmU3A3TRDxAw==">
-    <nameID aor="sip:bob@biloxy.com">
+    <nameID aor="sip:bob@biloxi.example.com">
       <name xml:lang="it">Bob</name>
     </nameID>
     <!-- Standardized extension -->
@@ -1258,7 +1258,7 @@ mod tests {
             parties: vec![
                 RecordedParty {
                     id: ALICE.into(),
-                    aor: "sip:alice@atlanta.com".into(),
+                    aor: "sip:alice@atlanta.example.com".into(),
                     name: Some("Alice".into()),
                     sends: vec![RecordedStream {
                         id: STREAM_97.into(),
@@ -1267,7 +1267,7 @@ mod tests {
                 },
                 RecordedParty {
                     id: BOB.into(),
-                    aor: "sip:bob@biloxy.com".into(),
+                    aor: "sip:bob@biloxi.example.com".into(),
                     name: Some("Bob".into()),
                     sends: vec![RecordedStream {
                         id: STREAM_96.into(),
@@ -1308,8 +1308,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                ("sip:alice@atlanta.com", "Alice", Some("it")),
-                ("sip:bob@biloxy.com", "Bob", Some("it"))
+                ("sip:alice@atlanta.example.com", "Alice", Some("it")),
+                ("sip:bob@biloxi.example.com", "Bob", Some("it"))
             ]
         );
         let labels: Vec<Option<&str>> = m.streams.iter().map(|s| s.label.as_deref()).collect();
