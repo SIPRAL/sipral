@@ -614,7 +614,13 @@ pub fn read_packets(mut bytes: &[u8]) -> Result<Vec<Packet>, ReadError> {
                 finished_here.push(core::mem::take(&mut current));
             }
         }
-        if page.lacing().last() == Some(&255) {
+        // a page ending in 255 leaves its last packet open, and a page with
+        // no segments at all leaves open whatever it continued
+        let open = match page.lacing().last() {
+            Some(value) => *value == 255,
+            None => page.is_continued(),
+        };
+        if open {
             partial = Some(current);
         }
         let count = finished_here.len();
@@ -975,6 +981,47 @@ mod tests {
         bytes[5] |= FLAG_EOS;
         reseal(&mut bytes, 0);
         assert_eq!(read_packets(&bytes), Err(ReadError::EndOfStream));
+    }
+
+    /// A sealed page with no segments.
+    fn empty_page(flags: u8, serial: u32, sequence: u32) -> Vec<u8> {
+        let mut page = CAPTURE_PATTERN.to_vec();
+        page.extend_from_slice(&[0, flags]);
+        page.extend_from_slice(&NO_GRANULE.to_le_bytes());
+        page.extend_from_slice(&serial.to_le_bytes());
+        page.extend_from_slice(&sequence.to_le_bytes());
+        page.extend_from_slice(&[0; 5]);
+        reseal(&mut page, 0);
+        page
+    }
+
+    #[test]
+    fn a_page_without_segments_leaves_the_open_packet_open() {
+        // a first page that is full and ends in 255, its packet still open
+        let mut writer = PageWriter::new(3);
+        let mut first = Vec::new();
+        writer
+            .write_packet(&mut first, &vec![1; 255 * 255], 1)
+            .unwrap();
+        assert_eq!(writer.pages_written(), 1);
+
+        // an EOS page that continues the packet with nothing: it never ends
+        let mut bytes = first.clone();
+        bytes.extend_from_slice(&empty_page(FLAG_CONTINUED | FLAG_EOS, 3, 1));
+        assert_eq!(read_packets(&bytes), Err(ReadError::EndOfStream));
+
+        // a page after the empty one that says it starts afresh
+        let mut bytes = first.clone();
+        bytes.extend_from_slice(&empty_page(FLAG_CONTINUED, 3, 1));
+        let mut fresh = PageWriter::new(3);
+        let mut rest = Vec::new();
+        fresh.write_packet(&mut rest, b"new", 2).unwrap();
+        fresh.finish(&mut rest).unwrap();
+        rest[5] = FLAG_EOS;
+        rest[18] = 2;
+        reseal(&mut rest, 0);
+        bytes.extend_from_slice(&rest);
+        assert_eq!(read_packets(&bytes), Err(ReadError::Continuation));
     }
 
     #[test]
