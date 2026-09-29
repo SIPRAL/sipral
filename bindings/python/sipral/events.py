@@ -26,7 +26,9 @@ from .enums import (
     AudioRole,
     Basic,
     ConferenceUpdate,
+    Departure,
     KeyExchange,
+    LocalConferenceChange,
     PresenceKind,
     Privacy,
     PublicationState,
@@ -45,6 +47,7 @@ __all__ = [
     "ConferenceNotice",
     "EndCause",
     "Event",
+    "LocalConferenceNotice",
     "Presence",
     "Protection",
     "TypedText",
@@ -208,6 +211,23 @@ class Event:
             return None
         return EndCause(
             sip=int(f["cause_sip"]), q850=int(f["cause_q850"]), text=f["cause_text"]
+        )
+
+    @property
+    def local_conference(self) -> "LocalConferenceNotice | None":
+        """`SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`, typed; ``None`` on
+        any other event."""
+        if self.kind != lib.SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED:
+            return None
+        f = self.fields
+        return LocalConferenceNotice(
+            conference=f["conference"],
+            change=LocalConferenceChange(f["change"]),
+            departure=Departure(f["departure"]),
+            member=f["member"],
+            members=f["members"],
+            talkers=f["talkers"],
+            loudest=f["loudest"],
         )
 
     @property
@@ -375,6 +395,22 @@ class EndCause:
     sip: int
     q850: int
     text: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class LocalConferenceNotice:
+    """What a local conference did (`sipral.LocalConference`): who joined
+    or left and why, who is talking, or a recording that stopped by itself.
+    ``member`` and ``loudest`` are call handles, or the conference's own
+    handle for this end; ``members`` and ``talkers`` how it stands now."""
+
+    conference: int
+    change: LocalConferenceChange
+    departure: Departure
+    member: int
+    members: int
+    talkers: int
+    loudest: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -583,6 +619,20 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "state": int(server.state),
             "server": _text(server.server, server.server_len),
             "previous": _text(server.previous, server.previous_len),
+        }
+
+    # A local conference changed: a member joined or left, who is talking
+    # changed, or its recording stopped (`sipral.LocalConference`).
+    if kind == lib.SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED:
+        changed = payload.local_conference
+        return {
+            "conference": int(changed.conference),
+            "change": int(changed.change),
+            "departure": int(changed.departure),
+            "member": int(changed.member),
+            "members": int(changed.members),
+            "talkers": int(changed.talkers),
+            "loudest": int(changed.loudest),
         }
 
     # The signalling connection failed or closed, with the TLS library's

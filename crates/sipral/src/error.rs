@@ -359,6 +359,43 @@ pub enum MediaError {
     /// ones it decodes out of the other — which two codecs only agree on
     /// when they cut a frame the same way.
     JoinIncompatible,
+    /// A [`LocalConference`](crate::LocalConference) has no place left, or
+    /// was asked to be made with none or with more than
+    /// [`MAX_CONFERENCE_MEMBERS`](crate::MAX_CONFERENCE_MEMBERS).
+    ConferenceFull {
+        /// How many members it holds, this end included.
+        capacity: usize,
+    },
+    /// A call whose codec a [`LocalConference`](crate::LocalConference)
+    /// cannot mix: it hears at a rate other than 8, 16, 32 or 48 kHz, or cuts
+    /// frames longer than sixty milliseconds. A conference made for this end
+    /// at such a rate is refused the same way, with no frame.
+    ConferenceIncompatible {
+        /// The rate asked for.
+        hertz: u32,
+        /// The frame asked for, in samples at that rate.
+        frame_samples: usize,
+    },
+    /// The call is already in a [`LocalConference`](crate::LocalConference)
+    /// or joined into a pair with
+    /// [`MediaEngine::join`](crate::MediaEngine::join): two drivers of one
+    /// call would each take every other frame from the other.
+    InConference,
+    /// A member was named that is not in the
+    /// [`LocalConference`](crate::LocalConference): a call never added or
+    /// already gone, or this end in a conference made without it.
+    NotInConference,
+    /// A [`LocalConference`](crate::LocalConference) is recorded as one mix,
+    /// in one channel; a stereo layout has nothing to put on its second.
+    ConferenceStereo,
+    /// This end's own frame handed to a
+    /// [`LocalConference`](crate::LocalConference) was not one tick long.
+    LocalFrame {
+        /// Samples in a tick at this end's rate.
+        expected: usize,
+        /// Samples given.
+        given: usize,
+    },
     /// Text was asked for on a call that negotiated no real-time text stream
     /// (RFC 4103): it was given no text socket
     /// ([`CallMedia::text`](crate::CallMedia::text)), the far end refused or
@@ -444,6 +481,47 @@ impl From<std::io::Error> for MediaError {
 }
 
 impl MediaError {
+    /// The sentence for a refusal about mixing calls — a pair or a local
+    /// conference — which `Display` hands here for the reason it hands the
+    /// path's to `about_the_path`.
+    fn about_mixing(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::SameCall => f.write_str("a call cannot be joined to itself"),
+            Self::AlreadyJoined => f.write_str("this call is already joined to another"),
+            Self::NotJoined => f.write_str("this call is not currently joined to another"),
+            Self::JoinIncompatible => f.write_str(
+                "the two calls decode at different sample rates, or cut audio into frames of \
+                 different lengths, so they cannot be mixed without resampling",
+            ),
+            Self::ConferenceFull { capacity } => {
+                write!(
+                    f,
+                    "the conference holds {capacity} members and has no place left"
+                )
+            }
+            Self::ConferenceIncompatible {
+                hertz,
+                frame_samples,
+            } => write!(
+                f,
+                "a conference mixes 8, 16, 32 and 48 kHz with frames of up to 60 ms, and this \
+                 is {hertz} Hz with frames of {frame_samples} samples"
+            ),
+            Self::InConference => f.write_str(
+                "this call is already in a conference or joined into a pair, which drives it",
+            ),
+            Self::NotInConference => f.write_str("that member is not in the conference"),
+            Self::ConferenceStereo => {
+                f.write_str("a conference is recorded as one mix, in one channel, not in stereo")
+            }
+            Self::LocalFrame { expected, given } => write!(
+                f,
+                "this end's frame in a conference is {expected} samples, and {given} were given"
+            ),
+            _ => f.write_str(UNNAMED),
+        }
+    }
+
     /// The refusals about how a call is secured and how its path is chosen.
     ///
     /// Lifted out of [`fmt::Display`] because the one match there had grown
@@ -596,13 +674,16 @@ impl fmt::Display for MediaError {
             ),
             Self::ConsentTone(what) => write!(f, "consent tone: {what}"),
             Self::Signalling(error) => write!(f, "user agent: {error}"),
-            Self::SameCall => f.write_str("a call cannot be joined to itself"),
-            Self::AlreadyJoined => f.write_str("this call is already joined to another"),
-            Self::NotJoined => f.write_str("this call is not currently joined to another"),
-            Self::JoinIncompatible => f.write_str(
-                "the two calls decode at different sample rates, or cut audio into frames of \
-                 different lengths, so they cannot be mixed without resampling",
-            ),
+            Self::SameCall
+            | Self::AlreadyJoined
+            | Self::NotJoined
+            | Self::JoinIncompatible
+            | Self::ConferenceFull { .. }
+            | Self::ConferenceIncompatible { .. }
+            | Self::InConference
+            | Self::NotInConference
+            | Self::ConferenceStereo
+            | Self::LocalFrame { .. } => self.about_mixing(f),
             Self::NoText => f.write_str("the call negotiated no real-time text stream"),
             Self::TextBufferFull { room } => write!(
                 f,
@@ -651,6 +732,18 @@ mod tests {
             MediaError::AlreadyJoined,
             MediaError::NotJoined,
             MediaError::JoinIncompatible,
+            MediaError::ConferenceFull { capacity: 3 },
+            MediaError::ConferenceIncompatible {
+                hertz: 44_100,
+                frame_samples: 882,
+            },
+            MediaError::InConference,
+            MediaError::NotInConference,
+            MediaError::ConferenceStereo,
+            MediaError::LocalFrame {
+                expected: 320,
+                given: 160,
+            },
             #[cfg(feature = "dtls")]
             MediaError::DtlsIdentity,
             #[cfg(feature = "dtls")]

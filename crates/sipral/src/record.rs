@@ -462,6 +462,19 @@ impl Recorder {
         self.offer(Leg::Played, samples)
     }
 
+    /// A whole mix that is already one channel — a conference's — written
+    /// as it is.
+    ///
+    /// Handed over as both directions of a mixed recording, each of which
+    /// the mix halves: the two halves are the mix again, to the rounding of
+    /// one step, converted to the file's rate on the way as any frame is.
+    ///
+    /// # Errors
+    /// Whatever the sink says.
+    pub(crate) fn mix(&mut self, samples: &[i16]) -> Result<(), MediaError> {
+        self.write_pair(samples, samples)
+    }
+
     /// How much audio has been written.
     pub(crate) fn recorded(&self) -> Duration {
         Duration::from_nanos(

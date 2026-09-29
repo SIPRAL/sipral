@@ -90,6 +90,12 @@ pub(crate) mod min_size {
     pub const CODEC_INFO: usize = 32;
     /// `sipral_counters_t`
     pub const COUNTERS: usize = 152;
+    /// `sipral_local_conference_config_t`
+    pub const LOCAL_CONFERENCE_CONFIG: usize = 24;
+    /// `sipral_local_conference_info_t`
+    pub const LOCAL_CONFERENCE_INFO: usize = 56;
+    /// `sipral_local_conference_member_t`
+    pub const LOCAL_CONFERENCE_MEMBER: usize = 40;
     /// `sipral_media_info_t`
     pub const MEDIA_INFO: usize = 88;
     /// `sipral_media_packet_t`

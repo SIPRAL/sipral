@@ -197,6 +197,38 @@ Java_org_sipral_idiomatic_SipralMediaNative_stackPollFarewell(JNIEnv *env, jclas
     return status;
 }
 
+struct conference_args {
+    sipral_handle_t conference;
+    sipral_handle_t out_call;
+};
+
+static sipral_status_t
+conference_fetch(sipral_media_packet_t *packet, void *raw)
+{
+    struct conference_args *args = (struct conference_args *)raw;
+    return sipral_local_conference_poll_transmit(args->conference, &args->out_call, packet);
+}
+
+/* sipral_local_conference_poll_transmit: the oldest packet a member of a
+ * local conference owes its far end, filled the same way, with the call it
+ * belongs to in outCall. */
+JNIEXPORT jint JNICALL
+Java_org_sipral_idiomatic_SipralMediaNative_localConferencePollTransmit(JNIEnv *env, jclass cls,
+    jlong conference, jbyteArray outData, jbyteArray outDestination, jlongArray outLen, jlongArray outCall)
+{
+    struct conference_args args;
+    jint status;
+    jlong call_slot;
+
+    (void)cls;
+    args.conference = (sipral_handle_t)conference;
+    args.out_call = 0;
+    status = run_packet_call(env, outData, outDestination, outLen, conference_fetch, &args);
+    call_slot = (jlong)args.out_call;
+    (*env)->SetLongArrayRegion(env, outCall, 0, 1, &call_slot);
+    return status;
+}
+
 static sipral_status_t
 poll_text_fetch(sipral_media_packet_t *packet, void *raw)
 {

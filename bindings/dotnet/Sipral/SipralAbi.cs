@@ -16,6 +16,10 @@ namespace Sipral;
 ///
 /// The numbers are part of the ABI. A value keeps its meaning for the life of
 /// the ABI's major version, and a new one is only ever added at the end.
+///
+/// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
+/// statuses, and it stays reserved and never used, so no build returns
+/// it and `sipral_status_name` has no name for it.
 /// </summary>
 public enum SipralStatus : int
 {
@@ -162,6 +166,13 @@ public enum SipralStatus : int
     /// the stack with `sipral_stack_transport_bind`, and ask again.
     /// </summary>
     TransportDown = 22,
+    /// <summary>
+    /// A local conference would not take the call (ABI 0.32): it is
+    /// full, the call is already in a conference or joined into a pair
+    /// with `sipral_call_join`, or its codec hears at a rate the
+    /// conference does not mix. The last error says which.
+    /// </summary>
+    ConferenceRefused = 23,
 }
 
 /// <summary>
@@ -1542,6 +1553,19 @@ public enum SipralEventKind : uint
     /// are `SIPRAL_HANDLE_NONE`: a transport is neither.
     /// </summary>
     TransportFailed = 53,
+    /// <summary>
+    /// A local conference changed (ABI 0.32): a member joined or left, who
+    /// is talking changed, or its recording stopped by itself.
+    ///
+    /// `payload.local_conference` says which conference and what
+    /// happened: `member` is the call that joined or left — or the
+    /// conference's own handle for this end — `departure` why it left,
+    /// and `members`, `talkers` and `loudest` how the conference stands
+    /// now. The talkers themselves are read with
+    /// `sipral_local_conference_talker_at`. `account` and `call` are
+    /// `SIPRAL_HANDLE_NONE`: a conference is neither.
+    /// </summary>
+    LocalConferenceChanged = 54,
 }
 
 /// <summary>
@@ -3320,6 +3344,63 @@ public enum SipralPublishFailure : uint
     /// No answer at all.
     /// </summary>
     Unreachable = 5,
+}
+
+/// <summary>
+/// What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` says happened.
+/// Names for `sipral_local_conference_event_t::change`.
+/// </summary>
+public enum SipralLocalConferenceChange : uint
+{
+    /// <summary>
+    /// Never written by this build.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// `member` joined: a call added, or this end when the conference was
+    /// made with it.
+    /// </summary>
+    Joined = 1,
+    /// <summary>
+    /// `member` left, for the reason `departure` gives.
+    /// </summary>
+    Left = 2,
+    /// <summary>
+    /// Who is talking changed: `talkers` and `loudest` say who now, and
+    /// `sipral_local_conference_talker_at` lists them, loudest first.
+    /// </summary>
+    Talkers = 3,
+    /// <summary>
+    /// The conference's recording stopped by itself: the file would not
+    /// take what was written. It holds the audio up to its last
+    /// checkpoint.
+    /// </summary>
+    RecordingStopped = 4,
+}
+
+/// <summary>
+/// Why a member left. Names for
+/// `sipral_local_conference_event_t::departure`.
+/// </summary>
+public enum SipralDeparture : uint
+{
+    /// <summary>
+    /// Nobody left.
+    /// </summary>
+    None = 0,
+    /// <summary>
+    /// `sipral_local_conference_remove` took it out.
+    /// </summary>
+    Removed = 1,
+    /// <summary>
+    /// Its call's media ended.
+    /// </summary>
+    Ended = 2,
+    /// <summary>
+    /// Its call moved to a codec whose rate or frame the conference
+    /// cannot mix.
+    /// </summary>
+    Incompatible = 3,
 }
 
 /// <summary>
@@ -7071,6 +7152,43 @@ public struct SipralTransportFailedEvent
 }
 
 /// <summary>
+/// What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` carries.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralLocalConferenceEvent
+{
+    /// <summary>
+    /// The conference.
+    /// </summary>
+    public ulong Conference;
+    /// <summary>
+    /// A SipralLocalConferenceChange.
+    /// </summary>
+    public uint Change;
+    /// <summary>
+    /// A SipralDeparture, for `SIPRAL_LOCAL_CONFERENCE_CHANGE_LEFT`.
+    /// </summary>
+    public uint Departure;
+    /// <summary>
+    /// Who joined or left: a call, or the conference's own handle for
+    /// this end. `SIPRAL_HANDLE_NONE` for the other changes.
+    /// </summary>
+    public ulong Member;
+    /// <summary>
+    /// Members now, this end included.
+    /// </summary>
+    public uint Members;
+    /// <summary>
+    /// Members talking now.
+    /// </summary>
+    public uint Talkers;
+    /// <summary>
+    /// The loudest of them, or `SIPRAL_HANDLE_NONE`.
+    /// </summary>
+    public ulong Loudest;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -7195,6 +7313,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralTransportFailedEvent TransportFailed;
+    /// <summary>
+    /// For SipralEventKind.LocalConferenceChanged.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralLocalConferenceEvent LocalConference;
 }
 
 /// <summary>
@@ -8268,6 +8391,159 @@ public struct SipralRecordConfig
 }
 
 /// <summary>
+/// How `sipral_local_conference_create` makes a conference. Zero in
+/// every member but `size` is a conference of sixteen with this end in
+/// it at 16 kHz.
+///
+/// Set `size` to `sizeof(sipral_local_conference_config_t)` before the
+/// call.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralLocalConferenceConfig
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The most members it holds at once, this end included, or zero
+    /// for sixteen. At most 1024.
+    /// </summary>
+    public uint MaxMembers;
+    /// <summary>
+    /// A `SipralToggle`: whether this end takes part. On unless it is
+    /// `SIPRAL_TOGGLE_OFF`; a conference without this end only bridges
+    /// its calls.
+    /// </summary>
+    public uint Local;
+    /// <summary>
+    /// The rate of this end's frames in application mode, in hertz —
+    /// 8000, 16000, 32000 or 48000 — or zero for 16000. A tick's frame is
+    /// twenty milliseconds of it. In device mode the audio engine
+    /// converts the devices to it.
+    /// </summary>
+    public uint SampleRate;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralLocalConferenceConfig Sized()
+    {
+        var value = default(SipralLocalConferenceConfig);
+        value.Size = (nuint)Marshal.SizeOf<SipralLocalConferenceConfig>();
+        return value;
+    }
+}
+
+/// <summary>
+/// A conference as it stands: `sipral_local_conference_info`.
+///
+/// Set `size` to `sizeof(sipral_local_conference_info_t)` before the
+/// call.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralLocalConferenceInfo
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// Members, this end included.
+    /// </summary>
+    public uint Members;
+    /// <summary>
+    /// The most it holds.
+    /// </summary>
+    public uint Capacity;
+    /// <summary>
+    /// Members talking in the last tick.
+    /// </summary>
+    public uint Talkers;
+    /// <summary>
+    /// 1 when this end takes part.
+    /// </summary>
+    public uint Local;
+    /// <summary>
+    /// The rate of this end's frames, in hertz.
+    /// </summary>
+    public uint SampleRate;
+    /// <summary>
+    /// Samples in one of this end's frames: twenty milliseconds.
+    /// </summary>
+    public uint FrameSamples;
+    /// <summary>
+    /// 1 while the conference is being recorded.
+    /// </summary>
+    public uint Recording;
+    /// <summary>
+    /// How much has been recorded, while it is.
+    /// </summary>
+    public ulong RecordedMs;
+    /// <summary>
+    /// Packets dropped because nobody polled for them in time.
+    /// </summary>
+    public ulong PacketsDropped;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralLocalConferenceInfo Sized()
+    {
+        var value = default(SipralLocalConferenceInfo);
+        value.Size = (nuint)Marshal.SizeOf<SipralLocalConferenceInfo>();
+        return value;
+    }
+}
+
+/// <summary>
+/// One member of a conference: `sipral_local_conference_member_at`.
+///
+/// Set `size` to `sizeof(sipral_local_conference_member_t)` before the
+/// call.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralLocalConferenceMember
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The call, or the conference's own handle for this end.
+    /// </summary>
+    public ulong Member;
+    /// <summary>
+    /// 1 when it was talking in the last tick, muted or not.
+    /// </summary>
+    public uint Talking;
+    /// <summary>
+    /// 1 when nobody hears it.
+    /// </summary>
+    public uint MutedInput;
+    /// <summary>
+    /// 1 when it hears nothing.
+    /// </summary>
+    public uint MutedOutput;
+    /// <summary>
+    /// The level of what it says, in the steps `sipral_audio_set_gain`
+    /// takes: 256 is unity.
+    /// </summary>
+    public uint GainInput;
+    /// <summary>
+    /// The level of what it hears, in the same steps.
+    /// </summary>
+    public uint GainOutput;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralLocalConferenceMember Sized()
+    {
+        var value = default(SipralLocalConferenceMember);
+        value.Size = (nuint)Marshal.SizeOf<SipralLocalConferenceMember>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -8883,6 +9159,45 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_record_start_with(ulong media, sbyte[] path, nuint pathLen, in SipralRecordingOptions options);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_create(ulong stack, in SipralLocalConferenceConfig config, out ulong conference);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_destroy(ulong conference);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_add(ulong conference, ulong call);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_remove(ulong conference, ulong call);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_set_muted(ulong conference, ulong member, uint direction, uint muted);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_set_gain(ulong conference, ulong member, uint direction, uint gain);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_info(ulong conference, ref SipralLocalConferenceInfo outInfo);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_member_at(ulong conference, nuint index, ref SipralLocalConferenceMember outMember);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_talker_at(ulong conference, nuint index, out ulong member);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_tick(ulong conference, ulong nowMs, short[] mic, nuint micCount, short[] speaker, nuint capacity, out nuint written);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_poll_transmit(ulong conference, out ulong call, ref SipralMediaPacket outPacket);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_record_start(ulong conference, sbyte[] path, nuint pathLen, in SipralRecordingOptions options);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_local_conference_record_stop(ulong conference);
+
 }
 
 /// <summary>Everything the library does, with the C conventions read
@@ -8928,7 +9243,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 31;
+    public const uint AbiVersionMinor = 32;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -9204,6 +9519,14 @@ public static class Sipral
     /// configuration, and what it agreed in `sipral_media_info_t`.
     /// </summary>
     public const uint FeatureRtcpFeedback = 8388608;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. A local conference of any number of
+    /// calls, each on its own codec and rate, with or without this end
+    /// (ABI 0.32): `sipral_local_conference_create` and
+    /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
+    /// </summary>
+    public const uint FeatureLocalConference = 16777216;
 
     /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
@@ -13505,6 +13828,246 @@ public static class Sipral
         var pathSigned = new sbyte[pathBytes.Length];
         Buffer.BlockCopy(pathBytes, 0, pathSigned, 0, pathBytes.Length);
         Check(NativeMethods.sipral_media_record_start_with(media, pathSigned, (nuint)pathSigned.Length, in options));
+    }
+
+    /// <summary>
+    /// Make a local conference on this stack, empty but for this end when
+    /// `config` says it takes part, and write its handle to
+    /// `out_conference`.
+    ///
+    /// In device mode the audio engine starts carrying it at once, opening
+    /// the devices under automatic activation as a call's media does.
+    ///
+    /// `SIPRAL_STATUS_CONFERENCE_REFUSED` for a rate that is not 8, 16, 32
+    /// or 48 kHz and for more than 1024 members.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_local_conference_config_t` whose
+    /// `size` member says how long it is, and `out_conference` at one
+    /// `sipral_handle_t`.
+    /// </summary>
+    public static ulong LocalConferenceCreate(ulong stack, in SipralLocalConferenceConfig config)
+    {
+        Check(NativeMethods.sipral_local_conference_create(stack, in config, out var conference));
+        return conference;
+    }
+
+    /// <summary>
+    /// End a conference. Every call still in it goes back to carrying its
+    /// own audio — in device mode, the audio engine takes each up again —
+    /// a recording running is finished, and the handle is stale.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void LocalConferenceDestroy(ulong conference)
+    {
+        Check(NativeMethods.sipral_local_conference_destroy(conference));
+    }
+
+    /// <summary>
+    /// Add a call. It takes part from the next tick, at its own codec's rate,
+    /// and its far end hears everybody in the conference but itself.
+    ///
+    /// The call needs media running, as for `sipral_call_media`.
+    /// `SIPRAL_STATUS_CONFERENCE_REFUSED` when the conference is full, for a
+    /// call already in this one or another or joined with
+    /// `sipral_call_join`, and for a codec the conference cannot mix — a
+    /// rate other than 8, 16, 32 or 48 kHz, or frames past 60 ms.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    /// </summary>
+    public static void LocalConferenceAdd(ulong conference, ulong call)
+    {
+        Check(NativeMethods.sipral_local_conference_add(conference, call));
+    }
+
+    /// <summary>
+    /// Take a call out. From the next tick nobody in the conference hears it
+    /// and it hears nobody; its media is the application's again — in device
+    /// mode, the audio engine carries it as it carries any call.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call that is not in it.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    /// </summary>
+    public static void LocalConferenceRemove(ulong conference, ulong call)
+    {
+        Check(NativeMethods.sipral_local_conference_remove(conference, call));
+    }
+
+    /// <summary>
+    /// Mute or unmute one way of a member, from the next tick: its input,
+    /// which everybody else stops hearing, or its output, which it stops
+    /// hearing. `direction` is `SIPRAL_AUDIO_DIRECTION_INPUT` or
+    /// `SIPRAL_AUDIO_DIRECTION_OUTPUT`; `member` is a call in the conference,
+    /// or the conference's own handle for this end.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a member that is not in it.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    /// </summary>
+    public static void LocalConferenceSetMuted(ulong conference, ulong member, uint direction, uint muted)
+    {
+        Check(NativeMethods.sipral_local_conference_set_muted(conference, member, direction, muted));
+    }
+
+    /// <summary>
+    /// Set the level of one way of a member, from the next tick, in the
+    /// steps `sipral_audio_set_gain` takes: 256 is unity and 1024, four
+    /// times, the most. Its input's level is what everybody else hears of
+    /// it; its output's is what it hears.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    /// </summary>
+    public static void LocalConferenceSetGain(ulong conference, ulong member, uint direction, uint gain)
+    {
+        Check(NativeMethods.sipral_local_conference_set_gain(conference, member, direction, gain));
+    }
+
+    /// <summary>
+    /// How the conference stands.
+    ///
+    /// Safety
+    ///
+    /// `out_info` must point at a `sipral_local_conference_info_t` whose
+    /// `size` member says how long it is.
+    /// </summary>
+    public static SipralLocalConferenceInfo LocalConferenceInfo(ulong conference)
+    {
+        var info = SipralLocalConferenceInfo.Sized();
+        Check(NativeMethods.sipral_local_conference_info(conference, ref info));
+        return info;
+    }
+
+    /// <summary>
+    /// One member, by index: this end first when it takes part, then the
+    /// calls in the order they joined. The index is stable until the next
+    /// member joins or leaves.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last member.
+    ///
+    /// Safety
+    ///
+    /// `out_member` must point at a `sipral_local_conference_member_t` whose
+    /// `size` member says how long it is.
+    /// </summary>
+    public static SipralLocalConferenceMember LocalConferenceMemberAt(ulong conference, nuint index)
+    {
+        var member = SipralLocalConferenceMember.Sized();
+        Check(NativeMethods.sipral_local_conference_member_at(conference, index, ref member));
+        return member;
+    }
+
+    /// <summary>
+    /// Who was talking in the last tick, by rank: index zero is the
+    /// loudest. A muted member is never listed.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last talker,
+    /// which `sipral_local_conference_info_t::talkers` counts.
+    ///
+    /// Safety
+    ///
+    /// `out_member` must point at one `sipral_handle_t`.
+    /// </summary>
+    public static ulong LocalConferenceTalkerAt(ulong conference, nuint index)
+    {
+        Check(NativeMethods.sipral_local_conference_talker_at(conference, index, out var member));
+        return member;
+    }
+
+    /// <summary>
+    /// Twenty milliseconds of conference, in application mode: `mic` is this
+    /// end's frame, `sipral_local_conference_info_t::frame_samples` long,
+    /// and `speaker` is filled with what this end hears, the same length,
+    /// written to `out_written`. A conference without this end reads no
+    /// microphone — `mic` may be null — and fills `speaker` with silence.
+    ///
+    /// Call it once every twenty milliseconds, from the thread that carries
+    /// the audio, and then drain `sipral_local_conference_poll_transmit`.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` in device mode, where the audio engine
+    /// ticks it; `SIPRAL_STATUS_INVALID_ARGUMENT` for a frame of any other
+    /// length, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` for a speaker buffer
+    /// shorter than a frame, with the length needed in `out_written`.
+    ///
+    /// Safety
+    ///
+    /// `mic` must be readable for `mic_count` `int16_t`, `speaker` writable
+    /// for `capacity` `int16_t`, and `out_written` must point at one
+    /// `size_t` or be null.
+    /// </summary>
+    public static nuint LocalConferenceTick(ulong conference, ulong nowMs, short[] mic, short[] speaker)
+    {
+        Check(NativeMethods.sipral_local_conference_tick(conference, nowMs, mic, (nuint)mic.Length, speaker, (nuint)speaker.Length, out var written));
+        return written;
+    }
+
+    /// <summary>
+    /// The oldest packet a member's call owes its far end, in application
+    /// mode: `out_call` names the call, whose media socket sends it, and
+    /// `out_packet` is filled as `sipral_media_capture` fills one. A `len`
+    /// of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
+    /// waiting. Drain it after every tick.
+    ///
+    /// Safety
+    ///
+    /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+    /// `sipral_media_packet_t` as `sipral_media_capture` describes.
+    /// </summary>
+    public static ulong LocalConferencePollTransmit(ulong conference, ref SipralMediaPacket outPacket)
+    {
+        Check(NativeMethods.sipral_local_conference_poll_transmit(conference, out var call, ref outPacket));
+        return call;
+    }
+
+    /// <summary>
+    /// Record the whole conference to `path`: everybody it hears, each at
+    /// its own level, in one channel, written as `options` say — WAV or Ogg
+    /// Opus, at the conference's rate unless another is named.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when it is already being recorded,
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a stereo layout, for options no
+    /// file can be written with and for a path the file system refuses, and
+    /// `SIPRAL_STATUS_RECORDING_FAILED` when the file would not take its
+    /// header.
+    ///
+    /// Safety
+    ///
+    /// `path` must be readable for `path_len` bytes, and `options` must point
+    /// at a `sipral_recording_options_t` whose `size` member says how long
+    /// it is.
+    /// </summary>
+    public static void LocalConferenceRecordStart(ulong conference, string path, in SipralRecordingOptions options)
+    {
+        var pathBytes = Encoding.UTF8.GetBytes(path);
+        var pathSigned = new sbyte[pathBytes.Length];
+        Buffer.BlockCopy(pathBytes, 0, pathSigned, 0, pathBytes.Length);
+        Check(NativeMethods.sipral_local_conference_record_start(conference, pathSigned, (nuint)pathSigned.Length, in options));
+    }
+
+    /// <summary>
+    /// Stop recording the conference, and finish the file.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when nothing is being recorded.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void LocalConferenceRecordStop(ulong conference)
+    {
+        Check(NativeMethods.sipral_local_conference_record_stop(conference));
     }
 
 }

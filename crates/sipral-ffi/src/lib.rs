@@ -79,6 +79,7 @@ pub mod lifecycle;
 /// crosses the ABI.
 #[cfg(test)]
 mod load;
+pub mod local_conference;
 pub mod log;
 pub mod media;
 pub mod message;

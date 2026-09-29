@@ -59,7 +59,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
         if (jni_event_callback_class == NULL) {
             return JNI_ERR;
         }
-        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJJJ[B[J[B[B[B[B[B[B[B[B[B[B[B[B[J[B[J[B[J[J[J[B[J[J[J[B[J[B[B[B[J[B[B[B[J[B[B[B[B[J[B[B[J[B[B[J[J[B[B[J[B[B[B[B[J[J[J[B[J[B[B[J[B[J)V");
+        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJJJ[B[J[B[B[B[B[B[B[B[B[B[B[B[B[J[B[J[B[J[J[J[B[J[J[J[B[J[B[B[B[J[B[B[B[J[B[B[B[B[J[B[B[J[B[B[J[J[B[B[J[B[B[B[B[J[J[J[B[J[B[B[J[B[J[J)V");
         if (jni_event_callback_deliver == NULL) {
             return JNI_ERR;
         }
@@ -237,6 +237,7 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     jlongArray payloadPresenceNumbers = NULL;
     jbyteArray payloadTransportFailedDetail = NULL;
     jlongArray payloadTransportFailedNumbers = NULL;
+    jlongArray payloadLocalConferenceNumbers = NULL;
 
     if (jni_vm == NULL || event == NULL) {
         return;
@@ -976,7 +977,23 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
         }
     }
     if (built) {
-        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, JNI_REACHES(event, sipral_event_t, account) ? (jlong)event->account : 0, JNI_REACHES(event, sipral_event_t, call) ? (jlong)event->call : 0, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget, payloadTransferNumbers, payloadMediaReason, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost, payloadResolveNumbers, payloadMessageContentType, payloadMessageBody, payloadMessageMessageAccount, payloadMessageNumbers, payloadNatLocal, payloadNatMapped, payloadNatPrevious, payloadNatNumbers, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason, payloadRelayNumbers, payloadReferralTarget, payloadReferralReferredBy, payloadReferralNumbers, payloadTurnStreamLocal, payloadTurnStreamServer, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer, payloadStunServerPrevious, payloadStunServerNumbers, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText, payloadTextNumbers, payloadPresenceEntity, payloadPresenceNote, payloadPresenceNumbers, payloadTransportFailedDetail, payloadTransportFailedNumbers);
+        jlong slots[7] = { 0 };
+        slots[0] = JNI_REACHES(event, sipral_event_t, payload.local_conference.conference) ? (jlong)event->payload.local_conference.conference : 0;
+        slots[1] = JNI_REACHES(event, sipral_event_t, payload.local_conference.change) ? (jlong)event->payload.local_conference.change : 0;
+        slots[2] = JNI_REACHES(event, sipral_event_t, payload.local_conference.departure) ? (jlong)event->payload.local_conference.departure : 0;
+        slots[3] = JNI_REACHES(event, sipral_event_t, payload.local_conference.member) ? (jlong)event->payload.local_conference.member : 0;
+        slots[4] = JNI_REACHES(event, sipral_event_t, payload.local_conference.members) ? (jlong)event->payload.local_conference.members : 0;
+        slots[5] = JNI_REACHES(event, sipral_event_t, payload.local_conference.talkers) ? (jlong)event->payload.local_conference.talkers : 0;
+        slots[6] = JNI_REACHES(event, sipral_event_t, payload.local_conference.loudest) ? (jlong)event->payload.local_conference.loudest : 0;
+        payloadLocalConferenceNumbers = (*env)->NewLongArray(env, 7);
+        if (payloadLocalConferenceNumbers == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetLongArrayRegion(env, payloadLocalConferenceNumbers, 0, 7, slots);
+        }
+    }
+    if (built) {
+        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, JNI_REACHES(event, sipral_event_t, account) ? (jlong)event->account : 0, JNI_REACHES(event, sipral_event_t, call) ? (jlong)event->call : 0, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget, payloadTransferNumbers, payloadMediaReason, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost, payloadResolveNumbers, payloadMessageContentType, payloadMessageBody, payloadMessageMessageAccount, payloadMessageNumbers, payloadNatLocal, payloadNatMapped, payloadNatPrevious, payloadNatNumbers, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason, payloadRelayNumbers, payloadReferralTarget, payloadReferralReferredBy, payloadReferralNumbers, payloadTurnStreamLocal, payloadTurnStreamServer, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer, payloadStunServerPrevious, payloadStunServerNumbers, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText, payloadTextNumbers, payloadPresenceEntity, payloadPresenceNote, payloadPresenceNumbers, payloadTransportFailedDetail, payloadTransportFailedNumbers, payloadLocalConferenceNumbers);
     }
     /* deliver hands what a listener throws to the thread's own handler, so
      * what is pending here is the JVM's -- an array it could not make --
@@ -1176,6 +1193,9 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     }
     if (payloadTransportFailedNumbers != NULL) {
         (*env)->DeleteLocalRef(env, payloadTransportFailedNumbers);
+    }
+    if (payloadLocalConferenceNumbers != NULL) {
+        (*env)->DeleteLocalRef(env, payloadLocalConferenceNumbers);
     }
     if (attached) {
         (*jni_vm)->DetachCurrentThread(jni_vm);
@@ -4839,6 +4859,203 @@ Java_org_sipral_SipralNative_sipral_1media_1record_1start_1with(JNIEnv *env, job
     if (path) {
         (*env)->ReleaseByteArrayElements(env, path, path_data, JNI_ABORT);
     }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1create(JNIEnv *env, jobject self, jlong stack, jlong configMaxMembers, jlong configLocal, jlong configSampleRate, jlongArray conference)
+{
+    (void)env;
+    (void)self;
+    sipral_local_conference_config_t config_value;
+    memset(&config_value, 0, sizeof config_value);
+    config_value.size = sizeof config_value;
+    config_value.max_members = (uint32_t)configMaxMembers;
+    config_value.local = (uint32_t)configLocal;
+    config_value.sample_rate = (uint32_t)configSampleRate;
+    sipral_handle_t conference_value = 0;
+    sipral_status_t status = sipral_local_conference_create((sipral_handle_t)stack, &config_value, &conference_value);
+    {
+        jlong slot = (jlong)conference_value;
+        (*env)->SetLongArrayRegion(env, conference, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1destroy(JNIEnv *env, jobject self, jlong conference)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_local_conference_destroy((sipral_handle_t)conference);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1add(JNIEnv *env, jobject self, jlong conference, jlong call)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_local_conference_add((sipral_handle_t)conference, (sipral_handle_t)call);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1remove(JNIEnv *env, jobject self, jlong conference, jlong call)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_local_conference_remove((sipral_handle_t)conference, (sipral_handle_t)call);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1set_1muted(JNIEnv *env, jobject self, jlong conference, jlong member, jlong direction, jlong muted)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_local_conference_set_muted((sipral_handle_t)conference, (sipral_handle_t)member, (uint32_t)direction, (uint32_t)muted);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1set_1gain(JNIEnv *env, jobject self, jlong conference, jlong member, jlong direction, jlong gain)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_local_conference_set_gain((sipral_handle_t)conference, (sipral_handle_t)member, (uint32_t)direction, (uint32_t)gain);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1info(JNIEnv *env, jobject self, jlong conference, jlongArray info)
+{
+    (void)env;
+    (void)self;
+    sipral_local_conference_info_t info_value;
+    memset(&info_value, 0, sizeof info_value);
+    info_value.size = sizeof info_value;
+    sipral_status_t status = sipral_local_conference_info((sipral_handle_t)conference, &info_value);
+    {
+        jlong slots[10];
+        slots[0] = (jlong)info_value.size;
+        slots[1] = (jlong)info_value.members;
+        slots[2] = (jlong)info_value.capacity;
+        slots[3] = (jlong)info_value.talkers;
+        slots[4] = (jlong)info_value.local;
+        slots[5] = (jlong)info_value.sample_rate;
+        slots[6] = (jlong)info_value.frame_samples;
+        slots[7] = (jlong)info_value.recording;
+        slots[8] = (jlong)info_value.recorded_ms;
+        slots[9] = (jlong)info_value.packets_dropped;
+        (*env)->SetLongArrayRegion(env, info, 0, 10, slots);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1member_1at(JNIEnv *env, jobject self, jlong conference, jlong index, jlongArray member)
+{
+    (void)env;
+    (void)self;
+    sipral_local_conference_member_t member_value;
+    memset(&member_value, 0, sizeof member_value);
+    member_value.size = sizeof member_value;
+    sipral_status_t status = sipral_local_conference_member_at((sipral_handle_t)conference, (size_t)index, &member_value);
+    {
+        jlong slots[7];
+        slots[0] = (jlong)member_value.size;
+        slots[1] = (jlong)member_value.member;
+        slots[2] = (jlong)member_value.talking;
+        slots[3] = (jlong)member_value.muted_input;
+        slots[4] = (jlong)member_value.muted_output;
+        slots[5] = (jlong)member_value.gain_input;
+        slots[6] = (jlong)member_value.gain_output;
+        (*env)->SetLongArrayRegion(env, member, 0, 7, slots);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1talker_1at(JNIEnv *env, jobject self, jlong conference, jlong index, jlongArray member)
+{
+    (void)env;
+    (void)self;
+    sipral_handle_t member_value = 0;
+    sipral_status_t status = sipral_local_conference_talker_at((sipral_handle_t)conference, (size_t)index, &member_value);
+    {
+        jlong slot = (jlong)member_value;
+        (*env)->SetLongArrayRegion(env, member, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1tick(JNIEnv *env, jobject self, jlong conference, jlong nowMs, jshortArray mic, jshortArray speaker, jlongArray written)
+{
+    (void)env;
+    (void)self;
+    jshort *mic_data = mic ? (*env)->GetShortArrayElements(env, mic, NULL) : NULL;
+    jsize mic_size = mic ? (*env)->GetArrayLength(env, mic) : 0;
+    jshort *speaker_data = speaker ? (*env)->GetShortArrayElements(env, speaker, NULL) : NULL;
+    jsize speaker_size = speaker ? (*env)->GetArrayLength(env, speaker) : 0;
+    size_t written_value = 0;
+    sipral_status_t status = sipral_local_conference_tick((sipral_handle_t)conference, (uint64_t)nowMs, (const int16_t *)mic_data, (size_t)mic_size, (int16_t *)speaker_data, (size_t)speaker_size, &written_value);
+    if (mic) {
+        (*env)->ReleaseShortArrayElements(env, mic, mic_data, JNI_ABORT);
+    }
+    if (speaker) {
+        (*env)->ReleaseShortArrayElements(env, speaker, speaker_data, 0);
+    }
+    {
+        jlong slot = (jlong)written_value;
+        (*env)->SetLongArrayRegion(env, written, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1poll_1transmit(JNIEnv *env, jobject self, jlong conference, jlongArray call, jlong outPacket)
+{
+    (void)env;
+    (void)self;
+    sipral_handle_t call_value = 0;
+    sipral_status_t status = sipral_local_conference_poll_transmit((sipral_handle_t)conference, &call_value, (sipral_media_packet_t *)(intptr_t)outPacket);
+    {
+        jlong slot = (jlong)call_value;
+        (*env)->SetLongArrayRegion(env, call, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1record_1start(JNIEnv *env, jobject self, jlong conference, jbyteArray path, jlong optionsFormat, jlong optionsLayout, jlong optionsSampleRate, jlong optionsBitrate, jlong optionsCheckpointMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *path_data = path ? (*env)->GetByteArrayElements(env, path, NULL) : NULL;
+    jsize path_size = path ? (*env)->GetArrayLength(env, path) : 0;
+    sipral_recording_options_t options_value;
+    memset(&options_value, 0, sizeof options_value);
+    options_value.size = sizeof options_value;
+    options_value.format = (uint32_t)optionsFormat;
+    options_value.layout = (uint32_t)optionsLayout;
+    options_value.sample_rate = (uint32_t)optionsSampleRate;
+    options_value.bitrate = (uint32_t)optionsBitrate;
+    options_value.checkpoint_ms = (uint32_t)optionsCheckpointMs;
+    sipral_status_t status = sipral_local_conference_record_start((sipral_handle_t)conference, (const char *)path_data, (size_t)path_size, &options_value);
+    if (path) {
+        (*env)->ReleaseByteArrayElements(env, path, path_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1local_1conference_1record_1stop(JNIEnv *env, jobject self, jlong conference)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_local_conference_record_stop((sipral_handle_t)conference);
     return (jint)status;
 }
 

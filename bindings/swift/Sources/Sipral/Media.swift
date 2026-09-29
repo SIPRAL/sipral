@@ -89,6 +89,15 @@ public final class Media: @unchecked Sendable {
 
     private let stateQueue = DispatchQueue(label: "org.sipral.media.state")
     private var _remoteAddress: String?
+    /// Whether a `LocalConference` carries this call's frames, which this
+    /// media's own thread then leaves alone, as it does in device mode.
+    private var _carriedByConference = false
+    var carriedByConference: Bool { stateQueue.sync { _carriedByConference } }
+
+    /// Called by `LocalConference` as the call joins it and leaves it.
+    func setCarriedByConference(_ carried: Bool) {
+        stateQueue.sync { _carriedByConference = carried }
+    }
     public var remoteAddress: String? { stateQueue.sync { _remoteAddress } }
 
     /// How many frames one reader of `frames(bufferingNewest:)` holds unread
@@ -477,9 +486,10 @@ public final class Media: @unchecked Sendable {
             let started = DispatchTime.now()
             drainReceive()
 
-            if active && !pumpsFrames {
-                // the engine plays and captures; what is left here is the
-                // packets it does not carry: RTCP, and ICE's and DTLS's
+            if active && (!pumpsFrames || carriedByConference) {
+                // the engine, or a local conference, plays and captures;
+                // what is left here is the packets it does not carry: RTCP,
+                // and ICE's and DTLS's
                 do {
                     _ = try Sipral.mediaInfo(media: handle)
                 } catch let error as SipralError where error.status != .busy {

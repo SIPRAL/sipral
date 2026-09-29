@@ -10867,11 +10867,11 @@ fn a_new_association_that_is_never_finished_leaves_the_call_on_the_one_it_had() 
 
 // -- a local conference of two calls -----------------------------------------
 
-fn carol_sip() -> SocketAddr {
+pub(crate) fn carol_sip() -> SocketAddr {
     "192.0.2.3:5060".parse().expect("an address")
 }
 
-fn carol_media() -> SocketAddr {
+pub(crate) fn carol_media() -> SocketAddr {
     "192.0.2.3:40004".parse().expect("an address")
 }
 
@@ -10880,7 +10880,7 @@ fn carol_media() -> SocketAddr {
 /// whichever two stacks a local-conference test needs settled: a call joined
 /// to another still has to be placed against, and torn down against, a third
 /// stack `Pair` itself never carries.
-fn settle_two(a: &mut Stack, b: &mut Stack, answer_b: bool, now: Instant) {
+pub(crate) fn settle_two(a: &mut Stack, b: &mut Stack, answer_b: bool, now: Instant) {
     for _ in 0..12 {
         let from_a = a.outbound();
         let from_b = b.outbound();
@@ -10902,7 +10902,7 @@ fn settle_two(a: &mut Stack, b: &mut Stack, answer_b: bool, now: Instant) {
 /// confirmed — [`Pair::connect`], generalised the same way [`settle_two`] is:
 /// a local conference joins two calls this end placed to two different
 /// stacks, and `Pair` only ever knows about one.
-fn connect_two(
+pub(crate) fn connect_two(
     from: &mut Stack,
     to: &mut Stack,
     to_user: &str,

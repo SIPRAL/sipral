@@ -31,7 +31,7 @@ constants! {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 31;
+    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 32;
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     pub const SIPRAL_ABI_VERSION_PATCH: u32 = 0;

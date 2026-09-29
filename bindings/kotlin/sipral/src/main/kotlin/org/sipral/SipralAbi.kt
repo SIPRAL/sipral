@@ -12,6 +12,10 @@ package org.sipral
  *
  * The numbers are part of the ABI. A value keeps its meaning for the life of
  * the ABI's major version, and a new one is only ever added at the end.
+ *
+ * 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
+ * statuses, and it stays reserved and never used, so no build returns
+ * it and `sipral_status_name` has no name for it.
  */
 enum class SipralStatus(val value: Int) {
     /**
@@ -157,6 +161,13 @@ enum class SipralStatus(val value: Int) {
      * the stack with `sipral_stack_transport_bind`, and ask again.
      */
     TRANSPORT_DOWN(22),
+    /**
+     * A local conference would not take the call (ABI 0.32): it is
+     * full, the call is already in a conference or joined into a pair
+     * with `sipral_call_join`, or its codec hears at a rate the
+     * conference does not mix. The last error says which.
+     */
+    CONFERENCE_REFUSED(23),
     ;
 
     companion object {
@@ -1614,6 +1625,19 @@ enum class SipralEventKind(val value: Int) {
      * are `SIPRAL_HANDLE_NONE`: a transport is neither.
      */
     TRANSPORT_FAILED(53),
+    /**
+     * A local conference changed (ABI 0.32): a member joined or left, who
+     * is talking changed, or its recording stopped by itself.
+     *
+     * `payload.local_conference` says which conference and what
+     * happened: `member` is the call that joined or left — or the
+     * conference's own handle for this end — `departure` why it left,
+     * and `members`, `talkers` and `loudest` how the conference stands
+     * now. The talkers themselves are read with
+     * `sipral_local_conference_talker_at`. `account` and `call` are
+     * `SIPRAL_HANDLE_NONE`: a conference is neither.
+     */
+    LOCAL_CONFERENCE_CHANGED(54),
     ;
 
     companion object {
@@ -3624,6 +3648,71 @@ enum class SipralPublishFailure(val value: Int) {
 }
 
 /**
+ * What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` says happened.
+ * Names for `sipral_local_conference_event_t::change`.
+ */
+enum class SipralLocalConferenceChange(val value: Int) {
+    /**
+     * Never written by this build.
+     */
+    UNKNOWN(0),
+    /**
+     * `member` joined: a call added, or this end when the conference was
+     * made with it.
+     */
+    JOINED(1),
+    /**
+     * `member` left, for the reason `departure` gives.
+     */
+    LEFT(2),
+    /**
+     * Who is talking changed: `talkers` and `loudest` say who now, and
+     * `sipral_local_conference_talker_at` lists them, loudest first.
+     */
+    TALKERS(3),
+    /**
+     * The conference's recording stopped by itself: the file would not
+     * take what was written. It holds the audio up to its last
+     * checkpoint.
+     */
+    RECORDING_STOPPED(4),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralLocalConferenceChange? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Why a member left. Names for
+ * `sipral_local_conference_event_t::departure`.
+ */
+enum class SipralDeparture(val value: Int) {
+    /**
+     * Nobody left.
+     */
+    NONE(0),
+    /**
+     * `sipral_local_conference_remove` took it out.
+     */
+    REMOVED(1),
+    /**
+     * Its call's media ended.
+     */
+    ENDED(2),
+    /**
+     * Its call moved to a codec whose rate or frame the conference
+     * cannot mix.
+     */
+    INCOMPATIBLE(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralDeparture? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * The version of the ABI this library provides.
  *
  * Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -5068,6 +5157,124 @@ data class SipralConferenceUser(
 }
 
 /**
+ * A conference as it stands: `sipral_local_conference_info`.
+ *
+ * Set `size` to `sizeof(sipral_local_conference_info_t)` before the
+ * call.
+ */
+data class SipralLocalConferenceInfo(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * Members, this end included.
+     */
+    val members: Long,
+    /**
+     * The most it holds.
+     */
+    val capacity: Long,
+    /**
+     * Members talking in the last tick.
+     */
+    val talkers: Long,
+    /**
+     * 1 when this end takes part.
+     */
+    val local: Long,
+    /**
+     * The rate of this end's frames, in hertz.
+     */
+    val sampleRate: Long,
+    /**
+     * Samples in one of this end's frames: twenty milliseconds.
+     */
+    val frameSamples: Long,
+    /**
+     * 1 while the conference is being recorded.
+     */
+    val recording: Long,
+    /**
+     * How much has been recorded, while it is.
+     */
+    val recordedMs: Long,
+    /**
+     * Packets dropped because nobody polled for them in time.
+     */
+    val packetsDropped: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 10
+
+        fun of(slots: LongArray): SipralLocalConferenceInfo = SipralLocalConferenceInfo(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+            slots[4],
+            slots[5],
+            slots[6],
+            slots[7],
+            slots[8],
+            slots[9],
+        )
+    }
+}
+
+/**
+ * One member of a conference: `sipral_local_conference_member_at`.
+ *
+ * Set `size` to `sizeof(sipral_local_conference_member_t)` before the
+ * call.
+ */
+data class SipralLocalConferenceMember(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * The call, or the conference's own handle for this end.
+     */
+    val member: Long,
+    /**
+     * 1 when it was talking in the last tick, muted or not.
+     */
+    val talking: Long,
+    /**
+     * 1 when nobody hears it.
+     */
+    val mutedInput: Long,
+    /**
+     * 1 when it hears nothing.
+     */
+    val mutedOutput: Long,
+    /**
+     * The level of what it says, in the steps `sipral_audio_set_gain`
+     * takes: 256 is unity.
+     */
+    val gainInput: Long,
+    /**
+     * The level of what it hears, in the same steps.
+     */
+    val gainOutput: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 7
+
+        fun of(slots: LongArray): SipralLocalConferenceMember = SipralLocalConferenceMember(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+            slots[4],
+            slots[5],
+            slots[6],
+        )
+    }
+}
+
+/**
  * One header field an application hands over: a name and a value, UTF-8,
  * neither NUL-terminated.
  *
@@ -6342,6 +6549,39 @@ class SipralRecordConfig(
 )
 
 /**
+ * How `sipral_local_conference_create` makes a conference. Zero in
+ * every member but `size` is a conference of sixteen with this end in
+ * it at 16 kHz.
+ *
+ * Set `size` to `sizeof(sipral_local_conference_config_t)` before the
+ * call.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralLocalConferenceConfig(
+    /**
+     * The most members it holds at once, this end included, or zero
+     * for sixteen. At most 1024.
+     */
+    val maxMembers: Long = 0,
+    /**
+     * A `SipralToggle`: whether this end takes part. On unless it is
+     * `SIPRAL_TOGGLE_OFF`; a conference without this end only bridges
+     * its calls.
+     */
+    val local: Long = 0,
+    /**
+     * The rate of this end's frames in application mode, in hertz —
+     * 8000, 16000, 32000 or 48000 — or zero for 16000. A tick's frame is
+     * twenty milliseconds of it. In device mode the audio engine
+     * converts the devices to it.
+     */
+    val sampleRate: Long = 0,
+)
+
+/**
  * Something the library has to tell the application.
  *
  * The pointer handed to the callback is the library's, and it is valid for
@@ -7421,6 +7661,41 @@ data class SipralTransportFailedEvent(
 )
 
 /**
+ * What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` carries.
+ */
+data class SipralLocalConferenceEvent(
+    /**
+     * The conference.
+     */
+    val conference: Long,
+    /**
+     * A SipralLocalConferenceChange.
+     */
+    val change: Long,
+    /**
+     * A SipralDeparture, for `SIPRAL_LOCAL_CONFERENCE_CHANGE_LEFT`.
+     */
+    val departure: Long,
+    /**
+     * Who joined or left: a call, or the conference's own handle for
+     * this end. `SIPRAL_HANDLE_NONE` for the other changes.
+     */
+    val member: Long,
+    /**
+     * Members now, this end included.
+     */
+    val members: Long,
+    /**
+     * Members talking now.
+     */
+    val talkers: Long,
+    /**
+     * The loudest of them, or `SIPRAL_HANDLE_NONE`.
+     */
+    val loudest: Long,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -7521,6 +7796,10 @@ class SipralEventPayload(
      * For SipralEventKind.TRANSPORT_FAILED.
      */
     val transportFailed: SipralTransportFailedEvent,
+    /**
+     * For SipralEventKind.LOCAL_CONFERENCE_CHANGED.
+     */
+    val localConference: SipralLocalConferenceEvent,
 )
 
 class SipralEvent(
@@ -7850,6 +8129,10 @@ class SipralEvent(
      * For SipralEventKind.TRANSPORT_FAILED.
      */
     private val payloadTransportFailedNumbers: LongArray? = null,
+    /**
+     * For SipralEventKind.LOCAL_CONFERENCE_CHANGED.
+     */
+    private val payloadLocalConferenceNumbers: LongArray? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -7876,6 +8159,7 @@ class SipralEvent(
             SipralTextEvent(payloadTextText, (payloadTextNumbers?.get(0) ?: 0L)),
             SipralPresenceEvent((payloadPresenceNumbers?.get(0) ?: 0L), (payloadPresenceNumbers?.get(1) ?: 0L), (payloadPresenceNumbers?.get(2) ?: 0L), (payloadPresenceNumbers?.get(3) ?: 0L), payloadPresenceEntity, payloadPresenceNote, (payloadPresenceNumbers?.get(4) ?: 0L), (payloadPresenceNumbers?.get(5) ?: 0L), (payloadPresenceNumbers?.get(6) ?: 0L), (payloadPresenceNumbers?.get(7) ?: 0L), (payloadPresenceNumbers?.get(8) ?: 0L)),
             SipralTransportFailedEvent((payloadTransportFailedNumbers?.get(0) ?: 0L), (payloadTransportFailedNumbers?.get(1) ?: 0L), (payloadTransportFailedNumbers?.get(2) ?: 0L), (payloadTransportFailedNumbers?.get(3) ?: 0L), payloadTransportFailedDetail),
+            SipralLocalConferenceEvent((payloadLocalConferenceNumbers?.get(0) ?: 0L), (payloadLocalConferenceNumbers?.get(1) ?: 0L), (payloadLocalConferenceNumbers?.get(2) ?: 0L), (payloadLocalConferenceNumbers?.get(3) ?: 0L), (payloadLocalConferenceNumbers?.get(4) ?: 0L), (payloadLocalConferenceNumbers?.get(5) ?: 0L), (payloadLocalConferenceNumbers?.get(6) ?: 0L)),
         )
 }
 
@@ -7947,10 +8231,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -8493,7 +8777,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 31)
+        agree(0, 32)
     }
 
     /**
@@ -8675,6 +8959,19 @@ internal object SipralNative {
     external fun sipral_call_detect_progress(stack: Long, call: Long, configListen: Long, configRegion: Long, configAnsweringMachine: Long, configBeep: Long, configBeepWindowMs: Long, configMaxInitialSilenceMs: Long, configMaxGreetingMs: Long, configSilenceAfterGreetingMs: Long, configMaxWords: Long, configMinWordMs: Long, configMinWordGapMs: Long, configMaxDecisionMs: Long, configMinSpeechAboveFloorDb: Long, configBeepMinMs: Long, configBeepMaxMs: Long, configToneCycles: Long): Int
     external fun sipral_call_consent_tone(stack: Long, call: Long, toneEnabled: Long, toneFrequencyHz: Long, toneAttenuationDb: Long, toneLengthMs: Long, toneIntervalMs: Long, toneLocal: Long): Int
     external fun sipral_media_record_start_with(media: Long, path: ByteArray, optionsFormat: Long, optionsLayout: Long, optionsSampleRate: Long, optionsBitrate: Long, optionsCheckpointMs: Long): Int
+    external fun sipral_local_conference_create(stack: Long, configMaxMembers: Long, configLocal: Long, configSampleRate: Long, conference: LongArray): Int
+    external fun sipral_local_conference_destroy(conference: Long): Int
+    external fun sipral_local_conference_add(conference: Long, call: Long): Int
+    external fun sipral_local_conference_remove(conference: Long, call: Long): Int
+    external fun sipral_local_conference_set_muted(conference: Long, member: Long, direction: Long, muted: Long): Int
+    external fun sipral_local_conference_set_gain(conference: Long, member: Long, direction: Long, gain: Long): Int
+    external fun sipral_local_conference_info(conference: Long, info: LongArray): Int
+    external fun sipral_local_conference_member_at(conference: Long, index: Long, member: LongArray): Int
+    external fun sipral_local_conference_talker_at(conference: Long, index: Long, member: LongArray): Int
+    external fun sipral_local_conference_tick(conference: Long, nowMs: Long, mic: ShortArray, speaker: ShortArray, written: LongArray): Int
+    external fun sipral_local_conference_poll_transmit(conference: Long, call: LongArray, outPacket: Long): Int
+    external fun sipral_local_conference_record_start(conference: Long, path: ByteArray, optionsFormat: Long, optionsLayout: Long, optionsSampleRate: Long, optionsBitrate: Long, optionsCheckpointMs: Long): Int
+    external fun sipral_local_conference_record_stop(conference: Long): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -8698,7 +8995,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 31
+    const val ABI_VERSION_MINOR: Long = 32
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -8974,6 +9271,14 @@ object Sipral {
      * configuration, and what it agreed in `sipral_media_info_t`.
      */
     const val FEATURE_RTCP_FEEDBACK: Long = 8388608
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. A local conference of any number of
+     * calls, each on its own codec and rate, with or without this end
+     * (ABI 0.32): `sipral_local_conference_create` and
+     * `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
+     */
+    const val FEATURE_LOCAL_CONFERENCE: Long = 16777216
 
     /**
      * The buffer a caller has to bring for one outgoing packet.
@@ -13177,6 +13482,235 @@ object Sipral {
     fun mediaRecordStartWith(media: Long, path: String, options: SipralRecordingOptions) {
         val pathBytes = path.toByteArray(Charsets.UTF_8)
         check(SipralNative.sipral_media_record_start_with(media, pathBytes, options.format, options.layout, options.sampleRate, options.bitrate, options.checkpointMs))
+    }
+
+    /**
+     * Make a local conference on this stack, empty but for this end when
+     * `config` says it takes part, and write its handle to
+     * `out_conference`.
+     *
+     * In device mode the audio engine starts carrying it at once, opening
+     * the devices under automatic activation as a call's media does.
+     *
+     * `SIPRAL_STATUS_CONFERENCE_REFUSED` for a rate that is not 8, 16, 32
+     * or 48 kHz and for more than 1024 members.
+     *
+     * Safety
+     *
+     * `config` must point at a `sipral_local_conference_config_t` whose
+     * `size` member says how long it is, and `out_conference` at one
+     * `sipral_handle_t`.
+     */
+    fun localConferenceCreate(stack: Long, config: SipralLocalConferenceConfig): Long {
+        val conferenceSlot = LongArray(1)
+        check(SipralNative.sipral_local_conference_create(stack, config.maxMembers, config.local, config.sampleRate, conferenceSlot))
+        return conferenceSlot[0]
+    }
+
+    /**
+     * End a conference. Every call still in it goes back to carrying its
+     * own audio — in device mode, the audio engine takes each up again —
+     * a recording running is finished, and the handle is stale.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun localConferenceDestroy(conference: Long) {
+        check(SipralNative.sipral_local_conference_destroy(conference))
+    }
+
+    /**
+     * Add a call. It takes part from the next tick, at its own codec's rate,
+     * and its far end hears everybody in the conference but itself.
+     *
+     * The call needs media running, as for `sipral_call_media`.
+     * `SIPRAL_STATUS_CONFERENCE_REFUSED` when the conference is full, for a
+     * call already in this one or another or joined with
+     * `sipral_call_join`, and for a codec the conference cannot mix — a
+     * rate other than 8, 16, 32 or 48 kHz, or frames past 60 ms.
+     *
+     * Safety
+     *
+     * Safe to call with any handle values.
+     */
+    fun localConferenceAdd(conference: Long, call: Long) {
+        check(SipralNative.sipral_local_conference_add(conference, call))
+    }
+
+    /**
+     * Take a call out. From the next tick nobody in the conference hears it
+     * and it hears nobody; its media is the application's again — in device
+     * mode, the audio engine carries it as it carries any call.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` for a call that is not in it.
+     *
+     * Safety
+     *
+     * Safe to call with any handle values.
+     */
+    fun localConferenceRemove(conference: Long, call: Long) {
+        check(SipralNative.sipral_local_conference_remove(conference, call))
+    }
+
+    /**
+     * Mute or unmute one way of a member, from the next tick: its input,
+     * which everybody else stops hearing, or its output, which it stops
+     * hearing. `direction` is `SIPRAL_AUDIO_DIRECTION_INPUT` or
+     * `SIPRAL_AUDIO_DIRECTION_OUTPUT`; `member` is a call in the conference,
+     * or the conference's own handle for this end.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` for a member that is not in it.
+     *
+     * Safety
+     *
+     * Safe to call with any handle values.
+     */
+    fun localConferenceSetMuted(conference: Long, member: Long, direction: Long, muted: Long) {
+        check(SipralNative.sipral_local_conference_set_muted(conference, member, direction, muted))
+    }
+
+    /**
+     * Set the level of one way of a member, from the next tick, in the
+     * steps `sipral_audio_set_gain` takes: 256 is unity and 1024, four
+     * times, the most. Its input's level is what everybody else hears of
+     * it; its output's is what it hears.
+     *
+     * Safety
+     *
+     * Safe to call with any handle values.
+     */
+    fun localConferenceSetGain(conference: Long, member: Long, direction: Long, gain: Long) {
+        check(SipralNative.sipral_local_conference_set_gain(conference, member, direction, gain))
+    }
+
+    /**
+     * How the conference stands.
+     *
+     * Safety
+     *
+     * `out_info` must point at a `sipral_local_conference_info_t` whose
+     * `size` member says how long it is.
+     */
+    fun localConferenceInfo(conference: Long): SipralLocalConferenceInfo {
+        val infoSlots = LongArray(SipralLocalConferenceInfo.SLOTS)
+        check(SipralNative.sipral_local_conference_info(conference, infoSlots))
+        return SipralLocalConferenceInfo.of(infoSlots)
+    }
+
+    /**
+     * One member, by index: this end first when it takes part, then the
+     * calls in the order they joined. The index is stable until the next
+     * member joins or leaves.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last member.
+     *
+     * Safety
+     *
+     * `out_member` must point at a `sipral_local_conference_member_t` whose
+     * `size` member says how long it is.
+     */
+    fun localConferenceMemberAt(conference: Long, index: Long): SipralLocalConferenceMember {
+        val memberSlots = LongArray(SipralLocalConferenceMember.SLOTS)
+        check(SipralNative.sipral_local_conference_member_at(conference, index, memberSlots))
+        return SipralLocalConferenceMember.of(memberSlots)
+    }
+
+    /**
+     * Who was talking in the last tick, by rank: index zero is the
+     * loudest. A muted member is never listed.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last talker,
+     * which `sipral_local_conference_info_t::talkers` counts.
+     *
+     * Safety
+     *
+     * `out_member` must point at one `sipral_handle_t`.
+     */
+    fun localConferenceTalkerAt(conference: Long, index: Long): Long {
+        val memberSlot = LongArray(1)
+        check(SipralNative.sipral_local_conference_talker_at(conference, index, memberSlot))
+        return memberSlot[0]
+    }
+
+    /**
+     * Twenty milliseconds of conference, in application mode: `mic` is this
+     * end's frame, `sipral_local_conference_info_t::frame_samples` long,
+     * and `speaker` is filled with what this end hears, the same length,
+     * written to `out_written`. A conference without this end reads no
+     * microphone — `mic` may be null — and fills `speaker` with silence.
+     *
+     * Call it once every twenty milliseconds, from the thread that carries
+     * the audio, and then drain `sipral_local_conference_poll_transmit`.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` in device mode, where the audio engine
+     * ticks it; `SIPRAL_STATUS_INVALID_ARGUMENT` for a frame of any other
+     * length, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` for a speaker buffer
+     * shorter than a frame, with the length needed in `out_written`.
+     *
+     * Safety
+     *
+     * `mic` must be readable for `mic_count` `int16_t`, `speaker` writable
+     * for `capacity` `int16_t`, and `out_written` must point at one
+     * `size_t` or be null.
+     */
+    fun localConferenceTick(conference: Long, nowMs: Long, mic: ShortArray, speaker: ShortArray): Long {
+        val writtenSlot = LongArray(1)
+        check(SipralNative.sipral_local_conference_tick(conference, nowMs, mic, speaker, writtenSlot))
+        return writtenSlot[0]
+    }
+
+    /**
+     * The oldest packet a member's call owes its far end, in application
+     * mode: `out_call` names the call, whose media socket sends it, and
+     * `out_packet` is filled as `sipral_media_capture` fills one. A `len`
+     * of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
+     * waiting. Drain it after every tick.
+     *
+     * Safety
+     *
+     * `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+     * `sipral_media_packet_t` as `sipral_media_capture` describes.
+     */
+    fun localConferencePollTransmit(conference: Long, outPacket: Long): Long {
+        val callSlot = LongArray(1)
+        check(SipralNative.sipral_local_conference_poll_transmit(conference, callSlot, outPacket))
+        return callSlot[0]
+    }
+
+    /**
+     * Record the whole conference to `path`: everybody it hears, each at
+     * its own level, in one channel, written as `options` say — WAV or Ogg
+     * Opus, at the conference's rate unless another is named.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` when it is already being recorded,
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for a stereo layout, for options no
+     * file can be written with and for a path the file system refuses, and
+     * `SIPRAL_STATUS_RECORDING_FAILED` when the file would not take its
+     * header.
+     *
+     * Safety
+     *
+     * `path` must be readable for `path_len` bytes, and `options` must point
+     * at a `sipral_recording_options_t` whose `size` member says how long
+     * it is.
+     */
+    fun localConferenceRecordStart(conference: Long, path: String, options: SipralRecordingOptions) {
+        val pathBytes = path.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_local_conference_record_start(conference, pathBytes, options.format, options.layout, options.sampleRate, options.bitrate, options.checkpointMs))
+    }
+
+    /**
+     * Stop recording the conference, and finish the file.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` when nothing is being recorded.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun localConferenceRecordStop(conference: Long) {
+        check(SipralNative.sipral_local_conference_record_stop(conference))
     }
 
 }

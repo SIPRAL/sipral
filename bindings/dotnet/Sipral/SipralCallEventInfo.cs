@@ -354,6 +354,21 @@ public sealed record SipralConferenceEventInfo(
     uint Version,
     uint Users);
 
+/// <summary>What a <see cref="SipralEventKind.LocalConferenceChanged"/>
+/// event carries: which <see cref="SipralLocalConference"/>, what changed —
+/// a member joined or left and why, who is talking, a recording that stopped
+/// by itself — and how it stands now. <see cref="Member"/> and
+/// <see cref="Loudest"/> are call handles, or the conference's own handle
+/// for this end.</summary>
+public sealed record SipralLocalConferenceEventInfo(
+    ulong Conference,
+    SipralLocalConferenceChange Change,
+    SipralDeparture Departure,
+    ulong Member,
+    uint Members,
+    uint Talkers,
+    ulong Loudest);
+
 /// <summary>What a <see cref="SipralEventKind.TextReceived"/> event carries:
 /// what the far end typed on the call's real-time text stream (RFC 4103), in
 /// order — an erasure of its last character as BACKSPACE (U+0008), a new line

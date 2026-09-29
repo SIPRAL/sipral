@@ -12,6 +12,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **`scripts/lab.sh nway`: three calls in one local conference, through Kamailio.** Three of the harness's stacks register as `conf-a`, `conf-b` and `conf-c`, each on a codec of its own (PCMU, G.722, L16 at 16 kHz), and a fourth calls them through the proxy and mixes them: each has to hear the other two pitches and not its own, and when `conf-c` hangs up the conference has to say so and the two left have to go on hearing each other. The matrix has its row and its feature.
+- **A local conference in the four idiomatic layers.** Python's `LocalConference`, .NET's `SipralLocalConference`, Swift's `LocalConference` and Kotlin's `SipralLocalConference` add and remove calls, mute and level each way of a member (this end when no call is named), list the members and the talkers, record the mix and decode `LOCAL_CONFERENCE_CHANGED`; a member's own media thread leaves its frames to the conference while it is in one, and in application mode the conference ticks on a thread of its own with this end's microphone and speaker as a queue and a stream. Each layer's test bridges two calls between three stacks on loopback and checks the far end hears the other steadily.
+- **A local conference over the C ABI (0.32).** `sipral_local_conference_create`, `_add`, `_remove`, `_set_muted`, `_set_gain`, `_info`, `_member_at`, `_talker_at`, `_record_start`, `_record_stop` and `_destroy`; in device mode the audio engine carries the conference in place of its members and every packet reaches `audio_transmit_callback` under its member's call handle, and in application mode `sipral_local_conference_tick` and `_poll_transmit` drive it. This end is named by the conference's own handle. `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` (54), `SIPRAL_STATUS_CONFERENCE_REFUSED` (23) for a full conference, a call already in one or joined into a pair, or a codec it cannot mix, and `SIPRAL_FEATURE_LOCAL_CONFERENCE` (`1 << 24`); `sipral_call_join` refuses a conference's member. Status 17 is documented as a permanent hole. The header and the four bindings are regenerated, and `smoke.c` hands the three new structs over at their pinned lengths.
+- **A local conference of any number of calls, `sipral::LocalConference`.** `MediaEngine::local_conference` makes one over `sipral_media::nway`: calls join and leave at any time, each on its own codec, rate and frame (8 to 48 kHz, 10 to 60 ms), with or without this end's microphone and speaker as a member, and each hears everybody but itself. Per member, a mute and a gain each way; a member on hold leaves the others talking; a call whose codec moves is seated again at its new rate with its controls; a call that ends leaves by itself. Who joined, who left and why, and who is talking (loudest first) are reported as `ConferenceChange`s, and the whole mix is recorded through the call recorder in WAV or Ogg Opus. `sipral-audio`'s `CallAudio::capture_each` lets one entry the pump carries name each packet after a call of its own.
 - **Conferences, presence, real-time text, RTCP feedback and SIPREC in the .NET and Python layers:** subscriptions (`Account.Subscribe`/`subscribe`) with the conference picture read whole, presence watched and published, a call's text stream sent and read, AVPF asked for, a focus named and a call recorded to a recording server, with L16 proved as a codec.
 - **STIR/SHAKEN in calls.** An account given a P-256 key and the URL of its
   certificate signs every call it places (RFC 8224 §6.1, full-form PASSporT
@@ -63,6 +67,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - **`scripts/lab.sh inband`: digits, a machine and a recording against Asterisk.** On an endpoint with no telephone event, four digits dialled in the audio are read there by Asterisk and heard back in it; ringback on early media, a recorded greeting and its beep are reported as a machine and its beep; and a call recorded to stereo WAV and Ogg Opus is read back by the harness and by `soxi` and `opusinfo`.
 
 - **Device mode on Android, over AAudio.** From API level 28 the built-in engine runs every call through AAudio voice-communication streams (the platform's echo canceller in the input preset, a ringtone stream for the ringer), lists the phone's devices and moves calls between the earpiece, the loudspeaker and a wired or Bluetooth headset through `AudioManager` once `SipralAndroidAudio.attach(context)` has handed it a context, and reports changes as `AUDIO_DEVICES_CHANGED`; `SIPRAL_FEATURE_AUDIO_DEVICE` is now the phone's answer, and below API level 28 the telecom helper's `AudioRecord` and `AudioTrack` stay the path. `SipralCallAudios` drives the engine through the framework's hold and call focus with `EngineAudioDevice` (`docs/15-mobile.md`).
+- **An N-way conference mixer, `sipral_media::nway`.** Participants join
+  and leave at any point, each at 8, 16, 32 or 48 kHz with its own frame,
+  and each hears everybody but itself, resampled to its own rate. The mix
+  is formed on a 20 ms tick at 48 kHz, sans I/O, and allocates nothing
+  after a participant has joined. Per participant: gain in and out, mute in
+  and out, and listen-only. A soft limiter (1 ms attack, 80 ms release, a
+  ceiling at three quarters of full scale) keeps any number of loud legs off
+  the rail; an energy detector with hysteresis lists who is talking,
+  loudest first; and a tap records the whole mix at a chosen rate.
 - **The four idiomatic layers carry the rest of ABI 0.30.** Each stack
   class reads its counters (`counters()` / `Counters()`, the retransmission
   and limit counters among them), replaces its STUN servers while running
@@ -1427,6 +1440,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 - **The Kotlin binding loads with every 0.31 event arm.** Each payload arm's numbers now cross JNI in one `long[]`, so the event's `deliver` stays inside the JVM's 255 parameter slots; `SipralEvent.payload` reads the same.
 - **The Swift binding hands an empty list over as a null pointer.** `Sipral.callAnswerWith` with no header fields was refused `headers is not read here`, because an empty Swift array still carried a buffer; every printed wrapper that takes a list now passes null and zero for an empty one, as the .NET and Kotlin layers already did.
+- **The interop matrix reads the steps wave C added to a lab run.** The SRTP policy per account against Asterisk and through the proxy, STIR/SHAKEN between two C ABI stacks (whose flows start after the seed and end at `every STIR call passed`) and SIP over TCP and TLS through the four layers (one row per agent, a stray FAIL a row of its own) each have rows and a feature in `interop/features.toml`, so the recorded run passes the generator's own check again; `docs/11-testing.md` is regenerated from it.
+- **Every result a lab run prints has a row in the interop matrix.**
+  `scripts/interop-matrix.py` knew section headers only from its own list, so
+  a step it was not told about was read as the tail of the step above it: the
+  field failures, the NAT pair with its first STUN server dead, the call whose
+  address moves and the call placed 330 s after registering all went
+  unreported, and a FAIL in any of them could have turned the TURN relay's
+  rows into failures. Every header lab.sh prints now ends a section, those
+  four steps have rows and features, and an `ok`/`FAIL` line in a step that
+  produced no row stops the generator, in both modes, naming the line.
+  `--self-test` runs the generator's own tests. In the same batch,
+  `scripts/bench.sh scale` counts each call it asks for once: a call never
+  answered is no longer counted again as never ended, and a call that fails
+  early no longer stops the placing short of the calls asked for.
 - **A 2xx lost on UDP is sent again until its ACK arrives.** RFC 3261
   §13.3.1.4 has the answering end repeat its 2xx, T1 doubling up to T2, and
   nothing did: the INVITE's retransmissions stop at the first provisional,

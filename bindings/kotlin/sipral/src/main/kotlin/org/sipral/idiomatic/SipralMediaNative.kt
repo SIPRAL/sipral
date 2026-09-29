@@ -48,6 +48,19 @@ internal object SipralMediaNative {
         outLen: LongArray,
     ): Int
 
+    /**
+     * `sipral_local_conference_poll_transmit`, filled the same way; `outCall`
+     * comes back as the member call the packet belongs to, or
+     * `SIPRAL_HANDLE_NONE` when nothing was waiting.
+     */
+    external fun localConferencePollTransmit(
+        conference: Long,
+        outData: ByteArray,
+        outDestination: ByteArray?,
+        outLen: LongArray,
+        outCall: LongArray,
+    ): Int
+
     /** `sipral_media_poll_transmit`, filled the same way. */
     external fun mediaPollTransmit(
         media: Long,

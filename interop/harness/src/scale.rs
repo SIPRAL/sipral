@@ -37,6 +37,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::hash::Hash;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -578,6 +579,133 @@ struct Placed {
     at: Instant,
     confirmed: Option<Instant>,
     ended: bool,
+    /// Already counted among the failures: whatever else goes wrong with it
+    /// later is the same call failing, not another one.
+    failed: bool,
+}
+
+/// The calling end's count of what it asked for and what came of it, kept
+/// apart from the sockets and the stack so that what is counted can be
+/// checked on its own. Each call asked for is attempted once, placed or not,
+/// and each counts at most one failure, however many things then go wrong
+/// with it.
+struct Tally<K> {
+    calls: usize,
+    attempts: usize,
+    legs: HashMap<K, Placed>,
+    failures: Vec<String>,
+}
+
+impl<K: Copy + Eq + Hash> Tally<K> {
+    fn new(calls: usize) -> Self {
+        Self {
+            calls,
+            attempts: 0,
+            legs: HashMap::new(),
+            failures: Vec::new(),
+        }
+    }
+
+    /// Whether a call asked for is still to be attempted. A failure of a
+    /// call already placed is not an attempt, so it does not cut the placing
+    /// short.
+    fn wants_more(&self) -> bool {
+        self.attempts < self.calls
+    }
+
+    fn placed(&mut self, call: K, at: Instant) {
+        self.attempts += 1;
+        self.legs.insert(
+            call,
+            Placed {
+                at,
+                confirmed: None,
+                ended: false,
+                failed: false,
+            },
+        );
+    }
+
+    fn not_placed(&mut self, why: &str) {
+        self.attempts += 1;
+        self.failures.push(format!("not placed: {why}"));
+    }
+
+    fn confirmed(&mut self, call: K, at: Instant) {
+        if let Some(leg) = self.legs.get_mut(&call) {
+            leg.confirmed = Some(at);
+        }
+    }
+
+    /// A call of ours ended; `early` says why that is a failure, when it is
+    /// one. Whether the call was ours at all is the answer.
+    fn ended(&mut self, call: K, early: Option<String>) -> bool {
+        let Some(leg) = self.legs.get_mut(&call) else {
+            return false;
+        };
+        leg.ended = true;
+        if let Some(why) = early {
+            self.fail(call, why);
+        }
+        true
+    }
+
+    /// Counts `why` against `call`, unless the call has already failed.
+    fn fail(&mut self, call: K, why: String) {
+        if let Some(leg) = self.legs.get_mut(&call)
+            && !leg.failed
+        {
+            leg.failed = true;
+            self.failures.push(why);
+        }
+    }
+
+    /// Every call up or gone.
+    fn settled(&self) -> bool {
+        self.legs
+            .values()
+            .all(|leg| leg.confirmed.is_some() || leg.ended)
+    }
+
+    /// Counts every call neither up nor gone as never answered.
+    fn write_off_unanswered(&mut self) {
+        let unanswered: Vec<K> = self
+            .legs
+            .iter()
+            .filter(|(_, leg)| leg.confirmed.is_none() && !leg.ended)
+            .map(|(call, _)| *call)
+            .collect();
+        for call in unanswered {
+            self.fail(call, "never answered".to_owned());
+        }
+    }
+
+    fn unended(&self) -> Vec<K> {
+        self.legs
+            .iter()
+            .filter(|(_, leg)| !leg.ended)
+            .map(|(call, _)| *call)
+            .collect()
+    }
+
+    fn all_ended(&self) -> bool {
+        self.legs.values().all(|leg| leg.ended)
+    }
+
+    /// Counts every call still up as never ended — one already counted,
+    /// never answered among them, stays counted once.
+    fn write_off_unended(&mut self) {
+        for call in self.unended() {
+            self.fail(call, "never ended".to_owned());
+        }
+    }
+
+    fn answered(&self) -> usize {
+        self.legs
+            .values()
+            .filter(|leg| leg.confirmed.is_some())
+            .count()
+    }
 }
 
 /// The answering end: answer everything, carry its audio, and stop once
@@ -683,8 +811,7 @@ fn call_with(peer: SocketAddr, settings: &Settings) -> Result<String, String> {
     );
 
     let gap = Duration::from_secs(1) / u32::try_from(settings.rate).unwrap_or(u32::MAX).max(1);
-    let mut placed: HashMap<CallHandle, Placed> = HashMap::new();
-    let mut failures: Vec<String> = Vec::new();
+    let mut tally: Tally<CallHandle> = Tally::new(settings.calls);
     let mut next_at = now;
     let began = now;
     let mut hold_began: Option<(Instant, Snapshot)> = None;
@@ -699,9 +826,7 @@ fn call_with(peer: SocketAddr, settings: &Settings) -> Result<String, String> {
         for event in side.drain(now) {
             match event {
                 Event::Signalling(UaEvent::CallConfirmed { call, .. }) => {
-                    if let Some(leg) = placed.get_mut(&call) {
-                        leg.confirmed = Some(now);
-                    }
+                    tally.confirmed(call, now);
                 }
                 Event::Media {
                     call,
@@ -714,34 +839,23 @@ fn call_with(peer: SocketAddr, settings: &Settings) -> Result<String, String> {
                     ..
                 }) => {
                     side.sockets.remove(&call);
-                    if let Some(leg) = placed.get_mut(&call) {
-                        leg.ended = true;
-                        if hung_up.is_none() {
-                            failures.push(format!(
-                                "ended before it was hung up: {reason:?}{}",
-                                status.map(|code| format!(" ({code})")).unwrap_or_default()
-                            ));
-                        }
-                    }
+                    let early = hung_up.is_none().then(|| {
+                        format!(
+                            "ended before it was hung up: {reason:?}{}",
+                            status.map(|code| format!(" ({code})")).unwrap_or_default()
+                        )
+                    });
+                    tally.ended(call, early);
                 }
                 _ => {}
             }
         }
 
         let mut placing = 0;
-        while placed.len() + failures.len() < settings.calls && now >= next_at && placing < 64 {
+        while tally.wants_more() && now >= next_at && placing < 64 {
             match place(&mut side, account, &target, peer, now) {
-                Ok(call) => {
-                    placed.insert(
-                        call,
-                        Placed {
-                            at: now,
-                            confirmed: None,
-                            ended: false,
-                        },
-                    );
-                }
-                Err(why) => failures.push(format!("not placed: {why}")),
+                Ok(call) => tally.placed(call, now),
+                Err(why) => tally.not_placed(&why),
             }
             next_at += gap;
             placing += 1;
@@ -749,16 +863,11 @@ fn call_with(peer: SocketAddr, settings: &Settings) -> Result<String, String> {
         side.flush();
         side.sweep(now);
 
-        let all_placed = placed.len() + failures.len() >= settings.calls;
-        let settled = placed
-            .values()
-            .all(|leg| leg.confirmed.is_some() || leg.ended);
-        if hold_began.is_none() && all_placed && (settled || now > began + settings.patience) {
-            let unanswered = placed
-                .values()
-                .filter(|leg| leg.confirmed.is_none() && !leg.ended)
-                .count();
-            failures.extend(std::iter::repeat_n("never answered".to_owned(), unanswered));
+        if hold_began.is_none()
+            && !tally.wants_more()
+            && (tally.settled() || now > began + settings.patience)
+        {
+            tally.write_off_unanswered();
             hold_began = Some((now, Snapshot::take(&side, &carriers.totals, now)));
         }
         if let Some((at, before)) = hold_began
@@ -766,11 +875,7 @@ fn call_with(peer: SocketAddr, settings: &Settings) -> Result<String, String> {
             && now >= at + settings.hold
         {
             held = Some((before, Snapshot::take(&side, &carriers.totals, now)));
-            hanging = placed
-                .iter()
-                .filter(|(_, leg)| !leg.ended)
-                .map(|(call, _)| *call)
-                .collect();
+            hanging = tally.unended();
             next_at = now;
             hung_up = Some(now);
         }
@@ -783,7 +888,7 @@ fn call_with(peer: SocketAddr, settings: &Settings) -> Result<String, String> {
                 break;
             };
             if let Err(error) = side.agent.hangup(call, now) {
-                failures.push(format!("could not hang up: {error}"));
+                tally.fail(call, format!("could not hang up: {error}"));
             }
             next_at += gap;
             ending += 1;
@@ -799,10 +904,9 @@ fn call_with(peer: SocketAddr, settings: &Settings) -> Result<String, String> {
         let drained = side.agent.endpoint().in_flight().0 == 0 || now > last_hangup + DRAIN;
         if let Some(at) = hung_up
             && hanging.is_empty()
-            && ((placed.values().all(|leg| leg.ended) && drained) || now > at + ENDING)
+            && ((tally.all_ended() && drained) || now > at + ENDING)
         {
-            let unended = placed.values().filter(|leg| !leg.ended).count();
-            failures.extend(std::iter::repeat_n("never ended".to_owned(), unended));
+            tally.write_off_unended();
             break;
         }
         if !arrived {
@@ -812,27 +916,23 @@ fn call_with(peer: SocketAddr, settings: &Settings) -> Result<String, String> {
     let counted = side.agent.endpoint().retransmissions();
     let worst_tick_us = carriers.totals.worst_tick_us.load(Ordering::Relaxed);
     carriers.finish();
-    let setups = setup_times(&placed);
+    let setups = setup_times(&tally.legs);
     let report = Report {
         settings,
-        placed: &placed,
+        placed: &tally.legs,
         setups: &setups,
         held,
         retransmitted: (counted.requests, counted.responses, counted.timeouts),
         worst_tick_us,
     }
     .render();
-    let answered = placed
-        .values()
-        .filter(|leg| leg.confirmed.is_some())
-        .count();
-    if answered == 0 {
+    if tally.answered() == 0 {
         return Err(format!("nothing answered{report}"));
     }
-    if let Some(first) = failures.first() {
+    if let Some(first) = tally.failures.first() {
         return Err(format!(
             "{} of {} failed, the first: {first}{report}",
-            failures.len(),
+            tally.failures.len(),
             settings.calls
         ));
     }
@@ -1020,9 +1120,80 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use super::{Settings, answer_with, call_with, percentile};
+    use super::{Settings, Tally, answer_with, call_with, percentile};
+
+    #[test]
+    fn an_early_failure_does_not_cut_the_placing_short() {
+        let now = Instant::now();
+        let mut tally = Tally::new(3);
+        tally.placed(1, now);
+        tally.ended(1, Some("ended before it was hung up".to_owned()));
+        assert!(tally.wants_more());
+        tally.placed(2, now);
+        assert!(tally.wants_more());
+        tally.placed(3, now);
+        assert!(!tally.wants_more());
+        assert_eq!(tally.legs.len(), 3);
+        assert_eq!(tally.failures.len(), 1);
+    }
+
+    #[test]
+    fn a_call_that_could_not_be_placed_is_still_an_attempt() {
+        let mut tally: Tally<u32> = Tally::new(2);
+        tally.not_placed("no socket");
+        assert!(tally.wants_more());
+        tally.placed(1, Instant::now());
+        assert!(!tally.wants_more());
+        assert_eq!(tally.failures, ["not placed: no socket"]);
+    }
+
+    #[test]
+    fn a_call_never_answered_is_not_also_counted_never_ended() {
+        let now = Instant::now();
+        let mut tally = Tally::new(2);
+        tally.placed(1, now);
+        tally.placed(2, now);
+        tally.confirmed(1, now);
+        tally.write_off_unanswered();
+        assert_eq!(tally.failures, ["never answered"]);
+        let mut hanging = tally.unended();
+        hanging.sort_unstable();
+        assert_eq!(hanging, [1, 2]);
+        assert!(tally.ended(1, None));
+        tally.write_off_unended();
+        assert_eq!(tally.failures, ["never answered"]);
+        assert_eq!(tally.answered(), 1);
+    }
+
+    #[test]
+    fn a_call_never_answered_that_then_ends_early_counts_once() {
+        let now = Instant::now();
+        let mut tally = Tally::new(1);
+        tally.placed(7, now);
+        tally.write_off_unanswered();
+        assert!(tally.ended(7, Some("ended before it was hung up: Timeout".to_owned())));
+        tally.fail(7, "could not hang up: gone".to_owned());
+        assert_eq!(tally.failures, ["never answered"]);
+    }
+
+    #[test]
+    fn an_answered_call_that_never_ends_counts_once() {
+        let now = Instant::now();
+        let mut tally = Tally::new(2);
+        tally.placed(1, now);
+        tally.placed(2, now);
+        tally.confirmed(1, now);
+        tally.confirmed(2, now);
+        tally.write_off_unanswered();
+        assert!(tally.failures.is_empty());
+        assert!(tally.ended(2, None));
+        assert!(!tally.all_ended());
+        tally.write_off_unended();
+        assert_eq!(tally.failures, ["never ended"]);
+        assert!(!tally.ended(9, None));
+    }
 
     #[test]
     fn percentile_reads_off_the_sorted_list() {

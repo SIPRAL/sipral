@@ -49,6 +49,7 @@ mod latency;
 #[cfg(test)]
 mod local;
 mod moved;
+mod nway;
 mod pair;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 mod pipewire;
@@ -569,6 +570,22 @@ fn extra_flows(
             Ok(said) => println!("  pass  forked, the second phone answering first{said}"),
             Err(why) => {
                 println!("  FAIL  forked, the second phone answering first — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // three stacks registered at the proxy as the conference's members and a
+    // fourth calling each and bridging the three in one local conference
+    // (see `nway`): only through Kamailio, whose config knows the three
+    // users, and only when named, since `scripts/lab.sh` gives it a step of
+    // its own
+    if server == "kamailio" && wanted.split(',').any(|name| name.trim() == "nway") {
+        match nway::run(server, remote, user, pass) {
+            Ok(said) => {
+                println!("  pass  N-way local conference, three calls through the proxy{said}");
+            }
+            Err(why) => {
+                println!("  FAIL  N-way local conference, three calls through the proxy — {why}");
                 failures += 1;
             }
         }
@@ -2785,6 +2802,8 @@ mod tests {
     ///
     /// A step new to this list adds its own constants here too: nothing
     /// discovers them on its own.
+    // one line per constant is the point: a registry grows with every step
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn endpoint_identity_constants_are_distinct() {
         const FLOWS: &[Flow] = &[
@@ -2860,6 +2879,14 @@ mod tests {
             scale::CALLER_MEDIA_SEED => crate::scale::CALLER_MEDIA_SEED,
             scale::ANSWER_SEED => crate::scale::ANSWER_SEED,
             scale::ANSWER_MEDIA_SEED => crate::scale::ANSWER_MEDIA_SEED,
+            nway::HOST_SEED => crate::nway::HOST_SEED,
+            nway::HOST_MEDIA_SEED => crate::nway::HOST_MEDIA_SEED,
+            nway::MEMBER_SEEDS[0] => crate::nway::MEMBER_SEEDS[0],
+            nway::MEMBER_SEEDS[1] => crate::nway::MEMBER_SEEDS[1],
+            nway::MEMBER_SEEDS[2] => crate::nway::MEMBER_SEEDS[2],
+            nway::MEMBER_MEDIA_SEEDS[0] => crate::nway::MEMBER_MEDIA_SEEDS[0],
+            nway::MEMBER_MEDIA_SEEDS[1] => crate::nway::MEMBER_MEDIA_SEEDS[1],
+            nway::MEMBER_MEDIA_SEEDS[2] => crate::nway::MEMBER_MEDIA_SEEDS[2],
         ];
         #[cfg(all(feature = "pipewire", target_os = "linux"))]
         all.extend(id![

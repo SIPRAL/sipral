@@ -78,6 +78,8 @@ public sealed class SipralEventArgs : EventArgs
     public SipralTextEventInfo? Text { get; private init; }
     /// <summary>Set for <see cref="SipralEventKind.PresenceChanged"/>.</summary>
     public SipralPresenceEventInfo? Presence { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.LocalConferenceChanged"/>.</summary>
+    public SipralLocalConferenceEventInfo? LocalConference { get; private init; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
@@ -297,6 +299,15 @@ public sealed class SipralEventArgs : EventArgs
                 p.ExpiresMs, p.RefreshInMs);
         }
 
+        SipralLocalConferenceEventInfo? localConference = null;
+        if (kind == SipralEventKind.LocalConferenceChanged)
+        {
+            var l = evt.Payload.LocalConference;
+            localConference = new SipralLocalConferenceEventInfo(
+                l.Conference, (SipralLocalConferenceChange)l.Change, (SipralDeparture)l.Departure, l.Member,
+                l.Members, l.Talkers, l.Loudest);
+        }
+
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
             registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio,
             stunServer, verification, progress)
@@ -305,6 +316,7 @@ public sealed class SipralEventArgs : EventArgs
             Conference = conference,
             Text = text,
             Presence = presence,
+            LocalConference = localConference,
         };
     }
 

@@ -220,3 +220,51 @@ name = "WASAPI audio backend"
 implemented = true
 unit_tested = true
 flows = []
+
+[[feature]]
+name = "Call surviving a change of its own address"
+implemented = true
+unit_tested = true
+flows = ["a call moved to another address"]
+
+[[feature]]
+name = "Registrar keep-alive holding a filtering NAT open"
+implemented = true
+unit_tested = true
+flows = ["called 330 s after registering, the keep-alive holding the NAT open"]
+
+[[feature]]
+name = "Field failures: a request too large for a datagram over TCP, a silent connection ended at Timer B"
+implemented = true
+unit_tested = true
+flows = ["field failures: fragments dropped, a silent and a dark connection"]
+
+[[feature]]
+name = "STUN server failover"
+implemented = true
+unit_tested = true
+flows = ["STUN failover, the first server dead, C calling and Rust answering"]
+
+[[feature]]
+name = "SRTP policy per account (SDES required, DTLS-SRTP required, off)"
+implemented = true
+unit_tested = true
+flows = ["SDES required by the account", "DTLS-SRTP required by the account", "SRTP off on the account"]
+
+[[feature]]
+name = "STIR/SHAKEN (RFC 8224, RFC 8588), signed and verified"
+implemented = true
+unit_tested = true
+flows = ["a signed call, verified and carried", "an unsigned call, refused by a strict account", "a call signed by a certificate nobody trusts, refused"]
+
+[[feature]]
+name = "SIP over TCP and TLS through the four idiomatic layers"
+implemented = true
+unit_tested = true
+flows = ["agent.py over TLS", "Agent.kt over TLS", "Sipral.Sample.Agent over TLS", "SipralLabAgent over TCP"]
+
+[[feature]]
+name = "Local conference of N calls, each on its own codec"
+implemented = true
+unit_tested = true
+flows = ["N-way local conference, three calls through the proxy"]

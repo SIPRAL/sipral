@@ -78,6 +78,28 @@ pub trait CallAudio: Send {
     /// # Errors
     /// [`CallGone::Ended`] once the call's media is over.
     fn playback(&mut self, out: &mut [i16]) -> Result<(), CallGone>;
+    /// Encode one microphone frame and hand every packet it produced to
+    /// `send`, each with the call it belongs to. This is what the pump calls.
+    ///
+    /// A call is one stream, and the default is [`CallAudio::capture`] with
+    /// its packet named `own`, the name the pump carries it under. A local
+    /// conference carried as one entry is several streams, each of a call
+    /// of its own, and names each packet after the call it belongs to.
+    ///
+    /// # Errors
+    /// [`CallGone::Ended`] once the media is over.
+    fn capture_each(
+        &mut self,
+        own: CallId,
+        frame: &[i16],
+        now: Instant,
+        send: &mut dyn FnMut(CallId, Outgoing),
+    ) -> Result<(), CallGone> {
+        if let Some(packet) = self.capture(frame, now)? {
+            send(own, packet);
+        }
+        Ok(())
+    }
     /// The loudspeaker-to-microphone delay of the devices the call is on,
     /// told once when the call is attached and again whenever a device
     /// changes under it: the reference a canceller attached to the call

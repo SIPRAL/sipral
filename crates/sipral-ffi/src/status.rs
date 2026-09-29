@@ -19,6 +19,10 @@ codes! {
     ///
     /// The numbers are part of the ABI. A value keeps its meaning for the life of
     /// the ABI's major version, and a new one is only ever added at the end.
+    ///
+    /// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
+    /// statuses, and it stays reserved and never used, so no build returns
+    /// it and `sipral_status_name` has no name for it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum SipralStatus: i32 {
         /// The call did what it was asked to.
@@ -120,6 +124,11 @@ codes! {
         /// reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
         /// the stack with `sipral_stack_transport_bind`, and ask again.
         TransportDown = 22,
+        /// A local conference would not take the call (ABI 0.32): it is
+        /// full, the call is already in a conference or joined into a pair
+        /// with `sipral_call_join`, or its codec hears at a rate the
+        /// conference does not mix. The last error says which.
+        ConferenceRefused = 23,
     }
 }
 
@@ -152,11 +161,13 @@ entry! {
             14 => c"device unusable".as_ptr(),
             15 => c"device timed out".as_ptr(),
             16 => c"limit reached".as_ptr(),
+            // 17 is reserved and never used: a permanent hole, with no name
             18 => c"refused by security policy".as_ptr(),
             19 => c"recording failed".as_ptr(),
             20 => c"not negotiated".as_ptr(),
             21 => c"not a focus".as_ptr(),
             22 => c"transport down".as_ptr(),
+            23 => c"conference refused".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -204,6 +215,7 @@ mod tests {
             SipralStatus::NotNegotiated,
             SipralStatus::NotAFocus,
             SipralStatus::TransportDown,
+            SipralStatus::ConferenceRefused,
         ];
         for status in all {
             let code = status as i32;
@@ -214,7 +226,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in (0..=16).chain(18..=22) {
+        for code in (0..=16).chain(18..=23) {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -226,7 +238,7 @@ mod tests {
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
         assert!(name(17).is_none());
-        assert!(name(23).is_none());
+        assert!(name(24).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -260,5 +272,6 @@ mod tests {
         assert_eq!(SipralStatus::NotNegotiated as i32, 20);
         assert_eq!(SipralStatus::NotAFocus as i32, 21);
         assert_eq!(SipralStatus::TransportDown as i32, 22);
+        assert_eq!(SipralStatus::ConferenceRefused as i32, 23);
     }
 }

@@ -46,7 +46,9 @@
     X(sipral_presence) X(sipral_record_config)                                \
     X(sipral_stir_config) X(sipral_stream_encryption)                         \
     X(sipral_progress_config) X(sipral_consent_tone)                          \
-    X(sipral_recording_options) X(sipral_transport_failure)
+    X(sipral_recording_options) X(sipral_transport_failure)                   \
+    X(sipral_local_conference_config) X(sipral_local_conference_info)         \
+    X(sipral_local_conference_member)
 
 static int failures;
 
@@ -999,6 +1001,69 @@ static sipral_status_t transport_failure_at(struct fixture *fixture, size_t decl
     return sipral_stack_transport_failure(fixture->stack, &failure, 0);
 }
 
+/* A local conference on the fixture's stack, made as declared and ended
+ * again at once. */
+static sipral_status_t local_conference_config_at(struct fixture *fixture, size_t declared)
+{
+    sipral_local_conference_config_t config = { 0 };
+    config.size = declared;
+    config.max_members = 4;
+    sipral_handle_t conference = SIPRAL_HANDLE_NONE;
+    sipral_status_t status = sipral_local_conference_create(fixture->stack, &config, &conference);
+    if (status == SIPRAL_STATUS_OK &&
+        sipral_local_conference_destroy(conference) != SIPRAL_STATUS_OK) {
+        status = SIPRAL_STATUS_WRONG_STATE;
+    }
+    return status;
+}
+
+/* A conference of the fixture's own, made at its defaults, for the two
+ * structs read out of one; SIPRAL_HANDLE_NONE when it could not be made. */
+static sipral_handle_t a_local_conference(struct fixture *fixture)
+{
+    sipral_local_conference_config_t config = { 0 };
+    config.size = sizeof config;
+    sipral_handle_t conference = SIPRAL_HANDLE_NONE;
+    if (sipral_local_conference_create(fixture->stack, &config, &conference) != SIPRAL_STATUS_OK) {
+        return SIPRAL_HANDLE_NONE;
+    }
+    return conference;
+}
+
+/* How that conference stands: this end alone, at 16 kHz. */
+static sipral_status_t local_conference_info_at(struct fixture *fixture, size_t declared)
+{
+    sipral_handle_t conference = a_local_conference(fixture);
+    if (conference == SIPRAL_HANDLE_NONE) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_local_conference_info_t info = { 0 };
+    info.size = declared;
+    sipral_status_t status = sipral_local_conference_info(conference, &info);
+    if (status == SIPRAL_STATUS_OK && (info.members != 1 || info.sample_rate != 16000)) {
+        status = SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_local_conference_destroy(conference);
+    return status;
+}
+
+/* Its one member, this end, named by the conference's own handle. */
+static sipral_status_t local_conference_member_at(struct fixture *fixture, size_t declared)
+{
+    sipral_handle_t conference = a_local_conference(fixture);
+    if (conference == SIPRAL_HANDLE_NONE) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_local_conference_member_t member = { 0 };
+    member.size = declared;
+    sipral_status_t status = sipral_local_conference_member_at(conference, 0, &member);
+    if (status == SIPRAL_STATUS_OK && member.member != conference) {
+        status = SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_local_conference_destroy(conference);
+    return status;
+}
+
 static sipral_status_t subscribe_config_at(struct fixture *fixture, size_t declared)
 {
     sipral_subscribe_config_t config = fixture_subscribe_config(declared);
@@ -1172,6 +1237,9 @@ static const struct {
     { "sipral_consent_tone_t", consent_tone_at },
     { "sipral_recording_options_t", recording_options_at },
     { "sipral_transport_failure_t", transport_failure_at },
+    { "sipral_local_conference_config_t", local_conference_config_at },
+    { "sipral_local_conference_info_t", local_conference_info_at },
+    { "sipral_local_conference_member_t", local_conference_member_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])

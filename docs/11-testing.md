@@ -669,6 +669,16 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | .NET agent example | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2022 ms, nothing after it (C ABI) | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 48 ms (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | SDES required by the account (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | DTLS-SRTP required by the account (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | SRTP off on the account (C ABI) | pass | 2026-09-29 |
+| Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | SDES required by the account (C ABI) | pass | 2026-09-29 |
+| Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | DTLS-SRTP required by the account (C ABI) | pass | 2026-09-29 |
+| Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | SRTP off on the account (C ABI) | pass | 2026-09-29 |
+| sipral, C ABI to C ABI (STIR/SHAKEN) | n/a | a signed call, verified and carried (C ABI) | pass | 2026-09-29 |
+| sipral, C ABI to C ABI (STIR/SHAKEN) | n/a | an unsigned call, refused by a strict account (C ABI) | pass | 2026-09-29 |
+| sipral, C ABI to C ABI (STIR/SHAKEN) | n/a | a call signed by a certificate nobody trusts, refused (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | a call moved to another address | pass | 2026-09-29 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | call | pass | 2026-09-29 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | hold and resume | pass | 2026-09-29 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | SRTP, phone to phone | pass | 2026-09-29 |
@@ -679,6 +689,7 @@ the generator itself — never the block, which the next run overwrites.
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | DTLS-SRTP, phone to phone (C ABI) | pass | 2026-09-29 |
 | Asterisk, from behind a NAT (STUN) | 22.10.1 | behind a NAT, through STUN (C ABI) | pass | 2026-09-29 |
 | Asterisk, from behind a NAT (STUN) | 22.10.1 | called behind a NAT, through STUN (C ABI) | pass | 2026-09-29 |
+| Asterisk, from behind a NAT (STUN) | 22.10.1 | called 330 s after registering, the keep-alive holding the NAT open (C ABI) | pass | 2026-09-29 |
 | headless agent (ICE-lite) | n/a | ICE required, against 172.18.0.5 | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | ICE-lite, Asterisk's ICE calling in | pass | 2026-09-29 |
 | headless agent (ICE-lite) | n/a | ICE required, against 172.18.0.5 (C ABI) | pass | 2026-09-29 |
@@ -689,6 +700,12 @@ the generator itself — never the block, which the next run overwrites.
 | sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN (C ABI) | pass | 2026-09-29 |
 | sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN, caller relay only (C ABI) | pass | 2026-09-29 |
 | sipral, self-to-self (each behind its own NAT) | n/a | forked to two phones behind a NAT, relayed, calling, via TURN | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | agent.py over TLS | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | Agent.kt over TLS | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | Sipral.Sample.Agent over TLS | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | SipralLabAgent over TCP | pass | 2026-09-29 |
+| a listener that never answers, over a link that drops fragments | n/a | field failures: fragments dropped, a silent and a dark connection (C ABI) | pass | 2026-09-29 |
+| sipral, self-to-self (each behind its own NAT) | n/a | STUN failover, the first server dead, C calling and Rust answering | pass | 2026-09-29 |
 | Kamailio → FreeSWITCH | 6.1.4 | register, over a bad link (lossy) | pass | 2026-09-29 |
 | Kamailio → FreeSWITCH | 6.1.4 | call, over a bad link (lossy) | pass | 2026-09-29 |
 | Kamailio → FreeSWITCH | 6.1.4 | register, over a bad link (mobile) | pass | 2026-09-29 |
@@ -739,6 +756,14 @@ the generator itself — never the block, which the next run overwrites.
 | .NET binding | yes | yes | yes |
 | PipeWire audio backend | yes | yes | n/a |
 | WASAPI audio backend | yes | yes | n/a |
+| Call surviving a change of its own address | yes | yes | yes |
+| Registrar keep-alive holding a filtering NAT open | yes | yes | yes |
+| Field failures: a request too large for a datagram over TCP, a silent connection ended at Timer B | yes | yes | yes |
+| STUN server failover | yes | yes | yes |
+| SRTP policy per account (SDES required, DTLS-SRTP required, off) | yes | yes | yes |
+| STIR/SHAKEN (RFC 8224, RFC 8588), signed and verified | yes | yes | yes |
+| SIP over TCP and TLS through the four idiomatic layers | yes | yes | yes |
+| Local conference of N calls, each on its own codec | yes | yes | not yet |
 
 <!-- END GENERATED interop-matrix -->
 
@@ -867,6 +892,7 @@ server:
 | call, ended by the far end (`Flow::PeerHangup`, key `peerhangup`) | dialled at a fifth baresip peer of its own, `baresip-hangup` (`interop/baresip/config-hangup`) — connected, then only waited on: no `listen_until` ever schedules this flow's own hangup, unlike every other row in this table but the two transfers. `scripts/lab.sh`'s own `baresip_ctrl_hangup` sends `{"command":"hangup"}` to that peer's `ctrl_tcp` port a couple of seconds in, which is baresip ending the call through its own control interface — nothing in its account or call configuration can end an already-answered one by itself, `call_local_timeout` being cancelled the instant a call is answered (`interop/baresip/config-hangup/config`'s own reasoning). Passes on `CallEndReason::RemoteHangup` alone (`Fact::RemoteEnded`); `Fact::Ours` must stay unset. The C ABI runs the same flow as `FLOW_PEER_HANGUP` (key `peerhangup`), waiting on `end_reason == SIPRAL_CALL_END_REASON_REMOTE_HANGUP` the same way | baresip only |
 | hold with a codec change | as hold, but between the hold and the resume the call is moved onto a narrower codec list while it stays held (`MediaEngine::change_codecs`): the far end's answer names a different codec than the one the call held on, the hold survives the change, and the resume keeps the new codec | Asterisk only |
 | local conference | two calls placed on one account — one to the lab's own tone extension (9000), one to its echo extension (9008, `Answer(); Echo();`) — joined with `MediaEngine::join` and driven a frame at a time with `MediaEngine::mix`; passes once several frames are audible while the tone extension's own cadence says it should be silent, which only the echo extension playing back what this end had just relayed to it can produce (`interop/harness/src/join.rs`'s own module documentation has the reasoning) | Asterisk only |
+| N-way local conference, three calls through the proxy | four stacks in one harness run (`interop/harness/src/nway.rs`): three register at Kamailio as `conf-a`, `conf-b` and `conf-c` — users `interop/kamailio/kamailio.cfg` looks up for this flow alone — each offering one codec, PCMU at 8 kHz, G.722 at 16 kHz and L16 at 16 kHz, and a fourth calls each of them through the proxy and puts the three calls in one `sipral::LocalConference`, taking no part itself. Each member sends a sine of its own pitch (500, 900 and 1300 Hz); after 1.5 s the three listen for 2 s, and each has to hear the other two pitches (Goertzel amplitude over 1000) and not its own (under 300). Then `conf-c` hangs up: the conference has to report it left as `Departure::Ended`, and 1.5 s later `conf-a` and `conf-b` have to go on hearing each other and nothing of `conf-c`. Run with `scripts/lab.sh nway`, with `kamailio`, or in a run that names nothing. On 29 September 2026, on the Linux x86-64 lab machine, every member heard each of the other two at an amplitude of about 5000, the tone's own, and after `conf-c` left `conf-a` and `conf-b` heard each other at 5002 and 5012 | Kamailio only |
 | forked, the second phone answering first | three stacks in one harness run (`interop/harness/src/fork.rs`): a desk and a mobile register as the one user `interop/kamailio/kamailio.cfg` forks — `forked`, looked up and relayed to every binding in parallel, which no other flow dials — the mobile second; a third calls that user. The desk rings at once and never answers, the mobile rings 400 ms later and answers at 1.2 s, so the call placed is the desk's early dialog and the mobile's is the sibling `UaEvent::CallForked` announced, and the first 2xx is the sibling's. Passes when `ForkPolicy::KeepFirst` kept the sibling (`CallConfirmed` on it), the branch placed ended `ForkLost`, the desk saw Kamailio's CANCEL (its call ended `Cancelled`), the mobile's call lasted until the caller hung up three seconds later, and at least ten frames of tone crossed each way on the branch kept. A run where the desk's branch answered instead fails as proving nothing. Run with `scripts/lab.sh kamailio`, or alone with `SIPRAL_FLOWS=fork`. On 25 September 2026, on the Linux x86-64 lab machine, it passed with 118 audible frames at the caller and 119 at the mobile; the same step built with the user agent as it was before the fix failed it, the mobile's branch hung up by the caller the moment it answered | Kamailio only |
 | MESSAGE, echoed | an out-of-dialog MESSAGE (`UserAgent::message`) sent to the lab's own echo extension (`interop/asterisk/extensions.conf`'s 9006, `MessageSend()`), answered with success (`UaEvent::MessageSent`), and a MESSAGE of the dialplan's own arriving back (`UaEvent::MessageReceived`) — proving both directions, not only that this end's own send was accepted | Asterisk only |
 | message waiting indication | a subscription to `message-summary` for this account's own mailbox (`labuser-mwi`, whose AOR in `interop/asterisk/pjsip.conf` has `mailboxes=9007@default` — on the AOR, since that is what a SUBSCRIBE is matched against; on the endpoint it means unsolicited NOTIFYs and every SUBSCRIBE is answered 404), read once before anything is left in it; a call into the lab's own mailbox extension (9007), whose hangup handler raises the mailbox's new-message count by one with `MinivmMWI()`, keeping the count itself since `MinivmMWI()` publishes a count rather than adding to one, so each driver's flow in the same lab run sees its own call raise it — not `VoiceMail()`, which cannot record in this image because it ships no sound files and the greeting fails; and the mailbox's `new` count (`UaEvent::MessagesWaiting`) read higher once Asterisk's own `res_pjsip_mwi` reports it — not that it starts at zero, since an earlier run may have left mail behind | Asterisk only |

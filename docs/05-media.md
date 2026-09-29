@@ -2678,3 +2678,61 @@ the survivor's own `call`: an application driving the pair through
 `sipral_media_mix` alone, with no reason to touch the stack's own event
 queue otherwise, still gets told the moment it needs to stop calling
 `sipral_media_mix` on that pair and go back to driving the survivor directly.
+
+## A local conference of any number of calls
+
+The pair above is two calls at one rate, halved and summed. `LocalConference`
+(`crates/sipral/src/local_conference.rs`, made by
+`MediaEngine::local_conference`) is the general case, over
+`sipral_media::nway`: any number of calls, each on its own codec, rate and
+frame, and this end or not, every member hearing everybody but itself.
+
+### The mixer
+
+`sipral_media::nway::Mixer` is sans I/O and runs on a 20 ms tick its caller
+drives. Every member's tick of input is resampled up to 48 kHz, scaled by its
+input gain and added into one wide sum; each member then hears that sum
+minus its own contribution, scaled by its output gain, held under full scale
+by a soft limiter of its own (1 ms attack, 80 ms release, a ceiling at three
+quarters of full scale, a curve rather than a clamp above it) and resampled
+down to its own rate. One sum and one subtraction per member keeps a tick
+linear in the number of members, and the sum is wide enough that the
+subtraction is exact at the most members and the highest gain allowed.
+Nothing allocates once a member has joined. Who is talking comes from an
+energy detector with hysteresis per member — two ticks over −40 dBFS to
+start, twenty under −46 dBFS to stop — ranked by a smoothed level, loudest
+first; a muted member is never listed. A tap records the whole mix at a rate
+of the caller's choosing.
+
+### Calls in it
+
+A call joins at the rate its codec decodes to and with its own frame: a
+10 ms frame is read twice a tick, 40 and 60 ms every second and third tick,
+and 30 ms every tick and a half, so each call keeps its own packetisation.
+The conference reaches each session through its `SessionShare` and holds no
+engine, so the thread that ticks it is the thread that carries audio, as
+for a single call; a call in a conference is driven by it alone, which is
+why a call already paired with `MediaEngine::join` is refused
+(`sipral-ffi` enforces both ways). A member on hold is mixed as silence
+either way — the session sends nothing to a far end this end holds, and a
+far end that holds this end sends nothing — and the others go on hearing
+each other. A member whose codec moves under it is seated again at its new
+rate with the controls it had; one whose media ends leaves on the next tick.
+Joins, departures and their reasons, the talkers and a recording that
+stopped by itself are `ConferenceChange`s, oldest first.
+
+### Recording
+
+`LocalConference::start_recording` writes the tap through the call recorder
+(`crates/sipral/src/record.rs`), in WAV or Ogg Opus, as one channel: the
+whole mix is already one signal, so it goes in as both halves of a mixed
+recording, each of which the recorder halves. A stereo layout is refused.
+
+### Across the C ABI
+
+`sipral_local_conference_*` (`docs/08-ffi.md`). In device mode the audio
+engine carries the conference as one entry in place of its members —
+`CallAudio::capture_each` lets that one entry hand the pump packets named
+after each member's call — and in application mode the application ticks it
+and polls its packets. Changes arrive as
+`SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.

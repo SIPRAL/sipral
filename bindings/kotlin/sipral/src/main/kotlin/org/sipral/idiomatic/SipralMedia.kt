@@ -53,7 +53,7 @@ data class PathCandidate(
     val remote: String,
 )
 
-private fun parseAddress(text: String): InetSocketAddress {
+internal fun parseAddress(text: String): InetSocketAddress {
     val at = text.lastIndexOf(':')
     return InetSocketAddress(text.substring(0, at), text.substring(at + 1).toInt())
 }
@@ -135,6 +135,11 @@ class SipralMedia internal constructor(
     private var pending = ShortArray(0)
 
     private val frameChannel = Channel<ShortArray>(Channel.UNLIMITED)
+
+    /** Whether a [SipralLocalConference] carries this call's frames, which
+     * this media's own thread then leaves alone, as it does in device mode. */
+    @Volatile
+    internal var carriedByConference: Boolean = false
 
     /** Decoded 16-bit mono PCM, one frame per element, in arrival order. */
     val frames: Flow<ShortArray> = frameChannel.receiveAsFlow()
@@ -512,7 +517,7 @@ class SipralMedia internal constructor(
             if (active) {
                 try {
                     drainReceive()
-                    if (pumpsFrames) {
+                    if (pumpsFrames && !carriedByConference) {
                         val playback = ShortArray(frameSamples)
                         val (written, _) = Sipral.mediaPlayback(handle, playback)
                         if (written > 0) {

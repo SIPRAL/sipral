@@ -41,6 +41,7 @@ use crate::audio::SipralAudioEvent;
 use crate::conference::SipralConferenceEvent;
 use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+use crate::local_conference::SipralLocalConferenceEvent;
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
 use crate::names::Names;
 use crate::nat::{
@@ -672,6 +673,17 @@ event_kinds! {
         /// meanwhile is `SIPRAL_STATUS_TRANSPORT_DOWN`. `account` and `call`
         /// are `SIPRAL_HANDLE_NONE`: a transport is neither.
         53 = TransportFailed, c"transport failed";
+        /// A local conference changed (ABI 0.32): a member joined or left, who
+        /// is talking changed, or its recording stopped by itself.
+        ///
+        /// `payload.local_conference` says which conference and what
+        /// happened: `member` is the call that joined or left — or the
+        /// conference's own handle for this end — `departure` why it left,
+        /// and `members`, `talkers` and `loudest` how the conference stands
+        /// now. The talkers themselves are read with
+        /// `sipral_local_conference_talker_at`. `account` and `call` are
+        /// `SIPRAL_HANDLE_NONE`: a conference is neither.
+        54 = LocalConferenceChanged, c"local conference changed";
     }
 }
 
@@ -746,6 +758,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::TextReceived, "text"),
     (SipralEventKind::PresenceChanged, "presence"),
     (SipralEventKind::TransportFailed, "transport_failed"),
+    (SipralEventKind::LocalConferenceChanged, "local_conference"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1664,6 +1677,8 @@ record! {
         pub presence: SipralPresenceEvent,
         /// For [`SipralEventKind::TransportFailed`].
         pub transport_failed: SipralTransportFailedEvent,
+        /// For [`SipralEventKind::LocalConferenceChanged`].
+        pub local_conference: SipralLocalConferenceEvent,
     }
 }
 
@@ -1902,6 +1917,18 @@ pub(crate) fn turn_stream(stack: SipralHandle, payload: SipralTurnStreamEvent) -
         stack,
         SipralEventKind::TurnStream,
         payload!(turn_stream: payload),
+    )
+}
+
+/// What a local conference did, as C reads it.
+pub(crate) fn local_conference_changed(
+    stack: SipralHandle,
+    payload: SipralLocalConferenceEvent,
+) -> SipralEvent {
+    SipralEvent::of(
+        stack,
+        SipralEventKind::LocalConferenceChanged,
+        payload!(local_conference: payload),
     )
 }
 
@@ -3680,7 +3707,8 @@ mod tests {
         assert_eq!(SipralEventKind::TextReceived as u32, 51);
         assert_eq!(SipralEventKind::PresenceChanged as u32, 52);
         assert_eq!(SipralEventKind::TransportFailed as u32, 53);
-        assert_eq!(SipralEventKind::ALL.len(), 51, "and there are no others");
+        assert_eq!(SipralEventKind::LocalConferenceChanged as u32, 54);
+        assert_eq!(SipralEventKind::ALL.len(), 52, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -3779,7 +3807,12 @@ mod tests {
         assert_eq!(name(51).as_deref(), Some("text received"), "51 is live");
         assert_eq!(name(52).as_deref(), Some("presence changed"), "52 is live");
         assert_eq!(name(53).as_deref(), Some("transport failed"), "53 is live");
-        assert_eq!(name(54), None, "past the last kind");
+        assert_eq!(
+            name(54).as_deref(),
+            Some("local conference changed"),
+            "54 is live"
+        );
+        assert_eq!(name(55), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }
