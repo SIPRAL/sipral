@@ -6,7 +6,7 @@
 //! Everything the engine knows about devices it learns through [`Backend`],
 //! and everything it does to one it does through a [`CaptureStream`] or a
 //! [`PlaybackStream`]. The platform crates — `sipral-io-coreaudio`,
-//! `sipral-io-wasapi` — sit behind these three traits and nothing else, so
+//! `sipral-io-wasapi`, `sipral-io-aaudio` — sit behind these three traits and nothing else, so
 //! that every rule the engine keeps (a handle that survives a refresh, a
 //! device with no channels refused, a loss reopened on the fallback, a
 //! setting carried across a change) is written once and tested against a
@@ -23,7 +23,7 @@ use crate::device::Direction;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawDevice {
     /// The platform's stable identity: a CoreAudio UID, a WASAPI endpoint
-    /// identifier.
+    /// identifier, a kind and an address on Android.
     pub identity: String,
     /// What it is called.
     pub name: String,
@@ -128,6 +128,24 @@ pub trait Backend: Send {
         identity: Option<&str>,
         wanted: Format,
     ) -> Result<Box<dyn PlaybackStream>, BackendError>;
+
+    /// Open the ringer on the device with `identity`, or wherever the
+    /// platform plays a ring for `None`.
+    ///
+    /// The loudspeaker by default. A platform that tells a ring from a call
+    /// — Android, whose ring is a ringtone stream that the platform plays
+    /// where a ring goes, while a call's output is a voice stream it puts
+    /// on the call's route — opens it as one.
+    ///
+    /// # Errors
+    /// As [`Backend::open_capture`].
+    fn open_ringer(
+        &mut self,
+        identity: Option<&str>,
+        wanted: Format,
+    ) -> Result<Box<dyn PlaybackStream>, BackendError> {
+        self.open_playback(identity, wanted)
+    }
 
     /// Whether this platform runs the microphone and the loudspeaker as one
     /// unit on one device pair, so that a second, separate output cannot be

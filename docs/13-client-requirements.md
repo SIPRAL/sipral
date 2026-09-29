@@ -515,7 +515,8 @@ The Rust surface for each of these already exists somewhere below
   gain, mute and the meter per direction, kept across a device change.
   Linux has no backend for the engine yet (`sipral-io-pipewire` links a
   library the packaged wheel must not require), so on Linux A2 and A3 stay
-  the application's.
+  the application's. Android has one from API level 28, over AAudio, with
+  the phone's devices and call routes (`docs/15-mobile.md`).
 
 ---
 

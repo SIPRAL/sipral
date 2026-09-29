@@ -2089,10 +2089,12 @@ public enum Sipral {
     /// created with `sipral_stack_config_t::audio` set to
     /// `SIPRAL_AUDIO_DEVICE` opens the platform's devices and pumps every
     /// managed call itself, with the `sipral_audio_*` entry points to list,
-    /// choose and control them. Clear on a platform this build has no
-    /// backend for — Linux and Android today — where `SIPRAL_AUDIO_DEVICE`
+    /// choose and control them. Clear where there is no backend — on Linux,
+    /// and on an Android phone below API level 28, where AAudio cannot open
+    /// a voice-communication stream — and `SIPRAL_AUDIO_DEVICE` then
     /// answers `SIPRAL_STATUS_NOT_SUPPORTED` and the application pumps the
-    /// frames as it always has.
+    /// frames as it always has. On Android the answer is the phone's, read
+    /// when asked, not the build's.
     ///
     /// This crate's own answer rather than the facade's: the engine sits
     /// beside the facade, not under it, so the facade has nothing to say.

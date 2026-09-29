@@ -836,6 +836,7 @@ if command -v zig >/dev/null 2>&1; then
         done
         if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
             for file in bindings/kotlin/sipral/src/main/jni/sipral_jni.c \
+                bindings/kotlin/sipral/src/main/jni/audio_routes.c \
                 bindings/kotlin/sipral/src/test/jni/native_thread.c; do
                 if ! zig cc -target "$arch-linux-gnu" -std=c11 -Wall -Wextra -Werror \
                     -I"$jdk/include" -I"$jdk/include/darwin" -I bindings/c/include \
@@ -857,8 +858,9 @@ fi
 
 # Everything behind cfg(target_os = "windows") in sipral-io-wasapi, everything
 # behind cfg(target_os = "linux") in sipral-io-pipewire and the harness's own
-# PipeWire flow, and the three iOS bodies in sipral-io-coreaudio, are read by
-# no compiler on this machine, and a crate whose platform half only compiles
+# PipeWire flow, the three iOS bodies in sipral-io-coreaudio, and the AAudio
+# streams and backend behind cfg(target_os = "android") in sipral-io-aaudio
+# and sipral-audio, are read by no compiler on this machine, and a crate whose platform half only compiles
 # on the platform is a crate that stops compiling there quietly. The targets
 # are rustup components rather than machines, so this type-checks and lints
 # without linking anything -- which is what rots. Rustdoc goes with clippy for
@@ -925,6 +927,21 @@ if rustup target list --installed 2>/dev/null | grep -qx aarch64-apple-ios; then
         || fail "RUSTDOCFLAGS=-D warnings cargo doc --no-deps --target aarch64-apple-ios$ios_args"
 else
     fail "aarch64-apple-ios is not installed: rustup target add aarch64-apple-ios"
+fi
+# the Android half: sipral-ffi's graph as scripts/package/aar.sh builds it,
+# with the AAudio backend in it. Type-checked and linted only; the streams
+# themselves run on a phone or an emulator (docs/15-mobile.md).
+if rustup target list --installed 2>/dev/null | grep -qx aarch64-linux-android; then
+    cargo clippy -p sipral-io-aaudio -p sipral-audio -p sipral-ffi --no-default-features \
+        --target aarch64-linux-android -- -D warnings >/dev/null 2>&1 \
+        && pass "cargo clippy -p sipral-io-aaudio -p sipral-audio -p sipral-ffi for Android" \
+        || fail "cargo clippy -p sipral-io-aaudio -p sipral-audio -p sipral-ffi --no-default-features --target aarch64-linux-android"
+    RUSTDOCFLAGS="-D warnings" cargo doc -p sipral-io-aaudio -p sipral-audio --no-deps \
+        --target aarch64-linux-android >/dev/null 2>&1 \
+        && pass "cargo doc -p sipral-io-aaudio -p sipral-audio for Android" \
+        || fail "RUSTDOCFLAGS=-D warnings cargo doc -p sipral-io-aaudio -p sipral-audio --no-deps --target aarch64-linux-android"
+else
+    fail "aarch64-linux-android is not installed: rustup target add aarch64-linux-android"
 fi
 
 # crates/sipral-aec-webrtc is outside the workspace (Cargo.toml at its root
@@ -1420,7 +1437,7 @@ fi
 # header is what is looked for, not the command.
 jdk="${JAVA_HOME:-$(/usr/libexec/java_home 2>/dev/null || true)}"
 if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
-    for shim in sipral_jni idiomatic_media; do
+    for shim in sipral_jni idiomatic_media audio_routes; do
         cc -fsyntax-only -Wall -Wextra -Werror \
             -I"$jdk/include" -I"$jdk/include/darwin" -I"$ROOT/bindings/c/include" \
             "$ROOT/bindings/kotlin/sipral/src/main/jni/$shim.c" >/dev/null 2>&1 \
@@ -1449,7 +1466,7 @@ if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
         # what SipralAbi.kt itself cannot construct (bindings/kotlin/README.md),
         # so org.sipral.idiomatic's own native calls have to resolve out of
         # the library the generated one already loads.
-        for pair in "sipral_jni:bindings/kotlin/sipral/src/main/jni/sipral_jni.c bindings/kotlin/sipral/src/main/jni/idiomatic_media.c" \
+        for pair in "sipral_jni:bindings/kotlin/sipral/src/main/jni/sipral_jni.c bindings/kotlin/sipral/src/main/jni/idiomatic_media.c bindings/kotlin/sipral/src/main/jni/audio_routes.c" \
             "sipral_jni_check:bindings/kotlin/sipral/src/test/jni/native_thread.c"; do
             name="${pair%%:*}"
             sources="${pair#*:}"

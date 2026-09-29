@@ -12,6 +12,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Device mode on Android, over AAudio.** From API level 28 the built-in engine runs every call through AAudio voice-communication streams (the platform's echo canceller in the input preset, a ringtone stream for the ringer), lists the phone's devices and moves calls between the earpiece, the loudspeaker and a wired or Bluetooth headset through `AudioManager` once `SipralAndroidAudio.attach(context)` has handed it a context, and reports changes as `AUDIO_DEVICES_CHANGED`; `SIPRAL_FEATURE_AUDIO_DEVICE` is now the phone's answer, and below API level 28 the telecom helper's `AudioRecord` and `AudioTrack` stay the path. `SipralCallAudios` drives the engine through the framework's hold and call focus with `EngineAudioDevice` (`docs/15-mobile.md`).
 - **The four idiomatic layers carry the rest of ABI 0.30.** Each stack
   class reads its counters (`counters()` / `Counters()`, the retransmission
   and limit counters among them), replaces its STUN servers while running

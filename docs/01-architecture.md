@@ -190,8 +190,8 @@ Detail in [05-media.md](05-media.md).
 ### sipral-io-*, sipral-headless
 
 Two ways to get audio in and out, and they are mutually exclusive by design. A
-device build links `sipral-io-coreaudio`, `sipral-io-wasapi` or
-`sipral-io-pipewire` (AAudio follows). An agent build links `sipral-headless` and touches no audio API at
+device build links `sipral-io-coreaudio`, `sipral-io-wasapi`,
+`sipral-io-pipewire` or `sipral-io-aaudio`. An agent build links `sipral-headless` and touches no audio API at
 all.
 
 That second build is not a stripped-down first build. It is why the audio device
@@ -213,7 +213,7 @@ thread is out of our memory before the memory is freed, and volume, mute and
 the meter. They were written twice, once per backend, and the second copy's
 own documentation said it was the first copy's. They are `sipral-io-common`
 now — one file each, compiled and tested on every platform the workspace
-builds on rather than once per backend — so that PipeWire and AAudio are not
+builds on rather than once per backend — so that PipeWire and AAudio were not
 the third and fourth copy.
 
 What stayed behind in each backend is what is genuinely its own, and the

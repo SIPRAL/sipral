@@ -741,6 +741,68 @@ switching the route between earpiece, speaker, a wired and a Bluetooth
 headset, the framework's mute from a headset button, and a car taking the
 call over need a phone, as does a real carrier's call.
 
+### Device mode on Android
+
+From Android 9 (API level 28) the library's own engine runs every call on
+Android, as it does on the desktops, over AAudio (`sipral-io-aaudio`):
+`SIPRAL_FEATURE_AUDIO_DEVICE` is set, `SipralAudioMode.platformDefault` is
+`Device`, and the application writes no audio code. Below API level 28 the
+feature bit is clear, the default is `Application`, and `SipralCallAudios`
+carries each call over `AudioRecord` and `AudioTrack` as described above.
+The bit is the phone's, read when asked: the same `libsipral_ffi.so` loads
+on the API level 21 floor, because `libaaudio.so` is looked up with `dlsym`
+rather than linked.
+
+| What | How |
+|---|---|
+| The microphone | An AAudio input stream with `AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION`, the platform's own echo canceller, noise suppressor and gain control where the phone has them; on the device chosen for the microphone role, or following the call's route when none is |
+| The loudspeaker | An AAudio output stream with `AAUDIO_USAGE_VOICE_COMMUNICATION`: the platform puts it on the call's route and it plays at the call volume. Both ask for `AAUDIO_PERFORMANCE_MODE_LOW_LATENCY`, shared, one channel of sixteen-bit samples, and take whatever rate and format AAudio answers with (two channels and floats are converted in the callback) |
+| The ring | A stream of its own, `AAUDIO_USAGE_NOTIFICATION_RINGTONE`, which the platform plays where a ring goes, on the ringer's device when one is chosen |
+| The device list | `AudioManager.getDevices`, merged so that a headset's two halves are one device: the earpiece, the loudspeaker, the built-in microphones, a wired headset or headphones, a Bluetooth headset (the call profile, not A2DP), USB, hearing aids and Bluetooth LE. Each is named by kind and address (`android:bluetooth-sco:AA:BB:…`), so a headset that reconnects keeps its engine id. The default output is the communication device; the default input is that device's microphone, or the built-in one |
+| Routing | `select(SPEAKER, device)` sets the call route: `setCommunicationDevice` from API level 31, and before it `setSpeakerphoneOn` for the loudspeaker and `startBluetoothSco` with `setBluetoothScoOn` for a Bluetooth headset. Handing the role back to the system gives the route back (`clearCommunicationDevice`, both switches off) |
+| Changes | The list and the route are read again every half second, and what moved is `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` with the same changes and origins as on the desktops. A route the engine set itself is not announced back as the system's for a second and a half, while the platform applies it. A stream AAudio disconnects — the device gone, the audio server restarted — is `LOST`, then `REOPENED` on the route |
+
+AAudio lists no devices and routes nothing: both are `AudioManager`'s, a Java
+API. The Kotlin binding's shim holds the application's context and a
+`JavaVM` and gives the engine a table of C functions over them
+(`bindings/kotlin/sipral/src/main/jni/audio_routes.c`, found by `dlsym` in
+the library the JVM loaded, and not part of `sipral.h`), once the
+application has called `SipralAndroidAudio.attach(context)`;
+`SipralCallAudios` calls it itself. Without it — an application that drives
+the C ABI from JNI of its own — the list is empty and every call follows the
+platform's route, as on iOS.
+
+Under the telecom framework the engine is opened with manual activation,
+and `SipralCallAudios` drives it: every call's device is `EngineAudioDevice`,
+one for all of them, which activates the engine when the first call's audio
+starts and deactivates it when the last one is let go — a call held for a
+cellular one lets go, the call answered beside it keeps the devices — and
+the framework's mute is the engine's input mute. A self-managed call's
+route is still the framework's; the engine reports it.
+
+**Run on the emulator, 29 September 2026.** The sample's APK
+(`scripts/package/android.sh`, 22,916,490 bytes) on an `android-36`
+`google_apis` arm64 AVD, calling a Sipral headless agent (`headless-agent`,
+cross-built for arm64-v8a) running inside the same emulator:
+
+| | |
+|---|---|
+| `sipral-io-aaudio`'s own tests, cross-built and run in `adb shell` (`--include-ignored`) | 15 passed. The microphone, a call stream and a ring stream at 48, 16 and 8 kHz, each opened at the rate asked for; in one second the microphone gave 59, 48 and 43 frames, and each output took every frame it was given. Without the Kotlin shim the list is empty |
+| The client opened | `audio: AAudio, devices Speaker (output), Microphone (bottom) (input)` — device mode, and the phone's list through the shim |
+| The call placed | Both roles `REOPENED` as the engine activated; `dumpsys audio` showed the sample's AAudio player with `USAGE_VOICE_COMMUNICATION` on device 2 at 48 kHz, one channel, and its recording with source `VOICE_COMMUNICATION` at 48 kHz |
+| Held from the sample | `held, audio paused`: the recording stopped and no player was left |
+| Resumed | `audio resumed`, both roles `REOPENED`, a new recording session |
+| The audio server killed mid-call (`kill`, as root) | `LOST`, then `REOPENED`; a new player and a new recording on the new audio server, and no `MEDIA_STALLED` |
+| Hung up | `call_ended`, `audio stopped`, no player or recording left. The agent counted 2,871 packets sent and 2,743 received over the 57 seconds, none lost, G.722 |
+
+The emulator's audio policy has one output, the loudspeaker, so no route
+could be moved and no headset connected: the routing paths above (the
+communication device from API level 31, the two switches before it, and
+the notices) are tested on the build machine against a fake `AudioManager`
+(`crates/sipral-io-aaudio/src/route.rs`), and need a phone to be seen
+working. So do an Android 8 phone, where the telecom helper's own streams
+take over, and a real Bluetooth headset.
+
 ### iOS
 
 `CallAudio` (in the Swift package) keeps one call's device over a

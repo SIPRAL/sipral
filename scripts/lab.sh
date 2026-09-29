@@ -823,7 +823,7 @@ kotlin_agent() {
             cc -std=c11 -Wall -shared -fPIC \
                 -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" -I/sipral-include \
                 -o /tmp/libsipral_jni.so \
-                /sipral-jni/sipral_jni.c /sipral-jni/idiomatic_media.c \
+                /sipral-jni/sipral_jni.c /sipral-jni/idiomatic_media.c /sipral-jni/audio_routes.c \
                 -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral
             address=$(getent hosts asterisk | cut -d" " -f1)
             SIPRAL_REGISTRAR_ADDRESS="$address:5060" \

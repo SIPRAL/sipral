@@ -40,6 +40,7 @@ struct State {
     rate_hz: u32,
     system_echo_cancellation: bool,
     opens: usize,
+    ringer_opens: usize,
     duplex_only: bool,
 }
 
@@ -68,6 +69,7 @@ impl FakeControl {
                     rate_hz,
                     system_echo_cancellation: false,
                     opens: 0,
+                    ringer_opens: 0,
                     duplex_only: false,
                 }),
                 Condvar::new(),
@@ -190,6 +192,12 @@ impl FakeControl {
     #[must_use]
     pub fn opens(&self) -> usize {
         lock(&self.state).opens
+    }
+
+    /// How many of those were opened as a ringer.
+    #[must_use]
+    pub fn ringer_opens(&self) -> usize {
+        lock(&self.state).ringer_opens
     }
 
     /// Queue one microphone frame on a device, at the platform's rate.
@@ -340,6 +348,16 @@ impl Backend for FakeBackend {
             channel: Arc::new(Channel::new(window_samples(format.sample_rate_hz))),
             aec,
         }))
+    }
+
+    fn open_ringer(
+        &mut self,
+        identity: Option<&str>,
+        wanted: Format,
+    ) -> Result<Box<dyn PlaybackStream>, BackendError> {
+        let opened = self.open_playback(identity, wanted)?;
+        lock(&self.state).ringer_opens += 1;
+        Ok(opened)
     }
 
     fn duplex_only(&self) -> bool {

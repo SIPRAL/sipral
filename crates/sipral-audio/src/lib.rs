@@ -5,8 +5,9 @@
 //! a call, behind one API on every platform.
 //!
 //! `sipral` carries a call's audio as frames and leaves the device to the
-//! application, and `sipral-io-coreaudio` and `sipral-io-wasapi` each open a
-//! device and leave the call to the application. This crate is the piece
+//! application, and `sipral-io-coreaudio`, `sipral-io-wasapi` and
+//! `sipral-io-aaudio` each open a device and leave the call to the
+//! application. This crate is the piece
 //! between them that every softphone otherwise writes for itself: it lists
 //! the devices, opens the chosen ones, keeps them open through a headset
 //! being unplugged and the default moving, resamples every call to whatever
@@ -66,6 +67,8 @@ mod pump;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 
+#[cfg(target_os = "android")]
+mod aaudio;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod coreaudio;
 #[cfg(target_os = "windows")]
@@ -82,24 +85,36 @@ pub use engine::{Activation, Config, Engine, Info};
 pub use probe::DEFAULT_PROBE_WAIT;
 pub use sipral_io_common::level::{Gain, Level};
 
-/// Whether this crate has a backend for the platform it was built for,
-/// without constructing one: what a capability answer is made of.
+/// Whether this crate has a backend for the platform it runs on, without
+/// constructing one: what a capability answer is made of.
+///
+/// A property of the build on macOS, iOS and Windows. On Android it is the
+/// phone's: AAudio carries a call from API level 28
+/// (`sipral_io_aaudio::MIN_API`), and on an older phone the application runs
+/// its own audio, as the telecom helper does over `AudioRecord` and
+/// `AudioTrack`.
 #[must_use]
-pub const fn platform_has_backend() -> bool {
-    cfg!(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "windows"
-    ))
+pub fn platform_has_backend() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        sipral_io_aaudio::available()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        cfg!(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "windows"
+        ))
+    }
 }
 
 /// The platform's own backend, where this crate has one.
 ///
-/// `None` on a platform this crate has no backend for yet — Linux, where
-/// `sipral-io-pipewire` links a library the packaged `sipral-ffi` must not
-/// require, and Android, whose devices belong to the application's own
-/// layer — so that a caller can say "device mode is not available here"
-/// rather than open nothing quietly.
+/// `None` where it has none — Linux, where `sipral-io-pipewire` links a
+/// library the packaged `sipral-ffi` must not require, and an Android phone
+/// below API level 28 — so that a caller can say "device mode is not
+/// available here" rather than open nothing quietly.
 #[must_use]
 pub fn platform_backend() -> Option<Box<dyn backend::Backend>> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -110,7 +125,20 @@ pub fn platform_backend() -> Option<Box<dyn backend::Backend>> {
     {
         Some(Box::new(wasapi::WasapiBackend::new()))
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+    #[cfg(target_os = "android")]
+    {
+        if sipral_io_aaudio::available() {
+            Some(Box::new(aaudio::AAudioBackend::new()))
+        } else {
+            None
+        }
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows",
+        target_os = "android"
+    )))]
     {
         None
     }

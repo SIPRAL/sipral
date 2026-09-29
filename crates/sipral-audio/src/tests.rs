@@ -356,6 +356,11 @@ fn the_ring_plays_on_the_ringer_and_not_on_the_call_speaker() {
     assert!(!engine.is_active(), "nothing to do yet");
     engine.ring(vec![1_000; 800], 8_000, true).unwrap();
     assert!(engine.is_active() && engine.is_ringing());
+    assert_eq!(
+        fake.ringer_opens(),
+        1,
+        "the ringer's stream was opened as a ring, not as a second call output"
+    );
     wait_ticks(&engine, 4);
     let room = fake.played_by("builtin-out");
     assert!(room.iter().any(|s| *s != 0), "the room speaker rang");

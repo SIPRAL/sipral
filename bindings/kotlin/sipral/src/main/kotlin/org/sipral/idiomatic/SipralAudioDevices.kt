@@ -22,14 +22,16 @@ import org.sipral.SipralStatus
  * Who runs a client's audio: `sipral_stack_config_t::audio`.
  *
  * [Device] has the library open the platform's own devices -- the
- * voice-processing unit on macOS, communications streams on Windows -- and
- * pump every call from the moment its media starts to the moment it ends,
- * with nothing for the application to do but choose devices through
- * [SipralClient.audio]. [Application] is the client as it was before:
- * [SipralMedia.frames] carries the far end's audio and
+ * voice-processing unit on macOS, communications streams on Windows,
+ * AAudio voice-communication streams on Android -- and pump every call from
+ * the moment its media starts to the moment it ends, with nothing for the
+ * application to do but choose devices through [SipralClient.audio] (on
+ * Android, after [SipralAndroidAudio.attach]). [Application] is the client
+ * as it was before: [SipralMedia.frames] carries the far end's audio and
  * [SipralMedia.sendAudio] takes the microphone's, for an application that
- * runs its own audio -- a voice agent, a recorder, a test, and Android,
- * whose devices belong to the telecom helper's `CallAudio`.
+ * runs its own audio -- a voice agent, a recorder, a test, and an Android
+ * phone below API level 28, whose calls the telecom helper carries over
+ * `AudioRecord` and `AudioTrack`.
  */
 sealed class SipralAudioMode {
     /** The library opens the devices, and [activation] says when. */
@@ -41,10 +43,11 @@ sealed class SipralAudioMode {
     companion object {
         /**
          * What a client is opened with unless it says otherwise: [Device]
-         * with automatic activation wherever this build of the library has
-         * an engine for the platform -- macOS, Windows -- and [Application]
-         * where it has none: Linux, and Android, whose telecom helper runs
-         * the devices itself.
+         * with automatic activation wherever the library has an engine for
+         * the platform -- macOS, Windows, and Android from API level 28 --
+         * and [Application] where it has none: Linux, and an older Android
+         * phone, whose calls the telecom helper carries itself. On Android
+         * the answer is the phone's, not the build's.
          */
         val platformDefault: SipralAudioMode
             get() = if (Sipral.capabilities().features and Sipral.FEATURE_AUDIO_DEVICE != 0L) {

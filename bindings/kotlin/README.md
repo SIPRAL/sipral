@@ -29,6 +29,7 @@ cc -std=c11 -dynamiclib -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/darwin" \
     -Ibindings/c/include -o libsipral_jni.dylib \
     bindings/kotlin/sipral/src/main/jni/sipral_jni.c \
     bindings/kotlin/sipral/src/main/jni/idiomatic_media.c \
+    bindings/kotlin/sipral/src/main/jni/audio_routes.c \
     -Ltarget/release -lsipral_ffi
 ```
 
@@ -105,8 +106,8 @@ sockets default to 127.0.0.1, so name an address the registrar can reach.
 
 `SipralClient.open(audio = ...)` takes a `SipralAudioMode`.
 `SipralAudioMode.Device(activation)` -- `SipralAudioMode.platformDefault`
-wherever this build of the library has an engine for the platform, macOS and
-Windows on a JVM -- has the library open the devices with the first call's
+wherever the library has an engine for the platform, macOS and Windows on a
+JVM and Android from API level 28 -- has the library open the devices with the first call's
 media or the first ring and close them with the last (`AUTOMATIC`), or only
 between `audio.activate()` and `audio.deactivate()` (`MANUAL`): every call is
 resampled to the device's rate and mixed into the loudspeaker, the microphone
@@ -115,8 +116,20 @@ Each packet the engine encodes reaches this layer on the engine's thread, and
 goes out of the call's own socket or on its connection to a TURN server.
 `SipralAudioMode.Application` is the client as it was: `SipralMedia.sendAudio`
 and `frames` carry the call's PCM, for a voice agent, a recorder, a test --
-and Android, where the default is `Application` because the devices belong to
-the telecom helper (below).
+and an Android phone below API level 28, where the default is `Application`
+and the telecom helper (below) carries each call over `AudioRecord` and
+`AudioTrack`.
+
+On Android the engine's streams are AAudio's (voice communication, the
+platform's echo canceller in the input preset, a ringtone stream for the
+ringer), and its devices and routes are `AudioManager`'s:
+`SipralAndroidAudio.attach(context)` hands it a context, after which
+`devices()` lists the earpiece, the loudspeaker, a wired or Bluetooth headset
+as the phone has them, `select(SPEAKER, device)` moves every call there (the
+communication device from API level 31, the speakerphone and Bluetooth SCO
+switches before it), and a headset arriving or the route moving arrives as
+`AUDIO_DEVICES_CHANGED`. Without it the list is empty and calls follow the
+platform's route. `SipralCallAudios` calls it itself.
 
 `client.audio` is the engine: `refresh()`/`devices()` list
 `SipralAudioDeviceInfo` with channel counts under ids that survive a refresh
@@ -427,6 +440,14 @@ scope.launch { audios.transitions.collect { (callId, change) -> log(callId, chan
 // DeviceFailed, DeviceRestored, Stopped
 scope.launch { audios.states.collect { show(it) } }   // each call's AudioState, by id
 ```
+
+On a client in device mode it opens no stream of its own: every call's
+device is `EngineAudioDevice`, the engine's activation shared by all of
+them -- on while any call holds it, off when the last lets go -- and the
+framework's mute is the engine's; open such a client with
+`SipralAudioMode.Device(SipralAudioActivation.MANUAL)`, as the sample does,
+so that nothing opens before the framework's call is active. On an older
+phone each call has its own `AudioRecord` and `AudioTrack`.
 
 It follows the call through the bridge (let go while held, taken back when
 active, closed when it ends), the call focus the framework moves between

@@ -39,8 +39,9 @@ fun main() {
     val said = try {
         val fakes = fakeSequences()
         val audio = callAudioSequences()
+        val engine = engineAudioSequences()
         val real = runBlocking { overLoopback() }
-        "$fakes; $audio; $real"
+        "$fakes; $audio; $engine; $real"
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)
