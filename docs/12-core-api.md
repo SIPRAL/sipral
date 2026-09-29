@@ -98,7 +98,11 @@ does not terminate the INVITE transaction outright. The client transaction sits
 in `Accepted` for timer M (64·T1) and passes every further 2xx, including those
 from other forks, up to the dialog layer instead of treating them as strays.
 The server transaction sits in `Accepted` for timer L and absorbs
-retransmissions of the INVITE. Three reviewers flagged the absence of this
+retransmissions of the INVITE, and over UDP it sends the 2xx again on timer G's
+schedule — T1 doubling up to T2 — until the ACK arrives, which §13.3.1.4 asks
+of the layer above and which the endpoint does on its behalf. The ACK is sent
+under a branch of its own, so the dialog that takes it tells the transaction.
+Three reviewers flagged the absence of this
 state independently; it is the corner that produces "the call connected but the
 app thinks it failed" in the field.
 

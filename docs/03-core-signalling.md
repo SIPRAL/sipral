@@ -234,11 +234,13 @@ Four state machines from RFC 3261 §17, implemented from the diagrams in the RFC
 |---|---|
 | INVITE client | A, B, D, and M (RFC 6026) |
 | non-INVITE client | E, F, K |
-| INVITE server | G, H, I, and L (RFC 6026) |
+| INVITE server | G (for a 2xx too, until its ACK), H, I, and L (RFC 6026) |
 | non-INVITE server | J |
 
 RFC 6026's `Accepted` state keeps both INVITE machines alive for 64·T1 after
-a 2xx. A 2xx that reaches an INVITE client in `Completed` — another branch
+a 2xx. On the server side over UDP, timer G sends that 2xx again until its ACK
+arrives (§13.3.1.4 asks it of the layer above; the endpoint does it for every
+layer there is). A 2xx that reaches an INVITE client in `Completed` — another branch
 answering after one refused, which a proxy forwards whatever it has already
 sent upstream (RFC 3261 §16.7 step 5) — goes up like one in `Accepted`,
 without an ACK: RFC 6026 §8.4 re-sends the stored ACK only for a

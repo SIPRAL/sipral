@@ -962,6 +962,10 @@ Content-Length: 0\r\n\
     // ACK came under a branch of its own and never matched it, and it is
     // still the ACK: nothing timed out, and the record does not say one did
     endpoint.handle_timeout(t0 + 64 * T1);
+    assert!(
+        transmits(&mut endpoint).is_empty(),
+        "the 2xx does not go again once its ACK has come"
+    );
     assert_eq!(endpoint.in_flight().0, 0, "timer L ended the transaction");
     assert_eq!(endpoint.retransmissions().timeouts, 0);
     let unacknowledged = endpoint
@@ -974,7 +978,7 @@ Content-Length: 0\r\n\
 }
 
 #[test]
-fn a_2xx_nobody_acknowledges_is_a_timeout_when_timer_l_fires() {
+fn a_2xx_goes_again_until_timer_l_and_is_then_a_timeout() {
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);
     deliver(&mut endpoint, &incoming("INVITE", "in3", ""), t0);
@@ -985,6 +989,7 @@ fn a_2xx_nobody_acknowledges_is_a_timeout_when_timer_l_fires() {
             _ => None,
         })
         .expect("an incoming call");
+    transmits(&mut endpoint);
     endpoint
         .respond_invite(
             transaction,
@@ -992,8 +997,20 @@ fn a_2xx_nobody_acknowledges_is_a_timeout_when_timer_l_fires() {
             t0,
         )
         .expect("200 goes");
-    transmits(&mut endpoint);
-    endpoint.handle_timeout(t0 + 64 * T1);
+    let ok = sent(&mut endpoint);
+
+    // §13.3.1.4: lost on the way, the 2xx goes again T1 later, the same bytes
+    endpoint.handle_timeout(t0 + T1);
+    assert_eq!(sent(&mut endpoint), ok);
+    assert_eq!(endpoint.retransmissions().responses, 1);
+
+    for step in 2..=64_u32 {
+        endpoint.handle_timeout(t0 + step * T1);
+    }
+    assert!(
+        transmits(&mut endpoint).len() > 1,
+        "on timer G's schedule until timer L"
+    );
     assert_eq!(endpoint.retransmissions().timeouts, 1);
 }
 

@@ -1163,6 +1163,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A 2xx lost on UDP is sent again until its ACK arrives.** RFC 3261
+  §13.3.1.4 has the answering end repeat its 2xx, T1 doubling up to T2, and
+  nothing did: the INVITE's retransmissions stop at the first provisional,
+  so a lost 200 left the caller ringing until it gave up and the answering
+  end holding a call nobody heard; ten thousand calls on one machine lost
+  243 of them this way. The INVITE server transaction now repeats
+  it on timer G's schedule until the ACK or timer L.
 - **An answered call's ACK is no longer recorded as missing.** The ACK to a
   2xx arrives under a branch of its own and never reached the INVITE's
   server transaction, so when RFC 6026's timer L ended it 32 seconds later

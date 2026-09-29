@@ -14,8 +14,13 @@
 //! A 2xx does not end this transaction either. RFC 6026 puts it in `Accepted`
 //! for timer L, where retransmissions of the INVITE are absorbed rather than
 //! answered again — the far end is retransmitting because it has not seen the
-//! 2xx, and the *user* is the one required to retransmit that (§13.3.1.4), so
-//! the machine passes each fresh copy to the transport and stays put.
+//! 2xx. §13.3.1.4 has the user retransmit that 2xx until the ACK arrives, and
+//! this machine does it on the user's behalf, on timer G's schedule, because
+//! every layer above would otherwise have to and none did: a 2xx lost on UDP
+//! left the caller ringing until it gave up. The ACK stops it, whether it
+//! reaches this transaction or, sent under a branch of its own as §17.1.1.3
+//! has it, the dialog, which tells the transaction. A fresh copy the user
+//! passes down is still sent as it comes.
 //!
 //! An ACK means two different things depending on where the machine is. After
 //! a non-2xx final response it is the transaction's own, and it moves to
@@ -159,6 +164,7 @@ impl InviteServerMachine {
             // and not absorbed"
             InviteServerState::Accepted => {
                 self.acked = true;
+                self.timer_g = None;
                 Effects::notify(Notify::Ack)
             }
             InviteServerState::Proceeding
@@ -168,12 +174,13 @@ impl InviteServerMachine {
     }
 
     /// The dialog took the ACK to this transaction's 2xx, which arrived under
-    /// a branch of its own and so never reached [`Self::on_ack`]: timer L
-    /// ends the transaction quietly rather than as a 2xx nobody
-    /// acknowledged.
+    /// a branch of its own and so never reached [`Self::on_ack`]: the 2xx
+    /// stops going out again, and timer L ends the transaction quietly
+    /// rather than as a 2xx nobody acknowledged.
     pub(crate) const fn acknowledged_elsewhere(&mut self) {
         if matches!(self.state, InviteServerState::Accepted) {
             self.acked = true;
+            self.timer_g = None;
         }
     }
 
@@ -262,6 +269,11 @@ impl InviteServerMachine {
         if status.is_success() {
             self.state = InviteServerState::Accepted;
             self.timer_l = Some(now + self.config.sixty_four_t1());
+            // §13.3.1.4: the 2xx goes again, T1 doubling up to T2, until its
+            // ACK arrives; over a reliable transport the transport sees to it
+            self.attempt = 0;
+            self.timer_g =
+                (!self.reliable).then(|| now + self.config.retransmit(0, Some(self.config.t2)));
             return Effects {
                 send,
                 ..Effects::default()
@@ -377,23 +389,70 @@ Content-Length: 0\r\n\
         assert!(effects.send.is_some());
         assert!(!effects.terminated);
         assert_eq!(machine.state(), InviteServerState::Accepted);
-        assert_eq!(machine.next_deadline(), Some(now + config.sixty_four_t1()));
+        assert_eq!(
+            machine.next_deadline(),
+            Some(now + config.t1),
+            "the 2xx goes again T1 later unless its ACK arrives"
+        );
 
         let absorbed = machine.on_request();
         assert!(absorbed.send.is_none(), "not answered again");
         assert!(absorbed.notify.is_none(), "and not passed up");
 
-        // the user retransmits the 2xx itself; the machine puts each copy on
-        // the wire and stays where it is
+        // a fresh copy the user passes down goes on the wire, and the
+        // machine stays where it is
         let again = machine.respond(response(200), now);
         assert!(again.send.is_some());
         assert_eq!(machine.state(), InviteServerState::Accepted);
 
+        machine.on_ack(now);
+        assert_eq!(machine.next_deadline(), Some(now + config.sixty_four_t1()));
         let (name, done) = machine
             .handle_timeout(now + config.sixty_four_t1())
             .expect("timer L");
         assert_eq!(name, TimerName::L);
         assert!(done.terminated);
+    }
+
+    #[test]
+    fn a_2xx_goes_again_on_timer_g_until_its_ack_arrives() {
+        // §13.3.1.4: "an interval that starts at T1 seconds and doubles for
+        // each retransmission until it reaches T2 seconds ... Response
+        // retransmissions cease when an ACK request for the response is
+        // received"
+        let (mut machine, _, now, config) = start(false);
+        let sent = machine
+            .respond(response(200), now)
+            .send
+            .map(|message| message.bytes().to_vec());
+        let mut at = now;
+        for gap in [
+            config.t1,
+            2 * config.t1,
+            4 * config.t1,
+            config.t2,
+            config.t2,
+        ] {
+            at += gap;
+            let (name, effects) = machine.handle_timeout(at).expect("timer G");
+            assert_eq!(name, TimerName::G);
+            assert_eq!(
+                effects.send.map(|message| message.bytes().to_vec()),
+                sent,
+                "the same 2xx"
+            );
+        }
+        machine.acknowledged_elsewhere();
+        let (name, done) = machine
+            .handle_timeout(now + config.sixty_four_t1())
+            .expect("only timer L is left");
+        assert_eq!(name, TimerName::L);
+        assert_eq!(done.notify, None, "acknowledged, so nothing went wrong");
+
+        // and over a reliable transport the transport sees to it
+        let (mut machine, _, now, config) = start(true);
+        machine.respond(response(200), now);
+        assert_eq!(machine.next_deadline(), Some(now + config.sixty_four_t1()));
     }
 
     #[test]
@@ -414,10 +473,17 @@ Content-Length: 0\r\n\
         // ACK, it SHOULD generate a BYE" — which needs somebody to be told
         let (mut machine, _, now, config) = start(false);
         machine.respond(response(200), now);
-        let (name, done) = machine
-            .handle_timeout(now + config.sixty_four_t1())
-            .expect("timer L");
-        assert_eq!(name, TimerName::L);
+        let mut fired = Vec::new();
+        let done = loop {
+            let (name, effects) = machine
+                .handle_timeout(now + config.sixty_four_t1())
+                .expect("timer G until timer L");
+            fired.push(name);
+            if name == TimerName::L {
+                break effects;
+            }
+        };
+        assert!(fired.len() > 1, "{fired:?}: the 2xx went again first");
         assert_eq!(done.notify, Some(Notify::TimedOut));
         assert!(done.terminated);
     }
