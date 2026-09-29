@@ -60,6 +60,7 @@ pub mod drift;
 pub mod g711;
 pub mod g722;
 pub mod g729;
+pub mod inband;
 pub mod mix;
 #[cfg(feature = "opus")]
 pub mod opus;
