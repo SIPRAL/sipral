@@ -296,6 +296,10 @@ pub(crate) struct Media {
     pending_mark: Option<PendingMark>,
     /// Marks whose echo has come back since the last [`Media::take_marks`].
     marks: Vec<Mark>,
+    /// A payload type written on the wire as another: `(sent, wire)`. What
+    /// `Flow::Renumbered` stands between the stack and a far end that
+    /// renumbered a dynamic type with (see [`Media::rewrite_payload`]).
+    rewrite: Option<(u8, u8)>,
 }
 
 impl Media {
@@ -333,6 +337,7 @@ impl Media {
                 .then(quality::Gate::new),
             pending_mark: None,
             marks: Vec::new(),
+            rewrite: None,
         }
     }
 
@@ -537,6 +542,14 @@ impl Media {
     /// Everything about the codec, the jitter buffer and the concealment is
     /// `session`'s; this only watches what crosses the socket, the way a real
     /// audio device and a real network would.
+    /// Write every RTP packet this end sends with payload type `sent` as
+    /// `wire` instead, marker bit kept: the far end numbered the format
+    /// `sent` in its answer and is the one listening, but the server on the
+    /// other side of this socket numbers it `wire`.
+    pub(crate) const fn rewrite_payload(&mut self, sent: u8, wire: u8) {
+        self.rewrite = Some((sent, wire));
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(crate) fn turn(&mut self, session: &mut MediaSession, now: Instant) {
         // The socket was bound before the call was placed or answered, so its
@@ -578,7 +591,10 @@ impl Media {
                 session.capture(samples.get(..frame).unwrap_or_default(), now)
                 && self
                     .socket
-                    .send_to(datagram.payload, datagram.destination)
+                    .send_to(
+                        &rewritten(datagram.payload, self.rewrite),
+                        datagram.destination,
+                    )
                     .is_ok()
             {
                 self.heard.sent = self.heard.sent.saturating_add(1);
@@ -702,6 +718,21 @@ impl Media {
     /// for one.
     pub(crate) fn quality_report(&self) -> Option<quality::Report> {
         self.quality.as_ref().map(quality::Gate::report)
+    }
+}
+
+/// `packet` with its payload type moved as `rewrite` says, `(from, to)`, when
+/// it carries `from`; as it is otherwise.
+fn rewritten(packet: &[u8], rewrite: Option<(u8, u8)>) -> std::borrow::Cow<'_, [u8]> {
+    match (rewrite, packet.get(1)) {
+        (Some((from, to)), Some(&second)) if second & 0x7f == from => {
+            let mut moved = packet.to_vec();
+            if let Some(byte) = moved.get_mut(1) {
+                *byte = (second & 0x80) | to;
+            }
+            std::borrow::Cow::Owned(moved)
+        }
+        _ => std::borrow::Cow::Borrowed(packet),
     }
 }
 
