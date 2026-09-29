@@ -986,6 +986,121 @@ fn a_client_offering_only_aes_128_cm_still_completes_on_it() {
     );
 }
 
+/// The `use_srtp` profiles of every ClientHello `from` sent.
+fn offered_profiles(pair: &Pair, from: usize) -> Vec<Vec<SrtpProtectionProfile>> {
+    pair.sent
+        .iter()
+        .filter(|(sender, _)| *sender == from)
+        .flat_map(|(_, datagram)| plaintext_fragments(datagram))
+        .filter(|(_, header, _)| header.msg_type == HandshakeType::CLIENT_HELLO)
+        .map(|(_, _, body)| {
+            let hello = ClientHello::parse(&body).unwrap();
+            hello
+                .extensions
+                .unwrap()
+                .use_srtp()
+                .unwrap()
+                .profiles
+                .clone()
+        })
+        .collect()
+}
+
+/// RFC 5764 §4.1.1: the client offers its profiles "in descending order of
+/// preference", and the server answers with one of them, chosen here in the
+/// server's own configured order. A peer offering only the RFC 5764 AES-CM
+/// profiles, a peer offering only the RFC 7714 §14.2 GCM ones, and two ends
+/// with nothing in common are each met with the peer as client and as
+/// server.
+#[test]
+fn a_profile_is_agreed_in_the_servers_order_or_the_handshake_fails_for_want_of_one() {
+    use SrtpProtectionProfile as P;
+    let (one, other) = (identity(1), identity(2));
+    let cm = vec![P::AES128_CM_HMAC_SHA1_80, P::AES128_CM_HMAC_SHA1_32];
+    let gcm = vec![P::AEAD_AES_128_GCM, P::AEAD_AES_256_GCM];
+    let every = KEYABLE.to_vec();
+    // the client's list, the server's, what they agree on
+    let cases: [(&[P], &[P], Option<P>); 9] = [
+        (&cm, &every, Some(P::AES128_CM_HMAC_SHA1_80)),
+        (&every, &cm, Some(P::AES128_CM_HMAC_SHA1_80)),
+        (&gcm, &every, Some(P::AEAD_AES_256_GCM)),
+        (&every, &gcm, Some(P::AEAD_AES_128_GCM)),
+        (&gcm, &cm, None),
+        (&cm, &gcm, None),
+        (&[P::AEAD_AES_128_GCM], &[P::AEAD_AES_256_GCM], None),
+        (&every, &every, Some(P::AEAD_AES_256_GCM)),
+        (
+            &every,
+            &[P::AES128_CM_HMAC_SHA1_32, P::AEAD_AES_128_GCM],
+            Some(P::AES128_CM_HMAC_SHA1_32),
+        ),
+    ];
+    for (seed, (client, server, agreed)) in (31..).zip(cases) {
+        let what = format!("client {client:?}, server {server:?}");
+        let mut configs = pair_configs(Role::Client, &one, &other);
+        configs[0].srtp_profiles = client.to_vec();
+        configs[1].srtp_profiles = server.to_vec();
+        let mut pair = Pair::new(configs, Path::CLEAN, seed);
+        pair.run(Duration::from_secs(10));
+
+        // the client offered its own list, in its own order, every time
+        let offers = offered_profiles(&pair, 0);
+        assert!(!offers.is_empty(), "{what}");
+        assert!(offers.iter().all(|offer| offer == client), "{what}");
+
+        match agreed {
+            Some(profile) => {
+                let (client_keys, server_keys) = (keyed(&pair.events[0]), keyed(&pair.events[1]));
+                assert_eq!(client_keys.profile(), profile, "{what}");
+                assert_keyed_alike(client_keys, server_keys);
+            }
+            None => {
+                assert_eq!(refused(&pair.events[1]), Failure::NoSrtpProfile, "{what}");
+                assert_eq!(
+                    refused(&pair.events[0]),
+                    Failure::PeerAlert(AlertDescription::HANDSHAKE_FAILURE),
+                    "{what}"
+                );
+            }
+        }
+    }
+}
+
+/// RFC 5764 §4.2 exports `2 * (master_key_len + master_salt_len)` octets, the
+/// lengths being the negotiated profile's: RFC 7714 §12 gives both GCM
+/// profiles a 96-bit salt, and a 128- or 256-bit key.
+#[test]
+fn each_profile_keys_both_directions_at_its_own_widths() {
+    use SrtpProtectionProfile as P;
+    let (one, other) = (identity(1), identity(2));
+    let widths = [
+        (P::AEAD_AES_256_GCM, 32, 12),
+        (P::AEAD_AES_128_GCM, 16, 12),
+        (P::AES128_CM_HMAC_SHA1_80, 16, 14),
+        (P::AES128_CM_HMAC_SHA1_32, 16, 14),
+    ];
+    for (seed, (profile, key, salt)) in (41..).zip(widths) {
+        for first_role in [Role::Client, Role::Server] {
+            let mut configs = pair_configs(first_role, &one, &other);
+            for config in &mut configs {
+                config.srtp_profiles = vec![profile];
+            }
+            let mut pair = Pair::new(configs, Path::CLEAN, seed);
+            pair.run(Duration::from_secs(10));
+            let (first, second) = (keyed(&pair.events[0]), keyed(&pair.events[1]));
+            assert_eq!(first.profile(), profile);
+            assert_keyed_alike(first, second);
+            for keys in [first, second] {
+                assert_eq!(keys.local_master_key().len(), key, "{profile:?}");
+                assert_eq!(keys.remote_master_key().len(), key, "{profile:?}");
+                assert_eq!(keys.local_master_salt().len(), salt, "{profile:?}");
+                assert_eq!(keys.remote_master_salt().len(), salt, "{profile:?}");
+                assert_ne!(keys.local_master_salt(), keys.remote_master_salt());
+            }
+        }
+    }
+}
+
 /// The ClientHello body with `use_srtp` holding no profiles and no MKI: the
 /// octets `00 0e 00 03 00 00 00`, which `<2..2^16-1>` does not allow and no
 /// encoder here will write.
