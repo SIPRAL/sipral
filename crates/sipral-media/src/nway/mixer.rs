@@ -9,6 +9,7 @@ use core::fmt;
 use super::convert::Converter;
 use super::limiter::Limiter;
 use super::ring::Ring;
+use super::talker::Talker;
 use super::{MAX_FRAME_TICKS, MAX_PARTICIPANTS, MIX_RATE, MIX_TICK};
 use crate::mix::Gain;
 use crate::resample::RateError;
@@ -255,6 +256,7 @@ struct Participant {
     /// Whether `downstream` and `limiter` do.
     downstream_live: bool,
     limiter: Limiter,
+    talker: Talker,
     /// What this participant put into the current tick's sum, at the mix's
     /// rate, so it can be taken out again for its own ears.
     contribution: Vec<i32>,
@@ -279,15 +281,16 @@ impl Participant {
             upstream_live: false,
             downstream_live: false,
             limiter: Limiter::new(MIX_RATE),
+            talker: Talker::default(),
             contribution: vec![0; MIX_TICK],
             started: false,
             stats: ParticipantStats::default(),
         })
     }
 
-    /// Takes one tick of input, and adds what the others should hear of it
-    /// to `sum`.
-    fn take_input(&mut self, native: &mut [i16], wide: &mut [i16], sum: &mut [i32]) {
+    /// Takes tick number `tick` of input, measures it for the talker
+    /// detector, and adds what the others should hear of it to `sum`.
+    fn take_input(&mut self, tick: u64, native: &mut [i16], wide: &mut [i16], sum: &mut [i32]) {
         let Some(frame) = native.get_mut(..self.tick) else {
             return;
         };
@@ -299,6 +302,15 @@ impl Participant {
             if self.started && !self.controls.listen_only {
                 self.stats.underruns += 1;
             }
+        }
+
+        if self.controls.listen_only {
+            self.talker.reset();
+        } else {
+            // measured even while muted, so a caller can tell a participant
+            // that it is talking into a mute
+            self.talker
+                .update(energy(frame, self.controls.gain_in), tick);
         }
 
         if self.controls.mute_in || self.controls.listen_only {
@@ -344,6 +356,13 @@ impl Participant {
     }
 }
 
+impl Participant {
+    /// Whether the conference should list this participant as talking.
+    const fn heard_talking(&self) -> bool {
+        self.talker.talking() && !self.controls.mute_in && !self.controls.listen_only
+    }
+}
+
 /// A place in the conference, and how many participants have held it.
 struct Slot {
     generation: u32,
@@ -364,6 +383,8 @@ pub struct Mixer {
     wide: Vec<i16>,
     /// One tick at a participant's rate, reused likewise.
     native: Vec<i16>,
+    /// Who is talking, loudest first, as of the last tick.
+    talkers: Vec<ParticipantId>,
     ticks: u64,
 }
 
@@ -391,6 +412,7 @@ impl Mixer {
             sum: vec![0; MIX_TICK],
             wide: vec![0; MIX_TICK],
             native: vec![0; MIX_TICK],
+            talkers: Vec::with_capacity(requested),
             ticks: 0,
         })
     }
@@ -446,6 +468,7 @@ impl Mixer {
         let slot = self.slot_mut(id).ok_or(MixError::UnknownParticipant(id))?;
         slot.participant = None;
         self.present -= 1;
+        self.talkers.retain(|talker| *talker != id);
         Ok(())
     }
 
@@ -594,6 +617,48 @@ impl Mixer {
         Ok(())
     }
 
+    /// Who was talking in the last tick, loudest first.
+    ///
+    /// A participant joins the list after [`START_TICKS`] ticks of speech and
+    /// leaves it after [`STOP_TICKS`] ticks of silence, and is ranked by its
+    /// level averaged over [`SMOOTHING_TICKS`] ticks; two at the same level
+    /// are ranked by who started first. A muted or listen-only participant is
+    /// never listed, and one that leaves is gone from the list at once. The
+    /// [`talker`](super::talker) module has the levels.
+    ///
+    /// [`START_TICKS`]: super::talker::START_TICKS
+    /// [`STOP_TICKS`]: super::talker::STOP_TICKS
+    /// [`SMOOTHING_TICKS`]: super::talker::SMOOTHING_TICKS
+    #[must_use]
+    pub fn talkers(&self) -> &[ParticipantId] {
+        &self.talkers
+    }
+
+    /// Whether a participant was talking in the last tick.
+    ///
+    /// Unlike [`talkers`](Self::talkers) this is true of a participant that
+    /// is talking into its own mute, which is what a client needs to say so.
+    /// It is never true of a listen-only participant.
+    ///
+    /// # Errors
+    ///
+    /// [`MixError::UnknownParticipant`] when it is not in the conference.
+    pub fn is_talking(&self, id: ParticipantId) -> Result<bool, MixError> {
+        Ok(self.participant(id)?.talker.talking())
+    }
+
+    /// The level talkers are ranked by: mean-square energy after the input
+    /// gain, averaged over [`SMOOTHING_TICKS`] ticks.
+    ///
+    /// # Errors
+    ///
+    /// [`MixError::UnknownParticipant`] when it is not in the conference.
+    ///
+    /// [`SMOOTHING_TICKS`]: super::talker::SMOOTHING_TICKS
+    pub fn talk_level(&self, id: ParticipantId) -> Result<i64, MixError> {
+        Ok(self.participant(id)?.talker.level())
+    }
+
     /// Mixes one tick, 20 ms.
     ///
     /// Takes a tick of input from every participant — silence for whatever
@@ -606,6 +671,8 @@ impl Mixer {
             sum,
             wide,
             native,
+            talkers,
+            ticks,
             ..
         } = self;
         sum.fill(0);
@@ -613,8 +680,9 @@ impl Mixer {
             .iter_mut()
             .filter_map(|slot| slot.participant.as_mut())
         {
-            participant.take_input(native, wide, sum);
+            participant.take_input(*ticks, native, wide, sum);
         }
+        rank(slots, talkers);
         for participant in slots
             .iter_mut()
             .filter_map(|slot| slot.participant.as_mut())
@@ -643,6 +711,43 @@ impl Mixer {
             .and_then(|slot| slot.participant.as_mut())
             .ok_or(MixError::UnknownParticipant(id))
     }
+}
+
+/// Lists the participants that are talking, loudest first, in place.
+fn rank(slots: &[Slot], talkers: &mut Vec<ParticipantId>) {
+    talkers.clear();
+    for (index, slot) in slots.iter().enumerate() {
+        if let (Some(participant), Ok(index)) = (&slot.participant, u32::try_from(index))
+            && participant.heard_talking()
+        {
+            talkers.push(ParticipantId {
+                slot: index,
+                generation: slot.generation,
+            });
+        }
+    }
+    let key = |id: &ParticipantId| {
+        let talker = usize::try_from(id.slot)
+            .ok()
+            .and_then(|index| slots.get(index))
+            .and_then(|slot| slot.participant.as_ref())
+            .map(|participant| participant.talker)
+            .unwrap_or_default();
+        (core::cmp::Reverse(talker.level()), talker.since(), *id)
+    };
+    talkers.sort_unstable_by_key(key);
+}
+
+/// Mean-square energy of a tick at `gain`.
+fn energy(frame: &[i16], gain: Gain) -> i64 {
+    let total: i64 = frame
+        .iter()
+        .map(|sample| {
+            let scaled = scale(i64::from(*sample), gain);
+            scaled * scaled
+        })
+        .sum();
+    total / i64::try_from(frame.len()).unwrap_or(1).max(1)
 }
 
 /// Written out: the filters and queues are tens of kilobytes each.

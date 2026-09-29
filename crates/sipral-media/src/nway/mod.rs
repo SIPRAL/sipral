@@ -40,6 +40,14 @@
 //! an underrun. Muting out still queues a tick of silence every tick, so the
 //! participant's playout clock keeps running.
 //!
+//! # Who is talking
+//!
+//! Every tick, each participant's input is measured, and
+//! [`talkers`](Mixer::talkers) lists who is talking, loudest first. Starting
+//! and stopping each need a run of ticks past a threshold of their own, so
+//! the list does not flicker with every syllable; [`talker`] has the
+//! thresholds and the spans.
+//!
 //! # Latency
 //!
 //! A tick consumes one tick of queued input from every participant and queues
@@ -71,6 +79,7 @@ mod convert;
 pub mod limiter;
 mod mixer;
 mod ring;
+pub mod talker;
 
 pub use limiter::Limiter;
 pub use mixer::{

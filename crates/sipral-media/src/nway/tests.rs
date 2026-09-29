@@ -669,3 +669,88 @@ fn audio_pushed_before_a_tick_is_heard_right_after_it() {
         .unwrap();
     assert_eq!(peak, 20 + 64, "the impulse came out at {peak}");
 }
+
+#[test]
+fn talkers_are_listed_loudest_first_with_hysteresis() {
+    let mut mixer = mixer(5);
+    let mut legs = vec![
+        Leg::join(&mut mixer, Rate::Hz8000, Some((500.0, 2_000.0))),
+        Leg::join(&mut mixer, Rate::Hz16000, Some((700.0, 8_000.0))),
+        Leg::join(&mut mixer, Rate::Hz48000, Some((900.0, 4_000.0))),
+        Leg::join(&mut mixer, Rate::Hz32000, None),
+    ];
+    let (a, b, c, d) = (legs[0].id, legs[1].id, legs[2].id, legs[3].id);
+
+    // one tick of speech is not enough, two are
+    run(&mut mixer, &mut legs, 1);
+    assert!(mixer.talkers().is_empty());
+    run(&mut mixer, &mut legs, 1);
+    assert_eq!(mixer.talkers(), [b, c, a]);
+    assert!(!mixer.is_talking(d).unwrap());
+
+    // b falls silent: it keeps its place in the list through the pause, but
+    // sinks as its level decays, and is gone once the pause is long enough
+    legs[1].tone = None;
+    run(&mut mixer, &mut legs, 10);
+    assert_eq!(mixer.talkers(), [c, a, b]);
+    run(&mut mixer, &mut legs, 9);
+    assert_eq!(mixer.talkers(), [c, a, b]);
+    run(&mut mixer, &mut legs, 1);
+    assert_eq!(mixer.talkers(), [c, a]);
+    assert!(mixer.talk_level(c).unwrap() > mixer.talk_level(a).unwrap());
+
+    // a muted talker is not listed, but can be told it is talking; a
+    // listen-only one is neither
+    mixer.set_mute_in(c, true).unwrap();
+    mixer.set_listen_only(a, true).unwrap();
+    run(&mut mixer, &mut legs, 1);
+    assert!(mixer.talkers().is_empty());
+    assert!(mixer.is_talking(c).unwrap());
+    assert!(!mixer.is_talking(a).unwrap());
+
+    // and one that leaves is off the list before the next tick
+    mixer.set_mute_in(c, false).unwrap();
+    run(&mut mixer, &mut legs, 1);
+    assert_eq!(mixer.talkers(), [c]);
+    mixer.leave(c).unwrap();
+    assert!(mixer.talkers().is_empty());
+}
+
+#[test]
+fn talkers_at_the_same_level_are_listed_by_who_started_first() {
+    let mut mixer = mixer(2);
+    let late = mixer.join(ParticipantConfig::new(Rate::Hz8000)).unwrap();
+    let early = mixer.join(ParticipantConfig::new(Rate::Hz8000)).unwrap();
+    // a constant has the same energy in every tick, so both levels converge
+    // on the same value by the same steps
+    let level = vec![1_000_i16; 160];
+    for tick in 0..100 {
+        mixer.push(early, &level).unwrap();
+        if tick >= 5 {
+            mixer.push(late, &level).unwrap();
+        }
+        mixer.mix();
+    }
+    assert_eq!(
+        mixer.talk_level(early).unwrap(),
+        mixer.talk_level(late).unwrap()
+    );
+    assert_eq!(mixer.talkers(), [early, late]);
+}
+
+#[test]
+fn talking_is_measured_after_the_input_gain() {
+    let mut mixer = mixer(2);
+    let mut legs = vec![
+        Leg::join(&mut mixer, Rate::Hz8000, Some((500.0, 1_000.0))),
+        Leg::join(&mut mixer, Rate::Hz8000, None),
+    ];
+    let a = legs[0].id;
+    mixer.set_gain_in(a, Gain::ratio(1, 4)).unwrap();
+    run(&mut mixer, &mut legs, 5);
+    // an RMS of 707 before the gain, 177 after it: under the start level
+    assert!(mixer.talkers().is_empty());
+    mixer.set_gain_in(a, Gain::UNITY).unwrap();
+    run(&mut mixer, &mut legs, 2);
+    assert_eq!(mixer.talkers(), [a]);
+}
