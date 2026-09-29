@@ -148,6 +148,28 @@ answers an incoming call 302 with a `Diversion`.
 call anonymous in `From`) and `trusted_peers`, the addresses whose asserted
 identity the account believes and toward which alone it asserts its own.
 
+## STIR/SHAKEN, SRTP per account and the encryption report
+
+`add_account(..., stir_key=key, stir_certificate_url=url)` signs every call
+the account places (RFC 8224, with RFC 8588's `attest` and `origid`); the
+key is the bare 32 bytes or SEC1 or PKCS #8 in DER or PEM, and the stack
+needs the time first: `stack.stir(None)` on one that only signs. A signed INVITE
+is some five hundred octets longer, and past RFC 3261's 1300 over UDP it
+needs a stream transport. `stack.stir(anchors)` verifies the callers of
+every account that reports (the default) or is `StirVerification.STRICT`:
+`EventKind.CALLER_VERIFICATION` with `event.verification.stage ==
+CERTIFICATE_WANTED` asks for the chain at `certificate_url`, which
+`stack.stir_certificate(event.call, chain)` hands over (`None` for one that
+could not be had); the verdict follows as the same kind, just before the
+call, and `event.identity.verification` carries it on every call event.
+
+`add_account(..., srtp=lib.SIPRAL_SRTP_REQUIRED, srtp_suites=[...])` holds
+every call of one account to its own SRTP policy and suites; a call may ask
+for more and never less. `call.media.encryption()` is the encryption report
+(`Protection`: how the keys were exchanged, encrypted, the suite, and
+whether the exchange authenticated the far end), and `event.protection`
+carries it on media started, changed and secured.
+
 ## A call that moves with the network
 
 `stack.move_to(host)` is what an application calls when the platform says

@@ -499,8 +499,31 @@ class Stack:
         session_interval_seconds: int = 0,
         privacy: int = 0,
         trusted_peers: Sequence[str] | str | None = None,
+        srtp: int = 0,
+        srtp_suites: Sequence[str] | str | None = None,
+        stir_verification: int = 0,
+        stir_key: bytes | None = None,
+        stir_certificate_url: str | None = None,
+        stir_orig: str | None = None,
+        stir_origid: str | None = None,
+        stir_attestation: int = 0,
     ) -> Account:
         """`sipral_account_add`. See :class:`sipral.account.Account`.
+
+        ``srtp`` is a `SIPRAL_SRTP_*` every call of this account is held to,
+        over the stack's own -- a call may ask for more and never for less
+        -- and ``srtp_suites`` the suites those calls run, most preferred
+        first, by their RFC 4568 and RFC 7714 names. ``stir_verification`` is
+        a :class:`sipral.enums.StirVerification`: what the account does with
+        the `Identity` of the calls it receives, once :meth:`stir` gave the
+        stack trust anchors. ``stir_key`` (a P-256 key: the bare 32 bytes, or
+        SEC1 or PKCS #8 in DER or PEM) with ``stir_certificate_url`` signs
+        every call the account places (RFC 8224), as ``stir_orig`` or the
+        number in ``aor``, claiming ``stir_attestation`` (a
+        :class:`sipral.enums.Attestation`, ``NONE`` for A) and
+        ``stir_origid``. A PASSporT carries the time, which :meth:`stir`
+        gives the stack: call it first, with ``None`` for anchors on a stack
+        that only signs.
 
         ``session_timer`` is an :class:`sipral.enums.SessionTimer`: ``0`` for
         the stack's default, ``OFF``, or ``INTERVAL`` with
@@ -535,10 +558,70 @@ class Stack:
             session_interval_seconds=session_interval_seconds,
             privacy=privacy,
             trusted_peers=trusted_peers,
+            srtp=srtp,
+            srtp_suites=srtp_suites,
+            stir_verification=stir_verification,
+            stir_key=stir_key,
+            stir_certificate_url=stir_certificate_url,
+            stir_orig=stir_orig,
+            stir_origid=stir_origid,
+            stir_attestation=stir_attestation,
         )
         with self._lock:
             self._accounts.append(account)
         return account
+
+    def stir(
+        self,
+        anchors: bytes | str | None,
+        *,
+        freshness_seconds: int = 0,
+        certificate_wait_ms: int = 0,
+        unix_seconds: int | None = None,
+    ) -> None:
+        """`sipral_stack_stir`: verify the callers of the calls this stack's
+        accounts receive against ``anchors`` (PEM or DER certificates, the
+        STI-PA's roots in a SHAKEN deployment) from now on (RFC 8224).
+
+        ``unix_seconds`` is the wall clock now, which a PASSporT is signed
+        and judged by, and defaults to this machine's; a stack whose
+        accounts only sign calls this too, with ``None`` for ``anchors``,
+        before adding them. The certificate a call names
+        is wanted through `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`
+        (:attr:`sipral.events.Event.verification`) and handed over with
+        :meth:`stir_certificate`.
+        """
+        raw = anchors.encode("utf-8") if isinstance(anchors, str) else anchors
+        anchors_buf = ffi.new("uint8_t[]", raw) if raw else None
+        config = ffi.new("sipral_stir_config_t *")
+        config.size = ffi.sizeof("sipral_stir_config_t")
+        if anchors_buf is not None:
+            config.anchors = anchors_buf
+            config.anchors_len = len(raw)
+        config.freshness_seconds = freshness_seconds
+        config.certificate_wait_ms = certificate_wait_ms
+        config.unix_seconds = int(time.time()) if unix_seconds is None else unix_seconds
+        _retry(
+            lambda: lib.sipral_stack_stir(self.handle, config, self.now_ms()),
+            "sipral_stack_stir",
+        )
+
+    def stir_certificate(self, call: int, chain: bytes | None) -> None:
+        """`sipral_call_stir_certificate`: the chain the certificate URL a
+        verification wanted yielded -- PEM or DER, the signing certificate
+        first -- or ``None`` for one that could not be had. ``call`` is the
+        handle the event named: the call has not been announced yet."""
+        chain_buf = ffi.new("uint8_t[]", chain) if chain else None
+        _retry(
+            lambda: lib.sipral_call_stir_certificate(
+                self.handle,
+                call,
+                chain_buf if chain_buf is not None else ffi.NULL,
+                len(chain) if chain else 0,
+                self.now_ms(),
+            ),
+            "sipral_call_stir_certificate",
+        )
 
     def place_call(
         self,

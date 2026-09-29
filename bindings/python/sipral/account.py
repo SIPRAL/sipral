@@ -87,6 +87,14 @@ class Account:
         session_interval_seconds: int = 0,
         privacy: int = 0,
         trusted_peers: Sequence[str] | str | None = None,
+        srtp: int = 0,
+        srtp_suites: Sequence[str] | str | None = None,
+        stir_verification: int = 0,
+        stir_key: bytes | None = None,
+        stir_certificate_url: str | None = None,
+        stir_orig: str | None = None,
+        stir_origid: str | None = None,
+        stir_attestation: int = 0,
     ) -> "Account":
         aor_bytes = aor.encode("utf-8")
         registrar_address_bytes = registrar_address.encode("utf-8")
@@ -142,6 +150,35 @@ class Account:
         if peers_buf is not None:
             config.trusted_peers = peers_buf
             config.trusted_peers_len = len(peers_bytes)
+        config.srtp = int(srtp)
+        suites = srtp_suites if isinstance(srtp_suites, str) else ",".join(srtp_suites or ())
+        # every buffer below is kept alive by a name until `sipral_account_add`
+        # has read it, and not a moment longer is needed
+        suites_buf = ffi.new("char[]", suites.encode("utf-8")) if suites else None
+        if suites_buf is not None:
+            config.srtp_suites = suites_buf
+            config.srtp_suites_len = len(suites.encode("utf-8"))
+        config.stir_verification = int(stir_verification)
+        key_buf = ffi.new("uint8_t[]", stir_key) if stir_key else None
+        if key_buf is not None:
+            config.stir_key = key_buf
+            config.stir_key_len = len(stir_key)
+        url_bytes = _optional(stir_certificate_url)
+        url_buf = ffi.new("char[]", url_bytes) if url_bytes else None
+        if url_buf is not None:
+            config.stir_certificate_url = url_buf
+            config.stir_certificate_url_len = len(url_bytes)
+        orig_bytes = _optional(stir_orig)
+        orig_buf = ffi.new("char[]", orig_bytes) if orig_bytes else None
+        if orig_buf is not None:
+            config.stir_orig = orig_buf
+            config.stir_orig_len = len(orig_bytes)
+        origid_bytes = _optional(stir_origid)
+        origid_buf = ffi.new("char[]", origid_bytes) if origid_bytes else None
+        if origid_buf is not None:
+            config.stir_origid = origid_buf
+            config.stir_origid_len = len(origid_bytes)
+        config.stir_attestation = int(stir_attestation)
 
         out_account = ffi.new("sipral_handle_t *")
         _call(

@@ -42,7 +42,15 @@ from .audio import Audio, AudioDevice, AudioInfo
 from .call import Call
 from .counters import Counters
 from .errors import SipralError
-from .events import Answering, AudioNotice, CallerIdentity, EndCause, Event
+from .events import (
+    Answering,
+    AudioNotice,
+    CallerIdentity,
+    EndCause,
+    Event,
+    Protection,
+    Verification,
+)
 from .media import Media
 from .stack import TRACE, Stack, features
 
@@ -61,9 +69,11 @@ __all__ = [
     "EndCause",
     "Event",
     "Media",
+    "Protection",
     "SipralError",
     "Stack",
     "TRACE",
+    "Verification",
     "__version__",
     "features",
 ]

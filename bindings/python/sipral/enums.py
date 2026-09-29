@@ -57,6 +57,13 @@ __all__ = [
     "IdentityText",
     "SessionTimer",
     "LogLevel",
+    "KeyExchange",
+    "MediaKind",
+    "StirVerification",
+    "Attestation",
+    "VerificationOutcome",
+    "VerificationFailure",
+    "VerificationStage",
 ]
 
 
@@ -253,3 +260,28 @@ SessionTimer = _enum("SessionTimer", "SIPRAL_SESSION_TIMER_")
 #: A `sipral_log_level_t`: how loud a line of :meth:`sipral.Stack.set_log`
 #: is, and how much a stack delivers. ``OFF`` is what a stack starts with.
 LogLevel = _enum("LogLevel", "SIPRAL_LOG_LEVEL_")
+
+#: A `sipral_key_exchange_t`: how a stream's SRTP keys were exchanged, in
+#: the encryption report and on the media events.
+KeyExchange = _enum("KeyExchange", "SIPRAL_KEY_EXCHANGE_")
+
+#: A `sipral_media_kind_t`: what a stream of the encryption report carries.
+MediaKind = _enum("MediaKind", "SIPRAL_MEDIA_KIND_")
+
+#: A `sipral_stir_verification_t`: what an account does with the `Identity`
+#: of the calls it receives (RFC 8224).
+StirVerification = _enum("StirVerification", "SIPRAL_STIR_VERIFICATION_")
+
+#: A `sipral_attestation_t` (RFC 8588): ``NONE`` for no SHAKEN claim.
+Attestation = _enum("Attestation", "SIPRAL_ATTESTATION_")
+
+#: A `sipral_verification_outcome_t`: what this stack's own check of a
+#: caller came to.
+VerificationOutcome = _enum("VerificationOutcome", "SIPRAL_VERIFICATION_OUTCOME_")
+
+#: A `sipral_verification_failure_t`: why it did not hold.
+VerificationFailure = _enum("VerificationFailure", "SIPRAL_VERIFICATION_FAILURE_")
+
+#: A `sipral_verification_stage_t`: which half of a caller's verification
+#: `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` reports.
+VerificationStage = _enum("VerificationStage", "SIPRAL_VERIFICATION_STAGE_")
