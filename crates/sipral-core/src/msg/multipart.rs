@@ -1319,6 +1319,49 @@ Content-Type: text/html\r\n\
     }
 
     #[test]
+    fn a_body_exactly_at_the_byte_bound_is_read() {
+        let body = b"--b\r\n\r\nx\r\n--b--";
+        let exact = MultipartLimits {
+            max_bytes: body.len(),
+            ..MultipartLimits::DEFAULT
+        };
+        let ct = media(b"multipart/mixed;boundary=b");
+        assert!(Multipart::parse_with_limits(&ct, body, exact).is_ok());
+    }
+
+    #[test]
+    fn a_part_header_section_is_held_to_its_grammar() {
+        let ct = b"multipart/mixed;boundary=b";
+        for (headers, error) in [
+            (
+                &b"Content-Disposition: render\r\ncontent-disposition: session\r\n"[..],
+                MultipartError::DuplicateHeader("Content-Disposition"),
+            ),
+            (
+                b"Content-ID: <a@x>\r\nContent-ID: <b@x>\r\n",
+                MultipartError::DuplicateHeader("Content-ID"),
+            ),
+            // msg-id has an addr-spec between its brackets
+            (
+                b"Content-ID: <>\r\n",
+                MultipartError::BadPartHeader("Content-ID"),
+            ),
+            // RFC 822 §3.2: no space and no control in a field name
+            (
+                b"Content Type: text/plain\r\n",
+                MultipartError::BadPartHeader("a field name"),
+            ),
+            (
+                b"X\x01: 1\r\n",
+                MultipartError::BadPartHeader("a field name"),
+            ),
+        ] {
+            let body = [b"--b\r\n", headers, b"\r\nx\r\n--b--"].concat();
+            assert_eq!(read(ct, &body).err(), Some(error), "{headers:?}");
+        }
+    }
+
+    #[test]
     fn malformed_boundaries_are_refused() {
         let long = format!("multipart/mixed;boundary={}", "a".repeat(71));
         for ct in [
