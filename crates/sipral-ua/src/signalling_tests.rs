@@ -532,13 +532,17 @@ fn a_redirect_with_nowhere_to_go_or_no_redirection_status_is_refused_and_sends_n
     let mut agent = agent(t0);
     agent.add_account(account());
     let call = call_arriving(&mut agent, &incoming_invite("nowhere", Some(OFFER)), t0);
-    assert!(matches!(
-        agent.redirect(call, &Redirect::moved_temporarily(), t0),
-        Err(UaError::NotARedirection(_))
-    ));
-    assert!(
-        Redirect::with_status(StatusCode::BUSY_HERE).is_err(),
-        "a 486 is a refusal, not a redirection"
+    let nowhere = agent.redirect(call, &Redirect::moved_temporarily(), t0);
+    assert!(matches!(nowhere, Err(UaError::NotARedirection(_))));
+    assert_eq!(
+        nowhere.map_err(|error| error.to_string()),
+        Err("a 302 with no Contact to name is not a redirection".to_owned())
+    );
+    let refusal = Redirect::with_status(StatusCode::BUSY_HERE);
+    assert_eq!(
+        refusal.map_err(|error| error.to_string()).err().as_deref(),
+        Some("a 486 is not a redirection: those are 300 to 399"),
+        "a 486 is a refusal, not a redirection, and is not told it lacks a Contact"
     );
     assert!(transmits(&mut agent).is_empty());
     let alternative = Redirect::with_status(StatusCode::new(380).expect("a status"))

@@ -117,9 +117,14 @@ impl fmt::Display for UaError {
                 "a registrar keep-alive every {} ms is outside 1 000 to 120 000 ms",
                 interval.as_millis()
             ),
-            Self::NotARedirection(status) => write!(
+            Self::NotARedirection(status) if (300..400).contains(&status.get()) => write!(
                 f,
                 "a {} with no Contact to name is not a redirection",
+                status.get()
+            ),
+            Self::NotARedirection(status) => write!(
+                f,
+                "a {} is not a redirection: those are 300 to 399",
                 status.get()
             ),
         }
