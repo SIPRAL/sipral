@@ -597,7 +597,8 @@ mod tests {
 
     /// RFC 3863 §6's example: two tuples, one with an extension inside its
     /// status, notes in two languages and a timestamp, and a note on the
-    /// document itself.
+    /// document itself. The carrier's domain is moved under `example.net`,
+    /// the only change.
     const RFC3863: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <presence xmlns="urn:ietf:params:xml:ns:pidf"
     xmlns:im="urn:ietf:params:xml:ns:pidf:im"
@@ -609,7 +610,7 @@ mod tests {
       <im:im>busy</im:im>
       <myex:location>home</myex:location>
     </status>
-    <contact priority="0.8">im:someone@mobilecarrier.net</contact>
+    <contact priority="0.8">im:someone@mobilecarrier.example.net</contact>
     <note xml:lang="en">Don't Disturb Please!</note>
     <note xml:lang="fr">Ne derangez pas, s'il vous plait</note>
     <timestamp>2001-10-27T16:49:29Z</timestamp>
@@ -651,7 +652,7 @@ mod tests {
         assert_eq!(&*first.id, "bs35r9");
         assert_eq!(first.basic, Some(Basic::Open));
         let contact = first.contact.as_ref().expect("a contact");
-        assert_eq!(&*contact.uri, "im:someone@mobilecarrier.net");
+        assert_eq!(&*contact.uri, "im:someone@mobilecarrier.example.net");
         assert_eq!(contact.priority, Some(800));
         assert_eq!(first.notes.len(), 2);
         assert_eq!(&*first.notes[0].text, "Don't Disturb Please!");
