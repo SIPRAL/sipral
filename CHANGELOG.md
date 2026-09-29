@@ -63,6 +63,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - **`scripts/lab.sh inband`: digits, a machine and a recording against Asterisk.** On an endpoint with no telephone event, four digits dialled in the audio are read there by Asterisk and heard back in it; ringback on early media, a recorded greeting and its beep are reported as a machine and its beep; and a call recorded to stereo WAV and Ogg Opus is read back by the harness and by `soxi` and `opusinfo`.
 
 - **Device mode on Android, over AAudio.** From API level 28 the built-in engine runs every call through AAudio voice-communication streams (the platform's echo canceller in the input preset, a ringtone stream for the ringer), lists the phone's devices and moves calls between the earpiece, the loudspeaker and a wired or Bluetooth headset through `AudioManager` once `SipralAndroidAudio.attach(context)` has handed it a context, and reports changes as `AUDIO_DEVICES_CHANGED`; `SIPRAL_FEATURE_AUDIO_DEVICE` is now the phone's answer, and below API level 28 the telecom helper's `AudioRecord` and `AudioTrack` stay the path. `SipralCallAudios` drives the engine through the framework's hold and call focus with `EngineAudioDevice` (`docs/15-mobile.md`).
+- **An N-way conference mixer, `sipral_media::nway`.** Participants join
+  and leave at any point, each at 8, 16, 32 or 48 kHz with its own frame,
+  and each hears everybody but itself, resampled to its own rate. The mix
+  is formed on a 20 ms tick at 48 kHz, sans I/O, and allocates nothing
+  after a participant has joined. Per participant: gain in and out, mute in
+  and out, and listen-only. A soft limiter (1 ms attack, 80 ms release, a
+  ceiling at three quarters of full scale) keeps any number of loud legs off
+  the rail; an energy detector with hysteresis lists who is talking,
+  loudest first; and a tap records the whole mix at a chosen rate.
 - **The four idiomatic layers carry the rest of ABI 0.30.** Each stack
   class reads its counters (`counters()` / `Counters()`, the retransmission
   and limit counters among them), replaces its STUN servers while running
