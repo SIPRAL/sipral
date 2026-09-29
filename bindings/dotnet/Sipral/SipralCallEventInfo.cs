@@ -302,7 +302,8 @@ public sealed record SipralProgressOptions
 /// <c>frames_underrun</c>: frames the earpiece played as nothing because
 /// the jitter buffer had run dry while the far end was still sending, which
 /// <see cref="LossRate"/>, <see cref="Score"/> and <see cref="Suffering"/>
-/// take in and no RTCP-XR figure does.</summary>
+/// take in and no RTCP-XR figure does. <see cref="Feedback"/> is what RTP/AVPF
+/// did on the stream, <see langword="null"/> while it does not run it.</summary>
 public sealed record SipralStreamStatistics(
     SipralCodec Codec,
     ulong? RoundTripUs,
@@ -321,4 +322,62 @@ public sealed record SipralStreamStatistics(
     double Score,
     bool Suffering,
     ulong SilentForMs,
-    ulong FramesUnderrun);
+    ulong FramesUnderrun,
+    SipralFeedbackStatistics? Feedback = null);
+
+/// <summary>What RTCP feedback (RFC 4585) did on one stream: the
+/// <c>trr-int</c> both ends agreed (zero for none), the Generic NACKs this
+/// end sent and the packets they asked for again, the ones the far end sent
+/// and the packets they asked this end for, the early RTCP packets this end
+/// sent, its reduced-size ones (RFC 5506), and the feedback it held back
+/// because the stream's RTCP bandwidth had none to spare.</summary>
+public sealed record SipralFeedbackStatistics(
+    uint TrrIntervalMs,
+    ulong NacksSent,
+    ulong PacketsNacked,
+    ulong NacksReceived,
+    ulong PacketsAskedFor,
+    ulong EarlyPackets,
+    ulong ReducedSizePackets,
+    ulong FeedbackSuppressed);
+
+/// <summary>What a <see cref="SipralEventKind.ConferenceChanged"/> event
+/// carries: which subscription, whether a document was merged into its
+/// picture (<see cref="SipralConferenceUpdate.Applied"/>) or the focus
+/// deleted the conference (<see cref="SipralConferenceUpdate.Ended"/>, after
+/// which the subscription is being given up), the version the picture is at
+/// and how many users it holds. <see cref="SipralSubscription.Conference"/>
+/// reads the picture itself.</summary>
+public sealed record SipralConferenceEventInfo(
+    ulong Subscription,
+    SipralConferenceUpdate Update,
+    uint Version,
+    uint Users);
+
+/// <summary>What a <see cref="SipralEventKind.TextReceived"/> event carries:
+/// what the far end typed on the call's real-time text stream (RFC 4103), in
+/// order — an erasure of its last character as BACKSPACE (U+0008), a new line
+/// as LINE SEPARATOR (U+2028), a REPLACEMENT CHARACTER (U+FFFD) where a block
+/// of text was lost for good — and how many blocks were lost so.</summary>
+public sealed record SipralTextEventInfo(string Text, uint Missing);
+
+/// <summary>What a <see cref="SipralEventKind.PresenceChanged"/> event
+/// carries. For <see cref="SipralPresenceKind.Watched"/>: the
+/// <see cref="Subscription"/> that was told, and what the PIDF document said —
+/// open or closed, the first RPID activity, the presentity and the first
+/// note. For <see cref="SipralPresenceKind.Publication"/>, about the event's
+/// <see cref="SipralEventArgs.Account"/>: what became of its published
+/// presence, why it failed, the SIP status the compositor answered with, the
+/// lifetime granted and when the stack refreshes it.</summary>
+public sealed record SipralPresenceEventInfo(
+    SipralPresenceKind Kind,
+    ulong Subscription,
+    SipralBasic Basic,
+    SipralActivity Activity,
+    string? Entity,
+    string? Note,
+    SipralPublicationState PublicationState,
+    SipralPublishFailure Failure,
+    uint StatusCode,
+    ulong ExpiresMs,
+    ulong RefreshInMs);

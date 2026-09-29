@@ -46,14 +46,18 @@ from .events import (
     Answering,
     AudioNotice,
     CallerIdentity,
+    ConferenceNotice,
     EndCause,
     Event,
+    Presence,
     Protection,
+    TypedText,
     Verification,
 )
 from .media import Media
 from .signalling import InviteLimit, TlsTrust
 from .stack import TRACE, Stack, features
+from .subscription import ConferencePicture, Participant, Subscription
 
 __version__ = "0.0.1"
 
@@ -66,16 +70,22 @@ __all__ = [
     "AudioNotice",
     "Call",
     "CallerIdentity",
+    "ConferenceNotice",
+    "ConferencePicture",
     "Counters",
     "EndCause",
     "Event",
     "InviteLimit",
     "Media",
+    "Participant",
+    "Presence",
     "Protection",
     "SipralError",
     "Stack",
+    "Subscription",
     "TRACE",
     "TlsTrust",
+    "TypedText",
     "Verification",
     "__version__",
     "features",

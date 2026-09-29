@@ -32,6 +32,11 @@ platform's when unset). A connection that fails is printed as
 ``transport failed error=<...> tls=<...>`` with the TLS library's words, and
 tried again. ``SIPRAL_INVITE_LIMIT=voice-agent`` takes a trunk's rush of
 calls the default rate floor would answer 480.
+
+``SIPRAL_TEXT=1`` answers every call with a real-time text stream beside
+the audio (RFC 4103) where the caller offered one, and types back whatever
+the caller types. ``SIPRAL_PRESENCE=1`` publishes the agent as open, "Agent
+ready", once it starts (RFC 3903), and prints what the compositor made of it.
 """
 
 from __future__ import annotations
@@ -42,7 +47,16 @@ import socket
 import ssl
 
 from sipral import Call, InviteLimit, Stack, TlsTrust
-from sipral.enums import AudioMode, EventKind, Ice, Nat, TlsFailure, Transport, TransportError
+from sipral.enums import (
+    AudioMode,
+    Basic,
+    EventKind,
+    Ice,
+    Nat,
+    TlsFailure,
+    Transport,
+    TransportError,
+)
 from sipral.errors import SipralError
 
 
@@ -114,6 +128,12 @@ async def run_call(
             heard = await call.media.frames.get()
             call.media.send_audio(respond(heard))
 
+    async def type_back() -> None:
+        while True:
+            typed = await call.text.get()
+            print("text", repr(typed))
+            call.send_text(typed)
+
     stats: dict[str, object] = {}
 
     async def poll_statistics() -> None:
@@ -177,6 +197,7 @@ async def run_call(
             await asyncio.sleep(0.05)
 
     talking = asyncio.create_task(talk())
+    typing = asyncio.create_task(type_back()) if call.text_address else None
     polling = asyncio.create_task(poll_statistics())
     hanging_up = asyncio.create_task(listen_for_hangup())
     ending = asyncio.create_task(wait_for_remote_hangup())
@@ -188,6 +209,8 @@ async def run_call(
         await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
     finally:
         talking.cancel()
+        if typing is not None:
+            typing.cancel()
         polling.cancel()
         hanging_up.cancel()
         ending.cancel()
@@ -333,6 +356,9 @@ async def main() -> None:
     )
     if os.environ.get("SIPRAL_REGISTRAR"):
         account.register()
+    if os.environ.get("SIPRAL_PRESENCE") == "1":
+        account.publish_presence(Basic.OPEN, note="Agent ready")
+    text = os.environ.get("SIPRAL_TEXT") == "1"
 
     print(f"listening on {stack.bind_address}")
     calls: set[asyncio.Task] = set()
@@ -347,8 +373,14 @@ async def main() -> None:
                 )
             if event.kind == EventKind.REGISTRATION_CHANGED:
                 print(f"registration {event.fields.get('state')}")
+            if event.presence is not None:
+                presence = event.presence
+                print(
+                    f"presence {presence.publication_state.name.lower()} "
+                    f"status={presence.status_code}"
+                )
             if event.kind == EventKind.INCOMING_CALL:
-                call = stack.answer_call(event, media_host=host)
+                call = stack.answer_call(event, media_host=host, text=text)
                 task = asyncio.create_task(run_call(call))
                 calls.add(task)
                 task.add_done_callback(calls.discard)

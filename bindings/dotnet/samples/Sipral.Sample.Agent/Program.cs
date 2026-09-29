@@ -24,6 +24,12 @@
 // SslStream's own words, and tried again. SIPRAL_INVITE_LIMIT=voice-agent
 // takes a trunk's rush of calls the default rate floor would answer 480.
 //
+// SIPRAL_TEXT=1 answers every call with a real-time text stream beside the
+// audio (RFC 4103) where the caller offered one, and types back whatever the
+// caller types. SIPRAL_PRESENCE=1 publishes the agent as open, "Agent
+// ready", once it starts (RFC 3903), and prints what the compositor made of
+// it.
+//
 // Doubles as the sample apps' shared, non-UI core: the same register/place
 // or answer/hold/resume/DTMF calls the WPF sample's UI makes, run here
 // without one, which is what scripts/lab.sh runs headless in a container
@@ -117,6 +123,25 @@ async Task RunCallAsync(Call call, int tag)
         }
     });
 
+    var typing = Task.Run(async () =>
+    {
+        if (call.TextAddress is null)
+        {
+            return;
+        }
+        try
+        {
+            await foreach (var typed in call.Text.WithCancellation(stop.Token))
+            {
+                Console.WriteLine($"text {typed}");
+                call.SendText(typed);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    });
+
     var hangingUp = Task.Run(async () =>
     {
         await foreach (var digit in call.Dtmf.WithCancellation(stop.Token))
@@ -152,7 +177,7 @@ async Task RunCallAsync(Call call, int tag)
 
     await Task.WhenAny(hangingUp, endingRemotely);
     stop.Cancel();
-    await Task.WhenAll(talking, polling, hangingUp, endingRemotely).ContinueWith(_ => { });
+    await Task.WhenAll(talking, typing, polling, hangingUp, endingRemotely).ContinueWith(_ => { });
 
     call.Close();
     Console.WriteLine(
@@ -416,6 +441,11 @@ if (!string.IsNullOrEmpty(registrar))
 {
     account.Register();
 }
+if (Environment.GetEnvironmentVariable("SIPRAL_PRESENCE") == "1")
+{
+    account.PublishPresence(SipralBasic.Open, note: "Agent ready");
+}
+var text = Environment.GetEnvironmentVariable("SIPRAL_TEXT") == "1";
 
 Console.WriteLine($"listening on {stack.BindAddress}");
 
@@ -436,9 +466,13 @@ await foreach (var e in stack.Events)
     {
         Console.WriteLine($"registration {(uint)registration.State}");
     }
+    if (e.Presence is { } presence)
+    {
+        Console.WriteLine($"presence {Snake(presence.PublicationState.ToString())} status={presence.StatusCode}");
+    }
     if (e.Kind == SipralEventKind.IncomingCall)
     {
-        var call = stack.AnswerCall(e, mediaHost: bindHost);
+        var call = stack.AnswerCall(e, mediaHost: bindHost, options: text ? new SipralCallOptions(Text: true) : null);
         var tag = ++nextTag;
         Task? task = null;
         task = RunCallAsync(call, tag).ContinueWith(t =>

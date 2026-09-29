@@ -310,7 +310,69 @@ while the call is recorded. `call.media.record(path, format=..., layout=...,
 sample_rate=..., bitrate=..., checkpoint_ms=...)` writes WAV or Ogg Opus,
 mixed or stereo with this end on the left, and `stop_recording()` /
 `recording` stop it and say how far it got. `tests/test_inband.py` proves
-each over two stacks on loopback.
+each over two stacks on loopback. `Stack(codecs="L16/16000")` (or
+`L16/8000`) offers the samples themselves, and `Codec(info()["codec"])` says
+`Codec.L16_WIDEBAND` once both ends took it.
+
+## Real-time text, RTCP feedback, conferences, presence and recording servers
+
+```python
+from sipral.enums import Activity, Basic, EventKind
+
+call = stack.place_call(account, "sip:bob@example.com", text=True, feedback=True)
+...
+call.send_text("On my way\u2028")        # RFC 4103, once media started
+typed = await call.text.get()            # what the far end typed
+
+room = call.subscribe_conference()        # the far end answered as a focus
+event = await stack.events.get()          # EventKind.CONFERENCE_CHANGED
+picture = room.conference()               # subject, users, where each one is
+
+buddy = account.watch_presence("sip:bob@example.com")
+account.publish_presence(Basic.OPEN, Activity.ON_THE_PHONE, "In a call")
+event = await stack.events.get()          # EventKind.PRESENCE_CHANGED
+print(event.presence)
+```
+
+`text=True` on `place_call` or `answer_call` opens a second socket and puts
+a real-time text stream (RFC 4103, T.140 with redundancy) beside the audio:
+`call.send_text(...)` queues what the user typed, `call.text` has what the
+far end typed with BACKSPACE, LINE SEPARATOR and a REPLACEMENT CHARACTER per
+lost block left in, and `event.text` has the same with `missing` counted. A
+call that agreed no text stream answers `send_text` with
+`Status.NOT_NEGOTIATED`; one keyed by SRTP or gathering ICE never offers
+one. `feedback=True` offers RTP/AVPF with Generic NACKs and reduced-size
+RTCP (RFC 4585, RFC 5506): `info()` says `feedback`, `generic_nack` and
+`reduced_size`, and `statistics()["feedback"]` counts the NACKs and early
+packets, `None` on a call that runs none. `focus=True` answers (or places)
+as a conference focus (RFC 4579), and `call.set_focus(...)` says so later;
+on the other end `call.conference_uri` names the conference, `None` when
+the far end is no focus, and `call.subscribe_conference()` watches it.
+
+`account.subscribe(target, package)` watches any event package and hands
+back a `Subscription` — `handle`, `state`, `end()` — and
+`account.watch_presence(target)` is it for `presence`: each document
+arrives as `EventKind.PRESENCE_CHANGED`, whose `event.presence` is a
+`Presence` with `basic`, `activity`, `note` and `entity`. A conference
+subscription raises `EventKind.CONFERENCE_CHANGED` (`event.conference`:
+applied or ended, the version, how many users), and `subscription.conference()`
+reads the picture whole as a `ConferencePicture` of `Participant`s.
+`account.publish_presence(basic, activity, note)` publishes this account's
+own (RFC 3903), modifies it on every later call and keeps it refreshed until
+`unpublish_presence()`; `EventKind.PRESENCE_CHANGED` with
+`PresenceKind.PUBLICATION` says what the compositor did, its
+`publication_state`, `failure` and `status_code`.
+
+`call.record_to("sip:srs@example.com")` records a call to a recording
+server (SIPREC, RFC 7866): two sockets are opened beside the media one, a
+recording session carrying the metadata goes from the call's account — over
+a stream, since that INVITE is too large for a datagram, so on a stack
+signalling over TCP or TLS to the server — and once it answers, the copies
+of this end's audio and the far end's leave from them as the call runs.
+`call.recording_session` is its handle, and `call.stop_recording_to()` hangs
+it up. `tests/test_protocols.py` proves each: text and feedback between two
+stacks on loopback, and the conference, presence and recording server
+played by hand.
 
 ## SIP over TCP or TLS
 

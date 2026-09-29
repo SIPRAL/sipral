@@ -72,6 +72,12 @@ public sealed class SipralEventArgs : EventArgs
     public SipralProgressEventInfo? Progress { get; }
     /// <summary>Set for <see cref="SipralEventKind.TransportFailed"/>.</summary>
     public SipralTransportFailedEventInfo? TransportFailed { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.ConferenceChanged"/>.</summary>
+    public SipralConferenceEventInfo? Conference { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.TextReceived"/>.</summary>
+    public SipralTextEventInfo? Text { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.PresenceChanged"/>.</summary>
+    public SipralPresenceEventInfo? Presence { get; private init; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
@@ -268,9 +274,38 @@ public sealed class SipralEventArgs : EventArgs
                 (SipralTransportError)t.Error, (SipralTlsFailure)t.Tls, ReadUtf8(t.Detail, t.DetailLen));
         }
 
+        SipralConferenceEventInfo? conference = null;
+        SipralTextEventInfo? text = null;
+        SipralPresenceEventInfo? presence = null;
+        if (kind == SipralEventKind.ConferenceChanged)
+        {
+            var c = evt.Payload.Conference;
+            conference = new SipralConferenceEventInfo(c.Subscription, (SipralConferenceUpdate)c.Update, c.Version, c.Users);
+        }
+        else if (kind == SipralEventKind.TextReceived)
+        {
+            var t = evt.Payload.Text;
+            text = new SipralTextEventInfo(ReadUtf8(t.Text, t.TextLen) ?? string.Empty, t.Missing);
+        }
+        else if (kind == SipralEventKind.PresenceChanged)
+        {
+            var p = evt.Payload.Presence;
+            presence = new SipralPresenceEventInfo(
+                (SipralPresenceKind)p.Kind, p.Subscription, (SipralBasic)p.Basic, (SipralActivity)p.Activity,
+                ReadUtf8(p.Entity, p.EntityLen), ReadUtf8(p.Note, p.NoteLen),
+                (SipralPublicationState)p.PublicationState, (SipralPublishFailure)p.Failure, p.StatusCode,
+                p.ExpiresMs, p.RefreshInMs);
+        }
+
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
             registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio,
-            stunServer, verification, progress) { TransportFailed = transportFailed };
+            stunServer, verification, progress)
+        {
+            TransportFailed = transportFailed,
+            Conference = conference,
+            Text = text,
+            Presence = presence,
+        };
     }
 
     internal static SipralStreamStatistics? ReadStatistics(IntPtr ptr)
@@ -279,13 +314,22 @@ public sealed class SipralEventArgs : EventArgs
         {
             return null;
         }
-        var s = Marshal.PtrToStructure<SipralStreamStats>(ptr);
-        return new SipralStreamStatistics(
+        return Statistics(Marshal.PtrToStructure<SipralStreamStats>(ptr));
+    }
+
+    /// <summary>One <c>sipral_stream_stats_t</c>, copied out: what an event
+    /// carries and what <see cref="CallMedia.Statistics"/> reads.</summary>
+    internal static SipralStreamStatistics Statistics(in SipralStreamStats s) =>
+        new(
             (SipralCodec)s.Codec, s.HasRoundTrip != 0 ? s.RoundTripUs : null, s.PacketsSent, s.OctetsSent,
             s.PacketsReceived, s.PacketsLost, s.PacketsLate, s.PacketsOverflowed, s.PacketsDuplicated,
             s.PacketsReordered, s.DelayUs, s.TargetDelayUs, s.JitterUs, s.LossRate, s.Score,
-            s.Suffering != 0, s.SilentForMs, s.FramesUnderrun);
-    }
+            s.Suffering != 0, s.SilentForMs, s.FramesUnderrun,
+            s.Feedback != 0
+                ? new SipralFeedbackStatistics(
+                    s.TrrIntervalMs, s.NacksSent, s.PacketsNacked, s.NacksReceived, s.PacketsAskedFor,
+                    s.EarlyPackets, s.ReducedSizePackets, s.FeedbackSuppressed)
+                : null);
 
     private static byte[]? ReadBytes(IntPtr ptr, nuint len)
     {

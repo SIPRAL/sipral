@@ -237,6 +237,91 @@ public sealed class Account
         return (SipralRegistrationState)state;
     }
 
+    /// <summary>
+    /// <c>sipral_account_subscribe</c>: watch <paramref name="target"/> (a SIP
+    /// URI) through the event package <paramref name="package"/> —
+    /// <c>presence</c>, <c>conference</c>, <c>dialog</c>… — sent where this
+    /// account sends, or to <paramref name="destination"/> (<c>host:port</c>).
+    /// <paramref name="accept"/> is the body type wanted when it is not the
+    /// package's default; <paramref name="expiresSeconds"/> is how long to ask
+    /// for, zero for an hour. Nothing has happened when this returns: the
+    /// SUBSCRIBE is on its way, and what the notifier says arrives as events
+    /// naming <see cref="SipralSubscription.Handle"/>.
+    /// </summary>
+    public SipralSubscription Subscribe(string target, string package, string? accept = null, uint expiresSeconds = 0, string? destination = null)
+    {
+        var targetBytes = Encoding.UTF8.GetBytes(target);
+        var packageBytes = Encoding.UTF8.GetBytes(package);
+        var acceptBytes = accept is null ? null : Encoding.UTF8.GetBytes(accept);
+        var destinationBytes = destination is null ? null : Encoding.UTF8.GetBytes(destination);
+        ulong subscription = 0;
+        using (var targetPin = Pin(targetBytes))
+        using (var packagePin = Pin(packageBytes))
+        using (var acceptPin = Pin(acceptBytes))
+        using (var destinationPin = Pin(destinationBytes))
+        {
+            var config = SipralSubscribeConfig.Sized();
+            config.Target = targetPin.Pointer;
+            config.TargetLen = (nuint)targetBytes.Length;
+            config.Package = packagePin.Pointer;
+            config.PackageLen = (nuint)packageBytes.Length;
+            config.Accept = acceptPin.Pointer;
+            config.AcceptLen = (nuint)(acceptBytes?.Length ?? 0);
+            config.ExpiresSeconds = expiresSeconds;
+            config.Destination = destinationPin.Pointer;
+            config.DestinationLen = (nuint)(destinationBytes?.Length ?? 0);
+            SipralErrors.Call(
+                () => NativeMethods.sipral_account_subscribe(_stack.Handle, Handle, config, out subscription, _stack.NowMs),
+                "sipral_account_subscribe");
+        }
+        return new SipralSubscription(_stack, subscription, package);
+    }
+
+    /// <summary>Watch a presentity's presence (RFC 3856): <see cref="Subscribe"/>
+    /// to the <c>presence</c> package. Each document it sends arrives as
+    /// <see cref="SipralEventKind.PresenceChanged"/> with
+    /// <see cref="SipralPresenceKind.Watched"/>, open or closed, the activity,
+    /// the note and the entity decoded.</summary>
+    public SipralSubscription WatchPresence(string target, uint expiresSeconds = 0, string? destination = null) =>
+        Subscribe(target, "presence", expiresSeconds: expiresSeconds, destination: destination);
+
+    /// <summary>
+    /// <c>sipral_account_publish_presence</c>: publish this account's presence
+    /// (RFC 3903) — <paramref name="basic"/> open or closed (required), an RPID
+    /// <paramref name="activity"/> (<see cref="SipralActivity.None"/> publishes
+    /// no person; <see cref="SipralActivity.Other"/> is refused, having no name
+    /// to publish under) and a one-line <paramref name="note"/>. The first call
+    /// publishes and every later one modifies the same publication, which the
+    /// stack keeps refreshed until <see cref="UnpublishPresence"/>.
+    /// <see cref="SipralEventKind.PresenceChanged"/> with
+    /// <see cref="SipralPresenceKind.Publication"/> says what the compositor
+    /// did with it.
+    /// </summary>
+    public void PublishPresence(SipralBasic basic, SipralActivity activity = SipralActivity.None, string? note = null)
+    {
+        var noteBytes = note is null ? null : Encoding.UTF8.GetBytes(note);
+        using var notePin = Pin(noteBytes);
+        var presence = SipralPresence.Sized();
+        presence.Basic = (uint)basic;
+        presence.Activity = (uint)activity;
+        presence.Note = notePin.Pointer;
+        presence.NoteLen = (nuint)(noteBytes?.Length ?? 0);
+        SipralErrors.Call(
+            () => NativeMethods.sipral_account_publish_presence(_stack.Handle, Handle, presence, _stack.NowMs),
+            "sipral_account_publish_presence");
+    }
+
+    /// <summary><c>sipral_account_unpublish_presence</c>: take the published
+    /// presence away (RFC 3903 §4.5); <see cref="SipralPublicationState.Removed"/>
+    /// says when it is gone. <see cref="SipralStatus.WrongState"/> when nothing
+    /// was published.</summary>
+    public void UnpublishPresence()
+    {
+        SipralErrors.Call(
+            () => NativeMethods.sipral_account_unpublish_presence(_stack.Handle, Handle, _stack.NowMs),
+            "sipral_account_unpublish_presence");
+    }
+
     /// <summary><c>sipral_account_remove</c>. Every call this account
     /// placed ends.</summary>
     public void Remove()

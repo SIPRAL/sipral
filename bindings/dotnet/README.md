@@ -334,6 +334,70 @@ network's tones, who answered and the machine's beep as
 writes WAV or Ogg Opus, mixed or stereo with this end on the left, and
 `StopRecording()` / `Recording` stop it and say how far it got.
 `Sipral.Tests/InBandTests.cs` proves each over two stacks on loopback.
+`new SipralStack(codecs: "L16/16000")` (or `L16/8000`) offers the samples
+themselves, and `Media.Info().Codec` says `SipralCodec.L16Wideband` once both
+ends took it.
+
+### Real-time text, RTCP feedback, conferences, presence and recording servers
+
+```csharp
+var call = stack.PlaceCall(account, "sip:bob@example.com",
+    options: new SipralCallOptions(Text: true, Feedback: true));
+...
+call.SendText("On my way\u2028");                 // RFC 4103, once media started
+await foreach (var typed in call.Text) { /* what the far end typed */ }
+
+var room = call.SubscribeConference();             // the far end answered as a focus
+var picture = room.Conference();                   // after SipralEventKind.ConferenceChanged
+
+var buddy = account.WatchPresence("sip:bob@example.com");
+account.PublishPresence(SipralBasic.Open, SipralActivity.OnThePhone, "In a call");
+await foreach (var args in stack.Events)
+{
+    if (args.Presence is { } presence) { Console.WriteLine(presence); }
+}
+```
+
+`SipralCallOptions(Text: true)` on `PlaceCall` or `AnswerCall` opens a second
+socket and puts a real-time text stream (RFC 4103, T.140 with redundancy)
+beside the audio: `call.SendText(...)` queues what the user typed,
+`call.Text` has what the far end typed with BACKSPACE, LINE SEPARATOR and a
+REPLACEMENT CHARACTER per lost block left in, and `args.Text` has the same
+with `Missing` counted. A call that agreed no text stream answers `SendText`
+with `SipralStatus.NotNegotiated`; one keyed by SRTP or gathering ICE never
+offers one. `Feedback: true` offers RTP/AVPF with Generic NACKs and
+reduced-size RTCP (RFC 4585, RFC 5506): `Media.Info()` says `Feedback`,
+`GenericNack` and `ReducedSize`, and `Media.Statistics().Feedback` counts the
+NACKs and early packets, `null` on a call that runs none. `Focus: true`
+answers (or places) as a conference focus (RFC 4579), and `call.SetFocus(...)`
+says so later; on the other end `call.ConferenceUri` names the conference,
+`null` when the far end is no focus, and `call.SubscribeConference()` watches
+it.
+
+`account.Subscribe(target, package)` watches any event package and hands back
+a `SipralSubscription` — `Handle`, `State`, `End()` — and
+`account.WatchPresence(target)` is it for `presence`: each document arrives
+as `SipralEventKind.PresenceChanged`, whose `args.Presence` has `Basic`,
+`Activity`, `Note` and `Entity`. A conference subscription raises
+`SipralEventKind.ConferenceChanged` (`args.Conference`: applied or ended, the
+version, how many users), and `subscription.Conference()` reads the picture
+whole as a `SipralConferencePicture` of `SipralConferenceParticipant`s.
+`account.PublishPresence(basic, activity, note)` publishes this account's own
+(RFC 3903), modifies it on every later call and keeps it refreshed until
+`UnpublishPresence()`; `SipralEventKind.PresenceChanged` with
+`SipralPresenceKind.Publication` says what the compositor did, its
+`PublicationState`, `Failure` and `StatusCode`.
+
+`call.RecordTo("sip:srs@example.com")` records a call to a recording server
+(SIPREC, RFC 7866): two sockets are opened beside the media one, a recording
+session carrying the metadata goes from the call's account — over a stream,
+since that INVITE is too large for a datagram, so on a stack signalling over
+TCP or TLS to the server — and once it answers, the copies of this end's
+audio and the far end's leave from them as the call runs.
+`call.RecordingSession` is its handle, and `call.StopRecordingTo()` hangs it
+up. `Sipral.Tests/ProtocolTests.cs` proves each: text and feedback between
+two stacks on loopback, and the conference, presence and recording server
+played by hand.
 
 ### SIP over TCP or TLS
 

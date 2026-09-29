@@ -849,12 +849,17 @@ public sealed partial class SipralStack : IDisposable
     /// <c>sipral_call_place</c>, with this stack running the call's audio:
     /// a media socket is opened before the INVITE goes out, and its
     /// <c>host:port</c> is offered as <c>media_address</c>.
+    /// <paramref name="options"/> adds a real-time text stream on a socket of
+    /// its own, RTCP feedback, or this end as a conference's focus
+    /// (<see cref="SipralCallOptions"/>).
     /// </summary>
-    public Call PlaceCall(Account account, string target, string mediaHost = "127.0.0.1", int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0)
+    public Call PlaceCall(Account account, string target, string mediaHost = "127.0.0.1", int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0, SipralCallOptions? options = null)
     {
         var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
         MapMediaSocket(mediaSocket, mediaAddress);
+        var textSocket = options is { Text: true } ? OpenMediaSocket(mediaHost) : null;
+        var textAddressBytes = textSocket is null ? null : Encoding.UTF8.GetBytes(FormatAddress((IPEndPoint)textSocket.LocalEndPoint!));
 
         var targetBytes = Encoding.UTF8.GetBytes(target);
         var mediaAddressBytes = Encoding.UTF8.GetBytes(mediaAddress);
@@ -864,6 +869,7 @@ public sealed partial class SipralStack : IDisposable
         using (var targetPin = Pin(targetBytes))
         using (var mediaPin = Pin(mediaAddressBytes))
         using (var destPin = Pin(destinationBytes))
+        using (var textPin = Pin(textAddressBytes))
         {
             var config = SipralCallConfig.Sized();
             config.Target = targetPin.Pointer;
@@ -877,6 +883,10 @@ public sealed partial class SipralStack : IDisposable
                 config.Destination = destPin.Pointer;
                 config.DestinationLen = (nuint)destinationBytes.Length;
             }
+            config.TextAddress = textPin.Pointer;
+            config.TextAddressLen = (nuint)(textAddressBytes?.Length ?? 0);
+            config.Feedback = (uint)(options is { Feedback: true } ? SipralToggle.On : SipralToggle.Default);
+            config.Focus = options is { Focus: true } ? 1u : 0u;
 
             try
             {
@@ -886,11 +896,15 @@ public sealed partial class SipralStack : IDisposable
             {
                 ForgetMediaSocket(mediaAddress);
                 mediaSocket.Dispose();
+                if (textSocket is not null)
+                {
+                    CloseSocket(textSocket);
+                }
                 throw;
             }
         }
 
-        var call = new Call(this, callHandle, mediaSocket, mediaAddress);
+        var call = new Call(this, callHandle, mediaSocket, mediaAddress, textSocket);
         Track(call, mediaAddress);
         return call;
     }
@@ -899,28 +913,62 @@ public sealed partial class SipralStack : IDisposable
     /// Opens a media socket for an incoming call and answers it there,
     /// through <c>sipral_call_answer_media</c>. <paramref name="args"/>
     /// is the <see cref="SipralEventKind.IncomingCall"/> event a listener
-    /// read off <see cref="Events"/>.
+    /// read off <see cref="Events"/>. With <paramref name="options"/> the
+    /// call is answered through <c>sipral_call_answer_with</c>: a text
+    /// socket opened for a real-time text stream the offer carried, RTCP
+    /// feedback, or this end named the focus of a conference.
     /// </summary>
-    public Call AnswerCall(SipralEventArgs args, string mediaHost = "127.0.0.1", int mediaPort = 0)
+    public Call AnswerCall(SipralEventArgs args, string mediaHost = "127.0.0.1", int mediaPort = 0, SipralCallOptions? options = null)
     {
         var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
         MapMediaSocket(mediaSocket, mediaAddress);
+        var textSocket = options is { Text: true } ? OpenMediaSocket(mediaHost) : null;
 
-        var call = new Call(this, args.Call, mediaSocket, mediaAddress);
+        var call = new Call(this, args.Call, mediaSocket, mediaAddress, textSocket);
         Track(call, mediaAddress);
         try
         {
-            call.Answer();
+            if (options is null)
+            {
+                call.Answer();
+            }
+            else
+            {
+                call.AnswerWith(options);
+            }
         }
         catch
         {
             ForgetCall(call.Handle);
             ForgetMediaSocket(mediaAddress);
             mediaSocket.Dispose();
+            if (textSocket is not null)
+            {
+                CloseSocket(textSocket);
+            }
             throw;
         }
         return call;
+    }
+
+    /// <summary>Closes a socket this stack opened with
+    /// <see cref="OpenMediaSocket"/> beside a call's media one — its text
+    /// socket, a recording server's two — and gives its port back to the
+    /// RTP range.</summary>
+    internal void CloseSocket(Socket socket)
+    {
+        int port;
+        try
+        {
+            port = ((IPEndPoint)socket.LocalEndPoint!).Port;
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+        socket.Dispose();
+        GiveBackPort(port);
     }
 
     /// <summary><c>sipral_call_reject</c> for an incoming call nothing has

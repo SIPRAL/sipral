@@ -11,9 +11,11 @@ from typing import TYPE_CHECKING
 
 from . import events as _events
 from ._sipral_cffi import ffi, lib
-from .enums import AudioMode, CallState, DtmfVia, SrtpSuite
+from .enums import AudioMode, CallState, DtmfVia, SrtpSuite, Status
+from .errors import SipralError
 from .errors import call as _call
 from .media import Media
+from .subscription import Subscription, read_text
 
 if TYPE_CHECKING:
     from .stack import Stack
@@ -37,6 +39,7 @@ class Call:
         handle: int,
         media_socket: socket_module.socket,
         media_address: str,
+        text_socket: socket_module.socket | None = None,
     ) -> None:
         self.stack = stack
         self.handle = handle
@@ -53,6 +56,20 @@ class Call:
         #: voice agent that only cares about DTMF does not have to filter
         #: `events` itself, nor care which way the far end sent the key.
         self.dtmf: asyncio.Queue[str] = asyncio.Queue()
+        #: Just the real-time text (RFC 4103):
+        #: `SIPRAL_EVENT_KIND_TEXT_RECEIVED`'s own text, in the order the far
+        #: end typed it, with the control characters
+        #: :class:`sipral.events.TypedText` names left in.
+        self.text: asyncio.Queue[str] = asyncio.Queue()
+        self._text_socket = text_socket
+        #: The socket this call's real-time text arrives on, as
+        #: ``host:port``, when it was placed or answered with ``text=True``.
+        self.text_address: str | None = (
+            "{}:{}".format(*text_socket.getsockname()) if text_socket is not None else None
+        )
+        #: The recording session :meth:`record_to` placed, while it records:
+        #: a call handle of its own, whose events arrive on the stack's.
+        self.recording_session: int | None = None
 
     def deliver(self, event: _events.Event) -> None:
         """Called by :class:`sipral.stack.Stack` on its own poll thread.
@@ -78,6 +95,7 @@ class Call:
                 self.handle,
                 self._media_socket,
                 pumped=self.stack.audio_mode == AudioMode.DEVICE,
+                text_socket=self._text_socket,
             )
 
         if event.kind == lib.SIPRAL_EVENT_KIND_MEDIA_SECURED:
@@ -107,6 +125,14 @@ class Call:
                     loop.call_soon_threadsafe(self.dtmf.put_nowait, digit)
                 else:
                     self.dtmf.put_nowait(digit)
+
+        if event.kind == lib.SIPRAL_EVENT_KIND_TEXT_RECEIVED:
+            typed = event.fields.get("text")
+            if typed:
+                if loop is not None and not loop.is_closed():
+                    loop.call_soon_threadsafe(self.text.put_nowait, typed)
+                else:
+                    self.text.put_nowait(typed)
 
     # -- state --------------------------------------------------------
 
@@ -407,6 +433,155 @@ class Call:
         else:
             old.close()
 
+    def answer_with(self, *, feedback: bool = False, focus: bool = False) -> None:
+        """`sipral_call_answer_with`: accept as :meth:`answer` does, with the
+        real-time text stream this call was built with a socket for, RTCP
+        feedback, or this end named the focus of a conference."""
+        address = self._media_address.encode("utf-8")
+        address_buf = ffi.new("char[]", address)
+        config = ffi.new("sipral_call_config_t *")
+        config.size = ffi.sizeof("sipral_call_config_t")
+        config.media_address = address_buf
+        config.media_address_len = len(address)
+        text_buf = None
+        if self.text_address is not None:
+            text = self.text_address.encode("utf-8")
+            text_buf = ffi.new("char[]", text)
+            config.text_address = text_buf
+            config.text_address_len = len(text)
+        config.feedback = lib.SIPRAL_TOGGLE_ON if feedback else lib.SIPRAL_TOGGLE_DEFAULT
+        config.focus = 1 if focus else 0
+        _call(
+            lambda: lib.sipral_call_answer_with(
+                self.stack.handle, self.handle, config, self.stack.now_ms()
+            ),
+            "sipral_call_answer_with",
+        )
+
+    # -- real-time text ---------------------------------------------------
+
+    def send_text(self, text: str) -> None:
+        """`sipral_media_send_text`: queue text the user typed for the far
+        end (RFC 4103). It goes in the next 300 ms interval; a line break
+        goes as a new line and BACKSPACE (U+0008) erases the far end's last
+        character. `SIPRAL_STATUS_NOT_NEGOTIATED` on a call that agreed no
+        text stream, `SIPRAL_STATUS_EXHAUSTED` when more is waiting unsent
+        than a stream holds, and `RuntimeError` before media starts."""
+        if self.media is None:
+            raise RuntimeError("the call has no media yet; wait for MEDIA_STARTED")
+        self.media.send_text(text)
+
+    # -- conferences ------------------------------------------------------
+
+    def set_focus(self, focus: bool) -> None:
+        """`sipral_call_set_focus`: say, or stop saying, that this end is the
+        focus of a conference the call belongs to (RFC 4579): `isfocus` on
+        the `Contact` of everything the call sends from here on."""
+        _call(
+            lambda: lib.sipral_call_set_focus(self.stack.handle, self.handle, 1 if focus else 0),
+            "sipral_call_set_focus",
+        )
+
+    @property
+    def conference_uri(self) -> str | None:
+        """`sipral_call_conference_uri`: the URI of the conference this call
+        belongs to, when its far end said it is a focus (`isfocus`, RFC 4579
+        Section 4.2), or ``None`` when it did not."""
+        try:
+            return read_text(
+                lambda buffer, capacity, needed: lib.sipral_call_conference_uri(
+                    self.stack.handle, self.handle, buffer, capacity, needed
+                ),
+                "sipral_call_conference_uri",
+            )
+        except SipralError as refused:
+            if refused.status == Status.NOT_AFOCUS:
+                return None
+            raise
+
+    def subscribe_conference(self) -> Subscription:
+        """`sipral_call_subscribe_conference`: watch the conference of this
+        call's focus (RFC 4579 Section 3.4) from the call's own account. The
+        subscription outlives the call; `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`
+        says what it learns and
+        :meth:`sipral.subscription.Subscription.conference` reads the
+        picture. `SIPRAL_STATUS_NOT_AFOCUS` when the far end is not one."""
+        out = ffi.new("sipral_handle_t *")
+        _call(
+            lambda: lib.sipral_call_subscribe_conference(
+                self.stack.handle, self.handle, out, self.stack.now_ms()
+            ),
+            "sipral_call_subscribe_conference",
+        )
+        return Subscription(self.stack, int(out[0]), "conference")
+
+    # -- recording to a server (SIPREC) -----------------------------------
+
+    def record_to(self, server: str, *, destination: str | None = None) -> int:
+        """`sipral_call_record_to`: record this call to a recording server
+        (RFC 7866).
+
+        Two sockets are opened beside the call's media socket -- the copy of
+        what this end sends leaves from one, labelled ``1``, and the far
+        end's audio from the other, labelled ``2`` -- and a recording session
+        is placed to ``server`` (its URI) from the call's account, where the
+        account sends or at ``destination`` (``host:port``), with the
+        metadata beside the offer. That INVITE is too large for a datagram,
+        so the stack must reach the server over a stream: a stack signalling
+        over TCP or TLS to it. Once the server answers, the copies leave from
+        the two sockets as the call's media runs. Needs media started
+        (`SIPRAL_STATUS_WRONG_STATE` before that, and while a recording
+        already runs). Returns the recording session's handle, as
+        :attr:`recording_session` keeps it.
+        """
+        if self.media is None:
+            raise SipralError(lib.SIPRAL_STATUS_WRONG_STATE, "sipral_call_record_to")
+        host = self._media_address.rpartition(":")[0]
+        this_end = self.stack.open_media_socket(host)
+        far_end = self.stack.open_media_socket(host)
+        try:
+            server_bytes = server.encode("utf-8")
+            this_bytes = "{}:{}".format(*this_end.getsockname()).encode("utf-8")
+            far_bytes = "{}:{}".format(*far_end.getsockname()).encode("utf-8")
+            keep = [ffi.new("char[]", server_bytes), ffi.new("char[]", this_bytes), ffi.new("char[]", far_bytes)]
+            config = ffi.new("sipral_record_config_t *")
+            config.size = ffi.sizeof("sipral_record_config_t")
+            config.server, config.server_len = keep[0], len(server_bytes)
+            config.this_end, config.this_end_len = keep[1], len(this_bytes)
+            config.far_end, config.far_end_len = keep[2], len(far_bytes)
+            if destination is not None:
+                destination_bytes = destination.encode("utf-8")
+                keep.append(ffi.new("char[]", destination_bytes))
+                config.destination, config.destination_len = keep[-1], len(destination_bytes)
+            out = ffi.new("sipral_handle_t *")
+            _call(
+                lambda: lib.sipral_call_record_to(
+                    self.stack.handle, self.handle, config, out, self.stack.now_ms()
+                ),
+                "sipral_call_record_to",
+            )
+        except Exception:
+            self.stack._close_socket(this_end)
+            self.stack._close_socket(far_end)
+            raise
+        self.media.attach_recording(this_end, far_end)
+        self.recording_session = int(out[0])
+        return self.recording_session
+
+    def stop_recording_to(self) -> None:
+        """`sipral_call_stop_recording_to`: the copies stop at once, the
+        recording session is hung up and its two sockets closed.
+        `SIPRAL_STATUS_WRONG_STATE` when nothing records the call."""
+        _call(
+            lambda: lib.sipral_call_stop_recording_to(
+                self.stack.handle, self.handle, self.stack.now_ms()
+            ),
+            "sipral_call_stop_recording_to",
+        )
+        if self.media is not None:
+            self.media.detach_recording()
+        self.recording_session = None
+
     def close(self) -> None:
         """Hang up if this call is still up, release its media, forget it.
 
@@ -428,6 +603,8 @@ class Call:
             # before the socket closes under it.
             self.stack._forget_media_socket(self._media_address)
             self._media_socket.close()
+            if self._text_socket is not None:
+                self.stack._close_socket(self._text_socket)
         self.stack.forget_call(self.handle)
 
     @property
