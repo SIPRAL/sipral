@@ -31,9 +31,10 @@ publish = true
 #
 # `dtls` is the other one, and it is off the same pattern for a different
 # reason. libopus is a licensing question; this is a size one. DTLS-SRTP
-# brings `sipral-dtls` and the four RustCrypto crates under it — an elliptic
-# curve, AES-GCM, SHA-256 and HMAC — into a build that may never place a call
-# that uses them, because an SDES stream over a TLS-protected SIP transport is
+# brings `sipral-dtls` and the RustCrypto crates under it — an elliptic
+# curve, SHA-256 and HMAC — into a build that may never place a call that
+# uses them (AES-GCM is in every build: `sipral-rtp` keys SRTP's AEAD suites
+# with it, whether SDES or DTLS-SRTP carried the key), because an SDES stream over a TLS-protected SIP transport is
 # what most carriers ask for and all a deployment behind one carrier will ever
 # see. With it off there is no handshake, no certificate and no fingerprint in
 # any offer this stack writes, `Capabilities::srtp_keying` says so before a
