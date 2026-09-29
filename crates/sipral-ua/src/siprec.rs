@@ -747,7 +747,7 @@ impl Writer {
             self.out.push(' ');
             self.out.push_str(key);
             self.out.push_str("=\"");
-            self.escaped(value)?;
+            self.escaped(value, true)?;
             self.out.push('"');
         }
         self.out.push('>');
@@ -780,7 +780,7 @@ impl Writer {
         text: &str,
     ) -> Result<(), SiprecError> {
         self.start(depth, name, attributes)?;
-        self.escaped(text)?;
+        self.escaped(text, false)?;
         self.out.push_str("</");
         self.out.push_str(name);
         self.out.push_str(">\n");
@@ -800,8 +800,10 @@ impl Writer {
     }
 
     /// XML 1.0 §2.4 and §2.2: markup escaped, and no character a document
-    /// cannot hold.
-    fn escaped(&mut self, text: &str) -> Result<(), SiprecError> {
+    /// cannot hold. A reader rewrites a CR before anything else sees it
+    /// (§2.11), and every TAB, LF and CR of an attribute value into a space
+    /// (§3.3.3); those are written as character references, which it keeps.
+    fn escaped(&mut self, text: &str, attribute: bool) -> Result<(), SiprecError> {
         if text.len() > MAX_TEXT {
             return Err(SiprecError::IllegalValue("a value too long to read back"));
         }
@@ -812,7 +814,10 @@ impl Writer {
                 '>' => self.out.push_str("&gt;"),
                 '"' => self.out.push_str("&quot;"),
                 '\'' => self.out.push_str("&apos;"),
-                '\t' | '\n' | '\r' => self.out.push(c),
+                '\r' => self.out.push_str("&#13;"),
+                '\t' if attribute => self.out.push_str("&#9;"),
+                '\n' if attribute => self.out.push_str("&#10;"),
+                '\t' | '\n' => self.out.push(c),
                 c if c.is_control() => {
                     return Err(SiprecError::IllegalValue("a control character"));
                 }
@@ -1426,6 +1431,20 @@ mod tests {
             m.to_xml(),
             Err(SiprecError::IllegalValue("a control character"))
         );
+    }
+
+    #[test]
+    fn whitespace_a_reader_would_normalise_is_written_as_a_reference() {
+        // XML 1.0 §2.11 turns CR LF and a lone CR into LF before anything
+        // else sees them, and §3.3.3 turns TAB, LF and CR in an attribute
+        // value into spaces: only a character reference survives either
+        let mut m = call().metadata();
+        m.participants[0].name_ids[0].names[0].text = "one\r\ntwo\rthree\tfour\nfive".into();
+        m.participants[0].name_ids[0].aor = "sip:a\tb\nc\rd@example.com".into();
+        let xml = m.to_xml().expect("written");
+        assert!(xml.contains("<name>one&#13;\ntwo&#13;three\tfour\nfive</name>"));
+        assert!(xml.contains("aor=\"sip:a&#9;b&#10;c&#13;d@example.com\""));
+        assert_eq!(RecordingMetadata::parse(xml.as_bytes()).expect("read"), m);
     }
 
     #[test]
