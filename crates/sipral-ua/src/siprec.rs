@@ -1441,6 +1441,28 @@ mod tests {
     }
 
     #[test]
+    fn every_association_resolves_in_a_complete_document() {
+        let mut m = call().metadata();
+        m.session_recording[0].session_id = "other".into();
+        assert_eq!(
+            m.validate(),
+            Err(SiprecError::UnknownReference("sessionrecordingassoc"))
+        );
+        let mut m = call().metadata();
+        m.participant_sessions[0].session_id = "other".into();
+        assert_eq!(
+            m.validate(),
+            Err(SiprecError::UnknownReference("participantsessionassoc"))
+        );
+        let mut m = call().metadata();
+        m.participant_streams[0].participant_id = "other".into();
+        assert_eq!(
+            m.validate(),
+            Err(SiprecError::UnknownReference("participantstreamassoc"))
+        );
+    }
+
+    #[test]
     fn a_value_xml_cannot_carry_is_refused() {
         let mut m = call().metadata();
         m.participants[0].id = String::new();
@@ -1612,6 +1634,41 @@ a=sendonly\r\n";
             RecordingMetadata::parse(long.as_bytes()),
             Err(SiprecError::TooLarge("text"))
         );
+    }
+
+    #[test]
+    fn the_stream_references_of_one_association_are_bounded() {
+        let xml = format!(
+            "<recording><participantstreamassoc participant_id='p'>{}\
+</participantstreamassoc></recording>",
+            "<send>s</send>".repeat(MAX_ITEMS + 1)
+        );
+        assert_eq!(
+            RecordingMetadata::parse(xml.as_bytes()),
+            Err(SiprecError::TooLarge("stream references"))
+        );
+    }
+
+    #[test]
+    fn a_name_id_needs_its_aor_and_a_name_needs_a_participant() {
+        assert_eq!(
+            RecordingMetadata::parse(
+                b"<recording><participant participant_id='p'><nameID/></participant></recording>"
+            ),
+            Err(SiprecError::MissingAttribute("aor"))
+        );
+        // a nameID in a session is an extension, and its name is nobody's
+        let xml = b"<recording><participant participant_id='p'>\
+<nameID aor='sip:a@example.com'><name>Alice</name></nameID></participant>\
+<session session_id='s'><nameID aor='sip:m@example.com'><name>Mallory</name></nameID>\
+</session></recording>";
+        let m = RecordingMetadata::parse(xml).expect("read");
+        let names: Vec<&str> = m.participants[0].name_ids[0]
+            .names
+            .iter()
+            .map(|n| n.text.as_str())
+            .collect();
+        assert_eq!(names, ["Alice"]);
     }
 
     #[test]
