@@ -18,8 +18,10 @@
 //!   stream's own sample clock, so that a caller receiving the same key as an
 //!   RFC 4733 event as well can tell the two apart from one press.
 //! - [`generate`] writes digits and call-progress tones into a buffer.
-//! - [`progress`] holds the call-progress tones of three networks as data,
-//!   frequencies and cadences from ITU-T E.180 Supplement 2.
+//! - [`progress`] holds the call-progress tones of three networks as data —
+//!   frequencies and cadences from ITU-T E.180 Supplement 2 — and detects
+//!   them, and the three-tone special information sequence, on a call's
+//!   inbound audio.
 //!
 //! Everything here works on 16-bit linear PCM at 8 or 16 kHz, in plain
 //! floating-point arithmetic with no platform-specific instructions. Each

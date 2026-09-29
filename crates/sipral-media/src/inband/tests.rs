@@ -7,6 +7,7 @@
 
 use super::SampleRate;
 use super::dtmf::{DtmfDetector, DtmfEvent};
+use super::progress::{ProgressDetector, ProgressEvent, Region};
 use super::signals::{Rng, pink, speech, to_pcm, white};
 
 const RATES: [SampleRate; 2] = [SampleRate::Hz8000, SampleRate::Hz16000];
@@ -63,5 +64,40 @@ fn a_minute_of_white_or_pink_noise_dials_nothing() {
         }
         let events = digits_in(rate, &to_pcm(&signal));
         assert!(events.is_empty(), "{rate:?} pink: {events:?}");
+    }
+}
+
+fn progress_in(rate: SampleRate, region: Region, pcm: &[i16]) -> Vec<ProgressEvent> {
+    let mut detector = ProgressDetector::new(rate, region.tones());
+    let mut events = Vec::new();
+    for chunk in pcm.chunks(160) {
+        detector.process(chunk, |e| events.push(e));
+    }
+    events
+}
+
+#[test]
+fn a_minute_of_speech_is_no_call_progress_tone_anywhere() {
+    for rate in RATES {
+        let pcm = a_minute_of_speech(rate, 21);
+        for region in Region::ALL {
+            let events = progress_in(rate, region, &pcm);
+            assert!(events.is_empty(), "{rate:?} {region:?}: {events:?}");
+        }
+    }
+}
+
+#[test]
+fn a_minute_of_noise_is_no_call_progress_tone_anywhere() {
+    let mut rng = Rng::new(0xC0DE);
+    for rate in RATES {
+        let len = usize::try_from(rate.hz()).unwrap() * 30;
+        let mut signal = white(&mut rng, -20.0, len);
+        signal.extend(pink(&mut rng, -20.0, len));
+        let pcm = to_pcm(&signal);
+        for region in Region::ALL {
+            let events = progress_in(rate, region, &pcm);
+            assert!(events.is_empty(), "{rate:?} {region:?}: {events:?}");
+        }
     }
 }
