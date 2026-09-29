@@ -545,6 +545,11 @@ public static class Sipral
     public static readonly nuint MessageBytes = 65535;
 
     /// <summary>
+    /// How long a refused request waits before it is tried again.
+    /// </summary>
+    public const ulong RetryEveryMs = 2000;
+
+    /// <summary>
     /// Nothing built against another major works against this one.
     /// </summary>
     public const uint AbiVersionMajor = 0;

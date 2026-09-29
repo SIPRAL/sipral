@@ -215,11 +215,9 @@ class SipralEvent(
      */
     val message: ByteArray?,
     /**
-     * Where it got to.
+     * Read when the kind is a registration one.
      */
-    private val payloadRegistrationState: Long = 0,
-    private val payloadRegistrationStatusCode: Long = 0,
-    private val payloadMediaCodec: Long = 0,
+    private val payloadRegistrationNumbers: LongArray? = null,
     /**
      * Why, as UTF-8, or null.
      */
@@ -228,12 +226,16 @@ class SipralEvent(
      * What the stream has done, or null when there is none.
      */
     private val payloadMediaStatistics: LongArray? = null,
+    /**
+     * Read when the kind is a media one.
+     */
+    private val payloadMediaNumbers: LongArray? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
         get() = SipralEventPayload(
-            SipralRegistrationEvent(payloadRegistrationState, payloadRegistrationStatusCode),
-            SipralMediaEvent(payloadMediaCodec, payloadMediaReason, payloadMediaStatistics?.let { SipralCounters.of(it) }),
+            SipralRegistrationEvent((payloadRegistrationNumbers?.get(0) ?: 0L), (payloadRegistrationNumbers?.get(1) ?: 0L)),
+            SipralMediaEvent((payloadMediaNumbers?.get(0) ?: 0L), payloadMediaReason, payloadMediaStatistics?.let { SipralCounters.of(it) }),
         )
 }
 
@@ -299,10 +301,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationStatusCode: Long, payloadMediaCodec: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, message, payloadRegistrationState, payloadRegistrationStatusCode, payloadMediaCodec, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics))
+            listener.onEvent(SipralEvent(size, stack, kind, message, payloadRegistrationNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -562,6 +564,11 @@ object Sipral {
      * The longest message that crosses.
      */
     const val MESSAGE_BYTES: Long = 65535
+
+    /**
+     * How long a refused request waits before it is tried again.
+     */
+    const val RETRY_EVERY_MS: Long = 2000
 
     /**
      * Nothing built against another major works against this one.

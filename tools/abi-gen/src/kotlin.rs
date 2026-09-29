@@ -868,36 +868,73 @@ fn arm_fields<'a>(
     Ok(out)
 }
 
-/// A plain field read through the union: `payload.registration.state`.
-fn payload_plain(
+/// Every plain number of one union arm, read through the union into one
+/// `long[]` in the arm's declared order: `payload.registration.state` and
+/// the rest of the arm beside it.
+///
+/// One array per arm rather than one parameter per number, because the JVM
+/// holds a method to 255 parameter slots and a `long` takes two: once the
+/// arms of `SipralEventPayload` carried more than about a hundred numbers
+/// between them, a constructor taking each one alone was one no class file
+/// can declare, and the class failed to load. A float crosses as the bits of
+/// the double it widens to, the way [`payload_given`] carries one.
+fn payload_numbers(
     event: &str,
     spelled: &str,
-    path: &str,
+    arm: &Read<'_>,
     kotlin: String,
-    field: &Read<'_>,
+    numbers: &[(String, &Read<'_>)],
 ) -> Handed {
-    let (cast, zero) = match field.ty.base {
-        Base::Float(_) => ("jdouble", "0.0"),
-        _ => ("jlong", "0"),
-    };
-    let c_passed =
-        format!("JNI_REACHES({event}, {spelled}, {path}) ? ({cast}){event}->{path} : {zero}");
+    let count = numbers.len();
+    let mut fill = String::new();
+    for (index, (path, field)) in numbers.iter().enumerate() {
+        if matches!(field.ty.base, Base::Float(_)) {
+            let _ = writeln!(
+                fill,
+                "        if (JNI_REACHES({event}, {spelled}, {path})) {{\n            \
+                 double wide = (double){event}->{path};\n            \
+                 memcpy(&slots[{index}], &wide, sizeof wide);\n        }}"
+            );
+        } else {
+            let _ = writeln!(
+                fill,
+                "        slots[{index}] = JNI_REACHES({event}, {spelled}, {path}) ? (jlong){event}->{path} : 0;"
+            );
+        }
+    }
+    let c_make = format!(
+        "    if (built) {{\n\
+         \x20       jlong slots[{count}] = {{ 0 }};\n{fill}\
+         \x20       {kotlin} = (*env)->NewLongArray(env, {count});\n\
+         \x20       if ({kotlin} == NULL) {{\n\
+         \x20           built = 0;\n\
+         \x20       }} else {{\n\
+         \x20           (*env)->SetLongArrayRegion(env, {kotlin}, 0, {count}, slots);\n\
+         \x20       }}\n\
+         \x20   }}\n"
+    );
     Handed {
-        from: field.member.name,
-        doc: field.member.doc,
-        parameter: format!("{kotlin}: {}", plain_kotlin(&field.ty)),
+        from: arm.member.name,
+        doc: arm.member.doc,
+        parameter: format!("{kotlin}: LongArray?"),
         argument: kotlin.clone(),
-        field: format!(
-            "private val {kotlin}: {} = {}",
-            plain_kotlin(&field.ty),
-            zero_of(&field.ty)
-        ),
-        descriptor: plain_descriptor(&field.ty).to_owned(),
-        kotlin,
-        c_local: None,
-        c_make: String::new(),
-        c_passed,
+        field: format!("private val {kotlin}: LongArray? = null"),
+        descriptor: "[J".to_owned(),
+        kotlin: kotlin.clone(),
+        c_local: Some((kotlin.clone(), "jlongArray".to_owned())),
+        c_make,
+        c_passed: kotlin,
         c_after: String::new(),
+    }
+}
+
+/// What a plain number of an arm is read back as, out of the arm's array
+/// [`payload_numbers`] filled: slot `index` of `numbers`, zero when the array
+/// never crossed.
+fn number_at(numbers: &str, index: usize, ty: &Type) -> String {
+    match ty.base {
+        Base::Float(_) => format!("Double.fromBits({numbers}?.get({index}) ?: 0L)"),
+        _ => format!("({numbers}?.get({index}) ?: 0L)"),
     }
 }
 
@@ -1107,21 +1144,22 @@ fn payload_arms(
         let guard = kind_guard(surface, event, arm.member.name)?;
         let mut fields = Vec::new();
         let mut crossing = Vec::new();
+        let numbers_name = payload_flat(arm.member.name, "numbers");
+        let mut numbers = Vec::new();
         for one in arm_fields(surface, arm_record, &arm_read)? {
             match one {
                 ArmField::Plain(field) => {
-                    let flat = payload_flat(arm.member.name, field.member.name);
                     let path = format!(
                         "{}.{}.{}",
                         union_field.member.name, arm.member.name, field.member.name
                     );
-                    crossing.push(payload_plain(event, spelled, &path, flat.clone(), field));
                     fields.push(PayloadField {
                         kotlin: safe(&lower_camel(field.member.name)),
                         kotlin_type: plain_kotlin(&field.ty).to_owned(),
                         doc: field.member.doc,
-                        from_raw: flat,
+                        from_raw: number_at(&numbers_name, numbers.len(), &field.ty),
                     });
+                    numbers.push((path, field));
                 }
                 ArmField::Buffer { data, len } => {
                     let flat = payload_flat(arm.member.name, data.member.name);
@@ -1180,6 +1218,15 @@ fn payload_arms(
                     });
                 }
             }
+        }
+        if !numbers.is_empty() {
+            crossing.push(payload_numbers(
+                event,
+                spelled,
+                &arm,
+                numbers_name,
+                &numbers,
+            ));
         }
         out.push(PayloadArm {
             kotlin: safe(&lower_camel(arm.member.name)),

@@ -605,7 +605,7 @@ const FUNCTIONS: &[Function] = &[
 /// A surface small enough to read and wide enough to reach every shape the
 /// real one does: a handle, the callback, two enumerations, a union and the
 /// records it holds, a record with a size member and records without one,
-/// pointers of every width that crosses, constants of three types, and at
+/// pointers of every width that crosses, constants of four types, and at
 /// least one entry point per convention in `docs/08-ffi.md`.
 ///
 /// The second half of that sentence is held by
@@ -690,6 +690,12 @@ const SYNTHETIC: Surface = Surface {
                 doc: &[" The longest message that crosses."],
                 rust_type: "usize",
                 value: 65_535,
+            },
+            Value {
+                name: "SIPRAL_RETRY_EVERY_MS",
+                doc: &[" How long a refused request waits before it is tried again."],
+                rust_type: "u64",
+                value: 2_000,
             },
         ],
         VERSION,
@@ -1664,9 +1670,9 @@ fn a_callback_that_answers_nothing_still_prints_as_it_always_did() {
         kotlin.contains(
             "        val listener = synchronized(this) { listening[key] } ?: \
              return\n        try {\n            listener.onEvent(SipralEvent(size, stack, \
-             kind, message, payloadRegistrationState, payloadRegistrationStatusCode, \
-             payloadMediaCodec, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, \
-             payloadMediaStatistics))\n        } catch (failure: Throwable) {"
+             kind, message, payloadRegistrationNumbers, payloadMediaReason?.let { String(it, \
+             Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers))\n        } catch \
+             (failure: Throwable) {"
         ),
         "{kotlin}"
     );
@@ -1786,13 +1792,13 @@ fn the_callback_lands_in_a_kotlin_listener() {
     );
     // the head of the event is handed over, and every arm of the union
     // beside it, flattened: nothing in the declarations names which value of
-    // `kind` goes with which arm, so every arm is carried on every event
+    // `kind` goes with which arm, so every arm is carried on every event --
+    // each arm's numbers in one array, its buffers and records alone
     assert!(
         printed.contains(
             "    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: \
-             ByteArray?, payloadRegistrationState: Long, payloadRegistrationStatusCode: Long, \
-             payloadMediaCodec: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: \
-             LongArray?) {"
+             ByteArray?, payloadRegistrationNumbers: LongArray?, payloadMediaReason: \
+             ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?) {"
         ),
         "{printed}"
     );
@@ -1800,9 +1806,10 @@ fn the_callback_lands_in_a_kotlin_listener() {
     assert!(
         printed.contains(
             "    val payload: SipralEventPayload\n        get() = SipralEventPayload(\n            \
-             SipralRegistrationEvent(payloadRegistrationState, payloadRegistrationStatusCode),\n            \
-             SipralMediaEvent(payloadMediaCodec, payloadMediaReason, payloadMediaStatistics?.let { \
-             SipralCounters.of(it) }),\n        )"
+             SipralRegistrationEvent((payloadRegistrationNumbers?.get(0) ?: 0L), \
+             (payloadRegistrationNumbers?.get(1) ?: 0L)),\n            \
+             SipralMediaEvent((payloadMediaNumbers?.get(0) ?: 0L), payloadMediaReason, \
+             payloadMediaStatistics?.let { SipralCounters.of(it) }),\n        )"
         ),
         "{printed}"
     );
@@ -1821,7 +1828,7 @@ fn the_callback_lands_in_a_kotlin_listener() {
     assert!(
         shim.contains(
             "(*env)->GetStaticMethodID(env, jni_event_callback_class, \"deliver\", \
-             \"(JJJJ[BJJJ[B[J)V\")"
+             \"(JJJJ[B[J[B[J[J)V\")"
         ),
         "the descriptor the shim looks deliver up by is not the one Kotlin declares:\n{shim}"
     );
@@ -3477,4 +3484,70 @@ fn the_words_a_name_is_made_of_join_back_into_snake() {
     );
     let why = refusal(&C_RESERVED, &c::Names);
     assert!(why.contains("implementation"), "{why}");
+}
+
+/// The parameter slots one JVM method descriptor takes: two for a `long` or
+/// a `double`, one for anything else, an array of either included.
+fn jvm_slots(descriptor: &str) -> usize {
+    let inside = descriptor
+        .strip_prefix('(')
+        .and_then(|rest| rest.split(')').next())
+        .expect("a method descriptor");
+    let mut slots = 0;
+    let mut chars = inside.chars();
+    while let Some(one) = chars.next() {
+        match one {
+            'J' | 'D' => slots += 2,
+            '[' => {
+                // the element names the array's type, and the array is one slot
+                let mut element = chars.next().expect("an array's element");
+                while element == '[' {
+                    element = chars.next().expect("an array's element");
+                }
+                if element == 'L' {
+                    let _ = chars.by_ref().find(|&c| c == ';');
+                }
+                slots += 1;
+            }
+            'L' => {
+                let _ = chars.by_ref().find(|&c| c == ';');
+                slots += 1;
+            }
+            _ => slots += 1,
+        }
+    }
+    slots
+}
+
+/// Every method the shim calls into the JVM through fits in the 255
+/// parameter slots a class file allows (JVMS 4.3.3). The event's `deliver`,
+/// and the class it builds, carry every arm of the payload union: once the
+/// arms held more numbers than that with a `long` each, the class failed to
+/// load with "Too many arguments in method signature", and only a JVM
+/// running the binding said so.
+#[test]
+fn every_method_the_shim_calls_fits_the_jvm() {
+    assert_eq!(jvm_slots("(JJ[B[JLjava/lang/Object;I)V"), 8);
+    let shim = kotlin::shim(&sipral_ffi::abi::SURFACE).unwrap();
+    let mut seen = 0;
+    for line in shim.lines().filter(|line| line.contains("MethodID(")) {
+        let Some(descriptor) = line.rsplit('"').nth(1) else {
+            continue;
+        };
+        if !descriptor.starts_with('(') {
+            continue;
+        }
+        seen += 1;
+        // the class `deliver` builds takes the same members with `this` in
+        // place of the key, so the static method is the wider of the two
+        assert!(
+            jvm_slots(descriptor) <= 255,
+            "a method takes {} parameter slots, past the JVM's 255: {line}",
+            jvm_slots(descriptor)
+        );
+    }
+    assert!(
+        seen > 0,
+        "the shim looked up no method, so nothing was measured"
+    );
 }

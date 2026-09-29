@@ -1424,6 +1424,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **The Kotlin binding loads with every 0.31 event arm.** Each payload arm's numbers now cross JNI in one `long[]`, so the event's `deliver` stays inside the JVM's 255 parameter slots; `SipralEvent.payload` reads the same.
 - **A 2xx lost on UDP is sent again until its ACK arrives.** RFC 3261
   §13.3.1.4 has the answering end repeat its 2xx, T1 doubling up to T2, and
   nothing did: the INVITE's retransmissions stop at the first provisional,

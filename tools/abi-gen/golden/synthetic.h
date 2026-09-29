@@ -47,6 +47,11 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_MESSAGE_BYTES ((size_t)65535)
 
 /**
+ * How long a refused request waits before it is tried again.
+ */
+#define SIPRAL_RETRY_EVERY_MS ((uint64_t)2000)
+
+/**
  * Nothing built against another major works against this one.
  */
 #define SIPRAL_ABI_VERSION_MAJOR ((uint32_t)0)

@@ -116,7 +116,12 @@ private suspend fun everything(): String {
         // SipralEvent.payload -- one class per arm -- independent of
         // anything a real call does, so a hand-built event round-trips a
         // field of each of the three arms an application actually reads:
-        // a DTMF digit, a registration state and a media codec.
+        // a DTMF digit, a registration state and a media codec. Each arm's
+        // numbers cross in one array, in the arm's declared order: the media
+        // arm's codec is its first number and its digit its sixth, the
+        // registration arm's state its first.
+        fun armNumbers(vararg set: Pair<Int, Long>) =
+            LongArray(64).also { numbers -> set.forEach { (at, value) -> numbers[at] = value } }
         val digitEvent = SipralEvent(
             size = 0,
             stack = clientB.handle,
@@ -124,7 +129,7 @@ private suspend fun everything(): String {
             account = 0,
             call = 0,
             message = null,
-            payloadMediaDigit = '#'.code.toLong(),
+            payloadMediaNumbers = armNumbers(5 to '#'.code.toLong()),
         )
         assertEquals('#', digitOf(digitEvent), "payload.media.digit did not round-trip")
 
@@ -135,7 +140,7 @@ private suspend fun everything(): String {
             account = 0,
             call = 0,
             message = null,
-            payloadRegistrationState = org.sipral.SipralRegistrationState.REGISTERED.value.toLong(),
+            payloadRegistrationNumbers = armNumbers(0 to org.sipral.SipralRegistrationState.REGISTERED.value.toLong()),
         )
         assertEquals(
             org.sipral.SipralRegistrationState.REGISTERED,
@@ -150,7 +155,7 @@ private suspend fun everything(): String {
             account = 0,
             call = 0,
             message = null,
-            payloadMediaCodec = org.sipral.SipralCodec.OPUS.value.toLong(),
+            payloadMediaNumbers = armNumbers(0 to org.sipral.SipralCodec.OPUS.value.toLong()),
         )
         assertEquals(
             org.sipral.SipralCodec.OPUS.value.toLong(),

@@ -195,6 +195,9 @@ public enum Sipral {
     /// The longest message that crosses.
     public static let messageBytes: Int = 65535
 
+    /// How long a refused request waits before it is tried again.
+    public static let retryEveryMs: UInt64 = 2000
+
     /// Nothing built against another major works against this one.
     public static let abiVersionMajor: UInt32 = 0
 
