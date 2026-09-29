@@ -293,23 +293,27 @@ impl<'a> Iterator for Params<'a> {
     type Item = (&'a [u8], Option<&'a [u8]>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.rest.is_empty() {
-            return None;
-        }
-        let field = match split_top_level(self.rest, b';') {
-            (Some(head), tail) => {
-                self.rest = tail;
-                head
+        // a loop, not a call per empty field: `;;;;` is as long as the value
+        // it arrived in, and the stack is not
+        let field = loop {
+            if self.rest.is_empty() {
+                return None;
             }
-            (None, all) => {
-                self.rest = b"";
-                all
+            let field = match split_top_level(self.rest, b';') {
+                (Some(head), tail) => {
+                    self.rest = tail;
+                    head
+                }
+                (None, all) => {
+                    self.rest = b"";
+                    all
+                }
+            };
+            let field = trim(field);
+            if !field.is_empty() {
+                break field;
             }
         };
-        let field = trim(field);
-        if field.is_empty() {
-            return self.next();
-        }
         Some(match split_top_level(field, b'=') {
             (Some(n), v) => (trim(n), Some(trim(v))),
             (None, n) => (trim(n), None),

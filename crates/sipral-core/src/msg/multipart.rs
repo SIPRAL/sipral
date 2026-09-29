@@ -1501,6 +1501,19 @@ new\r\n\
     }
 
     #[test]
+    fn a_long_run_of_empty_parameters_does_not_exhaust_the_stack() {
+        // a part's Content-Type of one type and 60 000 empty parameters: the
+        // boundary lookup walks every one of them
+        let mut body = b"--b\r\nContent-Type: multipart/mixed".to_vec();
+        body.extend(std::iter::repeat_n(b';', 60_000));
+        body.extend_from_slice(b"\r\n\r\nx\r\n--b--");
+        assert_eq!(
+            read(b"multipart/mixed;boundary=b", &body).err(),
+            Some(MultipartError::NoBoundary)
+        );
+    }
+
+    #[test]
     fn arbitrary_bytes_never_panic() {
         let ct = media(b"multipart/mixed;boundary=b");
         let pieces: [&[u8]; 8] = [
