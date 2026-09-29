@@ -45,5 +45,11 @@ rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["sha2"]
 # crate denies
 zeroize = "=1.9.0"
 
+[dev-dependencies]
+# the SRTP suites a negotiated profile keys, for the tests that carry a packet
+# each way under the keys a real handshake exported. Tests only: nothing in
+# this crate's library depends on how SRTP is done with the keys it hands out
+sipral-rtp = { path = "../sipral-rtp", version = "0.0.1" }
+
 [lints]
 workspace = true
