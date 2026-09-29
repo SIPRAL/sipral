@@ -12,6 +12,23 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Multipart bodies, and the metadata of a recorded call.**
+  `sipral_core::msg::Multipart` reads a `multipart/mixed` or
+  `multipart/alternative` body (RFC 5621, RFC 2046 §5.1) into parts, each
+  with its own `Content-Type`, `Content-Disposition` and `Content-ID`,
+  nested multipart included, within bounds on parts, depth, size and
+  fields per part; `Multipart::check` returns a required part the receiver
+  does not understand as an `Unsupported`, whose status is the 415 of
+  RFC 5621 §9. `MultipartBuilder` writes one, with a boundary that occurs
+  in no part. `sipral_ua::siprec` holds SIPREC recording metadata, the
+  RFC 7865 model in RFC 7866's `application/rs-metadata+xml`: written,
+  read through the same bounded reader dialog-info bodies use, built for a
+  call by `RecordedCall`, and checked against the SDP's `a=label` lines;
+  and the pieces of a recording session's INVITE: the SDP and metadata
+  body with `Content-Disposition: recording-session`, the `+sip.src`
+  feature tag and the `siprec` option tag. Not yet wired into calls. A
+  `multipart` fuzz target reads any body and requires what it reads to be
+  written back the same.
 - **A call's audio on Android survives what the platform does to it.**
   `SipralCallAudio` (in the `ConnectionService` helper) keeps one call's
   microphone and speaker through a cellular call answered over it — the
