@@ -17,6 +17,9 @@
 //!   of ITU-T Q.24, and reports each one as a start and an end on the
 //!   stream's own sample clock, so that a caller receiving the same key as an
 //!   RFC 4733 event as well can tell the two apart from one press.
+//! - [`generate`] writes digits and call-progress tones into a buffer.
+//! - [`progress`] holds the call-progress tones of three networks as data,
+//!   frequencies and cadences from ITU-T E.180 Supplement 2.
 //!
 //! Everything here works on 16-bit linear PCM at 8 or 16 kHz, in plain
 //! floating-point arithmetic with no platform-specific instructions. Each
@@ -34,6 +37,8 @@
 
 mod analysis;
 pub mod dtmf;
+pub mod generate;
+pub mod progress;
 #[cfg(test)]
 mod signals;
 #[cfg(test)]
@@ -137,5 +142,15 @@ pub(crate) fn round_position(value: f64) -> u64 {
         0
     } else {
         value.round() as u64
+    }
+}
+
+/// A float clamped to the 16-bit sample range and rounded.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn to_sample(value: f64) -> i16 {
+    if value.is_nan() {
+        0
+    } else {
+        value.round().clamp(-32_768.0, 32_767.0) as i16
     }
 }

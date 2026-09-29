@@ -7,7 +7,7 @@
 
 use std::f64::consts::PI;
 
-use super::{count_f64, dbm0_to_peak, dbm0_to_power};
+use super::{count_f64, dbm0_to_peak, dbm0_to_power, to_sample};
 
 /// A xorshift generator: small, fast, and the same on every machine.
 pub(crate) struct Rng(u64);
@@ -80,12 +80,6 @@ pub(crate) fn mix(into: &mut [f64], other: &[f64]) {
     for (a, b) in into.iter_mut().zip(other) {
         *a += b;
     }
-}
-
-/// A float clamped to the 16-bit sample range and rounded.
-#[allow(clippy::cast_possible_truncation)]
-fn to_sample(value: f64) -> i16 {
-    value.round().clamp(-32_768.0, 32_767.0) as i16
 }
 
 pub(crate) fn to_pcm(signal: &[f64]) -> Vec<i16> {
