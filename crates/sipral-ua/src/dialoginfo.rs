@@ -700,12 +700,28 @@ impl<'a> Reader<'a> {
         // at most one skipped construct per call is not enough: a document
         // starts with a declaration and may then carry comments
         for _ in 0..MAX_NODES {
-            let rest = self.rest.trim_ascii_start();
-            self.rest = rest;
+            let rest = self.rest;
             let Some(&first) = rest.first() else {
                 return Ok(None);
             };
             if first != b'<' {
+                // a run of nothing but whitespace (XML 1.0 §2.3's S) is
+                // markup's layout and not a node; any other run is text as
+                // written, its leading whitespace included, since text that
+                // follows a comment or a child element begins where it
+                // ends and the space before its first word is part of it
+                let end = rest
+                    .iter()
+                    .position(|byte| *byte == b'<')
+                    .unwrap_or(rest.len());
+                let run = rest.get(..end).unwrap_or_default();
+                if run
+                    .iter()
+                    .all(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
+                {
+                    self.rest = rest.get(end..).unwrap_or_default();
+                    continue;
+                }
                 return self.text().map(Some);
             }
             match rest.get(1) {
@@ -944,6 +960,26 @@ mod tests {
             ["open x", "open y empty", "close x"]
         );
         assert!(nodes(b"").is_empty());
+    }
+
+    #[test]
+    fn text_after_a_comment_or_a_child_keeps_its_leading_whitespace() {
+        assert_eq!(
+            nodes(b"<x>a<!-- c --> b<y/> c\t</x>"),
+            [
+                "open x",
+                "text a",
+                "text  b",
+                "open y empty",
+                "text  c\t",
+                "close x"
+            ]
+        );
+        // a run of nothing but whitespace is still not a node
+        assert_eq!(
+            nodes(b"<x> <!-- c -->\r\n <y/>\n</x>\n"),
+            ["open x", "open y empty", "close x"]
+        );
     }
 
     #[test]

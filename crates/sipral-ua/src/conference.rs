@@ -1646,6 +1646,18 @@ entity=\"sips:conf233@example.com\" state=\"partial\" version=\"{version}\">\
     }
 
     #[test]
+    fn text_split_by_a_comment_keeps_the_space_between_its_words() {
+        let body = concat!(
+            "<conference-info entity=\"sip:conf@example.com\" version=\"1\">",
+            "<conference-description><subject>Agenda<!-- x --> for today</subject>",
+            "</conference-description></conference-info>"
+        );
+        let document = ConferenceInfo::parse(body.as_bytes()).expect("a document");
+        let subject = document.description.and_then(|d| d.subject);
+        assert_eq!(subject.as_deref(), Some("Agenda for today"));
+    }
+
+    #[test]
     fn the_rfcs_full_example_reads_as_the_rfc_describes_it() {
         let info = document(FULL);
         assert_eq!(&*info.entity, "sips:conf233@example.com");
