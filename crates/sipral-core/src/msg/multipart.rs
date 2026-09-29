@@ -594,15 +594,16 @@ impl Reader {
         // the last field is part of that field, so a part with no fields
         // starts with the separating CRLF, and a part with no content has no
         // separating CRLF at all
+        // and every piece stays a span of the caller's bytes, empty or not
         let (headers, body) = if let Some(body) = raw.strip_prefix(b"\r\n") {
-            (&b""[..], body)
+            (raw.get(..0).unwrap_or_default(), body)
         } else if let Some(at) = find(raw, b"\r\n\r\n") {
             (
                 raw.get(..at).unwrap_or_default(),
                 raw.get(at + 4..).unwrap_or_default(),
             )
         } else {
-            (raw, &b""[..])
+            (raw, raw.get(raw.len()..).unwrap_or_default())
         };
         let mut part = BodyPart {
             headers,
@@ -1166,6 +1167,10 @@ Content-ID: <meta@example.com>\r\n\
         let part = parsed.parts().first().expect("a part");
         assert!(part.is("text", "plain"));
         assert!(part.body().is_empty());
+        // still a span of the input, not an empty slice from elsewhere
+        let input = body.as_ptr_range();
+        let span = part.body().as_ptr_range();
+        assert!(input.start <= span.start && span.end <= input.end);
     }
 
     #[test]
