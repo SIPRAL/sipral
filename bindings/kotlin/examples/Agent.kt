@@ -38,6 +38,7 @@ import org.sipral.SipralException
 import org.sipral.SipralIce
 import org.sipral.SipralStreamStats
 import org.sipral.SipralTransport
+import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.SipralTurnServer
@@ -284,7 +285,7 @@ private suspend fun runDirectCall(): Boolean {
     }
     val ice = if (System.getenv("SIPRAL_ICE") == "required") SipralIce.REQUIRED else null
 
-    val client = SipralClient.open(bindHost = host, stunServer = stunServer, turn = turn, ice = ice)
+    val client = SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, stunServer = stunServer, turn = turn, ice = ice)
     val account = client.addAccount(aor = "sip:caller@${client.bindAddress}", registrarAddress = peer)
     println("dialling sip:$peerUser@$peer from ${client.bindAddress}")
     val call = try {
@@ -332,7 +333,7 @@ fun main() = runBlocking {
     val registrarAddress = System.getenv("SIPRAL_REGISTRAR_ADDRESS")
         ?: error("SIPRAL_REGISTRAR_ADDRESS is required")
     val host = routeTo(registrarAddress)
-    val client = SipralClient.open(bindHost = host)
+    val client = SipralClient.open(audio = SipralAudioMode.Application, bindHost = host)
     val account = client.addAccount(
         aor = System.getenv("SIPRAL_AOR") ?: "sip:agent@example.invalid",
         registrarAddress = registrarAddress,

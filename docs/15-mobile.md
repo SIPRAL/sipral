@@ -711,8 +711,12 @@ Every change is an `AudioTransition` on `SipralCallAudio.transitions`
 (`Started`, `Paused` with every reason still standing, `Resumed`,
 `RouteChanged`, `MuteChanged`, `DeviceFailed` with the platform's code,
 `DeviceRestored` with the number of tries, `Stopped`), and `state` says
-where the audio stands. The sample logs each one and shows the state on
-the call's card.
+where the audio stands. `SipralCallAudios` builds a `SipralCallAudio` for
+every call the bridge shows once its media has started and closes it when
+the call is gone, and carries every call's transitions and states: the
+library's device mode on Android, where the C library opens no device. The
+sample holds no audio code of its own; it logs each transition and shows
+the state on the call's card.
 
 **Run on the emulator, 27 September 2026.** The sample's APK
 (`scripts/package/android.sh`, 20,374,994 bytes) on an `android-36`

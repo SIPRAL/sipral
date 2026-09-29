@@ -85,7 +85,7 @@ private suspend fun read(socket: DatagramSocket, withinMs: Long, done: (List<Str
 private suspend fun refusedUnlessTaken(): String {
     DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { referrer ->
         val referrerAddress = formatAddress("127.0.0.1", referrer.localPort)
-        SipralClient.open(bindHost = "127.0.0.1").use { bob ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { bob ->
             bob.addAccount(aor = "sip:bob@sipral.invalid", registrarAddress = referrerAddress)
             send(referrer, refer(bob.bindAddress, referrerAddress, "sip:carol@sipral.invalid"), bob.bindAddress)
             val seen = read(referrer, 5_000) { seen -> seen.any { it.startsWith("SIP/2.0 ") } }
@@ -98,8 +98,8 @@ private suspend fun refusedUnlessTaken(): String {
 private suspend fun takenAndReported(): String {
     DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { referrer ->
         val referrerAddress = formatAddress("127.0.0.1", referrer.localPort)
-        SipralClient.open(bindHost = "127.0.0.1").use { carol ->
-            SipralClient.open(bindHost = "127.0.0.1", referrals = true).use { bob ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { carol ->
+            SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", referrals = true).use { bob ->
                 carol.addAccount(aor = "sip:carol@sipral.invalid", registrarAddress = bob.bindAddress)
                 bob.addAccount(aor = "sip:bob@sipral.invalid", registrarAddress = carol.bindAddress)
                 val target = "sip:carol@${carol.bindAddress}"

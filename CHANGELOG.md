@@ -23,6 +23,28 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   session timer, anonymity and trusted peers. The WPF sample is a softphone
   on the real device list with no audio code of its own, and Python gains
   `examples/softphone.py`.
+- **The Swift and Kotlin layers carry ABI 0.29 whole.** A stack opens in
+  the library's device mode wherever it has an engine for the platform
+  (`AudioMode.platformDefault`, `SipralAudioMode.platformDefault`) and in
+  application mode elsewhere, the packets the engine encodes sent from each
+  call's own socket or its TURN connection; `SipralStack.audio` and
+  `SipralClient.audio` list the devices under ids that survive a refresh,
+  choose the microphone, speaker and ringer apart, keep gain and mute per
+  direction across a change of device, meter each direction, ring, and open
+  and close the devices by hand under manual activation, which
+  `CallKitBridge.drive` ties to CallKit's audio session. A call's `Reason` is
+  written (`hangup(reason:)`) and read (`endCause`, `endCauseOf`), an
+  incoming call's asserted identity behind the account's trust gate, its
+  `Privacy`, `Diversion` and `History-Info` are `CallerIdentity`, its
+  `Answer-Mode`, `answer-after` and `Alert-Info` are `Answering`, a ringing
+  call is redirected with a 3xx, an account takes a session timer, anonymity
+  and its trusted peers, a DTLS-SRTP call names its suite, and a network
+  change rebinds the signalling socket, points every account at it and
+  moves each call's media (`networkChanged`, `moveMedia`). The macOS sample
+  has no audio code of its own and shows the devices, the meters and who is
+  calling; on Android, `SipralCallAudios` in the telecom helper runs every
+  call's `AudioRecord` and `AudioTrack`, and the Compose sample has no audio
+  code either.
 - **The library opens the audio devices itself, for the stack that asks.**
   `sipral-audio` is the built-in engine: the platform's devices listed with
   their channel counts under handles that survive a refresh and an unplug,

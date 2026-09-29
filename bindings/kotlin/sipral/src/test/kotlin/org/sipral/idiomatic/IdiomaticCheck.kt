@@ -36,7 +36,10 @@ import org.sipral.SipralStatus
 
 fun main() {
     val said = try {
-        runBlocking { everything() + "; " + natChecks() + "; " + referralChecks() }
+        runBlocking {
+            everything() + "; " + natChecks() + "; " + referralChecks() + "; " + signallingChecks() + "; " +
+                audioChecks()
+        }
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)
@@ -50,8 +53,8 @@ fun main() {
 }
 
 private suspend fun everything(): String {
-    val clientA = SipralClient.open(bindHost = "127.0.0.1")
-    val clientB = SipralClient.open(bindHost = "127.0.0.1")
+    val clientA = SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1")
+    val clientB = SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1")
     try {
         val accountA = clientA.addAccount(
             aor = "sip:alice@example.invalid",

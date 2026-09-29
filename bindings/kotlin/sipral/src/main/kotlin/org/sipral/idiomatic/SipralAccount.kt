@@ -17,24 +17,45 @@ import org.sipral.SipralRegistrationState
  * keeping the two together is what makes every method here safe to call
  * with nothing further to pass.
  */
-class SipralAccount internal constructor(val client: SipralClient, val handle: Long, val aor: String) {
+class SipralAccount internal constructor(
+    val client: SipralClient,
+    val handle: Long,
+    val aor: String,
+    /** Where the account's requests go, `host:port`. */
+    val registrarAddress: String,
+    contact: String,
+    /** The `Contact` the application wrote, or null when the account's is
+     * the one this layer derives from the signalling socket. */
+    private val givenContact: String?,
+) {
+    /** Where this account says it can be reached, as its `Contact` carries
+     * it now: after [SipralClient.networkChanged], the new address. */
+    @Volatile
+    var contact: String = contact
+        private set
+
     internal companion object {
         fun add(
             client: SipralClient,
             aor: String,
             registrarAddress: String,
             registrar: String?,
-            contact: String,
+            contact: String?,
             displayName: String?,
             authUser: String?,
             authPassword: String?,
             expiresSeconds: Long,
             push: SipralPush?,
+            sessionTimer: SipralSessionTimerChoice,
+            privacy: Set<SipralPrivacy>,
+            trustedPeers: List<String>,
         ): SipralAccount {
+            val written = contact ?: client.defaultContact(aor)
+            val (timer, seconds) = sessionTimer.raw
             val config = SipralAccountConfig(
                 aor = aor,
                 registrar = registrar,
-                contact = contact,
+                contact = written,
                 registrarAddress = registrarAddress,
                 displayName = displayName,
                 authUser = authUser,
@@ -44,10 +65,36 @@ class SipralAccount internal constructor(val client: SipralClient, val handle: L
                 pushPrid = push?.prid,
                 pushParam = push?.param,
                 pushWakesItself = if (push?.wakesItself == true) 1L else 0L,
+                sessionTimer = timer,
+                sessionIntervalSeconds = seconds,
+                privacy = SipralPrivacy.bits(privacy),
+                trustedPeers = trustedPeers.takeIf { it.isNotEmpty() }?.joinToString(","),
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
-            return SipralAccount(client, accountHandle, aor)
+            return SipralAccount(client, accountHandle, aor, registrarAddress, written, contact)
         }
+    }
+
+    /**
+     * `sipral_account_rebind` onto the signalling socket [local] the client
+     * bound after a network change: a derived `Contact` names the new
+     * socket; one the application wrote has the old address, wherever it
+     * names it, replaced by the new host, and is otherwise left as written.
+     */
+    internal fun rebind(local: String, previous: String?) {
+        val next = if (givenContact == null) {
+            client.defaultContact(aor, local)
+        } else if (previous != null && previous.isNotEmpty() && contact.contains(previous)) {
+            contact.replace(previous, local.substringBeforeLast(':'))
+        } else {
+            contact
+        }
+        retryBusy {
+            Sipral.accountRebind(
+                client.handle, handle, /* SIPRAL_TRANSPORT_MAIN */ 0, registrarAddress, next, client.nowMs(),
+            )
+        }
+        contact = next
     }
 
     /** `sipral_account_registration_state`, read fresh. */
@@ -134,6 +181,7 @@ class SipralAccount internal constructor(val client: SipralClient, val handle: L
     /** `sipral_account_remove`. Every call this account placed ends. */
     fun remove() {
         retryBusy { Sipral.accountRemove(client.handle, handle) }
+        client.forgetAccount(handle)
     }
 }
 

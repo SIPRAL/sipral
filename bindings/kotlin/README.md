@@ -90,16 +90,109 @@ val account = client.addAccount(
 )
 account.registerAndWait()
 val call = client.placeCall(account, "sip:bob@example.com", mediaHost = "192.0.2.10")
-call.waitConfirmed()
+call.waitConfirmed()        // heard at once: the client is in device mode wherever the library has an engine
 call.hold(); call.resume()
 call.sendDtmf("123#")
-call.hangup()
+call.hangup(SipralHangupReason.NORMAL_CLEARING)   // or hangup(), with no Reason
 client.close()
 ```
 
 Without `registrar` the account never registers: registering throws, and
 the registrar address is only the outbound proxy. The stack and media
 sockets default to 127.0.0.1, so name an address the registrar can reach.
+
+### The library runs the audio
+
+`SipralClient.open(audio = ...)` takes a `SipralAudioMode`.
+`SipralAudioMode.Device(activation)` -- `SipralAudioMode.platformDefault`
+wherever this build of the library has an engine for the platform, macOS and
+Windows on a JVM -- has the library open the devices with the first call's
+media or the first ring and close them with the last (`AUTOMATIC`), or only
+between `audio.activate()` and `audio.deactivate()` (`MANUAL`): every call is
+resampled to the device's rate and mixed into the loudspeaker, the microphone
+goes into every call, and the platform's own echo processing sits behind it.
+Each packet the engine encodes reaches this layer on the engine's thread, and
+goes out of the call's own socket or on its connection to a TURN server.
+`SipralAudioMode.Application` is the client as it was: `SipralMedia.sendAudio`
+and `frames` carry the call's PCM, for a voice agent, a recorder, a test --
+and Android, where the default is `Application` because the devices belong to
+the telecom helper (below).
+
+`client.audio` is the engine: `refresh()`/`devices()` list
+`SipralAudioDeviceInfo` with channel counts under ids that survive a refresh
+and an unplug; `select(role, device)` puts the `MICROPHONE`, the `SPEAKER` or
+the `RINGER` on one, or back on the system's route with null, refused by
+status before anything opens (`NO_SUCH_DEVICE`, `DEVICE_UNUSABLE`,
+`NOT_SUPPORTED` where the platform cannot -- on macOS the microphone follows
+the voice-processing unit's system input and the ring plays on the
+loudspeaker); `selection(role)` says what was asked and what runs while a
+chosen device is unplugged; `setGain(direction, factor)` (1.0 is unity, the
+input direction is the microphone's gain) and `setMuted` belong to the
+direction and survive a change of device; `level(direction)` is the meter, 0
+to 1; `ring(tone, rate)`/`stopRinging()` play on the ringer; `status()` says
+whether the devices are open, the render delay and whether the platform
+cancels the echo. `audioOf(event)` reads `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`:
+`changeKind`, and `originKind` -- `SYSTEM` or `ENGINE`, and an application
+re-applies nothing on the second.
+
+### Who is calling, why a call ended, and where it goes
+
+```kotlin
+client.events.collect { event ->
+    if (event.kind != SipralEventKind.INCOMING_CALL.value.toLong()) return@collect
+    val identity = client.callerIdentity(event)   // before answering
+    val name = identity.asserted?.displayName ?: event.payload.call.fromDisplay?.toString(Charsets.UTF_8)
+    if (SipralPrivacy.ID in identity.privacy) { /* number withheld */ }
+    client.answering(event).answerAfterMs?.let { /* the caller asked to be answered without the person */ }
+    client.redirectCall(event, listOf("sip:desk@example.com"), reason = "no-answer")   // a 302
+}
+```
+
+`SipralCallerIdentity` is what the network asserted -- `P-Asserted-Identity`,
+a calling `Remote-Party-ID`, `verstat` -- read only from a peer the account
+trusts (`trustedPeers`, RFC 3325 §8), the caller's `Privacy`, every
+`Diversion` (RFC 5806) and `History-Info` entry (RFC 7044). `SipralAnswering`
+is `Answer-Mode`/`Priv-Answer-Mode` (RFC 5373), `answer-after` and every
+`Alert-Info` with the ring source it names. `SipralCall.identity()` and
+`answering()` read the same for a call answered from its event.
+`SipralCall.hangup(reason)` writes a `Reason` (RFC 3326) on the BYE or the
+CANCEL -- `SipralHangupReason.COMPLETED_ELSEWHERE` is what a phone that lost a
+fork race is told -- and `endCauseOf(event)` reads the far end's off
+`CALL_ENDED`. `SipralCall.redirect(targets)` answers a ringing call with a
+3xx. `srtpSuiteOf(event)` names the suite a DTLS-SRTP call was keyed with,
+RFC 6188's AES-256 and RFC 7714's AES-GCM among them; `SipralClient.open(srtp
+= ...)` sets every call's policy.
+
+### The account's options
+
+```kotlin
+val account = client.addAccount(
+    "sip:alice@example.com",
+    registrarAddress = "203.0.113.5:5060",
+    sessionTimer = SipralSessionTimerChoice.Interval(600),   // or Off; thirty minutes by default
+    privacy = setOf(SipralPrivacy.ID),                        // withhold my number
+    trustedPeers = listOf("203.0.113.5"),                     // whose asserted identity is believed
+)
+```
+
+### A call on the move
+
+`client.networkChanged(SipralNetwork(SipralLink.WIFI, "10.0.0.7", interfaceName = "wlan0"))`
+tells the stack the platform moved it. When the address or the interface
+changed (`SipralRecovery.REBUILD`) the signalling socket is bound again there,
+every account is pointed at it, and every call up raises
+`SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`: `call.moveMedia()` binds a socket on
+the new network and offers the call there with a re-INVITE that moves only
+`c=` and the port (RFC 3264 §8.3.1). A call under ICE moves with
+`restartIce()` instead.
+
+`src/test/kotlin/org/sipral/idiomatic/SignallingCheck.kt` proves all of the
+above between two clients on loopback, and `AudioCheck.kt` the engine on this
+machine's devices: the list, the choices and the settings always, and what
+opens the devices -- activation, the ring, a call in device mode -- only with
+`SIPRAL_AUDIO_DEVICES=1`, since on macOS the voice-processing unit needs the
+microphone granted to the JVM's process and takes the process down without
+it.
 
 Three structs the generated shim has no way to build from Kotlin —
 `sipral_media_packet_t`, `sipral_transmit_t` and `sipral_path_candidate_t`,
@@ -112,7 +205,10 @@ the generated one, exposing the ABI calls that take them
 `sipral_media_poll_transmit`, `sipral_stack_poll_farewell`,
 `sipral_stack_poll_transmit`, `sipral_stack_poll_stun`,
 `sipral_media_path_candidate_at`) as plain byte arrays, linked into the same
-`libsipral_jni` the generated shim already loads.
+`libsipral_jni` the generated shim already loads -- and
+`sipral_stack_transport_bind` with no remote, which the generated
+`stackTransportBind` cannot say: it hands an empty array over as a remote
+address.
 
 It depends on `kotlinx-coroutines-core-jvm` (Apache-2.0,
 `THIRD-PARTY-NOTICES.md`), fetched once into a cache outside the repository
@@ -278,13 +374,17 @@ held within two seconds, so held cannot wait for the far end's answer.
 The call's audio, and C4 of `docs/13-client-requirements.md` -- the device
 taken away and given back mid-call -- is `CallAudio` in
 `org.sipral.telecom`, over an `AudioDevice`, and on Android
-`SipralCallAudio`, built once a call has media:
+`SipralCallAudio`, one per call. `SipralCallAudios` is the library running
+them all: each call the bridge shows gets its `SipralCallAudio` when its
+media starts and loses it when it ends, so an application writes no audio
+code of its own -- it reads what happens:
 
 ```kotlin
-val audio = SipralCallAudio(context, bridge, callId, sip.call(handle)!!.media!!, scope)
-scope.launch { audio.transitions.collect { log(it) } }   // Started, Paused(reasons), Resumed,
-                                                        // RouteChanged, MuteChanged,
-                                                        // DeviceFailed, DeviceRestored, Stopped
+val audios = SipralCallAudios(context, bridge, sip, client.events, scope)
+scope.launch { audios.transitions.collect { (callId, change) -> log(callId, change) } }
+// Started, Paused(reasons), Resumed, RouteChanged, MuteChanged,
+// DeviceFailed, DeviceRestored, Stopped
+scope.launch { audios.states.collect { show(it) } }   // each call's AudioState, by id
 ```
 
 It follows the call through the bridge (let go while held, taken back when
@@ -305,8 +405,9 @@ because every announcement waits the same window.
 
 `android/sample` is a Compose skeleton, not a product: register, call, a
 simulated push standing in for a push service, answer and decline, hold, a
-DTMF keypad and the audio routes, with each call's microphone and speaker
-kept by `SipralCallAudio` and every audio transition in its log.
+DTMF keypad and the audio routes, with every call's microphone and speaker
+run by `SipralCallAudios` and every audio transition in its log -- it has no
+audio code of its own.
 
 `scripts/package/android.sh --out DIR --accept-android-sdk-licenses` builds all
 three -- `sipral.aar`, `sipral-telecom.aar` and the sample's APK -- inside the

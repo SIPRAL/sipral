@@ -443,6 +443,7 @@ for class in org/sipral/android/telecom/SipralConnectionService.class \
     org/sipral/android/telecom/SipralConnection.class \
     org/sipral/android/telecom/AndroidTelecomPlatform.class \
     org/sipral/android/telecom/SipralCallAudio.class \
+    org/sipral/android/telecom/SipralCallAudios.class \
     org/sipral/android/telecom/AndroidAudioDevice.class; do
     # grep reads to the end rather than -q: under pipefail, grep -q leaving
     # at the first match kills the writer with SIGPIPE and fails the
@@ -467,7 +468,8 @@ classes=$("$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" dex packages --de
     | awk '$1 == "C" {print $NF}')
 for class in org.sipral.telecom.TelecomBridge org.sipral.telecom.CallAudio org.sipral.idiomatic.SipralClient \
     org.sipral.SipralEventListeners org.sipral.android.telecom.SipralConnectionService \
-    org.sipral.android.telecom.SipralCallAudio org.sipral.sample.MainActivity; do
+    org.sipral.android.telecom.SipralCallAudio org.sipral.android.telecom.SipralCallAudios \
+    org.sipral.sample.MainActivity; do
     printf '%s\n' "$classes" | grep -x "$class" >/dev/null \
         && pass "$APK_NAME: $class" || fail "$APK_NAME is missing $class"
 done

@@ -33,12 +33,19 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import org.sipral.Sipral
+import org.sipral.SipralAudioTransmit
+import org.sipral.SipralAudioTransmitListener
 import org.sipral.SipralCallConfig
+import org.sipral.SipralCallEvent
 import org.sipral.SipralEvent
 import org.sipral.SipralEventListener
 import org.sipral.SipralException
+import org.sipral.SipralHeader
 import org.sipral.SipralIce
+import org.sipral.SipralLink
 import org.sipral.SipralNat
+import org.sipral.SipralRecovery
+import org.sipral.SipralSrtp
 import org.sipral.SipralStackConfig
 import org.sipral.SipralStatus
 import org.sipral.SipralToggle
@@ -79,16 +86,46 @@ private class TurnStream(val socket: Socket) {
  * that address is what every `Via` this stack writes carries.
  */
 class SipralClient private constructor(
-    private val socket: DatagramSocket,
-    val bindAddress: String,
+    socket: DatagramSocket,
+    bindAddress: String,
     /** The STUN server this client asks where its sockets appear from, as
      * `host:port`, or null for a client that asks nobody. */
     val stunServer: String?,
     private val turnServer: String?,
     private val turn: SipralTurnServer?,
+    /** Who runs this client's audio, as it was opened. */
+    val audioMode: SipralAudioMode,
+    network: SipralNetwork,
 ) : AutoCloseable {
     internal var handle: Long = 0L
         private set
+
+    /** The signalling socket: read and written by the poll thread, and put
+     * in another's place by [networkChanged]. */
+    @Volatile
+    private var socket: DatagramSocket = socket
+
+    /** The signalling socket's address, `host:port`: where it was bound, and
+     * after [networkChanged] where it is bound now. */
+    @Volatile
+    var bindAddress: String = bindAddress
+        private set
+
+    /**
+     * The library's audio engine -- the devices, their gain, mute and level,
+     * the ring and when they are open -- in [SipralAudioMode.Device], and
+     * null in [SipralAudioMode.Application], where the application runs the
+     * audio itself.
+     */
+    var audio: SipralAudioDevices? = null
+        private set
+
+    /** Serialises a network change with the calls it moves, so that every
+     * account points at the new address before any call is offered there;
+     * also guards [network] and [accounts]. */
+    private val movingLock = Any()
+    private var network: SipralNetwork = network
+    private val accounts = LinkedHashMap<Long, SipralAccount>()
 
     private val origin = System.nanoTime()
 
@@ -163,6 +200,26 @@ class SipralClient private constructor(
          * port still lets the registrar's INVITE in minutes after the
          * REGISTER. On by default; false turns it off, and an interval with
          * it off is refused. Nothing is sent while the stack is suspended.
+         *
+         * [audio] says who runs the calls' audio:
+         * [SipralAudioMode.platformDefault], the library's own engine
+         * wherever this build has one for the platform, unless the
+         * application pumps the frames itself with
+         * [SipralAudioMode.Application]. Under `SipralAudioActivation.MANUAL`
+         * the devices open only between [SipralAudioDevices.activate] and
+         * [SipralAudioDevices.deactivate], rather than with the first call's
+         * media and the last call's end. [audioProbeMs] bounds how long a
+         * platform call about the devices may block before it is reported as
+         * `DEVICE_TIMED_OUT` (`0` for three seconds), and [audioDeviceRateHz]
+         * is the rate the devices are asked to run at (`0` for 48 000).
+         *
+         * [network] is the network the client starts on, what the first
+         * [networkChanged] compares with: a wired link at [bindHost], on no
+         * interface in particular, unless the application knows better.
+         *
+         * [srtp] is what every call does about SRTP unless [placeCall]'s own
+         * `srtp` says otherwise: offered, required, or keyed by DTLS-SRTP,
+         * whose suite `SIPRAL_EVENT_KIND_MEDIA_SECURED` names ([srtpSuiteOf]).
          */
         fun open(
             bindHost: String = "127.0.0.1",
@@ -176,15 +233,23 @@ class SipralClient private constructor(
             referrals: Boolean? = null,
             registrarKeepalive: Boolean? = null,
             registrarKeepaliveMs: Long = 0,
+            audio: SipralAudioMode = SipralAudioMode.platformDefault,
+            audioProbeMs: Long = 0,
+            audioDeviceRateHz: Long = 0,
+            network: SipralNetwork? = null,
+            srtp: SipralSrtp? = null,
         ): SipralClient {
             val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost))
             socket.soTimeout = 20
             val bindAddress = formatAddress(socket.localAddress.hostAddress, socket.localPort)
-            val client = SipralClient(socket, bindAddress, stunServer, turn?.address, turn)
+            val client = SipralClient(
+                socket, bindAddress, stunServer, turn?.address, turn, audio,
+                network ?: SipralNetwork(SipralLink.WIRED, address = bindHost),
+            )
             try {
                 client.start(
                     userAgent, codecs, ice, turn, g729AnnexB, referrals,
-                    registrarKeepalive, registrarKeepaliveMs,
+                    registrarKeepalive, registrarKeepaliveMs, audioProbeMs, audioDeviceRateHz, srtp,
                 )
             } catch (refused: Exception) {
                 socket.close()
@@ -209,11 +274,16 @@ class SipralClient private constructor(
         referrals: Boolean?,
         registrarKeepalive: Boolean?,
         registrarKeepaliveMs: Long,
+        audioProbeMs: Long,
+        audioDeviceRateHz: Long,
+        srtp: SipralSrtp?,
     ) {
         val random = SecureRandom()
         val entropy = ByteArray(32).also { random.nextBytes(it) }
         val mediaSeed = ByteArray(32).also { random.nextBytes(it) }
         val listener = SipralEventListener { event -> onEvent(event) }
+        val (audioRaw, activationRaw) = audioMode.raw
+        val device = audioMode is SipralAudioMode.Device
         val config = SipralStackConfig(
             eventListener = listener,
             transport = SipralTransport.UDP.value.toLong(),
@@ -233,8 +303,17 @@ class SipralClient private constructor(
             registrarKeepalive = toggle(registrarKeepalive),
             registrarKeepaliveMs = registrarKeepaliveMs,
             turnTransport = if (turn != null) turn.transport.value.toLong() else 0,
+            audio = audioRaw,
+            audioActivation = activationRaw,
+            audioTransmitListener = if (device) SipralAudioTransmitListener { transmitAudio(it) } else null,
+            audioProbeMs = audioProbeMs,
+            audioDeviceRateHz = audioDeviceRateHz,
+            srtp = (srtp?.value ?: 0).toLong(),
         )
         handle = Sipral.stackCreate(config)
+        if (device) {
+            audio = SipralAudioDevices(this)
+        }
         thread = Thread(::run, "sipral-client-$bindAddress").apply {
             isDaemon = true
             start()
@@ -247,7 +326,21 @@ class SipralClient private constructor(
 
     // -- accounts and calls ------------------------------------------------
 
-    /** `sipral_account_add`. See [SipralAccount]. */
+    /**
+     * `sipral_account_add`. See [SipralAccount].
+     *
+     * [sessionTimer] is how the account's calls ask for a session timer (RFC
+     * 4028): thirty minutes by default. [privacy] places every call
+     * anonymously (RFC 3323): `setOf(SipralPrivacy.ID)` is "withhold my
+     * number" -- `From` becomes `"Anonymous"
+     * <sip:anonymous@anonymous.invalid>`, `Privacy` carries the values, and
+     * the account's own identity goes in `P-Asserted-Identity` only toward a
+     * trusted peer. [trustedPeers] are the IP addresses of the peers this
+     * account trusts -- usually the registrar or the trunk -- RFC 3325's
+     * trust domain: a call from one of them has its asserted identity read
+     * ([callerIdentity]), from anywhere else it is left out, and once any
+     * are named no identity field leaves toward any other peer.
+     */
     fun addAccount(
         aor: String,
         registrarAddress: String,
@@ -258,24 +351,38 @@ class SipralClient private constructor(
         authPassword: String? = null,
         expiresSeconds: Long = 0,
         push: SipralPush? = null,
-    ): SipralAccount = SipralAccount.add(
-        this,
-        aor,
-        registrarAddress = registrarAddress,
-        registrar = registrar,
-        contact = contact ?: defaultContact(aor),
-        displayName = displayName,
-        authUser = authUser,
-        authPassword = authPassword,
-        expiresSeconds = expiresSeconds,
-        push = push,
-    )
+        sessionTimer: SipralSessionTimerChoice = SipralSessionTimerChoice.Default,
+        privacy: Set<SipralPrivacy> = emptySet(),
+        trustedPeers: List<String> = emptyList(),
+    ): SipralAccount {
+        val account = SipralAccount.add(
+            this,
+            aor,
+            registrarAddress = registrarAddress,
+            registrar = registrar,
+            contact = contact,
+            displayName = displayName,
+            authUser = authUser,
+            authPassword = authPassword,
+            expiresSeconds = expiresSeconds,
+            push = push,
+            sessionTimer = sessionTimer,
+            privacy = privacy,
+            trustedPeers = trustedPeers,
+        )
+        synchronized(movingLock) { accounts[account.handle] = account }
+        return account
+    }
 
-    private fun defaultContact(aor: String): String {
+    internal fun forgetAccount(account: Long) {
+        synchronized(movingLock) { accounts.remove(account) }
+    }
+
+    internal fun defaultContact(aor: String, at: String = bindAddress): String {
         val scheme = aor.substringBefore(':', "sip")
         val rest = aor.substringAfter(':', aor)
         val user = rest.substringBefore('@', "")
-        return if (user.isEmpty()) "$scheme:$bindAddress" else "$scheme:$user@$bindAddress"
+        return if (user.isEmpty()) "$scheme:$at" else "$scheme:$user@$at"
     }
 
     /**
@@ -287,7 +394,9 @@ class SipralClient private constructor(
      * and this returns once the server has answered -- or has not, five and
      * a half seconds on; with a TURN server, once the relay is allocated or
      * refused as well. So call it off the main thread. [ice] overrides the
-     * client's own ICE policy for this call.
+     * client's own ICE policy for this call. [headers] go on the INVITE as
+     * written -- an `Alert-Info` asking for a distinctive ring, an
+     * `Answer-Mode` asking an intercom to pick up.
      */
     fun placeCall(
         account: SipralAccount,
@@ -297,6 +406,7 @@ class SipralClient private constructor(
         destination: String? = null,
         srtp: Long = 0,
         ice: SipralIce? = null,
+        headers: List<SipralHeader> = emptyList(),
     ): SipralCall {
         val mediaSocket = DatagramSocket(mediaPort, InetAddress.getByName(mediaHost))
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
@@ -306,6 +416,7 @@ class SipralClient private constructor(
             destination = destination,
             srtp = srtp,
             ice = (ice?.value ?: 0).toLong(),
+            headers = headers.ifEmpty { null },
         )
         val callHandle = try {
             mapMediaSocket(mediaSocket, mediaAddress)
@@ -324,18 +435,23 @@ class SipralClient private constructor(
      * `event` is the `SIPRAL_EVENT_KIND_INCOMING_CALL` read off [events].
      */
     fun answerCall(event: SipralEvent, mediaHost: String = "127.0.0.1", mediaPort: Int = 0): SipralCall =
-        answerCall(event.call, mediaHost, mediaPort)
+        answerCall(event.call, mediaHost, mediaPort, event.payload.call)
 
     /**
      * [answerCall] by call handle, for a caller that has the handle and not
      * the event -- [SipralAnnounced.Arrived] hands back only the handle, and
      * the `SIPRAL_EVENT_KIND_INCOMING_CALL` behind it may already have been
-     * read by somebody else.
+     * read by somebody else. [SipralCall.identity] then has the lists but
+     * not the facts the event carried: whether the peer was trusted, and
+     * what it asserted.
      */
-    fun answerCall(callHandle: Long, mediaHost: String = "127.0.0.1", mediaPort: Int = 0): SipralCall {
+    fun answerCall(callHandle: Long, mediaHost: String = "127.0.0.1", mediaPort: Int = 0): SipralCall =
+        answerCall(callHandle, mediaHost, mediaPort, null)
+
+    private fun answerCall(callHandle: Long, mediaHost: String, mediaPort: Int, incoming: SipralCallEvent?): SipralCall {
         val mediaSocket = DatagramSocket(mediaPort, InetAddress.getByName(mediaHost))
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
-        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress)
+        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress, incoming)
         track(call, callHandle, mediaAddress)
         try {
             mapMediaSocket(mediaSocket, mediaAddress)
@@ -358,6 +474,33 @@ class SipralClient private constructor(
     fun rejectCall(callHandle: Long, code: Long = 486) {
         retryBusy { Sipral.callReject(handle, callHandle, code, nowMs()) }
     }
+
+    /**
+     * Answer the `SIPRAL_EVENT_KIND_INCOMING_CALL` [event] names with a 3xx
+     * instead of taking it (`sipral_call_redirect`, RFC 3261 §21.3): 302 is
+     * call forwarding, [targets] are where to try in order of preference,
+     * and [reason] -- `no-answer`, `user-busy`, `unconditional`,
+     * `deflection`, `do-not-disturb` or any other token -- adds a
+     * `Diversion` (RFC 5806) naming the address that was called.
+     */
+    fun redirectCall(event: SipralEvent, targets: List<String>, status: Int = 302, reason: String? = null) {
+        redirect(event.call, targets, status, reason)
+    }
+
+    internal fun redirect(callHandle: Long, targets: List<String>, status: Int, reason: String?) {
+        retryBusy {
+            Sipral.callRedirect(handle, callHandle, status.toLong(), targets.joinToString(","), reason ?: "", nowMs())
+        }
+    }
+
+    /** Who is calling, beyond the `From`, for the incoming call [event]
+     * names -- read before deciding whether to answer. */
+    fun callerIdentity(event: SipralEvent): SipralCallerIdentity =
+        IdentityReader.identity(this, event.call, event.payload.call)
+
+    /** How the incoming call [event] names asked to be answered and rung. */
+    fun answering(event: SipralEvent): SipralAnswering =
+        IdentityReader.answering(this, event.call, event.payload.call)
 
     /**
      * Take a REFER outside any dialog and place the call it asks for:
@@ -451,6 +594,10 @@ class SipralClient private constructor(
         val relayed = AtomicBoolean(!needsRelay)
         val done = CountDownLatch(1)
 
+        /** Where the STUN server saw the socket from. */
+        @Volatile
+        var publicAddress: String? = null
+
         fun settle() {
             if (mapped.get() && relayed.get()) done.countDown()
         }
@@ -464,9 +611,9 @@ class SipralClient private constructor(
      * server does; a TURN Allocate nobody answers is given up on after
      * thirty-nine and a half. Nothing at all without a STUN server.
      */
-    private fun mapMediaSocket(mediaSocket: DatagramSocket, local: String) {
+    private fun mapMediaSocket(mediaSocket: DatagramSocket, local: String): String? {
         if (stunServer == null) {
-            return
+            return null
         }
         val waiter = NatWaiter(needsRelay = turnServer != null)
         mediaSocket.soTimeout = 1
@@ -478,6 +625,7 @@ class SipralClient private constructor(
         } finally {
             natWaiters.remove(local)
         }
+        return waiter.publicAddress
     }
 
     /** The poll thread's half of [mapMediaSocket]'s wait. */
@@ -486,6 +634,7 @@ class SipralClient private constructor(
         val relay = relayOf(event)
         when {
             nat != null && nat.signalling == 0L -> natWaiters[nat.local ?: return]?.let {
+                it.publicAddress = nat.mapped
                 it.mapped.set(true)
                 it.settle()
             }
@@ -743,6 +892,109 @@ class SipralClient private constructor(
         }
     }
 
+    // -- the network changing under the client ------------------------------
+
+    /**
+     * The platform said the network changed: `sipral_stack_network_changed`,
+     * and what its answer asks of the client's own sockets.
+     *
+     * When the address or the interface changed -- `SipralRecovery.REBUILD`
+     * -- the signalling socket is bound again at [next]'s address and handed
+     * to the stack as its transport, and every account is pointed at it
+     * (`sipral_account_rebind`), so the REGISTER that follows names where
+     * this end is now. Every call up at the time then raises
+     * `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`: the far end is still sending
+     * its audio to the old address, and [SipralCall.moveMedia] offers it the
+     * new one. Anything less -- a roam that keeps the address -- only
+     * re-registers or re-proves. Safe to call as often as the platform
+     * notifies; `NOTHING` is most of the answers.
+     */
+    fun networkChanged(next: SipralNetwork): SipralRecovery = synchronized(movingLock) {
+        val previous = network
+        val moves = next.link != SipralLink.DOWN &&
+            (next.address != previous.address || next.interfaceName != previous.interfaceName)
+        var rebound: String? = null
+        if (moves) {
+            val host = next.address ?: bindAddress.substringBeforeLast(':')
+            val fresh = DatagramSocket(0, InetAddress.getByName(host))
+            fresh.soTimeout = 20
+            val local = formatAddress(fresh.localAddress.hostAddress, fresh.localPort)
+            val status = retryBusy {
+                SipralSignalNative.stackTransportRebind(handle, local.toByteArray(Charsets.UTF_8), nowMs()).also {
+                    if (it == SipralStatus.BUSY.value) throw SipralException(SipralStatus.BUSY, "")
+                }
+            }
+            if (status != SipralStatus.OK.value) {
+                fresh.close()
+                throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())
+            }
+            val old = socket
+            socket = fresh
+            bindAddress = local
+            old.close()
+            rebound = local
+        }
+        val raw = retryBusy {
+            Sipral.stackNetworkChanged(
+                handle,
+                previous.link.value.toLong(), previous.address ?: "", previous.interfaceName ?: "",
+                if (previous.resolves) 1L else 0L,
+                next.link.value.toLong(), next.address ?: "", next.interfaceName ?: "",
+                if (next.resolves) 1L else 0L,
+                nowMs(),
+            )
+        }
+        network = next.copy(address = next.address ?: previous.address)
+        if (rebound != null) {
+            for (account in accounts.values) {
+                account.rebind(rebound, previous.address)
+            }
+        }
+        SipralRecovery.of(raw.toInt()) ?: SipralRecovery.UNKNOWN
+    }
+
+    /** The address the client's sockets are bound on now. */
+    internal val currentHost: String
+        get() = synchronized(movingLock) { network.address } ?: bindAddress.substringBeforeLast(':')
+
+    /** Runs [body] with no network change half done: what
+     * [SipralCall.moveMedia] holds while it binds and offers. */
+    internal fun <T> moving(body: () -> T): T = synchronized(movingLock) { body() }
+
+    /** `mapMediaSocket` for the socket [SipralCall.moveMedia] binds: where the
+     * STUN server sees it from, or null on a client without one. */
+    internal fun mapMovedSocket(mediaSocket: DatagramSocket, local: String): String? =
+        mapMediaSocket(mediaSocket, local)
+
+    /** The call's old socket is gone: `sipral_stack_nat_unmap`, so the stack
+     * stops refreshing a mapping nothing uses. */
+    internal fun forgetMapping(local: String) {
+        if (stunServer == null) {
+            return
+        }
+        try {
+            retryBusy { Sipral.stackNatUnmap(handle, local, nowMs()) }
+        } catch (_: SipralException) {
+            // a mapping the stack already let go of
+        }
+    }
+
+    // -- the library's own audio engine ---------------------------------------
+
+    /** A packet the engine encoded from the microphone: sent from its call's
+     * media socket, or on its connection to a TURN server. On the engine's
+     * thread, which must not call the audio engine back. */
+    private fun transmitAudio(transmit: SipralAudioTransmit) {
+        val call = calls[transmit.call] ?: return
+        val payload = transmit.payload ?: return
+        if (overStream(transmit.protocol)) {
+            writeTurn(call.mediaAddress, payload)
+            return
+        }
+        val destination = transmit.destination ?: return
+        call.sendOnMediaSocket(payload, parseHostPort(destination))
+    }
+
     // -- the poll thread -----------------------------------------------------
 
     private fun onEvent(event: SipralEvent) {
@@ -816,8 +1068,12 @@ class SipralClient private constructor(
         val buffer = ByteArray(TRANSMIT_BYTES)
         while (!closed.get()) {
             try {
+                // the socket of this pass: [networkChanged] closes the one
+                // it replaces, which ends a receive waiting on it
+                val listening = socket
+                val arrivedAt = bindAddress
                 val packet = DatagramPacket(buffer, buffer.size)
-                socket.receive(packet)
+                listening.receive(packet)
                 val from = formatAddress(packet.address.hostAddress, packet.port)
                 retryBusy {
                     Sipral.stackReceiveDatagram(
@@ -825,7 +1081,7 @@ class SipralClient private constructor(
                         /* SIPRAL_TRANSPORT_MAIN */ 0,
                         packet.data.copyOfRange(0, packet.length),
                         from,
-                        bindAddress,
+                        arrivedAt,
                         nowMs(),
                     )
                 }

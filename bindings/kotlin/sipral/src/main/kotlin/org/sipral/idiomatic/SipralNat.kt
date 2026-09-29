@@ -6,6 +6,7 @@ package org.sipral.idiomatic
 import javax.net.ssl.SSLSocketFactory
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralLink
 import org.sipral.SipralNatEvent
 import org.sipral.SipralNatRelayEvent
 import org.sipral.SipralTransport
@@ -69,3 +70,17 @@ fun relayOf(event: SipralEvent): SipralNatRelayEvent? =
  */
 fun turnStreamOf(event: SipralEvent): SipralTurnStreamEvent? =
     if (event.kind == SipralEventKind.TURN_STREAM.value.toLong()) event.payload.turnStream else null
+
+/**
+ * The network the device is on, in as much detail as the stack's decision
+ * needs (`sipral_stack_network_changed`), for [SipralClient.networkChanged]:
+ * the kind of link, the local address -- an IPv4 literal, no port -- the
+ * platform's own name for the interface, never parsed, and whether names
+ * resolve there.
+ */
+data class SipralNetwork(
+    val link: SipralLink,
+    val address: String? = null,
+    val interfaceName: String? = null,
+    val resolves: Boolean = true,
+)

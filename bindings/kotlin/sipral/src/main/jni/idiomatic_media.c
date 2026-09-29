@@ -358,3 +358,28 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollStun(JNIEnv *env, jclass c
     (*env)->SetLongArrayRegion(env, outLen, 0, room < 4 ? room : 4, lens);
     return (jint)status;
 }
+
+/* sipral_stack_transport_bind for the main transport, bound again at
+ * `local` after the network changed, speaking what it already speaks. The
+ * remote is the null pointer a datagram transport says "none" with: the
+ * generated shim turns an empty Kotlin array into a pointer the stack reads
+ * as an address, and refuses. */
+JNIEXPORT jint JNICALL
+Java_org_sipral_idiomatic_SipralSignalNative_stackTransportRebind(JNIEnv *env, jclass cls,
+    jlong stack, jbyteArray local, jlong nowMs)
+{
+    jbyte *local_buf;
+    jsize local_len;
+    sipral_status_t status;
+
+    (void)cls;
+    local_len = (*env)->GetArrayLength(env, local);
+    local_buf = (*env)->GetByteArrayElements(env, local, NULL);
+    if (local_buf == NULL) {
+        return (jint)-1;
+    }
+    status = sipral_stack_transport_bind((sipral_handle_t)stack, SIPRAL_TRANSPORT_MAIN, 0,
+        (const char *)local_buf, (size_t)local_len, NULL, 0, (uint64_t)nowMs, NULL);
+    (*env)->ReleaseByteArrayElements(env, local, local_buf, JNI_ABORT);
+    return (jint)status;
+}

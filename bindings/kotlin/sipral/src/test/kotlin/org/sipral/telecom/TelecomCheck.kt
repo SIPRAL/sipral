@@ -32,6 +32,7 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAnnounced
+import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralClient
 
 fun main() {
@@ -539,8 +540,8 @@ private suspend fun Log.waitFor(what: String, condition: () -> Boolean) {
 }
 
 private suspend fun overLoopback(): String {
-    val caller = SipralClient.open(bindHost = "127.0.0.1")
-    val callee = SipralClient.open(bindHost = "127.0.0.1")
+    val caller = SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1")
+    val callee = SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1")
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     try {
         val alice = caller.addAccount(aor = "sip:alice@example.invalid", registrarAddress = callee.bindAddress)

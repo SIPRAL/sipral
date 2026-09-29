@@ -5,6 +5,7 @@ package org.sipral.idiomatic
 
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import org.sipral.Sipral
+import org.sipral.SipralCallEvent
 import org.sipral.SipralCallState
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
@@ -35,9 +37,21 @@ import org.sipral.SipralStatus
 class SipralCall internal constructor(
     val client: SipralClient,
     val handle: Long,
+    /** The socket the call was placed or answered on: the call's until
+     * [media] exists, [SipralMedia]'s from then on -- and whichever socket
+     * [moveMedia] puts in its place. */
     private val mediaSocket: DatagramSocket,
-    private val mediaAddress: String,
+    mediaAddress: String,
+    /** The `SIPRAL_EVENT_KIND_INCOMING_CALL` payload this call was answered
+     * from, for [identity] and [answering]; null for a call this end placed. */
+    private val incoming: SipralCallEvent? = null,
 ) : AutoCloseable {
+    /** The call's media socket, as `host:port`: the name
+     * `sipral_stack_nat_map` gave it, and so of its connection to a TURN
+     * server; after [moveMedia], the new one. */
+    @Volatile
+    internal var mediaAddress: String = mediaAddress
+        private set
     /**
      * This call's audio, once `SIPRAL_EVENT_KIND_MEDIA_STARTED` has minted
      * it. Null before then and after the call has ended and [close] has
@@ -150,7 +164,7 @@ class SipralCall internal constructor(
      * rather than a throw.
      */
     private fun mintMedia(): SipralMedia? = try {
-        SipralMedia(client, handle, mediaSocket)
+        SipralMedia(client, handle, mediaSocket, pumpsFrames = client.audioMode is SipralAudioMode.Application)
     } catch (gone: SipralException) {
         if (gone.status == SipralStatus.WRONG_STATE || gone.status == SipralStatus.STALE_HANDLE) {
             null
@@ -175,6 +189,82 @@ class SipralCall internal constructor(
     /** `sipral_call_hangup`. */
     fun hangup() {
         retryBusy { Sipral.callHangup(client.handle, handle, client.nowMs()) }
+    }
+
+    /**
+     * `sipral_call_hangup_for`: end the call as [hangup] does, and say why
+     * with a `Reason` (RFC 3326) on the BYE, or on the CANCEL a call still
+     * ringing turns into. A call that came in and was never answered is
+     * refused with only the Q.850 value (RFC 6432): a SIP one would repeat
+     * the refusal's own status.
+     */
+    fun hangup(reason: SipralHangupReason) {
+        retryBusy {
+            Sipral.callHangupFor(
+                client.handle, handle, (reason.sipCause ?: 0).toLong(), (reason.q850Cause ?: 0).toLong(),
+                reason.text ?: "", client.nowMs(),
+            )
+        }
+    }
+
+    /**
+     * `sipral_call_redirect`: answer a call that came in, and is still
+     * ringing, with a 3xx (RFC 3261 §21.3) naming where to try instead, in
+     * order of preference -- 302 is call forwarding. [reason] --
+     * `no-answer`, `user-busy`, `unconditional`, `deflection`,
+     * `do-not-disturb` or any other token -- adds a `Diversion` (RFC 5806)
+     * naming the address that was called.
+     */
+    fun redirect(targets: List<String>, status: Int = 302, reason: String? = null) {
+        client.redirect(handle, targets, status, reason)
+    }
+
+    /** Who is calling, beyond the `From`: for a call that came in, what the
+     * network asserted behind the account's trust gate, the caller's
+     * `Privacy` and where the call was diverted from. Empty for a call this
+     * end placed. */
+    fun identity(): SipralCallerIdentity = IdentityReader.identity(client, handle, incoming)
+
+    /** How a call that came in asked to be answered (RFC 5373) and rung
+     * (`Alert-Info`). */
+    fun answering(): SipralAnswering = IdentityReader.answering(client, handle, incoming)
+
+    /**
+     * Offer this call at a socket on the network the device is on now: what
+     * `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks for once
+     * [SipralClient.networkChanged] has said the old one is gone.
+     *
+     * A socket is bound at [host] -- the new network's address,
+     * [SipralClient.networkChanged]'s own by default -- asked where it
+     * appears from when the client has a STUN server, and the call offered
+     * there with `sipral_call_media_readdress`: a re-INVITE with only `c=`
+     * and the port moved (RFC 3264 §8.3.1), carrying the account's new
+     * `Contact`. The new socket carries the call from then on, whatever the
+     * far end answers; the answer arrives as
+     * `SIPRAL_EVENT_KIND_SESSION_CHANGED`, a refusal as
+     * `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`. A call under ICE is refused
+     * with `WRONG_STATE`: [restartIce] moves it.
+     */
+    fun moveMedia(host: String? = null, port: Int = 0) {
+        val bindOn = host ?: client.currentHost
+        client.moving {
+            val current = synchronized(mediaLock) { media }
+                ?: throw SipralException(SipralStatus.WRONG_STATE, "the call has no media to move yet")
+            val fresh = DatagramSocket(port, InetAddress.getByName(bindOn))
+            val local = formatAddress(fresh.localAddress.hostAddress, fresh.localPort)
+            try {
+                val public = client.mapMovedSocket(fresh, local)
+                retryBusy { Sipral.callMediaReaddress(client.handle, handle, local, public ?: "", client.nowMs()) }
+            } catch (refused: Exception) {
+                client.giveBackMediaSocket(fresh, local)
+                throw refused
+            }
+            val old = mediaAddress
+            client.mediaSocketTaken(local)
+            client.forgetMapping(old)
+            current.replaceSocket(fresh)
+            mediaAddress = local
+        }
     }
 
     /** `sipral_call_hold`. */
@@ -283,10 +373,16 @@ class SipralCall internal constructor(
         client.forgetCall(handle)
     }
 
-    /** Writes straight to this call's own media socket: what
-     * `sipral_stack_poll_farewell` hands [SipralClient] once signalling has
-     * already ended. */
+    /** Writes to this call's media socket: what `sipral_stack_poll_farewell`
+     * hands [SipralClient] once signalling has already ended, and the
+     * packets the library's engine encodes in device mode. Through [media]
+     * once it exists, which owns the socket then. */
     internal fun sendOnMediaSocket(payload: ByteArray, address: InetSocketAddress) {
+        val owner = media
+        if (owner != null) {
+            owner.sendTo(payload, address)
+            return
+        }
         try {
             mediaSocket.send(DatagramPacket(payload, payload.size, address))
         } catch (_: Exception) {

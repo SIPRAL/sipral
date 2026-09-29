@@ -279,7 +279,7 @@ private fun stunMappingReachesContactAndSdp(host: String): String {
     FakeStunServer(host).use { stun ->
         DatagramSocket(0, InetAddress.getByName(host)).use { peer ->
             val peerAddress = formatAddress(host, peer.localPort)
-            SipralClient.open(bindHost = host, stunServer = stun.address).use { client ->
+            SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, stunServer = stun.address).use { client ->
                 val seen = recordEvents(client, 20_000)
                 val account = client.addAccount(aor = "sip:alice@example.invalid", registrarAddress = peerAddress)
                 stun.open = true
@@ -326,6 +326,7 @@ private fun turnRelayIsAllocatedAndOffered(host: String): String {
             val peerAddress = formatAddress(host, peer.localPort)
             stun.open = true
             SipralClient.open(
+                audio = SipralAudioMode.Application,
                 bindHost = host,
                 ice = SipralIce.OFFERED,
                 stunServer = stun.address,
@@ -364,8 +365,8 @@ private fun turnRelayIsAllocatedAndOffered(host: String): String {
 private suspend fun iceBehindStunCarriesAudio(host: String): String {
     FakeStunServer(host, publicHost = host).use { stun ->
         stun.open = true
-        SipralClient.open(bindHost = host, ice = SipralIce.REQUIRED, stunServer = stun.address).use { alice ->
-            SipralClient.open(bindHost = host, ice = SipralIce.REQUIRED, stunServer = stun.address).use { bob ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.REQUIRED, stunServer = stun.address).use { alice ->
+            SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.REQUIRED, stunServer = stun.address).use { bob ->
                 val aliceAccount = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
                 bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)
                 val (aliceCall, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
@@ -411,8 +412,8 @@ private suspend fun iceBehindStunCarriesAudio(host: String): String {
  * both ways.
  */
 private suspend fun liteAnsweringAFullAgentCarriesAudio(host: String): String {
-    SipralClient.open(bindHost = host, ice = SipralIce.REQUIRED).use { alice ->
-        SipralClient.open(bindHost = host, ice = SipralIce.LITE).use { bob ->
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.REQUIRED).use { alice ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.LITE).use { bob ->
             val aliceAccount = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
             bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)
             val (aliceCall, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
@@ -473,13 +474,14 @@ private suspend fun turnAllocationIsGivenBackWhenTheCallEnds(host: String): Stri
         // 1300-byte line, and this loopback pair has no stream transport
         // open to fall back to.
         SipralClient.open(
+            audio = SipralAudioMode.Application,
             bindHost = host,
             ice = SipralIce.OFFERED,
             codecs = "PCMU",
             stunServer = stun.address,
             turn = SipralTurnServer(stun.address, "alice-turn", password),
         ).use { alice ->
-            SipralClient.open(bindHost = host, codecs = "PCMU").use { bob ->
+            SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, codecs = "PCMU").use { bob ->
                 val seen = recordEvents(alice, 30_000)
                 val aliceAccount = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
                 bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)
@@ -537,8 +539,8 @@ private suspend fun turnAllocationIsGivenBackWhenTheCallEnds(host: String): Stri
  * a second path is chosen.
  */
 private suspend fun iceCallSaysWhichPathsItTriedAndRestarts(host: String): String {
-    SipralClient.open(bindHost = host, ice = SipralIce.REQUIRED).use { alice ->
-        SipralClient.open(bindHost = host, ice = SipralIce.REQUIRED).use { bob ->
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.REQUIRED).use { alice ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.REQUIRED).use { bob ->
             val aliceAccount = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
             bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)
             val (aliceCall, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
@@ -587,6 +589,7 @@ private fun registrarFlowIsKeptOpenBehindTheNat(host: String): String {
             DatagramSocket(0, InetAddress.getByName(host)).use { registrar ->
                 val registrarAddress = formatAddress(host, registrar.localPort)
                 SipralClient.open(
+                    audio = SipralAudioMode.Application,
                     bindHost = host,
                     stunServer = stun.address,
                     registrarKeepalive = keepalive,
@@ -806,9 +809,9 @@ private suspend fun callThrough(
     turn: SipralTurnServer,
     afterRelay: suspend (SipralNatRelayEvent) -> Unit,
 ) {
-    SipralClient.open(bindHost = host, ice = SipralIce.OFFERED, codecs = "PCMU", stunServer = stun.address, turn = turn)
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.OFFERED, codecs = "PCMU", stunServer = stun.address, turn = turn)
         .use { alice ->
-            SipralClient.open(bindHost = host, codecs = "PCMU").use { bob ->
+            SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, codecs = "PCMU").use { bob ->
                 val seen = recordEvents(alice, 30_000)
                 val aliceAccount = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
                 bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)

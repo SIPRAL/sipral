@@ -20,13 +20,12 @@ import androidx.lifecycle.viewModelScope
 import java.net.Inet4Address
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.sipral.SipralEventKind
 import org.sipral.SipralIce
 import org.sipral.android.telecom.AndroidTelecomPlatform
-import org.sipral.android.telecom.SipralCallAudio
+import org.sipral.android.telecom.SipralCallAudios
 import org.sipral.android.telecom.SipralTelecom
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralClient
@@ -73,10 +72,8 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
 
     private var client: SipralClient? = null
     private var account: SipralAccount? = null
-    private var sip: IdiomaticSipCalls? = null
     private var bridge: TelecomBridge? = null
-    private val audio = HashMap<String, SipralCallAudio>()
-    private val audioWatchers = HashMap<String, List<Job>>()
+    private var audio: SipralCallAudios? = null
 
     /** Each call's audio state, by call id, for its card. */
     var audioStates by mutableStateOf<Map<String, AudioState>>(emptyMap())
@@ -131,26 +128,27 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
                 client = opened
                 account = added
                 val calls = IdiomaticSipCalls(opened, listOf(added), mediaHost = host)
-                sip = calls
                 val handle = SipralTelecom.registerAccount(context, "Sipral sample")
                 val wired = TelecomBridge(AndroidTelecomPlatform(context, handle), calls)
                 bridge = wired
                 SipralTelecom.install(wired) { id, _ -> notifyIncoming(id) }
                 wired.collect(scope, opened.events)
+                // Every call's microphone and speaker are the library's: it
+                // opens them when a call's media starts, keeps them through
+                // whatever the platform does, and lets them go when the call
+                // ends. The sample only shows what happens to them.
+                val audios = SipralCallAudios(context, wired, calls, opened.events, scope)
+                audio = audios
+                scope.launch { audios.transitions.collect { (_, change) -> append("audio ${describe(change)}") } }
+                scope.launch { audios.states.collect { audioStates = it } }
                 scope.launch { wired.calls.collect { reconcile(it) } }
                 scope.launch {
                     opened.events.collect { event ->
-                        val kind = SipralEventKind.of(event.kind.toInt())
                         val nat = natOf(event)
                         if (nat != null) {
                             append("nat mapping ${nat.local} -> ${nat.mapped ?: "no answer"}")
                         } else {
-                            kind?.let { append(it.name.lowercase()) }
-                        }
-                        // Media arrives after the call is up, and the list of
-                        // calls does not change when it does.
-                        if (kind == SipralEventKind.MEDIA_STARTED) {
-                            reconcile(wired.calls.value)
+                            SipralEventKind.of(event.kind.toInt())?.let { append(it.name.lowercase()) }
                         }
                     }
                 }
@@ -231,32 +229,10 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
         SipralTelecom.connections.value[id]?.requestRoute(route)
     }
 
-    /** Start a call's audio once it has media, and stop it once the call is
-     * gone; take the incoming-call notification down once nothing rings.
-     * Everything that happens to a call's audio in between -- held for a
-     * cellular call, the call focus lost, a new route, the audio server
-     * restarting -- is [SipralCallAudio]'s, and shown in the log. */
+    /** Show the calls the framework has; take the incoming-call
+     * notification down once nothing rings. */
     private fun reconcile(now: List<TelecomCall>) {
         calls = now
-        val sip = sip ?: return
-        val bridge = bridge ?: return
-        for (call in now) {
-            if (call.id in audio || call.call == 0L) {
-                continue
-            }
-            val media = sip.call(call.call)?.media ?: continue
-            val started = SipralCallAudio(context, bridge, call.id, media, scope)
-            audio[call.id] = started
-            audioWatchers[call.id] = listOf(
-                scope.launch { started.transitions.collect { append("audio ${describe(it)}") } },
-                scope.launch { started.state.collect { audioStates = audioStates + (call.id to it) } },
-            )
-        }
-        for (gone in audio.keys - now.map { it.id }.toSet()) {
-            audio.remove(gone)?.close()
-            audioWatchers.remove(gone)?.forEach { it.cancel() }
-            audioStates = audioStates - gone
-        }
         if (now.none { it.phase == TelecomPhase.RINGING }) {
             context.getSystemService(NotificationManager::class.java).cancel(INCOMING_NOTIFICATION)
         }
@@ -315,10 +291,8 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        for (one in audio.values) {
-            one.close()
-        }
-        audio.clear()
+        audio?.close()
+        audio = null
         // Before the client goes: once it has, nothing would ever end the
         // calls the framework is still showing.
         bridge?.endAll()

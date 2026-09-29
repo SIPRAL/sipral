@@ -66,12 +66,27 @@ private fun parseAddress(text: String): InetSocketAddress {
  * `SipralClient.close()` to sweep it is what lets a long call's media be
  * let go the moment `SIPRAL_EVENT_KIND_CALL_ENDED` says the session is
  * over.
+ *
+ * On a client in [SipralAudioMode.Device] the library's engine takes the far
+ * end's audio and gives the microphone's, so this thread carries only the
+ * packets: [frames] hands out nothing and [sendAudio] is not read
+ * ([pumpsFrames] says which). Statistics, the ICE paths and the socket are
+ * the same in both modes.
  */
 class SipralMedia internal constructor(
     internal val client: SipralClient,
     private val callHandle: Long,
-    private val socket: DatagramSocket,
+    socket: DatagramSocket,
+    /** Whether this media carries the call's frames through [frames] and
+     * [sendAudio] -- [SipralAudioMode.Application] -- or the library's
+     * engine does. */
+    val pumpsFrames: Boolean = true,
 ) : AutoCloseable {
+    /** The call's socket, guarded by [ioLock] -- as is every send and
+     * receive on it -- since [SipralCall.moveMedia] puts another in its
+     * place and the engine's thread sends on it in device mode. */
+    private var socket: DatagramSocket = socket
+    private val ioLock = Any()
     /**
      * `sipral_call_media`'s own handle. Retried on `SIPRAL_STATUS_BUSY` the
      * same way every other signalling call in this layer is: minting
@@ -165,17 +180,39 @@ class SipralMedia internal constructor(
      * (the Python binding) cuts it.
      */
     fun sendAudio(pcm: ShortArray) {
+        if (!pumpsFrames) {
+            // the microphone is the engine's: nothing would ever read this
+            return
+        }
         outgoing.put(pcm)
     }
 
     /** Write a datagram straight to this call's own RTP socket: how
      * [SipralClient] sends the RTCP goodbye a call that just ended still
-     * owes the far end. */
+     * owes the far end, and the packets the engine encodes in device mode. */
     internal fun sendTo(payload: ByteArray, address: InetSocketAddress) {
-        try {
-            socket.send(DatagramPacket(payload, payload.size, address))
-        } catch (_: Exception) {
-            // best effort: a farewell nobody is listening for any more
+        synchronized(ioLock) {
+            try {
+                socket.send(DatagramPacket(payload, payload.size, address))
+            } catch (_: Exception) {
+                // best effort: a farewell nobody is listening for any more
+            }
+        }
+    }
+
+    /** This call's media socket, as `host:port`: where it is offered now,
+     * and the name of its connection to a TURN server. */
+    val localAddress: String
+        get() = synchronized(ioLock) { formatAddress(socket.localAddress.hostAddress, socket.localPort) }
+
+    /** Put [fresh] in the place of the call's socket and close the old one:
+     * [SipralCall.moveMedia], once the call has been offered at the new one. */
+    internal fun replaceSocket(fresh: DatagramSocket) {
+        fresh.soTimeout = 5
+        synchronized(ioLock) {
+            val old = socket
+            socket = fresh
+            old.close()
         }
     }
 
@@ -187,7 +224,7 @@ class SipralMedia internal constructor(
             thread.join(5000)
         }
         Sipral.mediaRelease(handle)
-        socket.close()
+        synchronized(ioLock) { socket.close() }
     }
 
     // -- the frame-rate thread --------------------------------------------
@@ -204,10 +241,13 @@ class SipralMedia internal constructor(
 
     private fun drainReceive() {
         val buffer = ByteArray(2048)
+        // the socket of this pass: one [replaceSocket] closes under a
+        // receive ends it, and the next pass reads the new one
+        val current = synchronized(ioLock) { socket }
         while (true) {
             val packet = DatagramPacket(buffer, buffer.size)
             try {
-                socket.receive(packet)
+                current.receive(packet)
             } catch (_: SocketTimeoutException) {
                 return
             } catch (_: Exception) {
@@ -241,10 +281,6 @@ class SipralMedia internal constructor(
         }
     }
 
-    /** This call's media socket, as `host:port`: the name of its connection
-     * to a TURN server reached over TCP or TLS. */
-    private val localAddress = formatAddress(socket.localAddress.hostAddress, socket.localPort)
-
     /** One packet out where it says: a datagram from this call's socket,
      * or -- marked TCP or TLS -- bytes on the socket's connection to the TURN
      * server, which the client holds. `lens` is [len, destination_len,
@@ -273,14 +309,18 @@ class SipralMedia internal constructor(
             if (active) {
                 try {
                     drainReceive()
-                    val playback = ShortArray(frameSamples)
-                    val (written, _) = Sipral.mediaPlayback(handle, playback)
-                    if (written > 0) {
-                        frameChannel.trySend(playback.copyOfRange(0, written.toInt()))
+                    if (pumpsFrames) {
+                        val playback = ShortArray(frameSamples)
+                        val (written, _) = Sipral.mediaPlayback(handle, playback)
+                        if (written > 0) {
+                            frameChannel.trySend(playback.copyOfRange(0, written.toInt()))
+                        }
+                        captureOnce(nextChunk())
+                    } else {
+                        // the engine plays and captures; asking after the
+                        // media is what notices it gone
+                        Sipral.mediaInfo(handle)
                     }
-
-                    val chunk = nextChunk()
-                    captureOnce(chunk)
                     drainRtcp()
                     drainTransmit()
                 } catch (stale: SipralException) {

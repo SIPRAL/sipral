@@ -43,4 +43,12 @@ internal object SipralSignalNative {
         outSource: ByteArray,
         outLen: LongArray,
     ): Int
+
+    /**
+     * `sipral_stack_transport_bind` for the main transport, at [local], with
+     * no remote: a datagram transport has none, and only a null pointer says
+     * so -- the generated `stackTransportBind` hands an empty array over as a
+     * real one, which the stack refuses as an address.
+     */
+    external fun stackTransportRebind(stack: Long, local: ByteArray, nowMs: Long): Int
 }
