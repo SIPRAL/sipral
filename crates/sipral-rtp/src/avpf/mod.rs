@@ -19,6 +19,7 @@
 pub mod feedback;
 pub mod rsize;
 pub mod sdp;
+pub mod timing;
 
 pub use feedback::{
     FMT_GENERIC_NACK, FeedbackBuildError, FeedbackError, FeedbackPacket, GenericNack,
@@ -32,3 +33,4 @@ pub use sdp::{
     Feedback, FeedbackPayload, FeedbackValue, RTCP_FB, RTCP_RSIZE, RtcpFb, RtpProfile,
     answer_attributes, offers_rsize, rsize_negotiated, rtcp_fb,
 };
+pub use timing::{AvpfConfig, AvpfTimer, FeedbackTiming, RegularPacket};
