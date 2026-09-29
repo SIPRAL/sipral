@@ -1280,6 +1280,80 @@ fn every_ogg_opus_recording_draws_a_serial_of_its_own() {
     assert_ne!(serials[0], serials[1], "{serials:?}");
 }
 
+/// RFC 3264 §6.1 lets an answer renumber a dynamic payload type, and §5.1
+/// has each end send with the numbers the other listed: Alice offers L16 as
+/// 97 and named events as 101, Bob answers them as 99 and 100. Each sends on
+/// the other's numbers, and takes in and hears what arrives on its own —
+/// audio and keys alike — where the planner used to find no codec at all.
+#[test]
+fn a_codec_and_keys_the_answer_renumbered_cross_on_each_ends_own_numbers() {
+    let now = Instant::now();
+    let (offer, answer) = plan_pair(
+        "v=0\r\no=alice 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 97 101\r\na=rtpmap:97 L16/16000\r\n\
+         a=rtpmap:101 telephone-event/16000\r\na=fmtp:101 0-15\r\n",
+        "v=0\r\no=bob 2 2 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 99 100\r\na=rtpmap:99 L16/16000\r\n\
+         a=rtpmap:100 telephone-event/16000\r\na=fmtp:100 0-15\r\n",
+    );
+    let mut alice = session(&offer, &answer, now);
+    let mut bob = session(&answer, &offer, now);
+    let (at_alice, at_bob): (SocketAddr, SocketAddr) = (
+        "192.0.2.1:40000".parse().expect("an address"),
+        "192.0.2.2:40002".parse().expect("an address"),
+    );
+    let frame = vec![1_000_i16; alice.frame_samples()];
+    let mut played = vec![0_i16; alice.frame_samples()];
+    let mut heard = Vec::new();
+    let (mut queued, mut decoded) = (0, 0);
+    bob.send_dtmf(Digit::from_char('5').expect("a key"), DEFAULT_DIGIT)
+        .expect("the digit is queued");
+    for index in 0..20_u32 {
+        let at = now + Duration::from_millis(20) * index;
+        let mut to_bob = alice
+            .capture(&frame, at)
+            .expect("the frame encodes")
+            .expect("a frame goes out")
+            .payload
+            .to_vec();
+        assert_eq!(
+            to_bob.get(1).map(|byte| byte & 0x7f),
+            Some(99),
+            "Bob's number"
+        );
+        if matches!(bob.receive(&mut to_bob, at_alice, at), Arrival::Queued) {
+            queued += 1;
+        }
+        if let Some(datagram) = bob.capture(&frame, at).expect("the frame encodes") {
+            let mut to_alice = datagram.payload.to_vec();
+            let payload_type = to_alice.get(1).map(|byte| byte & 0x7f);
+            assert!(
+                matches!(payload_type, Some(97 | 101)),
+                "Alice's numbers: {payload_type:?}"
+            );
+            let _ = alice.receive(&mut to_alice, at_bob, at);
+        }
+        if matches!(alice.playback(&mut played), Playback::Packet) {
+            decoded += 1;
+        }
+        while let Some(event) = alice.poll_event() {
+            if let MediaEvent::DigitReceived { digit, .. } = event {
+                heard.push(digit);
+            }
+        }
+    }
+    // past RFC 3550 A.1's probation, every packet on Bob's own 99 is audio
+    assert!(
+        queued >= 18,
+        "Bob took {queued} of 20 frames on his own number"
+    );
+    assert_eq!(heard, [Some('5')], "the key Bob pressed, on Alice's 101");
+    assert!(
+        decoded >= 5,
+        "Alice played {decoded} frames of Bob's audio on her 97"
+    );
+}
+
 /// The lesson the interop harness's own media join used to encode by hand: a
 /// real PBX that answers with one G.711 law and sends the other. Dropping the
 /// far end's audio at the RTP layer would look like silence rather than like

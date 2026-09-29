@@ -653,11 +653,20 @@ fn audio_and_video_3() {
         settled(plan(&exchange, 1).expect("video").as_ref()),
         ("H261".to_owned(), Direction::SendRecv)
     );
-    // The planner matches formats by payload number, so a codec the two
-    // ends number differently is not found in common. RFC 3264 §6.1 makes
-    // the same number only a SHOULD; this pins the gap until the planner
-    // matches dynamic types by codec.
-    assert_eq!(plan(&exchange, 0), Err(SdpError::NoCodec { stream: 0 }));
+    // RFC 3264 §6.1 makes the same number only a SHOULD, and the planner
+    // matches a renumbered dynamic type by what it maps to. Each end sends
+    // with the other's number and takes its own (§5.1): Alice sends iLBC as
+    // Bob's 99 and receives it as her own 97, and Bob the other way round.
+    let alice = plan(&exchange, 0).expect("audio").expect("up");
+    assert_eq!(alice.codec.rtpmap.encoding, "iLBC");
+    assert_eq!((alice.codec.payload(), alice.codec_in), (99, 97));
+    let bob = answerer_plans(&exchange)
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("up");
+    assert_eq!(bob.codec.rtpmap.encoding, "iLBC");
+    assert_eq!((bob.codec.payload(), bob.codec_in), (97, 99));
 }
 
 /// §2.4: two audio streams, the second carrying only telephone-event and

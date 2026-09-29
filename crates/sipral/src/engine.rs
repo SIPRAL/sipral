@@ -4027,7 +4027,7 @@ impl MediaEngine {
         let annex_b = annex_b_in_use(&managed.catalog, local, remote, &plan);
         let feedback = match (live_stream(local), live_stream(remote)) {
             (Some(ours), Some(theirs)) => {
-                crate::feedback::negotiated(ours, theirs, plan.codec.payload())
+                crate::feedback::negotiated(ours, theirs, (plan.codec_in, plan.codec.payload()))
             }
             _ => None,
         };
@@ -4440,10 +4440,11 @@ impl MediaEngine {
             tap.redirect(destinations);
             return;
         }
+        let received = slot.session.plan().codec_in;
         slot.session.tap_to(Some(crate::siprec::Tap::new(
             &held.to,
             destinations,
-            held.payload_type,
+            (held.payload_type, received),
             held.numbers,
         )));
     }
@@ -4462,11 +4463,11 @@ impl MediaEngine {
         let Some(recording) = self.recording_of(call) else {
             return;
         };
-        let Some(codec) = self
-            .sessions
-            .get(&call)
-            .map(|session| share::lock(session).session.plan().codec.clone())
-        else {
+        let Some((codec, received)) = self.sessions.get(&call).map(|session| {
+            let slot = share::lock(session);
+            let plan = slot.session.plan();
+            (plan.codec.clone(), plan.codec_in)
+        }) else {
             return;
         };
         let Some(held) = self.recordings.get_mut(&recording) else {
@@ -4482,7 +4483,7 @@ impl MediaEngine {
             if let Some(session) = self.sessions.get(&call)
                 && let Some(tap) = share::lock(session).session.tap()
             {
-                tap.copy_payload_type(codec.payload());
+                tap.copy_payload_type((codec.payload(), received));
             }
         }
     }
@@ -5974,6 +5975,8 @@ mod keying_guards {
             }),
             direction: Direction::SendRecv,
             dtmf: None,
+            dtmf_in: None,
+            codec_in: 0,
             rtcp: RtcpPlan::Off,
             keying,
             voip_metrics_xr: false,
@@ -6370,6 +6373,8 @@ mod counter_wiring {
             }),
             direction: Direction::SendRecv,
             dtmf: None,
+            dtmf_in: None,
+            codec_in: 0,
             rtcp,
             keying: None,
             voip_metrics_xr: false,

@@ -65,7 +65,8 @@ pub(crate) fn answer(offered: &MediaDescription, accepted: &[String]) -> Vec<Att
 }
 
 /// What our description and the far end's agreed about feedback on the
-/// stream whose codec has payload type `payload`, or `None` when either does
+/// stream whose codec has payload type `payload` — our number for it, then
+/// theirs, which differ where an answer renumbered it — or `None` when either does
 /// not name a feedback profile.
 ///
 /// `trr-int` is the longer of the two when both name one, since each end
@@ -74,12 +75,15 @@ pub(crate) fn answer(offered: &MediaDescription, accepted: &[String]) -> Vec<Att
 pub(crate) fn negotiated(
     ours: &MediaDescription,
     theirs: &MediaDescription,
-    payload: u8,
+    payload: (u8, u8),
 ) -> Option<Negotiated> {
     if !has_feedback(&ours.proto) || !has_feedback(&theirs.proto) {
         return None;
     }
-    let (mine, far) = (Feedback::of(ours, payload), Feedback::of(theirs, payload));
+    let (mine, far) = (
+        Feedback::of(ours, payload.0),
+        Feedback::of(theirs, payload.1),
+    );
     let trr_interval = match (mine.trr_interval, far.trr_interval) {
         (Some(left), Some(right)) => left.max(right),
         (left, right) => left.or(right).unwrap_or_default(),
@@ -168,7 +172,7 @@ a=rtcp-fb:* nack pli\r\na=rtcp-rsize\r\n",
         let bare = stream("m=audio 4000 RTP/AVPF 0\r\n");
         let plain = stream("m=audio 4000 RTP/AVP 0\r\na=rtcp-fb:* nack\r\n");
         assert_eq!(
-            negotiated(&full, &full, 0),
+            negotiated(&full, &full, (0, 0)),
             Some(Negotiated {
                 generic_nack: true,
                 trr_interval: Duration::ZERO,
@@ -176,19 +180,19 @@ a=rtcp-fb:* nack pli\r\na=rtcp-rsize\r\n",
             })
         );
         assert_eq!(
-            negotiated(&full, &bare, 0),
+            negotiated(&full, &bare, (0, 0)),
             Some(Negotiated::default()),
             "the profile alone is RFC 4585's timing, with nothing more agreed"
         );
-        assert_eq!(negotiated(&full, &plain, 0), None);
+        assert_eq!(negotiated(&full, &plain, (0, 0)), None);
         let slow = stream("m=audio 4000 RTP/AVPF 0\r\na=rtcp-fb:0 trr-int 5000\r\n");
         let slower = stream("m=audio 4000 RTP/AVPF 0\r\na=rtcp-fb:* trr-int 8000\r\n");
         assert_eq!(
-            negotiated(&slow, &slower, 0).map(|agreed| agreed.trr_interval),
+            negotiated(&slow, &slower, (0, 0)).map(|agreed| agreed.trr_interval),
             Some(Duration::from_secs(8))
         );
         assert_eq!(
-            negotiated(&slow, &bare, 0).map(|agreed| agreed.trr_interval),
+            negotiated(&slow, &bare, (0, 0)).map(|agreed| agreed.trr_interval),
             Some(Duration::from_secs(5))
         );
     }

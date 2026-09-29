@@ -26,9 +26,11 @@ and the application carries both:
 pub struct MediaPlan {
     pub local: SocketAddr,          // where to receive; the caller chose it
     pub remote: SocketAddr,         // where to send, from the answer's c= and m=
-    pub codec: NegotiatedCodec,     // payload type, clock rate, channels, fmtp
+    pub codec: NegotiatedCodec,     // payload type to send with, clock rate, channels, fmtp
+    pub codec_in: u8,               // the payload type it arrives with: our own number for it
     pub direction: Direction,       // sendrecv, sendonly, recvonly, inactive
-    pub dtmf: Option<u8>,           // telephone-event payload type, when agreed
+    pub dtmf: Option<u8>,           // telephone-event payload type to send with, when agreed
+    pub dtmf_in: Option<u8>,        // and the one events arrive with
     pub rtcp: RtcpPlan,             // muxed, a second port, or off
     pub keying: Option<Keying>,     // SDES material, or a DTLS fingerprint
     pub voip_metrics_xr: bool,      // whether this stream should send RFC 3611 XR reports
@@ -45,6 +47,13 @@ pub struct MediaCapabilities {
     pub voip_metrics_xr: bool,      // whether to ask the peer for RFC 3611 XR reports
 }
 ```
+
+A format both descriptions list under one number is that format. A dynamic
+payload type the peer lists under a number ours does not is matched by what it
+maps to — encoding, clock rate and channels — since RFC 3264 §6.1 keeps the
+offer's number in an answer only as a SHOULD (RFC 4317 §2.3 answers iLBC as 99
+to an offer of 97). Each end then sends with the other's number and takes in
+its own (§5.1), which is why the plan carries both.
 
 Neither mentions a socket, a device, a thread or a codec implementation, which
 is what lets one `sipral-ua` drive a softphone and an agent that puts PCM on a

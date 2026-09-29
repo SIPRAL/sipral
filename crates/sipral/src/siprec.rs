@@ -289,7 +289,9 @@ struct Copy {
 }
 
 impl Copy {
-    fn packet(&mut self, header: RtpHeader, payload: &[u8]) -> Option<Vec<u8>> {
+    /// The copy of a packet with `header` and `payload`, carrying
+    /// `payload_type`: the number the server was offered the codec under.
+    fn packet(&mut self, header: RtpHeader, payload: &[u8], payload_type: u8) -> Option<Vec<u8>> {
         let sequence = *self
             .sequence
             .get_or_insert(self.base.0.wrapping_sub(header.sequence));
@@ -298,7 +300,7 @@ impl Copy {
             .get_or_insert(self.base.1.wrapping_sub(header.timestamp));
         let header = RtpHeader {
             marker: header.marker,
-            payload_type: header.payload_type,
+            payload_type,
             sequence: header.sequence.wrapping_add(sequence),
             timestamp: header.timestamp.wrapping_add(timestamp),
             ssrc: self.ssrc,
@@ -316,9 +318,15 @@ impl Copy {
 pub(crate) struct Tap {
     /// This end's audio, then the far end's.
     copies: [Option<Copy>; 2],
-    /// The payload type copied: the call's codec. Named events and comfort
-    /// noise are not offered to the server, so they are not sent to it.
+    /// The payload type copied: the call's codec, under the number the
+    /// server was offered it with, which is the one this end sends it with.
+    /// Named events and comfort noise are not offered to the server, so they
+    /// are not sent to it.
     payload_type: u8,
+    /// The number the far end sends the codec with: this end's own for it,
+    /// which differs from `payload_type` where an answer renumbered it (RFC
+    /// 3264 §6.1). The far end's copies are sent under `payload_type`.
+    received_payload_type: u8,
     /// The sockets the copies go from, this end's first.
     sockets: [SocketAddr; 2],
     /// The source, sequence number and timestamp each stream starts from.
@@ -328,18 +336,21 @@ pub(crate) struct Tap {
 }
 
 impl Tap {
-    /// Copies of `payload_type` to the two destinations the server answered
+    /// Copies of the codec to the two destinations the server answered
     /// with, sent from the two sockets `to` names, numbered from `numbers`
     /// (a source, a sequence number and a timestamp per stream).
+    /// `payload_types` is the number this end sends the codec with, which the
+    /// server was offered, then the one the far end sends it with.
     pub(crate) fn new(
         to: &RecordTo,
         destinations: [Option<SocketAddr>; 2],
-        payload_type: u8,
+        payload_types: (u8, u8),
         numbers: [(u32, u16, u32); 2],
     ) -> Self {
         let mut tap = Self {
             copies: [None, None],
-            payload_type,
+            payload_type: payload_types.0,
+            received_payload_type: payload_types.1,
             sockets: [to.this_end, to.far_end],
             numbers,
             queue: VecDeque::new(),
@@ -377,10 +388,12 @@ impl Tap {
         }
     }
 
-    /// The recorded call moved to the codec on `payload_type`, and the server
-    /// was offered it: copy that from here on.
-    pub(crate) const fn copy_payload_type(&mut self, payload_type: u8) {
-        self.payload_type = payload_type;
+    /// The recorded call moved to the codec this end sends on
+    /// `payload_types.0` and takes on `payload_types.1`, and the server was
+    /// offered it under the first: copy that from here on.
+    pub(crate) const fn copy_payload_type(&mut self, payload_types: (u8, u8)) {
+        self.payload_type = payload_types.0;
+        self.received_payload_type = payload_types.1;
     }
 
     /// This end sent `wire`, whose payload before protection was `payload`.
@@ -402,13 +415,18 @@ impl Tap {
     }
 
     fn copy(&mut self, stream: usize, header: RtpHeader, payload: &[u8]) {
-        if header.payload_type != self.payload_type {
+        let expected = if stream == 0 {
+            self.payload_type
+        } else {
+            self.received_payload_type
+        };
+        if header.payload_type != expected {
             return;
         }
         let Some(copy) = self.copies.get_mut(stream).and_then(Option::as_mut) else {
             return;
         };
-        let Some(packet) = copy.packet(header, payload) else {
+        let Some(packet) = copy.packet(header, payload, self.payload_type) else {
             return;
         };
         let (from, destination) = (copy.from, copy.destination);
@@ -430,5 +448,77 @@ impl Tap {
             far_end: stream == 1,
             payload: &self.out,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RecordTo, Tap};
+    use sipral_core::msg::Uri;
+    use sipral_rtp::{PacketBuilder, RtpHeader, RtpPacket};
+    use std::net::SocketAddr;
+
+    fn address(text: &str) -> SocketAddr {
+        text.parse().expect("an address")
+    }
+
+    fn packet(payload_type: u8, sequence: u16) -> Vec<u8> {
+        let header = RtpHeader {
+            marker: false,
+            payload_type,
+            sequence,
+            timestamp: u32::from(sequence) * 320,
+            ssrc: 0x0102_0304,
+        };
+        let builder = PacketBuilder::new(header, &[7; 40]);
+        let mut out = vec![0; builder.encoded_len()];
+        let written = builder.write(&mut out).expect("room");
+        out.truncate(written);
+        out
+    }
+
+    fn record_to() -> RecordTo {
+        RecordTo::new(
+            Uri::parse_str("sip:srs@example.com").expect("a URI"),
+            address("192.0.2.1:42000"),
+            address("192.0.2.1:42002"),
+        )
+    }
+
+    fn destinations() -> [Option<SocketAddr>; 2] {
+        [
+            Some(address("192.0.2.3:30000")),
+            Some(address("192.0.2.3:30002")),
+        ]
+    }
+
+    /// Every copy waiting: whether it is the far end's, and its payload
+    /// type.
+    fn drained(tap: &mut Tap) -> Vec<(bool, u8)> {
+        let mut copied = Vec::new();
+        while let Some(copy) = tap.poll() {
+            let header = RtpPacket::parse(copy.payload).expect("RTP").header();
+            copied.push((copy.far_end, header.payload_type));
+        }
+        copied
+    }
+
+    /// A call whose answer renumbered its codec (RFC 3264 §6.1) sends it on
+    /// one number and takes it on another. Both parties' copies are the
+    /// codec, and both go to the server under the number it was offered.
+    #[test]
+    fn the_far_ends_audio_on_this_ends_own_number_is_copied_under_the_offered_one() {
+        let mut tap = Tap::new(
+            &record_to(),
+            destinations(),
+            (99, 97),
+            [(1, 10, 100), (2, 20, 200)],
+        );
+        tap.sent(&packet(99, 1), &[7; 40]);
+        tap.received(&packet(97, 1));
+        assert_eq!(drained(&mut tap), [(false, 99), (true, 99)]);
+        // the send number arriving from the far end is not this call's codec
+        tap.received(&packet(99, 2));
+        assert_eq!(drained(&mut tap), []);
     }
 }
