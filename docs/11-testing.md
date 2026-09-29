@@ -669,6 +669,16 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | .NET agent example | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2022 ms, nothing after it (C ABI) | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 48 ms (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | SDES required by the account (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | DTLS-SRTP required by the account (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | SRTP off on the account (C ABI) | pass | 2026-09-29 |
+| Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | SDES required by the account (C ABI) | pass | 2026-09-29 |
+| Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | DTLS-SRTP required by the account (C ABI) | pass | 2026-09-29 |
+| Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | SRTP off on the account (C ABI) | pass | 2026-09-29 |
+| sipral, C ABI to C ABI (STIR/SHAKEN) | n/a | a signed call, verified and carried (C ABI) | pass | 2026-09-29 |
+| sipral, C ABI to C ABI (STIR/SHAKEN) | n/a | an unsigned call, refused by a strict account (C ABI) | pass | 2026-09-29 |
+| sipral, C ABI to C ABI (STIR/SHAKEN) | n/a | a call signed by a certificate nobody trusts, refused (C ABI) | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | a call moved to another address | pass | 2026-09-29 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | call | pass | 2026-09-29 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | hold and resume | pass | 2026-09-29 |
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | SRTP, phone to phone | pass | 2026-09-29 |
@@ -679,6 +689,7 @@ the generator itself — never the block, which the next run overwrites.
 | baresip (phone to phone, via Kamailio) | 4.11.0 (baresip) / 6.1.4 (proxy) | DTLS-SRTP, phone to phone (C ABI) | pass | 2026-09-29 |
 | Asterisk, from behind a NAT (STUN) | 22.10.1 | behind a NAT, through STUN (C ABI) | pass | 2026-09-29 |
 | Asterisk, from behind a NAT (STUN) | 22.10.1 | called behind a NAT, through STUN (C ABI) | pass | 2026-09-29 |
+| Asterisk, from behind a NAT (STUN) | 22.10.1 | called 330 s after registering, the keep-alive holding the NAT open (C ABI) | pass | 2026-09-29 |
 | headless agent (ICE-lite) | n/a | ICE required, against 172.18.0.5 | pass | 2026-09-29 |
 | Asterisk | 22.10.1 | ICE-lite, Asterisk's ICE calling in | pass | 2026-09-29 |
 | headless agent (ICE-lite) | n/a | ICE required, against 172.18.0.5 (C ABI) | pass | 2026-09-29 |
@@ -689,6 +700,12 @@ the generator itself — never the block, which the next run overwrites.
 | sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN (C ABI) | pass | 2026-09-29 |
 | sipral, self-to-self (each behind its own NAT) | n/a | full ICE through two NATs, calling, via TURN, caller relay only (C ABI) | pass | 2026-09-29 |
 | sipral, self-to-self (each behind its own NAT) | n/a | forked to two phones behind a NAT, relayed, calling, via TURN | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | agent.py over TLS | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | Agent.kt over TLS | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | Sipral.Sample.Agent over TLS | pass | 2026-09-29 |
+| Asterisk | 22.10.1 | SipralLabAgent over TCP | pass | 2026-09-29 |
+| a listener that never answers, over a link that drops fragments | n/a | field failures: fragments dropped, a silent and a dark connection (C ABI) | pass | 2026-09-29 |
+| sipral, self-to-self (each behind its own NAT) | n/a | STUN failover, the first server dead, C calling and Rust answering | pass | 2026-09-29 |
 | Kamailio → FreeSWITCH | 6.1.4 | register, over a bad link (lossy) | pass | 2026-09-29 |
 | Kamailio → FreeSWITCH | 6.1.4 | call, over a bad link (lossy) | pass | 2026-09-29 |
 | Kamailio → FreeSWITCH | 6.1.4 | register, over a bad link (mobile) | pass | 2026-09-29 |
@@ -739,6 +756,13 @@ the generator itself — never the block, which the next run overwrites.
 | .NET binding | yes | yes | yes |
 | PipeWire audio backend | yes | yes | n/a |
 | WASAPI audio backend | yes | yes | n/a |
+| Call surviving a change of its own address | yes | yes | yes |
+| Registrar keep-alive holding a filtering NAT open | yes | yes | yes |
+| Field failures: a request too large for a datagram over TCP, a silent connection ended at Timer B | yes | yes | yes |
+| STUN server failover | yes | yes | yes |
+| SRTP policy per account (SDES required, DTLS-SRTP required, off) | yes | yes | yes |
+| STIR/SHAKEN (RFC 8224, RFC 8588), signed and verified | yes | yes | yes |
+| SIP over TCP and TLS through the four idiomatic layers | yes | yes | yes |
 
 <!-- END GENERATED interop-matrix -->
 

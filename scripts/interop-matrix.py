@@ -87,6 +87,22 @@ FLOW_SECTIONS = {
     ),
     "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them": ("full_ice", "rust"),
     "a call whose address moves under it -- straight at Asterisk": ("asterisk", "rust"),
+    "SRTP required, DTLS-SRTP required and off, on the account -- straight at Asterisk": (
+        "asterisk",
+        "c",
+    ),
+    "SRTP required, DTLS-SRTP required and off, on the account -- through the proxy": (
+        "kamailio",
+        "c",
+    ),
+    "STIR/SHAKEN between two C ABI stacks -- one signs, one verifies": ("stir_pair", "c"),
+}
+# The FLOW_SECTIONS headers whose harness prints no "lab: ..." line before
+# its flows: the STIR/SHAKEN step runs two stacks of the C harness against
+# each other, with no server to name, and its flows start after the "seed:"
+# line instead. Read by parse_flow_lines() through its `starts` argument.
+SEED_STARTED_SECTIONS = {
+    "STIR/SHAKEN between two C ABI stacks -- one signs, one verifies",
 }
 # The one FLOW_SECTIONS header lab.sh runs through nat_pair_call (ice_nat_flow)
 # rather than a single harness process: parse_log() reads it with
@@ -114,6 +130,25 @@ AGENT_SECTIONS = {
     "ICE-lite -- Asterisk's own ICE calling the headless agent": (
         "asterisk",
         "ICE-lite, Asterisk's ICE calling in",
+    ),
+}
+# Steps where lab.sh prints one `ok`/`FAIL` line per example agent, each
+# opening with the agent's name and what it signalled over -- SIP over TCP
+# and TLS through the four idiomatic layers -- mapped to the peer and to the
+# prefixes those lines open with. Each prefix is a flow label of this file's
+# own, and each line that opens with it is a row. A FAIL line that opens with
+# none of them (the certificates could not be made, Asterisk would not
+# restart) is a failing row under its own text rather than a line nobody
+# reads; an `ok` line that opens with none is a readiness note.
+LAYER_SECTIONS = {
+    "SIP over TCP and TLS through the four idiomatic layers, called by Asterisk": (
+        "asterisk",
+        (
+            "agent.py over TLS",
+            "Agent.kt over TLS",
+            "Sipral.Sample.Agent over TLS",
+            "SipralLabAgent over TCP",
+        ),
     ),
 }
 # Steps whose one result is lab.sh's own closing `ok`/`FAIL` line, read the
@@ -170,6 +205,7 @@ PEER_LABELS = {
     "ice_lite": "headless agent (ICE-lite)",
     "full_ice": "sipral, self-to-self (each behind its own NAT)",
     "robust_listener": "a listener that never answers, over a link that drops fragments",
+    "stir_pair": "sipral, C ABI to C ABI (STIR/SHAKEN)",
 }
 
 # Named by the owner (root CLAUDE.md, intern/TASKS.md 8.6.8): every peer worth
@@ -197,8 +233,11 @@ FLOW_PASS_RE = re.compile(r"^  pass  (.+)$")
 # flow of its own if a section's terminator ("every flow passed" / "N flow(s)
 # failed") is ever missing from what was captured.
 FLOW_FAIL_RE = re.compile(r"^  FAIL  (.+?) \u2014 (.+)$")
-EVERY_PASSED_RE = re.compile(r"^every flow passed$")
-N_FAILED_RE = re.compile(r"^\d+ flow\(s\) failed$")
+# The harness's own terminator, and the STIR/SHAKEN driver's, which counts
+# calls rather than flows.
+EVERY_PASSED_RE = re.compile(r"^every (?:flow|STIR call) passed$")
+N_FAILED_RE = re.compile(r"^\d+ (?:flow|STIR call)\(s\) failed$")
+SEED_LINE_RE = re.compile(r"^seed: [0-9a-f]+$")
 LAB_SH_LINE_RE = re.compile(r"^  (?:ok|FAIL)  +(.+)$")
 # Any result line of either shape -- lab.sh's own `ok`/`FAIL`, or the
 # harness's own FAIL -- which check_every_result_has_a_row() holds to a row.
@@ -286,18 +325,22 @@ def split_sections(text: str) -> list[tuple[str, list[str]]]:
     return sections
 
 
-def parse_flow_lines(lines: list[str]) -> list[tuple[str, str, str | None]]:
+def parse_flow_lines(
+    lines: list[str], starts: re.Pattern[str] = LAB_LINE_RE
+) -> list[tuple[str, str, str | None]]:
     """Reads the harness's own "  pass"/"  FAIL" lines up to its terminator,
-    from the line after its "lab: ..." line. Returns (flow, result, detail)
-    triples, result being "pass" or "fail". Lines before "lab: ..." (lab.sh's
-    own container-readiness notes) and after the terminator (lab.sh's own
-    closing pass/fail line for the section) are not the harness's and are
-    never reached: the loop returns as soon as the terminator is seen.
+    from the line after its "lab: ..." line -- or the line `starts` names,
+    for a section whose harness prints none (SEED_STARTED_SECTIONS). Returns
+    (flow, result, detail) triples, result being "pass" or "fail". Lines
+    before it (lab.sh's own container-readiness notes) and after the
+    terminator (lab.sh's own closing pass/fail line for the section) are not
+    the harness's and are never reached: the loop returns as soon as the
+    terminator is seen.
     """
     out: list[tuple[str, str, str | None]] = []
     started = False
     for line in lines:
-        if LAB_LINE_RE.match(line):
+        if starts.match(line):
             started = True
             continue
         if not started:
@@ -424,6 +467,41 @@ def parse_agent_section(
             date,
         )
     )
+
+
+def parse_layer_section(
+    lines: list[str],
+    peer_key: str,
+    prefixes: tuple[str, ...],
+    versions: dict[str, str],
+    date: str,
+    rows: list[Row],
+) -> None:
+    """One row per agent: each `ok`/`FAIL` line that opens with one of
+    `prefixes` is that agent's result, under the prefix as its flow. A FAIL
+    line that opens with none of them is a row of its own, failing under its
+    own text; an `ok` line that opens with none is a readiness note.
+    """
+    for line in lines:
+        m = LAB_SH_LINE_RE.match(line)
+        if not m:
+            continue
+        text = m.group(1)
+        result = "pass" if line.lstrip().startswith("ok") else "fail"
+        flow = next((prefix for prefix in prefixes if text.startswith(prefix)), None)
+        if flow is None and result == "pass":
+            continue
+        rows.append(
+            Row(
+                peer_key,
+                PEER_LABELS[peer_key],
+                peer_version_label(peer_key, versions),
+                flow or text,
+                result,
+                None if result == "pass" else text,
+                date,
+            )
+        )
 
 
 def impairment_profiles() -> list[str]:
@@ -637,6 +715,10 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         # itself, or being called by the same Asterisk container already
         # versioned above.
         return "n/a"
+    if peer_key == "stir_pair":
+        # two stacks of this library, and a certificate authority made for
+        # the run: nobody else's release to name
+        return "n/a"
     if peer_key == "robust_listener":
         # interop/robust/listener.py, a few lines of Python in the lab: no
         # release of anybody's to pin.
@@ -651,8 +733,12 @@ def parse_section(header: str, body: list[str], versions: dict[str, str], date: 
     rows: list[Row] = []
     if header in FLOW_SECTIONS:
         peer_key, driver = FLOW_SECTIONS[header]
-        parser = parse_nat_pair_flow_lines if header in NAT_PAIR_FLOW_SECTIONS else parse_flow_lines
-        flows = parser(body)
+        if header in NAT_PAIR_FLOW_SECTIONS:
+            flows = parse_nat_pair_flow_lines(body)
+        elif header in SEED_STARTED_SECTIONS:
+            flows = parse_flow_lines(body, SEED_LINE_RE)
+        else:
+            flows = parse_flow_lines(body)
         if not flows:
             print(f"warning: section {header!r} had no flow results", file=sys.stderr)
             return rows
@@ -675,6 +761,9 @@ def parse_section(header: str, body: list[str], versions: dict[str, str], date: 
     elif header in VERDICT_SECTIONS:
         peer_key, flow_label = VERDICT_SECTIONS[header]
         parse_agent_section(body, peer_key, flow_label, versions, date, rows)
+    elif header in LAYER_SECTIONS:
+        peer_key, prefixes = LAYER_SECTIONS[header]
+        parse_layer_section(body, peer_key, prefixes, versions, date, rows)
     elif header == NETEM_SECTION:
         parse_netem_section(body, versions, date, rows)
     elif header == TURN_RELAY_SECTION:
@@ -903,7 +992,8 @@ def main() -> int:
     if orphans:
         print(
             f"error: {len(orphans)} ok/FAIL line(s) in {args.log} belong to no row; "
-            "tell FLOW_SECTIONS, AGENT_SECTIONS or VERDICT_SECTIONS about their step:",
+            "tell FLOW_SECTIONS, AGENT_SECTIONS, VERDICT_SECTIONS or LAYER_SECTIONS about "
+            "their step:",
             file=sys.stderr,
         )
         for orphan in orphans:
@@ -1021,11 +1111,69 @@ def self_test() -> int:
             for _, label in VERDICT_SECTIONS.values():
                 self.assertIn(label, flows)
 
+        def test_the_stir_flows_start_after_the_seed(self) -> None:
+            header = next(iter(SEED_STARTED_SECTIONS))
+            rows, orphans = parse_log(
+                log(
+                    (
+                        header,
+                        [
+                            "subject=CN=Sipral Lab STI Signer trusted",
+                            "seed: 0123abcd",
+                            "  pass  a signed call, verified and carried   (verdict 1)",
+                            "  FAIL  an unsigned call, refused by a strict account \u2014 answered 200",
+                            "1 STIR call(s) failed",
+                            "  FAIL  STIR/SHAKEN between two C ABI stacks",
+                        ],
+                    )
+                ),
+                versions,
+                "2026-01-01",
+            )
+            self.assertEqual(orphans, [])
+            self.assertEqual(
+                [(r.peer_key, r.flow, r.result) for r in rows],
+                [
+                    ("stir_pair", "a signed call, verified and carried (C ABI)", "pass"),
+                    ("stir_pair", "an unsigned call, refused by a strict account (C ABI)", "fail"),
+                ],
+            )
+
+        def test_each_layer_is_a_row_and_a_stray_fail_is_one_too(self) -> None:
+            header = next(iter(LAYER_SECTIONS))
+            rows, orphans = parse_log(
+                log(
+                    (
+                        header,
+                        [
+                            "  ok    asterisk: Asterisk Ready",
+                            "  ok    agent.py over TLS: refused untrusted, then registered",
+                            "  FAIL  Agent.kt over TLS",
+                            "  FAIL  could not restart Asterisk with the TLS listeners",
+                        ],
+                    )
+                ),
+                versions,
+                "2026-01-01",
+            )
+            self.assertEqual(orphans, [])
+            self.assertEqual(
+                [(r.flow, r.result) for r in rows],
+                [
+                    ("agent.py over TLS", "pass"),
+                    ("Agent.kt over TLS", "fail"),
+                    ("could not restart Asterisk with the TLS listeners", "fail"),
+                ],
+            )
+
         def test_every_robust_flow_stands_for_a_feature(self) -> None:
             features = parse_features((ROOT / "interop/features.toml").read_text(encoding="utf-8"))
             listed = {flow for f in features for flow in f.flows}
             for _, label in VERDICT_SECTIONS.values():
                 self.assertIn(base_flow_name(label), listed)
+            for _, prefixes in LAYER_SECTIONS.values():
+                for prefix in prefixes:
+                    self.assertIn(prefix, listed)
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(Tests)
     result = unittest.TextTestRunner(verbosity=2).run(suite)

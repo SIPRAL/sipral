@@ -1436,6 +1436,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 - **The Kotlin binding loads with every 0.31 event arm.** Each payload arm's numbers now cross JNI in one `long[]`, so the event's `deliver` stays inside the JVM's 255 parameter slots; `SipralEvent.payload` reads the same.
 - **The Swift binding hands an empty list over as a null pointer.** `Sipral.callAnswerWith` with no header fields was refused `headers is not read here`, because an empty Swift array still carried a buffer; every printed wrapper that takes a list now passes null and zero for an empty one, as the .NET and Kotlin layers already did.
+- **The interop matrix reads the steps wave C added to a lab run.** The SRTP policy per account against Asterisk and through the proxy, STIR/SHAKEN between two C ABI stacks (whose flows start after the seed and end at `every STIR call passed`) and SIP over TCP and TLS through the four layers (one row per agent, a stray FAIL a row of its own) each have rows and a feature in `interop/features.toml`, so the recorded run passes the generator's own check again; `docs/11-testing.md` is regenerated from it.
 - **Every result a lab run prints has a row in the interop matrix.**
   `scripts/interop-matrix.py` knew section headers only from its own list, so
   a step it was not told about was read as the tail of the step above it: the
