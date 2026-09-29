@@ -1,0 +1,208 @@
+# RFC 4317 offer/answer examples. One entry per description, in RFC order.
+# Every offer is followed by the answer to it; "round" counts the exchanges
+# within one section, from 1.
+#
+# The files were written from the examples of RFC 4317, not extracted from a
+# published archive; README.md says how and what that means.
+
+[source]
+rfc = "https://www.rfc-editor.org/rfc/rfc4317.txt"
+descriptions = 22
+
+[[description]]
+name = "2.1-offer"
+section = "2.1"
+title = "Audio and Video 1"
+file = "2.1-offer.dat"
+role = "offer"
+round = "1"
+sha256 = "3eafd1713573345d161b88b67fe9262d4a171c4e70b9b6512c38de5df3101db7"
+
+[[description]]
+name = "2.1-answer"
+section = "2.1"
+title = "Audio and Video 1"
+file = "2.1-answer.dat"
+role = "answer"
+round = "1"
+sha256 = "56dfa86374bdd30657d46f85ecb2e9dccdf5932d816b53b6ef0dd886da38568d"
+
+[[description]]
+name = "2.2-offer"
+section = "2.2"
+title = "Audio and Video 2"
+file = "2.2-offer.dat"
+role = "offer"
+round = "1"
+sha256 = "3eafd1713573345d161b88b67fe9262d4a171c4e70b9b6512c38de5df3101db7"
+
+[[description]]
+name = "2.2-answer"
+section = "2.2"
+title = "Audio and Video 2"
+file = "2.2-answer.dat"
+role = "answer"
+round = "1"
+sha256 = "68c96abafc4d100d2cc4349a3e3bae89c8d323fa7c34772ba2f25b3a0f5fae93"
+
+[[description]]
+name = "2.2-offer-2"
+section = "2.2"
+title = "Audio and Video 2"
+file = "2.2-offer-2.dat"
+role = "offer"
+round = "2"
+sha256 = "032d74c811187876f963fb9e1e901c3fe697b6ec67798b54846c9e3cd26207fa"
+
+[[description]]
+name = "2.2-answer-2"
+section = "2.2"
+title = "Audio and Video 2"
+file = "2.2-answer-2.dat"
+role = "answer"
+round = "2"
+sha256 = "a2d8d7737f716cfaae2e9fba41d97809628c2ac03290f951121d50c7217c8864"
+
+[[description]]
+name = "2.4-offer"
+section = "2.4"
+title = "Two Audio Streams"
+file = "2.4-offer.dat"
+role = "offer"
+round = "1"
+sha256 = "b1027669105b4ca9f5cacdead53a83531e0d7e541ae2518eacbf46d87de50733"
+
+[[description]]
+name = "2.4-answer"
+section = "2.4"
+title = "Two Audio Streams"
+file = "2.4-answer.dat"
+role = "answer"
+round = "1"
+sha256 = "f60158229f168eca5171e18babc60234003a9d309c61bfadea325979040b827a"
+
+[[description]]
+name = "3.1-offer"
+section = "3.1"
+title = "Hold and Unhold 1"
+file = "3.1-offer.dat"
+role = "offer"
+round = "1"
+sha256 = "e35e75c22a038150a7700ba9d4d3ea8f80908dcbb43aa07bab261667004fd9e4"
+
+[[description]]
+name = "3.1-answer"
+section = "3.1"
+title = "Hold and Unhold 1"
+file = "3.1-answer.dat"
+role = "answer"
+round = "1"
+sha256 = "881fa1f22b59d6d7002a027fa3d4661c91b3017a768ba4a180a9bf3452424f62"
+
+[[description]]
+name = "3.1-offer-2"
+section = "3.1"
+title = "Hold and Unhold 1"
+file = "3.1-offer-2.dat"
+role = "offer"
+round = "2"
+sha256 = "db42cee6856d6f81149561f0038c7a62f3cd4ecc856218511b87afd8e4767121"
+
+[[description]]
+name = "3.1-answer-2"
+section = "3.1"
+title = "Hold and Unhold 1"
+file = "3.1-answer-2.dat"
+role = "answer"
+round = "2"
+sha256 = "cd55938b4ec722cb09b6f1f55767c6f25d26f6bffb7ac50420af86efd6891918"
+
+[[description]]
+name = "3.1-offer-3"
+section = "3.1"
+title = "Hold and Unhold 1"
+file = "3.1-offer-3.dat"
+role = "offer"
+round = "3"
+sha256 = "d9eae7814b677a1133d67fb22e1d5e3bb349882db84673b229cff8916e7e71c0"
+
+[[description]]
+name = "3.1-answer-3"
+section = "3.1"
+title = "Hold and Unhold 1"
+file = "3.1-answer-3.dat"
+role = "answer"
+round = "3"
+sha256 = "3894e0496651085d9941f1184bedfb40ff458227ab90691bc061bd9fef1772a9"
+
+[[description]]
+name = "4.1-offer"
+section = "4.1"
+title = "Second Audio Stream Added"
+file = "4.1-offer.dat"
+role = "offer"
+round = "1"
+sha256 = "e35e75c22a038150a7700ba9d4d3ea8f80908dcbb43aa07bab261667004fd9e4"
+
+[[description]]
+name = "4.1-answer"
+section = "4.1"
+title = "Second Audio Stream Added"
+file = "4.1-answer.dat"
+role = "answer"
+round = "1"
+sha256 = "881fa1f22b59d6d7002a027fa3d4661c91b3017a768ba4a180a9bf3452424f62"
+
+[[description]]
+name = "4.1-offer-2"
+section = "4.1"
+title = "Second Audio Stream Added"
+file = "4.1-offer-2.dat"
+role = "offer"
+round = "2"
+sha256 = "5a33636cb3a0bd9d7c1f2fc94e5858c9b486b0832d5e04f16ce8a63481141132"
+
+[[description]]
+name = "4.1-answer-2"
+section = "4.1"
+title = "Second Audio Stream Added"
+file = "4.1-answer-2.dat"
+role = "answer"
+round = "2"
+sha256 = "99abeb886c8837f2e2da255ff44e96967adf8a2f6564205d1dc549edeb2932a8"
+
+[[description]]
+name = "4.3-offer"
+section = "4.3"
+title = "Audio and Video, Then Video Deleted"
+file = "4.3-offer.dat"
+role = "offer"
+round = "1"
+sha256 = "f7314cc6863522d59fd206b773b734c6d03b3bd2a9d54dd75b5e0f61976ebf7c"
+
+[[description]]
+name = "4.3-answer"
+section = "4.3"
+title = "Audio and Video, Then Video Deleted"
+file = "4.3-answer.dat"
+role = "answer"
+round = "1"
+sha256 = "b4d892bcc399dc048235e8222534fc317b776661695abdbaa554623acc7d3ff9"
+
+[[description]]
+name = "4.3-offer-2"
+section = "4.3"
+title = "Audio and Video, Then Video Deleted"
+file = "4.3-offer-2.dat"
+role = "offer"
+round = "2"
+sha256 = "032d74c811187876f963fb9e1e901c3fe697b6ec67798b54846c9e3cd26207fa"
+
+[[description]]
+name = "4.3-answer-2"
+section = "4.3"
+title = "Audio and Video, Then Video Deleted"
+file = "4.3-answer-2.dat"
+role = "answer"
+round = "2"
+sha256 = "6e225567e43e1b16cb2a7e0821297ec82d57da6db04f712464f63d6cbd044edd"
