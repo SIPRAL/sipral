@@ -7,6 +7,7 @@ import java.util.concurrent.ConcurrentHashMap
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralAnnounced
 import org.sipral.idiomatic.SipralCall
+import org.sipral.idiomatic.SipralAudioDevices
 import org.sipral.idiomatic.SipralClient
 
 /**
@@ -38,6 +39,11 @@ class IdiomaticSipCalls(
     /** The [SipralCall] behind a handle, once it has been answered or
      * placed here and until it ends. */
     fun call(handle: Long): SipralCall? = calls[handle]
+
+    /** The client's own audio engine, when it runs the calls' audio itself
+     * ([org.sipral.idiomatic.SipralAudioMode.Device]); null when the
+     * application does. */
+    val audio: SipralAudioDevices? get() = client.audio
 
     private fun account(handle: Long): SipralAccount =
         accounts[handle] ?: throw IllegalArgumentException("account ${handle.toString(16)} is not one this bridge was given")

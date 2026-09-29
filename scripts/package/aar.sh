@@ -3,9 +3,10 @@
 # Copyright (c) 2026 Tiberiu Balasea
 #
 # The Android artefact: sipral.aar, carrying libsipral_ffi.so (the C ABI) and
-# libsipral_jni.so (the two shims in bindings/kotlin/sipral/src/main/jni,
-# the generated sipral_jni.c and the hand-written idiomatic_media.c, linked
-# against it -- the one a JVM actually loads, per bindings/kotlin/README.md)
+# libsipral_jni.so (the three shims in bindings/kotlin/sipral/src/main/jni,
+# the generated sipral_jni.c and the hand-written idiomatic_media.c and
+# audio_routes.c, linked against it -- the one a JVM actually loads, per
+# bindings/kotlin/README.md)
 # for arm64-v8a, armeabi-v7a and x86_64 under jni/, and the compiled classes
 # of everything under bindings/kotlin/sipral/src/main/kotlin over it:
 # SipralAbi.kt, org.sipral.idiomatic and org.sipral.telecom.
@@ -14,7 +15,7 @@
 #       needs the Android NDK (ANDROID_NDK_HOME) and cargo-ndk, which the
 #       image bindings/kotlin/android/Dockerfile carries and
 #       scripts/package/android.sh runs this inside: builds the three ABIs
-#       with cargo-ndk, links both shims against each with the same NDK's
+#       with cargo-ndk, links the shims against each with the same NDK's
 #       own clang, and writes DIR/jni/<abi>/libsipral_ffi.so and
 #       DIR/jni/<abi>/libsipral_jni.so
 #
@@ -154,6 +155,7 @@ if [ "$CMD" = "collect-natives" ]; then
             -o "$OUT/jni/$abi/libsipral_jni.so" \
             "$ROOT/bindings/kotlin/sipral/src/main/jni/sipral_jni.c" \
             "$ROOT/bindings/kotlin/sipral/src/main/jni/idiomatic_media.c" \
+            "$ROOT/bindings/kotlin/sipral/src/main/jni/audio_routes.c" \
             -L"$OUT/jni/$abi" -lsipral_ffi -Wl,-soname,libsipral_jni.so \
             >>"$OUT/collect-natives.log" 2>&1; then
             pass "$abi: libsipral_jni.so linked against libsipral_ffi.so"

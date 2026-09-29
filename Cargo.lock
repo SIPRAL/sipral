@@ -913,6 +913,7 @@ name = "sipral-audio"
 version = "0.0.1"
 dependencies = [
  "sipral",
+ "sipral-io-aaudio",
  "sipral-io-common",
  "sipral-io-coreaudio",
  "sipral-io-wasapi",
@@ -997,6 +998,13 @@ dependencies = [
  "sipral-io-pipewire",
  "sipral-io-wasapi",
  "sipral-media",
+]
+
+[[package]]
+name = "sipral-io-aaudio"
+version = "0.0.1"
+dependencies = [
+ "sipral-io-common",
 ]
 
 [[package]]

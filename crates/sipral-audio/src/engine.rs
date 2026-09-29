@@ -698,7 +698,11 @@ impl Engine {
                 Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(TryLockError::WouldBlock) => return Err(BackendError::TimedOut),
             };
-            backend.open_playback(identity.as_deref(), wanted)
+            if role == Role::Ringer {
+                backend.open_ringer(identity.as_deref(), wanted)
+            } else {
+                backend.open_playback(identity.as_deref(), wanted)
+            }
         })
     }
 

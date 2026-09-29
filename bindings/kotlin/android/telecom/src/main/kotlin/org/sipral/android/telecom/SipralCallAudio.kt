@@ -14,11 +14,15 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import org.sipral.SipralAudioDirection
+import org.sipral.idiomatic.SipralAudioDevices
 import org.sipral.idiomatic.SipralMedia
+import org.sipral.telecom.AudioDevice
 import org.sipral.telecom.AudioPause
 import org.sipral.telecom.AudioState
 import org.sipral.telecom.AudioTransition
 import org.sipral.telecom.CallAudio
+import org.sipral.telecom.EngineAudioDevice
 import org.sipral.telecom.TelecomBridge
 
 /**
@@ -56,6 +60,14 @@ import org.sipral.telecom.TelecomBridge
  *   answer `ERROR_DEAD_OBJECT`; both streams are built again, until they
  *   open, and the far end hears silence meanwhile.
  *
+ * On a client whose engine carries the calls (device mode, Android 9 and
+ * later) the streams are the engine's AAudio ones and none of the above
+ * opens anything: the device is the engine's activation, shared by every
+ * call, let go when no call holds it and taken back when one does; the
+ * framework's mute is the engine's; and the audio server dying is the
+ * engine's to recover from, reported on the client's
+ * `AUDIO_DEVICES_CHANGED` events.
+ *
  * Built once the call has media, for the call [id] the bridge knows it by,
  * and closed on its own when the call ends.
  */
@@ -65,8 +77,19 @@ class SipralCallAudio(
     val id: String,
     media: SipralMedia,
     private val scope: CoroutineScope,
+    /** The client's engine when it carries the call ([SipralCallAudios]
+     * passes it for a client in device mode), or null for `AudioRecord` and
+     * `AudioTrack` opened here. */
+    private val engine: SipralAudioDevices? = null,
+    /** What the call's audio is opened on: the engine's activation, shared
+     * by every call, or this call's own `AudioRecord` and `AudioTrack`. */
+    device: AudioDevice = if (engine != null) {
+        EngineAudioDevice(engine::activate, engine::deactivate)
+    } else {
+        AndroidAudioDevice(context.applicationContext)
+    },
 ) : AutoCloseable {
-    private val audio = CallAudio(id, AndroidAudioDevice(context.applicationContext), media, scope)
+    private val audio = CallAudio(id, device, media, scope)
     private val jobs = CopyOnWriteArrayList<Job>()
 
     /** Every change to this call's audio, in order; see [CallAudio.transitions]. */
@@ -82,7 +105,14 @@ class SipralCallAudio(
         jobs += scope.launch(start = CoroutineStart.UNDISPATCHED) {
             val connection = SipralTelecom.connections.map { it[id] }.filterNotNull().first()
             launch { connection.route.filterNotNull().collect { audio.routeChanged(it) } }
-            launch { connection.muted.collect { audio.setMuted(it) } }
+            launch {
+                connection.muted.collect { muted ->
+                    audio.setMuted(muted)
+                    // the engine reads the microphone into the call itself,
+                    // so the framework's mute is the engine's
+                    engine?.setMuted(SipralAudioDirection.INPUT, muted)
+                }
+            }
         }
         jobs += scope.launch(start = CoroutineStart.UNDISPATCHED) {
             audio.state.first { it == AudioState.STOPPED }

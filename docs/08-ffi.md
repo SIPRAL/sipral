@@ -1732,9 +1732,11 @@ packets go in through `sipral_media_receive` as before. The callback is
 required with `SIPRAL_AUDIO_DEVICE`, and a platform this build has no backend
 for answers `SIPRAL_STATUS_NOT_SUPPORTED`, which
 `SIPRAL_FEATURE_AUDIO_DEVICE` (2048) says before a stack is created: set on
-macOS, iOS and Windows; clear on Linux, where `sipral-io-pipewire` would
-link a library the packaged wheel must not require, and on Android, whose
-devices belong to the Kotlin layer's own `CallAudio`.
+macOS, iOS and Windows, and on Android from API level 28, where the answer
+is the phone's and not the build's (AAudio, `docs/15-mobile.md`); clear on
+Linux, where `sipral-io-pipewire` would link a library the packaged wheel
+must not require, and on an older Android phone, whose calls the Kotlin
+layer's own `CallAudio` carries over `AudioRecord` and `AudioTrack`.
 
 The engine keeps ten rules a softphone on another stack has been bitten by,
 each tested against a platform made of fakes (`crates/sipral-audio/src/tests.rs`)

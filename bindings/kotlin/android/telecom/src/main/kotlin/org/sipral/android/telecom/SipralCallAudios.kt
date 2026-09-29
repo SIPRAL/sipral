@@ -16,24 +16,30 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.idiomatic.SipralAndroidAudio
 import org.sipral.telecom.AudioState
 import org.sipral.telecom.AudioTransition
+import org.sipral.telecom.EngineAudioDevice
 import org.sipral.telecom.IdiomaticSipCalls
 import org.sipral.telecom.TelecomBridge
 import org.sipral.telecom.TelecomCall
 
 /**
- * Every self-managed call's audio, run by the library: the Android half of
- * the device mode the C library runs on macOS, iOS and Windows, where the
- * devices belong to this helper rather than to the engine.
+ * Every self-managed call's audio, run by the library, and kept through
+ * what the telecom framework does to it.
  *
- * Each call the [bridge] shows gets a [SipralCallAudio] -- `AudioRecord`
- * and `AudioTrack` in `VOICE_COMMUNICATION`, kept through the framework's
- * hold, the call focus, routes, mute and the audio server dying -- as soon
- * as its media has started, and loses it when the call is gone. What the
- * application sees is what a person does: every call's [states], and every
- * change as it happens on [transitions]. It writes no audio code of its
- * own.
+ * Each call the [bridge] shows gets a [SipralCallAudio] -- kept through the
+ * framework's hold, the call focus, routes, mute and the audio server
+ * dying -- as soon as its media has started, and loses it when the call is
+ * gone. On a client in device mode, which is the default from Android 9 (API
+ * level 28), the library's engine carries every call over AAudio and each
+ * [SipralCallAudio] says when the devices are the calls'; this also hands
+ * the engine the application's context, for the phone's device list and
+ * routes ([SipralAndroidAudio]). On a client in application mode -- an older
+ * phone -- each call's audio is its own `AudioRecord` and `AudioTrack` in
+ * `VOICE_COMMUNICATION`. What the application sees is the same either way:
+ * every call's [states], and every change as it happens on [transitions].
+ * It writes no audio code of its own.
  *
  * [events] is the client's own event flow, read for the moment a call's
  * media starts, since the list of calls does not change then.
@@ -46,6 +52,11 @@ class SipralCallAudios(
     private val scope: CoroutineScope,
 ) : AutoCloseable {
     private val context: Context = context.applicationContext
+    private val engine = sip.audio
+
+    // one for every call: the engine is one, and its devices stay on while
+    // any call holds them
+    private val engineDevice = engine?.let { EngineAudioDevice(it::activate, it::deactivate) }
     private val running = ConcurrentHashMap<String, SipralCallAudio>()
     private val watchers = ConcurrentHashMap<String, List<Job>>()
     private val statesFlow = MutableStateFlow<Map<String, AudioState>>(emptyMap())
@@ -62,6 +73,9 @@ class SipralCallAudios(
     val transitions: SharedFlow<Pair<String, AudioTransition>> = transitionsFlow
 
     init {
+        if (engine != null) {
+            SipralAndroidAudio.attach(this.context)
+        }
         jobs = listOf(
             scope.launch { bridge.calls.collect { reconcile(it) } },
             scope.launch {
@@ -84,7 +98,15 @@ class SipralCallAudios(
                 continue
             }
             val media = sip.call(call.call)?.media ?: continue
-            val started = SipralCallAudio(context, bridge, call.id, media, scope)
+            val started = SipralCallAudio(
+                context,
+                bridge,
+                call.id,
+                media,
+                scope,
+                engine,
+                engineDevice ?: AndroidAudioDevice(context),
+            )
             running[call.id] = started
             watchers[call.id] = listOf(
                 scope.launch { started.transitions.collect { transitionsFlow.emit(call.id to it) } },

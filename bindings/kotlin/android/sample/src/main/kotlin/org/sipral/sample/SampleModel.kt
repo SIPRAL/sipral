@@ -22,14 +22,19 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.sipral.SipralAudioActivation
 import org.sipral.SipralEventKind
 import org.sipral.SipralIce
 import org.sipral.android.telecom.AndroidTelecomPlatform
 import org.sipral.android.telecom.SipralCallAudios
 import org.sipral.android.telecom.SipralTelecom
 import org.sipral.idiomatic.SipralAccount
+import org.sipral.idiomatic.SipralAudioDeviceInfo
+import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.SipralTurnServer
+import org.sipral.idiomatic.audioOf
+import org.sipral.idiomatic.changeKind
 import org.sipral.idiomatic.natOf
 import org.sipral.telecom.AudioRoute
 import org.sipral.telecom.AudioState
@@ -79,6 +84,16 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
     var audioStates by mutableStateOf<Map<String, AudioState>>(emptyMap())
         private set
 
+    private fun describe(device: SipralAudioDeviceInfo): String = buildString {
+        append(device.name)
+        if (device.isDefaultOutput) {
+            append(" (output)")
+        }
+        if (device.isDefaultInput) {
+            append(" (input)")
+        }
+    }
+
     private fun append(line: String) {
         log.add(0, line)
         if (log.size > 100) {
@@ -111,11 +126,23 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
                     SipralTurnServer(it, turnUser.trim(), turnPassword)
                 }
                 val (opened, added) = withContext(Dispatchers.IO) {
+                    // The library's engine carries the calls over AAudio
+                    // where the phone allows (API level 28 and later), and
+                    // opens the devices only when the framework's call is
+                    // active: manual activation, driven by SipralCallAudios.
+                    // An older phone pumps the frames through AudioRecord
+                    // and AudioTrack instead.
+                    val audio = if (SipralAudioMode.platformDefault is SipralAudioMode.Device) {
+                        SipralAudioMode.Device(SipralAudioActivation.MANUAL)
+                    } else {
+                        SipralAudioMode.Application
+                    }
                     val opened = SipralClient.open(
                         bindHost = host,
                         stunServer = stun,
                         turn = turn,
                         ice = if (turn != null) SipralIce.OFFERED else null,
+                        audio = audio,
                     )
                     opened to opened.addAccount(
                         aor = aor,
@@ -139,6 +166,21 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
                 // ends. The sample only shows what happens to them.
                 val audios = SipralCallAudios(context, wired, calls, opened.events, scope)
                 audio = audios
+                val engine = opened.audio
+                if (engine == null) {
+                    append("audio: AudioRecord and AudioTrack")
+                } else {
+                    append("audio: AAudio, devices ${engine.refresh().joinToString { describe(it) }}")
+                    scope.launch {
+                        opened.events.collect { event ->
+                            val change = audioOf(event) ?: return@collect
+                            append(
+                                "audio devices: ${change.changeKind?.name?.lowercase()}, " +
+                                    engine.devices().filter { it.isPresent }.joinToString { describe(it) },
+                            )
+                        }
+                    }
+                }
                 scope.launch { audios.transitions.collect { (_, change) -> append("audio ${describe(change)}") } }
                 scope.launch { audios.states.collect { audioStates = it } }
                 scope.launch { wired.calls.collect { reconcile(it) } }

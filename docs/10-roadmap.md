@@ -444,6 +444,14 @@ after it. What is left is platform work, and platform work needs the platform.
   (`docs/15-mobile.md`, "C4"). What needs a phone is the system's own
   delivery: a carrier's call, a Bluetooth headset, a car, a route switched
   between real outputs.
+- **Device mode on Android** — the built-in engine over `sipral-io-aaudio`:
+  AAudio voice-communication streams from API level 28 (the input preset is
+  the platform's echo canceller), a ringtone stream for the ringer, the
+  phone's devices and call routes from `AudioManager` through the Kotlin
+  shim, and the same device-change events as the desktops; below API level
+  28 the telecom helper's `AudioRecord` and `AudioTrack` stay the path.
+  *Built, and run on an emulator* (`docs/15-mobile.md`, "Device mode on
+  Android"); a route switched between real outputs needs a phone.
 - **`ConnectionService` and the AAR** — C2 carried onto Android's telecom
   framework as a self-managed connection, and the AAR with both natives for
   arm64-v8a, armeabi-v7a and x86_64. *Built, and run on an emulator*: the

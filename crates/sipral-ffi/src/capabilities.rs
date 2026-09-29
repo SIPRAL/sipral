@@ -131,10 +131,12 @@ constants! {
     /// created with `sipral_stack_config_t::audio` set to
     /// `SIPRAL_AUDIO_DEVICE` opens the platform's devices and pumps every
     /// managed call itself, with the `sipral_audio_*` entry points to list,
-    /// choose and control them. Clear on a platform this build has no
-    /// backend for — Linux and Android today — where `SIPRAL_AUDIO_DEVICE`
+    /// choose and control them. Clear where there is no backend — on Linux,
+    /// and on an Android phone below API level 28, where AAudio cannot open
+    /// a voice-communication stream — and `SIPRAL_AUDIO_DEVICE` then
     /// answers `SIPRAL_STATUS_NOT_SUPPORTED` and the application pumps the
-    /// frames as it always has.
+    /// frames as it always has. On Android the answer is the phone's, read
+    /// when asked, not the build's.
     ///
     /// This crate's own answer rather than the facade's: the engine sits
     /// beside the facade, not under it, so the facade has nothing to say.
@@ -555,14 +557,18 @@ mod tests {
             read().features & SIPRAL_FEATURE_AUDIO_DEVICE != 0,
             sipral_audio::platform_has_backend()
         );
-        assert_eq!(
-            read().features & SIPRAL_FEATURE_AUDIO_DEVICE != 0,
-            cfg!(any(
-                target_os = "macos",
-                target_os = "ios",
-                target_os = "windows"
-            ))
-        );
+        // on Android the answer is the phone's API level, which the line
+        // above already holds it to; everywhere else it is the build's
+        if cfg!(not(target_os = "android")) {
+            assert_eq!(
+                read().features & SIPRAL_FEATURE_AUDIO_DEVICE != 0,
+                cfg!(any(
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "windows"
+                ))
+            );
+        }
         assert_eq!(SIPRAL_FEATURE_AUDIO_DEVICE, 2048);
     }
 

@@ -125,7 +125,8 @@ you pick, or replace, or leave out entirely.
 | `sipral-io-common` | the parts of a device backend that are not about any device: the lock-free ring between the audio thread and an ordinary one, the gate that says when that thread is out of our memory, and volume, mute and the meter |
 | `sipral-io-coreaudio` | macOS and iOS device I/O |
 | `sipral-io-wasapi` | Windows device I/O |
-| `sipral-io-pipewire` | Linux desktop device I/O, over `libpipewire`. AAudio for Android follows |
+| `sipral-io-pipewire` | Linux desktop device I/O, over `libpipewire` |
+| `sipral-io-aaudio` | Android device I/O, over AAudio (API level 28 and later), with the phone's devices and call routes through `AudioManager` |
 | `sipral-headless` | the PCM-over-a-socket framing and control protocol for AI agents, with no audio device. Joined to a call's media by `sipral`'s `headless` feature |
 | `sipral-ffi` | the C ABI, printed from one declaration into the header and the Swift, .NET, Kotlin and Python bindings. Not frozen yet |
 | `sipral` | the facade: signalling from `sipral-ua` joined to the media pipeline, with the codec catalogue, SRTP keying, DTMF, call recording and statistics per call. The one crate an application depends on, and what `sipral-ffi` exposes |

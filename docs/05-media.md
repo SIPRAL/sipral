@@ -2427,10 +2427,18 @@ what the engine reports as system echo cancellation, and where it did not
 the application attaches a canceller to each call at the seam above with the
 two streams' latencies as its reference. The endpoint list carries channel
 counts read from each endpoint's mix format without initialising a client
-on it. Linux has no backend yet — `sipral-io-pipewire` links a library the
-packaged Python wheel must not require — and Android's devices belong to
-the Kotlin layer's own `CallAudio`; on both the engine says so before a
-stack is created, and the application pumps as it always has.
+on it. On Android, from API level 28, `sipral-io-aaudio` opens AAudio
+voice-communication streams (the input preset is the platform's echo
+canceller) and a ringtone stream for the ringer; the loudspeaker role is a
+call route (`AudioManager`'s communication device) rather than a device a
+stream is opened on, and the list, the defaults and the route come from
+`AudioManager` through the Kotlin binding's shim (`docs/15-mobile.md`,
+"Device mode on Android"). Linux has no backend yet — `sipral-io-pipewire`
+links a library the packaged Python wheel must not require — and neither
+does an Android phone below API level 28, whose calls the Kotlin layer's
+own `CallAudio` carries over `AudioRecord` and `AudioTrack`; on both the
+engine says so before a stack is created, and the application pumps as it
+always has.
 
 ## Per call, not per process (D6)
 

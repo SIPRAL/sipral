@@ -178,10 +178,19 @@ private suspend fun aCallInDeviceModeIsPumpedByTheEngine(): String {
     return "a call in device mode was pumped by the engine both ways"
 }
 
+/** The Android context goes to the shim, which checks it is one: on a JVM
+ * that is not Android there is no `android.content.Context` at all, and an
+ * object is refused rather than kept. */
+private fun anAndroidContextIsCheckedByTheShim(): String {
+    val refused = assertFailsWith<IllegalArgumentException> { SipralAndroidAudio.attach(Any()) }
+    assertEquals("java.lang.Object is not an android.content.Context", refused.message)
+    return "an object that is no Android context refused by the shim"
+}
+
 /** Everything above, for IdiomaticCheck.kt's main: the settings wherever
  * there is an engine, what opens the devices only when asked. */
 internal suspend fun audioChecks(): String {
-    val said = mutableListOf(thePlatformDefault())
+    val said = mutableListOf(thePlatformDefault(), anAndroidContextIsCheckedByTheShim())
     if (!hasEngine) {
         return (said + "no audio engine in this build for this platform").joinToString(", ")
     }
