@@ -70,7 +70,8 @@ const MAX_ELEMENTS: usize = 4_096;
 /// How many groups, sessions, participants, streams and associations one
 /// document may carry, all counted together.
 const MAX_ITEMS: usize = 512;
-/// The longest text content kept.
+/// The longest text content kept, and the longest value written once
+/// escaped: the tokeniser takes no text or attribute value longer.
 const MAX_TEXT: usize = 1_024;
 
 /// Why recording metadata could not be read or written.
@@ -803,10 +804,14 @@ impl Writer {
     /// cannot hold. A reader rewrites a CR before anything else sees it
     /// (§2.11), and every TAB, LF and CR of an attribute value into a space
     /// (§3.3.3); those are written as character references, which it keeps.
+    ///
+    /// The bound is on the value as written: the reader bounds the escaped
+    /// bytes, and `&` is five of them.
     fn escaped(&mut self, text: &str, attribute: bool) -> Result<(), SiprecError> {
         if text.len() > MAX_TEXT {
             return Err(SiprecError::IllegalValue("a value too long to read back"));
         }
+        let start = self.out.len();
         for c in text.chars() {
             match c {
                 '&' => self.out.push_str("&amp;"),
@@ -827,6 +832,9 @@ impl Writer {
                 }
                 c => self.out.push(c),
             }
+        }
+        if self.out.len().saturating_sub(start) > MAX_TEXT {
+            return Err(SiprecError::IllegalValue("a value too long to read back"));
         }
         Ok(())
     }
@@ -1444,6 +1452,28 @@ mod tests {
         let xml = m.to_xml().expect("written");
         assert!(xml.contains("<name>one&#13;\ntwo&#13;three\tfour\nfive</name>"));
         assert!(xml.contains("aor=\"sip:a&#9;b&#10;c&#13;d@example.com\""));
+        assert_eq!(RecordingMetadata::parse(xml.as_bytes()).expect("read"), m);
+    }
+
+    #[test]
+    fn a_value_is_bounded_as_written_not_as_given() {
+        // 300 characters, each written as five: past what the reader takes
+        let mut m = call().metadata();
+        m.participants[0].name_ids[0].names[0].text = "&".repeat(300);
+        assert_eq!(
+            m.to_xml(),
+            Err(SiprecError::IllegalValue("a value too long to read back"))
+        );
+        let mut m = call().metadata();
+        m.participants[0].name_ids[0].aor = format!("sip:{}@example.com", "\"".repeat(300));
+        assert_eq!(
+            m.to_xml(),
+            Err(SiprecError::IllegalValue("a value too long to read back"))
+        );
+        // and whatever is written, however escaped, reads back
+        let mut m = call().metadata();
+        m.participants[0].name_ids[0].names[0].text = format!("{}x", "&".repeat(203));
+        let xml = m.to_xml().expect("1 016 bytes written");
         assert_eq!(RecordingMetadata::parse(xml.as_bytes()).expect("read"), m);
     }
 
