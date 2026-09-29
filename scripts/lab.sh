@@ -3249,12 +3249,14 @@ tls_agent_start() {
 
 # Registered, called, and what it said checked: over TLS, each refusal for
 # its own reason first; then the call answered, the "#" heard, audio both
-# ways, and Asterisk's contact for it naming the transport it came over.
+# ways, and Asterisk's contact for it naming the transport it came over --
+# read from the registrar's own store, since `pjsip show contacts` cuts a
+# URI that long short of its parameters.
 tls_agent_call() {
     local layer="$1" user="$2" over="$3" limit="$4" log tries contact
     tries=0
     until contact=$( ( cd interop && docker compose exec -T asterisk \
-            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep "$user/" ) \
+            asterisk -rx "database show registrar/contact" 2>/dev/null ) | grep "/$user;@" ) \
             && [ -n "$contact" ]; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$TLS_AGENT_NAME" 2>/dev/null)" != true ] \
@@ -3266,7 +3268,7 @@ tls_agent_call() {
         fi
         sleep 2
     done
-    printf '    %s\n' "$contact"
+    printf '%s\n' "$contact" | grep -o '"uri":"[^"]*"' | sed 's/^/    contact /'
     ( cd interop && docker compose exec -T asterisk asterisk -rx \
         "channel originate PJSIP/$user extension s@agent-call" ) >/dev/null 2>&1
     tries=0
