@@ -220,3 +220,27 @@ name = "WASAPI audio backend"
 implemented = true
 unit_tested = true
 flows = []
+
+[[feature]]
+name = "Call surviving a change of its own address"
+implemented = true
+unit_tested = true
+flows = ["a call moved to another address"]
+
+[[feature]]
+name = "Registrar keep-alive holding a filtering NAT open"
+implemented = true
+unit_tested = true
+flows = ["called 330 s after registering, the keep-alive holding the NAT open"]
+
+[[feature]]
+name = "Field failures: a request too large for a datagram over TCP, a silent connection ended at Timer B"
+implemented = true
+unit_tested = true
+flows = ["field failures: fragments dropped, a silent and a dark connection"]
+
+[[feature]]
+name = "STUN server failover"
+implemented = true
+unit_tested = true
+flows = ["STUN failover, the first server dead, C calling and Rust answering"]

@@ -1251,6 +1251,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **Every result a lab run prints has a row in the interop matrix.**
+  `scripts/interop-matrix.py` knew section headers only from its own list, so
+  a step it was not told about was read as the tail of the step above it: the
+  field failures, the NAT pair with its first STUN server dead, the call whose
+  address moves and the call placed 330 s after registering all went
+  unreported, and a FAIL in any of them could have turned the TURN relay's
+  rows into failures. Every header lab.sh prints now ends a section, those
+  four steps have rows and features, and an `ok`/`FAIL` line in a step that
+  produced no row stops the generator, in both modes, naming the line.
+  `--self-test` runs the generator's own tests.
 - **A 2xx lost on UDP is sent again until its ACK arrives.** RFC 3261
   §13.3.1.4 has the answering end repeat its 2xx, T1 doubling up to T2, and
   nothing did: the INVITE's retransmissions stop at the first provisional,

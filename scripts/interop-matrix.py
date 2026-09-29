@@ -26,6 +26,16 @@
 # (`SIPRAL_HARNESS_C` unset skips every "through the C ABI" section, for one)
 # rather than an error.
 #
+# WHAT MAY NOT GO UNREAD. A header lab.sh prints that this file has not been
+# told about is still found -- step() always prints one after an empty line,
+# at the start of it -- and still ends the section before it, so its lines are
+# never read as the tail of some other step's. Every `ok`/`FAIL` line in a step
+# is a result somebody meant to be seen; one in a step that produced no row
+# (an unknown header, or a known one whose parser found nothing) stops the run
+# with the lines named, in both modes, rather than leaving the table short a
+# result nobody notices is missing. Only SETUP_SECTIONS -- builds and readiness,
+# before the first flow -- are exempt.
+#
 # WHAT IS NOT PARSED. Everything from "the capture" on: the pcap directory
 # listing and, on a live run, the raw `docker compose logs` tail teardown()
 # prints after it. That text is for a person reading the run by eye, not
@@ -76,6 +86,7 @@ FLOW_SECTIONS = {
         "c",
     ),
     "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them": ("full_ice", "rust"),
+    "a call whose address moves under it -- straight at Asterisk": ("asterisk", "rust"),
 }
 # The one FLOW_SECTIONS header lab.sh runs through nat_pair_call (ice_nat_flow)
 # rather than a single harness process: parse_log() reads it with
@@ -105,6 +116,42 @@ AGENT_SECTIONS = {
         "ICE-lite, Asterisk's ICE calling in",
     ),
 }
+# Steps whose one result is lab.sh's own closing `ok`/`FAIL` line, read the
+# way AGENT_SECTIONS's are (parse_agent_section), though no example agent is
+# involved: a harness line inside them, where there is one, is not the whole
+# step. The 330-second call's harness line is the ordinary "called behind a
+# NAT" flow, and only lab.sh's line says it came 330 s after the REGISTER;
+# the field failures print "robust" lines, not flows, and lab.sh's line is the
+# one that also weighs what the listener saw; the dead-STUN step runs through
+# nat_pair_call, whose caller line is the ordinary full-ICE flow. Each flow
+# label is this file's own, with " (C ABI)" spelled out where the C harness
+# drives it, so base_flow_name() matches it against features.toml like any
+# other C row.
+VERDICT_SECTIONS = {
+    "called 330 s after registering, behind a filtering NAT, keep-alive on, in C": (
+        "nat_stun",
+        "called 330 s after registering, the keep-alive holding the NAT open (C ABI)",
+    ),
+    "the field failures -- a link that drops fragments, and connections nobody answers on, in C": (
+        "robust_listener",
+        "field failures: fragments dropped, a silent and a dark connection (C ABI)",
+    ),
+    "the NAT pair with its first STUN server dead -- C calling, Rust answering": (
+        "full_ice",
+        "STUN failover, the first server dead, C calling and Rust answering",
+    ),
+}
+# The steps lab.sh prints before any flow runs: builds and container
+# readiness. Their `ok` lines are notes, not results, and are the only ones
+# check_every_result_has_a_row() lets through without a row.
+SETUP_SECTIONS = {
+    "the harness",
+    "the harness, in C",
+    "the socket-framed agent",
+    "the Swift binding's lab agent",
+    "the lab",
+    "waiting for the servers to listen",
+}
 NETEM_SECTION = "the same call, over a bad network"
 TURN_RELAY_SECTION = "full ICE through a relay -- the path between the two NATs blocked, coturn as TURN"
 STOP_SECTION = "the capture"
@@ -122,6 +169,7 @@ PEER_LABELS = {
     "nat_stun": "Asterisk, from behind a NAT (STUN)",
     "ice_lite": "headless agent (ICE-lite)",
     "full_ice": "sipral, self-to-self (each behind its own NAT)",
+    "robust_listener": "a listener that never answers, over a link that drops fragments",
 }
 
 # Named by the owner (root CLAUDE.md, intern/TASKS.md 8.6.8): every peer worth
@@ -152,6 +200,9 @@ FLOW_FAIL_RE = re.compile(r"^  FAIL  (.+?) \u2014 (.+)$")
 EVERY_PASSED_RE = re.compile(r"^every flow passed$")
 N_FAILED_RE = re.compile(r"^\d+ flow\(s\) failed$")
 LAB_SH_LINE_RE = re.compile(r"^  (?:ok|FAIL)  +(.+)$")
+# Any result line of either shape -- lab.sh's own `ok`/`FAIL`, or the
+# harness's own FAIL -- which check_every_result_has_a_row() holds to a row.
+RESULT_LINE_RE = re.compile(r"^  (?:ok|FAIL)  ")
 # `scripts/lab.sh`'s own fail() closing a nat_pair_call-backed step or block --
 # never the harness's own FAIL line, which always carries the em dash above;
 # a lab.sh message never does, so excluding it is what tells the two apart.
@@ -206,25 +257,30 @@ def split_flow_line(text: str) -> tuple[str, str | None]:
 
 
 def split_sections(text: str) -> list[tuple[str, list[str]]]:
-    """Splits the log into (header, body) pairs at the known section headers,
-    stopping at STOP_SECTION. Text before the first known header (docker and
-    readiness noise) and after STOP_SECTION (the pcap listing, and on a live
-    run the raw container log tail) is not part of any section and is
-    dropped.
+    """Splits the log into (header, body) pairs at every header lab.sh's
+    step() printed -- a line at the start of the line right after an empty
+    one, known here or not -- stopping at STOP_SECTION. A header this file
+    does not know still ends the section before it: were it read as body, its
+    lines would count for the step above it, and a FAIL of its own could turn
+    that step's row into a failure (closing_lab_fail() reads a whole block).
+    Text before the first header and after STOP_SECTION (the pcap listing,
+    and on a live run the raw container log tail) is not part of any section
+    and is dropped.
     """
-    headers = set(FLOW_SECTIONS) | set(AGENT_SECTIONS) | {NETEM_SECTION, TURN_RELAY_SECTION}
     sections: list[tuple[str, list[str]]] = []
     header: str | None = None
     body: list[str] = []
+    previous = ""
     for line in text.split("\n"):
         if line == STOP_SECTION:
             break
-        if line in headers:
+        if previous == "" and line and not line[0].isspace():
             if header is not None:
                 sections.append((header, body))
             header, body = line, []
         elif header is not None:
             body.append(line)
+        previous = line
     if header is not None:
         sections.append((header, body))
     return sections
@@ -581,40 +637,74 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         # itself, or being called by the same Asterisk container already
         # versioned above.
         return "n/a"
+    if peer_key == "robust_listener":
+        # interop/robust/listener.py, a few lines of Python in the lab: no
+        # release of anybody's to pin.
+        return "n/a"
     raise ValueError(peer_key)
 
 
-def parse_log(text: str, versions: dict[str, str], date: str) -> list[Row]:
+def parse_section(header: str, body: list[str], versions: dict[str, str], date: str) -> list[Row]:
+    """The rows one section produces; none for a header this file does not
+    know, which check_every_result_has_a_row() then judges.
+    """
     rows: list[Row] = []
-    for header, body in split_sections(text):
-        if header in FLOW_SECTIONS:
-            peer_key, driver = FLOW_SECTIONS[header]
-            parser = parse_nat_pair_flow_lines if header in NAT_PAIR_FLOW_SECTIONS else parse_flow_lines
-            flows = parser(body)
-            if not flows:
-                print(f"warning: section {header!r} had no flow results", file=sys.stderr)
-                continue
-            version = peer_version_label(peer_key, versions)
-            for name, result, detail in flows:
-                rows.append(
-                    Row(
-                        peer_key,
-                        PEER_LABELS[peer_key],
-                        version,
-                        with_driver(name, driver),
-                        result,
-                        detail,
-                        date,
-                    )
+    if header in FLOW_SECTIONS:
+        peer_key, driver = FLOW_SECTIONS[header]
+        parser = parse_nat_pair_flow_lines if header in NAT_PAIR_FLOW_SECTIONS else parse_flow_lines
+        flows = parser(body)
+        if not flows:
+            print(f"warning: section {header!r} had no flow results", file=sys.stderr)
+            return rows
+        version = peer_version_label(peer_key, versions)
+        for name, result, detail in flows:
+            rows.append(
+                Row(
+                    peer_key,
+                    PEER_LABELS[peer_key],
+                    version,
+                    with_driver(name, driver),
+                    result,
+                    detail,
+                    date,
                 )
-        elif header in AGENT_SECTIONS:
-            peer_key, flow_label = AGENT_SECTIONS[header]
-            parse_agent_section(body, peer_key, flow_label, versions, date, rows)
-        elif header == NETEM_SECTION:
-            parse_netem_section(body, versions, date, rows)
-        elif header == TURN_RELAY_SECTION:
-            parse_turn_relay_section(body, versions, date, rows)
+            )
+    elif header in AGENT_SECTIONS:
+        peer_key, flow_label = AGENT_SECTIONS[header]
+        parse_agent_section(body, peer_key, flow_label, versions, date, rows)
+    elif header in VERDICT_SECTIONS:
+        peer_key, flow_label = VERDICT_SECTIONS[header]
+        parse_agent_section(body, peer_key, flow_label, versions, date, rows)
+    elif header == NETEM_SECTION:
+        parse_netem_section(body, versions, date, rows)
+    elif header == TURN_RELAY_SECTION:
+        parse_turn_relay_section(body, versions, date, rows)
     return rows
+
+
+def parse_log(text: str, versions: dict[str, str], date: str) -> tuple[list[Row], list[str]]:
+    """The rows, in the order the log printed them, and every result line
+    check_every_result_has_a_row() found no row for, each named with its
+    section's header.
+    """
+    rows: list[Row] = []
+    orphans: list[str] = []
+    for header, body in split_sections(text):
+        section_rows = parse_section(header, body, versions, date)
+        rows.extend(section_rows)
+        orphans.extend(check_every_result_has_a_row(header, body, section_rows))
+    return rows, orphans
+
+
+def check_every_result_has_a_row(header: str, body: list[str], section_rows: list[Row]) -> list[str]:
+    """The `ok`/`FAIL` lines of one section that belong to no row: all of
+    them when the section produced none, and it is not one of SETUP_SECTIONS.
+    A section that produced rows owns every result line in it -- its closing
+    verdict, and the container-readiness notes lab.sh prints before its flow.
+    """
+    if section_rows or header in SETUP_SECTIONS:
+        return []
+    return [f"{header!r}: {line.strip()}" for line in body if RESULT_LINE_RE.match(line)]
 
 
 def render_result(result: str, detail: str | None) -> str:
@@ -773,7 +863,7 @@ def resolve_date(args: argparse.Namespace, log_path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("log", type=Path, help="a scripts/lab.sh run, captured as text")
+    parser.add_argument("log", type=Path, nargs="?", help="a scripts/lab.sh run, captured as text")
     parser.add_argument(
         "--date",
         help="the run's own date (YYYY-MM-DD); defaults to <log>.date, then today",
@@ -795,11 +885,30 @@ def main() -> int:
         action="store_true",
         help="compare against --doc's current block instead of writing it",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run this file's own tests against small logs of its own, and nothing else",
+    )
     args = parser.parse_args()
+
+    if args.self_test:
+        return self_test()
+    if args.log is None:
+        parser.error("the log to read is required")
 
     date = resolve_date(args, args.log)
     versions = read_versions(ROOT)
-    rows = parse_log(args.log.read_text(encoding="utf-8"), versions, date)
+    rows, orphans = parse_log(args.log.read_text(encoding="utf-8"), versions, date)
+    if orphans:
+        print(
+            f"error: {len(orphans)} ok/FAIL line(s) in {args.log} belong to no row; "
+            "tell FLOW_SECTIONS, AGENT_SECTIONS or VERDICT_SECTIONS about their step:",
+            file=sys.stderr,
+        )
+        for orphan in orphans:
+            print(f"  {orphan}", file=sys.stderr)
+        return 1
     features = parse_features(args.features.read_text(encoding="utf-8"))
     new_block = render_block(rows, features, args.log, date)
 
@@ -824,6 +933,103 @@ def main() -> int:
 
     args.doc.write_text(replace_block(doc_text, new_block), encoding="utf-8")
     return 0
+
+
+def self_test() -> int:
+    import unittest
+
+    versions = {key: "1.0" for key in ("kamailio", "freeswitch", "asterisk", "opensips", "baresip")}
+
+    def log(*steps: tuple[str, list[str]]) -> str:
+        return "".join(f"\n{header}\n" + "".join(f"{line}\n" for line in body) for header, body in steps)
+
+    field_failures = next(h for h in VERDICT_SECTIONS if h.startswith("the field failures"))
+    stun_dead = next(h for h in VERDICT_SECTIONS if h.startswith("the NAT pair"))
+    turn_run = (
+        TURN_RELAY_SECTION,
+        [
+            "  with TURN: the call has to go through coturn",
+            "lab: 172.18.0.6:5060 at 172.18.0.6:5060, extension callee, as labuser",
+            "  pass  full ICE through two NATs, calling   (98 sent, 97 back)",
+            "every flow passed",
+            "    callee    pass  full ICE through two NATs, answering   (97 sent)",
+            "  ok    with TURN, every call went through coturn",
+        ],
+    )
+
+    class Tests(unittest.TestCase):
+        def test_an_ok_line_in_a_step_nobody_told_this_file_about_is_an_orphan(self) -> None:
+            rows, orphans = parse_log(
+                log(("a step added to lab.sh yesterday", ["  ok    it worked"])), versions, "2026-01-01"
+            )
+            self.assertEqual(rows, [])
+            self.assertEqual(orphans, ["'a step added to lab.sh yesterday': ok    it worked"])
+
+        def test_a_fail_line_in_a_known_step_that_gave_no_row_is_an_orphan(self) -> None:
+            header = "register, call, hold, resume, transfer -- through the proxy"
+            _, orphans = parse_log(log((header, ["  FAIL  kamailio to freeswitch"])), versions, "2026-01-01")
+            self.assertEqual(len(orphans), 1)
+
+        def test_setup_steps_are_notes_not_results(self) -> None:
+            rows, orphans = parse_log(
+                log(("the lab", ["  ok    three containers up"]), ("waiting for the servers to listen", ["  FAIL  asterisk"])),
+                versions,
+                "2026-01-01",
+            )
+            self.assertEqual((rows, orphans), ([], []))
+
+        def test_each_robust_step_is_a_row_of_its_own_verdict(self) -> None:
+            rows, orphans = parse_log(
+                log(
+                    (field_failures, ["  robust  the 1300-byte INVITE left as a datagram", "  ok    fragments dropped"]),
+                    (
+                        stun_dead,
+                        [
+                            "  ok    natbox: nat: masquerading out of",
+                            "lab: 172.18.0.6:5060 at 172.18.0.6:5060, extension callee, as labuser",
+                            "  pass  full ICE through two NATs, calling   (197 sent)",
+                            "every flow passed",
+                            "  FAIL  the NAT pair with its first STUN server dead",
+                        ],
+                    ),
+                ),
+                versions,
+                "2026-01-01",
+            )
+            self.assertEqual(orphans, [])
+            self.assertEqual(
+                [(r.peer_key, r.flow, r.result) for r in rows],
+                [
+                    ("robust_listener", VERDICT_SECTIONS[field_failures][1], "pass"),
+                    ("full_ice", VERDICT_SECTIONS[stun_dead][1], "fail"),
+                ],
+            )
+            self.assertEqual(rows[1].detail, "the NAT pair with its first STUN server dead")
+
+        def test_a_fail_in_an_unknown_step_does_not_reach_the_step_above_it(self) -> None:
+            rows, orphans = parse_log(
+                log(turn_run, ("a step added to lab.sh yesterday", ["  FAIL  it broke"])), versions, "2026-01-01"
+            )
+            self.assertEqual([r.result for r in rows], ["pass"])
+            self.assertEqual(orphans, ["'a step added to lab.sh yesterday': FAIL  it broke"])
+
+        def test_every_result_in_the_recorded_run_has_a_row(self) -> None:
+            text = (ROOT / "interop/fixtures/lab-run.log").read_text(encoding="utf-8")
+            rows, orphans = parse_log(text, read_versions(ROOT), "2026-01-01")
+            self.assertEqual(orphans, [])
+            flows = {r.flow for r in rows}
+            for _, label in VERDICT_SECTIONS.values():
+                self.assertIn(label, flows)
+
+        def test_every_robust_flow_stands_for_a_feature(self) -> None:
+            features = parse_features((ROOT / "interop/features.toml").read_text(encoding="utf-8"))
+            listed = {flow for f in features for flow in f.flows}
+            for _, label in VERDICT_SECTIONS.values():
+                self.assertIn(base_flow_name(label), listed)
+
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(Tests)
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if result.wasSuccessful() else 1
 
 
 if __name__ == "__main__":
