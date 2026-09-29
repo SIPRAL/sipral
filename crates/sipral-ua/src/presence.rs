@@ -155,7 +155,8 @@ pub struct Contact {
 pub struct Tuple {
     /// The `id` attribute: an `xs:ID`, unique within the document.
     pub id: Box<str>,
-    /// `status/basic`.
+    /// `status/basic`. A tuple without one can be read but not written: it
+    /// is the only child of `status` written, and §4.1.3 wants one.
     pub basic: Option<Basic>,
     /// `contact`.
     pub contact: Option<Contact>,
@@ -318,7 +319,8 @@ impl Presence {
     ///
     /// # Errors
     /// [`PresenceError::Unwritable`]: an empty entity, an identifier that is
-    /// not an XML name, two tuples with one identifier, a priority above
+    /// not an XML name, two tuples with one identifier, a tuple with no basic
+    /// status, a priority above
     /// 1000, an unlisted activity whose name is not an XML name, or a value
     /// holding a character no XML document can carry.
     pub fn to_xml(&self) -> Result<Vec<u8>, PresenceError> {
@@ -374,7 +376,8 @@ fn read_tuple(node: &XmlNode<'_>) -> Result<Tuple, PresenceError> {
         .attributes
         .text("id")?
         .ok_or(PresenceError::Malformed("a tuple with no id"))?;
-    // §4.1.3: every tuple has a status, even one with nothing in it
+    // §4.1.2: every tuple has a status. §4.1.3 wants a child in it, but one
+    // holding nothing this reads is read as no basic status
     let status = node
         .child("status")
         .ok_or(PresenceError::Malformed("a tuple with no status"))?;
@@ -521,9 +524,12 @@ fn write_tuple(out: &mut String, tuple: &Tuple) -> Result<(), PresenceError> {
     out.push_str(" <tuple id=\"");
     escape(out, &tuple.id)?;
     out.push_str("\">\n  <status>");
-    if let Some(basic) = tuple.basic {
-        push_raw(out, "<basic>", basic.as_str(), "</basic>");
-    }
+    // §4.1.3: a status holds at least one child, and `basic` is the only one
+    // written here
+    let Some(basic) = tuple.basic else {
+        return Err(PresenceError::Unwritable("a status with nothing in it"));
+    };
+    push_raw(out, "<basic>", basic.as_str(), "</basic>");
     out.push_str("</status>\n");
     if let Some(ref contact) = tuple.contact {
         out.push_str("  <contact");
@@ -815,6 +821,26 @@ mod tests {
             presence.to_xml(),
             Err(PresenceError::Unwritable("a priority above 1"))
         );
+    }
+
+    #[test]
+    fn a_tuple_whose_status_would_be_empty_is_not_written() {
+        // RFC 3863 §4.1.3: `status` holds at least one child element, and
+        // `basic` is the only one this writes
+        let mut presence = Presence::new("pres:a@example.com");
+        let mut tuple = Tuple::new("t", Basic::Open);
+        tuple.basic = None;
+        presence.tuples.push(tuple);
+        assert_eq!(
+            presence.to_xml(),
+            Err(PresenceError::Unwritable("a status with nothing in it"))
+        );
+        // one read with an empty status is still read: liberal in what comes in
+        let read = Presence::parse(
+            b"<presence entity=\"pres:a@example.com\"><tuple id=\"t\"><status/></tuple></presence>",
+        )
+        .expect("a document");
+        assert_eq!(read.tuples[0].basic, None);
     }
 
     #[test]
