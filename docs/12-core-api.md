@@ -98,7 +98,11 @@ does not terminate the INVITE transaction outright. The client transaction sits
 in `Accepted` for timer M (64·T1) and passes every further 2xx, including those
 from other forks, up to the dialog layer instead of treating them as strays.
 The server transaction sits in `Accepted` for timer L and absorbs
-retransmissions of the INVITE. Three reviewers flagged the absence of this
+retransmissions of the INVITE, and over UDP it sends the 2xx again on timer G's
+schedule — T1 doubling up to T2 — until the ACK arrives, which §13.3.1.4 asks
+of the layer above and which the endpoint does on its behalf. The ACK is sent
+under a branch of its own, so the dialog that takes it tells the transaction.
+Three reviewers flagged the absence of this
 state independently; it is the corner that produces "the call connected but the
 app thinks it failed" in the field.
 
@@ -762,9 +766,11 @@ pub struct EndpointConfig {
     /// 503 statelessly (§21.5.4) and `Event::Overloaded` says so. Defaults
     /// 256 and 128 — an order of magnitude past what a softphone reaches. An
     /// incoming call counts against `max_dialogs` from the moment its INVITE
-    /// is let in, not from the response of ours that makes its dialog; each
-    /// branch of a fork past the first dialog of our own INVITE, and past the
-    /// first 2xx to it, opens only while there is room.
+    /// is let in, not from the response of ours that makes its dialog, and a
+    /// call placed here from the moment its INVITE is sent — one placed at
+    /// the ceiling is `SendError::LimitReached`; each branch of a fork past
+    /// the first dialog of our own INVITE, and past the first 2xx to it,
+    /// opens only while there is room.
     pub max_server_transactions: usize,
     pub max_dialogs: usize,
     /// How much of the diagnostic record to keep: entries per call, and calls
@@ -1002,6 +1008,13 @@ impl Endpoint {
     /// How many messages the parser refused, whether they were answered 400
     /// or 513 or could not be answered at all; the record says which.
     pub const fn unreadable(&self) -> u64;
+    /// Requests and responses sent again, and transactions that timed out,
+    /// since the endpoint was created (`docs/17-observability.md`).
+    pub const fn retransmissions(&self) -> Retransmissions;
+    /// The same count of one live transaction's own repeats.
+    pub fn transaction_retransmissions(&self, id: impl Into<AnyTransactionId>) -> Option<u32>;
+    /// What the endpoint was configured with.
+    pub const fn config(&self) -> &EndpointConfig;
 
     // -- the diagnostic record --------------------------------------------------
     /// What this endpoint decided about one call, in order, with a stable code

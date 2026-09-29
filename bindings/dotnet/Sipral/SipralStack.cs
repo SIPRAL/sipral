@@ -256,7 +256,17 @@ public sealed class SipralStack : IDisposable
     /// for three seconds): a driver that does not answer is
     /// <see cref="SipralStatus.DeviceTimedOut"/>, not a hang.
     /// <paramref name="audioDeviceRateHz"/> is the rate the devices are asked
-    /// for (<c>0</c> for 48 000).</summary>
+    /// for (<c>0</c> for 48 000).
+    /// <paramref name="maxDialogs"/> is the most calls the stack holds at
+    /// once, either way (<c>0</c> for 128): one that arrives past it is
+    /// answered 503, and one placed past it is
+    /// <see cref="SipralStatus.LimitReached"/>.
+    /// <paramref name="maxServerTransactions"/> is the most requests from
+    /// other ends it works on at once (<c>0</c> for 256).
+    /// <paramref name="diagnosticDecisions"/> and
+    /// <paramref name="diagnosticRecords"/> bound the diagnostic record:
+    /// decisions kept per call (<c>0</c> for 64) and calls kept (<c>0</c>
+    /// for 32).</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -281,7 +291,11 @@ public sealed class SipralStack : IDisposable
         SipralAudio? audio = null,
         SipralAudioActivation audioActivation = SipralAudioActivation.Automatic,
         ulong audioProbeMs = 0,
-        uint audioDeviceRateHz = 0)
+        uint audioDeviceRateHz = 0,
+        uint maxDialogs = 0,
+        uint maxServerTransactions = 0,
+        uint diagnosticDecisions = 0,
+        uint diagnosticRecords = 0)
     {
         _nat = nat;
         _turn = turnServer is not null;
@@ -378,6 +392,10 @@ public sealed class SipralStack : IDisposable
             }
             config.AudioProbeMs = audioProbeMs;
             config.AudioDeviceRateHz = audioDeviceRateHz;
+            config.MaxDialogs = maxDialogs;
+            config.MaxServerTransactions = maxServerTransactions;
+            config.DiagnosticDecisions = diagnosticDecisions;
+            config.DiagnosticRecords = diagnosticRecords;
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }

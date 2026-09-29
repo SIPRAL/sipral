@@ -8,7 +8,7 @@
 //! it creates, an entry it is matched to, or an entry it should have ended.
 
 use super::tests::{deliver, endpoint, events, header, incoming, sent, transmits, with};
-use super::{DialogEndReason, Endpoint, Event, OutgoingResponse};
+use super::{DialogEndReason, Endpoint, Event, OutgoingResponse, SendError};
 use crate::dialog::DialogState;
 use crate::msg::{HeaderName, StatusCode};
 use crate::transaction::{DialogId, InviteServer, TransactionId};
@@ -292,6 +292,7 @@ fn ten_thousand_calls_whose_timers_fire_at_once_cost_two_sweeps_and_no_more() {
     const CALLS: usize = 10_000;
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);
+    endpoint.config.max_dialogs = CALLS;
     for _ in 0..CALLS {
         let invite = placed(&mut endpoint, t0);
         deliver(
@@ -673,11 +674,12 @@ fn status_of(bytes: &[u8]) -> Option<StatusCode> {
 fn the_call_this_end_placed_opens_its_first_dialog_however_full_the_endpoint_is() {
     // the ceiling bounds what a peer can make the endpoint hold, and the extra
     // branches of a fork are the peer's; the first dialog of an INVITE this
-    // end sent is the call the application asked for
+    // end sent is the call the application asked for, placed while there was
+    // room, and the ceiling coming down under it does not take it away
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);
-    endpoint.config.max_dialogs = 0;
     let invite = placed(&mut endpoint, t0);
+    endpoint.config.max_dialogs = 0;
     deliver(
         &mut endpoint,
         &super::tests::respond_to(&invite, 200, "OK", Some("desk")),
@@ -690,6 +692,112 @@ fn the_call_this_end_placed_opens_its_first_dialog_however_full_the_endpoint_is(
         "the call was answered and this end never heard"
     );
     assert_eq!(endpoint.in_flight().1, 1);
+}
+
+#[test]
+fn a_call_placed_past_the_ceiling_is_refused_before_anything_goes_out() {
+    // max_dialogs holds in both directions: a call this end places is a
+    // dialog the moment anything answers it, so it is counted from the
+    // INVITE on, and the one that would pass the ceiling is not sent at all
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint.config.max_dialogs = 2;
+    let first = placed(&mut endpoint, t0);
+    placed(&mut endpoint, t0);
+    assert_eq!(
+        endpoint.invite(&super::tests::invite_request(), t0),
+        Err(SendError::LimitReached { limit: 2 })
+    );
+    assert!(transmits(&mut endpoint).is_empty(), "nothing went out");
+
+    // a refusal gives the room back at once, while its transaction still
+    // stands for timer D: the call it placed is over
+    deliver(
+        &mut endpoint,
+        &super::tests::respond_to(&first, 486, "Busy Here", Some("desk")),
+        t0,
+    );
+    events(&mut endpoint);
+    transmits(&mut endpoint);
+    endpoint
+        .invite(&super::tests::invite_request(), t0)
+        .expect("the refused call's room is free again");
+}
+
+#[test]
+fn a_call_nothing_answers_gives_its_room_back_at_timer_b_and_is_counted() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint.config.max_dialogs = 1;
+    placed(&mut endpoint, t0);
+    assert_eq!(
+        endpoint.invite(&super::tests::invite_request(), t0),
+        Err(SendError::LimitReached { limit: 1 })
+    );
+    // timer B: 64·T1 of silence ends the INVITE
+    endpoint.handle_timeout(t0 + std::time::Duration::from_secs(32));
+    events(&mut endpoint);
+    transmits(&mut endpoint);
+    assert_eq!(endpoint.retransmissions().timeouts, 1);
+    endpoint
+        .invite(
+            &super::tests::invite_request(),
+            t0 + std::time::Duration::from_secs(32),
+        )
+        .expect("the call nothing answered is over, and its room free");
+}
+
+#[test]
+fn a_call_answered_and_hung_up_gives_its_room_back_before_its_invite_ends() {
+    // RFC 6026 keeps the INVITE's transaction for 64·T1 after the 2xx, and a
+    // call over before then is over: it does not go on holding a place under
+    // the ceiling for the rest of those 32 seconds
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint.config.max_dialogs = 1;
+    let invite = placed(&mut endpoint, t0);
+    deliver(
+        &mut endpoint,
+        &super::tests::respond_to(&invite, 200, "OK", Some("desk")),
+        t0,
+    );
+    let dialog = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Established { dialog, .. } => Some(dialog),
+            _ => None,
+        })
+        .expect("the call is up");
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    endpoint.bye(dialog, t0).expect("the BYE goes");
+    let bye = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &super::tests::respond_to(&bye, 200, "OK", None),
+        t0,
+    );
+    events(&mut endpoint);
+    assert_eq!(endpoint.in_flight().1, 0, "the dialog is gone");
+    endpoint
+        .invite(&super::tests::invite_request(), t0)
+        .expect("the call that ended left its room free");
+}
+
+#[test]
+fn a_stranger_is_refused_503_while_the_calls_this_end_placed_fill_the_ceiling() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint.config.max_dialogs = 1;
+    placed(&mut endpoint, t0);
+    deliver(&mut endpoint, &stranger(1), t0);
+    let answer = sent(&mut endpoint);
+    assert!(answer.starts_with(b"SIP/2.0 503 "), "{answer:?}");
+    assert!(
+        !String::from_utf8_lossy(&answer).contains("Retry-After"),
+        "an endpoint-wide refusal names no delay"
+    );
+    assert_eq!(endpoint.refused(), 1);
 }
 
 // -- a merged copy of one request is not a second call ------------------------
@@ -902,12 +1010,13 @@ fn a_placed_call_answered_by_another_branch_than_the_first_to_ring_is_establishe
     // A forking proxy rings the desk and the mobile, and the mobile answers:
     // the 2xx that answers the call the application placed comes from another
     // branch than the first to ring. A stranger's call waiting to be answered
-    // is all it takes to fill a ceiling of one.
+    // is all it takes to fill a ceiling of one, once the call is placed.
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);
-    endpoint.config.max_dialogs = 1;
-    let_in(&mut endpoint, &stranger(1), t0).expect("a stranger's call");
     let invite = placed(&mut endpoint, t0);
+    endpoint.config.max_dialogs = 2;
+    let_in(&mut endpoint, &stranger(1), t0).expect("a stranger's call");
+    endpoint.config.max_dialogs = 1;
     deliver(
         &mut endpoint,
         &super::tests::respond_to(&invite, 180, "Ringing", Some("desk")),

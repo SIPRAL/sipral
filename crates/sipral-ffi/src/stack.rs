@@ -563,6 +563,44 @@ record! {
         /// this one, and a platform that answers with another rate is
         /// taken at its word.
         pub audio_device_rate_hz: u32,
+        /// The most calls this stack holds at once, in either direction, or
+        /// zero for 128: a softphone's ceiling, well past what one person
+        /// can hold and well short of what a flood would make it keep. A
+        /// call counts from its INVITE on — one that arrives from the
+        /// moment it is let in, one placed here from the moment it is sent
+        /// — until it ends or is refused.
+        ///
+        /// An INVITE that arrives past it is answered `503 Service
+        /// Unavailable` before it rings, with no `Retry-After`: RFC 3261
+        /// §21.5.4 has the client try another server either way, and a
+        /// `Retry-After` would also have a proxy send this stack nothing at
+        /// all for that long, every call refused for one too many. A
+        /// call placed past it is `SIPRAL_STATUS_LIMIT_REACHED` and nothing
+        /// goes out. A media server built on this library raises it to what
+        /// its machine can carry; `docs/19-numbers.md` has what one costs.
+        ///
+        /// Appended at the tail (task 8.10), with the three below; the
+        /// pinned `MIN_SIZE` is unmoved.
+        pub max_dialogs: u32,
+        /// The most requests from other ends this stack works on at once —
+        /// its server transactions, RFC 3261 §17.2 — or zero for 256. Past
+        /// it a request that would start another is answered `503` at once,
+        /// statelessly and with no `Retry-After`, and every one already
+        /// under way is still answered. A request inside a call is held to
+        /// that call's own share instead, and a BYE never is.
+        pub max_server_transactions: u32,
+        /// D1: how many decisions each call's diagnostic record keeps, or
+        /// zero for 64. Past it the oldest go and the record counts them.
+        pub diagnostic_decisions: u32,
+        /// D1: how many calls have a diagnostic record at once, or zero for
+        /// 32; the endpoint's own record is kept besides them. Past it the
+        /// record written longest ago goes, and the stack counts it. Neither
+        /// of the two refuses anything: they bound what the records cost, a
+        /// quarter of a megabyte at the defaults. Every decision written
+        /// looks through the records for its call, so this one is best kept
+        /// in the hundreds even on a stack holding thousands of calls: the
+        /// calls a support case is about are the ones written most recently.
+        pub diagnostic_records: u32,
     }
 }
 
@@ -688,6 +726,21 @@ record! {
         /// Appended at the tail (task 8.7.4); the pinned `MIN_SIZE` is
         /// unmoved.
         pub registrar_keepalive_ms: u64,
+        /// The most calls the stack holds at once, with the default filled
+        /// in.
+        ///
+        /// Appended at the tail (task 8.10), with the three below; the
+        /// pinned `MIN_SIZE` is unmoved.
+        pub max_dialogs: u32,
+        /// The most server transactions it works on at once, with the
+        /// default filled in.
+        pub max_server_transactions: u32,
+        /// How many decisions a diagnostic record keeps, with the default
+        /// filled in.
+        pub diagnostic_decisions: u32,
+        /// How many diagnostic records the stack keeps, with the default
+        /// filled in.
+        pub diagnostic_records: u32,
     }
 }
 
@@ -1282,6 +1335,36 @@ fn timers_for(
     Ok(timers)
 }
 
+/// The four ceilings a stack is created with, each zero for the endpoint's
+/// own default. Every figure a `u32` can carry is taken: what one costs is a
+/// question for the machine, not for this check.
+fn limits_for(endpoint: &mut EndpointConfig, config: &SipralStackConfig) {
+    let given = |value: u32, default: usize| {
+        if value == 0 {
+            default
+        } else {
+            usize::try_from(value).unwrap_or(usize::MAX)
+        }
+    };
+    endpoint.max_dialogs = given(config.max_dialogs, endpoint.max_dialogs);
+    endpoint.max_server_transactions = given(
+        config.max_server_transactions,
+        endpoint.max_server_transactions,
+    );
+    endpoint.diagnostics.max_decisions = given(
+        config.diagnostic_decisions,
+        endpoint.diagnostics.max_decisions,
+    );
+    endpoint.diagnostics.max_records =
+        given(config.diagnostic_records, endpoint.diagnostics.max_records);
+}
+
+/// A count as the caller reads one: saturating, since a figure past what a
+/// `u32` holds was never one a caller could have given.
+fn count(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 /// What the user agent is told of the configuration's policies: whether it
 /// takes a REFER from outside any dialog, and how often an account behind a
 /// NAT sends to its registrar, or that it never does.
@@ -1448,6 +1531,7 @@ pub(crate) unsafe fn create_on(
     let turn_server = unsafe { crate::nat::turn_configured(&config) }?;
     let mut endpoint = EndpointConfig::default();
     endpoint.timers = timers;
+    limits_for(&mut endpoint, &config);
 
     let origin = Instant::now();
     let clock = crate::audio::Clock::new(origin);
@@ -1601,6 +1685,7 @@ entry! {
         // its size wrong is told that rather than something about the stack
         unsafe { declared_size(out_settings.cast_const()) }?;
         let settings = with_stack(stack, |state| {
+            let limits = *state.agent.endpoint().config();
             let catalog = state.engine.catalog();
             Ok(SipralStackSettings {
                 size: size_of::<SipralStackSettings>(),
@@ -1618,6 +1703,10 @@ entry! {
                 g729_annex_b: toggle_of(catalog.g729_annex_b()),
                 referrals: toggle_of(state.agent.allows_referrals()),
                 registrar_keepalive_ms: state.agent.registrar_keepalive().map_or(0, millis),
+                max_dialogs: count(limits.max_dialogs),
+                max_server_transactions: count(limits.max_server_transactions),
+                diagnostic_decisions: count(limits.diagnostics.max_decisions),
+                diagnostic_records: count(limits.diagnostics.max_records),
             })
         })?;
         unsafe { write_versioned(out_settings, settings) }?;
@@ -2541,6 +2630,10 @@ pub(crate) mod tests {
             registrar_keepalive: 0,
             registrar_keepalive_ms: 0,
             turn_transport: 0,
+            max_dialogs: 0,
+            max_server_transactions: 0,
+            diagnostic_decisions: 0,
+            diagnostic_records: 0,
         }
     }
 
@@ -2702,6 +2795,10 @@ pub(crate) mod tests {
             g729_annex_b: u32::MAX,
             referrals: u32::MAX,
             registrar_keepalive_ms: u64::MAX,
+            max_dialogs: u32::MAX,
+            max_server_transactions: u32::MAX,
+            diagnostic_decisions: u32::MAX,
+            diagnostic_records: u32::MAX,
         }
     }
 
@@ -2792,6 +2889,35 @@ pub(crate) mod tests {
                 "{toggle} {millis}"
             );
         }
+    }
+
+    /// The four ceilings read back as the defaults when left at zero, and as
+    /// what was given otherwise.
+    #[test]
+    fn the_limits_read_back_as_they_came_to() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let read = read_settings(handle);
+        assert_eq!(read.max_dialogs, 128);
+        assert_eq!(read.max_server_transactions, 256);
+        assert_eq!(read.diagnostic_decisions, 64);
+        assert_eq!(read.diagnostic_records, 32);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let mut raised = config(record, &mut observed);
+        raised.max_dialogs = 10_000;
+        raised.max_server_transactions = 20_000;
+        raised.diagnostic_decisions = 8;
+        raised.diagnostic_records = 4;
+        let (status, handle) = create(&raised);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let read = read_settings(handle);
+        assert_eq!(read.max_dialogs, 10_000);
+        assert_eq!(read.max_server_transactions, 20_000);
+        assert_eq!(read.diagnostic_decisions, 8);
+        assert_eq!(read.diagnostic_records, 4);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
     #[test]

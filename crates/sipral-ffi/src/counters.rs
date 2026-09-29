@@ -18,6 +18,7 @@
 //! into whatever shape its own language prefers.
 
 use sipral::Counters;
+use sipral_core::endpoint::Endpoint;
 
 use crate::abi::record;
 use crate::error::entry;
@@ -105,6 +106,26 @@ record! {
         /// INVITEs refused 403 for naming a call they had no standing to
         /// replace (RFC 3891 §3).
         pub screened_refused_by_replaces: u64,
+        /// Requests this stack sent again because nothing answered in time
+        /// (RFC 3261 timers A and E), and ACKs sent again because the 2xx
+        /// they acknowledge arrived again. Only ever over UDP: nothing
+        /// retransmits over a stream. A figure that climbs while calls still
+        /// connect is a path losing packets before it loses calls.
+        ///
+        /// Appended at the tail (task 8.10), with the three below.
+        pub requests_retransmitted: u64,
+        /// Responses sent again: timer G, a reliable provisional response's
+        /// own timer, and the last answer repeated because the far end sent
+        /// its request again, which is what it does when that answer did not
+        /// reach it.
+        pub responses_retransmitted: u64,
+        /// Transactions that ended because the far end never answered or
+        /// never acknowledged: timers B, F, H and L, and a reliable
+        /// provisional response never PRACKed.
+        pub transactions_timed_out: u64,
+        /// Requests answered `503` because the stack was at
+        /// `max_server_transactions`, or an INVITE was at `max_dialogs`.
+        pub requests_refused_at_limit: u64,
     }
 }
 
@@ -124,7 +145,9 @@ fn counters_of(
     events_dropped: u64,
     farewells_dropped: u64,
     refusals: sipral_ua::Refusals,
+    endpoint: &Endpoint,
 ) -> SipralCounters {
+    let repeated = endpoint.retransmissions();
     SipralCounters {
         size: size_of::<SipralCounters>(),
         registrations_attempted: counters.registrations_attempted.get(),
@@ -151,6 +174,10 @@ fn counters_of(
         screened_refused_by_rate: refusals.by_rate,
         screened_refused_by_crowding: refusals.by_crowding,
         screened_refused_by_replaces: refusals.by_replaces,
+        requests_retransmitted: repeated.requests,
+        responses_retransmitted: repeated.responses,
+        transactions_timed_out: repeated.timeouts,
+        requests_refused_at_limit: endpoint.refused(),
     }
 }
 
@@ -176,6 +203,7 @@ entry! {
                 state.events_dropped,
                 state.farewells_dropped,
                 state.agent.refusals(),
+                state.agent.endpoint(),
             ))
         })?;
         unsafe { write_versioned(out_counters, counters) }
@@ -185,7 +213,10 @@ entry! {
 #[cfg(test)]
 mod tests {
     use super::{SipralCounters, sipral_stack_counters};
-    use crate::call::tests::{hangup, media_call};
+    use crate::call::tests::{
+        as_text, deliver, hangup, invitation, managed_config, media_call, media_line, place, sent,
+        start_line,
+    };
     use crate::error::last_error_text;
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
     use crate::stack::tests::Observed;
@@ -218,6 +249,10 @@ mod tests {
             screened_refused_by_rate: u64::MAX,
             screened_refused_by_crowding: u64::MAX,
             screened_refused_by_replaces: u64::MAX,
+            requests_retransmitted: u64::MAX,
+            responses_retransmitted: u64::MAX,
+            transactions_timed_out: u64::MAX,
+            requests_refused_at_limit: u64::MAX,
         }
     }
 
@@ -304,6 +339,45 @@ mod tests {
             after.calls_ended_refused, 0,
             "not the disposition that happened"
         );
+    }
+
+    /// `max_dialogs` holds both ways: a call placed past it is
+    /// `SIPRAL_STATUS_LIMIT_REACHED` with nothing sent, and one that arrives
+    /// past it is answered 503 and counted. The INVITE that did go, left
+    /// unanswered, goes again T1 later and is counted as that.
+    #[test]
+    fn a_stack_at_its_call_ceiling_refuses_both_ways_and_counts_what_went_again() {
+        let mut observed = Observed::default();
+        let (stack, account) = media_line(&mut observed, |config| config.max_dialogs = 1);
+        let (status, _first) = place(stack, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(sent(stack).len(), 1, "the INVITE");
+
+        let mut second = managed_config();
+        let (address, address_len) = as_text("192.0.2.10:40002");
+        second.media_address = address;
+        second.media_address_len = address_len;
+        let (status, _) = place(stack, account, &second, 1_100);
+        assert_eq!(status, SipralStatus::LimitReached, "{}", last_error_text());
+        assert!(
+            sent(stack).is_empty(),
+            "nothing went out for the refused call"
+        );
+
+        deliver(stack, &invitation(), 1_200);
+        let answers = sent(stack);
+        assert_eq!(answers.len(), 1, "{answers:?}");
+        assert_eq!(start_line(&answers[0]), "SIP/2.0 503 Service Unavailable");
+
+        crate::stack::tests::poll(stack, 1_600);
+        let read = counters(stack);
+        assert_eq!(
+            read.requests_retransmitted, 1,
+            "timer A, T1 after the INVITE"
+        );
+        assert_eq!(read.responses_retransmitted, 0);
+        assert_eq!(read.transactions_timed_out, 0);
+        assert_eq!(read.requests_refused_at_limit, 1);
     }
 
     #[test]

@@ -356,6 +356,12 @@ registrar's INVITE in long after the REGISTER (`docs/06-nat.md`).
 interval, 1 000 to 120 000; nothing goes while the stack is suspended.
 `NatTests.swift` proves both on the wire.
 
+A stack holds 128 calls at once unless `maxDialogs` says otherwise: past
+it an incoming call is answered 503 and `placeCall` throws
+`.limitReached`. `maxServerTransactions` (256), `diagnosticDecisions` (64)
+and `diagnosticRecords` (32) are the other ceilings, zero for the default
+each (`docs/08-ffi.md`, "Limits, and what went out twice").
+
 `TurnServer(..., transport: .tcp)` reaches the TURN server over TCP, for the
 network that lets no UDP out, and `.tls` over TLS (RFC 8656 §3.1) — 5349 is
 the port for it. The stack opens a Network.framework `NWConnection` per media

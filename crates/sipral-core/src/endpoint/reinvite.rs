@@ -377,6 +377,7 @@ impl Endpoint {
                     Direction::Outbound,
                     went_on,
                 );
+                self.count_retransmission(true, None);
                 self.queue(went_on.transmit(ack.bytes()));
             }
             return;

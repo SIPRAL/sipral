@@ -113,7 +113,10 @@ fn two_hundred_calls_run_on_four_threads_without_one_waiting_on_another() {
     // the one codec `media_line` opens with: mu-law, the format every
     // answer below names back
     let starting = Instant::now();
-    let (stack, account) = media_line(&mut observed, |_| {});
+    // past the default ceiling of 128 calls, the way a dialler raises it
+    let (stack, account) = media_line(&mut observed, |config| {
+        config.max_dialogs = u32::try_from(calls).unwrap_or(u32::MAX);
+    });
     let started = starting.elapsed();
 
     let mut media = Vec::with_capacity(calls);

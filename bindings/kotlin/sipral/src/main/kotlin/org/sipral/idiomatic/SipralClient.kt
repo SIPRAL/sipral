@@ -213,6 +213,14 @@ class SipralClient private constructor(
          * `DEVICE_TIMED_OUT` (`0` for three seconds), and [audioDeviceRateHz]
          * is the rate the devices are asked to run at (`0` for 48 000).
          *
+         * [maxDialogs] is the most calls the client holds at once, either
+         * way (`0` for 128): one that arrives past it is answered 503, and
+         * one placed past it throws with `LIMIT_REACHED`.
+         * [maxServerTransactions] is the most requests from other ends it
+         * works on at once (`0` for 256). [diagnosticDecisions] and
+         * [diagnosticRecords] bound the diagnostic record: decisions kept
+         * per call (`0` for 64) and calls kept (`0` for 32).
+         *
          * [network] is the network the client starts on, what the first
          * [networkChanged] compares with: a wired link at [bindHost], on no
          * interface in particular, unless the application knows better.
@@ -236,6 +244,10 @@ class SipralClient private constructor(
             audio: SipralAudioMode = SipralAudioMode.platformDefault,
             audioProbeMs: Long = 0,
             audioDeviceRateHz: Long = 0,
+            maxDialogs: Long = 0,
+            maxServerTransactions: Long = 0,
+            diagnosticDecisions: Long = 0,
+            diagnosticRecords: Long = 0,
             network: SipralNetwork? = null,
             srtp: SipralSrtp? = null,
         ): SipralClient {
@@ -250,6 +262,7 @@ class SipralClient private constructor(
                 client.start(
                     userAgent, codecs, ice, turn, g729AnnexB, referrals,
                     registrarKeepalive, registrarKeepaliveMs, audioProbeMs, audioDeviceRateHz, srtp,
+                    maxDialogs, maxServerTransactions, diagnosticDecisions, diagnosticRecords,
                 )
             } catch (refused: Exception) {
                 socket.close()
@@ -277,6 +290,10 @@ class SipralClient private constructor(
         audioProbeMs: Long,
         audioDeviceRateHz: Long,
         srtp: SipralSrtp?,
+        maxDialogs: Long,
+        maxServerTransactions: Long,
+        diagnosticDecisions: Long,
+        diagnosticRecords: Long,
     ) {
         val random = SecureRandom()
         val entropy = ByteArray(32).also { random.nextBytes(it) }
@@ -309,6 +326,10 @@ class SipralClient private constructor(
             audioProbeMs = audioProbeMs,
             audioDeviceRateHz = audioDeviceRateHz,
             srtp = (srtp?.value ?: 0).toLong(),
+            maxDialogs = maxDialogs,
+            maxServerTransactions = maxServerTransactions,
+            diagnosticDecisions = diagnosticDecisions,
+            diagnosticRecords = diagnosticRecords,
         )
         handle = Sipral.stackCreate(config)
         if (device) {

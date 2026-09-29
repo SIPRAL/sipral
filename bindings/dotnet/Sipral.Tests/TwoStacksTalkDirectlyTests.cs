@@ -467,3 +467,30 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         throw new TimeoutException($"no matching item arrived within {timeout}");
     }
 }
+
+/// <summary>
+/// <c>maxDialogs</c> reaches the stack: at a ceiling of one call, the
+/// second call placed is refused with <see cref="SipralStatus.LimitReached"/>.
+/// </summary>
+public sealed class ACeilingOnCallsTests
+{
+    [Fact]
+    public void ACallPlacedPastMaxDialogsIsRefused()
+    {
+        using var alice = new SipralStack(audio: SipralAudio.Application, maxDialogs: 1);
+        using var bob = new SipralStack(audio: SipralAudio.Application);
+        var account = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
+
+        var first = alice.PlaceCall(account, $"sip:bob@{bob.BindAddress}");
+        try
+        {
+            var refused = Assert.Throws<SipralException>(
+                () => alice.PlaceCall(account, $"sip:bob@{bob.BindAddress}"));
+            Assert.Equal(SipralStatus.LimitReached, refused.Status);
+        }
+        finally
+        {
+            first.Close();
+        }
+    }
+}

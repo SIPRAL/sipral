@@ -278,6 +278,7 @@ fn a_retransmitted_answer_gets_the_same_ack_again_and_is_not_reported_twice() {
     deliver(&mut endpoint, &ok, t0 + T1);
     let again = sent(&mut endpoint);
     assert_eq!(first, again, "the same bytes, not a new ACK");
+    assert_eq!(endpoint.retransmissions().requests, 1, "and counted");
     assert!(
         events(&mut endpoint).is_empty(),
         "the caller heard about this answer already"

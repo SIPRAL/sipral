@@ -118,6 +118,14 @@ public enum SipralStatus : int
     /// the engine is not waiting on it. What was asked was not done.
     /// </summary>
     DeviceTimedOut = 15,
+    /// <summary>
+    /// A limit the stack was created with refused new work: a call placed
+    /// while the calls this stack holds, has let in or has placed and
+    /// not yet heard back about already come to
+    /// `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
+    /// that ends makes room; raising the limit means a new stack.
+    /// </summary>
+    LimitReached = 16,
 }
 
 /// <summary>
@@ -2620,6 +2628,34 @@ public struct SipralCounters
     /// replace (RFC 3891 §3).
     /// </summary>
     public ulong ScreenedRefusedByReplaces;
+    /// <summary>
+    /// Requests this stack sent again because nothing answered in time
+    /// (RFC 3261 timers A and E), and ACKs sent again because the 2xx
+    /// they acknowledge arrived again. Only ever over UDP: nothing
+    /// retransmits over a stream. A figure that climbs while calls still
+    /// connect is a path losing packets before it loses calls.
+    ///
+    /// Appended at the tail (task 8.10), with the three below.
+    /// </summary>
+    public ulong RequestsRetransmitted;
+    /// <summary>
+    /// Responses sent again: timer G, a reliable provisional response's
+    /// own timer, and the last answer repeated because the far end sent
+    /// its request again, which is what it does when that answer did not
+    /// reach it.
+    /// </summary>
+    public ulong ResponsesRetransmitted;
+    /// <summary>
+    /// Transactions that ended because the far end never answered or
+    /// never acknowledged: timers B, F, H and L, and a reliable
+    /// provisional response never PRACKed.
+    /// </summary>
+    public ulong TransactionsTimedOut;
+    /// <summary>
+    /// Requests answered `503` because the stack was at
+    /// `max_server_transactions`, or an INVITE was at `max_dialogs`.
+    /// </summary>
+    public ulong RequestsRefusedAtLimit;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -3038,6 +3074,52 @@ public struct SipralStackConfig
     /// taken at its word.
     /// </summary>
     public uint AudioDeviceRateHz;
+    /// <summary>
+    /// The most calls this stack holds at once, in either direction, or
+    /// zero for 128: a softphone's ceiling, well past what one person
+    /// can hold and well short of what a flood would make it keep. A
+    /// call counts from its INVITE on — one that arrives from the
+    /// moment it is let in, one placed here from the moment it is sent
+    /// — until it ends or is refused.
+    ///
+    /// An INVITE that arrives past it is answered `503 Service
+    /// Unavailable` before it rings, with no `Retry-After`: RFC 3261
+    /// §21.5.4 has the client try another server either way, and a
+    /// `Retry-After` would also have a proxy send this stack nothing at
+    /// all for that long, every call refused for one too many. A
+    /// call placed past it is `SIPRAL_STATUS_LIMIT_REACHED` and nothing
+    /// goes out. A media server built on this library raises it to what
+    /// its machine can carry; `docs/19-numbers.md` has what one costs.
+    ///
+    /// Appended at the tail (task 8.10), with the three below; the
+    /// pinned `MIN_SIZE` is unmoved.
+    /// </summary>
+    public uint MaxDialogs;
+    /// <summary>
+    /// The most requests from other ends this stack works on at once —
+    /// its server transactions, RFC 3261 §17.2 — or zero for 256. Past
+    /// it a request that would start another is answered `503` at once,
+    /// statelessly and with no `Retry-After`, and every one already
+    /// under way is still answered. A request inside a call is held to
+    /// that call's own share instead, and a BYE never is.
+    /// </summary>
+    public uint MaxServerTransactions;
+    /// <summary>
+    /// D1: how many decisions each call's diagnostic record keeps, or
+    /// zero for 64. Past it the oldest go and the record counts them.
+    /// </summary>
+    public uint DiagnosticDecisions;
+    /// <summary>
+    /// D1: how many calls have a diagnostic record at once, or zero for
+    /// 32; the endpoint's own record is kept besides them. Past it the
+    /// record written longest ago goes, and the stack counts it. Neither
+    /// of the two refuses anything: they bound what the records cost, a
+    /// quarter of a megabyte at the defaults. Every decision written
+    /// looks through the records for its call, so this one is best kept
+    /// in the hundreds even on a stack holding thousands of calls: the
+    /// calls a support case is about are the ones written most recently.
+    /// </summary>
+    public uint DiagnosticRecords;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -3200,6 +3282,29 @@ public struct SipralStackSettings
     /// unmoved.
     /// </summary>
     public ulong RegistrarKeepaliveMs;
+    /// <summary>
+    /// The most calls the stack holds at once, with the default filled
+    /// in.
+    ///
+    /// Appended at the tail (task 8.10), with the three below; the
+    /// pinned `MIN_SIZE` is unmoved.
+    /// </summary>
+    public uint MaxDialogs;
+    /// <summary>
+    /// The most server transactions it works on at once, with the
+    /// default filled in.
+    /// </summary>
+    public uint MaxServerTransactions;
+    /// <summary>
+    /// How many decisions a diagnostic record keeps, with the default
+    /// filled in.
+    /// </summary>
+    public uint DiagnosticDecisions;
+    /// <summary>
+    /// How many diagnostic records the stack keeps, with the default
+    /// filled in.
+    /// </summary>
+    public uint DiagnosticRecords;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -6437,7 +6542,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 29;
+    public const uint AbiVersionMinor = 30;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -6615,6 +6720,17 @@ public static class Sipral
     /// `session_timer`.
     /// </summary>
     public const uint FeatureCallerIdentity = 4096;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. The ceilings a stack is created with
+    /// (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
+    /// `diagnostic_records` in `sipral_stack_config_t`, read back through
+    /// `sipral_stack_settings_t`), `SIPRAL_STATUS_LIMIT_REACHED` for a call
+    /// placed past `max_dialogs`, and the counters of what went out again,
+    /// what timed out and what was refused at a limit in
+    /// `sipral_counters_t`.
+    /// </summary>
+    public const uint FeatureLimits = 32768;
 
     /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.

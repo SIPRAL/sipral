@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sipral::{CallMedia, CodecCatalog, IcePolicy, SrtpPolicy};
-use sipral_core::endpoint::TransportId;
+use sipral_core::endpoint::{SendError, TransportId};
 use sipral_core::msg::{HeaderName, StatusCode, Uri};
 use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, OutgoingExtras, UaError};
 // only the tests below name the bound by number; the entry point delegates to
@@ -200,6 +200,7 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         // object this call is about is busy with a request of its own, the
         // same reading `SipralStatus::Busy` already has elsewhere
         UaError::MessagePending => SipralStatus::Busy,
+        UaError::Send(SendError::LimitReached { .. }) => SipralStatus::LimitReached,
         _ => SipralStatus::NotSent,
     };
     fail(status, error.to_string())

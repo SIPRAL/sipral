@@ -51,7 +51,7 @@ mod via;
 pub(crate) use table::Flow;
 
 pub use config::{DatagramLimit, EndpointConfig};
-pub use driver::{DialogSnapshot, Endpoint};
+pub use driver::{DialogSnapshot, Endpoint, Retransmissions};
 pub use error::{
     AckError, AuthRetryError, CancelError, PrackError, ReceiveError, RespondError, SendError,
 };

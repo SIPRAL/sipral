@@ -382,6 +382,10 @@ Content-Length: 0\r\n\r\n"
             screened_refused_by_rate: 0,
             screened_refused_by_crowding: 0,
             screened_refused_by_replaces: 0,
+            requests_retransmitted: 0,
+            responses_retransmitted: 0,
+            transactions_timed_out: 0,
+            requests_refused_at_limit: 0,
         }
     }
 

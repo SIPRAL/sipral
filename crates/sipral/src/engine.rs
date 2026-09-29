@@ -58,6 +58,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
+use std::ops::Bound;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -91,7 +92,7 @@ use crate::keying::SrtpPolicy;
 use crate::keying::{self, Shape};
 use crate::payloads::Payloads;
 use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
-use crate::share::{self, Held, SessionGuard, SessionShare};
+use crate::share::{self, Held, Ready, SessionGuard, SessionShare};
 
 /// The media type this stack negotiates. There is no video, deliberately, and
 /// an offered stream of anything else is refused rather than half-taken.
@@ -420,6 +421,20 @@ pub struct MediaEngine {
     /// each: a thread that carries a call's audio reaches it through a
     /// [`SessionShare`], which works for as long as the entry is here.
     sessions: BTreeMap<CallHandle, Held>,
+    /// The calls in `sessions` that have an event waiting, raised by the
+    /// session itself: what makes [`MediaEngine::poll_event`] cost the
+    /// sessions with something to say rather than every session held.
+    ready: Arc<Ready>,
+    /// How many sessions [`MediaEngine::poll_event`] has locked, all told:
+    /// the figure the test of its cost counts.
+    #[cfg(test)]
+    sessions_polled: usize,
+    /// Where the drain of [`MediaEngine::poll_rtcp`] under way picks up: the
+    /// call it last answered for, or `None` to start from the first.
+    rtcp_after: Option<CallHandle>,
+    /// How many sessions [`MediaEngine::poll_rtcp`] has locked, all told.
+    #[cfg(test)]
+    rtcp_looked: usize,
     calls: BTreeMap<CallHandle, Managed>,
     events: VecDeque<(CallHandle, MediaEvent)>,
     /// The RTCP goodbyes of calls that have ended, waiting to be polled.
@@ -599,6 +614,12 @@ impl MediaEngine {
             config,
             clock,
             sessions: BTreeMap::new(),
+            ready: Arc::default(),
+            #[cfg(test)]
+            sessions_polled: 0,
+            rtcp_after: None,
+            #[cfg(test)]
+            rtcp_looked: 0,
             calls: BTreeMap::new(),
             events: VecDeque::new(),
             farewells: VecDeque::new(),
@@ -3016,7 +3037,10 @@ impl MediaEngine {
     /// goes.
     ///
     /// One at a time, like every other poll here. A caller loops until it
-    /// answers `None`.
+    /// answers `None`. Each call picks up after the call the last one
+    /// answered for, so one such drain looks at every session once, however
+    /// many reports are due in it; a report that comes due behind the drain
+    /// is found by the next one, which starts from the first call again.
     ///
     /// The octets are copied out rather than lent, because they are written
     /// into the session's own buffer and the session is only held for as long
@@ -3031,7 +3055,15 @@ impl MediaEngine {
     pub fn poll_rtcp(&mut self, now: Instant) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
         #[cfg(feature = "ice")]
         let (calls, streamed) = (&self.calls, &mut self.streamed);
-        for (call, held) in &self.sessions {
+        let from = self
+            .rtcp_after
+            .take()
+            .map_or(Bound::Unbounded, Bound::Excluded);
+        for (call, held) in self.sessions.range((from, Bound::Unbounded)) {
+            #[cfg(test)]
+            {
+                self.rtcp_looked += 1;
+            }
             let mut slot = share::lock(held);
             if !slot.session.rtcp_deadline_passed(now) {
                 continue;
@@ -3044,19 +3076,45 @@ impl MediaEngine {
                 set_aside(streamed, calls, *call, &datagram);
                 continue;
             }
+            self.rtcp_after = Some(*call);
             return Some((*call, datagram.destination, datagram.payload.to_vec()));
         }
         None
     }
 
-    /// The first event any session has to report.
-    fn session_event(&self) -> Option<(CallHandle, MediaEvent)> {
-        for (call, held) in &self.sessions {
-            if let Some(event) = share::lock(held).session.poll_event() {
-                return Some((*call, event));
+    /// The next event a session has to report.
+    ///
+    /// Taken from the list of calls whose sessions raised one, so the
+    /// sessions locked are the ones on it and no others. A call that has
+    /// ended since it was raised, or whose events were drained another way
+    /// (`MediaSession::poll_event` through [`MediaEngine::session`]), is on
+    /// the list once more than it needs to be and costs one look.
+    fn session_event(&mut self) -> Option<(CallHandle, MediaEvent)> {
+        while let Some(call) = self.ready.take() {
+            let Some(held) = self.sessions.get(&call) else {
+                continue;
+            };
+            #[cfg(test)]
+            {
+                self.sessions_polled += 1;
+            }
+            let mut slot = share::lock(held);
+            let (event, more) = slot.session.take_for_engine();
+            if more {
+                self.ready.put_back(call);
+            }
+            if let Some(event) = event {
+                return Some((call, event));
             }
         }
         None
+    }
+
+    /// Take a session that has just opened into the table, where its events
+    /// reach [`MediaEngine::poll_event`].
+    fn keep_session(&mut self, call: CallHandle, mut session: MediaSession) {
+        session.report_to(call, Arc::clone(&self.ready));
+        self.sessions.insert(call, share::hold(session));
     }
 
     /// Act on what the user agent said.
@@ -3772,9 +3830,7 @@ impl MediaEngine {
                     },
                 )
             }
-            .map(|session| {
-                self.sessions.insert(call, share::hold(session));
-            }),
+            .map(|session| self.keep_session(call, session)),
         };
         match outcome {
             Ok(()) => {
@@ -4921,9 +4977,9 @@ mod answer_parameters {
 mod counter_wiring {
     //! `poll_event` hands out a media event from two places: the queue
     //! `self.events` fills (a call starting, changing or ending) and
-    //! [`MediaEngine::session_event`], which asks each session directly for
-    //! what it has queued on its own (a stall, a resume, a recording that
-    //! stopped). `crates/sipral/src/counters.rs` is thorough about what
+    //! [`MediaEngine::session_event`], which takes from the sessions that
+    //! raised one what each has queued on its own (a stall, a resume, a
+    //! recording that stopped). `crates/sipral/src/counters.rs` is thorough about what
     //! `Counters::observe_media` does with a [`MediaEvent`] once it has one;
     //! what only a test through this module can show is that both places
     //! that hand one out actually call it. This is the one that goes through
@@ -4969,7 +5025,10 @@ mod counter_wiring {
         engine: &mut MediaEngine,
         now: Instant,
     ) -> (UserAgent, CallHandle) {
-        let mut agent = UserAgent::new(EndpointConfig::default(), [5; 32]).expect("a user agent");
+        // room for the thousand calls the cost of a poll is measured over
+        let mut config = EndpointConfig::default();
+        config.max_dialogs = 2_000;
+        let mut agent = UserAgent::new(config, [5; 32]).expect("a user agent");
         agent
             .receive(
                 Input::TransportBound {
@@ -4995,7 +5054,25 @@ mod counter_wiring {
                 now,
             )
             .expect("the INVITE can be built now that a transport is bound");
+        // short enough that the test does not need to fake a ten-second
+        // clock jump to reach it
+        open_session(
+            engine,
+            call,
+            (Some(Duration::from_millis(50)), RtcpPlan::Off),
+            now,
+        );
+        (agent, call)
+    }
 
+    /// Open a session for `call` by hand and give it to the engine, with a
+    /// stall watchdog of `stall_after`, or none.
+    fn open_session(
+        engine: &mut MediaEngine,
+        call: CallHandle,
+        (stall_after, rtcp): (Option<Duration>, RtcpPlan),
+        now: Instant,
+    ) {
         let plan = MediaPlan {
             local: media_local(),
             remote: media_remote(),
@@ -5007,14 +5084,12 @@ mod counter_wiring {
             }),
             direction: Direction::SendRecv,
             dtmf: None,
-            rtcp: RtcpPlan::Off,
+            rtcp,
             keying: None,
             voip_metrics_xr: false,
         };
         let config = MediaConfig {
-            // short enough that the test does not need to fake a ten-second
-            // clock jump to reach it
-            stall_after: Some(Duration::from_millis(50)),
+            stall_after,
             ..MediaConfig::default()
         };
         let identity = StreamIdentity {
@@ -5040,8 +5115,7 @@ mod counter_wiring {
             },
         )
         .expect("PCMU is always in this build's catalogue");
-        engine.sessions.insert(call, crate::share::hold(session));
-        (agent, call)
+        engine.keep_session(call, session);
     }
 
     /// `MediaEngine::drop` marks every session ended before it lets its own
@@ -5113,6 +5187,172 @@ mod counter_wiring {
             "the session was acted on after its call had ended"
         );
         drop(kept_alive);
+    }
+
+    /// `poll_event` used to lock every session in turn to ask whether it had
+    /// something to say, so a stack holding thousands of calls paid for all
+    /// of them on every event it handed out, signalling ones included. It
+    /// now reads the list of calls whose sessions raised an event: here a
+    /// thousand sessions are held, one of them stalls, and draining the
+    /// engine locks that one session and no other.
+    /// An engine holding `sessions` sessions, the first of them with a stall
+    /// watchdog of 50 ms and every other with `rtcp`, and the signalling
+    /// events of setting them up drained.
+    fn many_sessions(
+        sessions: usize,
+        rtcp: RtcpPlan,
+        now: Instant,
+    ) -> (MediaEngine, UserAgent, CallHandle) {
+        let mut engine = MediaEngine::new(
+            CodecCatalog::new(),
+            MediaConfig::default(),
+            WallClock::from_unix(now, 1_700_000_000, 0),
+            [31; 32],
+        );
+        let (mut agent, stalling) = call_with_a_stalling_session(&mut engine, now);
+        let account = agent.add_account(Account::new(
+            Uri::parse_str("sip:many@example.com").expect("a URI"),
+            Uri::parse_str("sip:example.com").expect("a URI"),
+            Uri::parse_str("sip:many@192.0.2.20").expect("a URI"),
+            TRANSPORT,
+            "192.0.2.99:5060".parse().expect("an address"),
+        ));
+        for _ in 1..sessions {
+            let call = agent
+                .call(
+                    account,
+                    &OutgoingCall::new(Uri::parse_str("sip:carol@example.com").expect("a URI")),
+                    now,
+                )
+                .expect("the INVITE can be built");
+            open_session(&mut engine, call, (None, rtcp), now);
+        }
+        // the INVITEs themselves are signalling, drained here so that what
+        // is counted afterwards is media alone
+        while engine.poll_event(&mut agent, now).is_some() {}
+        assert_eq!(engine.sessions.len(), sessions);
+        (engine, agent, stalling)
+    }
+
+    #[test]
+    fn a_poll_looks_only_at_the_sessions_that_have_an_event() {
+        const SESSIONS: usize = 1_000;
+        let now = Instant::now();
+        let (mut engine, mut agent, stalling) = many_sessions(SESSIONS, RtcpPlan::Off, now);
+        let before = engine.sessions_polled;
+
+        let later = now + Duration::from_millis(200);
+        engine.handle_timeout(later);
+        let mut stalled = Vec::new();
+        while let Some(event) = engine.poll_event(&mut agent, later) {
+            if let Event::Media {
+                call,
+                event: MediaEvent::Stalled { .. },
+            } = event
+            {
+                stalled.push(call);
+            }
+        }
+        assert_eq!(
+            stalled,
+            [stalling],
+            "the one session with a watchdog stalled"
+        );
+        assert_eq!(
+            engine.sessions_polled - before,
+            1,
+            "draining one event from one session of {SESSIONS} locked more than that session"
+        );
+
+        // and with nothing raised, asking again locks none at all
+        assert!(engine.poll_event(&mut agent, later).is_none());
+        assert_eq!(engine.sessions_polled - before, 1);
+    }
+
+    /// `poll_rtcp` used to start from the first session on every call, so
+    /// draining k due reports out of n sessions looked at up to k·n of them:
+    /// ten thousand calls, each reporting every five seconds, cost the
+    /// signalling thread more than the five milliseconds between its sweeps
+    /// on the lab machine. A drain now picks up where the last report came
+    /// from, and looks at each session once.
+    #[test]
+    fn a_drain_of_rtcp_looks_at_each_session_once() {
+        const SESSIONS: usize = 500;
+        let now = Instant::now();
+        let rtcp = RtcpPlan::SeparatePort {
+            local: "192.0.2.20:40001".parse().expect("an address"),
+            remote: "203.0.113.9:40011".parse().expect("an address"),
+        };
+        let (mut engine, _agent, _) = many_sessions(SESSIONS, rtcp, now);
+
+        // past every session's first report, however §6.3 drew it
+        let later = now + Duration::from_secs(10);
+        let before = engine.rtcp_looked;
+        let mut reports = 0;
+        while engine.poll_rtcp(later).is_some() {
+            reports += 1;
+        }
+        assert_eq!(reports, SESSIONS - 1, "every session with RTCP reported");
+        assert!(
+            engine.rtcp_looked - before <= SESSIONS,
+            "{} sessions looked at to drain {reports} reports from {SESSIONS}",
+            engine.rtcp_looked - before
+        );
+
+        // and the next drain starts from the first call again: nothing is
+        // due, and every session is looked at once to say so
+        let before = engine.rtcp_looked;
+        assert!(engine.poll_rtcp(later).is_none());
+        assert_eq!(engine.rtcp_looked - before, SESSIONS);
+    }
+
+    /// Events a session queues while the engine is taking one of them out
+    /// still come out, in order: the call goes back at the head of the list
+    /// for as long as it has more, and is raised afresh once it had none.
+    #[test]
+    fn a_session_with_several_events_is_drained_in_order_and_raised_again_later() {
+        let now = Instant::now();
+        let mut engine = MediaEngine::new(
+            CodecCatalog::new(),
+            MediaConfig::default(),
+            WallClock::from_unix(now, 1_700_000_000, 0),
+            [37; 32],
+        );
+        let (mut agent, call) = call_with_a_stalling_session(&mut engine, now);
+        while engine.poll_event(&mut agent, now).is_some() {}
+        let pushed = |engine: &MediaEngine, gaps: &[u64]| {
+            let held = engine.sessions.get(&call).expect("the session");
+            let mut slot = crate::share::lock(held);
+            for gap in gaps {
+                slot.session.push_event_for_test(MediaEvent::Resumed {
+                    silent_for: Duration::from_millis(*gap),
+                });
+            }
+        };
+        pushed(&engine, &[1, 2, 3]);
+        let mut seen = Vec::new();
+        while let Some(event) = engine.poll_event(&mut agent, now) {
+            if let Event::Media {
+                event: MediaEvent::Resumed { silent_for },
+                ..
+            } = event
+            {
+                seen.push(silent_for.as_millis());
+            }
+        }
+        assert_eq!(seen, [1, 2, 3]);
+
+        pushed(&engine, &[4]);
+        assert!(
+            matches!(
+                engine.poll_event(&mut agent, now),
+                Some(Event::Media {
+                    event: MediaEvent::Resumed { silent_for },
+                    ..
+                }) if silent_for == Duration::from_millis(4)
+            ),
+            "a session drained once is raised again by its next event"
+        );
     }
 
     #[test]

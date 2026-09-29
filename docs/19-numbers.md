@@ -25,6 +25,11 @@ signalling test twice, a hundred calls between two stacks and then a
 thousand, which fails in the same way if any call ends wrongly or any message
 goes missing.
 
+`./scripts/bench.sh scale` is apart from that run: five and then ten thousand
+calls with audio both ways, between two processes on one machine, each over
+real UDP sockets. It wants a machine with the cores for it and is the
+29 September section below.
+
 ## What is measured, and what it is not
 
 **Measured here:** the library's own cost, in one process, with no network
@@ -175,7 +180,9 @@ Read together:
   every signalling event costs a little more for each call already up. A
   softphone never sees it; a server holding thousands of calls on one engine
   would, and it is the first thing to change before anybody plans around a
-  thousand-call figure.
+  thousand-call figure. (Changed on 29 September: a poll now reads only the
+  sessions that raised an event; the section of that date below measures
+  five and ten thousand calls.)
 - **A call's memory is mostly its media session.** 35 KB of the roughly
   51 KB one end holds for a live call is the idle G.711 session, against
   16–17 KB for everything the signalling keeps. A hundred calls on one stack
@@ -847,6 +854,101 @@ callback size: the changes of 25 and 27 September above, measured then on
 the reviews' runs of a few minutes, held for the full hour. The slow
 earpieces read one frame above the 20 ms target at every report, and the
 two-frame one at times two; nothing was discarded for overflow.
+
+## 29 September 2026 — `0.0.1`, five and ten thousand calls held
+
+`scripts/bench.sh scale` (`interop/harness/src/scale.rs`), at `708ca99` with the
+harness committed beside this section. Two processes of the lab harness on one
+machine, both on 127.0.0.1: one places the calls at 500 a second, the other
+answers every INVITE; once all are up they are held sixty seconds and hung up
+at the same rate. Every call is G.711 over a UDP socket of its own at each end,
+a 400 Hz tone sent both ways every twenty milliseconds and played out of the
+jitter buffer. Each end is laid out as a server on this stack would be: one
+thread owns the user agent and the media engine and runs all the signalling,
+reading SIP, draining `MediaEngine::poll_event`, and every twenty milliseconds
+running `MediaEngine::handle_timeout`, `UserAgent::handle_timeout` and a drain
+of `MediaEngine::poll_rtcp`; `SIPRAL_SCALE_THREADS` others carry the audio,
+each reading its calls' sockets, then taking each call's own lock through a
+`SessionShare` for its frame, then sending. Everything is this end's, the
+calling one, read from `/proc/self` over the sixty seconds of the hold; each
+cost of a call into the stack is wall-clock time on the signalling thread.
+
+Both ends raise the limits past the calls asked for: `max_dialogs` to the
+calls and 64 more, `max_server_transactions` to twice the calls and 256 more.
+At the defaults, 128 and 256, the 129th call is refused both ways: one placed
+is `SendError::LimitReached` in Rust and `SIPRAL_STATUS_LIMIT_REACHED` (16)
+over the C ABI, with nothing sent, and an INVITE that arrives is answered
+`503 Service Unavailable` with no `Retry-After`, counted in
+`sipral_counters_t::requests_refused_at_limit` (`docs/08-ffi.md`, "Limits, and
+what went out twice", says why no `Retry-After`).
+
+The Linux x86-64 lab machine (Intel Xeon E5-2698 v4 at 2.2 GHz, 32 vCPUs,
+Debian 13, kernel 6.12, socket buffers at the default 212 992 bytes), the
+harness built with `rustc 1.95.0` in `rust:1.95-trixie`, release profile; both
+ends on it, and nothing else running. Reproduce, on a machine with the cores:
+
+```bash
+./scripts/bench.sh scale                           # 5 000, then 10 000
+SIPRAL_SCALE_THREADS=12 ./scripts/bench.sh scale 10000
+# a harness built elsewhere, e.g. in a container: SIPRAL_HARNESS=<path> ...
+```
+
+| This end, over the hold | 5 000 calls, 8 audio threads | 10 000, 8 threads | 10 000, 12 threads |
+|---|---|---|---|
+| Calls up | 5 000 | 10 000 | 10 000 |
+| Setup rate, first INVITE to last 2xx | 500 a second | 499 a second | 379 a second |
+| Setup, INVITE to 2xx: p50, p90, max | 2.6, 6.3, 54.6 ms | 7.5, 95.6, 642.5 ms | 13.5, 241.3, 7 445 ms |
+| Processor | 5.32 cores: 113.8 s user, 205.4 s system | 8.48 cores: 182.1 s, 326.5 s | 11.20 cores: 257.8 s, 414.3 s |
+| Resident memory, peak | 363 MB | 718 MB | 719 MB |
+| Packets a second, out and in (due: 50 a call) | 249 980, 250 011 | 407 085, 403 591 | 477 278, 481 537 |
+| Frames played with the buffer run dry | 50 of 14 998 922 | 420 865 of 24 425 392 (1.7 %) | 287 466 of 28 637 055 (1.0 %) |
+| Audio ticks started a frame late, and the slowest | 3, 47 ms | 3 854, 48 ms | 1 434, 60 ms |
+| `poll_event`, each | 0.42 µs | 0.44 µs | 0.52 µs |
+| `MediaEngine::handle_timeout`, each | 1.73 ms | 3.66 ms | 3.30 ms |
+| `UserAgent::handle_timeout`, each | 1.10 ms | 2.19 ms | 2.32 ms |
+| A drain of `poll_rtcp`, each (reports) | 1.55 ms (59 965) | 3.44 ms (119 939) | 3.61 ms (119 733) |
+| SIP sent again here, and by the far end | none, none | none; 113 responses | 527 requests; 1 495 responses |
+
+No SIP transaction timed out at either end in any run, and every BYE reached
+the answering end, which counted every call ended.
+
+Read together:
+
+- **A call costs about 72 KB of resident memory at this end**, the harness's
+  own share included, and about a thousandth of a core while it carries
+  audio: 5 000 calls held on 5.3 cores. Two thirds of that is system
+  time: two `recvfrom`s and a `sendto` a call every frame, on sockets of its
+  own. That is the application's input and output rather than the library's,
+  and it is where a machine runs out first.
+- **Past five thousand calls it is the audio threads that break.** At ten
+  thousand, eight threads carry 1 250 calls each every twenty milliseconds,
+  sixteen microseconds a call, and cannot: 3 854 ticks started late, 1.7 % of
+  frames played dry, 407 000 of the 500 000 packets a second due went out.
+  Twelve threads, with the answering end's twelve beside them on the same 32
+  vCPUs, bring it to 1.0 % and 477 000. A server past this point wants its
+  sockets read in batches (`recvmmsg`) or fewer of them — one port for many
+  calls, told apart by SSRC — rather than more threads.
+- **The signalling thread has room to spare, and is linear.** At ten thousand
+  calls its three sweeps take about 9.3 ms of every 20: 46 %, growing with the calls
+  held, so one engine thread on this machine reaches its end near twenty
+  thousand. Each sweep locks every session or visits every call; they are the
+  next thing to make proportional to what is due rather than to what is held.
+- **`poll_event` no longer grows with the calls held.** 0.42 µs with five
+  thousand and 0.44 µs with ten thousand: it reads the sessions that raised
+  an event, where before this change it locked every session to ask.
+- **What broke before this change.** The same ten thousand calls, with
+  `poll_rtcp` still starting from the first session for every report and the
+  sweeps every five milliseconds: a drain took 8.3 ms, more than the interval
+  between them, the signalling loop turned 77 times a second, INVITEs went
+  again 5 680 times, 269 transactions timed out and 4 034 of the 10 000 calls
+  failed. With the drain fixed but before the 2xx fix, the caller's socket
+  buffer overflowed during the busiest seconds and 243 200 OKs were lost for
+  good — nothing repeated them — so 243 calls never came up. The far end's
+  113 repeated 2xx in the second column are the same kind of loss, recovered.
+- **The setup rate held at the rate asked for** up to ten thousand calls with
+  eight threads; with twelve, the machine was busy enough that the 2xx went
+  again 1 495 times and the slowest call took 7.4 s to come up, every one of
+  them up in the end.
 
 ## What would make these numbers worse
 

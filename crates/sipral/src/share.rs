@@ -36,9 +36,13 @@
 //! the last thread that was inside it lets go.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
+use sipral_ua::CallHandle;
+
+use crate::MediaEvent;
 use crate::session::MediaSession;
 
 /// A session, and whether its call still has it.
@@ -57,6 +61,97 @@ pub(crate) fn hold(session: MediaSession) -> Held {
         session,
         ended: false,
     }))
+}
+
+/// The calls whose sessions have an event waiting, in the order each first
+/// had one.
+///
+/// A session raises its own call here the moment an event goes into its
+/// queue with nothing already waiting there, and does it under its own lock,
+/// from whichever thread was carrying its audio at the time. So the engine
+/// finds the next media event by taking the first call off this list rather
+/// than by locking every session in turn to ask: a poll costs the sessions
+/// that have something to say, not the sessions there are.
+///
+/// Its lock is only ever taken with a session's lock already held or with no
+/// lock held at all, never the other way round, so the two cannot wait for
+/// each other.
+#[derive(Debug, Default)]
+pub(crate) struct Ready {
+    calls: Mutex<VecDeque<CallHandle>>,
+}
+
+impl Ready {
+    fn calls(&self) -> MutexGuard<'_, VecDeque<CallHandle>> {
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The call at the head of the list, taken off it.
+    pub(crate) fn take(&self) -> Option<CallHandle> {
+        self.calls().pop_front()
+    }
+
+    /// Put a call back at the head: it has more to say, and what it says
+    /// next comes before any other call's.
+    pub(crate) fn put_back(&self, call: CallHandle) {
+        self.calls().push_front(call);
+    }
+
+    fn raise(&self, call: CallHandle) {
+        self.calls().push_back(call);
+    }
+}
+
+/// A session's events, and how it tells the engine it has one.
+///
+/// What goes in comes out in the same order. The list the engine reads is
+/// told once per run of events rather than once per event: `raised` stays set
+/// from the first event of a run until the engine has taken the last, so a
+/// session that raises a hundred digits in one frame is on the list once.
+#[derive(Debug, Default)]
+pub(crate) struct Outbox {
+    queue: VecDeque<MediaEvent>,
+    to: Option<(CallHandle, Arc<Ready>)>,
+    raised: bool,
+}
+
+impl Outbox {
+    /// Queue an event, and put the call on the engine's list if it is not
+    /// already there.
+    pub(crate) fn push_back(&mut self, event: MediaEvent) {
+        self.queue.push_back(event);
+        if let Some((call, ready)) = &self.to
+            && !self.raised
+        {
+            self.raised = true;
+            ready.raise(*call);
+        }
+    }
+
+    /// The oldest event, taken.
+    pub(crate) fn pop_front(&mut self) -> Option<MediaEvent> {
+        self.queue.pop_front()
+    }
+
+    /// Say where to raise this session from now on, and raise it at once
+    /// when events are already waiting: they were queued before the engine
+    /// took the session in.
+    pub(crate) fn report_to(&mut self, call: CallHandle, ready: Arc<Ready>) {
+        self.raised = !self.queue.is_empty();
+        if self.raised {
+            ready.raise(call);
+        }
+        self.to = Some((call, ready));
+    }
+
+    /// The engine took the call off its list: the next event, and whether
+    /// the call has to go back on it for the one after.
+    pub(crate) fn take_for_engine(&mut self) -> (Option<MediaEvent>, bool) {
+        let event = self.queue.pop_front();
+        let more = !self.queue.is_empty();
+        self.raised = more;
+        (event, more)
+    }
 }
 
 /// Take a session's lock, waiting for whoever has it.

@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from sipral import Stack
+from sipral import SipralError, Stack
 from sipral._sipral_cffi import ffi, lib
 from sipral.enums import AudioMode, CallState, EventKind
 from sipral.events import _statistics
@@ -134,6 +134,30 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
     async def _close_calls(self, *calls) -> None:
         for call in calls:
             call.close()
+
+
+class ACeilingOnCalls(unittest.IsolatedAsyncioTestCase):
+    async def test_a_call_placed_past_max_dialogs_is_refused(self) -> None:
+        loop = asyncio.get_running_loop()
+        alice = Stack(loop=loop, audio=AudioMode.APPLICATION, max_dialogs=1)
+        bob = Stack(loop=loop, audio=AudioMode.APPLICATION)
+        self.addCleanup(bob.close)
+        self.addCleanup(alice.close)
+
+        settings = ffi.new("sipral_stack_settings_t *")
+        settings.size = ffi.sizeof("sipral_stack_settings_t")
+        self.assertEqual(lib.sipral_stack_settings(alice.handle, settings), 0)
+        self.assertEqual(settings.max_dialogs, 1)
+        self.assertEqual(settings.max_server_transactions, 256)
+
+        account = alice.add_account(
+            "sip:alice@sipral.invalid", registrar_address=bob.bind_address
+        )
+        first = alice.place_call(account, f"sip:bob@{bob.bind_address}")
+        self.addCleanup(first.close)
+        with self.assertRaises(SipralError) as raised:
+            alice.place_call(account, f"sip:bob@{bob.bind_address}")
+        self.assertEqual(raised.exception.status, lib.SIPRAL_STATUS_LIMIT_REACHED)
 
 
 if __name__ == "__main__":

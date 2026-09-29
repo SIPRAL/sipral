@@ -53,6 +53,7 @@ mod pair;
 mod pipewire;
 mod quality;
 mod referral;
+mod scale;
 mod volume;
 #[cfg(all(feature = "wasapi", target_os = "windows"))]
 mod wasapi;
@@ -627,6 +628,27 @@ fn extra_flows(
             Err(why) => {
                 println!("  FAIL  a volume of calls — {why}");
                 failures += 1;
+            }
+        }
+    }
+    // thousands of calls between two of this binary's own processes, and
+    // only when named: `server` is where the answering end listens, the
+    // address it binds under `scale-answer` and the one the calling end
+    // dials under `scale` (see `scale`'s own module doc)
+    for (name, run) in [
+        (
+            "scale-answer",
+            scale::answer as fn(SocketAddr) -> Result<String, String>,
+        ),
+        ("scale", scale::call),
+    ] {
+        if wanted.split(',').any(|flow| flow.trim() == name) {
+            match run(remote) {
+                Ok(said) => println!("  pass  {name}{said}"),
+                Err(why) => {
+                    println!("  FAIL  {name} — {why}");
+                    failures += 1;
+                }
             }
         }
     }
@@ -2808,6 +2830,10 @@ mod tests {
             moved::MEDIA_SEED => crate::moved::MEDIA_SEED,
             volume::SEED => crate::volume::SEED,
             volume::MEDIA_SEED => crate::volume::MEDIA_SEED,
+            scale::CALLER_SEED => crate::scale::CALLER_SEED,
+            scale::CALLER_MEDIA_SEED => crate::scale::CALLER_MEDIA_SEED,
+            scale::ANSWER_SEED => crate::scale::ANSWER_SEED,
+            scale::ANSWER_MEDIA_SEED => crate::scale::ANSWER_MEDIA_SEED,
         ];
         #[cfg(all(feature = "pipewire", target_os = "linux"))]
         all.extend(id![

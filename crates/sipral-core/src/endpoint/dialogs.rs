@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use super::table::Flow;
 use crate::dialog::{Dialog, DialogKey, DialogSet};
 use crate::msg::OwnedMessage;
-use crate::transaction::{DialogId, InviteClient, Raw, TransactionId, slab::Slab};
+use crate::transaction::{DialogId, InviteClient, InviteServer, Raw, TransactionId, slab::Slab};
 
 /// Which of the two shapes a dialog is in.
 #[derive(Debug)]
@@ -65,6 +65,11 @@ struct Entry {
     /// Not the dialog's remote sequence number: a PRACK or an UPDATE the far
     /// end sends before its ACK moves that one on.
     answered_invite: Option<u32>,
+    /// The server transaction that sent that 2xx. RFC 6026 keeps it in
+    /// Accepted for 64·T1 after, and the ACK that ends the wait is sent under
+    /// a branch of its own (§17.1.1.3), so it never matches the transaction:
+    /// this is how the transaction learns it came.
+    answered_by: Option<TransactionId<InviteServer>>,
     /// The `CSeq` number of the last ACK reported for such a 2xx, so that a
     /// repeat of it, sent for a retransmission of the 2xx, is not reported
     /// again.
@@ -80,6 +85,17 @@ struct Branches {
     invite: Option<TransactionId<InviteClient>>,
     /// How many dialog entries still point here.
     live: usize,
+    /// Whether the set is counted in [`Dialogs::unopened`]: its INVITE is
+    /// running, nothing has answered it with a dialog, and nothing has
+    /// refused it.
+    awaiting: bool,
+    /// A final response other than a 2xx has arrived: whatever the set still
+    /// holds is ending, and nothing will open it again.
+    refused: bool,
+    /// A 2xx has come for one of its dialogs: the call it placed was
+    /// answered, and once the dialogs it holds have ended the call is over,
+    /// however long RFC 6026's timer M keeps the INVITE's transaction.
+    answered: bool,
 }
 
 /// Every dialog of one endpoint.
@@ -89,6 +105,11 @@ pub(crate) struct Dialogs {
     sets: Slab<Branches>,
     by_key: HashMap<DialogKey, DialogId>,
     by_invite: HashMap<TransactionId<InviteClient>, Raw>,
+    /// Sets whose INVITE is still running and which hold no dialog yet: the
+    /// calls this end placed that nothing has answered or refused. Kept as a
+    /// count, moved wherever a set's `awaiting` changes, so that asking costs
+    /// nothing whatever the number of calls.
+    unopened: usize,
 }
 
 impl Dialogs {
@@ -99,6 +120,7 @@ impl Dialogs {
             sets: Slab::new(),
             by_key: HashMap::new(),
             by_invite: HashMap::new(),
+            unopened: 0,
         }
     }
 
@@ -107,14 +129,24 @@ impl Dialogs {
         self.entries.len()
     }
 
+    /// How many INVITEs this end sent are still running with no dialog to
+    /// show for it: each is a dialog the moment anything answers it.
+    pub(crate) const fn unopened(&self) -> usize {
+        self.unopened
+    }
+
     /// Start following an INVITE we are about to send.
     pub(crate) fn watch(&mut self, set: DialogSet, invite: TransactionId<InviteClient>) -> Raw {
         let raw = self.sets.insert(Branches {
             set,
             invite: Some(invite),
             live: 0,
+            awaiting: true,
+            refused: false,
+            answered: false,
         });
         self.by_invite.insert(invite, raw);
+        self.unopened += 1;
         raw
     }
 
@@ -139,6 +171,10 @@ impl Dialogs {
             return *known;
         }
         if let Some(branches) = self.sets.get_mut(set) {
+            if branches.awaiting {
+                branches.awaiting = false;
+                self.unopened = self.unopened.saturating_sub(1);
+            }
             branches.live += 1;
         }
         let raw = self.entries.insert(Entry {
@@ -149,6 +185,7 @@ impl Dialogs {
             acked_on: None,
             non_invite_transactions: 0,
             answered_invite: None,
+            answered_by: None,
             acknowledged_invite: None,
         });
         let id = DialogId::new(raw);
@@ -170,6 +207,7 @@ impl Dialogs {
             acked_on: None,
             non_invite_transactions: 0,
             answered_invite: None,
+            answered_by: None,
             acknowledged_invite: None,
         });
         let id = DialogId::new(raw);
@@ -262,12 +300,24 @@ impl Dialogs {
         }
     }
 
-    /// A 2xx to the INVITE numbered `seq` has gone out in this dialog, so the
-    /// ACK it is owed carries that number (§13.2.2.4).
-    pub(crate) fn answer_invite(&mut self, id: DialogId, seq: u32) {
+    /// A 2xx to the INVITE numbered `seq` has gone out in this dialog, from
+    /// `transaction`, so the ACK it is owed carries that number (§13.2.2.4).
+    pub(crate) fn answer_invite(
+        &mut self,
+        id: DialogId,
+        seq: u32,
+        transaction: TransactionId<InviteServer>,
+    ) {
         if let Some(entry) = self.entries.get_mut(id.raw) {
             entry.answered_invite = Some(seq);
+            entry.answered_by = Some(transaction);
         }
+    }
+
+    /// The server transaction that sent the 2xx the dialog's last ACK was
+    /// owed for.
+    pub(crate) fn answered_by(&self, id: DialogId) -> Option<TransactionId<InviteServer>> {
+        self.entries.get(id.raw).and_then(|entry| entry.answered_by)
     }
 
     /// Whether an ACK numbered `seq` is the one the last 2xx this end sent in
@@ -343,8 +393,34 @@ impl Dialogs {
         if let Some(invite) = branches.invite.take() {
             self.by_invite.remove(&invite);
         }
+        if branches.awaiting {
+            branches.awaiting = false;
+            self.unopened = self.unopened.saturating_sub(1);
+        }
         if branches.live == 0 {
             self.sets.remove(set);
+        }
+    }
+
+    /// The INVITE was refused: the call it placed is over, even while its
+    /// transaction stands for timer D to absorb the refusal again. A retry
+    /// with credentials is a new INVITE and counted as one.
+    pub(crate) fn refused(&mut self, set: Raw) {
+        let Some(branches) = self.sets.get_mut(set) else {
+            return;
+        };
+        branches.refused = true;
+        if branches.awaiting {
+            branches.awaiting = false;
+            self.unopened = self.unopened.saturating_sub(1);
+        }
+    }
+
+    /// A 2xx answered the INVITE a set follows: when its dialogs end, the
+    /// call it placed is over and stops counting against `max_dialogs`.
+    pub(crate) fn answered(&mut self, set: Raw) {
+        if let Some(branches) = self.sets.get_mut(set) {
+            branches.answered = true;
         }
     }
 
@@ -357,8 +433,16 @@ impl Dialogs {
             && let Some(branches) = self.sets.get_mut(set)
         {
             branches.live = branches.live.saturating_sub(1);
-            if branches.live == 0 && branches.invite.is_none() {
-                self.sets.remove(set);
+            if branches.live == 0 {
+                if branches.invite.is_none() {
+                    self.sets.remove(set);
+                } else if !branches.refused && !branches.answered {
+                    // the INVITE is still running with nothing but early
+                    // dialogs to show for it, and whatever answers it next
+                    // opens a dialog again
+                    branches.awaiting = true;
+                    self.unopened += 1;
+                }
             }
         }
         Some(entry.key)
