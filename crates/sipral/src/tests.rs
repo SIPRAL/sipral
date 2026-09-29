@@ -11914,3 +11914,154 @@ fn a_port_a_call_took_comes_back_when_the_call_ends() {
         "the ended call gave its port back"
     );
 }
+
+// -- RTCP feedback (RFC 4585, RFC 5506) ---------------------------------------
+
+fn feedback_catalog() -> CodecCatalog {
+    CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_feedback(true)
+}
+
+fn names(stream: &MediaDescription) -> Vec<String> {
+    stream
+        .attributes
+        .iter()
+        .map(|attribute| match attribute.value.as_deref() {
+            Some(value) => format!("{}:{value}", attribute.name),
+            None => attribute.name.clone(),
+        })
+        .collect()
+}
+
+fn agreed(
+    pair: &mut Pair,
+    call: CallHandle,
+    remote: CallHandle,
+) -> [Option<crate::FeedbackAgreed>; 2] {
+    let now = pair.now;
+    let placing = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .statistics(now)
+        .feedback;
+    let answering = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("the callee's media")
+        .statistics(now)
+        .feedback;
+    [placing, answering]
+}
+
+#[test]
+fn a_call_that_asks_for_feedback_runs_avpf_with_nacks_and_reduced_size() {
+    let mut pair = Pair::new(feedback_catalog());
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let offered = one_stream(&pair.callee.offer_received().expect("an offer"));
+    assert_eq!(offered.proto, "RTP/AVPF");
+    let lines = names(&offered);
+    assert!(lines.contains(&"rtcp-fb:* nack".to_owned()), "{lines:?}");
+    assert!(lines.contains(&"rtcp-rsize".to_owned()), "{lines:?}");
+    let answered = one_stream(&pair.caller.answer_received().expect("an answer"));
+    assert_eq!(
+        answered.proto, "RTP/AVPF",
+        "an answer keeps the offer's profile"
+    );
+    let lines = names(&answered);
+    assert!(lines.contains(&"rtcp-fb:* nack".to_owned()), "{lines:?}");
+    assert!(lines.contains(&"rtcp-rsize".to_owned()), "{lines:?}");
+
+    let both = crate::FeedbackAgreed {
+        generic_nack: true,
+        trr_interval: Duration::ZERO,
+        reduced_size: true,
+    };
+    assert_eq!(agreed(&mut pair, call, remote), [Some(both), Some(both)]);
+}
+
+#[test]
+fn an_answerer_that_does_not_ask_keeps_the_profile_and_agrees_to_nothing_more() {
+    let mut pair = Pair::asymmetric(
+        feedback_catalog(),
+        CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+    );
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let answered = one_stream(&pair.caller.answer_received().expect("an answer"));
+    assert_eq!(answered.proto, "RTP/AVPF");
+    assert!(
+        !names(&answered)
+            .iter()
+            .any(|line| line.starts_with("rtcp-fb") || line == "rtcp-rsize"),
+        "nothing it did not ask for"
+    );
+    let bare = crate::FeedbackAgreed::default();
+    assert_eq!(
+        agreed(&mut pair, call, remote),
+        [Some(bare), Some(bare)],
+        "RFC 4585's timing all the same: the profile is what was agreed"
+    );
+}
+
+#[test]
+fn a_call_that_does_not_ask_offers_no_feedback_and_runs_rfc_3550_alone() {
+    let mut pair = Pair::new(CodecCatalog::with_order(&["PCMU"]).expect("an order"));
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let offered = one_stream(&pair.callee.offer_received().expect("an offer"));
+    assert_eq!(offered.proto, "RTP/AVP");
+    assert_eq!(agreed(&mut pair, call, remote), [None, None]);
+}
+
+#[test]
+fn a_lost_packet_is_asked_for_and_the_sender_counts_it() {
+    let mut pair = Pair::new(feedback_catalog());
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    for tick in 0..40 {
+        tone(&mut samples, 8_000, &mut phase);
+        if tick == 20 {
+            // captured, and lost on the way
+            let _lost = pair
+                .caller
+                .engine
+                .session(call)
+                .expect("the caller's media")
+                .capture(&samples, pair.now)
+                .expect("the frame encodes")
+                .map(|datagram| datagram.payload.to_vec());
+        } else {
+            pair.exchange(call, remote, &samples);
+        }
+        pair.exchange_control(call, remote);
+        pair.advance();
+    }
+    let now = pair.now;
+    let sent = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("the callee's media")
+        .statistics(now)
+        .feedback_counts;
+    assert_eq!(sent.nacks_sent, 1, "{sent:?}");
+    assert_eq!(sent.packets_nacked, 1);
+    assert_eq!(sent.early_packets, 1, "at once, in an Early packet");
+    let heard = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .statistics(now)
+        .feedback_counts;
+    assert_eq!(heard.nacks_received, 1, "{heard:?}");
+    assert_eq!(heard.packets_asked_for, 1);
+}

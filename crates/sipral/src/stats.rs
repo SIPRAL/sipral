@@ -70,6 +70,15 @@ pub struct StreamStatistics {
     /// [`sipral_rtp::RtpSession::build_report`]); this field is what an
     /// RFC 6035 quality report and this crate's own statistics both read.
     pub voip_metrics: Option<VoipMetricsBlock>,
+    /// What RTP/AVPF feedback this stream negotiated (RFC 4585, RFC 5506):
+    /// Generic NACKs, `trr-int`, reduced size. `None` on a stream whose
+    /// offer and answer did not both name a feedback profile, which runs
+    /// RFC 3550's RTCP alone.
+    pub feedback: Option<sipral_rtp::avpf::Negotiated>,
+    /// What that feedback has done: NACKs sent and received, Early and
+    /// reduced-size packets, Regular ones `trr-int` suppressed. Zero on a
+    /// stream without it.
+    pub feedback_counts: sipral_rtp::avpf::FeedbackCounts,
 }
 
 impl StreamStatistics {
@@ -146,6 +155,8 @@ mod tests {
             octets_sent: 0,
             silent_for: Duration::ZERO,
             voip_metrics: None,
+            feedback: None,
+            feedback_counts: sipral_rtp::avpf::FeedbackCounts::default(),
         }
     }
 

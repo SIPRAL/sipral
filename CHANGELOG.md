@@ -211,8 +211,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   is in both offer and answer and a compound packet has gone first
   (RFC 5506), and reads and writes `a=rtcp-fb` (`nack`, `trr-int`; the rest
   ignored) and the `RTP/AVPF` and `RTP/SAVPF` profile names through the
-  `sipral_core::sdp` model. Nothing is wired into `RtpSession` yet. New
-  fuzz target `rtcp_fb`.
+  `sipral_core::sdp` model. New fuzz target `rtcp_fb`.
+- **Calls negotiate RTP/AVPF and reduced-size RTCP, and run RFC 4585's RTCP when both ends do.** `CodecCatalog::with_feedback` offers `RTP/AVPF` (`RTP/SAVPF`, `UDP/TLS/RTP/SAVPF` when keyed) with `a=rtcp-fb:* nack` and `a=rtcp-rsize`, and answers an offer on a feedback profile with the lines this stack does; a stream whose offer and answer both name one runs `RtpSession::use_feedback`: AVPF's minimum interval, Early and Regular packets by RFC 4585 §3.5, `trr-int`, Generic NACKs for the packets it finds missing, and reduced-size Early packets once a compound one has gone (RFC 5506). Nothing is retransmitted; `StreamStatistics::feedback` and `feedback_counts` say what was agreed, sent and asked for.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when

@@ -12,6 +12,9 @@
 //!   packet's report and CNAME in front of it, and when that is allowed
 //!   (RFC 5506).
 //! - [`sdp`]: the profile names, `a=rtcp-fb` and `a=rtcp-rsize`.
+//! - [`session`]: all of it in a running stream, once
+//!   [`RtpSession::use_feedback`](crate::RtpSession::use_feedback) turns it
+//!   on.
 //!
 //! Sans-I/O like the rest of the crate: no clock, no socket, no random
 //! number drawn here. Written from RFC 4585 and RFC 5506 alone.
@@ -19,6 +22,7 @@
 pub mod feedback;
 pub mod rsize;
 pub mod sdp;
+pub mod session;
 pub mod timing;
 
 pub use feedback::{
@@ -33,4 +37,5 @@ pub use sdp::{
     Feedback, FeedbackPayload, FeedbackValue, RTCP_FB, RTCP_RSIZE, RtcpFb, RtpProfile,
     answer_attributes, offers_rsize, rsize_negotiated, rtcp_fb,
 };
+pub use session::{FeedbackCounts, Negotiated};
 pub use timing::{AvpfConfig, AvpfTimer, FeedbackTiming, RegularPacket};

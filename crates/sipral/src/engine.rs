@@ -3732,6 +3732,12 @@ impl MediaEngine {
             }
         };
         let annex_b = annex_b_in_use(&managed.catalog, local, remote, &plan);
+        let feedback = match (live_stream(local), live_stream(remote)) {
+            (Some(ours), Some(theirs)) => {
+                crate::feedback::negotiated(ours, theirs, plan.codec.payload())
+            }
+            _ => None,
+        };
         // D5: recorded here, at the point the negotiation is worked out, from
         // the far end's own description and this call's own catalogue —
         // never reconstructed later from state that may have moved on
@@ -3781,6 +3787,9 @@ impl MediaEngine {
             if slot.session.codec() == codec {
                 let unchanged = *slot.session.plan() == plan;
                 let adopted = slot.session.adopt(&plan, candidates, annex_b, now);
+                if let Some(agreed) = feedback {
+                    slot.session.use_feedback(agreed, now);
+                }
                 drop(slot);
                 match adopted {
                     Ok(()) if unchanged => {}
@@ -3801,7 +3810,7 @@ impl MediaEngine {
         }
         // a different codec needs a different encoder, a different decoder
         // and a different frame length, so it needs a different session
-        self.start(call, &plan, codec, annex_b, candidates, now);
+        self.start(call, &plan, codec, (annex_b, feedback), candidates, now);
     }
 
     /// Open the stream for a plan, or carry the one that is running onto a
@@ -3811,15 +3820,19 @@ impl MediaEngine {
     /// that the stream, its SRTP contexts and everything the call has
     /// accumulated survive a codec change. [`MediaSession::reformat`] says
     /// what that is and why each piece of it matters.
+    ///
+    /// `agreed` is whether G.729's Annex B is in use, and what RTCP feedback
+    /// the descriptions agreed, which the stream runs from its first report.
     fn start(
         &mut self,
         call: CallHandle,
         plan: &MediaPlan,
         codec: Codec,
-        annex_b: bool,
+        agreed: (bool, Option<sipral_rtp::avpf::Negotiated>),
         candidates: Vec<CodecCandidate>,
         now: Instant,
     ) {
+        let (annex_b, feedback) = agreed;
         let Some(managed) = self.calls.get(&call) else {
             return;
         };
@@ -3831,8 +3844,13 @@ impl MediaEngine {
         let outcome = match running {
             Some(held) => {
                 let mut slot = share::lock(&held);
-                slot.session
-                    .reformat(plan, frame_length, &config, candidates, annex_b, now)
+                let reformatted =
+                    slot.session
+                        .reformat(plan, frame_length, &config, candidates, annex_b, now);
+                if let Some(agreed) = feedback {
+                    slot.session.use_feedback(agreed, now);
+                }
+                reformatted
             }
             None => {
                 #[cfg(feature = "dtls")]
@@ -3868,7 +3886,12 @@ impl MediaEngine {
                     },
                 )
             }
-            .map(|session| self.keep_session(call, session)),
+            .map(|mut session| {
+                if let Some(agreed) = feedback {
+                    session.use_feedback(agreed, now);
+                }
+                self.keep_session(call, session);
+            }),
         };
         match outcome {
             Ok(()) => {
@@ -4253,11 +4276,13 @@ fn write_offer(
         Origin::new(session_id, version, address.ip()),
         Connection::new(address.ip()),
     );
-    description.media.push(catalog.offering(keys, dtls).offer(
-        AUDIO,
-        address.port(),
-        Direction::SendRecv,
-    ));
+    let mut stream = catalog
+        .offering(keys, dtls)
+        .offer(AUDIO, address.port(), Direction::SendRecv);
+    if catalog.feedback() {
+        crate::feedback::offer(&mut stream);
+    }
+    description.media.push(stream);
     description
 }
 
@@ -4459,6 +4484,14 @@ fn take_stream(
     // and its quality report has no `RemoteMetrics` set to write
     if capabilities.voip_metrics_xr {
         accepted = accepted.with_attribute(Attribute::with_value("rtcp-xr", "voip-metrics"));
+    }
+    // RFC 4585 §4.2: an answerer keeps the feedback it will do and leaves
+    // the rest out. The profile itself is the offer's either way, since an
+    // answer does not change the transport of a stream it accepts
+    if catalog.feedback() {
+        for line in crate::feedback::answer(offered, &formats) {
+            accepted = accepted.with_attribute(line);
+        }
     }
     if let Some(line) = crypto {
         accepted = accepted.with_attribute(line.attribute());

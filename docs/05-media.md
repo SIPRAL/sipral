@@ -258,6 +258,47 @@ places, plainly:
    report clears `Outbound::sent_since_report`: a stream that falls silent
    sends RRs one interval sooner than §6.4 says.
 
+### RTCP feedback: RTP/AVPF and reduced size
+
+**Asked for per call, and agreed by the profile.** `CodecCatalog::with_feedback`
+(off by default) makes an offer name the feedback profile beside the one it
+would have named — `RTP/AVPF`, `RTP/SAVPF` under SDES, `UDP/TLS/RTP/SAVPF`
+under DTLS — with `a=rtcp-fb:* nack` and `a=rtcp-rsize`. It is off for the
+reason multiplexing is: the profile is on the `m=` line, RFC 4585 §4.1 gives an
+answerer no way to take such a stream on RTP/AVP, and a peer that knows only
+RTP/AVP refuses it. An offer that arrives naming a feedback profile is answered
+on it whatever the catalogue says, since the answer keeps the offer's
+transport; with the flag on, the answer also keeps the `nack` and `trr-int`
+lines this stack does and `a=rtcp-rsize` when it was offered (RFC 4585 §4.2,
+`sipral::feedback`). **A stream whose offer and answer both name a feedback
+profile runs RFC 4585's RTCP** from its first report, whether or not a single
+`a=rtcp-fb` line was agreed (`RtpSession::use_feedback`): Generic NACKs when
+both named `nack` for the codec or `*`, a `trr-int` when either did (the longer
+of the two when both), reduced size when both said `a=rtcp-rsize`.
+
+**The schedule.** RFC 3550's interval is computed as before but with AVPF's
+minimum — one second before the first report, none after it (RFC 4585 §3.4 d)
+— and `avpf::AvpfTimer` owns the deadlines: the Regular packet at `tn`, full,
+minimal while `trr-int` has not elapsed and feedback is waiting, or suppressed
+while it has not and nothing is; and the Early packet (§3.5.2). A packet that
+arrives more than one ahead of the highest seen leaves the ones between it
+missing (at most sixty-four, and a jump past sixty-four is a restart rather
+than a loss); with NACKs agreed they are reported at once in an Early packet
+while `allow_early` holds — a call has two members, so `T_dither_max` is zero —
+and otherwise in the next Regular packet. One that turns up before its NACK
+goes is taken off the list. An Early packet is sent in reduced size once a
+compound one has gone and both ends said `a=rtcp-rsize` (RFC 5506 §4); every
+Regular packet stays compound. A reduced-size packet arriving is read only on a
+stream that agreed to it, and refused as malformed on any other.
+
+**Nothing is sent again.** A NACK asks for packets back, and retransmitting
+them belongs to a payload format of its own (RFC 4588) that a voice call does
+not negotiate; resending a packet under its own sequence number is not
+something RFC 4585 asks of a sender either. What each side found missing is
+counted instead — `StreamStatistics::feedback` says what was agreed and
+`feedback_counts` what was sent and received — which is what a quality monitor
+reads.
+
 ### RTCP XR and voice quality reports
 
 RFC 3611 defines the Extended Report packet type (§2, `rtcp::XR` = 207 in

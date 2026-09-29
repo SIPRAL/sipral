@@ -61,6 +61,11 @@ pub enum DigitSource {
 }
 
 /// What one call's audio is doing.
+// `Ended` carries the call's whole statistics by value, since `StreamStatistics`
+// is `Copy` and an end-of-call record should not be a pointer to chase; it is
+// raised once per call, so boxing it to even the variants up would save
+// nothing that matters and cost the `Copy`
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum MediaEvent {

@@ -720,6 +720,7 @@ impl MediaSession {
     /// nothing in this crate is allowed to ask a clock what the present is.
     #[must_use]
     pub fn statistics(&self, now: Instant) -> StreamStatistics {
+        let feedback = self.rtp.feedback();
         StreamStatistics {
             codec: self.codec(),
             quality: self.rtp.quality(),
@@ -728,7 +729,18 @@ impl MediaSession {
             octets_sent: self.octets_sent,
             silent_for: now.saturating_duration_since(self.last_inbound),
             voip_metrics: self.rtp.voip_metrics(self.codec().quality_model()),
+            feedback: feedback.map(|(negotiated, _)| negotiated),
+            feedback_counts: feedback.map(|(_, counts)| counts).unwrap_or_default(),
         }
+    }
+
+    /// Run this stream's RTCP as RTP/AVPF from `now` on, with what the two
+    /// descriptions agreed (RFC 4585, RFC 5506), or take what a later
+    /// exchange agreed for one already running it.
+    pub(crate) fn use_feedback(&mut self, agreed: sipral_rtp::avpf::Negotiated, now: Instant) {
+        let elapsed = self.elapsed(now);
+        let draw = self.draws.unit();
+        self.rtp.use_feedback(agreed, elapsed, draw);
     }
 
     /// The RFC 6035 quality report `sipral_ua::UserAgent::send_quality_report`
@@ -1418,7 +1430,9 @@ impl MediaSession {
         let elapsed = self.elapsed(now);
         let ntp = self.clock.at(now);
         match self.rtp.rtcp_receive(datagram, from, elapsed, ntp) {
-            RtcpReceived::Report => {
+            // a reduced-size packet is the far end all the same: feedback
+            // alone, which RFC 5506 lets it send between its reports
+            RtcpReceived::Report | RtcpReceived::Feedback => {
                 self.last_control = now;
                 Arrival::Control
             }
@@ -1786,6 +1800,11 @@ impl MediaSession {
             .rtp
             .build_report(&mut self.rtcp_out, elapsed, ntp, draw, codec)
             .ok()?;
+        // RTP/AVPF can spend a slot on nothing: a Regular packet `trr-int`
+        // suppressed, or an Early one whose loss turned up after all
+        if length == 0 {
+            return None;
+        }
         #[cfg(feature = "ice")]
         {
             self.on_path(Built::Rtcp, length, destination, now)

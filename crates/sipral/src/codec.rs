@@ -429,6 +429,9 @@ pub(crate) struct Keyed<'a>(core::marker::PhantomData<&'a ()>);
 /// explicit catalogue named for one call, not a global anybody could be
 /// mutating underneath a call already in progress, which is the race D6 is
 /// actually about.
+// each bool is an independent choice a site makes about what its calls offer
+// (named events, multiplexing, Annex B, feedback), not a state stepped through
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodecCatalog {
     order: Vec<Codec>,
@@ -438,6 +441,7 @@ pub struct CodecCatalog {
     srtp: SrtpPolicy,
     ice: IcePolicy,
     annex_b: bool,
+    feedback: bool,
 }
 
 impl CodecCatalog {
@@ -465,6 +469,7 @@ impl CodecCatalog {
             srtp: SrtpPolicy::NotOffered,
             ice: IcePolicy::Off,
             annex_b: true,
+            feedback: false,
         }
     }
 
@@ -622,6 +627,31 @@ impl CodecCatalog {
     #[must_use]
     pub const fn g729_annex_b(&self) -> bool {
         self.annex_b
+    }
+
+    /// Say whether this call asks for RTCP feedback: RTP/AVPF (RFC 4585),
+    /// or RTP/SAVPF (RFC 5124) and UDP/TLS/RTP/SAVPF where it is keyed, with
+    /// Generic NACKs (`a=rtcp-fb:* nack`) and reduced-size RTCP
+    /// (`a=rtcp-rsize`, RFC 5506).
+    ///
+    /// Off by default, and for the reason RTCP multiplexing is: the profile
+    /// is on the `m=` line itself, and a peer that knows only RTP/AVP refuses
+    /// a stream offered on RTP/AVPF rather than falling back. On, an offer
+    /// names the feedback profile, and an offer that arrived naming one is
+    /// answered with the feedback this stack does. Either way, a stream
+    /// whose offer and answer both name a feedback profile runs its RTCP by
+    /// RFC 4585's rules ([`sipral_rtp::RtpSession::use_feedback`]), and what
+    /// was agreed is in [`crate::StreamStatistics::feedback`].
+    #[must_use]
+    pub const fn with_feedback(mut self, feedback: bool) -> Self {
+        self.feedback = feedback;
+        self
+    }
+
+    /// Whether this call asks for RTCP feedback.
+    #[must_use]
+    pub const fn feedback(&self) -> bool {
+        self.feedback
     }
 
     /// The `a=fmtp` parameters this catalogue offers `codec` with:

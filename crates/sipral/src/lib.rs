@@ -153,6 +153,7 @@ mod echo;
 mod engine;
 mod error;
 mod event;
+mod feedback;
 #[cfg(feature = "headless")]
 mod headless;
 mod ice;
@@ -250,6 +251,7 @@ pub use sipral_core::sdp::{
 pub use sipral_media::processor::{NoProcessor, Processor};
 /// What the de-jitter buffer counted, which is most of what a stream statistic
 /// is.
+pub use sipral_rtp::avpf::{FeedbackCounts, Negotiated as FeedbackAgreed};
 pub use sipral_rtp::srtp::Suite as SrtpSuite;
 pub use sipral_rtp::{Discard, Quality, UNAVAILABLE, VoipMetricsBlock};
 /// Which end placed a call, renamed on the way through: `sipral-ua` and
