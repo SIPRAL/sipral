@@ -68,6 +68,9 @@ allow = ["AGPL-3.0-only"]
 name = "sipral-io-common"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]
+name = "sipral-audio"
+allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
 name = "sipral-io-pipewire"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]
