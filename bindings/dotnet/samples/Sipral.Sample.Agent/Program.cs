@@ -304,9 +304,13 @@ async Task<bool> RunDirectCallAsync()
     var stunServer = Environment.GetEnvironmentVariable("SIPRAL_STUN_SERVER");
     var turnServer = Environment.GetEnvironmentVariable("SIPRAL_TURN_SERVER");
     var ice = Environment.GetEnvironmentVariable("SIPRAL_ICE") == "required" ? SipralIce.Required : (SipralIce?)null;
-    var over = Environment.GetEnvironmentVariable("SIPRAL_TURN_TRANSPORT") ?? "udp";
+    // left unset without SIPRAL_TURN_TRANSPORT: the stack refuses a TURN
+    // transport named with no TURN server to use it on, and the lab's call
+    // that must find no path without TURN has to be placed to prove it
+    var over = Environment.GetEnvironmentVariable("SIPRAL_TURN_TRANSPORT");
     var turnTransport = over switch
     {
+        null => default,
         "udp" => SipralTransport.Udp,
         "tcp" => SipralTransport.Tcp,
         "tls" => SipralTransport.Tls,
@@ -346,7 +350,7 @@ async Task<bool> RunDirectCallAsync()
     var patienceMs = int.Parse(Environment.GetEnvironmentVariable("SIPRAL_PATIENCE_MS") ?? "20000");
     var dwellMs = int.Parse(Environment.GetEnvironmentVariable("SIPRAL_DWELL_MS") ?? "2000");
     var ok = await RunCallDirectAsync(call, patienceMs, dwellMs);
-    if (ok && turnServer is not null && turnTransport != SipralTransport.Udp)
+    if (ok && turnServer is not null && over is "tcp" or "tls")
     {
         Console.WriteLine($"relay over {over.ToUpperInvariant()} to {turnServer}: the call ran through it");
     }
