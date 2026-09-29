@@ -212,14 +212,15 @@ impl TextReceiver {
 
     /// When [`poll`](Self::poll) must next be called: when the block that
     /// has been held behind a gap the longest has waited its time, if any
-    /// block is held.
+    /// block is held. A wait too long for the clock to hold ends at
+    /// [`Duration::MAX`].
     #[must_use]
     pub fn deadline(&self) -> Option<Duration> {
         self.pending
             .values()
             .map(|(_, arrived)| *arrived)
             .min()
-            .map(|arrived| arrived + self.config.reorder_wait)
+            .map(|arrived| arrived.saturating_add(self.config.reorder_wait))
     }
 
     /// Give up on every gap that has held a block back for its whole wait
@@ -502,6 +503,22 @@ mod tests {
         rx.poll(ms(150));
         assert_eq!(transcript(&mut rx), "\u{FFFD}d");
         assert_eq!(rx.deadline(), None);
+    }
+
+    #[test]
+    fn a_wait_too_long_to_add_to_the_clock_holds_the_gap_open() {
+        let mut rx = TextReceiver::new(ReceiverConfig {
+            reorder_wait: Duration::MAX,
+            ..ReceiverConfig::new(T140, None)
+        })
+        .unwrap();
+        rx.receive(bare(1, b"a"), ms(0));
+        rx.receive(bare(3, b"c"), ms(10));
+        assert_eq!(rx.deadline(), Some(Duration::MAX));
+        rx.poll(ms(3_600_000));
+        assert_eq!(transcript(&mut rx), "a");
+        rx.receive(bare(2, b"b"), ms(3_600_001));
+        assert_eq!(transcript(&mut rx), "bc");
     }
 
     #[test]
