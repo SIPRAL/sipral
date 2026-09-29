@@ -926,6 +926,82 @@ Call-ID: pub@example.com\r\nCSeq: 1 PUBLISH\r\n{extra}Content-Length: 0\r\n\r\n"
     }
 
     #[test]
+    fn a_423_to_a_removal_is_a_failure_not_a_loop() {
+        // a removal asks for zero whatever the compositor's floor: sending it
+        // again would be the same request
+        let t0 = Instant::now();
+        let mut publication = published("dx200xyz", t0);
+        publication.remove().expect("something is published");
+        only(&mut publication);
+        answer(&mut publication, 423, "Min-Expires: 600\r\n", t0);
+        assert!(publication.poll_transmit().is_none());
+        assert_eq!(
+            events(&mut publication),
+            vec![PublishEvent::Failed {
+                reason: PublishFailure::IntervalTooBrief,
+                status: StatusCode::new(423).ok(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_removal_queued_behind_a_request_the_compositor_forgot_is_done() {
+        let t0 = Instant::now();
+        let mut publication = published("dx200xyz", t0);
+        publication.publish("text/plain", body("new"));
+        only(&mut publication);
+        publication.remove().expect("in flight");
+        answer(&mut publication, 412, "", t0);
+        assert!(
+            publication.poll_transmit().is_none(),
+            "nothing is published afresh only to be removed"
+        );
+        assert_eq!(events(&mut publication), vec![PublishEvent::Removed]);
+        assert_eq!(publication.etag(), None);
+    }
+
+    #[test]
+    fn a_refresh_asked_for_twice_goes_once() {
+        let t0 = Instant::now();
+        let mut publication = published("dx200xyz", t0);
+        publication.refresh().expect("published");
+        publication.refresh().expect("published");
+        assert_eq!(only(&mut publication).kind(), PublishKind::Refresh);
+    }
+
+    #[test]
+    fn an_entity_tag_past_the_bound_is_not_kept() {
+        let t0 = Instant::now();
+        for (length, kept) in [(128, true), (129, false)] {
+            let etag = "e".repeat(length);
+            let mut publication = Publication::new("presence");
+            publication.publish("text/plain", body("x"));
+            only(&mut publication);
+            answer(&mut publication, 200, &format!("SIP-ETag: {etag}\r\n"), t0);
+            assert_eq!(publication.etag().is_some(), kept, "{length}");
+        }
+    }
+
+    #[test]
+    fn nothing_queued_behind_a_489_goes_later() {
+        let t0 = Instant::now();
+        let mut publication = published("dx200xyz", t0);
+        publication.publish("text/plain", body("1"));
+        only(&mut publication);
+        publication.publish("text/plain", body("2"));
+        answer(&mut publication, 489, "", t0);
+        events(&mut publication);
+        // the caller tries again, somewhere that knows the package
+        publication.publish("text/plain", body("3"));
+        assert_eq!(only(&mut publication).kind(), PublishKind::Initial);
+        answer(&mut publication, 200, "SIP-ETag: e1\r\n", t0);
+        assert!(
+            publication.poll_transmit().is_none(),
+            "what the 489 answered for stays answered"
+        );
+    }
+
+    #[test]
     fn a_489_is_final_and_surfaced() {
         let t0 = Instant::now();
         let mut publication = published("dx200xyz", t0);
