@@ -57,7 +57,7 @@ pub const LONGEST_DIGIT: Duration = Duration::from_millis(10_000);
 /// The pause held between one digit and the next, from the same table.
 pub const DIGIT_GAP: Duration = Duration::from_millis(60);
 
-/// How loud a digit is sent, in dBm0 below full scale (RFC 4733 §2.3.3).
+/// How loud a digit is sent, in dBm0 below full scale (RFC 4733 §2.3.4).
 ///
 /// Ten is the conventional level for a generated digit: quiet enough not to be
 /// clipped anywhere along the path, loud enough that a detector at the far end

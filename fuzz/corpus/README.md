@@ -47,7 +47,10 @@ is a secret: the SRTP seeds are protected with the same fixed key the
 `srtp_unprotect` target unprotects with, which is in the target's source. The
 DTLS seeds are a handshake between two ends whose keys and random octets are
 fixed, in `tools/fuzz-seeds` and in the `dtls_record` target alike, so every
-secret in them can be computed again from this tree.
+secret in them can be computed again from this tree. The `stir_identity` seeds
+carry a certificate chain and a PASSporT signed with P-256 keys made from
+fixed scalars in `tools/fuzz-seeds`, for a number from the 555 range and
+under `example.com`; nothing they sign is anybody's.
 
 ```sh
 cargo run -p sipral-fuzz-seeds     # write this directory again

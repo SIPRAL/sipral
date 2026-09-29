@@ -114,6 +114,85 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `--invite-burst`, follows its own
   address when the route to its registrar changes, says when a request is too
   large for a datagram, and prints what each call measured when it ends.
+- **STIR/SHAKEN caller authentication, in its own crate.** `sipral-stir`
+  signs a caller's identity into an RFC 8224 Identity header field (a
+  PASSporT of RFC 8225 with RFC 8588's `shaken` claims, ES256, full or
+  compact form) and verifies one without I/O of its own: it names the
+  certificate to fetch, then takes the fetched chain, the trust anchors and
+  the time to the attestation level, calling number and origination
+  identifier, or to the one reason it fails with the SIP response RFC 8224
+  prescribes (403, 428, 436, 437, 438) and the `verstat` value to put on the
+  caller's identity. The chain is checked to a trust anchor with the
+  TNAuthList of RFC 8226 deciding which numbers it speaks for; freshness is
+  sixty seconds unless configured, revocation is left to the application,
+  and every input is bounded and fuzzed. Not yet reachable through the C
+  ABI or the bindings.
+- **Digits, call-progress tones and answering machines are heard in the
+  audio itself.** `sipral_media::inband` works on 8 and 16 kHz PCM with no
+  new dependency and no platform-specific instructions. `dtmf::DtmfDetector`
+  finds the sixteen Q.23 digits to the limits of ITU-T Q.24 Annex A (±1.5 %
+  accepted and ±3.5 % refused, twist +4/−8 dB, 40 ms accepted and 23 ms
+  refused, a 10 ms interruption bridged), holds off talk-off with a
+  signal-to-noise and a second-harmonic test, and reports each digit's
+  start and end on the stream's sample clock; `KeyPress::is_same_press`
+  matches one against an RFC 4733 event for the same key.
+  `generate::DtmfGenerator` and `ToneGenerator` write digits and
+  call-progress tones; `progress` tables dial, ringback, busy, congestion
+  and call waiting for the CEPT countries, North America and the United
+  Kingdom from ITU-T E.180 Supplement 2, and `ProgressDetector` hears them
+  and E.180's special information tone on a call's inbound audio.
+  `amd::AnsweringMachineDetector` says whether a person or a machine
+  answered an outbound call, and why, and `beep::BeepDetector` says when a
+  machine's beep has ended. A minute of synthesised speech and of noise
+  per rate triggers none of them; all four together run about a thousand
+  times faster than real time per core at 8 kHz.
+- **Multipart bodies, and the metadata of a recorded call.**
+  `sipral_core::msg::Multipart` reads a `multipart/mixed` or
+  `multipart/alternative` body (RFC 5621, RFC 2046 §5.1) into parts, each
+  with its own `Content-Type`, `Content-Disposition` and `Content-ID`,
+  nested multipart included, within bounds on parts, depth, size and
+  fields per part; `Multipart::check` returns a required part the receiver
+  does not understand as an `Unsupported`, whose status is the 415 of
+  RFC 5621 §9. `MultipartBuilder` writes one, with a boundary that occurs
+  in no part. `sipral_ua::siprec` holds SIPREC recording metadata, the
+  RFC 7865 model in RFC 7866's `application/rs-metadata+xml`: written,
+  read through the same bounded reader dialog-info bodies use, built for a
+  call by `RecordedCall`, and checked against the SDP's `a=label` lines;
+  and the pieces of a recording session's INVITE: the SDP and metadata
+  body with `Content-Disposition: recording-session`, the `+sip.src`
+  feature tag and the `siprec` option tag. Not yet wired into calls. A
+  `multipart` fuzz target reads any body and requires what it reads to be
+  written back the same.
+- **Conferences, presence documents and publishing, in `sipral-ua`.**
+  `conference` reads RFC 4575's `application/conference-info+xml` and
+  `Conference` merges full and partial notifications by §4.6: keyed users,
+  endpoints, media and entries merged, `deleted` removed, a stale version
+  discarded, and a partial document after a lost one held back with
+  `ConferenceUpdate::Resubscribe`, which `UserAgent::request_full_state`
+  answers with a refresh. `UserAgent::subscribe_conference` (and
+  `Subscribe::conference`) sends `Event: conference`. `presence` reads and
+  writes PIDF (RFC 3863) with the RPID activities in common use (RFC 4480).
+  `Publication` is an RFC 3903 PUBLISH client driven like every other
+  sans-I/O machine here: initial publish, `SIP-ETag` refreshes at the
+  registration margin, modify, remove, 412 republished afresh, 423 retried
+  with `Min-Expires`, 489 surfaced. Both XML formats go through the
+  dialog-info reader and inherit its refusals. No C ABI yet.
+- **Call audio as files, and L16 on RTP.** `sipral_media::formats`
+  (none of it needs the `opus` feature): `ogg` writes RFC 3533 pages
+  (lacing, continued/BOS/EOS flags, granule positions, the CRC with
+  generator 0x04c11db7) and reads them back with every checksum,
+  sequence and continuation checked; `ogg_opus` writes a `.opus` file
+  from packets that are already encoded, RFC 7845's `OpusHead` and
+  `OpusTags` (vendor `sipral`), granule positions at 48 kHz, the pre-skip,
+  end trimming on the last page, and a page written out at least once a
+  second (configurable); `wav` streams sixteen-bit PCM to any
+  `Write + Seek`, stereo with the local side left and the remote side
+  right, patches the sizes at `finish`, and finishes a file past 4 GiB as
+  RF64 (EBU Tech 3306) instead of stopping. `sipral_media::l16` is RFC 3551
+  §4.5.11 L16: big-endian samples at any rate and channel count, stereo
+  interleaved left first, the static payload types 10 and 11, and the
+  `L16/rate[/channels]` rtpmap encoding. Not yet wired into the call
+  recording, the codec negotiation or the C ABI.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when
@@ -1248,6 +1327,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   step in `scripts/check.sh`. Measured against a synthetic echo
   (`crates/sipral-aec-webrtc/examples/erle.rs`): 36.1 dB of echo return
   loss enhancement once AEC3 has adapted, in `docs/05-media.md`.
+- **Real-time text, RFC 4103, in `sipral_rtp::rtt`.** T.140 text over RTP,
+  sans-I/O like the rest of the crate. `TextSender` gathers typed text into
+  one T140block per transmission interval (300 ms by default, never under
+  100 ms), sends it inside RFC 2198 redundancy with two generations by
+  default on the 1000 Hz clock, keeps sending empty-primary packets only
+  while copies of the last text are owed, sets the marker bit after a
+  silence, opens with the byte order mark, sends new lines as LINE
+  SEPARATOR and holds characters back to the peer's `cps`. `TextReceiver`
+  places every block by sequence number, takes whichever copy arrives
+  first, waits a bounded time for a late packet, marks each span no copy
+  could recover with one U+FFFD, reassembles UTF-8 split across blocks,
+  bounds what it holds, and hands out erase, new-line, alert and character
+  events. `TextFormat` writes the `m=text` section with `t140/1000`,
+  `red/1000`, the red `fmtp` and `cps`, and reads the two `fmtp` values
+  back. A new fuzz target, `rtt`, drives the receiver with arbitrary
+  datagrams. Not yet reachable through the C ABI.
 
 ### Fixed
 

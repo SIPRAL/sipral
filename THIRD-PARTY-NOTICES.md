@@ -257,6 +257,49 @@ binary to reproduce its notice. Its `LICENSE` reads:
 followed by the three BSD conditions and the disclaimer, which a binary
 containing Sipral must carry once this crate is linked into it.
 
+### Certificates under STIR
+
+`sipral-stir` is STIR/SHAKEN caller authentication, and everything in it
+that is protocol -- the PASSporT and its deterministic JSON, the Identity
+header field, the TNAuthList extension, the path from a signing certificate
+to a trust anchor and the rules it is held to, PEM, Base64 -- is written
+in-tree from the RFCs. Two things are not. The signatures are ECDSA over
+P-256 with SHA-256, from the same `p256` the table under DTLS above lists,
+at the same exact version and for the same reason. And an X.509 certificate
+is read with the RustCrypto `x509-cert` crate: the structure is large, it is
+where a hand-written reader would most likely be wrong, and `der`, the DER
+layer it is built on, is already in the tree beneath `p256`.
+
+The crate names two dependencies, `p256` and `x509-cert`; the rest arrive
+through them. Nothing in the protocol crates depends on it, and the facade
+does not either, so none of the components below is in a binary that does
+not name `sipral-stir` itself. Every licence below was read from the
+component's own manifest, and every component ships its licence files
+beside it.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `x509-cert` 0.3.0 | X.509 certificates, read | Apache-2.0 OR MIT |
+| `spki` 0.8.0 | the SubjectPublicKeyInfo and AlgorithmIdentifier types `x509-cert` uses | Apache-2.0 OR MIT |
+| `der_derive` 0.8.0 | the derive macros `x509-cert` builds its types with; build time only | Apache-2.0 OR MIT |
+| `flagset` 0.4.7 | the bit-flag type of the key usage extension | Apache-2.0 |
+| `base64ct` 1.8.3 | named by `spki` for its optional `base64` feature, which nothing enables; in the lockfile, never built | Apache-2.0 OR MIT |
+
+`der`, `const-oid`, `zeroize` and everything under `p256` are listed with the
+DTLS primitives above; building `x509-cert` turns on further features of
+`der` (its derive macros and `flagset`) and of `const-oid` (its database of
+names), which adds the crates in this table and no second copy of any. The
+derive macros run inside the compiler, through `proc-macro2`, `quote`, `syn`
+and `unicode-ident`, which are already in the tree for other crates' macros,
+and none of the four is linked into what ships.
+
+All but `flagset` are dual-licensed like the rest, and the one MIT notice
+covers them. `flagset` is Apache-2.0 alone; it ships no NOTICE file, so what
+section 4 of that licence asks of a binary is a copy of the licence itself.
+`THIRD-PARTY-LICENSES.txt` is generated from the graphs of `sipral` and
+`sipral-ffi`, which do not reach this crate, so an application that links
+`sipral-stir` carries these components' licences beside that file itself.
+
 ### PipeWire
 
 `sipral-io-pipewire`, the Linux device crate, links `libpipewire-0.3`

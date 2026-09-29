@@ -43,11 +43,11 @@ use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sipral_core::msg::{
-    HeaderName, Method, ParseMode, ParseScratch, RequestBuilder, ResponseBuilder, StatusCode,
-    StreamFramer, parse,
+    BuiltMultipart, HeaderName, MediaTypeRef, Method, Multipart, MultipartBuilder, ParseMode,
+    ParseScratch, Part, RequestBuilder, ResponseBuilder, StatusCode, StreamFramer, parse,
 };
 use sipral_core::replay::Recording;
 use sipral_core::sdp::{self, Crypto};
@@ -63,14 +63,20 @@ use sipral_nat::stun::{
     AttributeType, Class, Message, MessageBuilder, Method as StunMethod, TransactionId,
 };
 use sipral_nat::turn::{ChannelData, ChannelNumber, StreamFraming, Transport};
+use sipral_rtp::rtt::{ReceiverConfig, SenderConfig, TextEvent, TextReceiver, TextSender};
 use sipral_rtp::srtp::{Master, Policy, Protector, SrtpError, Suite, Unprotector};
 use sipral_rtp::{
-    CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder, JitterBufferAdaptive,
-    PacketBuilder, PacketLossConcealment, ReceiverReportBuilder, RtpHeader, RtpPacket, RxConfig,
-    SdesItem, SenderInfo, SenderOrReceiver, SenderReportBuilder, SourceDescriptionBuilder,
-    UNAVAILABLE, VoipMetricsBlock, XrPacketBuilder,
+    CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, Frame, GoodbyeBuilder,
+    JitterBufferAdaptive, PacketBuilder, PacketLossConcealment, ReceiverReportBuilder, RtpHeader,
+    RtpPacket, RxConfig, SdesItem, SenderInfo, SenderOrReceiver, SenderReportBuilder,
+    SourceDescriptionBuilder, UNAVAILABLE, VoipMetricsBlock, XrPacketBuilder,
+};
+use sipral_stir::{
+    Attest, Claims, Dest, OrigId, Shaken, Signer, Tn, TnAuthList, TnEntry, TrustAnchors, Verdict,
+    Verifier,
 };
 use sipral_ua::dtmf::parse_info;
+use sipral_ua::siprec::{RecordedCall, RecordedParty, RecordedStream, RecordingMetadata};
 use sipral_ua::{DialogInfo, MessageSummary};
 
 /// Something this program will not write out, because it is not what it says
@@ -806,6 +812,333 @@ fn dialoginfo_seeds() -> Result<Vec<Seed>, Wrong> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------- STIR
+
+/// The time the `stir_identity` target verifies at, 2026-09-21: its `NOW`.
+const STIR_NOW: u64 = 1_790_000_000;
+
+/// DER, as X.690 §8.1 lays an element out: tag, the shortest length, contents.
+fn der(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let length = contents.len();
+    if length < 0x80 {
+        out.push(u8::try_from(length).unwrap_or_default());
+    } else if length < 0x100 {
+        out.extend([0x81, u8::try_from(length).unwrap_or_default()]);
+    } else {
+        out.push(0x82);
+        out.extend(u16::try_from(length).unwrap_or(u16::MAX).to_be_bytes());
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+/// `ecdsa-with-SHA256`, 1.2.840.10045.4.3.2 (RFC 5758 §3.2), parameters absent.
+const ECDSA_WITH_SHA256: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+/// `id-ecPublicKey` and `prime256v1` (RFC 5480 §2.1.1).
+const EC_PUBLIC_KEY: &[u8] = &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+const PRIME256V1: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+/// `id-at-commonName`, `id-ce-basicConstraints`, `id-ce-keyUsage`.
+const COMMON_NAME: &[u8] = &[0x06, 0x03, 0x55, 0x04, 0x03];
+const BASIC_CONSTRAINTS: &[u8] = &[0x06, 0x03, 0x55, 0x1d, 0x13];
+const KEY_USAGE: &[u8] = &[0x06, 0x03, 0x55, 0x1d, 0x0f];
+/// `id-pe-TNAuthList`, 1.3.6.1.5.5.7.1.26 (RFC 8226 §9).
+const TN_AUTH_LIST: &[u8] = &[0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x1a];
+
+/// What a certificate of the seeds' chain is for.
+enum CertRole {
+    Issuer { path_len: Option<u8> },
+    Signing,
+}
+
+/// One certificate of the seeds' chain.
+struct CertSpec<'a> {
+    subject: &'a str,
+    issuer: &'a str,
+    key: &'a p256::ecdsa::SigningKey,
+    /// An issuer, with its `pathLenConstraint`, or the signing certificate.
+    role: CertRole,
+    tn_auth_list: Option<Vec<u8>>,
+}
+
+/// A certificate as RFC 5280 §4.1 lays one out, signed by `issuer_key`.
+fn certificate(spec: &CertSpec<'_>, issuer_key: &p256::ecdsa::SigningKey) -> Vec<u8> {
+    use p256::ecdsa::Signature;
+    use p256::ecdsa::signature::Signer as _;
+
+    let name = |common: &str| {
+        let attribute = [COMMON_NAME, &der(0x0c, common.as_bytes())].concat();
+        der(0x30, &der(0x31, &der(0x30, &attribute)))
+    };
+    let extension = |id: &[u8], critical: bool, value: &[u8]| {
+        let critical: &[u8] = if critical { &[0x01, 0x01, 0xff] } else { &[] };
+        der(0x30, &[id, critical, &der(0x04, value)].concat())
+    };
+    let mut point = vec![0];
+    point.extend_from_slice(spec.key.verifying_key().to_sec1_point(false).as_bytes());
+    let spki = der(
+        0x30,
+        &[
+            der(0x30, &[EC_PUBLIC_KEY, PRIME256V1].concat()),
+            der(0x03, &point),
+        ]
+        .concat(),
+    );
+    let mut extensions = Vec::new();
+    match spec.role {
+        CertRole::Issuer { path_len } => {
+            let mut constraints = vec![0x01, 0x01, 0xff];
+            if let Some(path_len) = path_len {
+                constraints.extend(der(0x02, &[path_len]));
+            }
+            extensions.extend(extension(BASIC_CONSTRAINTS, true, &der(0x30, &constraints)));
+            // keyCertSign and cRLSign, one unused bit
+            extensions.extend(extension(KEY_USAGE, true, &[0x03, 0x02, 0x01, 0x06]));
+        }
+        // digitalSignature, seven unused bits
+        CertRole::Signing => {
+            extensions.extend(extension(KEY_USAGE, true, &[0x03, 0x02, 0x07, 0x80]));
+        }
+    }
+    if let Some(list) = &spec.tn_auth_list {
+        extensions.extend(extension(TN_AUTH_LIST, false, list));
+    }
+    let validity = [der(0x17, b"250101000000Z"), der(0x17, b"300101000000Z")].concat();
+    let tbs = der(
+        0x30,
+        &[
+            der(0xa0, &der(0x02, &[2])),
+            der(0x02, &[0x01, 0x23]),
+            der(0x30, ECDSA_WITH_SHA256),
+            name(spec.issuer),
+            der(0x30, &validity),
+            name(spec.subject),
+            spki,
+            der(0xa3, &der(0x30, &extensions)),
+        ]
+        .concat(),
+    );
+    let signature: Signature = issuer_key.sign(&tbs);
+    let mut bits = vec![0];
+    bits.extend_from_slice(signature.to_der().as_bytes());
+    der(
+        0x30,
+        &[tbs, der(0x30, ECDSA_WITH_SHA256), der(0x03, &bits)].concat(),
+    )
+}
+
+/// A certificate as a PEM block (RFC 7468 §5.1), sixty-four characters a line.
+fn pem(der: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut body = String::new();
+    for chunk in der.chunks(3) {
+        let bytes = [
+            chunk.first().copied().unwrap_or_default(),
+            chunk.get(1).copied().unwrap_or_default(),
+            chunk.get(2).copied().unwrap_or_default(),
+        ];
+        let group = u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]);
+        for index in 0..4 {
+            if index <= chunk.len() {
+                let six = usize::try_from((group >> (18 - 6 * index)) & 0x3f).unwrap_or_default();
+                body.push(char::from(ALPHABET.get(six).copied().unwrap_or(b'=')));
+            } else {
+                body.push('=');
+            }
+        }
+    }
+    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in body.as_bytes().chunks(64) {
+        out.push_str(&String::from_utf8_lossy(line));
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
+}
+
+/// The `stir_identity` target reads an Identity header field value, a zero
+/// octet, and the certificate chain its `info` names, which it also takes
+/// as the trust anchors. A seed is a SHAKEN PASSporT signed by `Signer` over
+/// the target's own claims, in the full form and in the compact one, with
+/// the chain from signing certificate to root, as DER and as PEM: each one
+/// verifies, so a run starts past every check rather than at the first.
+fn stir_identity_seeds() -> Result<Vec<Seed>, Wrong> {
+    let wrong = |what: &str, why: &dyn std::fmt::Display| Wrong(format!("the {what}: {why}"));
+    let key = |scalar: u8| {
+        p256::ecdsa::SigningKey::from_slice(&[scalar; 32]).map_err(|why| wrong("test key", &why))
+    };
+    let (root_key, intermediate_key, leaf_key) = (key(0x11)?, key(0x22)?, key(0x33)?);
+    let orig = "12155551212";
+    let list = TnAuthList::new(vec![TnEntry::One(orig.to_owned())])
+        .map_err(|why| wrong("TNAuthList", &why))?;
+    let (root_name, intermediate_name) = ("Sipral Seed STI Root", "Sipral Seed STI Intermediate");
+    let root = certificate(
+        &CertSpec {
+            subject: root_name,
+            issuer: root_name,
+            key: &root_key,
+            role: CertRole::Issuer { path_len: None },
+            tn_auth_list: None,
+        },
+        &root_key,
+    );
+    let intermediate = certificate(
+        &CertSpec {
+            subject: intermediate_name,
+            issuer: root_name,
+            key: &intermediate_key,
+            role: CertRole::Issuer { path_len: Some(0) },
+            tn_auth_list: None,
+        },
+        &root_key,
+    );
+    let leaf = certificate(
+        &CertSpec {
+            subject: "Sipral Seed STI Signer",
+            issuer: intermediate_name,
+            key: &leaf_key,
+            role: CertRole::Signing,
+            tn_auth_list: Some(list.to_der()),
+        },
+        &intermediate_key,
+    );
+    let der_chain = [leaf.as_slice(), &intermediate, &root].concat();
+    let pem_chain = [pem(&leaf), pem(&intermediate), pem(&root)].concat();
+
+    // the claims the target rebuilds a compact form from
+    let claims = Claims {
+        orig: Tn::new(orig).map_err(|why| wrong("originating number", &why))?,
+        dest: Dest::tn(Tn::new("12125551213").map_err(|why| wrong("destination", &why))?),
+        iat: STIR_NOW,
+        shaken: Some(Shaken {
+            attest: Attest::A,
+            origid: OrigId::from_bytes([0x5a; 16]),
+        }),
+    };
+    let signer = Signer::new(&[0x33; 32], "https://cert.example.com/sti.pem")
+        .map_err(|why| wrong("signer", &why))?;
+    let full = signer
+        .identity(&claims)
+        .map_err(|why| wrong("full form", &why))?;
+    let compact = signer
+        .identity_compact(&claims)
+        .map_err(|why| wrong("compact form", &why))?;
+
+    let mut out = Vec::new();
+    for (name, header, chain) in [
+        ("full-form-der-chain", &full, der_chain.as_slice()),
+        ("full-form-pem-chain", &full, pem_chain.as_bytes()),
+        ("compact-form-der-chain", &compact, der_chain.as_slice()),
+    ] {
+        let mut anchors = TrustAnchors::new();
+        anchors
+            .add(chain)
+            .map_err(|why| wrong(&format!("{name} seed's anchors"), &why))?;
+        let pending = Verifier::default()
+            .start(header, Some(&claims))
+            .map_err(|why| wrong(&format!("{name} seed's header"), &why))?;
+        if let Verdict::Invalid(why) = pending.verify(chain, &anchors, STIR_NOW) {
+            return Err(wrong(&format!("{name} seed"), &why));
+        }
+        let mut seed = header.as_bytes().to_vec();
+        seed.push(0);
+        seed.extend_from_slice(chain);
+        out.push((name, seed));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------- multipart
+
+/// The `multipart` target reads its input's first line as the
+/// `Content-Type` and the rest as the body. A seed is a body the builder
+/// writes: a recording session's INVITE body (RFC 7866 §6.1, the SDP and the
+/// metadata), a body with a nested `multipart/alternative`, and one whose
+/// parts carry a disposition with `handling` and a `Content-ID`.
+fn multipart_seeds() -> Result<Vec<Seed>, Wrong> {
+    let call = RecordedCall {
+        session_id: "hVpd7YQgRW2nD22h7q60JQ==".to_owned(),
+        sip_session_id: Some("ab30317f1a784dc48ff824d0d3715d86".to_owned()),
+        group_id: None,
+        started: Some("2026-09-21T10:00:00Z".to_owned()),
+        parties: vec![
+            RecordedParty {
+                id: "srfBElmCRp2QB23b7Mpk0w==".to_owned(),
+                aor: "sip:alice@example.com".to_owned(),
+                name: Some("Alice".to_owned()),
+                sends: vec![RecordedStream {
+                    id: "i1Pz3to5hGk8fuXl+PbwCw==".to_owned(),
+                    label: "1".to_owned(),
+                }],
+            },
+            RecordedParty {
+                id: "zSfPoSvdSDCmU3A3TRDxAw==".to_owned(),
+                aor: "sip:bob@example.com".to_owned(),
+                name: None,
+                sends: vec![RecordedStream {
+                    id: "UAAMm5GRQKSCMVvLyl4rFw==".to_owned(),
+                    label: "2".to_owned(),
+                }],
+            },
+        ],
+    };
+    let wrong = |what: &str, why: &dyn std::fmt::Display| Wrong(format!("the {what} seed: {why}"));
+    let recording = sipral_ua::siprec::recording_session_body(&offer(), &call.metadata())
+        .map_err(|why| wrong("recording-session", &why))?;
+    let inner = MultipartBuilder::alternative()
+        .part(Part::new("text/plain", b"Call me back"))
+        .part(Part::new("text/html", b"<p>Call me <b>back</b></p>"))
+        .build()
+        .map_err(|why| wrong("nested", &why))?;
+    let nested = MultipartBuilder::mixed()
+        .part(Part::new("application/sdp", &offer()))
+        .part(Part::new(inner.content_type(), inner.body()))
+        .build()
+        .map_err(|why| wrong("nested", &why))?;
+    let handling = MultipartBuilder::mixed()
+        .part(Part::new("application/sdp", &offer()).content_id("sdp@example.com"))
+        .part(
+            Part::new("application/vnd.example.extra", b"\x00\x01opaque")
+                .disposition("signal;handling=optional")
+                .content_id("extra@example.com"),
+        )
+        .build()
+        .map_err(|why| wrong("handling-optional", &why))?;
+    let mut out = Vec::new();
+    for (name, built, parts) in [
+        ("recording-session", &recording, 2),
+        ("nested", &nested, 2),
+        ("handling-optional", &handling, 2),
+    ] {
+        read_multipart(name, built, parts)?;
+        let mut seed = built.content_type().as_bytes().to_vec();
+        seed.push(b'\n');
+        seed.extend_from_slice(built.body());
+        out.push((name, seed));
+    }
+    Ok(out)
+}
+
+/// A seed's body read back as the target reads it: the parts are all there,
+/// and a recording session's metadata reads as metadata.
+fn read_multipart(name: &str, built: &BuiltMultipart, parts: usize) -> Result<(), Wrong> {
+    let content_type = MediaTypeRef::parse(built.content_type().as_bytes())
+        .map_err(|why| Wrong(format!("the {name} seed's type does not parse: {why:?}")))?;
+    let multipart = Multipart::parse(&content_type, built.body())
+        .map_err(|why| Wrong(format!("the {name} seed does not read back: {why}")))?;
+    if multipart.parts().len() != parts {
+        return Err(Wrong(format!(
+            "the {name} seed reads as {} parts, not {parts}",
+            multipart.parts().len()
+        )));
+    }
+    if let Some(metadata) = multipart.find("application", "rs-metadata+xml") {
+        RecordingMetadata::parse(metadata.body())
+            .map_err(|why| Wrong(format!("the {name} seed's metadata does not read: {why}")))?;
+    }
+    Ok(())
+}
+
 // -------------------------------------------------------- message-summary (MWI)
 
 fn mwi_seeds() -> Result<Vec<Seed>, Wrong> {
@@ -962,6 +1295,103 @@ fn push_datagram(out: &mut Vec<u8>, datagram: &[u8]) -> Result<(), Wrong> {
     out.push(len);
     out.extend_from_slice(datagram);
     Ok(())
+}
+
+/// The payload types the `rtt` target's receiver was negotiated with.
+const RTT_T140: u8 = 98;
+const RTT_RED: u8 = 100;
+
+/// The `rtt` target reads one-octet-length-prefixed datagrams too, each
+/// arriving a tenth of a second after the one before. A seed is a short
+/// conversation as `TextSender` sends it -- three words, erasures and a new
+/// line in them, then the redundancy flush -- whole, with one packet lost
+/// for the redundancy to cover, and with three lost so a gap is given up.
+fn rtt_seeds() -> Result<Vec<Seed>, Wrong> {
+    let config = SenderConfig::new(RTT_T140, RTT_RED);
+    let mut sender = TextSender::new(config, SSRC, 4000, 90_000)
+        .map_err(|why| Wrong(format!("the rtt sender does not build: {why}")))?;
+    let mut packets = Vec::new();
+    let mut now = Duration::ZERO;
+    for word in ["Hi", " thre\u{8}ee", "\r\n\u{20AC}5"] {
+        sender
+            .push(word)
+            .map_err(|why| Wrong(format!("the rtt sender refuses text: {why}")))?;
+        packets.extend(sender.poll(now));
+        now += Duration::from_millis(300);
+    }
+    while sender.next_poll().is_some() {
+        packets.extend(sender.poll(now));
+        now += Duration::from_millis(300);
+    }
+    let mut datagrams_sent = Vec::new();
+    for packet in &packets {
+        let datagram = packet
+            .to_datagram()
+            .map_err(|why| Wrong(format!("an rtt packet does not write: {why:?}")))?;
+        datagrams_sent.push(datagram);
+    }
+    let run = |skip: &[usize]| -> Result<Vec<u8>, Wrong> {
+        let mut out = Vec::new();
+        for (index, datagram) in datagrams_sent.iter().enumerate() {
+            if !skip.contains(&index) {
+                push_datagram(&mut out, datagram)?;
+            }
+        }
+        Ok(out)
+    };
+    let out = vec![
+        ("conversation", run(&[])?),
+        ("one-lost", run(&[1])?),
+        ("three-lost", run(&[1, 2, 3])?),
+    ];
+    // each run through a receiver the way the target drives one: what
+    // comes out has to be the conversation, or a gap where it must be
+    for ((name, bytes), expected) in out.iter().zip([
+        "Hi three\u{2028}\u{20AC}5",
+        "Hi three\u{2028}\u{20AC}5",
+        "Hi\u{FFFD}\u{2028}\u{20AC}5",
+    ]) {
+        let mut receiver = TextReceiver::new(ReceiverConfig::new(RTT_T140, Some(RTT_RED)))
+            .map_err(|why| Wrong(format!("the rtt receiver does not build: {why}")))?;
+        let mut clock = Duration::ZERO;
+        let mut events = Vec::new();
+        for datagram in datagrams(bytes) {
+            clock += Duration::from_millis(100);
+            let packet = RtpPacket::parse(datagram).map_err(|why| {
+                Wrong(format!(
+                    "a datagram of the {name} seed does not parse: {why:?}"
+                ))
+            })?;
+            let header = packet.header();
+            let frame = Frame {
+                sequence: header.sequence,
+                timestamp: header.timestamp,
+                payload_type: header.payload_type,
+                marker: header.marker,
+                payload: packet.payload(),
+            };
+            let _ = receiver.receive(frame, clock);
+            receiver.poll(clock);
+            events.extend(receiver.events());
+        }
+        receiver.poll(clock + Duration::from_secs(3600));
+        events.extend(receiver.events());
+        let mut text = String::new();
+        for event in events {
+            match event {
+                TextEvent::Erase => {
+                    text.pop();
+                }
+                event => text.push(event.as_char()),
+            }
+        }
+        if text != expected {
+            return Err(Wrong(format!(
+                "the {name} seed reads as {text:?} and it is meant to be {expected:?}"
+            )));
+        }
+    }
+    Ok(out)
 }
 
 fn rtcp_seeds() -> Result<Vec<Seed>, Wrong> {
@@ -2722,13 +3152,16 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("media_plc", media_plc_seeds()?),
         ("media_resample", media_resample_seeds()?),
         ("media_vad", media_vad_seeds()?),
+        ("multipart", multipart_seeds()?),
         ("mwi", mwi_seeds()?),
         ("parse", sip_seeds()?),
         ("replay", replay_seeds()?),
         ("rtcp", rtcp_seeds()?),
         ("rtp_dtmf", rtp_dtmf_seeds()?),
+        ("rtt", rtt_seeds()?),
         ("sdp", sdp_seeds()?),
         ("srtp_unprotect", srtp_seeds()?),
+        ("stir_identity", stir_identity_seeds()?),
         ("stun", stun_seeds()?),
         ("turn", turn_seeds()?),
         ("turn_client", turn_client_seeds()?),

@@ -57,9 +57,11 @@ builds it this way and why.\n"
 
 pub mod comfort_noise;
 pub mod drift;
+pub mod formats;
 pub mod g711;
 pub mod g722;
 pub mod g729;
+pub mod inband;
 pub mod mix;
 #[cfg(feature = "opus")]
 pub mod opus;
@@ -67,3 +69,5 @@ pub mod plc;
 pub mod processor;
 pub mod resample;
 pub mod vad;
+
+pub use formats::l16;
