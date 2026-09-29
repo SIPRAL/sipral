@@ -8,9 +8,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Sequence
 
 from ._sipral_cffi import ffi, lib
-from .enums import RegistrationState
+from .enums import Activity, RegistrationState
 from .errors import SipralError
 from .errors import call as _call
+from .subscription import Subscription
 
 if TYPE_CHECKING:
     from .stack import Stack
@@ -266,6 +267,99 @@ class Account:
             "sipral_account_registration_state",
         )
         return RegistrationState(out_state[0])
+
+    def subscribe(
+        self,
+        target: str,
+        package: str,
+        *,
+        accept: str | None = None,
+        expires_seconds: int = 0,
+        destination: str | None = None,
+    ) -> Subscription:
+        """`sipral_account_subscribe`: watch ``target`` (a SIP URI) through
+        the event package ``package`` -- ``presence``, ``conference``,
+        ``dialog``... -- sent where this account sends, or to ``destination``
+        (``host:port``). ``accept`` is the body type wanted when it is not the
+        package's default; ``expires_seconds`` how long to ask for, zero for
+        an hour. Nothing has happened when this returns: the SUBSCRIBE is on
+        its way, and what the notifier says arrives on the stack's events
+        naming :attr:`sipral.subscription.Subscription.handle`."""
+        keep = []
+
+        def text(value: str) -> tuple[object, int]:
+            encoded = value.encode("utf-8")
+            keep.append(ffi.new("char[]", encoded))
+            return keep[-1], len(encoded)
+
+        config = ffi.new("sipral_subscribe_config_t *")
+        config.size = ffi.sizeof("sipral_subscribe_config_t")
+        config.target, config.target_len = text(target)
+        config.package, config.package_len = text(package)
+        if accept is not None:
+            config.accept, config.accept_len = text(accept)
+        config.expires_seconds = expires_seconds
+        if destination is not None:
+            config.destination, config.destination_len = text(destination)
+        out = ffi.new("sipral_handle_t *")
+        _call(
+            lambda: lib.sipral_account_subscribe(
+                self.stack.handle, self.handle, config, out, self.stack.now_ms()
+            ),
+            "sipral_account_subscribe",
+        )
+        return Subscription(self.stack, int(out[0]), package)
+
+    def watch_presence(
+        self, target: str, *, expires_seconds: int = 0, destination: str | None = None
+    ) -> Subscription:
+        """Watch a presentity's presence (RFC 3856): :meth:`subscribe` to the
+        ``presence`` package. Each document it sends arrives as
+        `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`, whose
+        :attr:`sipral.events.Event.presence` has it decoded."""
+        return self.subscribe(
+            target, "presence", expires_seconds=expires_seconds, destination=destination
+        )
+
+    def publish_presence(
+        self, basic: int, activity: int = Activity.NONE, note: str | None = None
+    ) -> None:
+        """`sipral_account_publish_presence`: publish this account's presence
+        (RFC 3903) -- ``basic`` a :class:`sipral.enums.Basic`, open or closed
+        (required), an RPID ``activity`` (``Activity.NONE`` publishes no
+        person; ``Activity.OTHER`` is refused, having no name to publish
+        under) and a one-line ``note``. The first call publishes and every
+        later one modifies the same publication, which the stack keeps
+        refreshed until :meth:`unpublish_presence`.
+        `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with ``PresenceKind.PUBLICATION``
+        says what the compositor did with it."""
+        presence = ffi.new("sipral_presence_t *")
+        presence.size = ffi.sizeof("sipral_presence_t")
+        presence.basic = int(basic)
+        presence.activity = int(activity)
+        note_buf = None
+        if note is not None:
+            encoded = note.encode("utf-8")
+            note_buf = ffi.new("char[]", encoded)
+            presence.note = note_buf
+            presence.note_len = len(encoded)
+        _call(
+            lambda: lib.sipral_account_publish_presence(
+                self.stack.handle, self.handle, presence, self.stack.now_ms()
+            ),
+            "sipral_account_publish_presence",
+        )
+
+    def unpublish_presence(self) -> None:
+        """`sipral_account_unpublish_presence`: take the published presence
+        away (RFC 3903 Section 4.5); ``PublicationState.REMOVED`` says when it
+        is gone. `SIPRAL_STATUS_WRONG_STATE` when nothing was published."""
+        _call(
+            lambda: lib.sipral_account_unpublish_presence(
+                self.stack.handle, self.handle, self.stack.now_ms()
+            ),
+            "sipral_account_unpublish_presence",
+        )
 
     def remove(self) -> None:
         """`sipral_account_remove`. Every call this account placed ends."""

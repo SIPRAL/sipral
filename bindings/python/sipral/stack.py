@@ -740,6 +740,9 @@ class Stack:
         destination: str | None = None,
         srtp: int = 0,
         ice: int = 0,
+        text: bool = False,
+        feedback: bool = False,
+        focus: bool = False,
     ) -> Call:
         """`sipral_call_place`, with this stack running the call's audio.
 
@@ -757,10 +760,20 @@ class Stack:
         `SIPRAL_EVENT_KIND_NAT_MAPPING` arrives, exactly as
         `sipral_stack_nat_map`'s own doc comment requires: placing a call
         on the socket any sooner is `SIPRAL_STATUS_WRONG_STATE`.
+
+        ``text`` opens a second socket and offers a real-time text stream on
+        it (RFC 4103), which :meth:`sipral.call.Call.send_text` writes to and
+        ``call.text`` reads; it is not offered on a call keyed by SRTP or
+        gathering ICE, the stream having no key or candidates of its own.
+        ``feedback`` offers RTP/AVPF (RFC 4585) with Generic NACKs and
+        reduced-size RTCP (RFC 5506), off by default since a far end that
+        knows only RTP/AVP refuses the profile. ``focus`` says this end is
+        the focus of a conference (RFC 4579): `isfocus` on its `Contact`.
         """
         media_socket = self.open_media_socket(media_host, media_port)
         media_address = format_address(*media_socket.getsockname())
         self._map_media_socket(media_socket, media_address)
+        text_socket = self.open_media_socket(media_host) if text else None
 
         target_buf = ffi.new("char[]", target.encode("utf-8"))
         media_address_buf = ffi.new("char[]", media_address.encode("utf-8"))
@@ -779,6 +792,14 @@ class Stack:
         if destination_buf is not None:
             config.destination = destination_buf
             config.destination_len = len(destination.encode("utf-8"))
+        text_buf = None
+        if text_socket is not None:
+            text_address = format_address(*text_socket.getsockname()).encode("utf-8")
+            text_buf = ffi.new("char[]", text_address)
+            config.text_address = text_buf
+            config.text_address_len = len(text_address)
+        config.feedback = lib.SIPRAL_TOGGLE_ON if feedback else lib.SIPRAL_TOGGLE_DEFAULT
+        config.focus = 1 if focus else 0
 
         out_call = ffi.new("sipral_handle_t *")
         try:
@@ -791,8 +812,10 @@ class Stack:
         except Exception:
             self._forget_media_socket(media_address)
             media_socket.close()
+            if text_socket is not None:
+                self._close_socket(text_socket)
             raise
-        call = Call(self, int(out_call[0]), media_socket, media_address)
+        call = Call(self, int(out_call[0]), media_socket, media_address, text_socket)
         self.register_call(call)
         return call
 
@@ -802,6 +825,9 @@ class Stack:
         *,
         media_host: str = "127.0.0.1",
         media_port: int = 0,
+        text: bool = False,
+        feedback: bool = False,
+        focus: bool = False,
     ) -> Call:
         """Open a media socket for an incoming call and answer it there.
 
@@ -816,21 +842,42 @@ class Stack:
         On a stack built with ``nat=Nat.STUN`` this blocks the calling
         thread until the socket's `SIPRAL_EVENT_KIND_NAT_MAPPING` arrives,
         the same wait :meth:`place_call` makes.
+
+        With ``text``, ``feedback`` or ``focus`` -- as :meth:`place_call`
+        takes them -- the call is answered through `sipral_call_answer_with`,
+        a text socket opened for the real-time text stream the offer carried.
         """
         media_socket = self.open_media_socket(media_host, media_port)
         media_address = format_address(*media_socket.getsockname())
         self._map_media_socket(media_socket, media_address)
+        text_socket = self.open_media_socket(media_host) if text else None
 
-        call = Call(self, event.call, media_socket, media_address)
+        call = Call(self, event.call, media_socket, media_address, text_socket)
         self.register_call(call)
         try:
-            call.answer()
+            if text or feedback or focus:
+                call.answer_with(feedback=feedback, focus=focus)
+            else:
+                call.answer()
         except Exception:
             self.forget_call(call.handle)
             self._forget_media_socket(media_address)
             media_socket.close()
+            if text_socket is not None:
+                self._close_socket(text_socket)
             raise
         return call
+
+    def _close_socket(self, sock: socket.socket) -> None:
+        """Close a socket :meth:`open_media_socket` opened beside a call's
+        media one -- its text socket, a recording server's two -- and give
+        its port back to the RTP range."""
+        try:
+            port = sock.getsockname()[1]
+        except OSError:
+            return
+        sock.close()
+        self._give_back_port(port)
 
     def open_media_socket(self, host: str, port: int = 0) -> socket.socket:
         """A non-blocking UDP socket for a call's media, bound at ``host``.

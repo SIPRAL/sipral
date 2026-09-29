@@ -17,14 +17,20 @@ import dataclasses
 
 from ._sipral_cffi import ffi, lib
 from .enums import (
+    Activity,
     AnswerMode,
     Attestation,
     AudioChange,
     AudioDirection,
     AudioOrigin,
     AudioRole,
+    Basic,
+    ConferenceUpdate,
     KeyExchange,
+    PresenceKind,
     Privacy,
+    PublicationState,
+    PublishFailure,
     RingSource,
     VerificationFailure,
     VerificationOutcome,
@@ -36,9 +42,12 @@ __all__ = [
     "Answering",
     "AudioNotice",
     "CallerIdentity",
+    "ConferenceNotice",
     "EndCause",
     "Event",
+    "Presence",
     "Protection",
+    "TypedText",
     "Verification",
 ]
 
@@ -202,6 +211,49 @@ class Event:
         )
 
     @property
+    def conference(self) -> "ConferenceNotice | None":
+        """`SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`, typed; ``None`` on any
+        other event."""
+        if self.kind != lib.SIPRAL_EVENT_KIND_CONFERENCE_CHANGED:
+            return None
+        f = self.fields
+        return ConferenceNotice(
+            subscription=int(f["subscription"]),
+            update=ConferenceUpdate(f["update"]),
+            version=int(f["version"]),
+            users=int(f["users"]),
+        )
+
+    @property
+    def text(self) -> "TypedText | None":
+        """`SIPRAL_EVENT_KIND_TEXT_RECEIVED`, typed; ``None`` on any other
+        event."""
+        if self.kind != lib.SIPRAL_EVENT_KIND_TEXT_RECEIVED:
+            return None
+        return TypedText(text=self.fields["text"], missing=int(self.fields["missing"]))
+
+    @property
+    def presence(self) -> "Presence | None":
+        """`SIPRAL_EVENT_KIND_PRESENCE_CHANGED`, typed; ``None`` on any
+        other event."""
+        if self.kind != lib.SIPRAL_EVENT_KIND_PRESENCE_CHANGED:
+            return None
+        f = self.fields
+        return Presence(
+            kind=PresenceKind(f["kind"]),
+            subscription=int(f["subscription"]),
+            basic=Basic(f["basic"]),
+            activity=Activity(f["activity"]),
+            entity=f["entity"],
+            note=f["note"],
+            publication_state=PublicationState(f["publication_state"]),
+            failure=PublishFailure(f["failure"]),
+            status_code=int(f["status_code"]),
+            expires_ms=int(f["expires_ms"]),
+            refresh_in_ms=int(f["refresh_in_ms"]),
+        )
+
+    @property
     def audio(self) -> "AudioNotice | None":
         """`SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`, typed; ``None`` on any
         other event."""
@@ -323,6 +375,53 @@ class EndCause:
     sip: int
     q850: int
     text: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class ConferenceNotice:
+    """What a conference subscription learnt: a document merged into its
+    picture (``ConferenceUpdate.APPLIED``) or the conference deleted by its
+    focus (``ENDED``, after which the subscription is being given up), the
+    version the picture is at and how many users it holds.
+    :meth:`sipral.subscription.Subscription.conference` reads the picture."""
+
+    subscription: int
+    update: "ConferenceUpdate"
+    version: int
+    users: int
+
+
+@dataclasses.dataclass(frozen=True)
+class TypedText:
+    """What the far end typed on the call's real-time text stream (RFC
+    4103), in order: an erasure as BACKSPACE (U+0008), a new line as LINE
+    SEPARATOR (U+2028), a REPLACEMENT CHARACTER (U+FFFD) where a block was
+    lost for good, and ``missing`` counting those."""
+
+    text: str
+    missing: int
+
+
+@dataclasses.dataclass(frozen=True)
+class Presence:
+    """Presence moved. ``PresenceKind.WATCHED``: the ``subscription`` that
+    was told, and what the PIDF document said -- open or closed, the first
+    RPID activity, the presentity and the first note. ``PUBLICATION``, about
+    the event's ``account``: what became of its published presence, why it
+    failed, the SIP status the compositor answered with, the lifetime granted
+    and when the stack refreshes it."""
+
+    kind: "PresenceKind"
+    subscription: int
+    basic: "Basic"
+    activity: "Activity"
+    entity: str | None
+    note: str | None
+    publication_state: "PublicationState"
+    failure: "PublishFailure"
+    status_code: int
+    expires_ms: int
+    refresh_in_ms: int
 
 
 def _decode_payload(kind: int, payload) -> dict[str, object]:
@@ -538,6 +637,42 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "length_ms": int(progress.length_ms),
             "sit_hz": (int(progress.sit_hz_1), int(progress.sit_hz_2), int(progress.sit_hz_3)),
             "sit_ms": (int(progress.sit_ms_1), int(progress.sit_ms_2), int(progress.sit_ms_3)),
+        }
+
+    # A conference subscription's picture changed, or the conference ended
+    # (`Subscription.conference` reads the picture).
+    if kind == lib.SIPRAL_EVENT_KIND_CONFERENCE_CHANGED:
+        conference = payload.conference
+        return {
+            "subscription": int(conference.subscription),
+            "update": int(conference.update),
+            "version": int(conference.version),
+            "users": int(conference.users),
+        }
+
+    # What the far end typed on the call's real-time text stream.
+    if kind == lib.SIPRAL_EVENT_KIND_TEXT_RECEIVED:
+        typed = payload.text
+        return {
+            "text": _text(typed.text, typed.text_len) or "",
+            "missing": int(typed.missing),
+        }
+
+    # A watched presentity, or this account's own publication.
+    if kind == lib.SIPRAL_EVENT_KIND_PRESENCE_CHANGED:
+        presence = payload.presence
+        return {
+            "kind": int(presence.kind),
+            "subscription": int(presence.subscription),
+            "basic": int(presence.basic),
+            "activity": int(presence.activity),
+            "entity": _text(presence.entity, presence.entity_len),
+            "note": _text(presence.note, presence.note_len),
+            "publication_state": int(presence.publication_state),
+            "failure": int(presence.failure),
+            "status_code": int(presence.status_code),
+            "expires_ms": int(presence.expires_ms),
+            "refresh_in_ms": int(presence.refresh_in_ms),
         }
 
     # Unknown or not yet decoded here: the caller still has `message` and

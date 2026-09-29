@@ -74,6 +74,16 @@ __all__ = [
     "VerificationOutcome",
     "VerificationFailure",
     "VerificationStage",
+    "Codec",
+    "SubscriptionState",
+    "ConferenceUpdate",
+    "EndpointStatus",
+    "ConferenceText",
+    "PresenceKind",
+    "Basic",
+    "Activity",
+    "PublicationState",
+    "PublishFailure",
 ]
 
 
@@ -338,3 +348,41 @@ VerificationFailure = _enum("VerificationFailure", "SIPRAL_VERIFICATION_FAILURE_
 #: A `sipral_verification_stage_t`: which half of a caller's verification
 #: `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` reports.
 VerificationStage = _enum("VerificationStage", "SIPRAL_VERIFICATION_STAGE_")
+
+#: A `sipral_codec_t`: the codec a call runs, ``info()["codec"]`` -- L16 at
+#: 8 or 16 kHz (``L16_NARROWBAND``, ``L16_WIDEBAND``) only when the stack's
+#: codec order names ``L16/8000`` or ``L16/16000``. Excludes the codec
+#: outcome space, which shares the start.
+Codec = _enum("Codec", "SIPRAL_CODEC_", exclude=("SIPRAL_CODEC_OUTCOME_",))
+
+#: A `sipral_subscription_state_t`: where a subscription is
+#: (:attr:`sipral.subscription.Subscription.state`).
+SubscriptionState = _enum("SubscriptionState", "SIPRAL_SUBSCRIPTION_STATE_")
+
+#: A `sipral_conference_update_t`: what one conference document did,
+#: :attr:`sipral.events.ConferenceNotice.update`.
+ConferenceUpdate = _enum("ConferenceUpdate", "SIPRAL_CONFERENCE_UPDATE_")
+
+#: A `sipral_endpoint_status_t`: where one endpoint of a conference is (RFC
+#: 4575 §5.7.2).
+EndpointStatus = _enum("EndpointStatus", "SIPRAL_ENDPOINT_STATUS_")
+
+#: A `sipral_conference_text_t`: which piece of a conference's text is read.
+ConferenceText = _enum("ConferenceText", "SIPRAL_CONFERENCE_TEXT_")
+
+#: A `sipral_presence_kind_t`: whether a presence event is about a watched
+#: presentity or this account's own publication.
+PresenceKind = _enum("PresenceKind", "SIPRAL_PRESENCE_KIND_")
+
+#: A `sipral_basic_t`: PIDF's ``basic``, open or closed (RFC 3863).
+Basic = _enum("Basic", "SIPRAL_BASIC_")
+
+#: A `sipral_activity_t`: the RPID activity phones show (RFC 4480).
+Activity = _enum("Activity", "SIPRAL_ACTIVITY_")
+
+#: A `sipral_publication_state_t`: what became of this account's published
+#: presence.
+PublicationState = _enum("PublicationState", "SIPRAL_PUBLICATION_STATE_")
+
+#: A `sipral_publish_failure_t`: why a publication failed.
+PublishFailure = _enum("PublishFailure", "SIPRAL_PUBLISH_FAILURE_")

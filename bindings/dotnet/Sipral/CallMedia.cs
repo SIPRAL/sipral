@@ -54,6 +54,15 @@ public sealed class CallMedia : IDisposable
     private readonly IntPtr _packetData = Marshal.AllocHGlobal(PacketBytes);
     private readonly IntPtr _packetDestination = Marshal.AllocHGlobal(AddressBytes);
 
+    /// <summary>The socket real-time text arrives on and leaves from, when
+    /// the call was built with one.</summary>
+    private readonly Socket? _textSocket;
+    /// <summary>The two sockets a recording server's copies leave from —
+    /// this end's audio, then the far end's — while
+    /// <see cref="Call.RecordTo"/> records; swapped under
+    /// <see cref="_socketLock"/>.</summary>
+    private (Socket ThisEnd, Socket FarEnd)? _recording;
+
     private bool _active = true;
     private int _disposed;
     private short[] _pending = Array.Empty<short>();
@@ -99,12 +108,17 @@ public sealed class CallMedia : IDisposable
     /// the socket and sends what RTCP and DTMF owe.</summary>
     public bool Pumped { get; }
 
-    internal CallMedia(SipralStack stack, ulong callHandle, Socket socket, bool pumped = false)
+    internal CallMedia(SipralStack stack, ulong callHandle, Socket socket, bool pumped = false, Socket? textSocket = null)
     {
         Pumped = pumped;
         _stack = stack;
         _socket = socket;
         _socket.Blocking = false;
+        _textSocket = textSocket;
+        if (_textSocket is not null)
+        {
+            _textSocket.Blocking = false;
+        }
         _localAddress = SipralStack.FormatAddress((IPEndPoint)socket.LocalEndPoint!);
 
         ulong media = 0;
@@ -131,7 +145,8 @@ public sealed class CallMedia : IDisposable
             (SipralCodec)info.Codec, info.PayloadType, info.ClockRate, info.SampleRate, info.FrameMs,
             (int)info.FrameSamples, (SipralDirection)info.Direction, info.Sending != 0, info.Receiving != 0,
             info.HasDtmf != 0, info.DtmfPayloadType, (SipralRtcp)info.Rtcp, info.Secured != 0,
-            info.Recording != 0, info.RecordedMs, info.Stalled != 0);
+            info.Recording != 0, info.RecordedMs, info.Stalled != 0, info.HasText != 0, info.Feedback != 0,
+            info.GenericNack != 0, info.ReducedSize != 0);
     }
 
     // -- recording ----------------------------------------------------------
@@ -191,12 +206,7 @@ public sealed class CallMedia : IDisposable
     {
         var stats = SipralStreamStats.Sized();
         SipralErrors.Call(() => NativeMethods.sipral_media_statistics(Handle, _stack.NowMs, ref stats), "sipral_media_statistics");
-        return new SipralStreamStatistics(
-            (SipralCodec)stats.Codec, stats.HasRoundTrip != 0 ? stats.RoundTripUs : null, stats.PacketsSent,
-            stats.OctetsSent, stats.PacketsReceived, stats.PacketsLost, stats.PacketsLate,
-            stats.PacketsOverflowed, stats.PacketsDuplicated, stats.PacketsReordered, stats.DelayUs,
-            stats.TargetDelayUs, stats.JitterUs, stats.LossRate, stats.Score, stats.Suffering != 0,
-            stats.SilentForMs, stats.FramesUnderrun);
+        return SipralEventArgs.Statistics(stats);
     }
 
     /// <summary>Every path this call's ICE agent tried — the candidate
@@ -257,6 +267,162 @@ public sealed class CallMedia : IDisposable
                 (SipralSrtpSuite)stream.Suite, stream.Authenticated != 0, stream.AwaitingKeys != 0));
         }
         return streams;
+    }
+
+    // -- real-time text and the copies for a recording server ---------------
+
+    /// <summary><c>sipral_media_send_text</c>: see
+    /// <see cref="Call.SendText"/>.</summary>
+    public void SendText(string text)
+    {
+        var encoded = ToSBytes(text);
+        SipralErrors.Check(NativeMethods.sipral_media_send_text(Handle, encoded, (nuint)encoded.Length), "sipral_media_send_text");
+    }
+
+    /// <summary>Starts sending the recording server's copies from
+    /// <paramref name="thisEnd"/> and <paramref name="farEnd"/>: what
+    /// <see cref="Call.RecordTo"/> does once the recording session is
+    /// placed.</summary>
+    internal void AttachRecording(Socket thisEnd, Socket farEnd)
+    {
+        thisEnd.Blocking = false;
+        farEnd.Blocking = false;
+        lock (_socketLock)
+        {
+            _recording = (thisEnd, farEnd);
+        }
+    }
+
+    /// <summary>Closes the two sockets <see cref="AttachRecording"/> took, once
+    /// the recording stopped.</summary>
+    internal void DetachRecording()
+    {
+        (Socket ThisEnd, Socket FarEnd)? taken;
+        lock (_socketLock)
+        {
+            taken = _recording;
+            _recording = null;
+        }
+        if (taken is { } sockets)
+        {
+            _stack.CloseSocket(sockets.ThisEnd);
+            _stack.CloseSocket(sockets.FarEnd);
+        }
+    }
+
+    /// <summary>Every datagram waiting on the text socket to
+    /// <c>sipral_media_receive_text</c>, then every one
+    /// <c>sipral_media_poll_text</c> has due, sent from it.</summary>
+    private void CarryText()
+    {
+        if (_textSocket is not { } socket)
+        {
+            return;
+        }
+        var buffer = new byte[2048];
+        while (true)
+        {
+            EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+            int count;
+            try
+            {
+                if (!socket.Poll(0, SelectMode.SelectRead))
+                {
+                    break;
+                }
+                count = socket.ReceiveFrom(buffer, ref from);
+            }
+            catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+            {
+                return;
+            }
+            var fromBytes = ToSBytes(SipralStack.FormatAddress((IPEndPoint)from));
+            var data = buffer.AsSpan(0, count).ToArray();
+            NativeMethods.sipral_media_receive_text(Handle, data, (nuint)count, fromBytes, (nuint)fromBytes.Length, _stack.NowMs, out _);
+        }
+        while (true)
+        {
+            var packet = SipralMediaPacket.Sized();
+            packet.Data = _packetData;
+            packet.Capacity = PacketBytes;
+            packet.Destination = _packetDestination;
+            packet.DestinationCapacity = AddressBytes;
+            var status = NativeMethods.sipral_media_poll_text(Handle, _stack.NowMs, ref packet);
+            if (status != SipralStatus.Ok || packet.Len == 0)
+            {
+                return;
+            }
+            SendFrom(socket, packet);
+        }
+    }
+
+    /// <summary>Every copy <c>sipral_media_poll_recording</c> has waiting,
+    /// each from the socket it names; what the server sends back to those
+    /// sockets — its own RTCP — is read and let go.</summary>
+    private void CarryRecording()
+    {
+        (Socket ThisEnd, Socket FarEnd)? sockets;
+        lock (_socketLock)
+        {
+            sockets = _recording;
+        }
+        if (sockets is not { } open)
+        {
+            return;
+        }
+        Discard(open.ThisEnd);
+        Discard(open.FarEnd);
+        while (true)
+        {
+            var packet = SipralMediaPacket.Sized();
+            packet.Data = _packetData;
+            packet.Capacity = PacketBytes;
+            packet.Destination = _packetDestination;
+            packet.DestinationCapacity = AddressBytes;
+            var status = NativeMethods.sipral_media_poll_recording(Handle, ref packet, out var farEnd);
+            if (status != SipralStatus.Ok || packet.Len == 0)
+            {
+                return;
+            }
+            SendFrom(farEnd != 0 ? open.FarEnd : open.ThisEnd, packet);
+        }
+    }
+
+    private static void Discard(Socket socket)
+    {
+        var buffer = new byte[2048];
+        try
+        {
+            while (socket.Poll(0, SelectMode.SelectRead))
+            {
+                socket.Receive(buffer);
+            }
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+        }
+    }
+
+    /// <summary>One datagram out of <paramref name="socket"/>, to where
+    /// <paramref name="packet"/> says; best effort, like every send
+    /// here.</summary>
+    private void SendFrom(Socket socket, SipralMediaPacket packet)
+    {
+        var payload = new byte[(int)packet.Len];
+        Marshal.Copy(_packetData, payload, 0, payload.Length);
+        var text = Marshal.PtrToStringUTF8(_packetDestination, (int)packet.DestinationLen);
+        if (text is null)
+        {
+            return;
+        }
+        try
+        {
+            var (host, port) = SipralStack.ParseAddress(text);
+            socket.SendTo(payload, new IPEndPoint(IPAddress.Parse(host), port));
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException or FormatException)
+        {
+        }
     }
 
     // -- the two frame-carrying calls, as Span/ReadOnlySpan ---------------
@@ -377,6 +543,8 @@ public sealed class CallMedia : IDisposable
                 // what RTCP and DTMF owe, which are not frames
                 DrainPackets(NativeMethods.sipral_media_poll_rtcp);
                 DrainPackets(NativeMethods.sipral_media_poll_transmit);
+                CarryText();
+                CarryRecording();
             }
             else if (_active)
             {
@@ -404,6 +572,8 @@ public sealed class CallMedia : IDisposable
                 Capture(chunk);
                 DrainPackets(NativeMethods.sipral_media_poll_rtcp);
                 DrainPackets(NativeMethods.sipral_media_poll_transmit);
+                CarryText();
+                CarryRecording();
 
                 if (status is not (SipralStatus.Ok or SipralStatus.Busy))
                 {
@@ -530,6 +700,11 @@ public sealed class CallMedia : IDisposable
         _frames.Writer.TryComplete();
         _handle.Dispose();
         _socket.Dispose();
+        if (_textSocket is not null)
+        {
+            _stack.CloseSocket(_textSocket);
+        }
+        DetachRecording();
         Marshal.FreeHGlobal(_packetData);
         Marshal.FreeHGlobal(_packetDestination);
     }

@@ -12,6 +12,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Conferences, presence, real-time text, RTCP feedback and SIPREC in the .NET and Python layers:** subscriptions (`Account.Subscribe`/`subscribe`) with the conference picture read whole, presence watched and published, a call's text stream sent and read, AVPF asked for, a focus named and a call recorded to a recording server, with L16 proved as a codec.
 - **STIR/SHAKEN in calls.** An account given a P-256 key and the URL of its
   certificate signs every call it places (RFC 8224 §6.1, full-form PASSporT
   with RFC 8588's `attest` and `origid`, and the `Date` it is dated by):

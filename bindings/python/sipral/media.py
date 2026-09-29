@@ -24,6 +24,7 @@ from . import events as _events
 from ._sipral_cffi import ffi, lib
 from .enums import KeyExchange
 from .errors import call as _call
+from .errors import check
 
 if TYPE_CHECKING:
     from .stack import Stack
@@ -57,6 +58,7 @@ class Media:
         sock: socket_module.socket,
         *,
         pumped: bool = False,
+        text_socket: socket_module.socket | None = None,
     ) -> None:
         self.stack = stack
         self.call_handle = call_handle
@@ -103,6 +105,15 @@ class Media:
         self._socket_lock = threading.Lock()
         self._selector = selectors.DefaultSelector()
         self._selector.register(self._socket, selectors.EVENT_READ)
+        #: The socket real-time text arrives on and leaves from, when the
+        #: call was built with one.
+        self._text_socket = text_socket
+        if text_socket is not None:
+            text_socket.setblocking(False)
+        #: The two sockets a recording server's copies leave from -- this
+        #: end's audio, then the far end's -- while
+        #: :meth:`sipral.call.Call.record_to` records.
+        self._recording: tuple[socket_module.socket, socket_module.socket] | None = None
 
         self._thread = threading.Thread(
             target=self._run, name="sipral-media", daemon=True
@@ -143,6 +154,10 @@ class Media:
             "recording": bool(out.recording),
             "recorded_ms": int(out.recorded_ms),
             "stalled": bool(out.stalled),
+            "has_text": bool(out.has_text),
+            "feedback": bool(out.feedback),
+            "generic_nack": bool(out.generic_nack),
+            "reduced_size": bool(out.reduced_size),
         }
 
     def encryption(self) -> list[_events.Protection]:
@@ -179,6 +194,11 @@ class Media:
         ``frames_underrun`` counts frames the earpiece played as nothing
         because the jitter buffer had run dry while the far end was still
         sending; ``loss_rate``, ``score`` and ``suffering`` take them in.
+        ``feedback`` is what RTP/AVPF (RFC 4585) did on the stream, or
+        ``None`` while it does not run it: the agreed ``trr_interval_ms``,
+        the Generic NACKs sent and received and the packets they asked for,
+        the early and the reduced-size (RFC 5506) RTCP packets sent, and the
+        feedback held back for want of RTCP bandwidth.
         """
         out = ffi.new("sipral_stream_stats_t *")
         out.size = ffi.sizeof("sipral_stream_stats_t")
@@ -199,6 +219,18 @@ class Media:
             "score": float(out.score),
             "suffering": bool(out.suffering),
             "frames_underrun": int(out.frames_underrun),
+            "feedback": {
+                "trr_interval_ms": int(out.trr_interval_ms),
+                "nacks_sent": int(out.nacks_sent),
+                "packets_nacked": int(out.packets_nacked),
+                "nacks_received": int(out.nacks_received),
+                "packets_asked_for": int(out.packets_asked_for),
+                "early_packets": int(out.early_packets),
+                "reduced_size_packets": int(out.reduced_size_packets),
+                "feedback_suppressed": int(out.feedback_suppressed),
+            }
+            if out.feedback
+            else None,
         }
 
     def path_candidates(self) -> list[dict[str, object]]:
@@ -311,6 +343,85 @@ class Media:
         )
         return bool(running[0]), int(taken[0])
 
+    def send_text(self, text: str) -> None:
+        """`sipral_media_send_text`: see :meth:`sipral.call.Call.send_text`."""
+        encoded = text.encode("utf-8")
+        check(
+            lib.sipral_media_send_text(self.handle, encoded, len(encoded)),
+            "sipral_media_send_text",
+        )
+
+    def attach_recording(
+        self, this_end: socket_module.socket, far_end: socket_module.socket
+    ) -> None:
+        """Start sending a recording server's copies from ``this_end`` and
+        ``far_end``: what :meth:`sipral.call.Call.record_to` does once the
+        recording session is placed."""
+        this_end.setblocking(False)
+        far_end.setblocking(False)
+        with self._socket_lock:
+            self._recording = (this_end, far_end)
+
+    def detach_recording(self) -> None:
+        """Close the two sockets :meth:`attach_recording` took, once the
+        recording stopped."""
+        with self._socket_lock:
+            taken, self._recording = self._recording, None
+        if taken is not None:
+            for sock in taken:
+                self.stack._close_socket(sock)
+
+    def _carry_text(self) -> None:
+        """Every datagram waiting on the text socket to
+        `sipral_media_receive_text`, then every one `sipral_media_poll_text`
+        has due, sent from it."""
+        sock = self._text_socket
+        if sock is None:
+            return
+        taken = ffi.new("uint32_t *")
+        while True:
+            try:
+                data, from_address = sock.recvfrom(2048)
+            except (BlockingIOError, OSError):
+                break
+            from_text = _format_address(*from_address).encode("utf-8")
+            lib.sipral_media_receive_text(
+                self.handle, data, len(data), from_text, len(from_text), self.stack.now_ms(), taken
+            )
+        self._drain_packets(
+            lambda packet: lib.sipral_media_poll_text(self.handle, self.stack.now_ms(), packet),
+            sock,
+        )
+
+    def _carry_recording(self) -> None:
+        """Every copy `sipral_media_poll_recording` has waiting, each from
+        the socket it names; what the server sends back to those sockets --
+        its own RTCP -- is read and let go."""
+        with self._socket_lock:
+            sockets = self._recording
+        if sockets is None:
+            return
+        for sock in sockets:
+            while True:
+                try:
+                    sock.recv(2048)
+                except (BlockingIOError, OSError):
+                    break
+        far_end = ffi.new("uint32_t *")
+        packet = ffi.new("sipral_media_packet_t *")
+        data = ffi.new(f"uint8_t[{_PACKET_BYTES}]")
+        destination = ffi.new(f"char[{_ADDRESS_BYTES}]")
+        while True:
+            packet.size = ffi.sizeof("sipral_media_packet_t")
+            packet.data = data
+            packet.capacity = _PACKET_BYTES
+            packet.destination = destination
+            packet.destination_capacity = _ADDRESS_BYTES
+            status = lib.sipral_media_poll_recording(self.handle, packet, far_end)
+            if status != lib.SIPRAL_STATUS_OK or packet.len == 0:
+                return
+            self._send(packet, sockets[1] if far_end[0] else sockets[0])
+
     def rebind(self, sock: socket_module.socket) -> None:
         """Carry this call's media on ``sock`` from now on, and close the
         socket it had: what :meth:`sipral.call.Call.readdress` does once the
@@ -339,6 +450,9 @@ class Media:
         lib.sipral_media_release(self.handle)
         self._selector.close()
         self._socket.close()
+        if self._text_socket is not None:
+            self.stack._close_socket(self._text_socket)
+        self.detach_recording()
 
     # -- the frame-rate thread --------------------------------------------
 
@@ -372,7 +486,7 @@ class Media:
                 out_arrival,
             )
 
-    def _drain_packets(self, poll) -> None:
+    def _drain_packets(self, poll, sock: socket_module.socket | None = None) -> None:
         packet = ffi.new("sipral_media_packet_t *")
         data = ffi.new(f"uint8_t[{_PACKET_BYTES}]")
         destination = ffi.new(f"char[{_ADDRESS_BYTES}]")
@@ -385,20 +499,21 @@ class Media:
             status = poll(packet)
             if status != lib.SIPRAL_STATUS_OK or packet.len == 0:
                 return
-            self._send(packet)
+            self._send(packet, sock)
 
-    def _send(self, packet) -> None:
+    def _send(self, packet, sock: socket_module.socket | None = None) -> None:
         """One packet out where it says: a datagram from this call's
-        socket, or -- marked TCP or TLS -- bytes on the socket's connection
-        to the TURN server, which the stack holds."""
+        socket -- or from ``sock``, the text or a recording socket -- or,
+        marked TCP or TLS, bytes on the socket's connection to the TURN
+        server, which the stack holds."""
         payload = bytes(ffi.buffer(packet.data, packet.len))
-        if packet.protocol in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
+        if sock is None and packet.protocol in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
             self.stack.write_turn(self.local_address, payload)
             return
         text = ffi.string(packet.destination, packet.destination_len).decode("utf-8")
         host, port = _parse_address(text)
         try:
-            self._socket.sendto(payload, (host, port))
+            (sock or self._socket).sendto(payload, (host, port))
         except OSError:
             pass
 
@@ -465,6 +580,8 @@ class Media:
                         self.handle, self.stack.now_ms(), packet
                     )
                 )
+                self._carry_text()
+                self._carry_recording()
                 if status not in (lib.SIPRAL_STATUS_OK, lib.SIPRAL_STATUS_BUSY):
                     self._active = False
 
