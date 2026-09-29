@@ -66,6 +66,8 @@ public sealed class SipralEventArgs : EventArgs
     public SipralAudioEventInfo? Audio { get; }
     /// <summary>Set for <see cref="SipralEventKind.StunServer"/>.</summary>
     public SipralStunServerEventInfo? StunServer { get; }
+    /// <summary>Set for <see cref="SipralEventKind.TransportFailed"/>.</summary>
+    public SipralTransportFailedEventInfo? TransportFailed { get; private init; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
@@ -230,10 +232,17 @@ public sealed class SipralEventArgs : EventArgs
             stunServer = new SipralStunServerEventInfo((SipralStunServerState)s.State,
                 ReadUtf8(s.Server, s.ServerLen), ReadUtf8(s.Previous, s.PreviousLen));
         }
+        SipralTransportFailedEventInfo? transportFailed = null;
+        if (kind == SipralEventKind.TransportFailed)
+        {
+            var t = evt.Payload.TransportFailed;
+            transportFailed = new SipralTransportFailedEventInfo(t.Transport, (SipralTransport)t.Protocol,
+                (SipralTransportError)t.Error, (SipralTlsFailure)t.Tls, ReadUtf8(t.Detail, t.DetailLen));
+        }
 
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
             registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio,
-            stunServer);
+            stunServer) { TransportFailed = transportFailed };
     }
 
     internal static SipralStreamStatistics? ReadStatistics(IntPtr ptr)

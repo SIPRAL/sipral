@@ -46,6 +46,7 @@ use crate::nat::{
     SipralNatEvent, SipralNatRelayEvent, SipralStunServerEvent, SipralTurnStreamEvent,
 };
 use crate::subscription::{SipralSubscriptionState, named_end, named_state};
+use crate::transport::SipralTransportFailedEvent;
 
 /// Declare the event number space, once.
 ///
@@ -576,6 +577,30 @@ event_kinds! {
         /// `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
         /// neither.
         46 = StunServer, c"stun server";
+        reserved 47 = "held for the caller's identity verified by STIR/SHAKEN";
+        reserved 48 = "held for an in-band digit detected";
+        reserved 49 = "held for a call-progress or answering-machine verdict";
+        reserved 50 = "held for a conference's state";
+        reserved 51 = "held for real-time text received";
+        reserved 52 = "held for a presence or publication state";
+
+        /// A transport this stack signals on stopped carrying traffic: the
+        /// application said it failed (`sipral_stack_transport_failed`,
+        /// `sipral_stack_transport_failure`) or closed
+        /// (`sipral_stack_stream_closed`), or a stream carried bytes no
+        /// message starts with (`sipral_stack_receive_stream`).
+        ///
+        /// Raised by the next poll, before what the loss did to the
+        /// registrations and calls on it. `payload.transport_failed` says
+        /// which transport, what it spoke, what went wrong and — when TLS
+        /// refused the connection — why, as the application's TLS library
+        /// said it: untrusted, a name that does not match, expired, or a
+        /// handshake refused, with the library's own sentence beside it.
+        /// Nothing is sent on the transport until
+        /// `sipral_stack_transport_bind` brings it back; a request asked for
+        /// meanwhile is `SIPRAL_STATUS_TRANSPORT_DOWN`. `account` and `call`
+        /// are `SIPRAL_HANDLE_NONE`: a transport is neither.
+        53 = TransportFailed, c"transport failed";
     }
 }
 
@@ -643,6 +668,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::AudioDevicesChanged, "audio"),
     (SipralEventKind::CallAddressWanted, "call"),
     (SipralEventKind::StunServer, "stun_server"),
+    (SipralEventKind::TransportFailed, "transport_failed"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1345,6 +1371,8 @@ record! {
         pub audio: SipralAudioEvent,
         /// For [`SipralEventKind::StunServer`].
         pub stun_server: SipralStunServerEvent,
+        /// For [`SipralEventKind::TransportFailed`].
+        pub transport_failed: SipralTransportFailedEvent,
     }
 }
 
@@ -1544,6 +1572,19 @@ pub(crate) fn stun_server(stack: SipralHandle, payload: SipralStunServerEvent) -
         stack,
         SipralEventKind::StunServer,
         payload!(stun_server: payload),
+    )
+}
+
+/// A transport lost, as C reads it. The pointer in `payload` points into
+/// text the caller keeps beside the event.
+pub(crate) fn transport_failed(
+    stack: SipralHandle,
+    payload: SipralTransportFailedEvent,
+) -> SipralEvent {
+    SipralEvent::of(
+        stack,
+        SipralEventKind::TransportFailed,
+        payload!(transport_failed: payload),
     )
 }
 
@@ -3015,7 +3056,8 @@ mod tests {
         assert_eq!(SipralEventKind::AudioDevicesChanged as u32, 43);
         assert_eq!(SipralEventKind::CallAddressWanted as u32, 45);
         assert_eq!(SipralEventKind::StunServer as u32, 46);
-        assert_eq!(SipralEventKind::ALL.len(), 44, "and there are no others");
+        assert_eq!(SipralEventKind::TransportFailed as u32, 53);
+        assert_eq!(SipralEventKind::ALL.len(), 45, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -3099,7 +3141,11 @@ mod tests {
             "45 is live"
         );
         assert_eq!(name(46).as_deref(), Some("stun server"), "46 is live");
-        assert_eq!(name(47), None, "past the last kind");
+        for held in 47..=52 {
+            assert_eq!(name(held), None, "{held} is reserved, not live here");
+        }
+        assert_eq!(name(53).as_deref(), Some("transport failed"), "53 is live");
+        assert_eq!(name(54), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

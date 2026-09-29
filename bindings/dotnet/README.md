@@ -295,6 +295,48 @@ refuses it. **Off by default, and then every one is refused 403**: a peer that
 can make a phone dial is a toll-fraud vector, so each one is the
 application's decision.
 
+### SIP over TCP or TLS
+
+```csharp
+using var stack = new SipralStack(
+    bindHost: "192.0.2.20",
+    signalling: SipralTransport.Tls,
+    signallingServer: "198.51.100.10:5061",
+    tlsServerName: "pbx.example.com",
+    tlsTrust: SipralTlsTrust.OnlyAuthority(X509Certificate2.CreateFromPemFile("pbx-ca.pem")));
+var account = stack.AddAccount("sip:alice@example.com", "198.51.100.10:5061", registrar: "sip:example.com");
+account.Register();
+await foreach (var args in stack.Events)
+{
+    if (args.TransportFailed is { } failed)
+    {
+        Console.WriteLine($"{failed.Tls}: {failed.Detail}");
+    }
+}
+```
+
+`signalling` is `SipralTransport.Udp` (the default), `Tcp` or `Tls`. Over
+either of the last two the stack keeps one connection to `signallingServer`,
+the registrar or the outbound proxy, and every account and call rides on it;
+a `Contact` this layer writes names the transport. Over TLS, `SslStream`
+checks the certificate against `tlsServerName` (the server's host when
+`null`) with `tlsTrust`: `SipralTlsTrust.Platform` (the default),
+`PrivateAuthority(cert)` beside it, or `OnlyAuthority(cert)` alone. The
+first connection is made in the constructor. One that fails, or breaks
+later, arrives as `SipralEventKind.TransportFailed` with
+`args.TransportFailed` — `Tls` `Untrusted`, `NameMismatch`, `Expired` or
+`HandshakeRefused`, the `Error`, and `SslStream`'s own `Detail` — and the
+stack connects again, one second later and up to thirty seconds apart,
+registering every account again once it is back. `stack.Connected` says
+whether it is up; `Account.Register()` asked meanwhile is kept for then.
+`docs/22-tls.md` has the whole mapping.
+
+`inviteLimit` is how fast one address may ring the stack: every stack
+starts at `SipralInviteLimit.Default`, ten INVITEs at once and one every
+two seconds, past which a call is answered 480. A voice agent behind a
+trunk takes `SipralInviteLimit.VoiceAgent`, a hundred and twenty-eight at
+once and twenty a second.
+
 ## Samples
 
 `samples/Sipral.Sample.Agent` — a headless voice agent (answers, echoes,

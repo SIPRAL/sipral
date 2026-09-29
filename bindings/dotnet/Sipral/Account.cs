@@ -64,7 +64,7 @@ public sealed class Account
         var aorBytes = Encoding.UTF8.GetBytes(aor);
         var registrarAddressBytes = Encoding.UTF8.GetBytes(registrarAddress);
         var registrarBytes = registrar is null ? null : Encoding.UTF8.GetBytes(registrar);
-        var contactBytes = Encoding.UTF8.GetBytes(contact ?? DefaultContact(aor, stack.BindAddress));
+        var contactBytes = Encoding.UTF8.GetBytes(contact ?? DefaultContact(aor, stack.BindAddress, stack.ContactParameters));
         var displayNameBytes = displayName is null ? null : Encoding.UTF8.GetBytes(displayName);
         var authUserBytes = authUser is null ? null : Encoding.UTF8.GetBytes(authUser);
         var authPasswordBytes = authPassword is null ? null : Encoding.UTF8.GetBytes(authPassword);
@@ -132,7 +132,7 @@ public sealed class Account
     public void Rebind(string? remote = null, string? contact = null)
     {
         var remoteBytes = Interop.NativeText.ToSBytes(remote ?? RegistrarAddress);
-        var contactBytes = Interop.NativeText.ToSBytes(contact ?? DefaultContact(Aor, _stack.BindAddress));
+        var contactBytes = Interop.NativeText.ToSBytes(contact ?? DefaultContact(Aor, _stack.BindAddress, _stack.ContactParameters));
         SipralErrors.Call(
             () => NativeMethods.sipral_account_rebind(
                 _stack.Handle, Handle, global::Sipral.Sipral.TransportMain, remoteBytes, (nuint)remoteBytes.Length,
@@ -144,30 +144,49 @@ public sealed class Account
     /// who gave no <c>Contact</c> of its own — the user part of the AOR,
     /// kept, with the host replaced by the address this stack is
     /// listening on. The AOR itself is never a usable default: it names
-    /// who this is, not a socket anything can write to.</summary>
-    private static string DefaultContact(string aor, string bindAddress)
+    /// who this is, not a socket anything can write to. <paramref name="parameters"/>
+    /// follows the address: <c>;transport=tls</c> on a stack signalling over
+    /// TLS, since a server reaching this end names the transport it reaches
+    /// it over.</summary>
+    private static string DefaultContact(string aor, string bindAddress, string parameters)
     {
         var colon = aor.IndexOf(':');
         if (colon < 0)
         {
-            return $"sip:{bindAddress}";
+            return $"sip:{bindAddress}{parameters}";
         }
         var scheme = aor[..colon];
         var rest = aor[(colon + 1)..];
         var at = rest.IndexOf('@');
-        return at < 0 ? $"{scheme}:{bindAddress}" : $"{scheme}:{rest[..at]}@{bindAddress}";
+        return at < 0 ? $"{scheme}:{bindAddress}{parameters}" : $"{scheme}:{rest[..at]}@{bindAddress}{parameters}";
     }
 
+    /// <summary>Whether it was asked to register and not to unregister
+    /// since: the accounts a stack signalling over TCP or TLS registers again
+    /// once its connection is made again.</summary>
+    public bool WantsRegistration { get; private set; }
+
     /// <summary><c>sipral_account_register</c>. A no-op account refuses
-    /// this.</summary>
+    /// this. On a stack signalling over TCP or TLS whose connection is down
+    /// (<see cref="SipralStatus.TransportDown"/>, already raised as
+    /// <see cref="SipralEventKind.TransportFailed"/>) it is kept, and the
+    /// REGISTER goes the moment the connection is made again.</summary>
     public void Register()
     {
-        SipralErrors.Call(() => NativeMethods.sipral_account_register(_stack.Handle, Handle, _stack.NowMs), "sipral_account_register");
+        WantsRegistration = true;
+        try
+        {
+            SipralErrors.Call(() => NativeMethods.sipral_account_register(_stack.Handle, Handle, _stack.NowMs), "sipral_account_register");
+        }
+        catch (SipralException refused) when (refused.Status == SipralStatus.TransportDown)
+        {
+        }
     }
 
     /// <summary><c>sipral_account_unregister</c>.</summary>
     public void Unregister()
     {
+        WantsRegistration = false;
         SipralErrors.Call(() => NativeMethods.sipral_account_unregister(_stack.Handle, Handle, _stack.NowMs), "sipral_account_unregister");
     }
 

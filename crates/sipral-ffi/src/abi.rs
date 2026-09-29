@@ -525,6 +525,10 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
     ),
     ("SipralPushEcho", crate::versioned::min_size::PUSH_ECHO),
     ("SipralTransmit", crate::versioned::min_size::TRANSMIT),
+    (
+        "SipralTransportFailure",
+        crate::versioned::min_size::TRANSPORT_FAILURE,
+    ),
     // 32, the same literal `crate::lifecycle::SipralSuspending`'s own
     // `Versioned` impl pins its `MIN_SIZE` at — see the comment there for why
     // it is not `crate::versioned::min_size::SUSPENDING` beside the rest.
@@ -571,6 +575,7 @@ pub const SURFACE: Surface = Surface {
         crate::status::SipralStatus::ABI,
         crate::stack::SipralTransport::ABI,
         crate::transport::SipralTransportError::ABI,
+        crate::transport::SipralTlsFailure::ABI,
         crate::media::SipralToggle::ABI,
         crate::media::SipralSrtp::ABI,
         crate::media::SipralIce::ABI,
@@ -639,6 +644,7 @@ pub const SURFACE: Surface = Surface {
         crate::media::SipralMediaPacket::ABI,
         crate::media::SipralProcessorFrame::ABI,
         crate::transport::SipralTransmit::ABI,
+        crate::transport::SipralTransportFailure::ABI,
         crate::event::SipralRegistrationEvent::ABI,
         crate::event::SipralCallEvent::ABI,
         crate::event::SipralTransferEvent::ABI,
@@ -655,6 +661,7 @@ pub const SURFACE: Surface = Surface {
         crate::nat::SipralTurnStreamEvent::ABI,
         crate::audio::SipralAudioEvent::ABI,
         crate::nat::SipralStunServerEvent::ABI,
+        crate::transport::SipralTransportFailedEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -770,6 +777,7 @@ pub const SURFACE: Surface = Surface {
         crate::transport::sipral_stack_receive_stream::ABI,
         crate::transport::sipral_stack_transport_bind::ABI,
         crate::transport::sipral_stack_transport_failed::ABI,
+        crate::transport::sipral_stack_transport_failure::ABI,
         crate::transport::sipral_stack_stream_closed::ABI,
         crate::nat::sipral_stack_stun_servers::ABI,
         crate::nat::sipral_stack_nat_map::ABI,
@@ -1001,6 +1009,7 @@ mod tests {
             "SipralTurnStreamEvent",
             "SipralAudioEvent",
             "SipralStunServerEvent",
+            "SipralTransportFailedEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

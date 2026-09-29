@@ -15,6 +15,15 @@
 //   SIPRAL_AUTH_USER=agent SIPRAL_AUTH_PASSWORD=secret \
 //   dotnet run --project bindings/dotnet/samples/Sipral.Sample.Agent
 //
+// SIPRAL_SIGNALLING is udp (the default), tcp or tls: over either of the
+// last two the agent keeps one connection to SIPRAL_REGISTRAR_ADDRESS and
+// signals on it, and over TLS checks the server's certificate against
+// SIPRAL_TLS_SERVER_NAME (the address's host when unset) with SIPRAL_TLS_CA
+// as the only authority it trusts (the platform's when unset). A connection
+// that fails is printed as "transport failed error=<...> tls=<...>" with
+// SslStream's own words, and tried again. SIPRAL_INVITE_LIMIT=voice-agent
+// takes a trunk's rush of calls the default rate floor would answer 480.
+//
 // Doubles as the sample apps' shared, non-UI core: the same register/place
 // or answer/hold/resume/DTMF calls the WPF sample's UI makes, run here
 // without one, which is what scripts/lab.sh runs headless in a container
@@ -45,6 +54,10 @@ static string RouteTo(string address)
 
 // The one function a real agent replaces. Default: an echo.
 static short[] Respond(short[] pcm) => pcm;
+
+// "NameMismatch" as the other agents print it, "name_mismatch"
+static string Snake(string name) =>
+    string.Concat(name.Select((ch, at) => at > 0 && char.IsUpper(ch) ? "_" + char.ToLowerInvariant(ch) : char.ToLowerInvariant(ch).ToString()));
 
 async Task RunCallAsync(Call call, int tag)
 {
@@ -373,7 +386,24 @@ if (Environment.GetEnvironmentVariable("SIPRAL_PEER_HOST") is not null)
 var registrarAddress = Environment.GetEnvironmentVariable("SIPRAL_REGISTRAR_ADDRESS")
     ?? throw new InvalidOperationException("SIPRAL_REGISTRAR_ADDRESS is required");
 var bindHost = RouteTo(registrarAddress);
-using var stack = new SipralStack(bindHost: bindHost, audio: SipralAudio.Application);
+var signalling = Environment.GetEnvironmentVariable("SIPRAL_SIGNALLING") switch
+{
+    null or "" or "udp" => SipralTransport.Udp,
+    "tcp" => SipralTransport.Tcp,
+    "tls" => SipralTransport.Tls,
+    var other => throw new InvalidOperationException($"SIPRAL_SIGNALLING is udp, tcp or tls, not {other}"),
+};
+var tlsCa = Environment.GetEnvironmentVariable("SIPRAL_TLS_CA");
+using var stack = new SipralStack(
+    bindHost: bindHost,
+    audio: SipralAudio.Application,
+    signalling: signalling,
+    signallingServer: signalling == SipralTransport.Udp ? null : registrarAddress,
+    tlsServerName: Environment.GetEnvironmentVariable("SIPRAL_TLS_SERVER_NAME"),
+    tlsTrust: tlsCa is null ? null : SipralTlsTrust.OnlyAuthority(X509Certificate2.CreateFromPemFile(tlsCa)),
+    inviteLimit: Environment.GetEnvironmentVariable("SIPRAL_INVITE_LIMIT") == "voice-agent"
+        ? SipralInviteLimit.VoiceAgent
+        : null);
 
 var registrar = Environment.GetEnvironmentVariable("SIPRAL_REGISTRAR");
 var account = stack.AddAccount(
@@ -397,6 +427,15 @@ var calls = new HashSet<Task>();
 var nextTag = 0;
 await foreach (var e in stack.Events)
 {
+    if (e.TransportFailed is { } failed)
+    {
+        Console.WriteLine(
+            $"transport failed error={Snake(failed.Error.ToString())} tls={Snake(failed.Tls.ToString())}: {failed.Detail}");
+    }
+    if (e.Registration is { } registration)
+    {
+        Console.WriteLine($"registration {(uint)registration.State}");
+    }
     if (e.Kind == SipralEventKind.IncomingCall)
     {
         var call = stack.AnswerCall(e, mediaHost: bindHost);

@@ -41,11 +41,10 @@ public final class Account: @unchecked Sendable {
     /// after a network change: a derived `Contact` names the new socket; one
     /// the application wrote has the old address, wherever it names it,
     /// replaced by the new one, and is otherwise left as written.
-    func rebind(from socket: UDPSocket, previous: String?) throws {
-        let now = socket.localAddress
+    func rebind(local now: String, previous: String?) throws {
         let next: String
         if givenContact == nil {
-            next = Self.defaultContact(aor: aor, bindAddress: now)
+            next = Self.defaultContact(aor: aor, bindAddress: now, parameters: stack.contactParameters)
         } else if let previous, !previous.isEmpty {
             next = Self.replacing(previous, with: UDPSocket.parse(now).host, in: contact)
         } else {
@@ -83,13 +82,13 @@ public final class Account: @unchecked Sendable {
     /// `sip:` address of record names who this is, not a socket anything can
     /// write to (`bindings/python/sipral/account.py`'s `_default_contact`
     /// explains the same choice).
-    private static func defaultContact(aor: String, bindAddress: String) -> String {
+    private static func defaultContact(aor: String, bindAddress: String, parameters: String) -> String {
         guard let colon = aor.firstIndex(of: ":") else { return aor }
         let scheme = aor[aor.startIndex..<colon]
         let rest = aor[aor.index(after: colon)...]
-        guard let at = rest.firstIndex(of: "@") else { return "\(scheme):\(bindAddress)" }
+        guard let at = rest.firstIndex(of: "@") else { return "\(scheme):\(bindAddress)\(parameters)" }
         let user = rest[rest.startIndex..<at]
-        return "\(scheme):\(user)@\(bindAddress)"
+        return "\(scheme):\(user)@\(bindAddress)\(parameters)"
     }
 
     static func add(
@@ -107,7 +106,9 @@ public final class Account: @unchecked Sendable {
         trustedPeers: [String]
     ) throws -> Account {
         let given = contact
-        let contact = contact ?? defaultContact(aor: aor, bindAddress: stack.bindAddress)
+        let contact = contact ?? defaultContact(
+            aor: aor, bindAddress: stack.bindAddress, parameters: stack.contactParameters
+        )
         let peers = trustedPeers.isEmpty ? nil : trustedPeers.joined(separator: ",")
         let handle: SipralHandle = try CStrings.with(
             [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers]
@@ -153,14 +154,31 @@ public final class Account: @unchecked Sendable {
         )
     }
 
+    private var _wantsRegistration = false
+
+    /// Whether it was asked to register and not to unregister since: the
+    /// accounts a stack signalling over TCP or TLS registers again once its
+    /// connection is made again.
+    public var wantsRegistration: Bool { stateQueue.sync { _wantsRegistration } }
+
     /// `sipral_account_register`. A no-op account (no registrar) refuses this.
+    /// On a stack signalling over TCP or TLS whose connection is down
+    /// (`.transportDown`, already raised as `SipralEventKind.transportFailed`)
+    /// it is kept, and the REGISTER goes the moment the connection is made
+    /// again.
     public func register() throws {
-        try retryingBusy {
-            try Sipral.accountRegister(stack: stack.handle, account: handle, nowMs: stack.nowMs())
+        stateQueue.sync { _wantsRegistration = true }
+        do {
+            try retryingBusy {
+                try Sipral.accountRegister(stack: stack.handle, account: handle, nowMs: stack.nowMs())
+            }
+        } catch let refused as SipralError where refused.status == .transportDown {
+            return
         }
     }
 
     public func unregister() throws {
+        stateQueue.sync { _wantsRegistration = false }
         try retryingBusy {
             try Sipral.accountUnregister(stack: stack.handle, account: handle, nowMs: stack.nowMs())
         }

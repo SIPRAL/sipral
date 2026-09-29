@@ -121,6 +121,13 @@ enum class SipralStatus(val value: Int) {
      * that ends makes room; raising the limit means a new stack.
      */
     LIMIT_REACHED(16),
+    /**
+     * The transport the request would leave on has failed or closed and
+     * has not been bound again. Nothing went out. The failure was
+     * reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
+     * the stack with `sipral_stack_transport_bind`, and ask again.
+     */
+    TRANSPORT_DOWN(22),
     ;
 
     companion object {
@@ -201,6 +208,50 @@ enum class SipralTransportError(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralTransportError? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Why a TLS connection was refused, as the platform's TLS library said
+ * it. Names for `sipral_transport_failure_t::tls` and
+ * `sipral_transport_failed_event_t::tls`.
+ *
+ * Sipral links no TLS library (`docs/22-tls.md`), so these are the
+ * application's words, mapped from its own library's error: the stack
+ * only carries them to whoever reads the event, so that a user can be
+ * told which of the four it was rather than "the connection closed".
+ * A connection that was never answered is not one of them: that is
+ * `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
+ */
+enum class SipralTlsFailure(val value: Int) {
+    /**
+     * Not a TLS failure, or one the application could not classify.
+     */
+    NONE(0),
+    /**
+     * No trusted authority stands behind the server's certificate: a
+     * self-signed one, a private authority not handed over, or an
+     * authority other than the one pinned.
+     */
+    UNTRUSTED(1),
+    /**
+     * The certificate is trusted and names another server.
+     */
+    NAME_MISMATCH(2),
+    /**
+     * The certificate has expired, or is not valid yet.
+     */
+    EXPIRED(3),
+    /**
+     * The handshake itself failed: no protocol version or cipher in
+     * common, an alert from the server, or a server that does not speak
+     * TLS on that port.
+     */
+    HANDSHAKE_REFUSED(4),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralTlsFailure? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -914,6 +965,12 @@ enum class SipralDtmf(val value: Int) {
  * Numbers already spent on features this build does not have:
  * - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
  * - 44: held for a second audio device event, which the audio engine did not need; spent all the same
+ * - 47: held for the caller's identity verified by STIR/SHAKEN
+ * - 48: held for an in-band digit detected
+ * - 49: held for a call-progress or answering-machine verdict
+ * - 50: held for a conference's state
+ * - 51: held for real-time text received
+ * - 52: held for a presence or publication state
  */
 enum class SipralEventKind(val value: Int) {
     /**
@@ -1390,6 +1447,25 @@ enum class SipralEventKind(val value: Int) {
      * neither.
      */
     STUN_SERVER(46),
+    /**
+     * A transport this stack signals on stopped carrying traffic: the
+     * application said it failed (`sipral_stack_transport_failed`,
+     * `sipral_stack_transport_failure`) or closed
+     * (`sipral_stack_stream_closed`), or a stream carried bytes no
+     * message starts with (`sipral_stack_receive_stream`).
+     *
+     * Raised by the next poll, before what the loss did to the
+     * registrations and calls on it. `payload.transport_failed` says
+     * which transport, what it spoke, what went wrong and — when TLS
+     * refused the connection — why, as the application's TLS library
+     * said it: untrusted, a name that does not match, expired, or a
+     * handshake refused, with the library's own sentence beside it.
+     * Nothing is sent on the transport until
+     * `sipral_stack_transport_bind` brings it back; a request asked for
+     * meanwhile is `SIPRAL_STATUS_TRANSPORT_DOWN`. `account` and `call`
+     * are `SIPRAL_HANDLE_NONE`: a transport is neither.
+     */
+    TRANSPORT_FAILED(53),
     ;
 
     companion object {
@@ -4632,6 +4708,42 @@ class SipralCallConfig(
 )
 
 /**
+ * A transport that failed, and why, for
+ * sipral_stack_transport_failure.
+ *
+ * The caller fills in all of it. `detail` is the platform's own sentence
+ * — OpenSSL's, `SslStream`'s, `SSLSocket`'s, Network.framework's — and
+ * is optional; it travels to the event unread and unparsed, so a user's
+ * report can quote it.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralTransportFailure(
+    /**
+     * Which transport: SIPRAL_TRANSPORT_MAIN, or a number
+     * sipral_stack_transport_bind added.
+     */
+    val transport: Long = 0,
+    /**
+     * A SipralTransportError.
+     */
+    val error: Long = 0,
+    /**
+     * A SipralTlsFailure; `SIPRAL_TLS_FAILURE_NONE` for anything
+     * that was not TLS refusing, and only that on a transport that does
+     * not speak TLS.
+     */
+    val tls: Long = 0,
+    /**
+     * The platform's own words for it, not NUL-terminated. Null with a
+     * length of zero for none.
+     */
+    val detail: String? = null,
+)
+
+/**
  * What to watch, and how. Handed to sipral_account_subscribe.
  *
  * Set `size` to `sizeof(sipral_subscribe_config_t)` before the call.
@@ -5460,6 +5572,38 @@ data class SipralStunServerEvent(
 )
 
 /**
+ * The payload of `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: a transport this
+ * stack signals on stopped carrying traffic.
+ *
+ * The text is the library's, valid for as long as the callback runs.
+ */
+data class SipralTransportFailedEvent(
+    /**
+     * Which transport: SIPRAL_TRANSPORT_MAIN, or a number
+     * sipral_stack_transport_bind added.
+     */
+    val transport: Long,
+    /**
+     * What it spoke, as a `SipralTransport`.
+     */
+    val protocol: Long,
+    /**
+     * A SipralTransportError: what the application said went wrong,
+     * `SIPRAL_TRANSPORT_ERROR_CLOSED` for a connection that closed.
+     */
+    val error: Long,
+    /**
+     * A SipralTlsFailure: why TLS refused, when that is what it was.
+     */
+    val tls: Long,
+    /**
+     * The platform's own sentence, as the application handed it over.
+     * Null with a length of zero when it gave none.
+     */
+    val detail: String?,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -5536,6 +5680,10 @@ class SipralEventPayload(
      * For SipralEventKind.STUN_SERVER.
      */
     val stunServer: SipralStunServerEvent,
+    /**
+     * For SipralEventKind.TRANSPORT_FAILED.
+     */
+    val transportFailed: SipralTransportFailedEvent,
 )
 
 class SipralEvent(
@@ -6179,6 +6327,29 @@ class SipralEvent(
      * Empty otherwise.
      */
     private val payloadStunServerPrevious: String? = null,
+    /**
+     * Which transport: SIPRAL_TRANSPORT_MAIN, or a number
+     * sipral_stack_transport_bind added.
+     */
+    private val payloadTransportFailedTransport: Long = 0,
+    /**
+     * What it spoke, as a `SipralTransport`.
+     */
+    private val payloadTransportFailedProtocol: Long = 0,
+    /**
+     * A SipralTransportError: what the application said went wrong,
+     * `SIPRAL_TRANSPORT_ERROR_CLOSED` for a connection that closed.
+     */
+    private val payloadTransportFailedError: Long = 0,
+    /**
+     * A SipralTlsFailure: why TLS refused, when that is what it was.
+     */
+    private val payloadTransportFailedTls: Long = 0,
+    /**
+     * The platform's own sentence, as the application handed it over.
+     * Null with a length of zero when it gave none.
+     */
+    private val payloadTransportFailedDetail: String? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -6199,6 +6370,7 @@ class SipralEvent(
             SipralTurnStreamEvent(payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal, payloadTurnStreamServer),
             SipralAudioEvent(payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice),
             SipralStunServerEvent(payloadStunServerState, payloadStunServerServer, payloadStunServerPrevious),
+            SipralTransportFailedEvent(payloadTransportFailedTransport, payloadTransportFailedProtocol, payloadTransportFailedError, payloadTransportFailedTls, payloadTransportFailedDetail),
         )
 }
 
@@ -6270,10 +6442,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long, payloadStunServerState: Long, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadCallCauseSip: Long, payloadCallCauseQ850: Long, payloadCallCauseText: ByteArray?, payloadCallIdentityTrusted: Long, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallVerstat: Long, payloadCallPrivacy: Long, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallDiversionCount: Long, payloadCallHistoryCount: Long, payloadCallAnswerMode: Long, payloadCallAnswerModeRequired: Long, payloadCallPrivAnswerMode: Long, payloadCallPrivAnswerModeRequired: Long, payloadCallHasAnswerAfter: Long, payloadCallAnswerAfterMs: Long, payloadCallRingSource: Long, payloadCallAlertInfo: ByteArray?, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadRelayOutcome: Long, payloadRelayCode: Long, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadReferralStatusCode: Long, payloadReferralAttended: Long, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadTurnStreamState: Long, payloadTurnStreamProtocol: Long, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadAudioChange: Long, payloadAudioOrigin: Long, payloadAudioRole: Long, payloadAudioDirection: Long, payloadAudioDevice: Long, payloadStunServerState: Long, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadTransportFailedTransport: Long, payloadTransportFailedProtocol: Long, payloadTransportFailedError: Long, payloadTransportFailedTls: Long, payloadTransportFailedDetail: ByteArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice, payloadStunServerState, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadCallCauseSip, payloadCallCauseQ850, payloadCallCauseText, payloadCallIdentityTrusted, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallVerstat, payloadCallPrivacy, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallDiversionCount, payloadCallHistoryCount, payloadCallAnswerMode, payloadCallAnswerModeRequired, payloadCallPrivAnswerMode, payloadCallPrivAnswerModeRequired, payloadCallHasAnswerAfter, payloadCallAnswerAfterMs, payloadCallRingSource, payloadCallAlertInfo, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadRelayOutcome, payloadRelayCode, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadReferralStatusCode, payloadReferralAttended, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamState, payloadTurnStreamProtocol, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadAudioChange, payloadAudioOrigin, payloadAudioRole, payloadAudioDirection, payloadAudioDevice, payloadStunServerState, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedTransport, payloadTransportFailedProtocol, payloadTransportFailedError, payloadTransportFailedTls, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -6816,7 +6988,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 30)
+        agree(0, 31)
     }
 
     /**
@@ -6925,6 +7097,7 @@ internal object SipralNative {
     external fun sipral_stack_receive_stream(stack: Long, transport: Long, data: ByteArray, nowMs: Long): Int
     external fun sipral_stack_transport_bind(stack: Long, transport: Long, protocol: Long, local: ByteArray, remote: ByteArray, nowMs: Long, transportId: LongArray): Int
     external fun sipral_stack_transport_failed(stack: Long, transport: Long, error: Long, nowMs: Long): Int
+    external fun sipral_stack_transport_failure(stack: Long, failureTransport: Long, failureError: Long, failureTls: Long, failureDetail: ByteArray?, nowMs: Long): Int
     external fun sipral_stack_stream_closed(stack: Long, transport: Long, nowMs: Long): Int
     external fun sipral_stack_stun_servers(stack: Long, servers: ByteArray, nowMs: Long): Int
     external fun sipral_stack_nat_map(stack: Long, local: ByteArray, nowMs: Long): Int
@@ -6997,7 +7170,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 30
+    const val ABI_VERSION_MINOR: Long = 31
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -7257,6 +7430,15 @@ object Sipral {
     const val MESSAGE_BYTES: Long = 65535
 
     /**
+     * The longest `sipral_transport_failure_t::detail` this library takes.
+     *
+     * A platform's sentence about a refused certificate is a line, not a
+     * document; one longer than this is refused rather than cut, since a
+     * sentence cut short can say something else.
+     */
+    const val TRANSPORT_DETAIL_BYTES: Long = 1024
+
+    /**
      * The answer that lets an INVITE through, and the reason it is a status
      * code rather than a flag.
      *
@@ -7268,6 +7450,39 @@ object Sipral {
      * mean "let the stranger in".
      */
     const val SCREEN_ACCEPT: Long = 200
+
+    /**
+     * The burst a stack starts with: ten INVITEs from one address at once.
+     *
+     * With SIPRAL_INVITE_LIMIT_EVERY_MS, the floor every stack has from
+     * `sipral_stack_create` on. An INVITE past it is answered 480 and
+     * counted in `sipral_counters_t::screened_refused_by_rate`; nothing is
+     * raised for it.
+     */
+    const val INVITE_LIMIT_BURST: Long = 10
+
+    /**
+     * The interval a stack starts with: one more INVITE every two seconds.
+     */
+    const val INVITE_LIMIT_EVERY_MS: Long = 2000
+
+    /**
+     * The voice-agent preset's burst: a hundred and twenty-eight at once.
+     *
+     * For a headless service that takes every call from one trunk or proxy,
+     * where the default's ten-then-one-every-two-seconds answers a
+     * campaign's twelfth caller 480. Handed to `sipral_stack_invite_limit`
+     * with SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS. The burst is the
+     * default `max_dialogs`, so that a rush is turned away by the ceiling on
+     * calls held, with a 503, before it is by the rate.
+     */
+    const val INVITE_LIMIT_VOICE_AGENT_BURST: Long = 128
+
+    /**
+     * The voice-agent preset's interval: one more INVITE every fifty
+     * milliseconds, twenty a second.
+     */
+    const val INVITE_LIMIT_VOICE_AGENT_EVERY_MS: Long = 50
 
     /**
      * Bits of `sipral_call_event_t::privacy` and of
@@ -9620,6 +9835,11 @@ object Sipral {
      * socket over it would drop the calls that were fine. This is for the
      * socket that is over.
      *
+     * The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
+     * of what the failure did to the registrations and calls on it.
+     * sipral_stack_transport_failure is the same call with the TLS
+     * library's reason carried along.
+     *
      * Safety
      *
      * Safe to call with any handle value. Reads no memory the caller owns.
@@ -9629,13 +9849,45 @@ object Sipral {
     }
 
     /**
+     * Say that a transport failed, and why, in the words of the TLS library
+     * that refused it.
+     *
+     * Everything sipral_stack_transport_failed does — the transport is
+     * retired, the transactions on it fail, nothing is sent on it until
+     * sipral_stack_transport_bind brings it back — and the reason is
+     * carried to `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: `failure->tls` for a
+     * machine to switch on, `failure->detail` for a person to read. A
+     * connection that never got as far as a handshake is told here too, so
+     * that the application hears about it in the one place it hears about
+     * every other loss; retiring a transport that carried nothing yet costs
+     * nothing, and the bind that follows the reconnect undoes it. A
+     * transport already down is not retired twice, and the failure is still
+     * raised: that is how each attempt to connect again that fails is told.
+     *
+     * A TLS reason on a transport that does not speak TLS or WSS is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, and so is a detail longer than
+     * SIPRAL_TRANSPORT_DETAIL_BYTES or not UTF-8; nothing is retired.
+     *
+     * Safety
+     *
+     * `failure` must point at a `sipral_transport_failure_t` whose `size`
+     * member says how long it is, and its `detail` must be readable for
+     * `detail_len` bytes.
+     */
+    fun stackTransportFailure(stack: Long, failure: SipralTransportFailure, nowMs: Long) {
+        val failureDetail = failure.detail?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_stack_transport_failure(stack, failure.transport, failure.error, failure.tls, failureDetail, nowMs))
+    }
+
+    /**
      * Say that a connection closed: the far end went away, or a read returned
      * zero.
      *
      * The same retirement as sipral_stack_transport_failed, and a separate
      * call because it is a separate thing to have happened. An orderly close is
      * not an error the caller has to invent a kind for, and a stack that made it
-     * one would have the two indistinguishable in a log for ever after.
+     * one would have the two indistinguishable in a log for ever after. The
+     * event the next poll raises says `SIPRAL_TRANSPORT_ERROR_CLOSED`.
      *
      * Safety
      *

@@ -41,6 +41,8 @@ public struct SipralEvent: Sendable {
     public let audioData: AudioEventData?
     /// `payload.stun_server`, for `SipralEventKind.stunServer` only.
     public let stunServerData: StunServerEventData?
+    /// `payload.transport_failed`, for `SipralEventKind.transportFailed` only.
+    public var transportFailedData: TransportFailedEventData? = nil
 }
 
 /// The STUN server in use moved to another in the list, or every one of
@@ -446,7 +448,7 @@ enum SipralEventDecoder {
             announceData = self.announceData(raw.payload.announce)
         }
 
-        return SipralEvent(
+        var event = SipralEvent(
             kindRaw: kindRaw,
             kind: SipralEventKind(rawValue: kindRaw),
             kindName: kindName,
@@ -465,5 +467,16 @@ enum SipralEventDecoder {
             audioData: audioData,
             stunServerData: stunServerData
         )
+        if kindRaw == SipralEventKind.transportFailed.rawValue {
+            let lost = raw.payload.transport_failed
+            event.transportFailedData = TransportFailedEventData(
+                transport: lost.transport,
+                protocolRaw: lost.protocol,
+                error: SipralTransportError(rawValue: lost.error),
+                tls: SipralTlsFailure(rawValue: lost.tls),
+                detail: textC(lost.detail, lost.detail_len)
+            )
+        }
+        return event
     }
 }

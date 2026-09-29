@@ -38,7 +38,7 @@ fun main() {
     val said = try {
         runBlocking {
             everything() + "; " + natChecks() + "; " + referralChecks() + "; " + signallingChecks() + "; " +
-                audioChecks() + "; " + loggingChecks()
+                audioChecks() + "; " + loggingChecks() + "; " + tlsSignallingChecks()
         }
     } catch (failure: Throwable) {
         failure.printStackTrace()

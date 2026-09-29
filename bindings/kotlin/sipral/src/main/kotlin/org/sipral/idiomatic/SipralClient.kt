@@ -91,7 +91,8 @@ private class TurnStream(val socket: Socket) {
  * that address is what every `Via` this stack writes carries.
  */
 class SipralClient private constructor(
-    socket: DatagramSocket,
+    socket: DatagramSocket?,
+    private val link: SignallingLink?,
     bindAddress: String,
     stunServer: String?,
     private val turnServer: String?,
@@ -114,15 +115,31 @@ class SipralClient private constructor(
         private set
 
     /** The signalling socket: read and written by the poll thread, and put
-     * in another's place by [networkChanged]. */
+     * in another's place by [networkChanged]. Null for a client signalling
+     * over TCP or TLS, whose connection has a reader of its own. */
     @Volatile
-    private var socket: DatagramSocket = socket
+    private var socket: DatagramSocket? = socket
 
     /** The signalling socket's address, `host:port`: where it was bound, and
-     * after [networkChanged] where it is bound now. */
+     * after [networkChanged] where it is bound now. Over TCP or TLS, the
+     * address the connection to the server was made from, which moves with
+     * every connection made again. */
     @Volatile
     var bindAddress: String = bindAddress
         private set
+
+    /** What SIP travels over: UDP, or one TCP or TLS connection to the
+     * server. */
+    val signalling: SipralTransport
+        get() = link?.protocol ?: SipralTransport.UDP
+
+    /** Whether SIP can go out now: always over UDP, and over TCP or TLS
+     * while the connection to the server stands. */
+    val connected: Boolean
+        get() = link?.connected ?: true
+
+    internal val isClosed: Boolean
+        get() = closed.get()
 
     /**
      * The library's audio engine -- the devices, their gain, mute and level,
@@ -259,6 +276,36 @@ class SipralClient private constructor(
          * Both `0` -- the default -- leave the ports to the operating system.
          * Every pair taken throws `SipralStatus.EXHAUSTED` rather than binding
          * outside the range.
+         *
+         * [signalling] is what SIP travels over: `SipralTransport.UDP` (the
+         * default) on a socket bound at [bindHost], or `TCP` or `TLS` on one
+         * connection to [signallingServer] (`host:port` -- the registrar or
+         * the outbound proxy, 5061 for TLS by convention), which every
+         * account and every call on this client then shares, and on which
+         * the server's own requests arrive. Over TLS the server's
+         * certificate is checked against [tlsServerName] (the host part of
+         * [signallingServer] when null) with [tlsTrust]: the platform's
+         * authorities, a private authority beside them, or only one
+         * authority (`docs/22-tls.md`). Nothing here turns the check off.
+         *
+         * The first connection is made here, before this returns. When it
+         * fails, or later breaks, the stack is told why and raises
+         * `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`, read with [transportFailedOf]:
+         * untrusted, a name that does not match, expired, a handshake
+         * refused or a server that refused the connection, with
+         * `SSLSocket`'s own words; and this client connects again, one
+         * second after the loss and twice as long after each attempt that
+         * fails, up to thirty seconds. Once connected again every account is
+         * pointed at the new connection and registered again if it was
+         * registering. [SipralAccount.register] asked while it is down is
+         * kept for then; a call placed meanwhile throws with
+         * `SipralStatus.TRANSPORT_DOWN`.
+         *
+         * [inviteLimit] is how fast one address may ring this client:
+         * [SipralInviteLimit.DEFAULT] (what every client starts with, ten
+         * INVITEs at once then one every two seconds, past which a call is
+         * answered 480) or [SipralInviteLimit.VOICE_AGENT] for a service
+         * taking a trunk's calls.
          */
         fun open(
             bindHost: String = "127.0.0.1",
@@ -284,25 +331,68 @@ class SipralClient private constructor(
             stunFallbacks: List<String> = emptyList(),
             rtpPortMin: Int = 0,
             rtpPortMax: Int = 0,
+            signalling: SipralTransport = SipralTransport.UDP,
+            signallingServer: String? = null,
+            tlsServerName: String? = null,
+            tlsTrust: SipralTlsTrust = SipralTlsTrust.Platform,
+            inviteLimit: SipralInviteLimit? = null,
         ): SipralClient {
-            val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost))
-            socket.soTimeout = 20
-            val bindAddress = formatAddress(socket.localAddress.hostAddress, socket.localPort)
+            require(signalling == SipralTransport.UDP || signalling == SipralTransport.TCP || signalling == SipralTransport.TLS) {
+                "signalling is UDP, TCP or TLS"
+            }
+            val streamed = signalling != SipralTransport.UDP
+            require(!streamed || signallingServer != null) { "SIP over TCP or TLS needs signallingServer, host:port" }
+            var first: Pair<java.net.Socket, Pair<String, String>>? = null
+            var refused: SignallingRefused? = null
+            val socket = if (streamed) null else DatagramSocket(bindPort, InetAddress.getByName(bindHost))
+            val bindAddress = if (socket != null) {
+                socket.soTimeout = 20
+                formatAddress(socket.localAddress.hostAddress, socket.localPort)
+            } else {
+                "$bindHost:$bindPort"
+            }
+            val link = if (streamed) {
+                val server = signallingServer!!
+                SignallingLink(
+                    signalling, parseHostPort(server),
+                    tlsServerName ?: server.substring(0, server.lastIndexOf(':')), tlsTrust,
+                ).also { made ->
+                    made.bindHost = bindHost
+                    try {
+                        first = made.connect(bindHost)
+                    } catch (no: SignallingRefused) {
+                        refused = no
+                    }
+                }
+            } else {
+                null
+            }
             val client = SipralClient(
-                socket, bindAddress, stunServer, turn?.address, turn, audio,
+                socket, link, first?.second?.first ?: bindAddress, stunServer, turn?.address, turn, audio,
                 network ?: SipralNetwork(SipralLink.WIRED, address = bindHost),
                 if (rtpPortMin == 0 && rtpPortMax == 0) null else rtpPortMin to rtpPortMax,
             )
+            link?.owner = client
             try {
                 client.start(
                     userAgent, codecs, ice, turn, g729AnnexB, referrals,
                     registrarKeepalive, registrarKeepaliveMs, audioProbeMs, audioDeviceRateHz, srtp,
                     maxDialogs, maxServerTransactions, diagnosticDecisions, diagnosticRecords,
-                    stunFallbacks,
+                    stunFallbacks, signalling, inviteLimit,
                 )
-            } catch (refused: Exception) {
-                socket.close()
-                throw refused
+            } catch (refusal: Exception) {
+                socket?.close()
+                first?.first?.close()
+                throw refusal
+            }
+            if (link != null) {
+                val made = first
+                if (made != null) {
+                    link.install(made.first, made.second.first, made.second.second)
+                } else {
+                    link.report(refused ?: SignallingRefused(org.sipral.SipralTransportError.OTHER, org.sipral.SipralTlsFailure.NONE, "no connection"))
+                    link.reconnectLater()
+                }
             }
             return client
         }
@@ -331,6 +421,8 @@ class SipralClient private constructor(
         diagnosticDecisions: Long,
         diagnosticRecords: Long,
         stunFallbacks: List<String>,
+        signalling: SipralTransport,
+        inviteLimit: SipralInviteLimit?,
     ) {
         val random = SecureRandom()
         val entropy = ByteArray(32).also { random.nextBytes(it) }
@@ -340,7 +432,7 @@ class SipralClient private constructor(
         val device = audioMode is SipralAudioMode.Device
         val config = SipralStackConfig(
             eventListener = listener,
-            transport = SipralTransport.UDP.value.toLong(),
+            transport = signalling.value.toLong(),
             bindAddress = bindAddress,
             userAgent = userAgent,
             entropy = entropy,
@@ -372,6 +464,9 @@ class SipralClient private constructor(
             rtpPortMax = (rtpPorts?.second ?: 0).toLong(),
         )
         handle = Sipral.stackCreate(config)
+        if (inviteLimit != null) {
+            Sipral.stackInviteLimit(handle, inviteLimit.everyMs, inviteLimit.burst)
+        }
         if (device) {
             audio = SipralAudioDevices(this)
         }
@@ -583,7 +678,31 @@ class SipralClient private constructor(
         val scheme = aor.substringBefore(':', "sip")
         val rest = aor.substringAfter(':', aor)
         val user = rest.substringBefore('@', "")
-        return if (user.isEmpty()) "$scheme:$at" else "$scheme:$user@$at"
+        val parameters = link?.contactParameters ?: ""
+        return if (user.isEmpty()) "$scheme:$at$parameters" else "$scheme:$user@$at$parameters"
+    }
+
+    /** The connection to the server was made from [local]: the address the
+     * stack now signals from. */
+    internal fun linkBound(local: String) {
+        bindAddress = local
+    }
+
+    /** Every account added without a `Contact` of its own moves to the new
+     * connection's address, and every one that was registering registers
+     * again now rather than at its next back-off. */
+    internal fun afterReconnect() {
+        val all = synchronized(movingLock) { accounts.values.toList() }
+        for (account in all) {
+            try {
+                account.rebind(bindAddress, null)
+                if (account.wantsRegistration) {
+                    account.register()
+                }
+            } catch (_: SipralException) {
+                // the next loss or refresh tries again
+            }
+        }
     }
 
     /**
@@ -1116,7 +1235,10 @@ class SipralClient private constructor(
         val moves = next.link != SipralLink.DOWN &&
             (next.address != previous.address || next.interfaceName != previous.interfaceName)
         var rebound: String? = null
-        if (moves) {
+        val link = link
+        if (moves && link != null) {
+            rebound = link.move(next.address ?: bindAddress.substringBeforeLast(':'))
+        } else if (moves) {
             val host = next.address ?: bindAddress.substringBeforeLast(':')
             val fresh = DatagramSocket(0, InetAddress.getByName(host))
             fresh.soTimeout = 20
@@ -1133,7 +1255,7 @@ class SipralClient private constructor(
             val old = socket
             socket = fresh
             bindAddress = local
-            old.close()
+            old?.close()
             rebound = local
         }
         val raw = retryBusy {
@@ -1220,10 +1342,17 @@ class SipralClient private constructor(
             if (status != SipralStatus.OK.value || len == 0) {
                 return
             }
+            val link = link
+            if (link != null) {
+                // one connection carries everything, whatever it names: the
+                // server it reaches is the outbound proxy
+                link.write(data, len)
+                continue
+            }
             val destinationLen = lens[1].toInt()
             val to = parseHostPort(String(destination, 0, destinationLen, Charsets.UTF_8))
             try {
-                socket.send(DatagramPacket(data, len, to))
+                socket?.send(DatagramPacket(data, len, to))
             } catch (_: Exception) {
                 // best effort: the poll thread never raises out of its own loop
             }
@@ -1273,6 +1402,12 @@ class SipralClient private constructor(
                 // the socket of this pass: [networkChanged] closes the one
                 // it replaces, which ends a receive waiting on it
                 val listening = socket
+                if (listening == null) {
+                    // over TCP or TLS the connection has a reader of its
+                    // own; this loop only keeps the poll's cadence
+                    Thread.sleep(20)
+                    throw SocketTimeoutException()
+                }
                 val arrivedAt = bindAddress
                 val packet = DatagramPacket(buffer, buffer.size)
                 listening.receive(packet)
@@ -1357,7 +1492,8 @@ class SipralClient private constructor(
         for (local in turnStreams.keys.toList()) {
             loseTurnStream(local, tell = false)
         }
+        link?.close()
         Sipral.stackDestroy(handle)
-        socket.close()
+        socket?.close()
     }
 }

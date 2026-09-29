@@ -169,6 +169,25 @@ impl Rate {
         }
     }
 
+    /// A hundred and twenty-eight at once, then one every fifty milliseconds:
+    /// the preset for a voice agent or a headless answering service.
+    ///
+    /// Such a service takes every call from one trunk or proxy, dozens at a
+    /// time when a campaign starts, and the default's one call every two
+    /// seconds from that one address would answer the twelfth caller 480.
+    /// The burst is the default ceiling on calls held at once
+    /// (`EndpointConfig::max_dialogs`), so that at the start of a rush it is
+    /// the ceiling that turns calls away, with a 503 an operator can count,
+    /// and not the rate; twenty a second after that is well past what a trunk
+    /// offers and still far short of what a flood sends.
+    #[must_use]
+    pub const fn voice_agent() -> Self {
+        Self {
+            burst: 128,
+            every: Some(Duration::from_millis(50)),
+        }
+    }
+
     /// How many calls this rate lets arrive at once.
     #[must_use]
     pub const fn burst(self) -> u32 {
@@ -1023,5 +1042,36 @@ mod tests {
         assert_eq!(asked.every(), Some(Duration::from_secs(7)));
         assert_eq!(Rate::default().burst(), 10);
         assert_eq!(Rate::default().every(), Some(Duration::from_secs(2)));
+    }
+
+    /// A trunk handing a voice agent a campaign's first minute: the default
+    /// answers the eleventh call 480, the preset takes the whole rush and
+    /// twenty a second after it.
+    #[test]
+    fn the_voice_agent_preset_takes_a_trunks_rush_that_the_default_refuses() {
+        let t0 = Instant::now();
+        let mut guarded = Sources::default();
+        let refused = (0..40)
+            .filter(|_| guarded.admit(source(9), Rate::default(), t0) != Admission::Take)
+            .count();
+        assert_eq!(refused, 30, "ten at once and no more");
+
+        let preset = Rate::voice_agent();
+        assert_eq!(preset.burst(), 128);
+        assert_eq!(preset.every(), Some(Duration::from_millis(50)));
+        let mut agent = Sources::default();
+        for call in 0..128 {
+            assert_eq!(
+                agent.admit(source(9), preset, t0),
+                Admission::Take,
+                "call {call} is inside the rush"
+            );
+        }
+        assert_eq!(agent.admit(source(9), preset, t0), Admission::TooFast);
+        let second = t0 + Duration::from_secs(1);
+        let taken = (0..25)
+            .filter(|_| agent.admit(source(9), preset, second) == Admission::Take)
+            .count();
+        assert_eq!(taken, 20, "twenty a second once the rush is spent");
     }
 }

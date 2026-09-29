@@ -13,6 +13,16 @@
 //   SIPRAL_REGISTRAR_ADDRESS=203.0.113.10:5060 \
 //   SIPRAL_AUTH_USER=agent SIPRAL_AUTH_PASSWORD=secret \
 //   SipralLabAgent
+//
+// SIPRAL_SIGNALLING is udp (the default), tcp or tls: over either of the
+// last two the agent keeps one connection to SIPRAL_REGISTRAR_ADDRESS and
+// signals on it, and over TLS -- on Apple platforms, where Network.framework
+// is -- checks the server's certificate against SIPRAL_TLS_SERVER_NAME (the
+// address's host when unset) with SIPRAL_TLS_CA as the only authority it
+// trusts (the system's when unset). A connection that fails is printed as
+// "transport failed error=<...> tls=<...>" with Security's own words, and
+// tried again. SIPRAL_INVITE_LIMIT=voice-agent takes a trunk's rush of calls
+// the default rate floor would answer 480.
 
 #if canImport(Darwin)
 import Darwin
@@ -380,6 +390,17 @@ func runDirectCall() async -> Bool {
     return ok
 }
 
+/// "nameMismatch" as the other agents print it, "name_mismatch".
+func snake(_ name: String) -> String {
+    name.reduce(into: "") { out, character in
+        if character.isUppercase {
+            out += "_" + character.lowercased()
+        } else {
+            out.append(character)
+        }
+    }
+}
+
 /// The DER of every certificate in the PEM file at `path`, which is what
 /// `TurnServer.trustedCertificates` takes: how the lab's coturn, whose
 /// certificate is made for the run, is trusted over TLS.
@@ -415,7 +436,24 @@ if environmentValue("SIPRAL_PEER_HOST") != nil {
 
 let registrarAddress = environmentValue("SIPRAL_REGISTRAR_ADDRESS") ?? "127.0.0.1:5060"
 let bindHost = routeTo(registrarAddress)
-let stack = try SipralStack(audio: .application, bindHost: bindHost)
+let signalling: SipralTransport
+switch environmentValue("SIPRAL_SIGNALLING") ?? "udp" {
+case "udp": signalling = .udp
+case "tcp": signalling = .tcp
+case "tls": signalling = .tls
+case let other:
+    print("SIPRAL_SIGNALLING is udp, tcp or tls, not \(other)")
+    exit(1)
+}
+let authority = environmentValue("SIPRAL_TLS_CA").flatMap { certificatesIn($0).first }
+let stack = try SipralStack(
+    audio: .application, bindHost: bindHost,
+    signalling: signalling,
+    signallingServer: signalling == .udp ? nil : registrarAddress,
+    tlsServerName: environmentValue("SIPRAL_TLS_SERVER_NAME"),
+    tlsTrust: authority.map { .onlyAuthority($0) } ?? .platform,
+    inviteLimit: environmentValue("SIPRAL_INVITE_LIMIT") == "voice-agent" ? .voiceAgent : nil
+)
 let account = try stack.addAccount(
     aor: environmentValue("SIPRAL_AOR") ?? "sip:agent@example.invalid",
     registrarAddress: registrarAddress,
@@ -433,6 +471,11 @@ print("listening on \(stack.bindAddress)")
 
 await withTaskGroup(of: Void.self) { group in
     for await event in stackEvents {
+        if let failed = event.transportFailedData {
+            let error = failed.error.map { "\($0)" } ?? "\(failed.protocolRaw)"
+            let tls = failed.tls.map { "\($0)" } ?? "none"
+            print("transport failed error=\(snake(error)) tls=\(snake(tls)): \(failed.detail ?? "")")
+        }
         if event.kind == .incomingCall {
             guard let call = try? stack.takeIncomingCall(event, mediaHost: bindHost) else { continue }
             let streams = CallStreams(call)

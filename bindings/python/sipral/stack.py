@@ -33,6 +33,7 @@ from .counters import Counters
 from .enums import AudioMode, Feature, Link, LogLevel, Recovery
 from .errors import call as _retry
 from .errors import check
+from .signalling import InviteLimit, TlsTrust, classify, connect
 
 __all__ = ["TRACE", "Stack", "features"]
 
@@ -87,6 +88,15 @@ _ADDRESS_BYTES = 128
 #: How long a write on a connection to the TURN server may wait for room
 #: before the connection is given up as dead, which loses the relay on it.
 _TURN_WRITE_PATIENCE = 5.0
+#: How long one attempt at the signalling connection may take, the TLS
+#: handshake included, and how long a write on it may wait for room.
+_SIGNALLING_PATIENCE = 5.0
+#: The wait before the first attempt to connect again after the signalling
+#: connection was lost, doubled after every attempt that fails, up to the
+#: second number: soon enough for a server restarting, not so often that a
+#: server refusing the certificate is asked every second for ever.
+_RECONNECT_FIRST = 1.0
+_RECONNECT_MOST = 30.0
 
 
 def _toggle(value: bool | None) -> int:
@@ -168,8 +178,46 @@ class Stack:
         diagnostic_records: int = 0,
         rtp_port_min: int = 0,
         rtp_port_max: int = 0,
+        signalling: int = 0,
+        signalling_server: str | None = None,
+        tls_server_name: str | None = None,
+        tls_trust: TlsTrust | None = None,
+        invite_limit: InviteLimit | tuple[int, int] | None = None,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
+
+        ``signalling`` is what SIP travels over, a
+        :class:`sipral.enums.Transport`: ``UDP`` (``0``, the default) on a
+        socket bound at ``bind_host``, or ``TCP`` or ``TLS`` on one
+        connection to ``signalling_server`` (``host:port`` -- the registrar
+        or the outbound proxy, 5061 for TLS by convention), which every
+        account and every call on this stack then shares, and on which the
+        server's own requests arrive. Over TLS the server's certificate is
+        checked against ``tls_server_name`` (the host part of
+        ``signalling_server`` when left out) with ``tls_trust``, a
+        :class:`sipral.signalling.TlsTrust`: the platform's authorities
+        when left out, a private authority beside them, or only one
+        authority -- `docs/22-tls.md` says what each checks. Nothing here
+        turns the check off.
+
+        The first connection is made here, before this returns. When it
+        fails, or later breaks, the stack is told why
+        (`sipral_stack_transport_failure`) and says so as
+        `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` on :attr:`events` -- untrusted,
+        a name that does not match, expired, a handshake refused, a server
+        that refused the connection -- and this class connects again, one
+        second after the loss and twice as long after each attempt that
+        fails, up to thirty seconds. Once connected again every account is
+        pointed at the new connection and registered again if it was
+        registering. :meth:`sipral.account.Account.register` asked while it
+        is down is kept for then; a call placed meanwhile raises
+        ``SIPRAL_STATUS_TRANSPORT_DOWN``.
+
+        ``invite_limit`` is how fast one address may ring this stack, an
+        :class:`sipral.signalling.InviteLimit`: ``InviteLimit.DEFAULT``
+        (what every stack starts with, ten INVITEs at once then one every
+        two seconds, past which a call is answered 480) or
+        ``InviteLimit.VOICE_AGENT`` for a service taking a trunk's calls.
 
         ``audio`` is who pumps the calls' audio, an
         :class:`sipral.enums.AudioMode`. ``AudioMode.DEVICE`` has the library
@@ -312,10 +360,45 @@ class Stack:
         #: without it only the first.
         self._nat_waiters: dict[str, dict[str, threading.Event]] = {}
 
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._socket.bind((bind_host, bind_port))
-        self._socket.setblocking(False)
-        self.bind_address = format_address(*self._socket.getsockname())
+        signalling = signalling or lib.SIPRAL_TRANSPORT_UDP
+        if signalling not in (lib.SIPRAL_TRANSPORT_UDP, lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
+            raise ValueError("signalling is Transport.UDP, Transport.TCP or Transport.TLS")
+        if signalling != lib.SIPRAL_TRANSPORT_UDP and not signalling_server:
+            raise ValueError("SIP over TCP or TLS needs signalling_server, host:port")
+        #: What SIP travels over, a `SipralTransport`.
+        self.signalling = signalling
+        self._streamed = signalling != lib.SIPRAL_TRANSPORT_UDP
+        self._bind_host = bind_host
+        #: The signalling connection, when there is one, and the lock every
+        #: read and write on it holds: one TLS session read and written from
+        #: two threads at once is a session whose records interleave.
+        self._link: socket.socket | None = None
+        self._link_lock = threading.Lock()
+        self._reconnecting = False
+        self._server = parse_address(signalling_server) if self._streamed else None
+        self._server_name = tls_server_name or (self._server[0] if self._server else None)
+        self._tls_context = (
+            (tls_trust or TlsTrust.platform()).context()
+            if signalling == lib.SIPRAL_TRANSPORT_TLS
+            else None
+        )
+        self._first_failure: tuple[int, int, str] | None = None
+        remote = ""
+        if self._streamed:
+            self._socket = None
+            try:
+                self._link = self._connect(bind_host)
+                self.bind_address = format_address(*self._link.getsockname()[:2])
+                remote = format_address(*self._link.getpeername()[:2])
+            except (OSError, ssl.SSLError, ValueError) as refused:
+                # told to the stack as soon as there is one, and tried again
+                self._first_failure = classify(refused)
+                self.bind_address = format_address(bind_host, bind_port)
+        else:
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._socket.bind((bind_host, bind_port))
+            self._socket.setblocking(False)
+            self.bind_address = format_address(*self._socket.getsockname())
 
         self._origin = time.monotonic()
 
@@ -374,7 +457,7 @@ class Stack:
         config.size = ffi.sizeof("sipral_stack_config_t")
         config.event_callback = self._callback
         config.event_user_data = ffi.NULL
-        config.transport = lib.SIPRAL_TRANSPORT_UDP
+        config.transport = signalling
         config.bind_address = bind_address
         config.bind_address_len = len(self.bind_address)
         config.user_agent = user_agent_buf or ffi.NULL
@@ -435,12 +518,29 @@ class Stack:
         except Exception:
             # refused -- device mode on a build with no backend for this
             # platform, say -- so the socket bound above has nothing to serve
-            self._socket.close()
+            if self._socket is not None:
+                self._socket.close()
+            if self._link is not None:
+                self._link.close()
             raise
         self.handle = int(out_stack[0])
 
         self._selector = selectors.DefaultSelector()
-        self._selector.register(self._socket, selectors.EVENT_READ, data="main")
+        self._closed = threading.Event()
+        if self._socket is not None:
+            self._selector.register(self._socket, selectors.EVENT_READ, data="main")
+        if invite_limit is not None:
+            limit = InviteLimit(*invite_limit)
+            check(
+                lib.sipral_stack_invite_limit(self.handle, limit.every_ms, limit.burst),
+                "sipral_stack_invite_limit",
+            )
+        if self._link is not None:
+            self._install_link(self._link, remote)
+        elif self._streamed:
+            error, tls, detail = self._first_failure or classify(OSError("no connection"))
+            self._report_failure(error, tls, detail)
+            self._reconnect_later()
         self._transmit = ffi.new("sipral_transmit_t *")
         self._transmit_data = ffi.new(f"uint8_t[{_TRANSMIT_BYTES}]")
         self._transmit_destination = ffi.new(f"char[{_ADDRESS_BYTES}]")
@@ -453,7 +553,6 @@ class Stack:
         self._farewell_data = ffi.new(f"uint8_t[{_TRANSMIT_BYTES}]")
         self._farewell_destination = ffi.new(f"char[{_ADDRESS_BYTES}]")
 
-        self._closed = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="sipral-stack", daemon=True
         )
@@ -940,8 +1039,9 @@ class Stack:
         """The network under this stack changed, and ``host`` is this
         machine's address on the new one.
 
-        The signalling socket is bound again at ``host`` and the main
-        transport told (`sipral_stack_transport_bind`), the change reported
+        The signalling socket is bound again at ``host`` -- over TCP or TLS,
+        the connection made again from it -- and the main transport told
+        (`sipral_stack_transport_bind`), the change reported
         (`sipral_stack_network_changed`, with ``link`` an
         :class:`sipral.enums.Link`), and every account added without a
         `Contact` of its own pointed at the new address
@@ -955,6 +1055,67 @@ class Stack:
         :meth:`sipral.account.Account.rebind`.
         """
         previous = parse_address(self.bind_address)[0]
+        if self._streamed:
+            self._move_link(host)
+        else:
+            self._move_socket(host)
+
+        before = previous.encode("utf-8")
+        after = host.encode("utf-8")
+        recovery = ffi.new("uint32_t *")
+        _retry(
+            lambda: lib.sipral_stack_network_changed(
+                self.handle,
+                link,
+                before,
+                len(before),
+                ffi.NULL,
+                0,
+                1,
+                link,
+                after,
+                len(after),
+                ffi.NULL,
+                0,
+                1,
+                self.now_ms(),
+                recovery,
+            ),
+            "sipral_stack_network_changed",
+        )
+        with self._lock:
+            accounts = list(self._accounts)
+        for account in accounts:
+            if account.contact_given:
+                continue
+            account.rebind()
+        return Recovery(int(recovery[0]))
+
+    def _move_link(self, host: str) -> None:
+        """The signalling connection made again from ``host``: the old one
+        belongs to a network this machine has left. When the new one cannot
+        be made, the stack hears why and this class keeps trying."""
+        self._bind_host = host
+        with self._link_lock:
+            old, self._link = self._link, None
+        if old is not None:
+            try:
+                self._selector.unregister(old)
+            except (KeyError, ValueError, OSError):
+                pass
+            old.close()
+        try:
+            sock = self._connect(host)
+            self.bind_address = format_address(*sock.getsockname()[:2])
+            self._install_link(sock, format_address(*sock.getpeername()[:2]))
+        except (OSError, ssl.SSLError, ValueError) as refused:
+            self.bind_address = format_address(host, 0)
+            self._report_failure(*classify(refused))
+            self._reconnect_later()
+
+    def _move_socket(self, host: str) -> None:
+        """The UDP signalling socket bound again at ``host``, and the main
+        transport told."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind((host, 0))
         sock.setblocking(False)
@@ -987,37 +1148,6 @@ class Stack:
         except (KeyError, ValueError, OSError):
             pass
         old.close()
-
-        before = previous.encode("utf-8")
-        after = host.encode("utf-8")
-        recovery = ffi.new("uint32_t *")
-        _retry(
-            lambda: lib.sipral_stack_network_changed(
-                self.handle,
-                link,
-                before,
-                len(before),
-                ffi.NULL,
-                0,
-                1,
-                link,
-                after,
-                len(after),
-                ffi.NULL,
-                0,
-                1,
-                self.now_ms(),
-                recovery,
-            ),
-            "sipral_stack_network_changed",
-        )
-        with self._lock:
-            accounts = list(self._accounts)
-        for account in accounts:
-            if account.contact_given:
-                continue
-            account.rebind()
-        return Recovery(int(recovery[0]))
 
     def call_for(self, handle: int) -> Call | None:
         """The :class:`sipral.call.Call` already made for a call handle."""
@@ -1161,6 +1291,11 @@ class Stack:
             if transmit.len == 0:
                 return
             payload = bytes(ffi.buffer(transmit.data, transmit.len))
+            if self._socket is None:
+                # one connection carries everything, whatever it names:
+                # the server it reaches is the outbound proxy
+                self._write_link(payload)
+                continue
             destination = ffi.string(transmit.destination, transmit.destination_len)
             host, port = parse_address(destination.decode("utf-8"))
             self._socket.sendto(payload, (host, port))
@@ -1503,6 +1638,228 @@ class Stack:
         if tell:
             self._say_turn(lib.sipral_stack_turn_closed, local.encode("utf-8"))
 
+    # -- SIP over TCP or TLS: the one connection signalling travels on -----
+
+    @property
+    def contact_parameters(self) -> str:
+        """What goes after the address in a `Contact` this package writes:
+        ``;transport=tcp`` or ``;transport=tls`` for a stack signalling over
+        a connection (RFC 3261 Section 19.1.1), nothing over UDP."""
+        if self.signalling == lib.SIPRAL_TRANSPORT_TLS:
+            return ";transport=tls"
+        if self.signalling == lib.SIPRAL_TRANSPORT_TCP:
+            return ";transport=tcp"
+        return ""
+
+    @property
+    def connected(self) -> bool:
+        """Whether SIP can go out now: always over UDP, and over TCP or TLS
+        while the connection to the server stands."""
+        return not self._streamed or self._link is not None
+
+    def _connect(self, bind_host: str) -> socket.socket:
+        """One connection to the signalling server; raises what refused it."""
+        assert self._server is not None
+        return connect(
+            self._server,
+            bind_host=bind_host,
+            context=self._tls_context,
+            server_name=self._server_name,
+            timeout=_SIGNALLING_PATIENCE,
+        )
+
+    def _install_link(self, sock: socket.socket, remote: str) -> None:
+        """Tell the stack a connection is open (`sipral_stack_transport_bind`
+        naming both ends) and start reading it. Raises what the bind said,
+        with the connection closed."""
+        local = self.bind_address.encode("utf-8")
+        far = remote.encode("utf-8")
+        try:
+            _retry(
+                lambda: lib.sipral_stack_transport_bind(
+                    self.handle,
+                    lib.SIPRAL_TRANSPORT_MAIN,
+                    self.signalling,
+                    local,
+                    len(local),
+                    far,
+                    len(far),
+                    self.now_ms(),
+                    ffi.NULL,
+                ),
+                "sipral_stack_transport_bind",
+            )
+        except Exception:
+            sock.close()
+            raise
+        sock.settimeout(_SIGNALLING_PATIENCE)
+        with self._link_lock:
+            self._link = sock
+        self._selector.register(sock, selectors.EVENT_READ, data="signalling")
+
+    def _report_failure(self, error: int, tls: int, detail: str) -> None:
+        """`sipral_stack_transport_failure`, from whichever thread found out;
+        never raising on the way out."""
+        failure = ffi.new("sipral_transport_failure_t *")
+        failure.size = ffi.sizeof("sipral_transport_failure_t")
+        failure.transport = lib.SIPRAL_TRANSPORT_MAIN
+        failure.error = error
+        failure.tls = tls if self.signalling == lib.SIPRAL_TRANSPORT_TLS else lib.SIPRAL_TLS_FAILURE_NONE
+        text = detail.encode("utf-8")
+        text_buf = ffi.new("char[]", text) if text else ffi.NULL
+        failure.detail = text_buf
+        failure.detail_len = len(text)
+        try:
+            _retry(
+                lambda: lib.sipral_stack_transport_failure(self.handle, failure, self.now_ms()),
+                "sipral_stack_transport_failure",
+            )
+        except Exception:  # noqa: BLE001 -- the stack is going away
+            pass
+
+    def _lose_link(self, error: int, tls: int, detail: str, *, closed: bool = False, tell: bool = True) -> None:
+        """Close the signalling connection, tell the stack how it ended --
+        `sipral_stack_stream_closed` for an orderly close,
+        `sipral_stack_transport_failure` otherwise, nothing for one the
+        stack itself found broken -- and connect again."""
+        with self._link_lock:
+            sock, self._link = self._link, None
+        if sock is None:
+            return
+        try:
+            self._selector.unregister(sock)
+        except (KeyError, ValueError, OSError):
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+        if tell and closed:
+            try:
+                _retry(
+                    lambda: lib.sipral_stack_stream_closed(
+                        self.handle, lib.SIPRAL_TRANSPORT_MAIN, self.now_ms()
+                    ),
+                    "sipral_stack_stream_closed",
+                )
+            except Exception:  # noqa: BLE001 -- the stack is going away
+                pass
+        elif tell:
+            self._report_failure(error, tls, detail)
+        self._reconnect_later()
+
+    def _reconnect_later(self) -> None:
+        """Start the thread that connects again, unless one is running."""
+        with self._link_lock:
+            if self._reconnecting or self._closed.is_set():
+                return
+            self._reconnecting = True
+        threading.Thread(target=self._reconnect, name="sipral-reconnect", daemon=True).start()
+
+    def _reconnect(self) -> None:
+        """Connect again, backing off, until it works or the stack closes;
+        then point every account at the new connection and register again
+        the ones that were registering."""
+        delay = _RECONNECT_FIRST
+        try:
+            while not self._closed.wait(delay):
+                delay = min(delay * 2, _RECONNECT_MOST)
+                try:
+                    sock = self._connect(self._bind_host)
+                    local = format_address(*sock.getsockname()[:2])
+                    remote = format_address(*sock.getpeername()[:2])
+                except (OSError, ssl.SSLError, ValueError) as refused:
+                    self._report_failure(*classify(refused))
+                    continue
+                if self._closed.is_set():
+                    sock.close()
+                    return
+                self.bind_address = local
+                try:
+                    self._install_link(sock, remote)
+                except Exception:  # noqa: BLE001 -- tried again after the wait
+                    continue
+                self._after_reconnect()
+                return
+        finally:
+            with self._link_lock:
+                self._reconnecting = False
+
+    def _after_reconnect(self) -> None:
+        """Every account added without a `Contact` of its own moves to the
+        new connection's address, and every one that was registering
+        registers again now rather than at its next back-off."""
+        with self._lock:
+            accounts = list(self._accounts)
+        for account in accounts:
+            try:
+                if not account.contact_given:
+                    account.rebind()
+                if account.wants_registration:
+                    account.register()
+            except Exception:  # noqa: BLE001 -- the next loss or refresh tries again
+                pass
+
+    def _write_link(self, payload: bytes) -> None:
+        """Write one message on the signalling connection, whole; a write
+        that fails loses the connection."""
+        with self._link_lock:
+            sock = self._link
+            if sock is None:
+                return
+            try:
+                sock.sendall(payload)
+                return
+            except (OSError, ssl.SSLError) as broken:
+                failed = broken
+        self._lose_link(*classify(failed))
+
+    def _read_link(self) -> None:
+        """What the signalling connection carried, to
+        `sipral_stack_receive_stream` -- every byte, in order: a busy stack
+        is waited for rather than skipped, since a stream that loses a byte
+        never finds its place again."""
+        with self._link_lock:
+            sock = self._link
+            if sock is None:
+                return
+            try:
+                # read without waiting: the selector said bytes arrived, not
+                # that they make application data (a TLS 1.3 session ticket
+                # holds none)
+                sock.settimeout(0.0)
+                try:
+                    data = sock.recv(_TRANSMIT_BYTES)
+                    pending = getattr(sock, "pending", None)
+                    while pending is not None and pending() > 0:
+                        data += sock.recv(pending())
+                finally:
+                    sock.settimeout(_SIGNALLING_PATIENCE)
+            except (ssl.SSLWantReadError, BlockingIOError, socket.timeout):
+                return
+            except (OSError, ssl.SSLError) as broken:
+                failed: BaseException | None = broken
+                data = b""
+            else:
+                failed = None
+        if failed is not None:
+            self._lose_link(*classify(failed))
+            return
+        if not data:
+            self._lose_link(lib.SIPRAL_TRANSPORT_ERROR_CLOSED, lib.SIPRAL_TLS_FAILURE_NONE, "", closed=True)
+            return
+        while True:
+            status = lib.sipral_stack_receive_stream(
+                self.handle, lib.SIPRAL_TRANSPORT_MAIN, data, len(data), self.now_ms()
+            )
+            if status != lib.SIPRAL_STATUS_BUSY or self._closed.is_set():
+                break
+            time.sleep(0.001)
+        if status not in (lib.SIPRAL_STATUS_OK, lib.SIPRAL_STATUS_BUSY):
+            # the framing is lost: the stack has retired the transport and
+            # said so itself
+            self._lose_link(lib.SIPRAL_TRANSPORT_ERROR_OTHER, lib.SIPRAL_TLS_FAILURE_NONE, "", tell=False)
+
     def _run(self) -> None:
         result = ffi.new("sipral_poll_result_t *")
         while not self._closed.is_set():
@@ -1511,6 +1868,8 @@ class Stack:
             for key, _mask in events:
                 if isinstance(key.data, tuple) and key.data[0] == "turn":
                     self._read_turn_stream(key.data[1])
+                elif key.data == "signalling":
+                    self._read_link()
                 elif key.data == "main":
                     try:
                         data, from_address = self._socket.recvfrom(_TRANSMIT_BYTES)
@@ -1631,4 +1990,12 @@ class Stack:
             self._lose_turn_stream(local, tell=False)
         lib.sipral_stack_destroy(self.handle)
         self._selector.close()
-        self._socket.close()
+        if self._socket is not None:
+            self._socket.close()
+        with self._link_lock:
+            link, self._link = self._link, None
+        if link is not None:
+            try:
+                link.close()
+            except OSError:
+                pass

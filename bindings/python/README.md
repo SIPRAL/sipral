@@ -272,6 +272,51 @@ sender wrote, so taking one is the application's decision each time. One left
 unanswered comes back as a second `EventKind.REFERRAL` with
 `fields["status_code"]` set to the 408 the stack answered it with.
 
+## SIP over TCP or TLS
+
+```python
+from sipral import InviteLimit, Stack, TlsTrust
+from sipral.enums import EventKind, TlsFailure, Transport
+
+stack = Stack(
+    bind_host="192.0.2.20",
+    signalling=Transport.TLS,
+    signalling_server="198.51.100.10:5061",
+    tls_server_name="pbx.example.com",
+    tls_trust=TlsTrust.only_authority("pbx-ca.pem"),
+)
+account = stack.add_account(
+    "sip:alice@example.com", registrar="sip:example.com", registrar_address="198.51.100.10:5061"
+)
+account.register()
+event = await stack.events.get()
+if event.kind == EventKind.TRANSPORT_FAILED:
+    print(TlsFailure(event.fields["tls"]).name, event.fields["detail"])
+```
+
+`signalling` is `Transport.UDP` (the default), `TCP` or `TLS`. Over either of
+the last two the stack keeps one connection to `signalling_server`, the
+registrar or the outbound proxy, and every account and call rides on it; a
+`Contact` this package writes names the transport. Over TLS, Python's `ssl`
+checks the certificate against `tls_server_name` (the server's host when
+left out) with `tls_trust`: `TlsTrust.platform()` (the default),
+`TlsTrust.private_authority(cafile)` beside it, `TlsTrust.only_authority(cafile)`
+alone, or `TlsTrust.from_context(context)` for a context that verifies.
+The first connection is made in the constructor. One that fails, or breaks
+later, arrives as `EventKind.TRANSPORT_FAILED` with `fields["tls"]` —
+`TlsFailure.UNTRUSTED`, `NAME_MISMATCH`, `EXPIRED` or `HANDSHAKE_REFUSED` —
+`fields["error"]` and OpenSSL's own sentence in `fields["detail"]`, and the
+stack connects again, one second later and up to thirty seconds apart,
+registering every account again once it is back. `stack.connected` says
+whether it is up; `Account.register()` asked meanwhile is kept for then.
+`docs/22-tls.md` has the whole mapping.
+
+`invite_limit` is how fast one address may ring the stack: every stack
+starts at `InviteLimit.DEFAULT`, ten INVITEs at once and one every two
+seconds, past which a call is answered 480. A voice agent behind a trunk
+takes `InviteLimit.VOICE_AGENT`, a hundred and twenty-eight at once and
+twenty a second.
+
 ## Test
 
 ```sh

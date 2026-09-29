@@ -106,6 +106,8 @@ pub(crate) mod min_size {
     pub const SUBSCRIBE_CONFIG: usize = 88;
     /// `sipral_transmit_t`
     pub const TRANSMIT: usize = 88;
+    /// `sipral_transport_failure_t`
+    pub const TRANSPORT_FAILURE: usize = 40;
     /// `sipral_watched_dialog_t`
     pub const WATCHED_DIALOG: usize = 32;
 }

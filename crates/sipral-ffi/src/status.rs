@@ -94,6 +94,11 @@ codes! {
         /// `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
         /// that ends makes room; raising the limit means a new stack.
         LimitReached = 16,
+        /// The transport the request would leave on has failed or closed and
+        /// has not been bound again. Nothing went out. The failure was
+        /// reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
+        /// the stack with `sipral_stack_transport_bind`, and ask again.
+        TransportDown = 22,
     }
 }
 
@@ -126,6 +131,7 @@ entry! {
             14 => c"device unusable".as_ptr(),
             15 => c"device timed out".as_ptr(),
             16 => c"limit reached".as_ptr(),
+            22 => c"transport down".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -168,6 +174,7 @@ mod tests {
             SipralStatus::DeviceUnusable,
             SipralStatus::DeviceTimedOut,
             SipralStatus::LimitReached,
+            SipralStatus::TransportDown,
         ];
         for status in all {
             let code = status as i32;
@@ -178,7 +185,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in 0..=16 {
+        for code in (0..=16).chain([22]) {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -190,6 +197,7 @@ mod tests {
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
         assert!(name(17).is_none());
+        assert!(name(23).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -218,5 +226,6 @@ mod tests {
         assert_eq!(SipralStatus::DeviceUnusable as i32, 14);
         assert_eq!(SipralStatus::DeviceTimedOut as i32, 15);
         assert_eq!(SipralStatus::LimitReached as i32, 16);
+        assert_eq!(SipralStatus::TransportDown as i32, 22);
     }
 }

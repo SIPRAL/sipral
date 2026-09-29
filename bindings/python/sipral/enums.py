@@ -38,6 +38,8 @@ __all__ = [
     "PathOutcome",
     "CandidateKind",
     "Transport",
+    "TransportError",
+    "TlsFailure",
     "TurnStream",
     "StunServerState",
     "SrtpSuite",
@@ -164,8 +166,22 @@ CandidateKind = _enum("CandidateKind", "SIPRAL_CANDIDATE_KIND_")
 Transport = _enum(
     "Transport",
     "SIPRAL_TRANSPORT_",
-    exclude=("SIPRAL_TRANSPORT_BIT_", "SIPRAL_TRANSPORT_ERROR_", "SIPRAL_TRANSPORT_MAIN"),
+    exclude=(
+        "SIPRAL_TRANSPORT_BIT_",
+        "SIPRAL_TRANSPORT_ERROR_",
+        "SIPRAL_TRANSPORT_MAIN",
+        "SIPRAL_TRANSPORT_DETAIL_BYTES",
+    ),
 )
+
+#: A `SipralTransportError`: what went wrong with a transport, carried on
+#: `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` as ``fields["error"]``.
+TransportError = _enum("TransportError", "SIPRAL_TRANSPORT_ERROR_")
+
+#: A `SipralTlsFailure`: why TLS refused a connection, carried on
+#: `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` as ``fields["tls"]`` -- ``UNTRUSTED``,
+#: ``NAME_MISMATCH``, ``EXPIRED``, ``HANDSHAKE_REFUSED``, or ``NONE``.
+TlsFailure = _enum("TlsFailure", "SIPRAL_TLS_FAILURE_")
 
 #: A `sipral_turn_stream_t`, carried on `SIPRAL_EVENT_KIND_TURN_STREAM`:
 #: open the media socket's connection to the TURN server, or close it.

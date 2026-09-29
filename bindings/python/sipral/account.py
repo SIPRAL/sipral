@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Sequence
 
 from ._sipral_cffi import ffi, lib
 from .enums import RegistrationState
+from .errors import SipralError
 from .errors import call as _call
 
 if TYPE_CHECKING:
@@ -21,7 +22,7 @@ def _optional(text: str | None) -> bytes | None:
     return text.encode("utf-8") if text else None
 
 
-def _default_contact(aor: str, bind_address: str) -> str:
+def _default_contact(aor: str, bind_address: str, parameters: str = "") -> str:
     """Where this account can actually be reached, for a caller who gave
     no `Contact` of its own.
 
@@ -32,13 +33,15 @@ def _default_contact(aor: str, bind_address: str) -> str:
     name that was never meant to resolve to anything. The user part is
     kept -- it is what a `sip:` URI's own grammar (RFC 3261 §19.1.1) calls
     `userinfo`, up to the first unescaped `@` -- and the host becomes the
-    address this stack is actually listening on.
+    address this stack is actually listening on. ``parameters`` is what
+    follows it, ``;transport=tls`` on a stack signalling over TLS: a
+    server reaching this end names the transport it reaches it over.
     """
     scheme, _, rest = aor.partition(":")
     user, sep, _host = rest.partition("@")
     if not sep:
-        return f"{scheme}:{bind_address}"
-    return f"{scheme}:{user}@{bind_address}"
+        return f"{scheme}:{bind_address}{parameters}"
+    return f"{scheme}:{user}@{bind_address}{parameters}"
 
 
 class Account:
@@ -69,6 +72,10 @@ class Account:
         #: Whether it was added with a `Contact` of its own, which
         #: :meth:`sipral.stack.Stack.move_to` then leaves to the application.
         self.contact_given = contact_given
+        #: Whether it was asked to register and not to unregister since: the
+        #: accounts a stack signalling over TCP or TLS registers again once
+        #: its connection is made again.
+        self.wants_registration = False
 
     @classmethod
     def add(
@@ -91,9 +98,9 @@ class Account:
         aor_bytes = aor.encode("utf-8")
         registrar_address_bytes = registrar_address.encode("utf-8")
         registrar_bytes = _optional(registrar)
-        contact_bytes = (contact or _default_contact(aor, stack.bind_address)).encode(
-            "utf-8"
-        )
+        contact_bytes = (
+            contact or _default_contact(aor, stack.bind_address, stack.contact_parameters)
+        ).encode("utf-8")
         display_name_bytes = _optional(display_name)
         auth_user_bytes = _optional(auth_user)
         auth_password_bytes = _optional(auth_password)
@@ -164,9 +171,10 @@ class Account:
         REGISTER -- sent at once when the stack is waiting for it -- uses
         both."""
         remote_bytes = (remote or self.registrar_address).encode("utf-8")
-        contact_bytes = (contact or _default_contact(self.aor, self.stack.bind_address)).encode(
-            "utf-8"
-        )
+        contact_bytes = (
+            contact
+            or _default_contact(self.aor, self.stack.bind_address, self.stack.contact_parameters)
+        ).encode("utf-8")
         _call(
             lambda: lib.sipral_account_rebind(
                 self.stack.handle,
@@ -182,16 +190,27 @@ class Account:
         )
 
     def register(self) -> None:
-        """`sipral_account_register`. A no-op account refuses this."""
-        _call(
-            lambda: lib.sipral_account_register(
-                self.stack.handle, self.handle, self.stack.now_ms()
-            ),
-            "sipral_account_register",
-        )
+        """`sipral_account_register`. A no-op account refuses this.
+
+        On a stack signalling over TCP or TLS whose connection is down
+        (``SIPRAL_STATUS_TRANSPORT_DOWN``, which the stack has already
+        reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`) this is kept, and
+        the REGISTER goes the moment the connection is made again."""
+        self.wants_registration = True
+        try:
+            _call(
+                lambda: lib.sipral_account_register(
+                    self.stack.handle, self.handle, self.stack.now_ms()
+                ),
+                "sipral_account_register",
+            )
+        except SipralError as refused:
+            if refused.status != lib.SIPRAL_STATUS_TRANSPORT_DOWN:
+                raise
 
     def unregister(self) -> None:
         """`sipral_account_unregister`."""
+        self.wants_registration = False
         _call(
             lambda: lib.sipral_account_unregister(
                 self.stack.handle, self.handle, self.stack.now_ms()

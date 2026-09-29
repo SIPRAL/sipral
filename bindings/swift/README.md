@@ -425,6 +425,49 @@ can make a phone dial is a toll-fraud vector, so each one is the
 application's decision. `Tests/SipralTests/ReferralTests.swift` proves both
 halves on the wire.
 
+### SIP over TCP or TLS
+
+```swift
+let stack = try SipralStack(
+    bindHost: "192.0.2.20",
+    signalling: .tls,
+    signallingServer: "198.51.100.10:5061",
+    tlsServerName: "pbx.example.com",
+    tlsTrust: .onlyAuthority(pbxAuthorityDER)
+)
+let account = try stack.addAccount(
+    aor: "sip:alice@example.com", registrarAddress: "198.51.100.10:5061", registrar: "sip:example.com"
+)
+try account.register()
+for await event in stack.events() {
+    if let failed = event.transportFailedData {
+        print(failed.tls.map { "\($0)" } ?? "", failed.detail ?? "")
+    }
+}
+```
+
+`signalling` is `.udp` (the default), `.tcp` or `.tls`. Over either of the
+last two the stack keeps one connection to `signallingServer`, the registrar
+or the outbound proxy, and every account and call rides on it; a `Contact`
+this layer writes names the transport. TLS is Network.framework's, on Apple
+platforms only: the certificate is evaluated by `SecTrust` with the SSL
+policy for `tlsServerName` (the server's host when `nil`), under `tlsTrust`
+— `.platform` (the default), `.privateAuthority(der)` beside it, or
+`.onlyAuthority(der)` alone. On Linux `.tls` throws `.notSupported` and
+`.tcp` works on a plain socket. The first connection is made in the
+initializer. One that fails, or breaks later, arrives as
+`SipralEventKind.transportFailed` with `transportFailedData`: `tls`
+`.untrusted`, `.nameMismatch`, `.expired` or `.handshakeRefused`, the
+`error`, and Security's own `detail`. The stack connects again, one second
+later and up to thirty seconds apart, registering every account again once
+it is back; `stack.connected` says whether it is up, and `account.register()`
+asked meanwhile is kept for then. `docs/22-tls.md` has the whole mapping.
+
+`inviteLimit` is how fast one address may ring the stack: every stack
+starts at `InviteLimit.standard`, ten INVITEs at once and one every two
+seconds, past which a call is answered 480. A voice agent behind a trunk
+takes `.voiceAgent`, a hundred and twenty-eight at once and twenty a second.
+
 ## Samples
 
 `Sources/SipralLabAgent` — a headless voice agent (answers, echoes, hangs up

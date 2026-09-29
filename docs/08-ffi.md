@@ -967,6 +967,66 @@ show before anyone complains about it. The same figures are
 `Endpoint::transaction_retransmissions(id)` also answers for one live
 transaction.
 
+**How fast one address may ring this stack.** Beside the two ceilings, every
+stack starts with a floor on INVITEs per source address: ten at once, then
+one more every two seconds (`SIPRAL_INVITE_LIMIT_BURST`,
+`SIPRAL_INVITE_LIMIT_EVERY_MS`). An INVITE past it is answered
+`480 Temporarily Unavailable` before any policy sees it, and counted in
+`sipral_counters_t::screened_refused_by_rate`; nothing is raised for it,
+because an event queue anybody on the internet can fill is the same attack
+one layer up. It is loose on purpose, since a phone's calls all arrive from
+the one proxy it registered with. A voice agent or a headless answering
+service is the case it does not fit: every call comes from one trunk, dozens
+at once when a campaign starts, and the twelfth caller would be answered
+`480`. `sipral_stack_invite_limit(stack, SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS,
+SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST)` is the preset for it — a hundred and
+twenty-eight at once, the default `max_dialogs`, so that a rush meets the
+ceiling's `503` before the rate's `480`, then twenty a second. `Rate::voice_agent()`
+is the same preset in Rust, and each idiomatic layer takes it as a
+constructor argument (`invite_limit` / `inviteLimit`).
+
+### When a transport fails, and why
+
+Sipral opens no socket and links no TLS library (`22-tls.md`), so a TLS
+connection that is refused is refused in the application's code, and until
+ABI 0.31 the stack heard only that its transport failed. Every layer on top
+then reported "the connection to the server closed" whether the server was
+down, its certificate was self-signed, it named another host or it had
+expired.
+
+`sipral_stack_transport_failure(stack, &failure, now_ms)` is
+`sipral_stack_transport_failed` with the reason carried along. The caller fills
+in `sipral_transport_failure_t`: the transport, a `SipralTransportError`, a
+`SipralTlsFailure` — `UNTRUSTED` (1), `NAME_MISMATCH` (2), `EXPIRED` (3) or
+`HANDSHAKE_REFUSED` (4), `NONE` (0) for anything that was not TLS saying no —
+and, optionally, the TLS library's own sentence in `detail` (at most
+`SIPRAL_TRANSPORT_DETAIL_BYTES`, one line of UTF-8). A server that never
+answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with the TLS reason at
+none. A TLS reason on a transport that speaks neither TLS nor WSS is
+`SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is retired.
+
+Whichever of the three calls retired it — or `sipral_stack_receive_stream`,
+for a stream that carried bytes no message starts with — the next poll raises
+`SIPRAL_EVENT_KIND_TRANSPORT_FAILED` (53) with `payload.transport_failed`: the
+transport, what it spoke, the error (`SIPRAL_TRANSPORT_ERROR_CLOSED` after
+`sipral_stack_stream_closed`), the TLS reason and the detail. It comes before
+the registration and call events the loss caused, so an application that
+shows "registration failed" can say why in the same breath. A connection the
+application could not open at all is told the same way, which retires a
+transport that carried nothing yet; the bind after the reconnect undoes that.
+
+While a transport is down, a request that would leave on it — registering,
+placing a call, a MESSAGE — is `SIPRAL_STATUS_TRANSPORT_DOWN` (22), with nothing
+sent, rather than the `SIPRAL_STATUS_NOT_SENT` a request that could not be
+built gets: the one says reconnect and ask again, the other says the request
+is wrong. A registration already running is not lost meanwhile: it goes to
+`SIPRAL_REGISTRATION_STATE_RETRYING` and its back-off carries on, so a
+REGISTER due while the connection is being made again waits for the next
+rung, and one asked for after `sipral_stack_transport_bind` goes at once.
+
+Events 47 to 52 are held for other features of the same minor; a build that
+does not have them names none of the six, and never raises them.
+
 ### The log, the state snapshot and the RTP port range
 
 Three things an application wants once a deployment is in the field, each
@@ -1848,7 +1908,10 @@ What is not printed is the platform work, and it is what the binding earns its
 place for: `SipralStack`, `Account` and `Call` (`swift/Sources/Sipral/`), one
 POSIX socket per stack and per call's media (`UDPSocket.swift`, `Darwin` or
 `Glibc` directly rather than `Network.framework`, so the module also builds
-and runs on Linux), and the event callback bridged into `AsyncStream`s —
+and runs on Linux) — or, for SIP over TCP or TLS, one connection to the
+server (`Signalling.swift`: Network.framework on Apple platforms, where TLS
+is; a plain TCP socket on Linux, where it is not) — and the event callback
+bridged into `AsyncStream`s —
 decoded synchronously, on the poll thread, into a `Sendable` `SipralEvent`
 before it crosses, the same rule `bindings/python/sipral/events.py` follows
 for the same reason (`sipral_event_t`'s pointers outlive nothing past the
@@ -1917,7 +1980,9 @@ Every handle a call or an application holds is a `SafeHandle` subclass
 (`bindings/dotnet/Sipral/Handles.cs`), so a missed `Dispose` releases on a
 finalizer rather than leaking, and a double `Dispose` is the no-op
 `SafeHandle`'s own reference count already makes it. A `SipralStack` owns
-one UDP socket and one background poll thread — the same drain-receive,
+one UDP socket — or, for SIP over TCP or TLS, one connection to the server
+and a reader for it (`SipralSignalling.cs`) — and one background poll
+thread — the same drain-receive,
 poll, drain-transmit, drain-farewell loop `bindings/python/sipral/stack.py`
 runs, kept alive as a GC root by the thread's own closure over it rather
 than a separate keep-alive list — and delivers events two ways: an ordinary
@@ -2214,7 +2279,9 @@ different ways" below.
 `sipral.stack.Stack`, `sipral.account.Account` and `sipral.call.Call`, in
 `bindings/python/sipral/`, are written against `ffi`/`lib` by hand, the way
 `SipralAbi.swift` is the base the Swift package is written against. A
-`Stack` owns one UDP socket and one background thread: the thread drains
+`Stack` owns one UDP socket — or, with `signalling` TCP or TLS, one
+connection to the server (`sipral/signalling.py`) — and one background
+thread: the thread drains
 `sipral_stack_receive_datagram`, `sipral_stack_poll` and
 `sipral_stack_poll_transmit` in a loop, the same one `interop/harness-c/main.c`
 writes in C, and delivers events by decoding `sipral_event_t` whole,
