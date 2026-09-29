@@ -46,7 +46,9 @@ const ONE: u8 = 0xa2;
 pub enum TnEntry {
     /// A service provider code: every number the provider it names serves.
     Spc(String),
-    /// `count` numbers from `start` on, all as long as `start` is.
+    /// `count` numbers from `start` on, all as long as `start` is: `start`
+    /// holds digits only, and RFC 8226 §9 has `start + count` less than
+    /// `10^D` for a `start` of `D` digits.
     Range {
         /// The first number.
         start: String,
@@ -96,12 +98,16 @@ impl TnAuthList {
     ///
     /// [`InvalidTnAuthList`] for an empty list, a service provider code that
     /// is empty or not printable ASCII, a number that is not one to fifteen
-    /// of `0123456789#*`, or a range of fewer than two.
+    /// of `0123456789#*`, or a range RFC 8226 §9 calls invalid: fewer than
+    /// two, a start holding `*` or `#` ("The count field is only applicable
+    /// to start fields whose values do not include "*" or "#""), or one that
+    /// runs into numbers longer than its start ("TelephoneNumber + count
+    /// MUST be less than 10^D").
     pub fn new(entries: Vec<TnEntry>) -> Result<Self, InvalidTnAuthList> {
         let valid = !entries.is_empty()
             && entries.iter().all(|entry| match entry {
                 TnEntry::Spc(code) => is_spc(code.as_bytes()),
-                TnEntry::Range { start, count } => is_tn(start) && *count >= 2,
+                TnEntry::Range { start, count } => is_range(start, *count),
                 TnEntry::One(number) => is_tn(number),
             });
         if valid {
@@ -182,6 +188,17 @@ impl TnAuthList {
         }
         None
     }
+}
+
+fn is_range(start: &str, count: u64) -> bool {
+    let Some(first) = digits(start).filter(|_| is_tn(start)) else {
+        return false;
+    };
+    // at most fifteen digits, so 10^D fits
+    let limit = u32::try_from(start.len())
+        .ok()
+        .and_then(|d| 10_u64.checked_pow(d));
+    count >= 2 && limit.is_some_and(|limit| first.checked_add(count).is_some_and(|end| end < limit))
 }
 
 fn is_spc(code: &[u8]) -> bool {
@@ -319,12 +336,14 @@ mod tests {
 
     #[test]
     fn ranges_hold_only_digits() {
-        let list = TnAuthList::new(vec![TnEntry::Range {
-            start: "1215555*100".to_owned(),
-            count: 100,
-        }])
-        .unwrap();
-        assert_eq!(list.covers(&tn("1215555*100"), false), None);
+        // RFC 8226 §9: a count applies only to a start without "*" or "#"
+        assert_eq!(
+            TnAuthList::new(vec![TnEntry::Range {
+                start: "1215555*100".to_owned(),
+                count: 100,
+            }]),
+            Err(InvalidTnAuthList)
+        );
         let plain = TnAuthList::new(vec![TnEntry::Range {
             start: "12155550100".to_owned(),
             count: 2,
@@ -349,27 +368,32 @@ mod tests {
         assert_eq!(list.covers(&tn("0150"), false), Some(Coverage::Range));
         assert_eq!(list.covers(&tn("150"), false), None);
         assert_eq!(list.covers(&tn("00150"), false), None);
-        // and a range that runs past its last digit is read without overflow
-        let list = TnAuthList::new(vec![TnEntry::Range {
-            start: "999999999999998".to_owned(),
-            count: u64::MAX,
-        }])
-        .unwrap();
-        assert_eq!(
-            list.covers(&tn("999999999999999"), false),
-            Some(Coverage::Range)
-        );
-        assert_eq!(list.covers(&tn("99999999999999"), false), None);
     }
 
     #[test]
-    fn a_range_as_wide_as_a_u64() {
-        let list = TnAuthList::new(vec![TnEntry::Range {
-            start: "0".to_owned(),
-            count: u64::MAX,
-        }])
-        .unwrap();
-        assert_eq!(list.covers(&tn("9"), false), Some(Coverage::Range));
+    fn a_range_may_not_run_into_longer_numbers() {
+        let range = |start: &str, count: u64| {
+            TnAuthList::new(vec![TnEntry::Range {
+                start: start.to_owned(),
+                count,
+            }])
+        };
+        // RFC 8226 §9's own example: "a TelephoneNumberRange with
+        // TelephoneNumber=10 and count=91 is invalid"
+        assert_eq!(range("10", 91), Err(InvalidTnAuthList));
+        // and its formal rule, TelephoneNumber + count < 10^D
+        assert_eq!(range("10", 90), Err(InvalidTnAuthList));
+        let widest = range("10", 89).unwrap();
+        assert_eq!(widest.covers(&tn("98"), false), Some(Coverage::Range));
+        assert_eq!(widest.covers(&tn("99"), false), None);
+        // counts too large for any number of fifteen digits, without overflow
+        assert_eq!(range("999999999999998", u64::MAX), Err(InvalidTnAuthList));
+        assert_eq!(range("0", u64::MAX), Err(InvalidTnAuthList));
+        let fifteen = range("999999999999990", 9).unwrap();
+        assert_eq!(
+            fifteen.covers(&tn("999999999999998"), false),
+            Some(Coverage::Range)
+        );
     }
 
     #[test]

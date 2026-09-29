@@ -21,7 +21,8 @@ use crate::passport::{ALG, Claims, Header, PPT_SHAKEN, header_value};
 use crate::verdict::{Failure, InfoProblem, Malformed, Verdict, Verified};
 
 /// How far `iat` may be from the time of verification, in seconds, unless
-/// configured otherwise: the sixty seconds RFC 8224 §6.2.1 recommends.
+/// configured otherwise: the sixty seconds RFC 8224 §6.2 (Step 4)
+/// recommends.
 pub const DEFAULT_FRESHNESS: u64 = 60;
 
 /// A verifier's policy.
@@ -109,6 +110,12 @@ fn decode_json(segment: &str) -> Result<Vec<u8>, Failure> {
 }
 
 fn full(identity: &Identity, header: &str, claims: &str) -> Result<(Vec<u8>, Claims), Failure> {
+    // RFC 8224 §6.2, Step 1, before anything else: a `ppt` parameter this
+    // verifier does not support means the header field is ignored, whatever
+    // the PASSporT inside it says
+    if identity.ppt.as_deref().is_some_and(|ppt| ppt != PPT_SHAKEN) {
+        return Err(Failure::UnsupportedPpt);
+    }
     let parsed = Header::from_json(&decode_json(header)?)?;
     if identity.alg.as_deref().is_some_and(|alg| alg != ALG) {
         return Err(Failure::Malformed(Malformed::AlgMismatch));

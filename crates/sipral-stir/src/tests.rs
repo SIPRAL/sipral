@@ -496,10 +496,13 @@ fn a_ppt_parameter_that_disagrees() {
         start_failure(&identity, None),
         Failure::Malformed(Malformed::PptMismatch)
     );
+    // a ppt this verifier does not support is RFC 8224 §6.2's Step 1, taken
+    // before the PASSporT is read: the header field is ignored, not broken
     let identity = hand_made(HEADER, CLAIMS, ";ppt=div");
+    assert_eq!(start_failure(&identity, None), Failure::UnsupportedPpt);
     assert_eq!(
-        start_failure(&identity, None),
-        Failure::Malformed(Malformed::PptMismatch)
+        Failure::UnsupportedPpt.sip_response(),
+        SipResponse::USE_SUPPORTED_PASSPORT_FORMAT
     );
     // left out, it disagrees with nothing
     let pki = Pki::new();

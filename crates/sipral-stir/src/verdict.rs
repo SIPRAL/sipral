@@ -81,10 +81,13 @@ pub enum Failure {
     /// one this crate verifies (RFC 8225 §4.2 makes it mandatory to
     /// support).
     UnsupportedAlgorithm,
-    /// The PASSporT names a `ppt` extension other than `shaken`.
+    /// The Identity header field or its PASSporT names a `ppt` extension
+    /// other than `shaken`. RFC 8224 §6.2 (Step 1) has the verifier ignore
+    /// such a header field, so a request carrying only these is answered
+    /// as one carrying none, with 428.
     UnsupportedPpt,
     /// `iat` is further from the time of verification than the freshness
-    /// window allows (RFC 8224 §6.2.1).
+    /// window allows (RFC 8224 §6.2, Step 4).
     Stale {
         /// When the PASSporT says it was signed.
         iat: u64,
@@ -123,16 +126,16 @@ impl Failure {
         match self {
             Failure::Stale { .. } => SipResponse::STALE_DATE,
             Failure::MissingIdentity => SipResponse::USE_IDENTITY_HEADER,
+            Failure::UnsupportedPpt => SipResponse::USE_SUPPORTED_PASSPORT_FORMAT,
             Failure::BadInfo(_) => SipResponse::BAD_IDENTITY_INFO,
             Failure::UnsupportedAlgorithm
             | Failure::Untrusted
             | Failure::Expired { .. }
             | Failure::NotYetValid { .. }
             | Failure::InvalidChain(_) => SipResponse::UNSUPPORTED_CREDENTIAL,
-            Failure::Malformed(_)
-            | Failure::UnsupportedPpt
-            | Failure::BadSignature
-            | Failure::TnNotCovered => SipResponse::INVALID_IDENTITY_HEADER,
+            Failure::Malformed(_) | Failure::BadSignature | Failure::TnNotCovered => {
+                SipResponse::INVALID_IDENTITY_HEADER
+            }
         }
     }
 
@@ -343,7 +346,8 @@ pub struct SipResponse {
 }
 
 impl SipResponse {
-    /// 403: `iat` outside the freshness window (RFC 8224 §6.2.1).
+    /// 403: `iat` outside the freshness window (RFC 8224 §6.2, Step 4, and
+    /// §6.2.2).
     pub const STALE_DATE: SipResponse = SipResponse {
         code: 403,
         reason: "Stale Date",
@@ -352,6 +356,13 @@ impl SipResponse {
     pub const USE_IDENTITY_HEADER: SipResponse = SipResponse {
         code: 428,
         reason: "Use Identity Header",
+    };
+    /// 428 with the reason phrase RFC 8224 §6.2.2 suggests when the only
+    /// Identity header fields a request carries name a `ppt` the verifier
+    /// does not support.
+    pub const USE_SUPPORTED_PASSPORT_FORMAT: SipResponse = SipResponse {
+        code: 428,
+        reason: "Use Supported PASSporT Format",
     };
     /// 436: the `info` URI cannot be dereferenced, or does not yield a
     /// usable certificate.
@@ -445,7 +456,11 @@ mod tests {
                 438,
                 "Invalid Identity Header",
             ),
-            (Failure::UnsupportedPpt, 438, "Invalid Identity Header"),
+            (
+                Failure::UnsupportedPpt,
+                428,
+                "Use Supported PASSporT Format",
+            ),
             (Failure::BadSignature, 438, "Invalid Identity Header"),
             (Failure::TnNotCovered, 438, "Invalid Identity Header"),
         ];
