@@ -6,10 +6,13 @@
 //! of one channel.
 
 use super::SampleRate;
-use super::amd::{AnsweringMachineDetector, Verdict};
-use super::beep::{Beep, BeepDetector};
-use super::dtmf::{DtmfDetector, DtmfEvent};
-use super::progress::{ProgressDetector, ProgressEvent, Region};
+use super::amd::{AmdConfig, AnsweringMachineDetector, Verdict};
+use super::beep::{Beep, BeepConfig, BeepDetector};
+use super::dtmf::{Digit, DtmfConfig, DtmfDetector, DtmfEvent};
+use super::generate::{DtmfGenerator, DtmfTone, ToneGenerator};
+use super::progress::{
+    Burst, Cadence, ProgressConfig, ProgressDetector, ProgressEvent, ProgressTone, Region, ToneSpec,
+};
 use super::signals::{
     Rng, digit_vowels, glottal_speech, mix, music, pink, span, speech, sweeps, syllable, to_pcm,
     white,
@@ -339,6 +342,155 @@ fn cpu_per_channel() {
                 "{rate:?} {name:>15}: {samples_per_second:>14.0} samples/s, {:>8.0}x real time",
                 samples_per_second / hz
             );
+        }
+    }
+}
+
+/// Tables no network plays: no frequencies, frequencies no filter can hold,
+/// no bursts, bursts of nothing and of forever.
+static ODD_TONES: [ToneSpec; 4] = [
+    ToneSpec {
+        tone: ProgressTone::Busy,
+        frequencies: &[],
+        cadence: Cadence::Repeating(&[]),
+    },
+    ToneSpec {
+        tone: ProgressTone::Dial,
+        frequencies: &[f64::NAN, -5.0, 0.0, 1e12, f64::INFINITY],
+        cadence: Cadence::Continuous,
+    },
+    ToneSpec {
+        tone: ProgressTone::Ringback,
+        frequencies: &[425.0],
+        cadence: Cadence::Repeating(&[
+            Burst {
+                on_ms: 0,
+                off_ms: 0,
+            },
+            Burst {
+                on_ms: u32::MAX,
+                off_ms: u32::MAX,
+            },
+        ]),
+    },
+    ToneSpec {
+        tone: ProgressTone::Congestion,
+        frequencies: &[425.0],
+        cadence: Cadence::Repeating(&[Burst {
+            on_ms: 1,
+            off_ms: 0,
+        }]),
+    },
+];
+
+/// Floats and counts at the edges of their types, for every field of every
+/// configuration.
+const ODD_FLOATS: [f64; 6] = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0, 1e300];
+const ODD_COUNTS: [u32; 3] = [0, 1, u32::MAX];
+
+#[test]
+fn no_configuration_or_frame_makes_a_detector_panic() {
+    let mut rng = Rng::new(0xDEAD);
+    let frames: Vec<Vec<i16>> = vec![
+        Vec::new(),
+        vec![i16::MIN],
+        vec![i16::MIN; 4_000],
+        (0..4_000)
+            .map(|n| if n % 2 == 0 { i16::MIN } else { i16::MAX })
+            .collect(),
+        to_pcm(&white(&mut rng, 3.0, 4_000)),
+    ];
+    for rate in RATES {
+        for f in ODD_FLOATS {
+            for n in ODD_COUNTS {
+                let mut dtmf = DtmfDetector::with_config(
+                    rate,
+                    DtmfConfig {
+                        max_frequency_deviation: f,
+                        max_high_over_low_db: f,
+                        max_low_over_high_db: f,
+                        min_level_dbm0: f,
+                        min_signal_to_noise_db: f,
+                        max_second_harmonic_db: f,
+                        min_tone_ms: n,
+                        min_pause_ms: n,
+                    },
+                );
+                let mut progress = ProgressDetector::with_config(
+                    rate,
+                    &ODD_TONES,
+                    ProgressConfig {
+                        min_level_dbm0: f,
+                        min_signal_to_noise_db: f,
+                        max_imbalance_db: f,
+                        cadence_tolerance: f,
+                        cadence_slack_ms: n,
+                        continuous_ms: n,
+                        cycles: n,
+                        sit_tolerance_hz: f,
+                        sit_duration_ms: (n, n),
+                        sit_max_gap_ms: n,
+                    },
+                );
+                let mut beep = BeepDetector::with_config(
+                    rate,
+                    BeepConfig {
+                        min_hz: f,
+                        max_hz: f,
+                        min_ms: n,
+                        max_ms: n,
+                        min_level_dbm0: f,
+                        min_prediction_gain_db: f,
+                        max_drift: f,
+                    },
+                );
+                let mut amd = AnsweringMachineDetector::with_config(
+                    rate,
+                    AmdConfig {
+                        max_initial_silence_ms: n,
+                        max_greeting_ms: n,
+                        silence_after_greeting_ms: n,
+                        max_words: n,
+                        min_word_ms: n,
+                        min_word_gap_ms: n,
+                        max_decision_ms: n,
+                        min_speech_above_floor_db: n,
+                    },
+                );
+                for frame in &frames {
+                    dtmf.process(frame, |_| {});
+                    progress.process(frame, |_| {});
+                    beep.process(frame, |_| {});
+                    let _ = amd.process(frame);
+                }
+                dtmf.finish(|_| {});
+            }
+        }
+    }
+}
+
+#[test]
+fn no_level_or_length_makes_a_generator_panic() {
+    let mut out = vec![0_i16; 3_000];
+    for rate in RATES {
+        for f in ODD_FLOATS {
+            for n in ODD_COUNTS {
+                let mut digits = DtmfGenerator::with_tone(
+                    rate,
+                    DtmfTone {
+                        tone_ms: n,
+                        pause_ms: n,
+                        low_dbm0: f,
+                        high_dbm0: f,
+                    },
+                );
+                digits.start(Digit::D);
+                digits.fill(&mut out);
+                for spec in &ODD_TONES {
+                    ToneGenerator::new(rate, spec, f).fill(&mut out);
+                }
+                ToneGenerator::special_information(rate, [f; 3], [n; 3], f).fill(&mut out);
+            }
         }
     }
 }
