@@ -97,7 +97,7 @@ FLOW_SECTIONS = {
     ),
     "STIR/SHAKEN between two C ABI stacks -- one signs, one verifies": ("stir_pair", "c"),
     "an N-way local conference -- three calls through the proxy, each on its own codec": (
-        "kamailio",
+        "kamailio_members",
         "rust",
     ),
 }
@@ -210,6 +210,7 @@ PEER_LABELS = {
     "full_ice": "sipral, self-to-self (each behind its own NAT)",
     "robust_listener": "a listener that never answers, over a link that drops fragments",
     "stir_pair": "sipral, C ABI to C ABI (STIR/SHAKEN)",
+    "kamailio_members": "Kamailio, routing to three sipral stacks registered at it",
 }
 
 # Named by the owner (root CLAUDE.md, intern/TASKS.md 8.6.8): every peer worth
@@ -719,6 +720,10 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         # itself, or being called by the same Asterisk container already
         # versioned above.
         return "n/a"
+    if peer_key == "kamailio_members":
+        # the proxy routes, and the far ends are this stack's own: no
+        # FreeSWITCH behind it
+        return f"{v('kamailio')} (proxy)"
     if peer_key == "stir_pair":
         # two stacks of this library, and a certificate authority made for
         # the run: nobody else's release to name
