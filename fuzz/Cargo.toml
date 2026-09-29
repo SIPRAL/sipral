@@ -129,6 +129,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "rtcp_fb"
+path = "fuzz_targets/rtcp_fb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "rtp_dtmf"
 path = "fuzz_targets/rtp_dtmf.rs"
 test = false
