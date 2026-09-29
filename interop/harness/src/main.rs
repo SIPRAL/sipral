@@ -43,6 +43,7 @@ mod fork;
 mod fork_ice;
 mod ice_lite;
 mod ice_nat;
+mod inband;
 mod join;
 mod latency;
 #[cfg(test)]
@@ -297,6 +298,11 @@ fn main() -> ExitCode {
     #[cfg(all(feature = "wasapi", target_os = "windows"))]
     if env::args().nth(1).as_deref() == Some("--list-audio-devices") {
         return list_audio_devices();
+    }
+    // not a flow: the greeting and the beep `inband`'s machine flow has the
+    // far end play, written where `scripts/lab.sh` then copies them from
+    if env::args().nth(1).as_deref() == Some("--write-greeting") {
+        return inband::write_greeting_into(env::args().nth(2));
     }
     let server = env::args().nth(1).unwrap_or_else(|| "kamailio".to_owned());
     let port: u16 = env::args()
@@ -602,6 +608,18 @@ fn extra_flows(
                 failures += 1;
             }
         }
+    }
+    // what a call carries in its audio, and a call recorded: each only when
+    // named, since the machine flow needs the greeting `scripts/lab.sh`
+    // copies in first (see `inband`'s own module doc)
+    if server == "asterisk" {
+        let lab = inband::Lab {
+            server,
+            remote,
+            user,
+            pass,
+        };
+        failures += inband::run_named(&lab, wanted);
     }
     // a call whose address moves under it, and only when named: see
     // `moved`'s own module doc for what `scripts/lab.sh` does to the
@@ -2828,6 +2846,12 @@ mod tests {
             latency::MEDIA_SEED => crate::latency::MEDIA_SEED,
             moved::SEED => crate::moved::SEED,
             moved::MEDIA_SEED => crate::moved::MEDIA_SEED,
+            inband::INBAND_SEED => crate::inband::INBAND_SEED,
+            inband::INBAND_MEDIA_SEED => crate::inband::INBAND_MEDIA_SEED,
+            inband::AMD_SEED => crate::inband::AMD_SEED,
+            inband::AMD_MEDIA_SEED => crate::inband::AMD_MEDIA_SEED,
+            inband::RECORDING_SEED => crate::inband::RECORDING_SEED,
+            inband::RECORDING_MEDIA_SEED => crate::inband::RECORDING_MEDIA_SEED,
             volume::SEED => crate::volume::SEED,
             volume::MEDIA_SEED => crate::volume::MEDIA_SEED,
             scale::CALLER_SEED => crate::scale::CALLER_SEED,
