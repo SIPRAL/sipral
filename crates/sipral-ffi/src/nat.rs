@@ -253,14 +253,111 @@ record! {
     }
 }
 
-/// The server a stack's configuration asks, or `None` for one that asks
+codes! {
+    /// What happened to the STUN servers a stack asks. Names for
+    /// `sipral_stun_server_event_t::state`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralStunServerState: u32 {
+        /// The server in use is another one now: `previous` failed and
+        /// `server`, the next in the list, took over; a refresh found
+        /// `server`, earlier in the list, answering again; or
+        /// `sipral_stack_stun_servers` named another list.
+        Changed = 1,
+        /// Every server in the list has failed and each is backing off:
+        /// `server` is the last one that did. The sockets keep what they
+        /// learned, or are described by their own address, and a
+        /// signalling socket's refresh goes on asking. Said once until a
+        /// server answers again.
+        AllFailed = 2,
+    }
+}
+
+record! {
+    /// What a [`SipralEventKind::StunServer`](crate::event::SipralEventKind::StunServer)
+    /// carries.
+    ///
+    /// The addresses are `host:port`, not NUL-terminated, and the library's:
+    /// valid for as long as the callback runs.
+    #[derive(Clone, Copy)]
+    pub struct SipralStunServerEvent {
+        /// A [`SipralStunServerState`].
+        pub state: u32,
+        /// For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server in use now; for
+        /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED`, the last one that failed.
+        pub server: *const c_char,
+        /// How many bytes of it.
+        pub server_len: usize,
+        /// For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server that was in use.
+        /// Empty otherwise.
+        pub previous: *const c_char,
+        /// How many bytes of it.
+        pub previous_len: usize,
+    }
+}
+
+/// The STUN servers a stack asks, in order: the first, and the ones turned
+/// to when it fails.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StunServers {
+    first: SocketAddr,
+    rest: Vec<SocketAddr>,
+}
+
+/// A list of `host:port` addresses separated by commas, as `name` names
+/// it: an address each, not a name, since resolving one is the
+/// application's, and no entry empty.
+///
+/// # Safety
+///
+/// `list` must be readable for `len` bytes.
+unsafe fn addresses(
+    list: *const c_char,
+    len: usize,
+    name: &'static str,
+) -> Result<Vec<SocketAddr>, Fail> {
+    let Some(list) = (unsafe { text(list, len, name) })? else {
+        return Ok(Vec::new());
+    };
+    list.split(',')
+        .enumerate()
+        .map(|(at, entry)| {
+            entry.trim().parse::<SocketAddr>().map_err(|_| {
+                fail(
+                    SipralStatus::InvalidArgument,
+                    format!(
+                        "{name} entry {at} is {entry:?}, which is not an address and a port; the \
+                         list is host:port addresses separated by commas, and resolving a name is \
+                         the application's"
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The servers a stack's configuration asks, or `None` for one that asks
 /// nobody.
 ///
 /// # Safety
 ///
-/// `config.stun_server` must be readable for `config.stun_server_len` bytes.
-pub(crate) unsafe fn configured(config: &SipralStackConfig) -> Result<Option<SocketAddr>, Fail> {
+/// `config.stun_server` must be readable for `config.stun_server_len` bytes,
+/// and `config.stun_fallbacks` for `config.stun_fallbacks_len`.
+pub(crate) unsafe fn configured(config: &SipralStackConfig) -> Result<Option<StunServers>, Fail> {
     let server = unsafe { text(config.stun_server, config.stun_server_len, "stun_server") }?;
+    let rest = unsafe {
+        addresses(
+            config.stun_fallbacks,
+            config.stun_fallbacks_len,
+            "stun_fallbacks",
+        )
+    }?;
+    if !rest.is_empty() && server.is_none() {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "stun_fallbacks names servers to turn to and stun_server names none to turn from: \
+             the first server goes in stun_server",
+        ));
+    }
     match (config.nat, server) {
         (0 | 1, None) => Ok(None),
         (0 | 1, Some(_)) => Err(fail(
@@ -282,7 +379,10 @@ pub(crate) unsafe fn configured(config: &SipralStackConfig) -> Result<Option<Soc
                     ),
                 ));
             };
-            supported(address)
+            supported(StunServers {
+                first: address,
+                rest,
+            })
         }
         (other, _) => Err(fail(
             SipralStatus::InvalidArgument,
@@ -433,12 +533,12 @@ fn relaying(_turn: Turn<'_>) -> Result<Option<Turn<'_>>, Fail> {
 
 #[cfg(feature = "stun")]
 #[allow(clippy::unnecessary_wraps)]
-const fn supported(server: SocketAddr) -> Result<Option<SocketAddr>, Fail> {
-    Ok(Some(server))
+fn supported(servers: StunServers) -> Result<Option<StunServers>, Fail> {
+    Ok(Some(servers))
 }
 
 #[cfg(not(feature = "stun"))]
-fn supported(_server: SocketAddr) -> Result<Option<SocketAddr>, Fail> {
+fn supported(_servers: StunServers) -> Result<Option<StunServers>, Fail> {
     Err(fail(
         SipralStatus::NotSupported,
         "nat names STUN and this build has none: SIPRAL_FEATURE_STUN is clear in \
@@ -518,17 +618,17 @@ impl Nat {
     /// relay on it as well.
     pub(crate) fn start(
         state: &mut StackState,
-        server: Option<SocketAddr>,
+        servers: Option<StunServers>,
         turn: Option<Turn<'_>>,
         transport: TransportId,
         protocol: TransportProtocol,
         local: SocketAddr,
         now: Instant,
     ) {
-        let Some(server) = server else {
+        let Some(servers) = servers else {
             return;
         };
-        let mappings = state.engine.mappings(server);
+        let mappings = state.engine.mappings(servers.first).fallbacks(servers.rest);
         #[cfg(feature = "ice")]
         let relays = turn.map(|turn| {
             state
@@ -702,12 +802,16 @@ impl Nat {
         // the accounts below can have the user agent to itself
         let mut learned_all = Vec::new();
         while let Some(learned) = active.mappings.poll_event() {
-            let local = match learned {
+            let transport = match learned {
                 sipral::MappingEvent::Learned { local, .. }
                 | sipral::MappingEvent::Moved { local, .. }
-                | sipral::MappingEvent::Unanswered { local, .. } => local,
+                | sipral::MappingEvent::Unanswered { local, .. } => {
+                    active.signalling.get(&local).copied()
+                }
+                sipral::MappingEvent::ServerChanged { .. }
+                | sipral::MappingEvent::ServersFailed { .. } => None,
             };
-            learned_all.push((learned, active.signalling.get(&local).copied()));
+            learned_all.push((learned, transport));
         }
         let mut raised = Vec::new();
         for (learned, transport) in learned_all {
@@ -722,6 +826,24 @@ impl Nat {
                 } => (local, SipralNatMapping::Moved, Some(public), Some(previous)),
                 sipral::MappingEvent::Unanswered { local, .. } => {
                     (local, SipralNatMapping::Unanswered, None, None)
+                }
+                sipral::MappingEvent::ServerChanged { previous, server } => {
+                    raised.push(server_event(
+                        stack,
+                        SipralStunServerState::Changed,
+                        server,
+                        Some(previous),
+                    ));
+                    continue;
+                }
+                sipral::MappingEvent::ServersFailed { last } => {
+                    raised.push(server_event(
+                        stack,
+                        SipralStunServerState::AllFailed,
+                        last,
+                        None,
+                    ));
+                    continue;
                 }
             };
             // what the accounts' `Contact` names now: the socket itself the
@@ -976,6 +1098,71 @@ impl Nat {
         }
         Self::spent(state, local, now);
         Ok(())
+    }
+
+    /// Ask `servers` from now on, on a running stack; `None` to ask nobody.
+    ///
+    /// A stack already asking keeps every socket and asks each one again of
+    /// the new list at once. A stack that asked nobody starts on its main
+    /// transport, exactly as if it had been created with these servers.
+    /// Asking nobody any more moves every account's `Contact` back to its
+    /// socket's own address — each one that holds a binding registers it —
+    /// and forgets every media socket named; refused while a TURN server is
+    /// configured, whose relays are made on the media sockets STUN names.
+    fn replace_servers(
+        state: &mut StackState,
+        servers: Option<StunServers>,
+        now: Instant,
+    ) -> Result<(), Fail> {
+        match (servers, state.nat.active.as_mut()) {
+            (Some(servers), Some(active)) => {
+                active
+                    .mappings
+                    .set_servers(servers.first, servers.rest, now);
+                active.sort();
+                Ok(())
+            }
+            (Some(servers), None) => {
+                let (local, protocol) = (state.local, state.speaks.protocol());
+                Self::start(
+                    state,
+                    Some(servers),
+                    None,
+                    crate::stack::TRANSPORT,
+                    protocol,
+                    local,
+                    now,
+                );
+                Self::contacts_changed(state, now);
+                Ok(())
+            }
+            (None, None) => Ok(()),
+            (None, Some(active)) => {
+                #[cfg(feature = "ice")]
+                if active.relays.is_some() {
+                    return Err(fail(
+                        SipralStatus::InvalidArgument,
+                        "this stack has a TURN server, and its relays are made on the media \
+                         sockets STUN names: a stack that relays keeps asking STUN",
+                    ));
+                }
+                let back: Vec<(TransportId, SocketAddr, SocketAddr)> = active
+                    .signalling
+                    .iter()
+                    .filter_map(|(local, transport)| {
+                        Some((*transport, active.mappings.public(*local)?, *local))
+                    })
+                    .collect();
+                state.nat.active = None;
+                for (transport, public, local) in back {
+                    // how many moved is nobody's to report: no event says a
+                    // mapping was forgotten, the registrations say they are
+                    // owed again
+                    let _moved = state.agent.readdress(transport, public, local, now);
+                }
+                Ok(())
+            }
+        }
     }
 
     fn map_media(state: &mut StackState, local: SocketAddr, now: Instant) -> Result<(), Fail> {
@@ -1244,9 +1431,9 @@ pub(crate) const fn protocol_of(transport: TurnTransport) -> u32 {
 /// does not.
 #[cfg(not(feature = "stun"))]
 impl Nat {
-    pub(crate) const fn start(
+    pub(crate) fn start(
         _state: &mut StackState,
-        _server: Option<SocketAddr>,
+        _servers: Option<StunServers>,
         _turn: Option<Turn<'_>>,
         _transport: TransportId,
         _protocol: TransportProtocol,
@@ -1328,6 +1515,19 @@ impl Nat {
         Ok(None)
     }
 
+    /// Asking nobody is what a stack without STUN already does; asking
+    /// anybody is what it cannot.
+    fn replace_servers(
+        _state: &mut StackState,
+        servers: Option<StunServers>,
+        _now: Instant,
+    ) -> Result<(), Fail> {
+        match servers {
+            Some(servers) => supported(servers).map(|_| ()),
+            None => Ok(()),
+        }
+    }
+
     fn map_media(_state: &mut StackState, _local: SocketAddr, _now: Instant) -> Result<(), Fail> {
         Err(not_asking())
     }
@@ -1403,6 +1603,35 @@ fn event(
         previous_len: previous.len(),
     };
     (crate::event::nat_mapping(stack, payload), text)
+}
+
+/// One event about the STUN servers, laid out the way [`event`] lays out a
+/// mapping's.
+#[cfg(feature = "stun")]
+fn server_event(
+    stack: SipralHandle,
+    state: SipralStunServerState,
+    server: SocketAddr,
+    previous: Option<SocketAddr>,
+) -> Raised {
+    let server = server.to_string();
+    let previous = previous
+        .map(|address| address.to_string())
+        .unwrap_or_default();
+    let text = format!("{server}{previous}");
+    let base = text.as_ptr().cast::<c_char>();
+    let payload = SipralStunServerEvent {
+        state: state as u32,
+        server: base,
+        server_len: server.len(),
+        previous: if previous.is_empty() {
+            std::ptr::null()
+        } else {
+            base.wrapping_add(server.len())
+        },
+        previous_len: previous.len(),
+    };
+    (crate::event::stun_server(stack, payload), text)
 }
 
 /// One relay event, and the text its addresses and reason point into, laid
@@ -1512,6 +1741,51 @@ pub(crate) fn refusal_code(failure: sipral::TurnFailure) -> u32 {
         | TurnFailure::ChannelOutOfSync
         | TurnFailure::Oversized
         | TurnFailure::ConnectionLost => 0,
+    }
+}
+
+entry! {
+    /// Ask these STUN servers from now on, without creating the stack again.
+    ///
+    /// `servers` is `host:port` addresses separated by commas, in order of
+    /// preference: the first is what `stun_server` would have named, the
+    /// rest what `stun_fallbacks` would. On a stack that asks already, every
+    /// socket it keeps mapped is asked again of the new list at once, and
+    /// what each one learned stands until the new server answers —
+    /// `SIPRAL_EVENT_KIND_STUN_SERVER` says the server in use moved, and
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` what the new one answers. A server
+    /// kept from the old list keeps its back-off. On a stack created with
+    /// `SIPRAL_NAT_OFF` the main transport starts being kept mapped, as it
+    /// would have been with `SIPRAL_NAT_STUN`; a further datagram transport
+    /// joins it the next time it is bound with
+    /// `sipral_stack_transport_bind`.
+    ///
+    /// An empty list — `servers_len` zero — asks nobody any more: every
+    /// account whose `Contact` a STUN answer moved goes back to the socket's
+    /// own address and registers it, every media socket named is forgotten,
+    /// and a call is described by its socket's own address from then on.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for that on a stack with a TURN
+    /// server, whose relays ride on the media sockets STUN names, and for an
+    /// entry that is not an address and a port. `SIPRAL_STATUS_NOT_SUPPORTED`
+    /// for a list in a build without `SIPRAL_FEATURE_STUN`.
+    ///
+    /// # Safety
+    ///
+    /// `servers` must be readable for `servers_len` bytes.
+    fn sipral_stack_stun_servers(
+        stack: SipralHandle,
+        servers: *const c_char,
+        servers_len: usize,
+        now_ms: u64,
+    ) {
+        let mut list = unsafe { addresses(servers, servers_len, "servers") }?.into_iter();
+        let servers = list.next().map(|first| StunServers {
+            first,
+            rest: list.collect(),
+        });
+        with_stack_at(stack, now_ms, |state, now| {
+            Nat::replace_servers(state, servers, now)
+        })
     }
 }
 
@@ -1981,6 +2255,15 @@ mod tests {
             };
             MAPPED.with(|all| all.borrow_mut().push(mapped));
         }
+        if seen.kind == SipralEventKind::StunServer {
+            let payload = unsafe { seen.payload.stun_server };
+            let said = ServerSaid {
+                state: payload.state,
+                server: piece(payload.server, payload.server_len),
+                previous: piece(payload.previous, payload.previous_len),
+            };
+            SERVERS.with(|all| all.borrow_mut().push(said));
+        }
         #[cfg(feature = "ice")]
         if seen.kind == SipralEventKind::NatRelay {
             let payload = unsafe { seen.payload.relay };
@@ -2050,6 +2333,23 @@ mod tests {
     #[cfg(feature = "ice")]
     fn relayed() -> Vec<RelaySaid> {
         RELAYED.with(|all| std::mem::take(&mut *all.borrow_mut()))
+    }
+
+    /// What one `SIPRAL_EVENT_KIND_STUN_SERVER` said, copied out inside the
+    /// callback.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ServerSaid {
+        state: u32,
+        server: String,
+        previous: String,
+    }
+
+    thread_local! {
+        static SERVERS: RefCell<Vec<ServerSaid>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn servers_said() -> Vec<ServerSaid> {
+        SERVERS.with(|all| std::mem::take(&mut *all.borrow_mut()))
     }
 
     fn mapped() -> Vec<Mapped> {
@@ -2305,6 +2605,305 @@ mod tests {
             header(&register.0, "Contact").as_deref(),
             Some("<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.10:5060>;expires=0")
         );
+    }
+
+    // -- more than one server, and a list replaced while running ------------
+
+    const SECOND: &str = "198.51.100.2:3478";
+    const THIRD: &str = "198.51.100.3:3478";
+
+    fn from_address(stack: SipralHandle, data: &[u8], from: &str, now_ms: u64) -> SipralStatus {
+        unsafe {
+            sipral_stack_receive_datagram(
+                stack,
+                SIPRAL_TRANSPORT_MAIN,
+                data.as_ptr(),
+                data.len(),
+                from.as_ptr().cast::<c_char>(),
+                from.len(),
+                ptr::null(),
+                0,
+                now_ms,
+            )
+        }
+    }
+
+    /// Poll every tenth of a second from `from_ms` to `to_ms`, and gather
+    /// what the signalling socket was given to send.
+    fn run_signalling(stack: SipralHandle, from_ms: u64, to_ms: u64) -> Vec<(Vec<u8>, String)> {
+        let mut all = Vec::new();
+        let mut now = from_ms;
+        while now <= to_ms {
+            let _ = poll(stack, now);
+            all.extend(signalling_out(stack));
+            now += 100;
+        }
+        all
+    }
+
+    fn set_servers(stack: SipralHandle, list: &str, now_ms: u64) -> SipralStatus {
+        unsafe {
+            super::sipral_stack_stun_servers(
+                stack,
+                list.as_ptr().cast::<c_char>(),
+                list.len(),
+                now_ms,
+            )
+        }
+    }
+
+    #[test]
+    fn a_dead_first_server_hands_the_signalling_socket_to_the_next_and_says_so() {
+        let mut observed = Observed::default();
+        let _ = servers_said();
+        let mut settings = asking(&mut observed);
+        let fallbacks = format!("{SECOND}, {THIRD}");
+        (settings.stun_fallbacks, settings.stun_fallbacks_len) = as_text(&fallbacks);
+        let (status, stack) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        assert_eq!(
+            unsafe { sipral_account_register(stack, account, 10) },
+            SipralStatus::Ok
+        );
+
+        let out = run_signalling(stack, 10, 6_000);
+        let asked: Vec<&str> = out
+            .iter()
+            .filter(|(message, _)| is_stun(message))
+            .map(|(_, to)| to.as_str())
+            .collect();
+        assert_eq!(
+            asked,
+            vec![SERVER, SERVER, SERVER, SERVER, SECOND],
+            "four to the first, and the second asked the moment the first is given up on"
+        );
+        assert_eq!(
+            servers_said(),
+            vec![ServerSaid {
+                state: super::SipralStunServerState::Changed as u32,
+                server: SECOND.to_owned(),
+                previous: SERVER.to_owned(),
+            }]
+        );
+        let request = out
+            .iter()
+            .rev()
+            .find(|(message, to)| is_stun(message) && to == SECOND)
+            .map(|(message, _)| message.clone())
+            .expect("a request to the second server");
+        assert_eq!(
+            from_address(stack, &answer(&request, SIP_PUBLIC), SECOND, 6_000),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = poll(stack, 6_000);
+        let learned = mapped();
+        assert_eq!(learned.len(), 1, "{learned:?}");
+        assert_eq!(learned[0].mapping, SipralNatMapping::Learned as u32);
+        assert_eq!(learned[0].public, SIP_PUBLIC);
+        assert_eq!(
+            learned[0].accounts, 1,
+            "the account moved onto what it said"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn every_server_failing_is_said_once() {
+        let mut observed = Observed::default();
+        let _ = servers_said();
+        let mut settings = asking(&mut observed);
+        (settings.stun_fallbacks, settings.stun_fallbacks_len) = as_text(SECOND);
+        let (status, stack) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = run_signalling(stack, 10, 12_000);
+        assert_eq!(
+            servers_said(),
+            vec![
+                ServerSaid {
+                    state: super::SipralStunServerState::Changed as u32,
+                    server: SECOND.to_owned(),
+                    previous: SERVER.to_owned(),
+                },
+                ServerSaid {
+                    state: super::SipralStunServerState::AllFailed as u32,
+                    server: SECOND.to_owned(),
+                    previous: String::new(),
+                },
+            ]
+        );
+        let said = mapped();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].mapping, SipralNatMapping::Unanswered as u32);
+        // the refreshes go on, and the silence is not announced again
+        let _ = run_signalling(stack, 12_100, 70_000);
+        assert!(servers_said().is_empty());
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn fallbacks_are_addresses_and_stand_behind_a_server() {
+        let mut observed = Observed::default();
+        let mut settings = asking(&mut observed);
+        (settings.stun_fallbacks, settings.stun_fallbacks_len) =
+            as_text("198.51.100.2:3478,stun.example.net:3478");
+        assert_eq!(create(&settings).0, SipralStatus::InvalidArgument);
+        let said = last_error_text();
+        assert!(said.contains("stun_fallbacks entry 1"), "{said}");
+
+        let mut settings = asking(&mut observed);
+        (settings.stun_fallbacks, settings.stun_fallbacks_len) = as_text("198.51.100.2:3478,");
+        assert_eq!(
+            create(&settings).0,
+            SipralStatus::InvalidArgument,
+            "an empty entry is a list written wrong, not one fewer server"
+        );
+
+        let mut settings = asking(&mut observed);
+        settings.stun_server = ptr::null();
+        settings.stun_server_len = 0;
+        (settings.stun_fallbacks, settings.stun_fallbacks_len) = as_text(SECOND);
+        assert_eq!(create(&settings).0, SipralStatus::InvalidArgument);
+        assert!(last_error_text().contains("names none to turn from"));
+
+        let mut settings = config(listen, &mut observed);
+        (settings.stun_fallbacks, settings.stun_fallbacks_len) = as_text(SECOND);
+        assert_eq!(
+            create(&settings).0,
+            SipralStatus::InvalidArgument,
+            "a list nothing would ask is a setting nothing reads"
+        );
+    }
+
+    #[test]
+    fn the_servers_are_replaced_on_a_running_stack_and_asked_at_once() {
+        let mut observed = Observed::default();
+        let _ = servers_said();
+        let (stack, _) = behind_the_nat(&mut observed, |_| {});
+        let _ = mapped();
+
+        assert_eq!(
+            set_servers(stack, THIRD, 100),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let out = signalling_out(stack);
+        assert_eq!(out.len(), 1, "not at the next refresh: now. {out:?}");
+        assert!(is_stun(&out[0].0));
+        assert_eq!(out[0].1, THIRD);
+        assert_eq!(
+            from_address(stack, &answer(&out[0].0, "203.0.113.7:52000"), THIRD, 120),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = poll(stack, 120);
+        assert_eq!(
+            servers_said(),
+            vec![ServerSaid {
+                state: super::SipralStunServerState::Changed as u32,
+                server: THIRD.to_owned(),
+                previous: SERVER.to_owned(),
+            }]
+        );
+        let said = mapped();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].mapping, SipralNatMapping::Moved as u32);
+        assert_eq!(said[0].public, "203.0.113.7:52000");
+        let register = signalling_out(stack)
+            .into_iter()
+            .find(|(message, _)| message.starts_with(b"REGISTER "))
+            .expect("the account registered where the new server says it is");
+        assert!(
+            header(&register.0, "Contact")
+                .is_some_and(|contact| contact.starts_with("<sip:alice@203.0.113.7:52000>")),
+            "{:?}",
+            header(&register.0, "Contact")
+        );
+        assert_eq!(
+            set_servers(stack, "not-an-address", 130),
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn stun_starts_on_a_stack_created_without_it() {
+        let mut observed = Observed::default();
+        let _ = mapped();
+        let (status, stack) = create(&config(listen, &mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        assert_eq!(
+            unsafe { sipral_account_register(stack, account, 10) },
+            SipralStatus::Ok
+        );
+        let _ = signalling_out(stack);
+        assert_eq!(
+            map_media(stack, 20),
+            SipralStatus::WrongState,
+            "nobody is asked yet"
+        );
+
+        assert_eq!(
+            set_servers(stack, SERVER, 30),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let out = signalling_out(stack);
+        let request = out
+            .iter()
+            .find(|(message, to)| is_stun(message) && to == SERVER)
+            .map(|(message, _)| message.clone())
+            .expect("the main transport is asked about at once");
+        assert_eq!(
+            from_server(stack, &answer(&request, SIP_PUBLIC), 40),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 40);
+        let said = mapped();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].accounts, 1, "the account registering moved onto it");
+        assert_eq!(
+            map_media(stack, 50),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn asking_nobody_any_more_puts_every_contact_back_on_its_socket() {
+        let mut observed = Observed::default();
+        let (stack, _) = behind_the_nat(&mut observed, |_| {});
+        assert_eq!(
+            set_servers(stack, "", 100),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let register = signalling_out(stack)
+            .into_iter()
+            .find(|(message, _)| message.starts_with(b"REGISTER "))
+            .expect("the account registered its own address again");
+        assert!(
+            header(&register.0, "Contact")
+                .is_some_and(|contact| contact.starts_with("<sip:alice@192.0.2.10:5060>")),
+            "{:?}",
+            header(&register.0, "Contact")
+        );
+        assert_eq!(map_media(stack, 110), SipralStatus::WrongState);
+        let out = run_signalling(stack, 120, 60_000);
+        assert!(
+            !out.iter().any(|(message, _)| is_stun(message)),
+            "nothing asked any more"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
     }
 
     /// A stack configured with `configure`, an account registered on it and

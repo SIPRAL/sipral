@@ -64,15 +64,19 @@ public sealed class SipralEventArgs : EventArgs
     public SipralTurnStreamEventInfo? TurnStream { get; }
     /// <summary>Set for <see cref="SipralEventKind.AudioDevicesChanged"/>.</summary>
     public SipralAudioEventInfo? Audio { get; }
+    /// <summary>Set for <see cref="SipralEventKind.StunServer"/>.</summary>
+    public SipralStunServerEventInfo? StunServer { get; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
         SipralRegistrationEventInfo? registration, SipralCallEventInfo? callInfo,
         SipralMediaEventInfo? media, SipralTransferEventInfo? transfer, SipralResolveEventInfo? resolve,
         SipralNatEventInfo? nat, SipralNatRelayEventInfo? relay, SipralReferralEventInfo? referral,
-        SipralTurnStreamEventInfo? turnStream, SipralAudioEventInfo? audio)
+        SipralTurnStreamEventInfo? turnStream, SipralAudioEventInfo? audio,
+        SipralStunServerEventInfo? stunServer)
     {
         Audio = audio;
+        StunServer = stunServer;
         Kind = kind;
         KindName = kindName;
         Stack = stack;
@@ -132,6 +136,7 @@ public sealed class SipralEventArgs : EventArgs
         SipralReferralEventInfo? referral = null;
         SipralTurnStreamEventInfo? turnStream = null;
         SipralAudioEventInfo? audio = null;
+        SipralStunServerEventInfo? stunServer = null;
 
         if (kind == SipralEventKind.RegistrationChanged)
         {
@@ -219,9 +224,16 @@ public sealed class SipralEventArgs : EventArgs
             turnStream = new SipralTurnStreamEventInfo((SipralTurnStream)s.State, (SipralTransport)s.Protocol,
                 ReadUtf8(s.Local, s.LocalLen), ReadUtf8(s.Server, s.ServerLen));
         }
+        else if (kind == SipralEventKind.StunServer)
+        {
+            var s = evt.Payload.StunServer;
+            stunServer = new SipralStunServerEventInfo((SipralStunServerState)s.State,
+                ReadUtf8(s.Server, s.ServerLen), ReadUtf8(s.Previous, s.PreviousLen));
+        }
 
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
-            registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio);
+            registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio,
+            stunServer);
     }
 
     internal static SipralStreamStatistics? ReadStatistics(IntPtr ptr)

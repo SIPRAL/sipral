@@ -39,6 +39,7 @@ __all__ = [
     "CandidateKind",
     "Transport",
     "TurnStream",
+    "StunServerState",
     "SrtpSuite",
     "Feature",
     "AudioMode",
@@ -168,6 +169,11 @@ Transport = _enum(
 #: A `sipral_turn_stream_t`, carried on `SIPRAL_EVENT_KIND_TURN_STREAM`:
 #: open the media socket's connection to the TURN server, or close it.
 TurnStream = _enum("TurnStream", "SIPRAL_TURN_STREAM_")
+
+#: A `sipral_stun_server_state_t`, carried on
+#: `SIPRAL_EVENT_KIND_STUN_SERVER`: the server in use moved, or every one in
+#: the list failed.
+StunServerState = _enum("StunServerState", "SIPRAL_STUN_SERVER_STATE_")
 
 #: A `sipral_srtp_suite_t`, carried in `payload.media.suite` on
 #: `SIPRAL_EVENT_KIND_MEDIA_SECURED`: the transform a call is running, from

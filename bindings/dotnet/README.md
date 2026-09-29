@@ -220,6 +220,12 @@ port, over TLS with a certificate trusted and not.
 `g729AnnexB: false` on the stack turns off G.729's Annex B silence
 compression (`annexb=no`) if that codec runs at all.
 
+`stunFallbacks: new[] { "198.51.100.2:3478" }` names the STUN servers to
+turn to, in order, when `stunServer` stops answering; every socket moves on
+by itself, and a `SipralEventKind.StunServer` event (`evt.StunServer`: the
+state, the server, the one before it) says when the server in use changed or
+every one failed (`docs/06-nat.md`, "More than one server").
+
 Behind a NAT, every account `stunServer` showed to be behind one keeps its
 registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
 seconds, so that a NAT filtering by address and port keeps letting the

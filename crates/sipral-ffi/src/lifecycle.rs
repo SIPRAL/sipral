@@ -1192,6 +1192,8 @@ mod tests {
         let mut out = drain(handle);
         let request = out.pop().expect("the second REGISTER");
         receive(handle, &granted(&request, 3_600), 1_000);
+        let _ = poll(handle, 1_000);
+        let before = observed.events.len();
 
         assert_eq!(
             unsafe { sipral_stack_name_resolution_lost(handle, 1_100) },
@@ -1199,9 +1201,27 @@ mod tests {
             "{}",
             last_error_text()
         );
+        let _ = poll(handle, 1_100);
         assert_eq!(
             state_of(handle, named),
             SipralRegistrationState::Unverified as u32
+        );
+        // said, not only readable: a binding that stopped being evidence is
+        // an event on the next poll
+        let said: Vec<(SipralEventKind, SipralHandle)> = observed
+            .events
+            .iter()
+            .zip(&observed.named)
+            .skip(before)
+            .map(|(event, named)| (event.1, named.0))
+            .collect();
+        assert!(
+            said.contains(&(SipralEventKind::RegistrationChanged, named)),
+            "the resolver went and nothing was said about the account that needed it: {said:?}"
+        );
+        assert!(
+            !said.contains(&(SipralEventKind::RegistrationChanged, literal)),
+            "{said:?}"
         );
         assert_eq!(
             state_of(handle, literal),

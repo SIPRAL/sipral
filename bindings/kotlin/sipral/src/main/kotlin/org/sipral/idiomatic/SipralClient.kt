@@ -228,6 +228,15 @@ class SipralClient private constructor(
          * [srtp] is what every call does about SRTP unless [placeCall]'s own
          * `srtp` says otherwise: offered, required, or keyed by DTLS-SRTP,
          * whose suite `SIPRAL_EVENT_KIND_MEDIA_SECURED` names ([srtpSuiteOf]).
+         *
+         * [stunFallbacks] are the STUN servers to turn to, in order, when
+         * [stunServer] does not answer in five and a half seconds or answers
+         * without an address, each `host:port`: every socket asking the one
+         * that failed moves to the next at once, the one that failed is
+         * passed over for thirty seconds and twice as long each time it
+         * fails again, up to ten minutes, and `SIPRAL_EVENT_KIND_STUN_SERVER`
+         * (read with [stunServerOf]) says when the server in use moves or
+         * every one has failed.
          */
         fun open(
             bindHost: String = "127.0.0.1",
@@ -250,6 +259,7 @@ class SipralClient private constructor(
             diagnosticRecords: Long = 0,
             network: SipralNetwork? = null,
             srtp: SipralSrtp? = null,
+            stunFallbacks: List<String> = emptyList(),
         ): SipralClient {
             val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost))
             socket.soTimeout = 20
@@ -263,6 +273,7 @@ class SipralClient private constructor(
                     userAgent, codecs, ice, turn, g729AnnexB, referrals,
                     registrarKeepalive, registrarKeepaliveMs, audioProbeMs, audioDeviceRateHz, srtp,
                     maxDialogs, maxServerTransactions, diagnosticDecisions, diagnosticRecords,
+                    stunFallbacks,
                 )
             } catch (refused: Exception) {
                 socket.close()
@@ -294,6 +305,7 @@ class SipralClient private constructor(
         maxServerTransactions: Long,
         diagnosticDecisions: Long,
         diagnosticRecords: Long,
+        stunFallbacks: List<String>,
     ) {
         val random = SecureRandom()
         val entropy = ByteArray(32).also { random.nextBytes(it) }
@@ -330,6 +342,7 @@ class SipralClient private constructor(
             maxServerTransactions = maxServerTransactions,
             diagnosticDecisions = diagnosticDecisions,
             diagnosticRecords = diagnosticRecords,
+            stunFallbacks = stunFallbacks.takeIf { it.isNotEmpty() }?.joinToString(","),
         )
         handle = Sipral.stackCreate(config)
         if (device) {

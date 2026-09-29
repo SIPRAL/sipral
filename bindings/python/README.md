@@ -203,6 +203,13 @@ centre answering a WebRTC gateway. `g729_annex_b=False` on the stack turns off
 G.729's Annex B silence compression (`annexb=no`) if that codec runs at
 all.
 
+`stun_fallbacks=["198.51.100.2:3478", ...]` names the STUN servers to turn
+to, in order, when `stun_server` stops answering; every socket moves on by
+itself, and an `EventKind.STUN_SERVER` event (`fields["state"]` a
+`StunServerState`, `fields["server"]`, `fields["previous"]`) says when the
+server in use changed or every one failed (`docs/06-nat.md`, "More than one
+server").
+
 Behind a NAT, every account `stun_server` showed to be behind one keeps its
 registrar's flow open: a double CRLF, alone in a datagram, every 20 to 25
 seconds, so that a NAT filtering by address and port keeps letting the

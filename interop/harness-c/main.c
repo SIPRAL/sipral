@@ -30,7 +30,12 @@
  *
  * which binds port 5060, answers the first call that arrives by echoing it,
  * and takes the first REFER from outside any dialog by calling where it says
- * through `<server>` -- see `run_listen` for the variables that shape it.
+ * through `<server>` -- see `run_listen` for the variables that shape it --
+ * and one that proves what needs a bad network rather than a server:
+ *
+ *     harness-c robust <peer> [port]
+ *
+ * which the comment above `ROBUST_MARKER` describes.
  *
  * The lab passes no credentials in the environment -- it calls the harness
  * with three arguments and nothing else -- so the account names below are the
@@ -381,6 +386,13 @@ struct seen {
     int media_mapped;
     uint32_t media_mapping;
     char media_public[SIPRAL_ADDRESS_BYTES];
+    /* SIPRAL_STUN_FALLBACKS: the server in use moved, as the last
+     * `SIPRAL_EVENT_KIND_STUN_SERVER` said, from `stun_before` to
+     * `stun_now`; `stun_all_failed` when one said every server had */
+    int stun_changed;
+    int stun_all_failed;
+    char stun_before[SIPRAL_ADDRESS_BYTES];
+    char stun_now[SIPRAL_ADDRESS_BYTES];
     /* `FLOW_ICE_NAT`: what the TURN server said about the media socket, as
      * `SIPRAL_EVENT_KIND_NAT_RELAY` carried it, and when */
     int relay_seen;
@@ -496,6 +508,17 @@ static void on_event(const sipral_event_t *event, void *user_data)
         if (!seen->path_chosen) {
             seen->path_chosen = 1;
             seen->path_chosen_at_ms = now_ms();
+        }
+        break;
+    case SIPRAL_EVENT_KIND_STUN_SERVER:
+        if (event->payload.stun_server.state == SIPRAL_STUN_SERVER_STATE_CHANGED) {
+            seen->stun_changed = 1;
+            keep(seen->stun_before, sizeof seen->stun_before, event->payload.stun_server.previous,
+                 event->payload.stun_server.previous_len);
+            keep(seen->stun_now, sizeof seen->stun_now, event->payload.stun_server.server,
+                 event->payload.stun_server.server_len);
+        } else {
+            seen->stun_all_failed = 1;
         }
         break;
     case SIPRAL_EVENT_KIND_NAT_MAPPING:
@@ -1619,9 +1642,16 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
      * to show the call it exists for is lost without it */
     config.registrar_keepalive = keepalive_off() ? SIPRAL_TOGGLE_OFF : 0u;
     if (stun_for_this_flow != NULL) {
+        /* scripts/lab.sh's `robust` step names a first server that is dead
+         * and the lab's coturn behind it, to show the stack moving on */
+        const char *fallbacks = getenv("SIPRAL_STUN_FALLBACKS");
         config.nat = SIPRAL_NAT_STUN;
         config.stun_server = stun_for_this_flow;
         config.stun_server_len = strlen(stun_for_this_flow);
+        if (fallbacks != NULL && fallbacks[0] != '\0') {
+            config.stun_fallbacks = fallbacks;
+            config.stun_fallbacks_len = strlen(fallbacks);
+        }
     }
     /* the relay rides on the STUN path above: the same media socket named
      * with `sipral_stack_nat_map` is given a relay on this server too */
@@ -2910,6 +2940,21 @@ static int flow_ice_nat(struct endpoint *end, const char *server, const char *ex
                    "the way, and the run proves nothing");
         return -1;
     }
+    {
+        /* the `robust` step's first server is dead on purpose: a mapping
+         * that came back without the server in use moving means the
+         * failover was never exercised */
+        const char *expect = getenv("SIPRAL_STUN_EXPECT_FAILOVER");
+        if (expect != NULL && strcmp(expect, "1") == 0) {
+            if (!end->seen.stun_changed) {
+                wrong_text("the first STUN server was to be dead, and the server in use never "
+                           "moved");
+                return -1;
+            }
+            printf("  stun  %s did not answer; %s took over\n", end->seen.stun_before,
+                   end->seen.stun_now);
+        }
+    }
     if (turn_for_this_flow != NULL) {
         if (end->seen.relay_outcome != SIPRAL_NAT_RELAY_ALLOCATED) {
             (void)snprintf(trouble, sizeof trouble, "%s gave no relay (%u): %s",
@@ -4119,6 +4164,665 @@ static int run_listen(const char *server, uint16_t port, const char *user, const
     return 1;
 }
 
+/* -- `harness-c robust`: the field failures that need a real network ------ */
+
+/* `harness-c robust <peer> [port]`: the stack against a peer that only
+ * listens (interop/robust/listener.py, which prints what reached it), over a
+ * link scripts/lab.sh's own `robust` step has made bad. Three things, each
+ * a failure softphones meet in the field and each needing a real network to
+ * show:
+ *
+ *   fragments  the link drops IP fragments, as a good many NATs and
+ *              firewalls do. Two control datagrams show it does -- 200
+ *              bytes that arrive, 1 600 that do not -- and then INVITEs
+ *              carrying ICE are placed at exactly 1 300, 1 301 and 1 600
+ *              bytes: the first leaves as one datagram, the other two are
+ *              never written as datagrams at all. The stack refuses them
+ *              as datagrams and asks for a stream
+ *              (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, RFC 3261 section
+ *              18.1.1), this end opens it and places the call again, and
+ *              the INVITE goes whole over TCP.
+ *   silent     a connection the peer accepts and never answers on: the
+ *              operating system is content, and only the stack can end the
+ *              call -- Timer B (RFC 3261 section 17.1.1.2) at 32 seconds,
+ *              or the stream's own keep-alive going unanswered just before
+ *              it.
+ *   dark       the same connection with the path gone dark after the
+ *              handshake (SIPRAL_ROBUST_DARKEN, a command run once the
+ *              connection is up): the kernel retransmits for a quarter of
+ *              an hour before it says anything, and the call still ends at
+ *              Timer B.
+ *
+ * SIPRAL_ROBUST names which of the three run, all of them unless it is set.
+ * Every line it prints starts `  robust`; a failure is `robust: <why>`. */
+
+#define ROBUST_MARKER 0x0B0057u
+
+/* The INVITE sizes the fragments run aims at: the last one a datagram may
+ * carry, the first that may not, and one past an Ethernet frame. */
+static const size_t ROBUST_SIZES[3] = { 1300u, 1301u, 1600u };
+
+/* What the stack said, for the one call a robust run places. */
+struct robust_seen {
+    unsigned marker;
+    int wanted;
+    uint32_t wanted_protocol;
+    size_t wanted_bytes;
+    uint32_t wanted_limit;
+    int ended;
+    uint32_t end_reason;
+};
+
+static void robust_on_event(const sipral_event_t *event, void *user_data)
+{
+    struct robust_seen *seen = (struct robust_seen *)user_data;
+    if (seen == NULL || seen->marker != ROBUST_MARKER || event == NULL) {
+        return;
+    }
+    if (event->kind == SIPRAL_EVENT_KIND_TRANSPORT_WANTED) {
+        seen->wanted = 1;
+        seen->wanted_protocol = event->payload.transport_wanted.protocol;
+        seen->wanted_bytes = event->payload.transport_wanted.request_bytes;
+        seen->wanted_limit = event->payload.transport_wanted.limit_bytes;
+    } else if (event->kind == SIPRAL_EVENT_KIND_CALL_ENDED) {
+        seen->ended = 1;
+        seen->end_reason = event->payload.call.end_reason;
+    }
+}
+
+/* One stack, its two datagram sockets, and the connection it may be given. */
+struct robust_end {
+    sipral_handle_t stack;
+    sipral_handle_t account;
+    sipral_handle_t call;
+    int sip_fd;
+    int rtp_fd;
+    int tcp_fd;
+    char sip_address[SIPRAL_ADDRESS_BYTES];
+    char rtp_address[SIPRAL_ADDRESS_BYTES];
+    char tcp_local[SIPRAL_ADDRESS_BYTES];
+    struct robust_seen seen;
+    /* the largest datagram the stack ever had written, and the INVITE it
+     * wrote last: how long, and on which transport */
+    size_t largest_datagram;
+    size_t invite_len;
+    uint32_t invite_transport;
+};
+
+static void robust_close(struct robust_end *end)
+{
+    if (end->stack != SIPRAL_HANDLE_NONE) {
+        (void)sipral_stack_destroy(end->stack);
+        end->stack = SIPRAL_HANDLE_NONE;
+    }
+    if (end->sip_fd >= 0) {
+        (void)close(end->sip_fd);
+        end->sip_fd = -1;
+    }
+    if (end->rtp_fd >= 0) {
+        (void)close(end->rtp_fd);
+        end->rtp_fd = -1;
+    }
+    if (end->tcp_fd >= 0) {
+        (void)close(end->tcp_fd);
+        end->tcp_fd = -1;
+    }
+}
+
+/* A stack whose one account never registers and sends everything to `peer`,
+ * the way a trunk knows its far end by address. */
+static int robust_open(struct robust_end *end, const struct sockaddr_in *peer, unsigned which)
+{
+    sipral_stack_config_t config;
+    sipral_account_config_t account;
+    struct sockaddr_in local;
+    char host[INET_ADDRSTRLEN];
+    char peer_text[SIPRAL_ADDRESS_BYTES];
+    char aor[128];
+    uint8_t signalling_seed[32];
+    uint8_t media_seed[32];
+    sipral_status_t status;
+
+    memset(end, 0, sizeof *end);
+    end->sip_fd = -1;
+    end->rtp_fd = -1;
+    end->tcp_fd = -1;
+    end->stack = SIPRAL_HANDLE_NONE;
+    end->call = SIPRAL_HANDLE_NONE;
+    end->seen.marker = ROBUST_MARKER;
+    if (route_to(peer, host, sizeof host) != 0
+        || address_text(peer, peer_text, sizeof peer_text) != 0) {
+        wrong_text("no route to the peer");
+        return -1;
+    }
+    end->sip_fd = bind_udp(&local);
+    if (end->sip_fd < 0) {
+        wrong_text("cannot bind the signalling socket");
+        return -1;
+    }
+    (void)snprintf(end->sip_address, sizeof end->sip_address, "%s:%u", host,
+                   (unsigned)ntohs(local.sin_port));
+    end->rtp_fd = bind_udp(&local);
+    if (end->rtp_fd < 0) {
+        wrong_text("cannot bind the media socket");
+        robust_close(end);
+        return -1;
+    }
+    (void)snprintf(end->rtp_address, sizeof end->rtp_address, "%s:%u", host,
+                   (unsigned)ntohs(local.sin_port));
+
+    seeds_for(which, signalling_seed, media_seed);
+    memset(&config, 0, sizeof config);
+    config.size = sizeof config;
+    config.event_callback = robust_on_event;
+    config.event_user_data = &end->seen;
+    config.transport = SIPRAL_TRANSPORT_UDP;
+    config.bind_address = end->sip_address;
+    config.bind_address_len = strlen(end->sip_address);
+    config.entropy = signalling_seed;
+    config.entropy_len = sizeof signalling_seed;
+    config.media_seed = media_seed;
+    config.media_seed_len = sizeof media_seed;
+    config.codecs = "PCMU,PCMA";
+    config.codecs_len = strlen("PCMU,PCMA");
+    config.media_clock_unix_seconds = (uint64_t)time(NULL);
+    status = sipral_stack_create(&config, &end->stack);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_stack_create", status);
+        robust_close(end);
+        return -1;
+    }
+
+    (void)snprintf(aor, sizeof aor, "sip:robust@%s", end->sip_address);
+    memset(&account, 0, sizeof account);
+    account.size = sizeof account;
+    account.aor = aor;
+    account.aor_len = strlen(aor);
+    account.contact = aor;
+    account.contact_len = strlen(aor);
+    account.registrar_address = peer_text;
+    account.registrar_address_len = strlen(peer_text);
+    status = sipral_account_add(end->stack, &account, &end->account);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_add", status);
+        robust_close(end);
+        return -1;
+    }
+    return 0;
+}
+
+/* Everything the stack wants written: a datagram on the signalling socket,
+ * or bytes on the connection it was given. */
+static void robust_flush(struct robust_end *end)
+{
+    static uint8_t out[DATAGRAM];
+    static char destination[SIPRAL_ADDRESS_BYTES];
+    for (;;) {
+        sipral_transmit_t message;
+        struct sockaddr_in to;
+        memset(&message, 0, sizeof message);
+        message.size = sizeof message;
+        message.data = out;
+        message.capacity = sizeof out;
+        message.destination = destination;
+        message.destination_capacity = sizeof destination;
+        if (sipral_stack_poll_transmit(end->stack, &message) != SIPRAL_STATUS_OK
+            || message.len == 0) {
+            return;
+        }
+        if (message.len > 7u && memcmp(out, "INVITE ", 7) == 0) {
+            end->invite_len = message.len;
+            end->invite_transport = message.transport;
+        }
+        if (message.transport == SIPRAL_TRANSPORT_MAIN) {
+            if (message.len > end->largest_datagram) {
+                end->largest_datagram = message.len;
+            }
+            if (address_of(destination, &to) == 0) {
+                (void)sendto(end->sip_fd, out, message.len, 0, (const struct sockaddr *)&to,
+                             sizeof to);
+            }
+        } else if (end->tcp_fd >= 0) {
+            size_t written = 0;
+            while (written < message.len) {
+                ssize_t put = send(end->tcp_fd, out + written, message.len - written, NO_SIGNAL);
+                if (put <= 0) {
+                    break;
+                }
+                written += (size_t)put;
+            }
+        }
+    }
+}
+
+/* One turn: the stack's timers, what it wants written, and whatever came
+ * back on either socket. */
+static void robust_pump(struct robust_end *end)
+{
+    static uint8_t in[DATAGRAM];
+    sipral_poll_result_t result;
+    uint64_t now = now_ms();
+    memset(&result, 0, sizeof result);
+    result.size = sizeof result;
+    (void)sipral_stack_poll(end->stack, now, &result);
+    robust_flush(end);
+    for (;;) {
+        struct sockaddr_in from;
+        socklen_t length = sizeof from;
+        char from_text[SIPRAL_ADDRESS_BYTES];
+        ssize_t got = recvfrom(end->sip_fd, in, sizeof in, 0, (struct sockaddr *)&from, &length);
+        if (got <= 0 || address_text(&from, from_text, sizeof from_text) != 0) {
+            break;
+        }
+        (void)sipral_stack_receive_datagram(end->stack, SIPRAL_TRANSPORT_MAIN, in, (size_t)got,
+                                            from_text, strlen(from_text), end->sip_address,
+                                            strlen(end->sip_address), now);
+    }
+    if (end->tcp_fd >= 0) {
+        ssize_t got = recv(end->tcp_fd, in, sizeof in, 0);
+        if (got > 0) {
+            (void)sipral_stack_receive_stream(end->stack, 1u, in, (size_t)got, now);
+        }
+    }
+    robust_flush(end);
+}
+
+/* A TCP connection to `peer`, bound as transport 1 of the stack: what an
+ * application does when a request will not fit a datagram, and what a
+ * phone configured for TCP does before its first request. */
+static int robust_connect(struct robust_end *end, const struct sockaddr_in *peer)
+{
+    struct sockaddr_in local;
+    socklen_t length = sizeof local;
+    char remote[SIPRAL_ADDRESS_BYTES];
+    struct timeval instant;
+    sipral_status_t status;
+    end->tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (end->tcp_fd < 0 || connect(end->tcp_fd, (const struct sockaddr *)peer, sizeof *peer) != 0
+        || getsockname(end->tcp_fd, (struct sockaddr *)&local, &length) != 0
+        || address_text(&local, end->tcp_local, sizeof end->tcp_local) != 0
+        || address_text(peer, remote, sizeof remote) != 0) {
+        wrong_text("cannot open a TCP connection to the peer");
+        return -1;
+    }
+    instant.tv_sec = 0;
+    instant.tv_usec = 1000;
+    (void)setsockopt(end->tcp_fd, SOL_SOCKET, SO_RCVTIMEO, &instant, sizeof instant);
+    status = sipral_stack_transport_bind(end->stack, 1u, SIPRAL_TRANSPORT_TCP, end->tcp_local,
+                                         strlen(end->tcp_local), remote, strlen(remote), now_ms(),
+                                         NULL);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_stack_transport_bind", status);
+        return -1;
+    }
+    return 0;
+}
+
+/* Place a call carrying ICE at the peer, with `padding` bytes of an `X-Pad`
+ * header to bring the INVITE to the size a run wants, on `transport` (zero
+ * for the account's own). What `sipral_call_place` answered; anything but
+ * `SIPRAL_STATUS_OK` and `SIPRAL_STATUS_NOT_SENT`, which is an INVITE too
+ * large for a datagram with no stream to put it on, is also written to
+ * `trouble`. */
+static sipral_status_t robust_place(struct robust_end *end, const struct sockaddr_in *peer,
+                                    size_t padding, uint32_t transport)
+{
+    static char pad[2048];
+    sipral_call_config_t call;
+    sipral_header_t header;
+    char target[128];
+    char remote[SIPRAL_ADDRESS_BYTES];
+    sipral_status_t status;
+    if (padding >= sizeof pad || address_text(peer, remote, sizeof remote) != 0) {
+        wrong_text("no room for the padding asked for");
+        return SIPRAL_STATUS_INVALID_ARGUMENT;
+    }
+    memset(pad, 'x', padding);
+    pad[padding] = '\0';
+    (void)snprintf(target, sizeof target, "sip:listener@%s", remote);
+    memset(&header, 0, sizeof header);
+    header.name = "X-Pad";
+    header.name_len = strlen("X-Pad");
+    header.value = pad;
+    header.value_len = padding;
+    memset(&call, 0, sizeof call);
+    call.size = sizeof call;
+    call.target = target;
+    call.target_len = strlen(target);
+    call.media_address = end->rtp_address;
+    call.media_address_len = strlen(end->rtp_address);
+    call.ice = SIPRAL_ICE_OFFERED;
+    if (padding > 0) {
+        call.headers = &header;
+        call.headers_len = 1;
+    }
+    if (transport != 0u) {
+        call.destination = remote;
+        call.destination_len = strlen(remote);
+        call.transport = transport;
+    }
+    status = sipral_call_place(end->stack, end->account, &call, &end->call, now_ms());
+    if (status != SIPRAL_STATUS_OK && status != SIPRAL_STATUS_NOT_SENT) {
+        char why[160];
+        size_t why_len = 0;
+        if (sipral_last_error_message(why, sizeof why, &why_len) != SIPRAL_STATUS_OK) {
+            why[0] = '\0';
+        }
+        if (trouble[0] == '\0') {
+            (void)snprintf(trouble, sizeof trouble, "sipral_call_place: %s: %s",
+                           sipral_status_name(status), why);
+        }
+    }
+    return status;
+}
+
+/* Turn the loop for up to `patience_ms`, until the INVITE has been written
+ * or the stack has asked for a stream. */
+static void robust_until_sent(struct robust_end *end, unsigned patience_ms)
+{
+    uint64_t deadline = now_ms() + patience_ms;
+    while (now_ms() < deadline && end->invite_len == 0u && !end->seen.wanted) {
+        robust_pump(end);
+        sleep_ms(2);
+    }
+}
+
+/* The size an INVITE comes to with `padding`, placed on a fresh stack; zero
+ * when it went nowhere. `*as_datagram` says whether it was written as one. */
+static size_t robust_measure(const struct sockaddr_in *peer, size_t padding, unsigned which,
+                             int *as_datagram)
+{
+    struct robust_end end;
+    size_t size = 0;
+    sipral_status_t placed;
+    *as_datagram = 0;
+    if (robust_open(&end, peer, which) != 0) {
+        return 0;
+    }
+    placed = robust_place(&end, peer, padding, 0u);
+    if (placed != SIPRAL_STATUS_OK && placed != SIPRAL_STATUS_NOT_SENT) {
+        robust_close(&end);
+        return 0;
+    }
+    robust_until_sent(&end, 2000u);
+    if (end.invite_len != 0u && end.invite_transport == SIPRAL_TRANSPORT_MAIN) {
+        size = end.invite_len;
+        *as_datagram = 1;
+    } else if (end.seen.wanted) {
+        size = end.seen.wanted_bytes;
+    }
+    robust_close(&end);
+    return size;
+}
+
+/* The two control datagrams, from a socket of their own: what the link does
+ * to one small enough for a frame and to one that is not. */
+static int robust_controls(const struct sockaddr_in *peer)
+{
+    static uint8_t control[1600];
+    struct sockaddr_in local;
+    int fd = bind_udp(&local);
+    if (fd < 0) {
+        wrong_text("cannot bind the control socket");
+        return -1;
+    }
+    memset(control, 'c', sizeof control);
+    memcpy(control, "SIPRAL-CONTROL-SMALL", 20);
+    (void)sendto(fd, control, 200, 0, (const struct sockaddr *)peer, sizeof *peer);
+    memcpy(control, "SIPRAL-CONTROL-LARGE", 20);
+    (void)sendto(fd, control, sizeof control, 0, (const struct sockaddr *)peer, sizeof *peer);
+    (void)close(fd);
+    printf("  robust  control datagrams of 200 and 1600 bytes sent\n");
+    return 0;
+}
+
+/* One attempt at an INVITE of exactly `want` bytes, on a stack of its own,
+ * and where it went: a datagram at the line, a stream past it. The size an
+ * INVITE comes to moves by a byte or two from one stack to the next -- the
+ * `o=` line's numbers are not all the same width -- so `*came_to` says what
+ * this one came to, and an attempt that missed is 0 for the caller to pad
+ * again. 1 when it hit the size and went where it should, -1 when it hit it
+ * and did not. */
+static int robust_one_size(const struct sockaddr_in *peer, size_t want, size_t padding,
+                           unsigned which, size_t *came_to)
+{
+    struct robust_end end;
+    uint64_t deadline;
+    sipral_status_t placed;
+    *came_to = 0;
+    if (robust_open(&end, peer, which) != 0) {
+        return -1;
+    }
+    placed = robust_place(&end, peer, padding, 0u);
+    if (placed != SIPRAL_STATUS_OK && placed != SIPRAL_STATUS_NOT_SENT) {
+        robust_close(&end);
+        return -1;
+    }
+    robust_until_sent(&end, 2000u);
+    if (end.invite_len != 0u && end.invite_transport == SIPRAL_TRANSPORT_MAIN) {
+        *came_to = end.invite_len;
+    } else if (end.seen.wanted) {
+        *came_to = end.seen.wanted_bytes;
+    }
+    if (*came_to != want) {
+        robust_close(&end);
+        return 0;
+    }
+    if (want <= 1300u) {
+        if (placed != SIPRAL_STATUS_OK || end.invite_transport != SIPRAL_TRANSPORT_MAIN) {
+            (void)snprintf(trouble, sizeof trouble,
+                           "the %u-byte INVITE was not written as one datagram", (unsigned)want);
+            robust_close(&end);
+            return -1;
+        }
+        printf("  robust  the %u-byte INVITE left as a datagram\n", (unsigned)want);
+        sleep_ms(200);
+        robust_close(&end);
+        return 1;
+    }
+    if (placed != SIPRAL_STATUS_NOT_SENT || end.invite_len != 0u
+        || end.seen.wanted_protocol != SIPRAL_TRANSPORT_TCP || end.seen.wanted_limit != 1300u) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "the %u-byte INVITE did not ask for a stream (placing it said %s, %u "
+                       "bytes written, limit %u)",
+                       (unsigned)want, sipral_status_name(placed), (unsigned)end.invite_len,
+                       (unsigned)end.seen.wanted_limit);
+        robust_close(&end);
+        return -1;
+    }
+    printf("  robust  the %u-byte INVITE was refused as a datagram and asked for a stream: "
+           "over the %u-byte line\n",
+           (unsigned)want, (unsigned)end.seen.wanted_limit);
+    if (robust_connect(&end, peer) != 0) {
+        robust_close(&end);
+        return -1;
+    }
+    /* the stream the event asked for is open: placing the call again puts
+     * the INVITE on it */
+    if (robust_place(&end, peer, padding, 0u) != SIPRAL_STATUS_OK) {
+        wrong_text("placing the call again on the stream was refused");
+        robust_close(&end);
+        return -1;
+    }
+    deadline = now_ms() + 2000u;
+    while (now_ms() < deadline && end.invite_len == 0u) {
+        robust_pump(&end);
+        sleep_ms(2);
+    }
+    if (end.invite_len <= 1300u || end.invite_transport != 1u) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "the INVITE placed again was not written on the connection (%u bytes on "
+                       "transport %u)",
+                       (unsigned)end.invite_len, (unsigned)end.invite_transport);
+        robust_close(&end);
+        return -1;
+    }
+    if (end.largest_datagram > 1300u) {
+        (void)snprintf(trouble, sizeof trouble, "a %u-byte datagram was written",
+                       (unsigned)end.largest_datagram);
+        robust_close(&end);
+        return -1;
+    }
+    printf("  robust  placed again, it went whole over TCP as %u bytes, and no datagram over "
+           "1300 bytes was written\n",
+           (unsigned)end.invite_len);
+    sleep_ms(200);
+    robust_close(&end);
+    return 1;
+}
+
+/* The fragments run: see the comment above `ROBUST_MARKER`. */
+static int robust_fragments(const struct sockaddr_in *peer)
+{
+    size_t base;
+    size_t at;
+    int as_datagram = 0;
+
+    if (robust_controls(peer) != 0) {
+        return -1;
+    }
+    base = robust_measure(peer, 0u, 60u, &as_datagram);
+    if (base == 0u) {
+        wrong_text("an INVITE with ICE and nothing added was never written");
+        return -1;
+    }
+    if (!as_datagram || base + 9u >= ROBUST_SIZES[0]) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "an INVITE with ICE and nothing added came to %u bytes%s", (unsigned)base,
+                       as_datagram ? "" : ", not as a datagram");
+        return -1;
+    }
+    printf("  robust  an INVITE with ICE and nothing added is %u bytes\n", (unsigned)base);
+
+    for (at = 0; at < sizeof ROBUST_SIZES / sizeof ROBUST_SIZES[0]; at++) {
+        size_t want = ROBUST_SIZES[at];
+        size_t got = 0;
+        /* `X-Pad: ` and its CRLF are nine bytes */
+        size_t padding = want - base - 9u;
+        unsigned tries;
+        int hit = 0;
+        for (tries = 0; tries < 12u && hit == 0; tries++) {
+            hit = robust_one_size(peer, want, padding, 61u + (unsigned)at * 16u + tries, &got);
+            if (hit == 0 && got != 0u) {
+                padding = got < want ? padding + (want - got) : padding - (got - want);
+            } else if (hit == 0) {
+                wrong_text("a padded INVITE was never written");
+                return -1;
+            }
+        }
+        if (hit < 0) {
+            return -1;
+        }
+        if (hit == 0) {
+            (void)snprintf(trouble, sizeof trouble,
+                           "could not bring an INVITE to %u bytes (the last came to %u)",
+                           (unsigned)want, (unsigned)got);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* A call over a connection nobody answers on, until it ends; `darken` is run
+ * once the connection is up. The call has to end at Timer B, 64 times T1. */
+static int robust_black_hole(const struct sockaddr_in *peer, const char *label,
+                             const char *darken)
+{
+    struct robust_end end;
+    uint64_t placed;
+    uint64_t took;
+    if (robust_open(&end, peer, darken != NULL ? 91u : 90u) != 0) {
+        return -1;
+    }
+    if (robust_connect(&end, peer) != 0) {
+        robust_close(&end);
+        return -1;
+    }
+    if (darken != NULL) {
+        if (system(darken) != 0) {
+            (void)snprintf(trouble, sizeof trouble, "could not darken the path with: %s", darken);
+            robust_close(&end);
+            return -1;
+        }
+        printf("  robust  %s: the path to the peer went dark after the handshake\n", label);
+    }
+    if (robust_place(&end, peer, 0u, 1u) != SIPRAL_STATUS_OK) {
+        wrong_text("the call was not placed on the connection");
+        robust_close(&end);
+        return -1;
+    }
+    placed = now_ms();
+    while (!end.seen.ended && now_ms() - placed < 60000u) {
+        robust_pump(&end);
+        sleep_ms(5);
+    }
+    took = now_ms() - placed;
+    robust_close(&end);
+    if (!end.seen.ended) {
+        (void)snprintf(trouble, sizeof trouble, "the call was still up a minute on");
+        return -1;
+    }
+    /* Timer B is 32 000 ms; the stream's own keep-alive (RFC 5626 section
+     * 4.4.1), a double CRLF every 20 to 25 seconds with ten more for the
+     * answer, can find the flow dead a little before it, which ends the call
+     * the same way. Either is inside the window; the operating system's own
+     * give-up is a quarter of an hour away */
+    if (end.seen.end_reason != SIPRAL_CALL_END_REASON_UNREACHABLE || took < 29500u
+        || took > 34000u) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "the call ended after %u ms, reason %u, and Timer B is 32 000 ms, "
+                       "unreachable",
+                       (unsigned)took, (unsigned)end.seen.end_reason);
+        return -1;
+    }
+    printf("  robust  %s: the call ended unreachable at %u ms, %s, over a connection that "
+           "never closed\n",
+           label, (unsigned)took,
+           took >= 31500u ? "at Timer B" : "the flow's keep-alive unanswered just before Timer B");
+    return 0;
+}
+
+static int run_robust(const char *peer_name, uint16_t port)
+{
+    struct sockaddr_in peer;
+    const char *which = getenv("SIPRAL_ROBUST");
+    const char *darken = getenv("SIPRAL_ROBUST_DARKEN");
+    int failed = 0;
+    if (resolve(peer_name, port, &peer) != 0) {
+        printf("cannot resolve %s:%u\n", peer_name, (unsigned)port);
+        return 1;
+    }
+    if (which == NULL || which[0] == '\0') {
+        which = "fragments,silent,dark";
+    }
+    if (selected(which, "fragments")) {
+        trouble[0] = '\0';
+        if (robust_fragments(&peer) != 0) {
+            printf("robust: fragments: %s\n", trouble);
+            failed = 1;
+        }
+    }
+    if (selected(which, "silent")) {
+        trouble[0] = '\0';
+        if (robust_black_hole(&peer, "silent", NULL) != 0) {
+            printf("robust: silent: %s\n", trouble);
+            failed = 1;
+        }
+    }
+    if (selected(which, "dark")) {
+        trouble[0] = '\0';
+        if (darken == NULL || darken[0] == '\0') {
+            printf("robust: dark: SIPRAL_ROBUST_DARKEN names no command to darken the path\n");
+            failed = 1;
+        } else if (robust_black_hole(&peer, "dark", darken) != 0) {
+            printf("robust: dark: %s\n", trouble);
+            failed = 1;
+        }
+    }
+    (void)fflush(stdout);
+    return failed;
+}
+
 int main(int argc, char **argv)
 {
     const char *server = argc > 1 ? argv[1] : "kamailio";
@@ -4136,6 +4840,7 @@ int main(int argc, char **argv)
      * that never asked for that peer. */
     const char *peer = getenv("SIPRAL_PEER");
     int for_baresip = peer != NULL && strcmp(peer, "baresip") == 0;
+    int robust;
     struct sockaddr_in remote;
     char remote_text[SIPRAL_ADDRESS_BYTES];
     int failed = 0;
@@ -4161,7 +4866,8 @@ int main(int argc, char **argv)
     }
 
     listening = strcmp(server, "listen") == 0;
-    if (!listening) {
+    robust = strcmp(server, "robust") == 0;
+    if (!listening && !robust) {
         if (resolve(server, port, &remote) != 0
             || address_text(&remote, remote_text, sizeof remote_text) != 0) {
             printf("cannot resolve %s:%u\n", server, (unsigned)port);
@@ -4190,6 +4896,12 @@ int main(int argc, char **argv)
         }
         seed_hex(g_run_seed, hex);
         printf("seed: %s\n", hex);
+    }
+
+    /* `harness-c robust <peer> [port]`: the same */
+    if (robust) {
+        uint16_t peer_port = (uint16_t)(argc > 3 ? atoi(argv[3]) : 5060);
+        return run_robust(argc > 2 ? argv[2] : "listener", peer_port == 0 ? 5060u : peer_port);
     }
 
     /* `harness-c listen <server> [port]`: the words move one to the right */

@@ -116,6 +116,26 @@ fn invite() -> Result<Vec<u8>, Wrong> {
     Ok(built.as_raw().as_bytes().to_vec())
 }
 
+/// An INVITE over TCP whose caller's display name is UTF-8 of three and four
+/// bytes a character (RFC 3261 §25.1 allows UTF-8 in a quoted string).
+fn invite_from_a_name() -> Result<Vec<u8>, Wrong> {
+    let from = "\"\u{65e5}\u{672c}\u{8a9e} \u{1f4de}\" <sip:alice@example.com>;tag=1928301774";
+    let built = RequestBuilder::new(Method::Invite, b"sip:bob@example.com")
+        .via(b"SIP/2.0/TCP 192.0.2.1:5060;branch=z9hG4bKnamed")
+        .max_forwards(70)
+        .from(from.as_bytes())
+        .to(b"<sip:bob@example.com>")
+        .call_id(b"named@192.0.2.1")
+        .cseq(1)
+        .header(
+            HeaderName::Contact,
+            b"<sip:alice@192.0.2.1:5060;transport=tcp>",
+        )
+        .build()
+        .map_err(|why| Wrong(format!("the named INVITE seed does not build: {why:?}")))?;
+    Ok(built.as_raw().as_bytes().to_vec())
+}
+
 /// A REGISTER, which is the other request a stack sends first.
 fn register() -> Result<Vec<u8>, Wrong> {
     let built = RequestBuilder::new(Method::Register, b"sip:example.com")
@@ -238,12 +258,28 @@ fn framer_seeds() -> Result<Vec<Seed>, Wrong> {
     let mut two_in_a_row = vec![64];
     two_in_a_row.extend_from_slice(&request);
     two_in_a_row.extend_from_slice(&response);
+    let named = invite_from_a_name()?;
+    // the read ends one byte into the name's first character, so the stream
+    // is cut inside a multi-byte UTF-8 sequence
+    let into_name = named
+        .windows(2)
+        .position(|pair| pair == b"\"\xe6")
+        .ok_or_else(|| Wrong("the named INVITE seed has no quoted name".to_owned()))?
+        .saturating_add(2);
+    let cut = u8::try_from(into_name).map_err(|_| {
+        Wrong(format!(
+            "the named INVITE seed's name starts too late: {into_name}"
+        ))
+    })?;
+    let mut split_name = vec![cut];
+    split_name.extend_from_slice(&named);
     let out = vec![
         ("invite-whole", whole),
         ("ok-one-byte-at-a-time", byte_at_a_time),
         ("two-messages-in-one-read", two_in_a_row),
+        ("utf8-name-cut-mid-character", split_name),
     ];
-    for ((name, bytes), messages) in out.iter().zip([1, 1, 2]) {
+    for ((name, bytes), messages) in out.iter().zip([1, 1, 2, 1]) {
         through_framer(name, bytes, messages)?;
     }
     Ok(out)

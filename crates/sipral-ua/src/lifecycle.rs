@@ -943,6 +943,7 @@ impl UserAgent {
             Vec::new()
         };
         let mut unverified = 0_usize;
+        let mut doubted = Vec::new();
         for (id, reg) in &mut self.registrations {
             if only_named && !named.contains(id) {
                 continue;
@@ -965,7 +966,15 @@ impl UserAgent {
             ) {
                 reg.state = RegistrationState::Unverified;
                 unverified = unverified.saturating_add(1);
+                doubted.push(*id);
             }
+        }
+        // said as it happens, not left for the application to find by
+        // asking: a line shown as ready on a binding that stopped being
+        // evidence is the silence this state exists to end
+        doubted.sort_unstable();
+        for account in doubted {
+            self.events.push_back(UaEvent::Unverified { account });
         }
 
         // a lamp showing what a notifier said before the machine slept is the
@@ -1668,6 +1677,18 @@ mod tests {
         assert_eq!(
             agent.registration_state(named),
             Some(RegistrationState::Unverified)
+        );
+        let doubted: Vec<_> = events(&mut agent)
+            .into_iter()
+            .filter_map(|event| match event {
+                UaEvent::Unverified { account } => Some(account),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            doubted,
+            vec![named],
+            "the binding that needed a resolver is said to be unproved, and only it"
         );
         assert_eq!(
             agent.registration_state(literal),

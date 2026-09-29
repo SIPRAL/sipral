@@ -1,0 +1,10 @@
+sINVITE sip:bob@example.com SIP/2.0
+Via: SIP/2.0/TCP 192.0.2.1:5060;branch=z9hG4bKnamed
+Max-Forwards: 70
+From: "日本語 📞" <sip:alice@example.com>;tag=1928301774
+To: <sip:bob@example.com>
+Call-ID: named@192.0.2.1
+CSeq: 1 INVITE
+Contact: <sip:alice@192.0.2.1:5060;transport=tcp>
+Content-Length: 0
+

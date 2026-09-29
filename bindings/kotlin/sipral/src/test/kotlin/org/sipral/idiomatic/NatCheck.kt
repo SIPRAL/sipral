@@ -50,6 +50,7 @@ import org.sipral.SipralPathOutcome
 import org.sipral.SipralNatMapping
 import org.sipral.SipralNatRelay
 import org.sipral.SipralNatRelayEvent
+import org.sipral.SipralStunServerState
 import org.sipral.SipralTransport
 
 /**
@@ -312,6 +313,39 @@ private fun stunMappingReachesContactAndSdp(host: String): String {
                     assertTrue(invite.contains("m=audio ${publicMedia.port} "), "the SDP does not name the public port")
                 }
                 return "a STUN mapping reached the Contact and the SDP"
+            }
+        }
+    }
+}
+
+/** `stunFallbacks`: the first server named never answers, and the
+ * signalling socket is asked of the next one once five and a half seconds
+ * have gone by, with `SIPRAL_EVENT_KIND_STUN_SERVER` saying so. */
+private fun aSilentFirstServerHandsOver(host: String): String {
+    DatagramSocket(0, InetAddress.getByName(host)).use { silent ->
+        val silentAddress = formatAddress(host, silent.localPort)
+        FakeStunServer(host).use { stun ->
+            stun.open = true
+            SipralClient.open(
+                audio = SipralAudioMode.Application,
+                bindHost = host,
+                stunServer = silentAddress,
+                stunFallbacks = listOf(stun.address),
+            ).use { client ->
+                val seen = recordEvents(client, 15_000)
+                val deadline = System.currentTimeMillis() + 12_000
+                fun changed() = seen.toList().mapNotNull { stunServerOf(it) }.firstOrNull()
+                fun mapped() = seen.toList().mapNotNull { natOf(it) }.firstOrNull { it.signalling != 0L }
+                while ((changed() == null || mapped() == null) && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(20)
+                }
+                val moved = assertNotNull(changed(), "no STUN server event after the first server stayed silent")
+                assertEquals(SipralStunServerState.CHANGED.value.toLong(), moved.state)
+                assertEquals(silentAddress, moved.previous)
+                assertEquals(stun.address, moved.server)
+                val sip = assertNotNull(mapped(), "the next server's answer never became a mapping")
+                assertEquals(FakeStunServer.mapped(client.bindAddress), sip.mapped)
+                return "a silent first STUN server handed the socket to the next"
             }
         }
     }
@@ -897,6 +931,7 @@ internal suspend fun natChecks(): String {
     val host = hostAddress() ?: error("no interface but loopback: ICE has no host candidate to check with")
     return listOf(
         stunMappingReachesContactAndSdp(host),
+        aSilentFirstServerHandsOver(host),
         registrarFlowIsKeptOpenBehindTheNat(host),
         turnRelayIsAllocatedAndOffered(host),
         iceBehindStunCarriesAudio(host),

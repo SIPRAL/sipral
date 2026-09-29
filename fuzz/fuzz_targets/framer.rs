@@ -10,6 +10,12 @@
 //! the messages in front of it have been taken, and never panic on either. A
 //! message it refuses and passes over is salvaged the way the endpoint
 //! salvages one to answer it.
+//!
+//! And where the reads fell must not change what was read: the same stream
+//! taken in the fuzzer's pieces and taken one byte at a time gives the same
+//! messages, down to each `From` display name, byte for byte. A multi-byte UTF-8
+//! character split between two TCP segments is the case this is for — a
+//! name decoded before reassembly comes out as two broken halves.
 
 #![no_main]
 
@@ -29,18 +35,31 @@ fuzz_target!(|data: &[u8]| {
     for bound in BOUNDS {
         // lenient is what an endpoint reads with unless told otherwise
         for mode in [ParseMode::Strict, ParseMode::Lenient] {
-            frame(rest, chunk, bound, mode);
+            let pieces = frame(rest, chunk, bound, mode);
+            let bytes = frame(rest, 1, bound, mode);
+            // a stream that ran into its bound ends where the reads put it,
+            // so only two readings that both reached the end are compared
+            if let (Some(pieces), Some(bytes)) = (pieces, bytes) {
+                assert_eq!(pieces, bytes, "the reads changed what was read");
+            }
         }
     }
 });
 
-fn frame(rest: &[u8], chunk: usize, bound: u32, mode: ParseMode) {
+/// What one message said about its caller: the `From` display name, as the
+/// bytes it decodes from, when it has one that parses.
+type Caller = Option<Vec<u8>>;
+
+/// Frame `rest` read `chunk` bytes at a time, and say who every message was
+/// from, in order — or `None` when the stream ended early on its bound.
+fn frame(rest: &[u8], chunk: usize, bound: u32, mode: ParseMode) -> Option<Vec<Caller>> {
     let mut framer = StreamFramer::new(bound);
+    let mut callers = Vec::new();
     for piece in rest.chunks(chunk) {
         if framer.push(piece).is_err() {
             // a head past the bound: nothing says where the message ends, so
             // the caller closes the connection and this stream is done
-            return;
+            return None;
         }
 
         loop {
@@ -49,6 +68,12 @@ fn frame(rest: &[u8], chunk: usize, bound: u32, mode: ParseMode) {
                     assert!(message.len() <= rest.len());
                     let _ = message.validate();
                     let _ = message.to_owned();
+                    callers.push(
+                        message
+                            .from()
+                            .ok()
+                            .and_then(|from| from.display_name().map(|name| name.into_owned())),
+                    );
                 }
                 Ok(Some(Framed::Refused { head, length, .. })) => {
                     assert!(head.len() <= rest.len());
@@ -61,12 +86,14 @@ fn frame(rest: &[u8], chunk: usize, bound: u32, mode: ParseMode) {
                         let _ = request.call_id();
                         let _ = request.cseq();
                     }
+                    callers.push(None);
                 }
                 Ok(None) => break,
-                Err(_) => return,
+                Err(_) => return None,
             }
         }
         assert!(framer.pending() <= bound as usize);
         while framer.take_ping() {}
     }
+    Some(callers)
 }

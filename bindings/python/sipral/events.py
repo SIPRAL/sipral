@@ -354,6 +354,16 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "reason": _text(relay.reason, relay.reason_len),
         }
 
+    # The STUN server in use moved to another in the list, or every one of
+    # them failed (`Stack(stun_fallbacks=...)`).
+    if kind == lib.SIPRAL_EVENT_KIND_STUN_SERVER:
+        server = payload.stun_server
+        return {
+            "state": int(server.state),
+            "server": _text(server.server, server.server_len),
+            "previous": _text(server.previous, server.previous_len),
+        }
+
     # A media socket's connection to a TURN server reached over TCP or TLS:
     # open it, or close it (`Stack` does both itself).
     if kind == lib.SIPRAL_EVENT_KIND_TURN_STREAM:

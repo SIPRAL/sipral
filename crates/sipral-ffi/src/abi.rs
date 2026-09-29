@@ -599,6 +599,7 @@ pub const SURFACE: Surface = Surface {
         crate::nat::SipralNatMapping::ABI,
         crate::nat::SipralNatRelay::ABI,
         crate::nat::SipralTurnStream::ABI,
+        crate::nat::SipralStunServerState::ABI,
         crate::subscription::SipralSubscriptionState::ABI,
         crate::subscription::SipralSubscriptionEnd::ABI,
         crate::subscription::SipralDialogPhase::ABI,
@@ -650,6 +651,7 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralReferralEvent::ABI,
         crate::nat::SipralTurnStreamEvent::ABI,
         crate::audio::SipralAudioEvent::ABI,
+        crate::nat::SipralStunServerEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -764,6 +766,7 @@ pub const SURFACE: Surface = Surface {
         crate::transport::sipral_stack_transport_bind::ABI,
         crate::transport::sipral_stack_transport_failed::ABI,
         crate::transport::sipral_stack_stream_closed::ABI,
+        crate::nat::sipral_stack_stun_servers::ABI,
         crate::nat::sipral_stack_nat_map::ABI,
         crate::nat::sipral_stack_nat_unmap::ABI,
         crate::nat::sipral_stack_poll_stun::ABI,
@@ -988,6 +991,7 @@ mod tests {
             "SipralReferralEvent",
             "SipralTurnStreamEvent",
             "SipralAudioEvent",
+            "SipralStunServerEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

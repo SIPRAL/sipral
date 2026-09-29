@@ -57,6 +57,16 @@
 #                               coturn, the relay reached over TCP from the
 #                               C ABI, over TLS from Python, over TCP and TLS
 #                               from Kotlin and .NET, and over TCP from Swift
+#   scripts/lab.sh robust       only the field failures that need a network
+#                               to show (docs/11-testing.md's table): a
+#                               link that drops IP fragments, with INVITEs
+#                               carrying ICE at 1300, 1301 and 1600 bytes;
+#                               a TCP connection accepted and never answered,
+#                               and one whose path goes dark after the
+#                               handshake, each call ended at Timer B; then
+#                               the NAT pair's call with its first STUN
+#                               server dead, both ends moving to coturn.
+#                               About three minutes
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -2980,6 +2990,138 @@ if [ "$WANT" = all ] || [ "$WANT" = ice ] || [ "$WANT" = turn ]; then
     step "full ICE through a relay -- the path between the two NATs blocked, coturn as TURN"
     ice_turn_flow && pass "no path without TURN; with it, every call went through coturn and every relay was given back" \
         || fail "full ICE through a TURN relay"
+fi
+
+# The field failures that need a network to show, docs/11-testing.md's table
+# "What a field failure is answered by". Two parts.
+#
+# robust_link_flow: interop/robust/listener.py on the lab network, a peer that
+# takes UDP and TCP on 5060 and never answers anything, printing one line for
+# whatever reached it; and the C harness's `robust` mode beside it, its own
+# egress shaped so that every IP fragment it sends is dropped -- what a good
+# many NATs and firewalls do to a datagram too large for one frame. Three tc
+# filters on a prio qdisc whose third band is netem at 100% loss: a fragment
+# with more to come, and, of what is left, anything with an offset, which is
+# a last fragment; everything else goes out as usual. SIPRAL_ROBUST_DARKEN is
+# a fourth filter the harness adds itself once its `dark` connection is up:
+# every TCP segment to the peer, so the path goes dark after the handshake
+# and the kernel is left retransmitting into nothing.
+#
+# The harness proves its half on its own lines (interop/harness-c's comment
+# above ROBUST_MARKER); the listener's log proves the other: the 200-byte
+# control arrived and the 1600-byte one did not, which is the link doing what
+# the step says it does -- without it, the INVITEs below prove nothing -- the
+# 1300-byte INVITE arrived as a datagram, and the two placed again on TCP
+# after the 1301- and 1600-byte ones were refused as datagrams arrived whole.
+robust_link_flow() {
+    local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    local name="$project-robust-listener"
+    local beside listener status said
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    docker build -q -f "$ROOT/interop/nat/Dockerfile.python" \
+        -t sipral-lab-nat-python "$ROOT/interop/nat" >/dev/null \
+        && docker build -q -t sipral-lab-nat "$ROOT/interop/nat" >/dev/null \
+        || { printf '  could not build the images the step runs in\n'; return 1; }
+    docker rm -f "$name" >/dev/null 2>&1
+    docker run -d --name "$name" --network "$LAB_NETWORK" \
+        -v "$ROOT/interop/robust:/robust:ro" \
+        sipral-lab-nat-python python3 -u /robust/listener.py 5060 >/dev/null \
+        || { printf '  could not start the listener\n'; return 1; }
+    listener=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"$LAB_NETWORK\"}}{{.IPAddress}}{{end}}" "$name")
+    if [ -z "$listener" ]; then
+        printf '  could not read the listener'"'"'s address\n'
+        docker rm -f "$name" >/dev/null 2>&1
+        return 1
+    fi
+    printf '  the listener at %s:5060\n' "$listener"
+
+    lab_run "the C harness's robust runs" $((LAB_START_S + 3 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        --cap-add NET_ADMIN \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        sipral-lab-nat sh -c "
+            dev=\$(ip -o route get $listener | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p')
+            [ -n \"\$dev\" ] || exit 1
+            tc qdisc add dev \"\$dev\" root handle 1: prio bands 3 \
+                priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 || exit 1
+            tc qdisc add dev \"\$dev\" parent 1:3 handle 30: netem loss 100% || exit 1
+            tc filter add dev \"\$dev\" parent 1: protocol ip prio 2 \
+                u32 match u16 0x2000 0x2000 at 6 flowid 1:3 || exit 1
+            tc filter add dev \"\$dev\" parent 1: protocol ip prio 3 \
+                u32 match u16 0x0000 0x1fff at 6 flowid 1:2 || exit 1
+            tc filter add dev \"\$dev\" parent 1: protocol ip prio 4 \
+                u32 match u32 0 0 flowid 1:3 || exit 1
+            export SIPRAL_ROBUST_DARKEN=\"tc filter add dev \$dev parent 1: protocol ip prio 1 u32 match ip dst $listener/32 match ip protocol 6 0xff flowid 1:3\"
+            exec /harness-c robust $listener 5060"
+    status=$?
+    said=$(docker logs "$name" 2>&1)
+    docker rm -f "$name" >/dev/null 2>&1
+    printf '%s\n' "$said" | sed 's/^/  listener  /'
+    if ! printf '%s\n' "$said" | grep -q '^udp 200 SIPRAL-CONTROL-SMALL'; then
+        printf '  the 200-byte control never arrived: the link drops more than fragments\n'
+        return 1
+    fi
+    if printf '%s\n' "$said" | grep -q '^udp 1600 '; then
+        printf '  the 1600-byte control arrived: the link does not drop fragments, and the run proves nothing\n'
+        return 1
+    fi
+    printf '%s\n' "$said" | grep -q '^udp 1300 INVITE ' \
+        || { printf '  the 1300-byte INVITE never arrived as a datagram\n'; status=1; }
+    # the INVITE placed again on the stream comes to within a byte or two of
+    # the one refused, so what is counted is two over the line, whole
+    if [ "$(printf '%s\n' "$said" \
+        | awk '$1 == "tcp" && $2 > 1300 && $3 == "INVITE" && $NF == "complete"' | wc -l)" -lt 2 ]; then
+        printf '  the INVITEs over the line never arrived whole over TCP\n'
+        status=1
+    fi
+    if printf '%s\n' "$said" | awk '$1 == "udp" && $2 > 1300 { found = 1 } END { exit !found }'; then
+        printf '  a datagram over 1300 bytes reached the listener\n'
+        status=1
+    fi
+    return "$status"
+}
+
+# The NAT pair's STUN step with its first server dead: both ends -- the C
+# harness calling, the Rust harness answering -- are told to ask the second
+# NAT's own outside address first, where nothing listens on 3478, and coturn
+# behind it (SIPRAL_STUN_FALLBACKS). With SIPRAL_STUN_EXPECT_FAILOVER=1 each
+# fails its step unless the server in use moved before the mapping came back,
+# so a first server that answered after all is a failure too. The rest is the
+# ordinary call across the pair: ICE on what coturn said, and the tone both
+# ways.
+robust_stun_failover() {
+    local status
+    nat_pair_up -f compose.yaml || return 1
+    printf '  caller behind %s, callee behind %s, STUN at %s:3478 (dead) and then %s:3478\n' \
+        "$NAT_PAIR_GATEWAY" "$NAT_PAIR_GATEWAY2" "$NAT_PAIR_OUTSIDE2" "$NAT_PAIR_COTURN"
+    NAT_PAIR_CALLER=c nat_pair_call \
+        -e "SIPRAL_STUN_SERVER=$NAT_PAIR_OUTSIDE2:3478" \
+        -e "SIPRAL_STUN_FALLBACKS=$NAT_PAIR_COTURN:3478" \
+        -e SIPRAL_STUN_EXPECT_FAILOVER=1
+    status=$?
+    nat_pair_down -f compose.yaml
+    return "$status"
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = robust ]; then
+    step "the field failures -- a link that drops fragments, and connections nobody answers on, in C"
+    if [ -n "$HARNESS_C" ]; then
+        robust_link_flow \
+            && pass "fragments dropped; the 1300-byte INVITE went as a datagram, the 1301- and 1600-byte ones over TCP; both silent connections ended the call by Timer B" \
+            || fail "the field failures over a bad link"
+        step "the NAT pair with its first STUN server dead -- C calling, Rust answering"
+        robust_stun_failover \
+            && pass "both ends moved to coturn after the dead server, and the call crossed both NATs" \
+            || fail "the NAT pair with its first STUN server dead"
+    elif [ "$WANT" = robust ]; then
+        fail "the field failures: there is no C harness to run them with"
+    else
+        printf '  note  no C harness, so the field failures are skipped with the other C flows\n'
+    fi
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = netem ]; then

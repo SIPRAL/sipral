@@ -144,7 +144,7 @@ const SEED_BYTES: usize = 32;
 ///
 /// Published to C as `SIPRAL_TRANSPORT_MAIN`, in [`crate::transport`], which is
 /// also where the reason a stack has exactly one is written down.
-const TRANSPORT: TransportId = TransportId(0);
+pub(crate) const TRANSPORT: TransportId = TransportId(0);
 
 /// How far behind this stack's last reading of the caller's clock a
 /// signalling call may be and still be honoured.
@@ -601,6 +601,24 @@ record! {
         /// in the hundreds even on a stack holding thousands of calls: the
         /// calls a support case is about are the ones written most recently.
         pub diagnostic_records: u32,
+        /// The STUN servers to turn to, in this order, when `stun_server`
+        /// fails: `host:port` addresses separated by commas, not names.
+        /// Optional, and only beside a `stun_server`. A server fails when it
+        /// does not answer in five and a half seconds, or answers without an
+        /// address; every socket asking it moves to the next one at once,
+        /// and the one that failed is passed over for thirty seconds, then
+        /// twice as long each time it fails again, up to ten minutes. Only a
+        /// signalling socket's refresh goes back to a better server once its
+        /// time is up, so a call waiting for its media socket's address is
+        /// never spent on finding out. `SIPRAL_EVENT_KIND_STUN_SERVER` says
+        /// when the server in use moves, and when every one has failed.
+        /// Copied; the caller's buffer is its own again when this returns.
+        ///
+        /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub stun_fallbacks: *const c_char,
+        /// How many bytes of it.
+        pub stun_fallbacks_len: usize,
     }
 }
 
@@ -2605,6 +2623,8 @@ pub(crate) mod tests {
             audio_transmit_user_data: ptr::null_mut(),
             audio_probe_ms: 0,
             audio_device_rate_hz: 0,
+            stun_fallbacks: ptr::null(),
+            stun_fallbacks_len: 0,
             codecs: ptr::null(),
             codecs_len: 0,
             frame_ms: 0,

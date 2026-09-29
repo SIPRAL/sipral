@@ -353,7 +353,7 @@ final class PushKitBridgeTests: XCTestCase {
                 answerAfterMs: nil, ringSource: nil, alertInfo: nil
             ),
             mediaData: nil, registrationData: nil, announceData: nil, natData: nil, relayData: nil,
-            referralData: nil, turnStreamData: nil, audioData: nil
+            referralData: nil, turnStreamData: nil, audioData: nil, stunServerData: nil
         )
 
         pushKit.matchIncomingCall(event, on: stack)

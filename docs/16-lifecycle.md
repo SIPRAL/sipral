@@ -94,6 +94,12 @@ fix for the sentence at the top of this document: after a wake, "are we
 registered?" answers *unverified*, and an application that renders a green dot
 from it is making a decision rather than being misled by one.
 
+It is said, not only readable. The moment a binding becomes unverified,
+`UaEvent::Unverified` names its account — `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`
+with the state `SIPRAL_REGISTRATION_STATE_UNVERIFIED` across the C ABI — so a
+line whose resolver died after it registered goes grey on the next poll rather
+than staying green until a refresh fails minutes later.
+
 The FFI enum carries it as `SIPRAL_REGISTRATION_STATE_UNVERIFIED`, beside
 `SIPRAL_REGISTRATION_STATE_RESTORED`. `crates/sipral-ffi/src/lifecycle.rs` is
 where both become producible from C: `sipral_stack_suspending`,

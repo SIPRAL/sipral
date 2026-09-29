@@ -20,7 +20,12 @@ Rules for the ABI:
   member.
 - **Explicit ownership.** Every allocation the library returns has exactly one
   matching free function. Strings are UTF-8, length-delimited, never assumed
-  null-terminated on input.
+  null-terminated on input. No text crosses the boundary in either direction
+  without its length beside it, and the only text handed out without one —
+  the static names `sipral_status_name`, `sipral_event_kind_name` and
+  `sipral_codec_name` return — is NUL-terminated, which a test walking the
+  whole declared surface holds
+  (`docs/11-testing.md`, "What a field failure is answered by").
 - **No panics across the boundary.** Every entry point catches unwinding and
   turns it into an error code. A panic that reaches an `extern "C"` boundary
   uncaught aborts the whole host process (defined behaviour since Rust 1.24, but
@@ -444,9 +449,11 @@ retires its transport. A WebSocket frame goes in as a datagram, because RFC
 7118 §4.2 puts one message in each. §18.1.1 — a request that outgrew a
 datagram going out on a stream instead — arrives as
 `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, naming the protocol and the destination
-in `sipral_transport_wanted_event_t`; the application answers it with
-`sipral_stack_transport_bind`, and the stack sends the request again by itself
-once that returns `SIPRAL_STATUS_OK` — there is no separate "it went" event.
+in `sipral_transport_wanted_event_t`, and the call that asked for the request
+is refused with `SIPRAL_STATUS_NOT_SENT`, nothing on the wire; the application
+answers it with `sipral_stack_transport_bind`, and once that returns
+`SIPRAL_STATUS_OK` it asks again — places the call, registers — and the
+request leaves on that stream. There is no separate "it went" event.
 `sipral_transmit_t::protocol` is still the seam that made this possible
 without a second `sipral_stack_poll_transmit`: it says what the message went
 out over rather than what the socket is, which is what lets one account's
@@ -620,6 +627,16 @@ the tail; `MIN_SIZE` unmoved) turn on STUN: `SIPRAL_NAT_STUN` and a server as
 a build without `SIPRAL_FEATURE_STUN` answers `SIPRAL_STATUS_NOT_SUPPORTED`.
 `docs/06-nat.md` has the decisions; this is the order an application meets
 them in.
+
+**`stun_fallbacks` on `sipral_stack_config_t`** (appended at the tail in
+0.30) names the servers to turn to, in order, when `stun_server` does not
+answer: `host:port` addresses separated by commas, refused without a
+`stun_server` in front of them. Every socket moves on by itself, and
+`SIPRAL_EVENT_KIND_STUN_SERVER` (46) says when the server in use changed or
+every one failed (`payload.stun_server`: the state, the server, the one
+before it). **`sipral_stack_stun_servers(stack, list, len, now_ms)`** replaces
+the list on a running stack, starts STUN on one created without it, and with
+an empty list stops it; `docs/06-nat.md`, "More than one server".
 
 The **signalling socket** asks for nothing new. Its Binding request is the
 first thing `sipral_stack_poll_transmit` hands out, on the transport it is

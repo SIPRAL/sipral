@@ -943,12 +943,14 @@ public enum SipralEventKind : uint
     /// `payload.transport_wanted` says where it was going, over what
     /// protocol, and how it measured against the datagram it did not fit.
     ///
-    /// B1. Answered with
+    /// B1. The call that asked for the request — placing a call,
+    /// registering — was refused with `SIPRAL_STATUS_NOT_SENT`, and
+    /// nothing went on the wire. Answered with
     /// sipral_stack_transport_bind:
-    /// once the application binds a transport to that destination, the
-    /// stack sends the request again by itself and this ABI raises
-    /// nothing further about it — there is no "it went" event, the same
-    /// way there is none for an ordinary request that fit the first time.
+    /// once the application has bound a transport to that destination,
+    /// asking again sends the request on it, and this ABI raises nothing
+    /// further about it — there is no "it went" event, the same way there
+    /// is none for an ordinary request that fit the first time.
     /// </summary>
     TransportWanted = 18,
     /// <summary>
@@ -1299,6 +1301,27 @@ public enum SipralEventKind : uint
     /// `payload.call`, as for every other call event.
     /// </summary>
     CallAddressWanted = 45,
+    /// <summary>
+    /// The STUN server a stack asks changed, or every one of them failed.
+    /// Only on a stack created with `SIPRAL_NAT_STUN`, or given servers by
+    /// `sipral_stack_stun_servers`.
+    ///
+    /// `payload.stun_server` says which:
+    /// `SIPRAL_STUN_SERVER_STATE_CHANGED` when the server in use moved --
+    /// the one before it failed, one earlier in the list answered again,
+    /// or the list was replaced -- and
+    /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED` when every server in
+    /// `stun_server` and `stun_fallbacks` has failed and none is left to
+    /// turn to. A server fails when it does not answer in five and a half
+    /// seconds, or answers without an address, and is then passed over
+    /// for thirty seconds, twice as long each time it fails again, up to
+    /// ten minutes. Nothing is asked of the application: the sockets move
+    /// to the next server by themselves, and
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` says what each one learns there.
+    /// `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
+    /// neither.
+    /// </summary>
+    StunServer = 46,
 }
 
 /// <summary>
@@ -1757,6 +1780,29 @@ public enum SipralTurnStream : uint
     /// close it.
     /// </summary>
     Close = 2,
+}
+
+/// <summary>
+/// What happened to the STUN servers a stack asks. Names for
+/// `sipral_stun_server_event_t::state`.
+/// </summary>
+public enum SipralStunServerState : uint
+{
+    /// <summary>
+    /// The server in use is another one now: `previous` failed and
+    /// `server`, the next in the list, took over; a refresh found
+    /// `server`, earlier in the list, answering again; or
+    /// `sipral_stack_stun_servers` named another list.
+    /// </summary>
+    Changed = 1,
+    /// <summary>
+    /// Every server in the list has failed and each is backing off:
+    /// `server` is the last one that did. The sockets keep what they
+    /// learned, or are described by their own address, and a
+    /// signalling socket's refresh goes on asking. Said once until a
+    /// server answers again.
+    /// </summary>
+    AllFailed = 2,
 }
 
 /// <summary>
@@ -3120,6 +3166,28 @@ public struct SipralStackConfig
     /// calls a support case is about are the ones written most recently.
     /// </summary>
     public uint DiagnosticRecords;
+    /// <summary>
+    /// The STUN servers to turn to, in this order, when `stun_server`
+    /// fails: `host:port` addresses separated by commas, not names.
+    /// Optional, and only beside a `stun_server`. A server fails when it
+    /// does not answer in five and a half seconds, or answers without an
+    /// address; every socket asking it moves to the next one at once,
+    /// and the one that failed is passed over for thirty seconds, then
+    /// twice as long each time it fails again, up to ten minutes. Only a
+    /// signalling socket's refresh goes back to a better server once its
+    /// time is up, so a call waiting for its media socket's address is
+    /// never spent on finding out. `SIPRAL_EVENT_KIND_STUN_SERVER` says
+    /// when the server in use moves, and when every one has failed.
+    /// Copied; the caller's buffer is its own again when this returns.
+    ///
+    /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public IntPtr StunFallbacks;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint StunFallbacksLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -5368,6 +5436,40 @@ public struct SipralAudioEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.StunServer
+/// carries.
+///
+/// The addresses are `host:port`, not NUL-terminated, and the library's:
+/// valid for as long as the callback runs.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralStunServerEvent
+{
+    /// <summary>
+    /// A SipralStunServerState.
+    /// </summary>
+    public uint State;
+    /// <summary>
+    /// For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server in use now; for
+    /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED`, the last one that failed.
+    /// </summary>
+    public IntPtr Server;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ServerLen;
+    /// <summary>
+    /// For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server that was in use.
+    /// Empty otherwise.
+    /// </summary>
+    public IntPtr Previous;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint PreviousLen;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -5457,6 +5559,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralAudioEvent Audio;
+    /// <summary>
+    /// For SipralEventKind.StunServer.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralStunServerEvent StunServer;
 }
 
 /// <summary>
@@ -6367,6 +6474,9 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_stream_closed(ulong stack, uint transport, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_stun_servers(ulong stack, sbyte[] servers, nuint serversLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_nat_map(ulong stack, sbyte[] local, nuint localLen, ulong nowMs);
@@ -9144,10 +9254,11 @@ public static class Sipral
     ///
     /// This is also how a request
     /// SipralEventKind.TransportWanted
-    /// named gets to leave: once this returns `SIPRAL_STATUS_OK` for the
-    /// protocol and destination the event gave, the stack sends the request
-    /// again by itself on the next `sipral_stack_poll` — there is no further
-    /// event about that one request.
+    /// named gets to leave: the call that asked for it was refused with
+    /// `SIPRAL_STATUS_NOT_SENT` and nothing went on the wire, and once this
+    /// returns `SIPRAL_STATUS_OK` for the protocol and destination the event
+    /// gave, asking again — placing the call, registering — sends it on the
+    /// stream just bound. There is no further event about that one request.
     ///
     /// Safety
     ///
@@ -9207,6 +9318,43 @@ public static class Sipral
     public static void StackStreamClosed(ulong stack, uint transport, ulong nowMs)
     {
         Check(NativeMethods.sipral_stack_stream_closed(stack, transport, nowMs));
+    }
+
+    /// <summary>
+    /// Ask these STUN servers from now on, without creating the stack again.
+    ///
+    /// `servers` is `host:port` addresses separated by commas, in order of
+    /// preference: the first is what `stun_server` would have named, the
+    /// rest what `stun_fallbacks` would. On a stack that asks already, every
+    /// socket it keeps mapped is asked again of the new list at once, and
+    /// what each one learned stands until the new server answers —
+    /// `SIPRAL_EVENT_KIND_STUN_SERVER` says the server in use moved, and
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` what the new one answers. A server
+    /// kept from the old list keeps its back-off. On a stack created with
+    /// `SIPRAL_NAT_OFF` the main transport starts being kept mapped, as it
+    /// would have been with `SIPRAL_NAT_STUN`; a further datagram transport
+    /// joins it the next time it is bound with
+    /// `sipral_stack_transport_bind`.
+    ///
+    /// An empty list — `servers_len` zero — asks nobody any more: every
+    /// account whose `Contact` a STUN answer moved goes back to the socket's
+    /// own address and registers it, every media socket named is forgotten,
+    /// and a call is described by its socket's own address from then on.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for that on a stack with a TURN
+    /// server, whose relays ride on the media sockets STUN names, and for an
+    /// entry that is not an address and a port. `SIPRAL_STATUS_NOT_SUPPORTED`
+    /// for a list in a build without `SIPRAL_FEATURE_STUN`.
+    ///
+    /// Safety
+    ///
+    /// `servers` must be readable for `servers_len` bytes.
+    /// </summary>
+    public static void StackStunServers(ulong stack, string servers, ulong nowMs)
+    {
+        var serversBytes = Encoding.UTF8.GetBytes(servers);
+        var serversSigned = new sbyte[serversBytes.Length];
+        Buffer.BlockCopy(serversBytes, 0, serversSigned, 0, serversBytes.Length);
+        Check(NativeMethods.sipral_stack_stun_servers(stack, serversSigned, (nuint)serversSigned.Length, nowMs));
     }
 
     /// <summary>

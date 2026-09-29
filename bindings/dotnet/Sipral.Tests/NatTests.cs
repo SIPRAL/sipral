@@ -370,6 +370,31 @@ public sealed class NatTests
         Assert.Equal("203.0.113.7:40000", evt.Nat.Mapped);
     }
 
+    /// <summary><c>stunFallbacks</c>: the first server named never answers,
+    /// and the signalling socket is asked of the next one once five and a
+    /// half seconds have gone by, with <see cref="SipralEventKind.StunServer"/>
+    /// saying so.</summary>
+    [Fact]
+    public async Task ASilentFirstServerHandsTheSocketToTheNext()
+    {
+        using var silent = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        silent.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        var silentAddress = $"127.0.0.1:{((IPEndPoint)silent.LocalEndPoint!).Port}";
+        using var server = new FakeStunServer("203.0.113.7", 40010);
+        using var alice = new SipralStack(
+            audio: SipralAudio.Application, nat: SipralNat.Stun, stunServer: silentAddress,
+            stunFallbacks: new[] { server.Address });
+
+        var changed = await FirstMatchingAsync(alice.Events, e => e.Kind == SipralEventKind.StunServer,
+            TimeSpan.FromSeconds(10));
+        Assert.NotNull(changed.StunServer);
+        Assert.Equal(SipralStunServerState.Changed, changed.StunServer!.State);
+        Assert.Equal(silentAddress, changed.StunServer.Previous);
+        Assert.Equal(server.Address, changed.StunServer.Server);
+        var mapped = await FirstMatchingAsync(alice.Events, e => e.Kind == SipralEventKind.NatMapping, Timeout);
+        Assert.Equal("203.0.113.7:40010", mapped.Nat!.Mapped);
+    }
+
     /// <summary>An account the STUN answer showed behind a NAT keeps its
     /// registrar's flow open: a double CRLF, alone in a datagram, reaches
     /// the registrar every <c>registrarKeepaliveMs</c>, and none does with

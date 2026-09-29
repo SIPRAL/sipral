@@ -137,7 +137,11 @@ The offset is a `Duration` from the record's own first entry, not an instant.
 Nothing in the protocol crates reads a clock (`docs/11-testing.md`), so the
 time comes from the caller: every entry point that takes a `now` stamps it, and
 every decision made during that call into the endpoint shares it. That is not
-an approximation — inside one call into a sans-I/O core, no time passes.
+an approximation — inside one call into a sans-I/O core, no time passes. The
+resolution is the millisecond, the unit `now_ms` crosses the C ABI in, and
+nothing between it and an event rounds it: an event whose deadline is a given
+millisecond is raised by the first poll at that millisecond and never by the
+one before it (`docs/11-testing.md`, "What a field failure is answered by").
 
 ## The memory bound, and what happens at it
 
