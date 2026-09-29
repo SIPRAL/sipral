@@ -204,6 +204,15 @@ impl PageWriter {
         self.lacing.is_empty()
     }
 
+    /// Whether a packet of `length` octets would finish on the page being
+    /// filled, rather than send it out first because the segment table
+    /// fills.
+    #[must_use]
+    pub fn fits(&self, length: usize) -> bool {
+        let needed = length / 255 + 1;
+        self.lacing.len().saturating_add(needed) <= MAX_SEGMENTS
+    }
+
     /// Add one packet that ends at `granule`, writing out every page it
     /// fills on the way.
     ///
@@ -781,6 +790,28 @@ mod tests {
         assert_eq!(pages[1].lacing(), &[0]);
         assert!(pages[1].is_continued());
         assert_eq!(read_packets(&out).unwrap()[0].data, packet);
+    }
+
+    #[test]
+    fn a_packet_fits_while_its_lacing_values_fit_the_table_left() {
+        let mut writer = PageWriter::new(9);
+        let mut out = Vec::new();
+        assert!(
+            writer.fits(254 * 255 + 254),
+            "255 lacing values on a new page"
+        );
+        assert!(
+            !writer.fits(255 * 255),
+            "the terminating zero is one too many"
+        );
+        // 252 lacing values taken, three left
+        for _ in 0..63 {
+            writer.write_packet(&mut out, &[0; 1_000], 1).unwrap();
+        }
+        assert!(writer.fits(2 * 255 + 254));
+        assert!(!writer.fits(3 * 255));
+        assert!(!writer.fits(usize::MAX));
+        assert!(out.is_empty(), "nothing went out");
     }
 
     #[test]

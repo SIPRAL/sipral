@@ -476,14 +476,22 @@ impl<W: Write> Writer<W> {
             self.pages.finish(&mut self.out)?;
         } else {
             let max = self.granule + u64::from(self.held_samples);
+            // a last packet that does not fit the segment table sends out
+            // the page being filled first, and that page ends where the
+            // packets on it do
+            let floor = if !self.pages.is_empty() && !self.pages.fits(self.held.len()) {
+                self.granule
+            } else {
+                self.written_granule
+            };
             let end = match length {
                 None => max,
                 Some(requested) => {
                     let end = self.pre_skip.saturating_add(requested);
-                    if end > max || end < self.written_granule {
+                    if end > max || end < floor {
                         return Err(Error::Length {
                             requested,
-                            min: self.written_granule.saturating_sub(self.pre_skip),
+                            min: floor.saturating_sub(self.pre_skip),
                             max: max.saturating_sub(self.pre_skip),
                         });
                     }
@@ -786,6 +794,37 @@ mod tests {
         assert!(pages[3].is_continued());
         assert_eq!(pages[3].granule(), 63 * 960);
         assert_eq!(read_packets(&bytes).unwrap().len(), 67);
+    }
+
+    #[test]
+    fn a_last_packet_that_fills_the_segment_table_cannot_trim_behind_the_page_it_forces_out() {
+        let run = |length: u64| {
+            let mut writer = Writer::new(Vec::new(), &head(), &OpusTags::new(), 7).unwrap();
+            writer.set_max_page_duration(10_000).unwrap();
+            // sixty-three packets of four lacing values each take 252 of the
+            // 255; the sixty-fourth, held back for the end, needs four more,
+            // so writing it at the end sends out a page ending at 63 * 960
+            let big = vec![0x5A_u8; 1_000];
+            for _ in 0..64 {
+                writer.write_packet(&big, 960).unwrap();
+            }
+            writer.finish(Some(length))
+        };
+        assert!(matches!(
+            run(0),
+            Err(Error::Length {
+                requested: 0,
+                min: 60_168,
+                max: 61_128
+            })
+        ));
+        let bytes = run(60_168).unwrap();
+        let pages = pages(&bytes);
+        assert_eq!(pages.len(), 4);
+        assert_eq!(pages[2].granule(), 63 * 960);
+        assert_eq!(pages[3].granule(), 63 * 960);
+        assert!(pages[3].is_eos());
+        assert_eq!(read_packets(&bytes).unwrap().len(), 66);
     }
 
     #[test]
