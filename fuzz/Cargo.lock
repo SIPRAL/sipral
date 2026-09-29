@@ -662,6 +662,7 @@ version = "0.0.1"
 dependencies = [
  "aes",
  "aes-gcm",
+ "sipral-core",
  "zeroize",
 ]
 

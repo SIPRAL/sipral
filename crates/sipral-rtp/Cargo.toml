@@ -28,6 +28,10 @@ aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "z
 # optimiser is not allowed to remove, and that needs `unsafe`, which this
 # crate denies
 zeroize = "=1.9.0"
+# the session description model, for reading and writing the RFC 4585 and
+# RFC 5506 attributes through the same `Attribute` and `MediaDescription`
+# the rest of the tree negotiates with, rather than a second SDP parser
+sipral-core.workspace = true
 
 [lints]
 workspace = true

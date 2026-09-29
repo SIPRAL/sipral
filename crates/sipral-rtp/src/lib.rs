@@ -39,6 +39,7 @@
     )
 )]
 
+pub mod avpf;
 mod dtmf;
 mod emodel;
 mod endpoint;
