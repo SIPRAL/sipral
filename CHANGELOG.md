@@ -2307,6 +2307,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **On Android from API level 28 a client opens in device mode by default.** `SIPRAL_FEATURE_AUDIO_DEVICE` is now set there, so `SipralAudioMode.platformDefault` is `Device` with automatic activation and the engine, not the application, opens the microphone and the loudspeaker as a call's media starts; an application that reads `SipralMedia.frames` and runs its own audio opens its client with `SipralAudioMode.Application`, and one under the telecom framework with `Device(SipralAudioActivation.MANUAL)`, as the sample does.
 - **`max_dialogs` holds the calls this end places too.** A call counts
   from its INVITE on, and one placed at the ceiling is
   `SendError::LimitReached` before anything goes out; a refusal or timer B
