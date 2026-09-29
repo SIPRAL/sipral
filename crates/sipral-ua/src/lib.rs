@@ -101,6 +101,10 @@ mod screening;
 mod session;
 #[cfg(test)]
 mod signalling_tests;
+/// SIPREC recording metadata (RFC 7865, RFC 7866) and the pieces of the
+/// INVITE that offers a recording session, grouped under its own path: its
+/// model has a `Session` and a `Stream` of its own.
+pub mod siprec;
 mod subscription;
 #[cfg(test)]
 mod tests;

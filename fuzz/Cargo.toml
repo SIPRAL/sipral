@@ -267,3 +267,10 @@ path = "fuzz_targets/media_opus.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "multipart"
+path = "fuzz_targets/multipart.rs"
+test = false
+doc = false
+bench = false

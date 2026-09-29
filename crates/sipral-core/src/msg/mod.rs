@@ -21,6 +21,7 @@ mod header;
 mod lex;
 mod message;
 mod method;
+mod multipart;
 mod parse;
 mod route;
 mod scalar;
@@ -39,6 +40,10 @@ pub use header::HeaderName;
 pub use lex::{CommaList, LwsFields, Params, fields, is_quoted, trim, unfold, unquote};
 pub use message::{FieldValues, Invalid, MessageKind, OwnedMessage, RawMessage};
 pub use method::{InvalidStatusCode, Method, StatusCode};
+pub use multipart::{
+    BodyPart, BuiltMultipart, DispositionRef, Handling, Multipart, MultipartBuilder,
+    MultipartError, MultipartKind, MultipartLimits, Part, Unsupported,
+};
 pub(crate) use parse::field_value_len;
 pub use parse::{Limits, ParseMode, parse, parse_with_limits, salvage_request};
 pub use route::{RouteIter, RouteRef};
