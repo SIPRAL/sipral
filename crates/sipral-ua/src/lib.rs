@@ -50,6 +50,11 @@ mod answering;
 mod audit_tests;
 mod call;
 mod calls;
+/// The conference event package (RFC 4575): the document a focus notifies,
+/// and the merged picture of a conference kept from it — under its own path
+/// because its element types (`User`, `Endpoint`, `Media`) are the
+/// package's vocabulary, not this crate's.
+pub mod conference;
 mod contact;
 mod dialoginfo;
 /// Validation shared by every way a digit crosses this stack's boundary, and
@@ -72,6 +77,11 @@ mod message;
 mod mwi;
 mod options;
 mod parked;
+/// Presence documents (RFC 3863) with the rich presence activities of
+/// RFC 4480 — under their own path because `Tuple`, `Note` and `Contact`
+/// are PIDF's vocabulary, not this crate's.
+pub mod presence;
+mod publish;
 mod quality_report;
 mod reason;
 mod redirect;
@@ -105,6 +115,7 @@ pub use call::{
     CallEndReason, CallHandle, CallIdentity, CallState, Direction, ForkPolicy, OutgoingCall,
     OutgoingExtras,
 };
+pub use conference::{Conference, ConferenceInfo, ConferenceInfoError, ConferenceUpdate};
 pub use dialoginfo::{
     DialogEnded, DialogInfo, DialogInfoError, DialogInfoTable, DialogPhase, Initiated, Participant,
     WatchedDialog,
@@ -121,6 +132,10 @@ pub use lifecycle::{
 };
 pub use message::{MAX_UNSAFE_BODY_BYTES, MessageHandle};
 pub use mwi::{MessageClass, MessageSummary, MessageSummaryError};
+pub use presence::{Presence, PresenceError};
+pub use publish::{
+    Publication, PublishError, PublishEvent, PublishFailure, PublishKind, PublishRequest,
+};
 pub use quality_report::{QualityReportMetrics, RemoteQualityMetrics};
 pub use reason::{Reason, ReasonProtocol};
 pub use redirect::Redirect;

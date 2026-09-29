@@ -12,6 +12,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Conferences, presence documents and publishing, in `sipral-ua`.**
+  `conference` reads RFC 4575's `application/conference-info+xml` and
+  `Conference` merges full and partial notifications by §4.6: keyed users,
+  endpoints, media and entries merged, `deleted` removed, a stale version
+  discarded, and a partial document after a lost one held back with
+  `ConferenceUpdate::Resubscribe`, which `UserAgent::request_full_state`
+  answers with a refresh. `UserAgent::subscribe_conference` (and
+  `Subscribe::conference`) sends `Event: conference`. `presence` reads and
+  writes PIDF (RFC 3863) with the RPID activities in common use (RFC 4480).
+  `Publication` is an RFC 3903 PUBLISH client driven like every other
+  sans-I/O machine here: initial publish, `SIP-ETag` refreshes at the
+  registration margin, modify, remove, 412 republished afresh, 423 retried
+  with `Min-Expires`, 489 surfaced. Both XML formats go through the
+  dialog-info reader and inherit its refusals. No C ABI yet.
 - **Call audio as files, and L16 on RTP.** `sipral_media::formats`
   (none of it needs the `opus` feature): `ogg` writes RFC 3533 pages
   (lacing, continued/BOS/EOS flags, granule positions, the CRC with
