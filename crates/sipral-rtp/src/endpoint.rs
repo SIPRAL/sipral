@@ -943,7 +943,7 @@ impl RtpSession {
     /// Point the stream at a new address and forget the latch, for a
     /// re-INVITE that moved the far end. The next valid packet latches again,
     /// unless it comes from where the far end was: that one is still played,
-    /// and leaves the latch open until [`STILL_THERE`] of them have.
+    /// and leaves the latch open until half a second of them has.
     pub fn relocate(&mut self, remote: SocketAddr) {
         let was = self.inbound.latch.unwrap_or(self.inbound.signalled);
         self.inbound.left = (was != remote).then_some((was, 0));
