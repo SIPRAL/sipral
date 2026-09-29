@@ -338,6 +338,31 @@ mod tests {
     }
 
     #[test]
+    fn a_range_holds_numbers_of_its_start_length_only() {
+        // 0100 to 0199: 150 and 00150 have the value of one of them, and
+        // are other numbers
+        let list = TnAuthList::new(vec![TnEntry::Range {
+            start: "0100".to_owned(),
+            count: 100,
+        }])
+        .unwrap();
+        assert_eq!(list.covers(&tn("0150"), false), Some(Coverage::Range));
+        assert_eq!(list.covers(&tn("150"), false), None);
+        assert_eq!(list.covers(&tn("00150"), false), None);
+        // and a range that runs past its last digit is read without overflow
+        let list = TnAuthList::new(vec![TnEntry::Range {
+            start: "999999999999998".to_owned(),
+            count: u64::MAX,
+        }])
+        .unwrap();
+        assert_eq!(
+            list.covers(&tn("999999999999999"), false),
+            Some(Coverage::Range)
+        );
+        assert_eq!(list.covers(&tn("99999999999999"), false), None);
+    }
+
+    #[test]
     fn a_range_as_wide_as_a_u64() {
         let list = TnAuthList::new(vec![TnEntry::Range {
             start: "0".to_owned(),
