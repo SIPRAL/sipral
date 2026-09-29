@@ -12065,3 +12065,275 @@ fn a_lost_packet_is_asked_for_and_the_sender_counts_it() {
     assert_eq!(heard.nacks_received, 1, "{heard:?}");
     assert_eq!(heard.packets_asked_for, 1);
 }
+
+// -- real-time text (RFC 4103) ------------------------------------------------
+
+fn caller_text() -> SocketAddr {
+    "192.0.2.1:41000".parse().expect("an address")
+}
+
+fn callee_text() -> SocketAddr {
+    "192.0.2.2:41002".parse().expect("an address")
+}
+
+/// A call placed with a text socket, answered with one when `answering` is
+/// set, and taken as far as both sessions running.
+fn text_call(catalog: &CodecCatalog, answering: bool) -> (Pair, CallHandle, CallHandle) {
+    let mut pair = Pair::new(catalog.clone());
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let now = pair.now;
+    let call = pair
+        .caller
+        .engine
+        .place_with(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            CallMedia::new(catalog.clone(), MediaConfig::default()).text(caller_text()),
+            now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(now, false);
+    for datagram in pair.caller.outbound() {
+        pair.callee.deliver(&datagram, caller_sip(), now);
+    }
+    pair.callee.drain(now, false);
+    let remote = pair.callee.call().expect("the callee heard the INVITE");
+    let media = CallMedia::new(catalog.clone(), MediaConfig::default());
+    let media = if answering {
+        media.text(callee_text())
+    } else {
+        media
+    };
+    pair.callee
+        .engine
+        .answer_with(&mut pair.callee.agent, remote, callee_media(), media, now)
+        .expect("the answer goes");
+    pair.callee.drain(now, false);
+    pair.settle();
+    (pair, call, remote)
+}
+
+/// Move text between the two calls for `span`, a tick at a time, dropping
+/// the caller's packets whose index `lose` says to (counted from the start
+/// of this span), and say everything the callee has heard since the call
+/// began, and in how many places text was lost.
+fn carry_text(
+    pair: &mut Pair,
+    call: CallHandle,
+    remote: CallHandle,
+    span: Duration,
+    lose: impl Fn(usize) -> bool,
+) -> (String, u32) {
+    let mut sent = 0;
+    let mut heard = String::new();
+    let mut missing = 0;
+    let end = pair.now + span;
+    while pair.now < end {
+        let now = pair.now;
+        loop {
+            let packet = pair
+                .caller
+                .engine
+                .session(call)
+                .expect("the caller's media")
+                .poll_text(now)
+                .map(|datagram| (datagram.destination, datagram.payload.to_vec()));
+            let Some((destination, datagram)) = packet else {
+                break;
+            };
+            assert_eq!(
+                destination,
+                callee_text(),
+                "sent to the far end's text socket"
+            );
+            let index = sent;
+            sent += 1;
+            if lose(index) {
+                continue;
+            }
+            assert!(
+                pair.callee
+                    .engine
+                    .session(remote)
+                    .expect("the callee's media")
+                    .receive_text(&datagram, caller_text(), now),
+                "the callee took packet {index}"
+            );
+        }
+        pair.callee.engine.handle_timeout(now);
+        pair.callee.drain(now, false);
+        pair.advance();
+    }
+    for event in pair.callee.media_events() {
+        if let MediaEvent::TextReceived {
+            text,
+            missing: lost,
+        } = event
+        {
+            heard.push_str(text);
+            missing += lost;
+        }
+    }
+    (heard, missing)
+}
+
+#[test]
+fn a_call_given_a_text_socket_offers_rfc_4103s_stream_and_the_answer_takes_it() {
+    let (pair, _, _) = text_call(
+        &CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+        true,
+    );
+    let offer = pair.callee.offer_received().expect("an offer");
+    let text = offer
+        .media
+        .iter()
+        .find(|stream| stream.media == "text")
+        .expect("an m=text stream beside the audio");
+    assert_eq!(text.port, caller_text().port());
+    assert_eq!(text.proto, "RTP/AVP");
+    assert_eq!(text.formats, ["100", "98"], "red first, t140 beneath it");
+    let lines = names(text);
+    assert!(
+        lines.contains(&"rtpmap:98 t140/1000".to_owned()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"rtpmap:100 red/1000".to_owned()),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"fmtp:100 98/98/98".to_owned()), "{lines:?}");
+    assert_eq!(text.bandwidth, ["RS:0", "RR:0"], "no RTCP on it");
+    let answer = pair.caller.answer_received().expect("an answer");
+    let taken = answer
+        .media
+        .iter()
+        .find(|stream| stream.media == "text")
+        .expect("the answer's m=text");
+    assert_eq!(taken.port, callee_text().port());
+    assert_eq!(taken.formats, ["100", "98"]);
+    assert_eq!(taken.bandwidth, ["RS:0", "RR:0"]);
+}
+
+#[test]
+fn what_one_end_types_the_other_reads_in_order_with_erasures_and_new_lines() {
+    let (mut pair, call, remote) = text_call(
+        &CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+        true,
+    );
+    for side in [call, remote] {
+        let has = if side == call {
+            pair.caller.engine.session(side).map(|s| s.has_text())
+        } else {
+            pair.callee.engine.session(side).map(|s| s.has_text())
+        };
+        assert_eq!(has, Some(true));
+    }
+    pair.caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .send_text("hellp\u{8}o\r\nthere")
+        .expect("queued");
+    let (heard, missing) = carry_text(&mut pair, call, remote, Duration::from_secs(3), |_| false);
+    assert_eq!(heard, "hellp\u{8}o\u{2028}there");
+    assert_eq!(missing, 0);
+}
+
+#[test]
+fn a_lost_packet_is_recovered_from_redundancy_and_three_are_marked_lost() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let (mut pair, call, remote) = text_call(&catalog, true);
+    let type_slowly = |pair: &mut Pair, text: &str| {
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .send_text(text)
+            .expect("queued");
+    };
+    type_slowly(&mut pair, "ab");
+    // the first packet is lost; the two after it carry it again (RFC 4103 §4)
+    let (heard, missing) = carry_text(&mut pair, call, remote, Duration::from_secs(2), |index| {
+        index == 0
+    });
+    assert_eq!(heard, "ab");
+    assert_eq!(missing, 0);
+
+    let (mut pair, call, remote) = text_call(&catalog, true);
+    // the far end has to have heard the stream before a gap in it is a gap
+    type_slowly_on(&mut pair, call, "a");
+    let (before, _) = carry_text(&mut pair, call, remote, Duration::from_secs(1), |_| false);
+    assert_eq!(before, "a");
+    let typed = |pair: &mut Pair, text: &str| {
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .send_text(text)
+            .expect("queued");
+        carry_text(pair, call, remote, Duration::from_millis(300), |_| true)
+    };
+    // three packets in a row lost: past what two generations can repair
+    let _ = typed(&mut pair, "x");
+    let _ = typed(&mut pair, "y");
+    let _ = typed(&mut pair, "z");
+    pair.caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .send_text("!")
+        .expect("queued");
+    let (heard, missing) = carry_text(&mut pair, call, remote, Duration::from_secs(3), |_| false);
+    assert_eq!(missing, 1, "one block lost, marked once (RFC 4103 §5.3)");
+    assert_eq!(
+        heard, "a\u{FFFD}yz!",
+        "the block past two generations is lost, the two after it are not"
+    );
+}
+
+fn type_slowly_on(pair: &mut Pair, call: CallHandle, text: &str) {
+    pair.caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .send_text(text)
+        .expect("queued");
+}
+
+#[test]
+fn an_answerer_with_no_text_socket_refuses_the_stream_and_there_is_no_text() {
+    let (mut pair, call, _) = text_call(
+        &CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+        false,
+    );
+    let answer = pair.caller.answer_received().expect("an answer");
+    let refused = answer
+        .media
+        .iter()
+        .find(|stream| stream.media == "text")
+        .expect("the stream is answered in its place");
+    assert!(refused.is_rejected(), "port zero");
+    let mut session = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media");
+    assert!(!session.has_text());
+    assert_eq!(session.send_text("hi"), Err(MediaError::NoText));
+}
+
+#[test]
+fn a_call_that_keys_its_audio_offers_no_text() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered);
+    let (pair, _, _) = text_call(&catalog, true);
+    let offer = pair.callee.offer_received().expect("an offer");
+    assert!(
+        offer.media.iter().all(|stream| stream.media != "text"),
+        "typed text is not sent in the clear beside encrypted audio"
+    );
+}

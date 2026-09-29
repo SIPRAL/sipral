@@ -373,6 +373,12 @@ pub struct MediaSession {
     /// frame in it ([`MediaSession::receive_stream`]).
     #[cfg(feature = "ice")]
     stream_in: Vec<u8>,
+    /// The call's real-time text stream (RFC 4103), when both descriptions
+    /// agreed one: see [`crate::text`].
+    text: Option<crate::text::TextStream>,
+    /// One text datagram, held rather than allocated, for the borrow
+    /// [`MediaSession::poll_text`] hands back.
+    text_out: Vec<u8>,
 }
 
 /// Which of this session's own buffers a datagram was built in.
@@ -571,6 +577,8 @@ impl MediaSession {
             ice,
             #[cfg(feature = "ice")]
             stream_in: Vec::new(),
+            text: None,
+            text_out: Vec::new(),
         })
     }
 
@@ -1936,7 +1944,14 @@ impl MediaSession {
         let ice = self.ice.as_ref().and_then(crate::ice::Ice::deadline);
         #[cfg(not(feature = "ice"))]
         let ice = None;
-        [rtcp, stall, handshake, ice].into_iter().flatten().min()
+        let text = self
+            .text
+            .as_ref()
+            .and_then(crate::text::TextStream::deadline);
+        [rtcp, stall, handshake, ice, text]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Time has passed. The only thing this decides is whether the stream has
@@ -1964,6 +1979,11 @@ impl MediaSession {
             ice.top_up();
             ice.handle_timeout(now);
             self.drain_ice(now);
+        }
+        // and the text stream's gaps, which are given up on its own clock
+        if let Some(text) = self.text.as_mut() {
+            text.handle_timeout(now);
+            self.report_text();
         }
         let Some(after) = self.stall_after else {
             return;
@@ -2165,6 +2185,97 @@ impl MediaSession {
     /// This session's own timeline, which is what `sipral-rtp` counts in.
     fn elapsed(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.origin)
+    }
+}
+
+// -- real-time text (RFC 4103) -----------------------------------------------
+
+impl MediaSession {
+    /// Whether the call negotiated a real-time text stream.
+    #[must_use]
+    pub const fn has_text(&self) -> bool {
+        self.text.is_some()
+    }
+
+    /// Queue typed text for the far end: sent in the next transmission
+    /// interval (300 ms), at no more characters a second than the far end
+    /// said it takes, each block carried twice more as redundancy where both
+    /// ends agreed `red` (RFC 4103 §4, §5).
+    ///
+    /// A CR LF, a lone CR or a lone LF goes as the LINE SEPARATOR T.140 uses
+    /// for a new line, and BACKSPACE (U+0008) erases the last character at
+    /// the far end.
+    ///
+    /// # Errors
+    /// [`MediaError::NoText`] on a call that negotiated no text stream, and
+    /// [`MediaError::TextBufferFull`] for more than it holds unsent.
+    pub fn send_text(&mut self, text: &str) -> Result<(), MediaError> {
+        self.text.as_mut().ok_or(MediaError::NoText)?.send(text)
+    }
+
+    /// The next text datagram due, to send from the call's text socket.
+    ///
+    /// Call it whenever [`MediaSession::poll_timeout`] says to, or with every
+    /// frame of audio: `None` until a packet is due.
+    #[must_use]
+    pub fn poll_text(&mut self, now: Instant) -> Option<Datagram<'_>> {
+        let (destination, packet) = self.text.as_mut()?.poll_transmit(now)?;
+        self.text_out = packet;
+        Some(Datagram {
+            destination,
+            payload: &self.text_out,
+            #[cfg(feature = "ice")]
+            transport: crate::TurnTransport::Udp,
+        })
+    }
+
+    /// Take a datagram off the call's text socket. `false` when it was not
+    /// this call's text: not RTP, another payload type, from somewhere other
+    /// than where the stream has latched, or on a call with no text.
+    ///
+    /// What was typed arrives as [`MediaEvent::TextReceived`].
+    pub fn receive_text(&mut self, datagram: &[u8], from: SocketAddr, now: Instant) -> bool {
+        let Some(text) = self.text.as_mut() else {
+            return false;
+        };
+        let taken = text.receive(datagram, from, now);
+        self.report_text();
+        taken
+    }
+
+    /// What two descriptions agreed about text, taken up: the stream opened
+    /// on the first agreement, moved by a later one, and closed by one that
+    /// refused it.
+    pub(crate) fn set_text(&mut self, plan: Option<crate::text::TextPlan>, now: Instant) {
+        match (plan, self.text.as_mut()) {
+            (Some(plan), Some(running)) => running.update(plan),
+            (Some(plan), None) => {
+                let numbers = (
+                    self.draws.word(),
+                    u16::try_from(self.draws.word() & 0x7fff).unwrap_or(0),
+                    self.draws.word(),
+                );
+                match crate::text::TextStream::open(plan, numbers, now) {
+                    Ok(stream) => self.text = Some(stream),
+                    Err(error) => self.events.push_back(MediaEvent::Failed(error)),
+                }
+            }
+            (None, _) => self.text = None,
+        }
+    }
+
+    /// Raise what the text stream received, if it received anything.
+    fn report_text(&mut self) {
+        if let Some(heard) = self
+            .text
+            .as_mut()
+            .and_then(crate::text::TextStream::take_heard)
+        {
+            self.events.push_back(MediaEvent::TextReceived {
+                text: heard.text,
+                missing: heard.missing,
+            });
+        }
     }
 }
 
@@ -2929,13 +3040,20 @@ impl Draws {
 
     /// One draw, uniform on `[0, 1)`.
     fn unit(&mut self) -> f64 {
+        // the top thirty-two bits over two to the thirty-two: exactly
+        // representable, and short of one by construction
+        f64::from(self.word()) / 4_294_967_296.0
+    }
+
+    /// One draw of thirty-two bits, the top half of the next output: also
+    /// the numbers RFC 3550 §5.1 asks a second stream of the same call to
+    /// start from.
+    fn word(&mut self) -> u32 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^= z >> 31;
-        // the top thirty-two bits over two to the thirty-two: exactly
-        // representable, and short of one by construction
-        f64::from(u32::try_from(z >> 32).unwrap_or(0)) / 4_294_967_296.0
+        u32::try_from(z >> 32).unwrap_or(0)
     }
 }

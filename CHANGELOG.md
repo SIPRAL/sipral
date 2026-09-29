@@ -1362,7 +1362,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   events. `TextFormat` writes the `m=text` section with `t140/1000`,
   `red/1000`, the red `fmtp` and `cps`, and reads the two `fmtp` values
   back. A new fuzz target, `rtt`, drives the receiver with arbitrary
-  datagrams. Not yet reachable through the C ABI.
+  datagrams.
+- **Real-time text in calls.** `CallMedia::text` gives a call a second socket for RFC 4103 text: the offer carries RFC 4103 §7's `m=text` (`red/1000` over `t140/1000`, two generations, `b=RS:0`/`b=RR:0`), an offered text stream is answered on it, each end sends with the other's payload numbers and the far end's `cps`, and `MediaSession::send_text`, `poll_text` (or `MediaEngine::poll_text`) and `receive_text` carry it; `MediaEvent::TextReceived` says what was typed, erasures as U+0008, new lines as U+2028 and a U+FFFD for each block no redundant copy recovered. A call that keys its audio or uses ICE neither offers nor takes text.
 
 ### Fixed
 

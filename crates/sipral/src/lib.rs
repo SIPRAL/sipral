@@ -176,6 +176,7 @@ mod state;
 mod stats;
 #[cfg(test)]
 mod tests;
+mod text;
 
 pub use capabilities::{Capabilities, SrtpKeying};
 pub use clock::WallClock;

@@ -2307,6 +2307,46 @@ list survives the checklist it describes; a restart (RFC 8445 §9) starts it
 again with the new session. A call not using ICE has one path, the address
 its description named, and an empty list.
 
+## Real-time text in a call
+
+RFC 4103 puts T.140 on an RTP session of its own, so a call's text has a port
+of its own: `CallMedia::text(address)` gives a call the second socket the
+application bound for it, on `place_with`, `ring_with`, `answer_with` or
+`accept_transfer_with`. The offer then carries RFC 4103 §7's own stream beside
+the audio — `m=text <port> RTP/AVP 100 98`, `t140/1000` on 98 inside
+`red/1000` on 100 with `a=fmtp:100 98/98/98` (two redundant generations, which
+§4 recommends because a lost packet loses what was typed rather than a few
+milliseconds of sound) — and an offered `m=text` is answered on it, with `red`
+kept only where the offer carried it over `t140`. Each end sends with the
+payload numbers the other's description gave (RFC 3264 §5.1) and receives
+under its own, and holds its characters a second to the far end's `cps`. The
+stream says `b=RS:0` and `b=RR:0` (RFC 3556 §2): it sends no RTCP and ignores
+what arrives, since the call's audio stream already reports on the path.
+
+`MediaSession::send_text` queues what is typed — a CR LF, CR or LF becomes the
+LINE SEPARATOR T.140 uses, and BACKSPACE erases at the far end — and the
+sender in `sipral_rtp::rtt` gathers it into one block every 300 ms.
+`MediaSession::poll_text` (or `MediaEngine::poll_text` for every call at once)
+hands out what is due, to send from the text socket, and
+`MediaSession::receive_text` takes what arrives on it; like the audio, the
+stream latches onto where the far end's text comes from and sends there from
+then on. What was typed arrives as `MediaEvent::TextReceived`, in order:
+characters as they are, an erasure as U+0008, a new line as U+2028, an alert
+as U+0007, and one U+FFFD for each block that no redundant copy recovered once
+the receiver has waited a second for it (RFC 4103 §5.3) — so a single lost
+packet costs nothing, and three in a row cost one block. A re-offer that
+refuses the stream closes it; one that holds the call stops the sending the
+way it stops the audio.
+
+**Not on a keyed call, nor with ICE.** The stream is plain `RTP/AVP` and has
+no candidates, so a call whose catalogue offers SRTP or ICE does not offer it,
+and an offer whose audio is keyed is answered without it: typed text is
+exactly what an encrypted call is encrypted to hide, and a stream no
+candidate describes would not reach a peer behind a NAT that ICE is there for.
+The text socket is described by the call's own `c=` with its own port, so a
+call described by a public address (`CallMedia::public_address`) needs the
+text socket reachable at that address's host too.
+
 ## A local conference of two calls
 
 Nothing like a SIP conference server, and nothing that reaches `sipral-ua`:

@@ -231,4 +231,21 @@ pub enum MediaEvent {
     /// [`MediaSession::capture`](crate::MediaSession::capture) it is next
     /// given directly.
     Unjoined,
+    /// The far end typed something on the call's real-time text stream (RFC
+    /// 4103), in the order it typed it.
+    ///
+    /// Raised as blocks arrive and are put back in order, so one keystroke or
+    /// a whole burst may come in one event. A lost block that no redundant
+    /// copy could recover is marked where it was, and the text carries on
+    /// after it.
+    TextReceived {
+        /// What was typed: characters as they are, an erasure of the last
+        /// character as BACKSPACE (U+0008), a new line as LINE SEPARATOR
+        /// (U+2028), an alert as BELL (U+0007), and REPLACEMENT CHARACTER
+        /// (U+FFFD) where text was lost (RFC 4103 §5.3).
+        text: String,
+        /// How many blocks of text were lost: the REPLACEMENT CHARACTERs in
+        /// `text`, one per block (RFC 4103 §5.3).
+        missing: u32,
+    },
 }

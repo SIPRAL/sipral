@@ -246,6 +246,9 @@ struct Managed {
     /// until then a refusal leaves the call on the list it had, as RFC 3261
     /// §14.1 leaves the session.
     pending: Option<Pending>,
+    /// Where this call's real-time text arrives, when it was given a socket
+    /// for it ([`CallMedia::text`]).
+    text: Option<SocketAddr>,
 }
 
 /// A codec change on its way to the far end.
@@ -295,6 +298,9 @@ pub struct CallMedia {
     /// see [`CallMedia::relay`].
     #[cfg(feature = "ice")]
     pub relay: Option<crate::Relay>,
+    /// Where the call's real-time text arrives, when it offers or takes one
+    /// — see [`CallMedia::text`].
+    pub text: Option<SocketAddr>,
 }
 
 impl CallMedia {
@@ -307,7 +313,27 @@ impl CallMedia {
             public: None,
             #[cfg(feature = "ice")]
             relay: None,
+            text: None,
         }
+    }
+
+    /// Give the call real-time text (RFC 4103), on a second socket the
+    /// application bound at `address`: an offer carries an `m=text` stream
+    /// beside the audio, and an offer that carries one is answered with it.
+    /// Once both descriptions agree it, [`MediaSession::send_text`] sends,
+    /// [`MediaSession::poll_text`] and [`MediaSession::receive_text`] carry
+    /// the packets on this socket, and [`MediaEvent::TextReceived`] says
+    /// what the far end typed (`crate::text` has the whole of it).
+    ///
+    /// Text runs on plain `RTP/AVP` with no RTCP, so a call whose catalogue
+    /// offers SRTP or ICE, or an offer whose audio is keyed, leaves it out
+    /// rather than send typed text in the clear beside encrypted audio, or
+    /// a stream no candidate describes. The address goes into the
+    /// description as the call's own `c=` with this socket's port.
+    #[must_use]
+    pub const fn text(mut self, address: SocketAddr) -> Self {
+        self.text = Some(address);
+        self
     }
 
     /// Give the call a relay on a TURN server, allocated from its media
@@ -1843,6 +1869,7 @@ impl MediaEngine {
             catalog,
             config,
             public,
+            text,
             ..
         } = media;
         let public = public.or_else(|| handed.mapped());
@@ -1861,6 +1888,7 @@ impl MediaEngine {
             1,
             keys,
             keyed(dtls.as_ref()),
+            text,
         );
         describe_ice(&mut offer, ice.as_ref(), None);
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
@@ -1890,6 +1918,7 @@ impl MediaEngine {
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
+                text,
             },
         );
         Ok(call)
@@ -1965,6 +1994,7 @@ impl MediaEngine {
             catalog,
             config,
             public,
+            text,
             ..
         } = media;
         let public = public.or_else(|| handed.mapped());
@@ -1981,6 +2011,7 @@ impl MediaEngine {
             1,
             keys,
             keyed(dtls.as_ref()),
+            text,
         );
         describe_ice(&mut offer, ice.as_ref(), None);
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
@@ -2009,6 +2040,7 @@ impl MediaEngine {
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
+                text,
             },
         );
         Ok(new)
@@ -2106,6 +2138,7 @@ impl MediaEngine {
             catalog,
             config,
             public,
+            text,
             ..
         } = media;
         let public = public.or_else(|| handed.mapped());
@@ -2135,10 +2168,10 @@ impl MediaEngine {
             &catalog,
             &offer,
             public.unwrap_or(local),
-            session_id,
-            version,
+            (session_id, version),
             keys.as_ref(),
             keyed(dtls.as_ref()),
+            text,
         )?;
         describe_ice(&mut description, ice.as_ref(), Some(&offer));
         let bytes = description.to_bytes();
@@ -2153,6 +2186,7 @@ impl MediaEngine {
             managed.version = version;
             managed.catalog = catalog;
             managed.config = config;
+            managed.text = text;
             #[cfg(feature = "dtls")]
             {
                 managed.dtls_identity = managed.dtls_identity.take().or(named);
@@ -2262,6 +2296,7 @@ impl MediaEngine {
             catalog,
             config,
             public,
+            text,
             ..
         } = media;
         let public = public.or_else(|| handed.mapped());
@@ -2297,10 +2332,10 @@ impl MediaEngine {
                 &catalog,
                 offer,
                 described,
-                session_id,
-                version,
+                (session_id, version),
                 keys.as_ref(),
                 keyed(dtls.as_ref()),
+                text,
             )?
         } else {
             let keys = catalog.srtp().offers().then(|| self.draw_offer_keys());
@@ -2311,6 +2346,7 @@ impl MediaEngine {
                 version,
                 keys,
                 keyed(dtls.as_ref()),
+                text,
             )
         };
         describe_ice(&mut description, ice.as_ref(), offered.as_ref());
@@ -2326,6 +2362,7 @@ impl MediaEngine {
             managed.version = version;
             managed.catalog = catalog;
             managed.config = config;
+            managed.text = text;
             #[cfg(feature = "dtls")]
             {
                 managed.dtls_identity = managed.dtls_identity.take().or(named);
@@ -3120,6 +3157,20 @@ impl MediaEngine {
         None
     }
 
+    /// The next real-time text datagram any call has due, and where: sent
+    /// from that call's text socket ([`CallMedia::text`]), never its audio
+    /// one. A thread that carries one call's media asks that call alone with
+    /// [`MediaSession::poll_text`] instead.
+    #[must_use]
+    pub fn poll_text(&mut self, now: Instant) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
+        self.sessions.iter().find_map(|(call, held)| {
+            let mut slot = share::lock(held);
+            slot.session
+                .poll_text(now)
+                .map(|datagram| (*call, datagram.destination, datagram.payload.to_vec()))
+        })
+    }
+
     /// The next event a session has to report.
     ///
     /// Taken from the list of calls whose sessions raised one, so the
@@ -3265,6 +3316,9 @@ impl MediaEngine {
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
+                // a text socket is the application's to give, when it rings
+                // or answers
+                text: None,
             },
         );
     }
@@ -3447,6 +3501,7 @@ impl MediaEngine {
         let version = managed.version.saturating_add(1);
         let session_id = managed.session_id;
         let catalog = managed.catalog.clone();
+        let text = managed.text;
         // RFC 4568 §7.1.4 lets an answerer change its master key and warns in
         // the same breath that "the offerer will not be able to process
         // packets secured via this master key until the answer is received".
@@ -3499,10 +3554,10 @@ impl MediaEngine {
             &catalog,
             &offer,
             public.unwrap_or(address),
-            session_id,
-            version,
+            (session_id, version),
             keys.as_ref(),
             keyed(dtls.as_ref()),
+            text,
         ) {
             // RFC 3261 §14.2: "If the new session description is not
             // acceptable, the UAS can reject it by returning a 488", and the
@@ -3738,6 +3793,7 @@ impl MediaEngine {
             }
             _ => None,
         };
+        let text = crate::text::plan(local, remote);
         // D5: recorded here, at the point the negotiation is worked out, from
         // the far end's own description and this call's own catalogue —
         // never reconstructed later from state that may have moved on
@@ -3790,6 +3846,7 @@ impl MediaEngine {
                 if let Some(agreed) = feedback {
                     slot.session.use_feedback(agreed, now);
                 }
+                slot.session.set_text(text, now);
                 drop(slot);
                 match adopted {
                     Ok(()) if unchanged => {}
@@ -3810,7 +3867,14 @@ impl MediaEngine {
         }
         // a different codec needs a different encoder, a different decoder
         // and a different frame length, so it needs a different session
-        self.start(call, &plan, codec, (annex_b, feedback), candidates, now);
+        self.start(
+            call,
+            &plan,
+            codec,
+            (annex_b, feedback, text),
+            candidates,
+            now,
+        );
     }
 
     /// Open the stream for a plan, or carry the one that is running onto a
@@ -3821,18 +3885,23 @@ impl MediaEngine {
     /// accumulated survive a codec change. [`MediaSession::reformat`] says
     /// what that is and why each piece of it matters.
     ///
-    /// `agreed` is whether G.729's Annex B is in use, and what RTCP feedback
-    /// the descriptions agreed, which the stream runs from its first report.
+    /// `agreed` is whether G.729's Annex B is in use, what RTCP feedback the
+    /// descriptions agreed, which the stream runs from its first report, and
+    /// what they agreed about real-time text.
     fn start(
         &mut self,
         call: CallHandle,
         plan: &MediaPlan,
         codec: Codec,
-        agreed: (bool, Option<sipral_rtp::avpf::Negotiated>),
+        agreed: (
+            bool,
+            Option<sipral_rtp::avpf::Negotiated>,
+            Option<crate::text::TextPlan>,
+        ),
         candidates: Vec<CodecCandidate>,
         now: Instant,
     ) {
-        let (annex_b, feedback) = agreed;
+        let (annex_b, feedback, text) = agreed;
         let Some(managed) = self.calls.get(&call) else {
             return;
         };
@@ -3850,6 +3919,7 @@ impl MediaEngine {
                 if let Some(agreed) = feedback {
                     slot.session.use_feedback(agreed, now);
                 }
+                slot.session.set_text(text, now);
                 reformatted
             }
             None => {
@@ -3890,6 +3960,7 @@ impl MediaEngine {
                 if let Some(agreed) = feedback {
                     session.use_feedback(agreed, now);
                 }
+                session.set_text(text, now);
                 self.keep_session(call, session);
             }),
         };
@@ -4271,6 +4342,7 @@ fn write_offer(
     version: u64,
     keys: Option<[KeySalt; keying::OFFERED.len()]>,
     dtls: Option<Keyed<'_>>,
+    text: Option<SocketAddr>,
 ) -> SessionDescription {
     let mut description = SessionDescription::new(
         Origin::new(session_id, version, address.ip()),
@@ -4283,7 +4355,23 @@ fn write_offer(
         crate::feedback::offer(&mut stream);
     }
     description.media.push(stream);
+    if let Some(text) = text.filter(|_| text_offered(catalog)) {
+        description.media.push(crate::text::offer(text.port()));
+    }
     description
+}
+
+/// Whether a call on `catalog` offers real-time text: only on plain RTP and
+/// without ICE, since the text stream is neither keyed nor given candidates
+/// (`crate::text`).
+fn text_offered(catalog: &CodecCatalog) -> bool {
+    !catalog.srtp().offers() && !catalog.ice().offers()
+}
+
+/// Whether a call on `catalog` takes the text stream `offer` carries: the
+/// same, and only beside audio the offer did not key.
+fn text_answered(catalog: &CodecCatalog, offer: &SessionDescription) -> bool {
+    !any_secure_stream(offer) && !catalog.srtp().requires() && !catalog.ice().offers()
 }
 
 /// Whether this call will let a stream described like this carry audio.
@@ -4388,20 +4476,37 @@ fn keying_holds(
 /// second one; RFC 3264 §6 wants the refusal written as a port of zero in
 /// the same position rather than a stream left out, which is what
 /// [`StreamAnswer::Reject`] produces.
+///
+/// The one exception is real-time text: a call given a text socket
+/// ([`CallMedia::text`]) takes the first `m=text` stream on it, when
+/// [`text_answered`] allows, and says it runs no RTCP.
 fn write_answer(
     catalog: &CodecCatalog,
     offer: &SessionDescription,
     address: SocketAddr,
-    session_id: u64,
-    version: u64,
+    (session_id, version): (u64, u64),
     keys: Option<&KeySalt>,
     dtls: Option<Keyed<'_>>,
+    text: Option<SocketAddr>,
 ) -> Result<SessionDescription, MediaError> {
     let mut taken = false;
+    let mut text = text.filter(|_| text_answered(catalog, offer));
+    let mut text_at = None;
     let streams: Vec<StreamAnswer> = offer
         .media
         .iter()
-        .map(|offered| {
+        .enumerate()
+        .map(|(index, offered)| {
+            if offered.media == crate::text::TEXT && !offered.is_rejected() {
+                let Some(socket) = text.take() else {
+                    return StreamAnswer::Reject;
+                };
+                let answer = crate::text::answer(offered, socket.port());
+                if matches!(answer, StreamAnswer::Accept(_)) {
+                    text_at = Some(index);
+                }
+                return answer;
+            }
             if taken {
                 return StreamAnswer::Reject;
             }
@@ -4410,13 +4515,17 @@ fn write_answer(
             answer
         })
         .collect();
-    offer
+    let mut answer = offer
         .answer(
             Origin::new(session_id, version, address.ip()),
             Connection::new(address.ip()),
             &streams,
         )
-        .map_err(MediaError::from)
+        .map_err(MediaError::from)?;
+    if let Some(index) = text_at {
+        crate::text::no_rtcp(&mut answer, index);
+    }
+    Ok(answer)
 }
 
 /// What to do with one offered stream, kept to what `catalog` holds.
@@ -5330,8 +5439,16 @@ mod answer_parameters {
 
     fn answered(catalog: &CodecCatalog, stream: &str) -> SessionDescription {
         let address: SocketAddr = "192.0.2.1:40000".parse().expect("an address");
-        write_answer(catalog, &described(stream), address, 1, 1, None, None)
-            .expect("the offer is answered")
+        write_answer(
+            catalog,
+            &described(stream),
+            address,
+            (1, 1),
+            None,
+            None,
+            None,
+        )
+        .expect("the offer is answered")
     }
 
     /// RFC 4856 §2.1.9 reads G.729 with no `annexb` as G.729 with Annex B.
