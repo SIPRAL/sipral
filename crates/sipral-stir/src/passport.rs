@@ -256,19 +256,26 @@ impl Claims {
     }
 
     /// The claims as a JSON object, the SHAKEN pair only when `shaken`.
+    ///
+    /// RFC 8225 §5.2.1: "Within the "tn" and "uri" arrays, the identity
+    /// strings should be put in lexicographical order", which is also what
+    /// lets a verifier rebuild a compact form's claims from a request that
+    /// lists its destinations in another order.
     pub(crate) fn value(&self, shaken: bool) -> Value {
         let mut dest = Vec::new();
         if !self.dest.tn.is_empty() {
-            let numbers = self
-                .dest
-                .tn
-                .iter()
-                .map(|tn| Value::String(tn.0.clone()))
+            let mut numbers: Vec<&str> = self.dest.tn.iter().map(|tn| tn.0.as_str()).collect();
+            numbers.sort_unstable();
+            let numbers = numbers
+                .into_iter()
+                .map(|tn| Value::String(tn.to_owned()))
                 .collect();
             dest.push(("tn".to_owned(), Value::Array(numbers)));
         }
         if !self.dest.uri.is_empty() {
-            let uris = self.dest.uri.iter().cloned().map(Value::String).collect();
+            let mut uris: Vec<&String> = self.dest.uri.iter().collect();
+            uris.sort_unstable();
+            let uris = uris.into_iter().cloned().map(Value::String).collect();
             dest.push(("uri".to_owned(), Value::Array(uris)));
         }
         let mut members = vec![
@@ -490,6 +497,27 @@ mod tests {
         assert_eq!(
             Claims::from_json(claims.to_json().as_bytes(), false),
             Ok(claims)
+        );
+    }
+
+    #[test]
+    fn destinations_are_written_in_lexicographical_order() {
+        // RFC 8225 §5.2.1: within "tn" and "uri", lexicographical order
+        let claims = Claims {
+            orig: tn("12155551212"),
+            dest: Dest {
+                tn: vec![tn("12125551214"), tn("12125551213")],
+                uri: vec![
+                    "sip:bob@example.com".to_owned(),
+                    "sip:alice@example.com".to_owned(),
+                ],
+            },
+            iat: 1_443_208_345,
+            shaken: None,
+        };
+        assert_eq!(
+            claims.to_json(),
+            r#"{"dest":{"tn":["12125551213","12125551214"],"uri":["sip:alice@example.com","sip:bob@example.com"]},"iat":1443208345,"orig":{"tn":"12155551212"}}"#
         );
     }
 
