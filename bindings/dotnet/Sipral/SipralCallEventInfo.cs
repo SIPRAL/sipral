@@ -34,7 +34,9 @@ public sealed record SipralCallEventInfo(
 /// <c>From</c>. <see cref="AssertedUri"/>, <see cref="AssertedDisplay"/> and
 /// <see cref="Verstat"/> come only from a peer the account names in its
 /// trusted peers (RFC 3325 §8): <see cref="Trusted"/> says whether this call
-/// came from one. <see cref="Privacy"/> is the <c>Sipral.Privacy*</c> bits
+/// came from one. <see cref="Verification"/>, <see cref="Attestation"/> and
+/// <see cref="VerificationFailure"/> are this end's own STIR/SHAKEN verdict on
+/// the call's <c>Identity</c> (RFC 8224), when the account verifies. <see cref="Privacy"/> is the <c>Sipral.Privacy*</c> bits
 /// the caller's <c>Privacy</c> asked for. <see cref="DivertedFrom"/> and
 /// <see cref="DiversionReason"/> are the top-most <c>Diversion</c> (RFC
 /// 5806); the full lists, and every <c>History-Info</c> entry (RFC 7044),
@@ -49,7 +51,10 @@ public sealed record SipralCallerIdentity(
     string? DivertedFrom,
     string? DiversionReason,
     uint DiversionCount,
-    uint HistoryCount);
+    uint HistoryCount,
+    SipralVerificationOutcome Verification = SipralVerificationOutcome.None,
+    SipralAttestation Attestation = SipralAttestation.None,
+    SipralVerificationFailure VerificationFailure = SipralVerificationFailure.None);
 
 /// <summary>How an incoming call asked to be answered (RFC 5373) and rung
 /// (<c>Alert-Info</c>, RFC 7462). <see cref="AnswerAfterMs"/> is set when the
@@ -99,7 +104,44 @@ public sealed record SipralMediaEventInfo(
     uint EventCode,
     ulong HeldMs,
     SipralSrtpSuite Suite,
-    SipralDigitSource Source);
+    SipralDigitSource Source,
+    SipralKeyExchange KeyExchange = SipralKeyExchange.None,
+    bool Encrypted = false,
+    bool Authenticated = false);
+
+/// <summary>How one stream of a call is protected: a
+/// <c>sipral_stream_encryption_t</c> read out
+/// (<see cref="CallMedia.Encryption"/>). <see cref="AwaitingKeys"/> is a
+/// stream that will be encrypted once its DTLS-SRTP handshake ends.</summary>
+public sealed record SipralStreamProtection(
+    SipralMediaKind Media,
+    bool Encrypted,
+    SipralKeyExchange KeyExchange,
+    SipralSrtpSuite Suite,
+    bool Authenticated,
+    bool AwaitingKeys);
+
+/// <summary>What a <see cref="SipralEventKind.CallerVerification"/> event
+/// carries — the fields of <c>sipral_verification_event_t</c>. At
+/// <see cref="SipralVerificationStage.CertificateWanted"/> the application
+/// fetches <see cref="CertificateUrl"/> and hands the chain to
+/// <see cref="SipralStack.StirCertificate"/>; at
+/// <see cref="SipralVerificationStage.Verified"/> the rest is the verdict,
+/// announced just before the call it is about, which
+/// <see cref="Refused"/> says a strict account turned away with
+/// <see cref="ResponseCode"/>.</summary>
+public sealed record SipralVerificationEventInfo(
+    SipralVerificationStage Stage,
+    SipralVerificationOutcome Outcome,
+    SipralVerificationFailure Failure,
+    SipralAttestation Attestation,
+    SipralVerstat Verstat,
+    uint ResponseCode,
+    bool Refused,
+    string? CertificateUrl,
+    string? Orig,
+    string? Origid,
+    string? Detail);
 
 /// <summary>What a <see cref="SipralEventKind.RegistrationChanged"/> event
 /// carries.</summary>

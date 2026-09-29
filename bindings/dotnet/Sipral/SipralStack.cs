@@ -675,6 +675,47 @@ public sealed class SipralStack : IDisposable
         _nat = listed.Length == 0 ? SipralNat.Off : SipralNat.Stun;
     }
 
+    /// <summary><c>sipral_stack_stir</c>: verify the callers of the calls
+    /// this stack's accounts receive against <paramref name="anchors"/> (PEM
+    /// or DER certificates, the STI-PA's roots in a SHAKEN deployment) from
+    /// now on (RFC 8224), replacing what an earlier call set.
+    /// <paramref name="unixSeconds"/> is the wall clock now, which a PASSporT
+    /// is signed and judged by, and defaults to this machine's; a stack whose
+    /// accounts only sign calls this too, with no anchors, before adding
+    /// them. The certificate a call names is asked for by
+    /// <see cref="SipralEventKind.CallerVerification"/> at
+    /// <see cref="SipralVerificationStage.CertificateWanted"/> and handed
+    /// over with <see cref="StirCertificate"/>.</summary>
+    public void Stir(byte[]? anchors, ulong freshnessSeconds = 0, ulong certificateWaitMs = 0, ulong? unixSeconds = null)
+    {
+        using var pin = new Interop.PinnedBytes(anchors is { Length: > 0 } ? anchors : null);
+        var config = SipralStirConfig.Sized();
+        if (anchors is { Length: > 0 })
+        {
+            config.Anchors = pin.Pointer;
+            config.AnchorsLen = (nuint)anchors.Length;
+        }
+        config.FreshnessSeconds = freshnessSeconds;
+        config.CertificateWaitMs = certificateWaitMs;
+        config.UnixSeconds = unixSeconds ?? (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        SipralErrors.Call(() => NativeMethods.sipral_stack_stir(Handle, config, NowMs), "sipral_stack_stir");
+    }
+
+    /// <summary><c>sipral_call_stir_certificate</c>: the chain the URL a
+    /// verification asked for yielded — PEM or DER, the signing certificate
+    /// first — or <see langword="null"/> for one that could not be had.
+    /// <paramref name="call"/> is the handle the event named: the call has
+    /// not been announced yet. Its verdict follows as
+    /// <see cref="SipralEventKind.CallerVerification"/> at
+    /// <see cref="SipralVerificationStage.Verified"/>.</summary>
+    public void StirCertificate(ulong call, byte[]? chain)
+    {
+        var bytes = chain is { Length: > 0 } ? chain : null;
+        SipralErrors.Call(
+            () => NativeMethods.sipral_call_stir_certificate(Handle, call, bytes!, (nuint)(bytes?.Length ?? 0), NowMs),
+            "sipral_call_stir_certificate");
+    }
+
     /// <summary><c>host:port</c>, the text shape every address crosses
     /// this ABI as.</summary>
     public static string FormatAddress(IPEndPoint endpoint) => $"{endpoint.Address}:{endpoint.Port}";
@@ -705,7 +746,9 @@ public sealed class SipralStack : IDisposable
     /// <c>P-Asserted-Identity</c> this account believes and toward which
     /// alone it asserts its own (RFC 3325): a call from anywhere else carries
     /// no asserted identity, and <see cref="SipralCallerIdentity.Trusted"/>
-    /// says which it was.</summary>
+    /// says which it was. <paramref name="security"/> is the account's own
+    /// SRTP policy and suites, and its STIR/SHAKEN verification and signing
+    /// (<see cref="AccountSecurity"/>).</summary>
     public Account AddAccount(
         string aor,
         string registrarAddress,
@@ -718,11 +761,12 @@ public sealed class SipralStack : IDisposable
         SipralSessionTimer sessionTimer = SipralSessionTimer.Default,
         ulong sessionIntervalSeconds = 0,
         uint privacy = 0,
-        IEnumerable<string>? trustedPeers = null)
+        IEnumerable<string>? trustedPeers = null,
+        AccountSecurity? security = null)
     {
         var account = Account.Add(
             this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
-            sessionTimer, sessionIntervalSeconds, privacy, trustedPeers);
+            sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security);
         lock (_accounts)
         {
             _accounts.Add(account);

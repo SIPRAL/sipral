@@ -174,6 +174,28 @@ per-account options: `sessionTimer` and `sessionIntervalSeconds` (RFC 4028),
 `privacy` (`Sipral.PrivacyId` places every call anonymous in `From`) and
 `trustedPeers`.
 
+### STIR/SHAKEN, SRTP per account and the encryption report
+
+`AddAccount(..., security: new AccountSecurity(StirKey: key,
+StirCertificateUrl: url))` signs every call the account places (RFC 8224,
+with RFC 8588's `attest` and `origid`); the key is the bare 32 bytes or
+SEC1 or PKCS #8 in DER or PEM, and the stack needs the time first:
+`stack.Stir(null)` on one that only signs. A signed INVITE is some five
+hundred octets longer, and past RFC 3261's 1300 over UDP it needs a stream
+transport. `stack.Stir(anchors)` verifies the callers of every account that
+reports (the default) or is `SipralStirVerification.Strict`:
+`SipralEventKind.CallerVerification` with `args.Verification.Stage ==
+CertificateWanted` asks for the chain at `CertificateUrl`, which
+`stack.StirCertificate(args.Call, chain)` hands over (`null` for one that
+could not be had); the verdict follows as the same kind, just before the
+call, and `Identity.Verification` carries it on every call event.
+`new AccountSecurity(SipralSrtp.Required, new[] { "AES_CM_128_HMAC_SHA1_80" })`
+holds every call of one account to its own SRTP policy and suites; a call
+may ask for more and never less. `call.Media.Encryption()` is the encryption
+report (`SipralStreamProtection`: how the keys were exchanged, encrypted, the
+suite, and whether the exchange authenticated the far end), and
+`args.Media` carries the same on media started, changed and secured.
+
 ### A call that moves with the network
 
 `stack.MoveTo(host)` is what an application calls when the platform says the

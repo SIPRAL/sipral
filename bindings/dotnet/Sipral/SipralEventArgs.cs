@@ -66,6 +66,8 @@ public sealed class SipralEventArgs : EventArgs
     public SipralAudioEventInfo? Audio { get; }
     /// <summary>Set for <see cref="SipralEventKind.StunServer"/>.</summary>
     public SipralStunServerEventInfo? StunServer { get; }
+    /// <summary>Set for <see cref="SipralEventKind.CallerVerification"/>.</summary>
+    public SipralVerificationEventInfo? Verification { get; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
@@ -73,8 +75,9 @@ public sealed class SipralEventArgs : EventArgs
         SipralMediaEventInfo? media, SipralTransferEventInfo? transfer, SipralResolveEventInfo? resolve,
         SipralNatEventInfo? nat, SipralNatRelayEventInfo? relay, SipralReferralEventInfo? referral,
         SipralTurnStreamEventInfo? turnStream, SipralAudioEventInfo? audio,
-        SipralStunServerEventInfo? stunServer)
+        SipralStunServerEventInfo? stunServer, SipralVerificationEventInfo? verification)
     {
+        Verification = verification;
         Audio = audio;
         StunServer = stunServer;
         Kind = kind;
@@ -137,6 +140,7 @@ public sealed class SipralEventArgs : EventArgs
         SipralTurnStreamEventInfo? turnStream = null;
         SipralAudioEventInfo? audio = null;
         SipralStunServerEventInfo? stunServer = null;
+        SipralVerificationEventInfo? verification = null;
 
         if (kind == SipralEventKind.RegistrationChanged)
         {
@@ -158,7 +162,8 @@ public sealed class SipralEventArgs : EventArgs
                     c.IdentityTrusted != 0, ReadUtf8(c.AssertedUri, c.AssertedUriLen),
                     ReadUtf8(c.AssertedDisplay, c.AssertedDisplayLen), (SipralVerstat)c.Verstat, c.Privacy,
                     ReadUtf8(c.DivertedFrom, c.DivertedFromLen), ReadUtf8(c.DiversionReason, c.DiversionReasonLen),
-                    c.DiversionCount, c.HistoryCount),
+                    c.DiversionCount, c.HistoryCount, (SipralVerificationOutcome)c.Verification,
+                    (SipralAttestation)c.Attestation, (SipralVerificationFailure)c.VerificationFailure),
                 new SipralAnswering(
                     (SipralAnswerMode)c.AnswerMode, c.AnswerModeRequired != 0,
                     (SipralAnswerMode)c.PrivAnswerMode, c.PrivAnswerModeRequired != 0,
@@ -184,7 +189,8 @@ public sealed class SipralEventArgs : EventArgs
                 (SipralCodec)m.Codec, (SipralDirection)m.Direction, m.SilentForMs, m.RecordedMs,
                 (SipralMediaFault)m.Fault, ReadUtf8(m.Reason, m.ReasonLen), ReadStatistics(m.Statistics),
                 m.Digit == 0 ? null : (char)m.Digit, m.EventCode, m.HeldMs,
-                (SipralSrtpSuite)m.Suite, (SipralDigitSource)m.Source);
+                (SipralSrtpSuite)m.Suite, (SipralDigitSource)m.Source, (SipralKeyExchange)m.KeyExchange,
+                m.Encrypted != 0, m.Authenticated != 0);
         }
         else if (kind == SipralEventKind.ResolveNeeded)
         {
@@ -230,10 +236,19 @@ public sealed class SipralEventArgs : EventArgs
             stunServer = new SipralStunServerEventInfo((SipralStunServerState)s.State,
                 ReadUtf8(s.Server, s.ServerLen), ReadUtf8(s.Previous, s.PreviousLen));
         }
+        else if (kind == SipralEventKind.CallerVerification)
+        {
+            var v = evt.Payload.Verification;
+            verification = new SipralVerificationEventInfo(
+                (SipralVerificationStage)v.Stage, (SipralVerificationOutcome)v.Outcome,
+                (SipralVerificationFailure)v.Failure, (SipralAttestation)v.Attestation, (SipralVerstat)v.Verstat,
+                v.ResponseCode, v.Refused != 0, ReadUtf8(v.CertificateUrl, v.CertificateUrlLen),
+                ReadUtf8(v.Orig, v.OrigLen), ReadUtf8(v.Origid, v.OrigidLen), ReadUtf8(v.Detail, v.DetailLen));
+        }
 
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
             registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio,
-            stunServer);
+            stunServer, verification);
     }
 
     internal static SipralStreamStatistics? ReadStatistics(IntPtr ptr)
