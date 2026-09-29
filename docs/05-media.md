@@ -1294,6 +1294,16 @@ about. Which way the call flows is the user agent's to write
 (`UserAgent::change_formats`): a held call stays held through the change, and
 `resume` takes it off hold on the new list.
 
+The third re-offer moves the address instead: `MediaEngine::readdress(agent,
+call, local, public, now)` (`sipral_call_media_readdress` from C) describes the
+call at the media socket the application bound after the network changed, with
+only `c=` and the port on `m=` rewritten and everything above carried as it
+stands, `o=` included but for its version (RFC 3264 §8). The DTLS association
+survives it, since a datagram transport lets one span several 5-tuples (RFC
+8842 §3.2), so `a=setup` goes as `actpass` with the fingerprint the call
+already has. A call running ICE is refused, because its candidates name the
+old socket. `docs/16-lifecycle.md` has when it is asked for and in what order.
+
 **The DTLS roles.** RFC 8842 §5.5 asks every subsequent offer for
 `a=setup:actpass`, and every re-offer this stack writes carries it — the hold,
 the resume, the codec change and the ICE restart alike — including one made from a
