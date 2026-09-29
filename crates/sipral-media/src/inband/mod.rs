@@ -22,6 +22,9 @@
 //!   frequencies and cadences from ITU-T E.180 Supplement 2 — and detects
 //!   them, and the three-tone special information sequence, on a call's
 //!   inbound audio.
+//! - [`amd`] decides, from the pattern of speech and silence after answer,
+//!   whether a person or an answering machine is on the line, and
+//!   [`beep`] finds the tone a machine plays before it starts recording.
 //!
 //! Everything here works on 16-bit linear PCM at 8 or 16 kHz, in plain
 //! floating-point arithmetic with no platform-specific instructions. Each
@@ -37,7 +40,9 @@
 //! full scale is +3.14 dBm0, the A-law overload point, so a 0 dBm0 sine peaks
 //! at about 22 827 on the 16-bit scale.
 
+pub mod amd;
 mod analysis;
+pub mod beep;
 pub mod dtmf;
 pub mod generate;
 pub mod progress;

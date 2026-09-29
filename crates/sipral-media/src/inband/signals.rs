@@ -149,14 +149,70 @@ fn resonance(frequency: f64, centre: f64, bandwidth: f64) -> f64 {
     1.0 / re.hypot(im)
 }
 
-/// Speech-like audio: syllables of a voiced source, its pitch gliding,
-/// shaped by formants that move from one vowel to another, with noisy
-/// consonants before some syllables and pauses of varied length between
-/// them. Levels vary by syllable around `dbm0`.
-pub(crate) fn speech(rng: &mut Rng, rate: u32, seconds: f64, dbm0: f64) -> Vec<f64> {
-    let total = span(rate, seconds * 1_000.0);
+/// One voiced syllable of `ms`: a source whose pitch glides, shaped by
+/// formants that move from one vowel to another, rising and falling at its
+/// edges, at a level around `dbm0`.
+pub(crate) fn syllable(rng: &mut Rng, rate: u32, ms: f64, dbm0: f64) -> Vec<f64> {
     let fs = f64::from(rate);
     let nyquist = fs / 2.0;
+    let len = span(rate, ms);
+    let f0_start = rng.range(85.0, 260.0);
+    let f0_end = (f0_start * rng.range(0.7, 1.4)).clamp(70.0, 320.0);
+    let from = VOWELS[usize::try_from(rng.next_u64() % 8).unwrap()];
+    let to = VOWELS[usize::try_from(rng.next_u64() % 8).unwrap()];
+    let mut out = Vec::with_capacity(len);
+    let mut phase = rng.range(0.0, 2.0 * PI);
+    let mut amplitudes: Vec<f64> = Vec::new();
+    let block = span(rate, 5.0).max(1);
+    for n in 0..len {
+        let t = count_f64(n) / count_f64(len);
+        let f0 = f0_start + (f0_end - f0_start) * t;
+        if n % block == 0 {
+            let formants: Vec<f64> = (0..3).map(|i| from[i] + (to[i] - from[i]) * t).collect();
+            let count = to_count((nyquist * 0.95 / f0).floor()).max(1);
+            amplitudes = (1..=count)
+                .map(|k| {
+                    let f = f0 * count_f64(k);
+                    let shape: f64 = formants
+                        .iter()
+                        .zip(BANDWIDTHS)
+                        .map(|(&c, b)| resonance(f, c, b))
+                        .product();
+                    shape / count_f64(k)
+                })
+                .collect();
+        }
+        phase += 2.0 * PI * f0 / fs;
+        let (s1, c1) = phase.sin_cos();
+        // sin(kφ) by the recurrence sin((k+1)φ) = 2cosφ·sin(kφ) − sin((k−1)φ)
+        let mut previous = 0.0;
+        let mut current = s1;
+        let mut value = 0.0;
+        for a in &amplitudes {
+            value += a * current;
+            let next = 2.0 * c1 * current - previous;
+            previous = current;
+            current = next;
+        }
+        out.push(value);
+    }
+    // a rise and fall over the syllable rather than a hard gate
+    let edge = span(rate, 20.0).max(1);
+    for (n, x) in out.iter_mut().enumerate() {
+        let from_edge = n.min(len - 1 - n);
+        if from_edge < edge {
+            *x *= count_f64(from_edge) / count_f64(edge);
+        }
+    }
+    scale_to(&mut out, dbm0);
+    out
+}
+
+/// Speech-like audio: syllables of [`syllable`], with noisy consonants
+/// before some of them and pauses of varied length between them. Levels
+/// vary by syllable around `dbm0`.
+pub(crate) fn speech(rng: &mut Rng, rate: u32, seconds: f64, dbm0: f64) -> Vec<f64> {
+    let total = span(rate, seconds * 1_000.0);
     let mut out = Vec::with_capacity(total);
     while out.len() < total {
         if rng.uniform() < 0.3 {
@@ -165,59 +221,9 @@ pub(crate) fn speech(rng: &mut Rng, rate: u32, seconds: f64, dbm0: f64) -> Vec<f
             let burst = white(rng, level, len);
             out.extend(burst);
         }
-        let len = span(rate, rng.range(90.0, 380.0));
-        let f0_start = rng.range(85.0, 260.0);
-        let f0_end = (f0_start * rng.range(0.7, 1.4)).clamp(70.0, 320.0);
-        let from = VOWELS[usize::try_from(rng.next_u64() % 8).unwrap()];
-        let to = VOWELS[usize::try_from(rng.next_u64() % 8).unwrap()];
+        let ms = rng.range(90.0, 380.0);
         let level = dbm0 + rng.range(-6.0, 6.0);
-        let mut syllable = Vec::with_capacity(len);
-        let mut phase = rng.range(0.0, 2.0 * PI);
-        let mut amplitudes: Vec<f64> = Vec::new();
-        let block = span(rate, 5.0).max(1);
-        for n in 0..len {
-            let t = count_f64(n) / count_f64(len);
-            let f0 = f0_start + (f0_end - f0_start) * t;
-            if n % block == 0 {
-                let formants: Vec<f64> = (0..3).map(|i| from[i] + (to[i] - from[i]) * t).collect();
-                let count = to_count((nyquist * 0.95 / f0).floor()).max(1);
-                amplitudes = (1..=count)
-                    .map(|k| {
-                        let f = f0 * count_f64(k);
-                        let shape: f64 = formants
-                            .iter()
-                            .zip(BANDWIDTHS)
-                            .map(|(&c, b)| resonance(f, c, b))
-                            .product();
-                        shape / count_f64(k)
-                    })
-                    .collect();
-            }
-            phase += 2.0 * PI * f0 / fs;
-            let (s1, c1) = phase.sin_cos();
-            // sin(kφ) by the recurrence sin((k+1)φ) = 2cosφ·sin(kφ) − sin((k−1)φ)
-            let mut previous = 0.0;
-            let mut current = s1;
-            let mut value = 0.0;
-            for a in &amplitudes {
-                value += a * current;
-                let next = 2.0 * c1 * current - previous;
-                previous = current;
-                current = next;
-            }
-            syllable.push(value);
-        }
-        // a rise and fall over the syllable rather than a hard gate
-        let edge = span(rate, 20.0).max(1);
-        let slen = syllable.len();
-        for (n, x) in syllable.iter_mut().enumerate() {
-            let from_start = n.min(slen - 1 - n);
-            if from_start < edge {
-                *x *= count_f64(from_start) / count_f64(edge);
-            }
-        }
-        scale_to(&mut syllable, level);
-        out.extend(syllable);
+        out.extend(syllable(rng, rate, ms, level));
         let pause = if rng.uniform() < 0.15 {
             rng.range(400.0, 900.0)
         } else {
