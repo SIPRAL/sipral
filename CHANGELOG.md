@@ -12,6 +12,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The .NET and Python layers carry all of ABI 0.29, device mode first.**
+  A stack opens the platform's own devices by default wherever the library
+  can (Windows, macOS) and keeps application mode where it cannot or when
+  asked; `SipralStack.Audio`/`stack.audio` choose microphone, speaker and
+  ringer, gain, mute, the meter, activation and the ring. Calls gain the
+  caller's typed identity, Answer-Mode and Alert-Info, `Reason` both ways, a
+  3xx redirect, the SRTP suite a handshake settled on, and a move to a new
+  network (`MoveTo`/`move_to`, `Readdress`/`readdress`); accounts gain the
+  session timer, anonymity and trusted peers. The WPF sample is a softphone
+  on the real device list with no audio code of its own, and Python gains
+  `examples/softphone.py`.
 - **The library opens the audio devices itself, for the stack that asks.**
   `sipral-audio` is the built-in engine: the platform's devices listed with
   their channel counts under handles that survive a refresh and an unplug,

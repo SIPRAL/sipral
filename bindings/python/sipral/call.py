@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from . import events as _events
 from ._sipral_cffi import ffi, lib
-from .enums import CallState, DtmfVia
+from .enums import AudioMode, CallState, DtmfVia, SrtpSuite
 from .errors import call as _call
 from .media import Media
 
@@ -44,6 +44,7 @@ class Call:
         self._media_address = media_address
         self.media: Media | None = None
         self.ended = False
+        self._suite: SrtpSuite | None = None
 
         #: Every event this call's handle names, decoded whole.
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
@@ -71,7 +72,20 @@ class Call:
             # `Stack` stops treating it as a pre-media-handle STUN/TURN
             # socket first, so the two never race to read the same fd.
             self.stack._release_stun_socket(self._media_address)
-            self.media = Media(self.stack, self.handle, self._media_socket)
+            self.media = Media(
+                self.stack,
+                self.handle,
+                self._media_socket,
+                pumped=self.stack.audio_mode == AudioMode.DEVICE,
+            )
+
+        if event.kind == lib.SIPRAL_EVENT_KIND_MEDIA_SECURED:
+            # a suite a newer library names and this binding does not is
+            # still a secured call, whose transform this build cannot name
+            try:
+                self._suite = SrtpSuite(int(event.fields.get("suite", 0)))
+            except ValueError:
+                self._suite = SrtpSuite.UNKNOWN
 
         if event.kind == lib.SIPRAL_EVENT_KIND_CALL_ENDED:
             self.ended = True
@@ -181,6 +195,104 @@ class Call:
             "sipral_call_send_dtmf",
         )
 
+    def hangup_for(
+        self,
+        *,
+        sip_cause: int = 0,
+        q850_cause: int = 0,
+        text: str | None = None,
+    ) -> None:
+        """`sipral_call_hangup_for`: end the call saying why, as a `Reason`
+        (RFC 3326) on the BYE or the CANCEL -- ``sip_cause`` a SIP status,
+        ``q850_cause`` a Q.850 cause (16 is normal clearing), either or both,
+        with ``text`` beside them. The refusal of an incoming call nothing
+        answered carries only the Q.850 value (RFC 6432)."""
+        said = (text or "").encode("utf-8")
+        _call(
+            lambda: lib.sipral_call_hangup_for(
+                self.stack.handle,
+                self.handle,
+                sip_cause,
+                q850_cause,
+                said or ffi.NULL,
+                len(said),
+                self.stack.now_ms(),
+            ),
+            "sipral_call_hangup_for",
+        )
+
+    def identity(self, which: int) -> list[str]:
+        """Every entry of one identity list the INVITE of this call carried --
+        ``which`` an :class:`sipral.enums.IdentityText`: every asserted party,
+        every `Diversion` and its reason, every `History-Info` target and
+        index, every `Alert-Info` URI. :attr:`sipral.events.Event.identity`
+        has the first of each; this is the rest."""
+        return self.stack.call_identity(self.handle, which)
+
+    @property
+    def srtp_suite(self) -> SrtpSuite | None:
+        """The SRTP transform a DTLS-SRTP handshake settled this call's media
+        on, as the last `SIPRAL_EVENT_KIND_MEDIA_SECURED` said -- from
+        ``AES_CM80`` to RFC 7714's ``AEAD_AES256_GCM``, which two ends of
+        this stack agree on -- or ``None`` before the handshake and for a
+        call not keyed by one. A call keyed by SDES agreed its suite in the
+        SDP and raises no such event: ``media.info()["secured"]`` says it is
+        encrypted."""
+        return self._suite
+
+    def readdress(
+        self,
+        media_host: str,
+        *,
+        media_port: int = 0,
+        public_address: str | None = None,
+    ) -> None:
+        """Move this call's audio to a new network: what
+        `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks for once
+        :meth:`sipral.stack.Stack.move_to` changed the stack's address.
+
+        A media socket is bound at ``media_host:media_port`` and the call
+        offered at it (`sipral_call_media_readdress`): a re-INVITE with the
+        call's last description, only `c=` and the `m=` port moved, and
+        ``public_address`` (``host:port``) in their place when the socket
+        sits behind a NAT whose mapping the application knows. The new
+        socket is the call's from here, whatever the far end answers --
+        `SIPRAL_EVENT_KIND_SESSION_CHANGED`, or
+        `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` -- and the old one is
+        closed. ``SIPRAL_STATUS_WRONG_STATE`` for a call running ICE, which
+        :meth:`restart_ice` moves instead, or one with a change already on
+        its way.
+        """
+        sock = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+        sock.bind((media_host, media_port))
+        sock.setblocking(False)
+        host, port = sock.getsockname()
+        address = f"{host}:{port}".encode("utf-8")
+        public = (public_address or "").encode("utf-8")
+        try:
+            _call(
+                lambda: lib.sipral_call_media_readdress(
+                    self.stack.handle,
+                    self.handle,
+                    address,
+                    len(address),
+                    public or ffi.NULL,
+                    len(public),
+                    self.stack.now_ms(),
+                ),
+                "sipral_call_media_readdress",
+            )
+        except Exception:
+            sock.close()
+            raise
+        old = self._media_socket
+        self._media_socket = sock
+        self._media_address = address.decode("utf-8")
+        if self.media is not None:
+            self.media.rebind(sock)
+        else:
+            old.close()
+
     def close(self) -> None:
         """Hang up if this call is still up, release its media, forget it.
 
@@ -203,6 +315,12 @@ class Call:
             self.stack._forget_media_socket(self._media_address)
             self._media_socket.close()
         self.stack.forget_call(self.handle)
+
+    @property
+    def media_socket(self) -> socket_module.socket:
+        """This call's media socket: where device mode's encoded packets
+        leave from, and what :meth:`readdress` replaces."""
+        return self._media_socket
 
     @property
     def media_address(self) -> str:

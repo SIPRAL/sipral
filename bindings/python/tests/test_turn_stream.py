@@ -39,7 +39,7 @@ import threading
 import unittest
 
 from sipral import Stack
-from sipral.enums import EventKind, Ice, Nat, NatRelay, Transport
+from sipral.enums import AudioMode, EventKind, Ice, Nat, NatRelay, Transport
 
 from tests.test_nat import (
     _ALLOCATE_ERROR,
@@ -261,7 +261,7 @@ class _TwoStacks(unittest.IsolatedAsyncioTestCase):
         loop = asyncio.get_running_loop()
         self.alice_stack = Stack(
             bind_host=host,
-            loop=loop,
+            loop=loop, audio=AudioMode.APPLICATION,
             nat=Nat.STUN,
             ice=Ice.OFFERED,
             codecs="PCMU",
@@ -273,7 +273,7 @@ class _TwoStacks(unittest.IsolatedAsyncioTestCase):
             turn_server_name=_SERVER_NAME,
             turn_tls_context=self.client_context(),
         )
-        self.bob_stack = Stack(bind_host=host, loop=loop, codecs="PCMU")
+        self.bob_stack = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, codecs="PCMU")
         self.addAsyncCleanup(self._close_stacks)
 
     async def _close_servers(self) -> None:

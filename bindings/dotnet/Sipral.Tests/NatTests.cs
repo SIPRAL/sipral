@@ -362,7 +362,7 @@ public sealed class NatTests
     public async Task SignallingSocketLearnsTheMappingOnItsOwn()
     {
         using var server = new FakeStunServer("203.0.113.7", 40000);
-        using var alice = new SipralStack(nat: SipralNat.Stun, stunServer: server.Address);
+        using var alice = new SipralStack(audio: SipralAudio.Application, nat: SipralNat.Stun, stunServer: server.Address);
 
         var evt = await FirstMatchingAsync(alice.Events, e => e.Kind == SipralEventKind.NatMapping, Timeout);
         Assert.NotNull(evt.Nat);
@@ -384,7 +384,7 @@ public sealed class NatTests
         registrar.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         registrar.ReceiveTimeout = 100;
         using var alice = new SipralStack(
-            nat: SipralNat.Stun,
+            audio: SipralAudio.Application,nat: SipralNat.Stun,
             stunServer: server.Address,
             registrarKeepalive: keepalive,
             registrarKeepaliveMs: keepalive ? 1000ul : 0ul);
@@ -425,8 +425,8 @@ public sealed class NatTests
     public async Task CallOffersTheMappedMediaAddress()
     {
         using var server = new FakeStunServer("203.0.113.7", 40000);
-        using var alice = new SipralStack(nat: SipralNat.Stun, stunServer: server.Address);
-        using var bob = new SipralStack();
+        using var alice = new SipralStack(audio: SipralAudio.Application, nat: SipralNat.Stun, stunServer: server.Address);
+        using var bob = new SipralStack(audio: SipralAudio.Application);
 
         var aliceAccount = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
         bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);
@@ -455,7 +455,7 @@ public sealed class NatTests
     {
         using var server = new FakeStunServer("203.0.113.8", 40001);
         using var alice = new SipralStack(
-            nat: SipralNat.Stun, stunServer: server.Address,
+            audio: SipralAudio.Application,nat: SipralNat.Stun, stunServer: server.Address,
             turnServer: server.Address, turnUsername: "labuser", turnPassword: "labpass");
 
         // sipral_call_place refuses a socket named with
@@ -530,10 +530,10 @@ public sealed class NatTests
         // 1300-byte line, and this loopback pair has no stream transport
         // open to fall back to.
         var alice = new SipralStack(
-            bindHost: host, nat: SipralNat.Stun, ice: SipralIce.Offered, codecs: "PCMU",
+            audio: SipralAudio.Application,bindHost: host, nat: SipralNat.Stun, ice: SipralIce.Offered, codecs: "PCMU",
             stunServer: server.Address, turnServer: server.Address,
             turnUsername: "alice-turn", turnPassword: password);
-        using var bob = new SipralStack(bindHost: host, codecs: "PCMU");
+        using var bob = new SipralStack(audio: SipralAudio.Application, bindHost: host, codecs: "PCMU");
         try
         {
             var aliceAccount = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
@@ -595,8 +595,8 @@ public sealed class NatTests
             return; // no routable address on this machine to gather a host candidate from
         }
 
-        using var alice = new SipralStack(bindHost: host, ice: SipralIce.Required);
-        using var bob = new SipralStack(bindHost: host, ice: SipralIce.Required);
+        using var alice = new SipralStack(audio: SipralAudio.Application, bindHost: host, ice: SipralIce.Required);
+        using var bob = new SipralStack(audio: SipralAudio.Application, bindHost: host, ice: SipralIce.Required);
 
         var aliceAccount = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
         bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);

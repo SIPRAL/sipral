@@ -1,41 +1,87 @@
 <Window x:Class="SipralSample.Wpf.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Sipral sample" Height="480" Width="420">
-    <StackPanel Margin="12">
-        <TextBlock Text="Account" FontWeight="Bold" Margin="0,0,0,4" />
-        <TextBox x:Name="AorBox" Text="sip:alice@example.invalid" Margin="0,0,0,4" />
-        <TextBox x:Name="RegistrarBox" Text="sip:example.invalid" Margin="0,0,0,4" />
-        <TextBox x:Name="RegistrarAddressBox" Text="203.0.113.10:5060" Margin="0,0,0,4" />
-        <TextBox x:Name="AuthUserBox" Text="" Margin="0,0,0,4" />
-        <PasswordBox x:Name="AuthPasswordBox" Margin="0,0,0,4" />
-        <Button x:Name="RegisterButton" Content="Register" Click="OnRegisterClick" Margin="0,0,0,12" />
+        Title="Sipral sample" Height="760" Width="480">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="12">
+            <TextBlock Text="Account" FontWeight="Bold" Margin="0,0,0,4" />
+            <TextBox x:Name="AorBox" Text="sip:alice@example.invalid" Margin="0,0,0,4" />
+            <TextBox x:Name="RegistrarBox" Text="sip:example.invalid" Margin="0,0,0,4" />
+            <TextBox x:Name="RegistrarAddressBox" Text="203.0.113.10:5060" Margin="0,0,0,4" />
+            <TextBox x:Name="AuthUserBox" Text="" Margin="0,0,0,4" />
+            <PasswordBox x:Name="AuthPasswordBox" Margin="0,0,0,4" />
+            <Button x:Name="RegisterButton" Content="Register" Click="OnRegisterClick" Margin="0,0,0,12" />
 
-        <TextBlock Text="Call" FontWeight="Bold" Margin="0,0,0,4" />
-        <TextBox x:Name="TargetBox" Text="sip:bob@example.invalid" Margin="0,0,0,4" />
-        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-            <Button x:Name="CallButton" Content="Call" Click="OnCallClick" Width="80" Margin="0,0,4,0" />
-            <Button x:Name="HangupButton" Content="Hang up" Click="OnHangupClick" Width="80" Margin="0,0,4,0" />
-            <Button x:Name="HoldButton" Content="Hold" Click="OnHoldClick" Width="80" Margin="0,0,4,0" />
-            <Button x:Name="ResumeButton" Content="Resume" Click="OnResumeClick" Width="80" />
+            <TextBlock Text="Call" FontWeight="Bold" Margin="0,0,0,4" />
+            <TextBox x:Name="TargetBox" Text="sip:bob@example.invalid" Margin="0,0,0,4" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                <Button x:Name="CallButton" Content="Call" Click="OnCallClick" Width="80" Margin="0,0,4,0" />
+                <Button x:Name="AnswerButton" Content="Answer" Click="OnAnswerClick" Width="80" Margin="0,0,4,0" IsEnabled="False" />
+                <Button x:Name="HangupButton" Content="Hang up" Click="OnHangupClick" Width="80" Margin="0,0,4,0" />
+                <Button x:Name="HoldButton" Content="Hold" Click="OnHoldClick" Width="60" Margin="0,0,4,0" />
+                <Button x:Name="ResumeButton" Content="Resume" Click="OnResumeClick" Width="60" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                <TextBlock Text="DTMF:" VerticalAlignment="Center" Margin="0,0,4,0" />
+                <TextBox x:Name="DtmfBox" Width="120" Margin="0,0,4,0" />
+                <Button x:Name="DtmfButton" Content="Send" Click="OnDtmfClick" Width="60" />
+            </StackPanel>
+            <TextBlock x:Name="CallerText" Text="" TextWrapping="Wrap" Margin="0,0,0,12" />
+
+            <TextBlock Text="Devices" FontWeight="Bold" Margin="0,0,0,4" />
+            <TextBlock x:Name="AudioModeText" Text="" TextWrapping="Wrap" Margin="0,0,0,4" />
+            <Grid Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition />
+                    <RowDefinition />
+                    <RowDefinition />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="Microphone" VerticalAlignment="Center" />
+                <ComboBox x:Name="MicrophoneBox" Grid.Row="0" Grid.Column="1" Margin="0,2" SelectionChanged="OnDeviceChosen" />
+                <TextBlock Grid.Row="1" Text="Speaker" VerticalAlignment="Center" />
+                <ComboBox x:Name="SpeakerBox" Grid.Row="1" Grid.Column="1" Margin="0,2" SelectionChanged="OnDeviceChosen" />
+                <TextBlock Grid.Row="2" Text="Ringer" VerticalAlignment="Center" />
+                <ComboBox x:Name="RingerBox" Grid.Row="2" Grid.Column="1" Margin="0,2" SelectionChanged="OnDeviceChosen" />
+            </Grid>
+            <Grid Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="60" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition />
+                    <RowDefinition />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="Mic gain" VerticalAlignment="Center" />
+                <Slider x:Name="MicrophoneGainSlider" Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="4" Value="1" ValueChanged="OnGainChanged" />
+                <CheckBox x:Name="MicrophoneMutedBox" Grid.Row="0" Grid.Column="2" Content="Mute" Margin="6,0,0,0" Click="OnMuteClick" VerticalAlignment="Center" />
+                <TextBlock Grid.Row="1" Text="Volume" VerticalAlignment="Center" />
+                <Slider x:Name="VolumeSlider" Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="4" Value="1" ValueChanged="OnGainChanged" />
+                <CheckBox x:Name="SpeakerMutedBox" Grid.Row="1" Grid.Column="2" Content="Mute" Margin="6,0,0,0" Click="OnMuteClick" VerticalAlignment="Center" />
+            </Grid>
+            <Grid Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition />
+                    <RowDefinition />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="Microphone" VerticalAlignment="Center" />
+                <ProgressBar x:Name="MicrophoneMeter" Grid.Row="0" Grid.Column="1" Height="12" Minimum="0" Maximum="32767" Margin="0,2" />
+                <TextBlock Grid.Row="1" Text="Speaker" VerticalAlignment="Center" />
+                <ProgressBar x:Name="SpeakerMeter" Grid.Row="1" Grid.Column="1" Height="12" Minimum="0" Maximum="32767" Margin="0,2" />
+            </Grid>
+            <TextBlock x:Name="EchoText" Text="" TextWrapping="Wrap" Margin="0,0,0,12" />
+
+            <TextBlock Text="Events" FontWeight="Bold" Margin="0,0,0,4" />
+            <ListBox x:Name="EventsList" Height="160" />
         </StackPanel>
-        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-            <TextBlock Text="DTMF:" VerticalAlignment="Center" Margin="0,0,4,0" />
-            <TextBox x:Name="DtmfBox" Width="120" Margin="0,0,4,0" />
-            <Button x:Name="DtmfButton" Content="Send" Click="OnDtmfClick" Width="60" />
-        </StackPanel>
-
-        <TextBlock Text="Devices" FontWeight="Bold" Margin="0,0,0,4" />
-        <!-- A skeleton, not a product: this layer carries PCM over the ABI's
-             own sockets, the same way the sample console agent and every
-             binding's own tests do, and touches no real sound device, per
-             docs/01-architecture.md's "no audio device inside the core". A
-             shipping app wires this list to whatever local audio API it
-             already uses and feeds the frames this window's Call reads and
-             writes; this list is a placeholder for where that wiring goes. -->
-        <ListBox x:Name="DevicesList" Height="48" Margin="0,0,0,12" />
-
-        <TextBlock Text="Events" FontWeight="Bold" Margin="0,0,0,4" />
-        <ListBox x:Name="EventsList" Height="120" />
-    </StackPanel>
+    </ScrollViewer>
 </Window>

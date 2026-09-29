@@ -113,5 +113,42 @@ class SrtpSuitesHaveNames(unittest.TestCase):
         )
 
 
+class Abi29SpacesHaveNames(unittest.TestCase):
+    """Every numbered space ABI 0.29 added is read off `lib` whole, and none
+    swallows a neighbour that shares its start."""
+
+    def test_each_space_holds_exactly_its_own_values(self) -> None:
+        from sipral import enums
+
+        expected = {
+            enums.AudioMode: {"APPLICATION": 0, "DEVICE": 1},
+            enums.AudioActivation: {"AUTOMATIC": 0, "MANUAL": 1},
+            enums.AudioRole: {"MICROPHONE": 1, "SPEAKER": 2, "RINGER": 3},
+            enums.AudioDirection: {"INPUT": 1, "OUTPUT": 2},
+            enums.AudioOrigin: {"SYSTEM": 1, "ENGINE": 2},
+            enums.SessionTimer: {"DEFAULT": 0, "OFF": 1, "INTERVAL": 2},
+            enums.RingSource: {"UNKNOWN": 0, "INTERNAL": 1, "EXTERNAL": 2},
+        }
+        for space, members in expected.items():
+            with self.subTest(space=space.__name__):
+                self.assertEqual({m.name: int(m) for m in space}, members)
+        self.assertNotIn("OUTCOME_RUNNING", enums.Recovery.__members__)
+        self.assertEqual(int(enums.Recovery.REBUILD), lib.SIPRAL_RECOVERY_REBUILD)
+        self.assertEqual(int(enums.Privacy.ID), lib.SIPRAL_PRIVACY_ID)
+        self.assertEqual(int(enums.Feature.AUDIO_DEVICE), lib.SIPRAL_FEATURE_AUDIO_DEVICE)
+        self.assertEqual(int(enums.Feature.CALL_READDRESS), lib.SIPRAL_FEATURE_CALL_READDRESS)
+        self.assertEqual(len(enums.AudioChange), 6)
+        self.assertEqual(len(enums.IdentityText), 12)
+
+    def test_this_build_says_what_it_has(self) -> None:
+        from sipral import features
+        from sipral.enums import Feature
+
+        have = features()
+        self.assertIn(Feature.CALLER_IDENTITY, have)
+        self.assertIn(Feature.CALL_READDRESS, have)
+        self.assertIn(Feature.TURN_STREAM, have)
+
+
 if __name__ == "__main__":
     unittest.main()

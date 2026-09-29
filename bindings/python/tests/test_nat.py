@@ -49,6 +49,7 @@ import unittest
 
 from sipral import Stack
 from sipral.enums import (
+    AudioMode,
     CallState,
     CandidateKind,
     EventKind,
@@ -298,8 +299,8 @@ class TwoStacksTalkThroughStun(unittest.IsolatedAsyncioTestCase):
         self.server = _FakeStunServer(self.PUBLIC_HOST, self.PUBLIC_PORT)
         self.addAsyncCleanup(self._close_server)
         loop = asyncio.get_running_loop()
-        self.alice_stack = Stack(loop=loop, nat=Nat.STUN, stun_server=self.server.address)
-        self.bob_stack = Stack(loop=loop)
+        self.alice_stack = Stack(loop=loop, audio=AudioMode.APPLICATION, nat=Nat.STUN, stun_server=self.server.address)
+        self.bob_stack = Stack(loop=loop, audio=AudioMode.APPLICATION)
         self.addAsyncCleanup(self._close_stacks)
 
     async def _close_server(self) -> None:
@@ -367,7 +368,7 @@ class RegistrarFlowKeptOpenBehindTheNat(unittest.IsolatedAsyncioTestCase):
         registrar.settimeout(0.1)
         loop = asyncio.get_running_loop()
         stack = Stack(
-            loop=loop,
+            loop=loop, audio=AudioMode.APPLICATION,
             nat=Nat.STUN,
             stun_server=server.address,
             registrar_keepalive=keepalive,
@@ -417,14 +418,14 @@ class TurnAllocateRequestLeaves(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self._close_server)
         loop = asyncio.get_running_loop()
         self.alice_stack = Stack(
-            loop=loop,
+            loop=loop, audio=AudioMode.APPLICATION,
             nat=Nat.STUN,
             stun_server=self.server.address,
             turn_server=self.server.address,
             turn_username="labuser",
             turn_password="labpass",
         )
-        self.bob_stack = Stack(loop=loop)
+        self.bob_stack = Stack(loop=loop, audio=AudioMode.APPLICATION)
         self.addAsyncCleanup(self._close_stacks)
 
     async def _close_server(self) -> None:
@@ -513,7 +514,7 @@ class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase)
         # stream transport open to fall back to.
         self.alice_stack = Stack(
             bind_host=host,
-            loop=loop,
+            loop=loop, audio=AudioMode.APPLICATION,
             nat=Nat.STUN,
             ice=Ice.OFFERED,
             codecs="PCMU",
@@ -522,7 +523,7 @@ class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase)
             turn_username="alice-turn",
             turn_password=self.password,
         )
-        self.bob_stack = Stack(bind_host=host, loop=loop, codecs="PCMU")
+        self.bob_stack = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, codecs="PCMU")
         self.addAsyncCleanup(self._close_stacks)
 
     async def _close_server(self) -> None:
@@ -633,7 +634,7 @@ class TurnAllocationIsGivenBackWhenTheCallIsClosedAtItsEnd(unittest.IsolatedAsyn
         loop = asyncio.get_running_loop()
         self.alice_stack = Stack(
             bind_host=host,
-            loop=loop,
+            loop=loop, audio=AudioMode.APPLICATION,
             nat=Nat.STUN,
             ice=Ice.REQUIRED,
             codecs="PCMU",
@@ -642,7 +643,7 @@ class TurnAllocationIsGivenBackWhenTheCallIsClosedAtItsEnd(unittest.IsolatedAsyn
             turn_username="alice-turn",
             turn_password=self.password,
         )
-        self.bob_stack = Stack(bind_host=host, loop=loop, ice=Ice.REQUIRED, codecs="PCMU")
+        self.bob_stack = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, ice=Ice.REQUIRED, codecs="PCMU")
         self.addAsyncCleanup(self._close_stacks)
 
     async def _close_server(self) -> None:
@@ -735,8 +736,8 @@ class TwoStacksTalkThroughIce(unittest.IsolatedAsyncioTestCase):
             self.skipTest("no routable address on this machine to gather a host candidate from")
         self.host = host
         loop = asyncio.get_running_loop()
-        self.alice_stack = Stack(bind_host=host, loop=loop, ice=Ice.REQUIRED)
-        self.bob_stack = Stack(bind_host=host, loop=loop, ice=Ice.REQUIRED)
+        self.alice_stack = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, ice=Ice.REQUIRED)
+        self.bob_stack = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, ice=Ice.REQUIRED)
         self.addAsyncCleanup(self._close_stacks)
 
     async def _close_stacks(self) -> None:

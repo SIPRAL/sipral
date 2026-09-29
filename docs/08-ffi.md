@@ -1430,9 +1430,10 @@ and again through this ABI (`crates/sipral-ffi/src/audio.rs`):
   tells every managed call that delay itself, again after every device
   change.
 
-None of the idiomatic layers sets `audio` yet, so each keeps pumping its own
-frames exactly as it did; giving each its own device-mode API is the layer
-agents' work, on top of this surface.
+The .NET and Python layers choose device mode by default wherever
+`SIPRAL_FEATURE_AUDIO_DEVICE` is set and application mode elsewhere, and
+keep application mode for the caller that asks for it; their own sections
+below say how each carries the rest.
 
 ## One declaration, and every printed file (the header, the four bindings and the JNI shim)
 
@@ -1809,6 +1810,37 @@ STUN responder that test project runs itself, and runs two stacks with
 `ice: SipralIce.Required` against each other for the ICE half, with no
 server at all.
 
+ABI 0.29's surface reaches .NET the same way. `SipralStack`'s `audio` is
+nullable and resolves, when left out, to `SipralAudio.Device` where
+`sipral_capabilities` has `SIPRAL_FEATURE_AUDIO_DEVICE` and to
+`SipralAudio.Application` elsewhere (`SipralStack.AudioMode` says which): a
+Windows or macOS application gets the platform's devices with no audio code,
+and a Linux one keeps pumping its own frames. In device mode the stack
+registers its own `audio_transmit_callback`, kept alive beside the event
+callback, which looks the call up by handle and sends the packet from that
+call's media socket (or writes it on the socket's TURN connection, a broken
+one told to the stack from the poll thread, never from the engine's); it
+calls nothing in the library, since an entry point reached from the engine's
+thread could wait on the engine. `CallMedia.Pumped` is then true: its thread
+still reads the socket into `sipral_media_receive` and sends what RTCP and
+DTMF owe, and never plays or captures a frame. `SipralStack.Audio`
+(`SipralAudioEngine`) wraps the fifteen `sipral_audio_*` entry points, gain
+as a ratio over the ABI's 256 steps. `SipralCallEventInfo` grew `Identity`,
+`Answering` and `Cause`, `SipralEventArgs` grew `Audio`, and the call kinds
+grew `CallAddressWanted`; `Call.Readdress`, `Call.HangupFor`,
+`Call.Identity`, `Call.SrtpSuite`, `SipralStack.RedirectCall`,
+`SipralStack.CallIdentity`, `SipralStack.MoveTo` (the signalling socket
+bound again, `sipral_stack_transport_bind`, `sipral_stack_network_changed`,
+and `sipral_account_rebind` for every account with a default `Contact`) and
+`Account.Rebind` are the rest, with `AddAccount`'s `sessionTimer`,
+`sessionIntervalSeconds`, `privacy` and `trustedPeers`.
+`Sipral.Tests/AudioEngineTests.cs`, `IdentityTests.cs` and `MoveTests.cs`
+prove them; the one test that opens real devices runs only with
+`SIPRAL_AUDIO_DEVICES=1`, and passed on the Windows lab machine's virtual
+cable. Windows routes no datagram between a socket bound to loopback and
+one bound to the machine's own LAN address, so the move from one to the
+other is proved on macOS and Linux only.
+
 ## Kotlin
 
 Two printed files, because Android has no way to call C but JNI:
@@ -2120,6 +2152,26 @@ back through `sipral_stack_nat_unmap` when its `Call` closes, and so does
 `bindings/python/tests/test_nat.py` proves it against a STUN responder
 this test suite runs itself, and runs two stacks with `ice=Ice.REQUIRED`
 against each other for the ICE half, with no server at all.
+
+ABI 0.29 reaches Python as it reaches .NET. `Stack(audio=None)` resolves to
+`AudioMode.DEVICE` where `sipral.features()` has `Feature.AUDIO_DEVICE` and
+to `AudioMode.APPLICATION` elsewhere (`stack.audio_mode`); in device mode the
+stack hands the library a cffi `audio_transmit_callback`, kept on the
+instance like the event callback, that sends each packet from its call's
+media socket and calls nothing in the library, and `Media.pumped` keeps the
+media thread to the socket, RTCP and DTMF. `sipral.audio.Audio`
+(`stack.audio`) carries the `sipral_audio_*` entry points with gain as a
+ratio; `Event` grew the typed views `identity`, `answering`, `cause` and
+`audio` over the fields `_decode_payload` now copies; and `Call.readdress`,
+`Call.hangup_for`, `Call.identity`, `Call.srtp_suite`,
+`Stack.redirect_call`, `Stack.call_identity`, `Stack.move_to`,
+`Account.rebind` and `add_account`'s `session_timer`,
+`session_interval_seconds`, `privacy` and `trusted_peers` are the rest.
+`sipral.enums` reads the new spaces off `lib` like every other one, with
+`Feature` and `Privacy` as `IntFlag`s. `tests/test_audio.py`,
+`tests/test_identity.py` and `tests/test_move.py` prove them without opening a
+microphone: device mode is only ever activated manually there, and the
+transmit callback is handed a record the test builds.
 
 ## Versioning
 

@@ -16,8 +16,18 @@ from __future__ import annotations
 import dataclasses
 
 from ._sipral_cffi import ffi, lib
+from .enums import (
+    AnswerMode,
+    AudioChange,
+    AudioDirection,
+    AudioOrigin,
+    AudioRole,
+    Privacy,
+    RingSource,
+    Verstat,
+)
 
-__all__ = ["Event"]
+__all__ = ["Answering", "AudioNotice", "CallerIdentity", "EndCause", "Event"]
 
 
 def _bytes(pointer, length: int) -> bytes | None:
@@ -86,6 +96,138 @@ class Event:
     message: bytes | None
     fields: dict[str, object]
 
+    @property
+    def identity(self) -> "CallerIdentity | None":
+        """Who is calling, beyond `From`, on every event of an incoming call
+        -- ``None`` on an event that is not about a call."""
+        if self.kind not in _CALL_KINDS:
+            return None
+        f = self.fields
+        return CallerIdentity(
+            trusted=bool(f["identity_trusted"]),
+            asserted_uri=f["asserted_uri"],
+            asserted_display=f["asserted_display"],
+            verstat=Verstat(f["verstat"]),
+            privacy=Privacy(f["privacy"]),
+            diverted_from=f["diverted_from"],
+            diversion_reason=f["diversion_reason"],
+            diversion_count=int(f["diversion_count"]),
+            history_count=int(f["history_count"]),
+        )
+
+    @property
+    def answering(self) -> "Answering | None":
+        """How an incoming call asked to be answered and announced -- ``None``
+        on an event that is not about a call."""
+        if self.kind not in _CALL_KINDS:
+            return None
+        f = self.fields
+        return Answering(
+            answer_mode=AnswerMode(f["answer_mode"]),
+            answer_mode_required=bool(f["answer_mode_required"]),
+            priv_answer_mode=AnswerMode(f["priv_answer_mode"]),
+            priv_answer_mode_required=bool(f["priv_answer_mode_required"]),
+            answer_after_ms=f["answer_after_ms"],
+            ring_source=RingSource(f["ring_source"]),
+            alert_info=f["alert_info"],
+        )
+
+    @property
+    def cause(self) -> "EndCause | None":
+        """Why the far end ended the call: the `Reason` (RFC 3326) of the BYE,
+        the CANCEL or the refusal, on `SIPRAL_EVENT_KIND_CALL_ENDED`. ``None``
+        on any other event, and on an end that carried no `Reason`."""
+        if self.kind != lib.SIPRAL_EVENT_KIND_CALL_ENDED:
+            return None
+        f = self.fields
+        if not f["cause_sip"] and not f["cause_q850"] and not f["cause_text"]:
+            return None
+        return EndCause(
+            sip=int(f["cause_sip"]), q850=int(f["cause_q850"]), text=f["cause_text"]
+        )
+
+    @property
+    def audio(self) -> "AudioNotice | None":
+        """`SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`, typed; ``None`` on any
+        other event."""
+        if self.kind != lib.SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED:
+            return None
+        f = self.fields
+        return AudioNotice(
+            change=AudioChange(f["change"]),
+            origin=AudioOrigin(f["origin"]),
+            role=AudioRole(f["role"]) if f["role"] else None,
+            direction=AudioDirection(f["direction"]) if f["direction"] else None,
+            device=int(f["device"]) or None,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class AudioNotice:
+    """What changed among the audio devices, in device mode, and who changed
+    it. An application notes ``AudioOrigin.SYSTEM`` changes (a headset
+    plugged in, the default moved) and never answers an ``ENGINE`` one by
+    selecting again: that is the engine doing what was asked, or falling back
+    after a loss, and re-applying a choice on it loops. ``device`` is the id
+    :meth:`sipral.audio.Audio.devices` lists, or ``None``."""
+
+    change: "AudioChange"
+    origin: "AudioOrigin"
+    role: "AudioRole | None"
+    direction: "AudioDirection | None"
+    device: int | None
+
+
+@dataclasses.dataclass(frozen=True)
+class CallerIdentity:
+    """What an incoming INVITE said about who is calling, beyond its `From`.
+
+    ``asserted_uri``, ``asserted_display`` and ``verstat`` come only from a
+    peer the account names in ``trusted_peers`` (RFC 3325 Section 8):
+    ``trusted`` says whether this call came from one. ``privacy`` is what the
+    caller's `Privacy` asked for. ``diverted_from`` and ``diversion_reason``
+    are the top-most `Diversion` (RFC 5806); the full lists, and every
+    `History-Info` entry (RFC 7044), are read with
+    :meth:`sipral.call.Call.identity` or
+    :meth:`sipral.stack.Stack.call_identity`.
+    """
+
+    trusted: bool
+    asserted_uri: str | None
+    asserted_display: str | None
+    verstat: "Verstat"
+    privacy: "Privacy"
+    diverted_from: str | None
+    diversion_reason: str | None
+    diversion_count: int
+    history_count: int
+
+
+@dataclasses.dataclass(frozen=True)
+class Answering:
+    """How an incoming call asked to be answered (RFC 5373) and rung
+    (`Alert-Info`, RFC 7462). ``answer_after_ms`` is not ``None`` when the
+    call asked to be answered without the user -- whether to do so is the
+    application's policy, never the stack's (RFC 5373 Section 4.2)."""
+
+    answer_mode: "AnswerMode"
+    answer_mode_required: bool
+    priv_answer_mode: "AnswerMode"
+    priv_answer_mode_required: bool
+    answer_after_ms: int | None
+    ring_source: "RingSource"
+    alert_info: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class EndCause:
+    """The `Reason` a call ended with. ``sip`` 200 on a CANCEL is a forking
+    proxy saying another phone answered: not a missed call."""
+
+    sip: int
+    q850: int
+    text: str | None
+
 
 def _decode_payload(kind: int, payload) -> dict[str, object]:
     # Registration.
@@ -118,6 +260,37 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "to_uri": _text(call.to_uri, call.to_uri_len),
             "call_id": _text(call.call_id, call.call_id_len),
             "digit": int(call.digit),
+            "cause_sip": int(call.cause_sip),
+            "cause_q850": int(call.cause_q850),
+            "cause_text": _text(call.cause_text, call.cause_text_len),
+            "identity_trusted": bool(call.identity_trusted),
+            "asserted_uri": _text(call.asserted_uri, call.asserted_uri_len),
+            "asserted_display": _text(call.asserted_display, call.asserted_display_len),
+            "verstat": int(call.verstat),
+            "privacy": int(call.privacy),
+            "diverted_from": _text(call.diverted_from, call.diverted_from_len),
+            "diversion_reason": _text(call.diversion_reason, call.diversion_reason_len),
+            "diversion_count": int(call.diversion_count),
+            "history_count": int(call.history_count),
+            "answer_mode": int(call.answer_mode),
+            "answer_mode_required": bool(call.answer_mode_required),
+            "priv_answer_mode": int(call.priv_answer_mode),
+            "priv_answer_mode_required": bool(call.priv_answer_mode_required),
+            "answer_after_ms": int(call.answer_after_ms) if call.has_answer_after else None,
+            "ring_source": int(call.ring_source),
+            "alert_info": _text(call.alert_info, call.alert_info_len),
+        }
+
+    # The audio engine's own news, in device mode: a device arrived or left,
+    # a default moved, a role was put on a device or reopened elsewhere.
+    if kind == lib.SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED:
+        audio = payload.audio
+        return {
+            "change": int(audio.change),
+            "origin": int(audio.origin),
+            "role": int(audio.role),
+            "direction": int(audio.direction),
+            "device": int(audio.device),
         }
 
     # Every media kind shares `payload.media` (`sipral_media_event_t`).
@@ -220,6 +393,7 @@ _CALL_KINDS = frozenset(
         lib.SIPRAL_EVENT_KIND_CALL_REPLACED,
         lib.SIPRAL_EVENT_KIND_CALL_ENDED,
         lib.SIPRAL_EVENT_KIND_DTMF_SENT,
+        lib.SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED,
     }
 )
 

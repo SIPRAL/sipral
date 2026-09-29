@@ -17,8 +17,8 @@ Two layers, the way every binding here is two layers:
   exact; `tests/test_abi.py` checks it against `bindings/c/abi-sizes.txt`
   and against the header's own numbers.
 - `sipral/stack.py`, `sipral/account.py`, `sipral/call.py`,
-  `sipral/media.py`, `sipral/events.py`, `sipral/enums.py`, `sipral/errors.py`
-  — written by hand against `ffi`/`lib` directly, the way `SipralAbi.swift`
+  `sipral/media.py`, `sipral/audio.py`, `sipral/events.py`,
+  `sipral/enums.py`, `sipral/errors.py` — written by hand against `ffi`/`lib` directly, the way `SipralAbi.swift`
   is the base the Swift package is written against. `Stack`, `Account` and
   `Call` are what an application reaches for.
 
@@ -62,22 +62,107 @@ async def main():
         # address the registrar can reach.
 
         call = stack.place_call(account, "sip:bob@example.invalid", media_host="192.0.2.10")
-        while call.media is None:
+        while not call.ended:
             event = await call.events.get()
             print(event.kind_name)
-
-        call.media.send_audio(pcm_bytes)      # 16-bit mono, one call at a time
-        frame = await call.media.frames.get()  # the far end's own audio back
 
 asyncio.run(main())
 ```
 
+That is a whole softphone on macOS and Windows: the stack is in **device
+mode** there by default, so the library opens the machine's own microphone
+and loudspeaker and pumps the call through them, and the code above has no
+audio in it at all. `stack.audio` is what a person still decides (see "The
+devices" below). Where the library has no audio backend — Linux, or a build
+without one; `sipral.features()` has `Feature.AUDIO_DEVICE` exactly where it
+does — the default is **application mode**, and so is
+`Stack(audio=AudioMode.APPLICATION)` anywhere: the frames are the
+application's, which is what a voice agent, a recorder or a server wants:
+
+```python
+        call.media.send_audio(pcm_bytes)      # 16-bit mono, one call at a time
+        frame = await call.media.frames.get()  # the far end's own audio back
+```
+
 An incoming call has no `Call` until the application decides what to do
 with it: read `SIPRAL_EVENT_KIND_INCOMING_CALL` off `stack.events` and
-call `stack.answer_call(event)` or `stack.reject_call(event)`. `call.dtmf`
-is an `asyncio.Queue` of the digits the far end sent; `call.media.statistics()`
-is `sipral_media_statistics`, as a `dict`. See `examples/agent.py` for a
-complete voice agent that answers, talks and hears DTMF.
+call `stack.answer_call(event)`, `stack.reject_call(event)` or
+`stack.redirect_call(event, targets)`. `call.dtmf` is an `asyncio.Queue` of
+the digits the far end sent; `call.media.statistics()` is
+`sipral_media_statistics`, as a `dict`. `examples/softphone.py` is a
+terminal softphone in device mode, with no audio code; `examples/agent.py`
+a voice agent in application mode that answers, talks and hears DTMF.
+
+## The devices
+
+`stack.audio` (`sipral.audio.Audio`) is the library's audio engine, in
+device mode. `stack.audio.devices()` lists every device as an `AudioDevice`
+— `id`, `name`, `input_channels`, `output_channels`, whether it is the
+system's default either way, and whether it is still `present`; an id is
+the engine's, survives `refresh()` and is never reused, so a device
+unplugged keeps its row. `select(AudioRole.MICROPHONE | SPEAKER | RINGER,
+device)` puts one role on a device and `select(role, None)` back on the
+system's route; `selection(role)` reads back what was chosen and what the
+role is running on, which differ while a chosen device is unplugged — the
+choice is kept and comes back with the device. macOS runs the microphone
+and the loudspeaker as one unit, so there only the speaker is chosen and
+the others raise `SIPRAL_STATUS_NOT_SUPPORTED`; Windows takes all three.
+`set_gain(direction, ratio)` (`microphone_gain` and `volume` as
+properties; 1.0 is unity, 4.0 the most) and `set_muted(direction, muted)`
+belong to the direction and survive every device change; `level(direction)`
+is the meter, 0 to 32767, cheap enough for a window's timer.
+`Stack(audio_activation=AudioActivation.MANUAL)` opens the devices only
+between `activate()` and `deactivate()` — what CallKit or a telecom
+framework's audio focus asks for — instead of with the first call and the
+last; `ring(pcm, rate)` plays a tone on the ringer until `stop_ringing()`;
+`info()` says what is open, whether the platform's own echo cancellation
+sits behind the microphone, and the render delay. A device arriving or
+leaving, or the default moving, is `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`
+on `stack.events`, typed as `event.audio` (`AudioNotice`): react to an
+`AudioOrigin.SYSTEM` one, never re-select on an `ENGINE` one.
+
+In device mode `call.media.pumped` is true, `call.media.frames` stays
+empty and `send_audio` raises: the packets the engine encodes are handed
+back to this package, which sends them from the call's own media socket.
+
+## Who is calling, why a call ended, where it went
+
+Every call event carries `event.identity` (`CallerIdentity`: the
+`P-Asserted-Identity` and `verstat` — believed only from an address in the
+account's `trusted_peers`, and `trusted` says whether this call came from
+one — the caller's `Privacy`, the top `Diversion` and how many `Diversion`
+and `History-Info` entries there were) and `event.answering` (`Answering`:
+`Answer-Mode`, `Priv-Answer-Mode`, `answer_after_ms` when the call asks to
+be answered by itself — whether to is the application's policy — the ring
+source and the `Alert-Info` URI). `call.identity(IdentityText.DIVERSION)`
+or `stack.call_identity(event, which)` reads a whole list.
+`SIPRAL_EVENT_KIND_CALL_ENDED` carries `event.cause` (`EndCause`), the
+`Reason` of the BYE, CANCEL or refusal: `sip == 200` on a CANCEL is
+another phone answering, not a missed call. `call.hangup_for(q850_cause=16,
+text=...)` ends a call with a `Reason` of its own, and
+`stack.redirect_call(event, ["sip:desk@example.com"], reason="no-answer")`
+answers an incoming call 302 with a `Diversion`.
+
+`add_account` takes the per-account options: `session_timer` and
+`session_interval_seconds` (RFC 4028), `privacy` (`Privacy.ID` places every
+call anonymous in `From`) and `trusted_peers`, the addresses whose asserted
+identity the account believes and toward which alone it asserts its own.
+
+## A call that moves with the network
+
+`stack.move_to(host)` is what an application calls when the platform says
+the address changed: the signalling socket is bound again there, the change
+reported, and every account added without a `contact` pointed at the new
+address (`Account.rebind` does one by hand). On `Recovery.REBUILD` each call
+whose media was described at the old address gets
+`SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`, and `call.readdress(host)` offers it
+again from a socket there — a re-INVITE moving only `c=` and the `m=` port —
+so the far end sends its audio where this machine now is. A call running ICE
+is moved with `call.restart_ice()` instead.
+
+`call.srtp_suite` is the transform a DTLS-SRTP handshake settled on, from
+`SIPRAL_EVENT_KIND_MEDIA_SECURED` — `SrtpSuite.AEAD_AES256_GCM` between two
+ends of this stack, RFC 6188's and RFC 7714's suites included.
 
 Every idiomatic method raises `sipral.SipralError` on anything but
 `SIPRAL_STATUS_OK`, except an ordinary `SIPRAL_STATUS_BUSY` from another
@@ -167,11 +252,22 @@ sends a REFER from outside any call by hand, from a plain socket, and proves
 the 403 without `referrals=True` and, with it, the 202, the NOTIFYs from
 `100 Trying` to the placed call's `200 OK` and the call itself; and puts an
 `Ice.LITE` stack under one that requires ICE, audio crossing both ways.
+`tests/test_audio.py` proves which mode a stack gets, and — on a platform
+with devices, always under manual activation so no microphone is opened —
+the device list, the roles, gain, mute, the meter and a device-mode call the
+application pumps nothing into; it also hands the engine's transmit callback
+a packet of its own and proves it leaves from the call's socket.
+`tests/test_identity.py` plays the far end by hand for the caller's identity
+behind the trust gate, Answer-Mode and Alert-Info, `Reason` read and
+written, a 302 and the per-account options; `tests/test_move.py` moves a
+call from loopback to this host's routable address and hears it both ways
+after, and reads the suite a DTLS-SRTP call settled on.
 
 `examples/agent.py` is also run by the interop lab (`scripts/lab.sh`), as
 its own docstring says to run it: registered at the lab's Asterisk, called
 by it, hearing a tone, echoing it back and hanging up on the `#` the
-dialplan sends.
+dialplan sends. It runs in application mode on purpose, being a voice agent
+in a container with no sound device.
 
 ## What is not here
 

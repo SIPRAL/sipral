@@ -11,6 +11,12 @@ with a call into whatever transcribes, thinks and synthesizes; nothing
 else here changes; a large recorded reply crosses just as well as a frame
 at a time by queuing several calls to ``call.media.send_audio``.
 
+The one example here that handles frames itself, because a voice agent's
+frames are its whole job: it creates its stack with
+``audio=AudioMode.APPLICATION``, which is also what a machine with no sound
+device runs. A phone that a person talks into lets the library open the
+devices instead -- see ``softphone.py``, which has no audio code at all.
+
     SIPRAL_AOR=sip:agent@example.invalid \\
     SIPRAL_REGISTRAR=sip:example.invalid \\
     SIPRAL_REGISTRAR_ADDRESS=203.0.113.10:5060 \\
@@ -26,7 +32,7 @@ import socket
 import ssl
 
 from sipral import Call, Stack
-from sipral.enums import EventKind, Ice, Nat, Transport
+from sipral.enums import AudioMode, EventKind, Ice, Nat, Transport
 from sipral.errors import SipralError
 
 
@@ -242,6 +248,7 @@ async def run_direct_call() -> bool:
     stack = Stack(
         bind_host=host,
         loop=loop,
+        audio=AudioMode.APPLICATION,
         nat=Nat.STUN if stun_server else 0,
         stun_server=stun_server,
         turn_server=turn_server,
@@ -292,7 +299,7 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     registrar_address = os.environ["SIPRAL_REGISTRAR_ADDRESS"]
     host = route_to(registrar_address)
-    stack = Stack(loop=loop, bind_host=host)
+    stack = Stack(loop=loop, bind_host=host, audio=AudioMode.APPLICATION)
     account = stack.add_account(
         os.environ.get("SIPRAL_AOR", "sip:agent@example.invalid"),
         registrar=os.environ.get("SIPRAL_REGISTRAR"),

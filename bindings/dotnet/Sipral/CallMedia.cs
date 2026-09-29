@@ -40,10 +40,12 @@ public sealed class CallMedia : IDisposable
     private const int AddressBytes = 128;
 
     private readonly SipralStack _stack;
-    private readonly Socket _socket;
+    /// <summary>Replaced by <see cref="Rebind"/> under <see cref="_socketLock"/>.</summary>
+    private volatile Socket _socket;
+    private readonly object _socketLock = new();
     /// <summary>This call's media socket, as <c>host:port</c>: the name of its
     /// connection to a TURN server reached over TCP or TLS.</summary>
-    private readonly string _localAddress;
+    private volatile string _localAddress;
     private readonly MediaSafeHandle _handle = new();
     private readonly Thread _thread;
     private readonly ManualResetEventSlim _closed = new(initialState: false);
@@ -86,8 +88,20 @@ public sealed class CallMedia : IDisposable
     /// only.</summary>
     public delegate void FrameHandler(ReadOnlySpan<short> samples);
 
-    internal CallMedia(SipralStack stack, ulong callHandle, Socket socket)
+    /// <summary>The socket this media reads and sends on, as <c>host:port</c>
+    /// — a new one after <see cref="Call.Readdress"/>.</summary>
+    public string LocalAddress => _localAddress;
+
+    /// <summary>Whether the library's own audio engine pumps this call
+    /// (device mode): then no frame crosses here — <see cref="Frames"/> stays
+    /// empty, <see cref="FrameDecoded"/> never fires and
+    /// <see cref="SendAudio"/> throws — and this media's thread only reads
+    /// the socket and sends what RTCP and DTMF owe.</summary>
+    public bool Pumped { get; }
+
+    internal CallMedia(SipralStack stack, ulong callHandle, Socket socket, bool pumped = false)
     {
+        Pumped = pumped;
         _stack = stack;
         _socket = socket;
         _socket.Blocking = false;
@@ -216,10 +230,35 @@ public sealed class CallMedia : IDisposable
 
     /// <summary>Queues 16-bit mono PCM to go out, one frame at a time, cut
     /// to whatever <see cref="FrameSamples"/> this call negotiated as it
-    /// is sent rather than as it is queued. Thread-safe.</summary>
+    /// is sent rather than as it is queued. Thread-safe. Throws
+    /// <see cref="InvalidOperationException"/> in device mode
+    /// (<see cref="Pumped"/>), where the microphone is the call's audio and
+    /// nothing else is.</summary>
     public void SendAudio(ReadOnlySpan<short> samples)
     {
+        if (Pumped)
+        {
+            throw new InvalidOperationException(
+                "this call's audio is pumped by the library's own engine (device mode); " +
+                "create the stack with audio: SipralAudio.Application to send frames of your own");
+        }
         _toSend.Enqueue(samples.ToArray());
+    }
+
+    /// <summary>Carries this call's media on <paramref name="socket"/> from
+    /// now on and closes the one it had: what <see cref="Call.Readdress"/>
+    /// does once the call was offered at the new socket's address.</summary>
+    internal void Rebind(Socket socket)
+    {
+        socket.Blocking = false;
+        Socket old;
+        lock (_socketLock)
+        {
+            old = _socket;
+            _socket = socket;
+            _localAddress = SipralStack.FormatAddress((IPEndPoint)socket.LocalEndPoint!);
+        }
+        old.Dispose();
     }
 
     /// <summary>Writes straight to this call's own RTP socket — used by
@@ -257,7 +296,14 @@ public sealed class CallMedia : IDisposable
             var started = DateTime.UtcNow;
             DrainReceive();
 
-            if (_active)
+            if (_active && Pumped)
+            {
+                // the engine plays and captures; this thread still carries
+                // what RTCP and DTMF owe, which are not frames
+                DrainPackets(NativeMethods.sipral_media_poll_rtcp);
+                DrainPackets(NativeMethods.sipral_media_poll_transmit);
+            }
+            else if (_active)
             {
                 var status = PlaybackOnce(out var scratch, out var written, out _);
                 if (status == SipralStatus.Ok && written > 0)
@@ -302,17 +348,24 @@ public sealed class CallMedia : IDisposable
     private void DrainReceive()
     {
         var buffer = new byte[2048];
-        while (_socket.Poll(0, SelectMode.SelectRead))
+        while (true)
         {
             EndPoint from = new IPEndPoint(IPAddress.Any, 0);
             int count;
-            try
+            lock (_socketLock)
             {
-                count = _socket.ReceiveFrom(buffer, ref from);
-            }
-            catch (SocketException)
-            {
-                return;
+                try
+                {
+                    if (!_socket.Poll(0, SelectMode.SelectRead))
+                    {
+                        return;
+                    }
+                    count = _socket.ReceiveFrom(buffer, ref from);
+                }
+                catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+                {
+                    return;
+                }
             }
             RemoteAddress = SipralStack.FormatAddress((IPEndPoint)from);
             var fromBytes = ToSBytes(RemoteAddress);

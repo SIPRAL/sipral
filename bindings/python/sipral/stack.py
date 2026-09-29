@@ -21,15 +21,33 @@ import socket
 import ssl
 import threading
 import time
+from typing import Sequence
 
 from . import events as _events
 from ._sipral_cffi import ffi, lib
 from .account import Account
+from .audio import Audio
 from .call import Call
+from .enums import AudioMode, Feature, Link, Recovery
 from .errors import call as _retry
 from .errors import check
 
-__all__ = ["Stack"]
+__all__ = ["Stack", "features"]
+
+
+def features() -> Feature:
+    """What this build of the library has compiled in:
+    `sipral_capabilities_t::features`, as :class:`sipral.enums.Feature` bits.
+
+    ``Feature.AUDIO_DEVICE`` is set where the library can open the
+    platform's own audio devices (macOS, iOS, Windows) and clear where it
+    cannot (Linux, Android); a :class:`Stack` is created in device mode by
+    default exactly where it is set.
+    """
+    out = ffi.new("sipral_capabilities_t *")
+    out.size = ffi.sizeof("sipral_capabilities_t")
+    check(lib.sipral_capabilities(out), "sipral_capabilities")
+    return Feature(int(out.features))
 
 #: `sipral_transmit_t` and `sipral_media_packet_t` both bound a single
 #: datagram at this many bytes (`SIPRAL_MEDIA_PACKET_BYTES`); a signalling
@@ -110,8 +128,39 @@ class Stack:
         referrals: bool | None = None,
         registrar_keepalive: bool | None = None,
         registrar_keepalive_ms: int = 0,
+        audio: int | None = None,
+        audio_activation: int = 0,
+        audio_probe_ms: int = 0,
+        audio_device_rate_hz: int = 0,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
+
+        ``audio`` is who pumps the calls' audio, an
+        :class:`sipral.enums.AudioMode`. ``AudioMode.DEVICE`` has the library
+        open the platform's own microphone and loudspeaker and run every
+        call through them -- the application writes no audio code at all,
+        and chooses devices, volume, mute and the ring through
+        :attr:`audio` -- and the packets it encodes still leave from each
+        call's own media socket, which this class sends for it.
+        ``AudioMode.APPLICATION`` leaves the frames to
+        :class:`sipral.media.Media` (:attr:`sipral.media.Media.frames` in,
+        :meth:`sipral.media.Media.send_audio` out): a voice agent, a
+        recorder, a machine with no sound device. Left out, it is
+        ``DEVICE`` where :func:`features` has ``Feature.AUDIO_DEVICE`` and
+        ``APPLICATION`` elsewhere; :attr:`audio_mode` says which this stack
+        got. Asking for ``DEVICE`` on a build without it raises
+        ``SIPRAL_STATUS_NOT_SUPPORTED``.
+
+        ``audio_activation`` (an :class:`sipral.enums.AudioActivation`) is
+        when device mode opens the devices: ``AUTOMATIC`` (``0``) with the
+        first call's media or the first ring, closed with the last;
+        ``MANUAL`` only between :meth:`sipral.audio.Audio.activate` and
+        :meth:`sipral.audio.Audio.deactivate`, whatever the calls do.
+        ``audio_probe_ms`` bounds every platform call (``0`` for three
+        seconds): a driver that does not answer is
+        ``SIPRAL_STATUS_DEVICE_TIMED_OUT``, not a hang.
+        ``audio_device_rate_hz`` is the rate the devices are asked for
+        (``0`` for 48 000).
 
         ``ice`` and ``nat`` are :class:`sipral.enums.Ice` /
         :class:`sipral.enums.Nat` values, or ``0`` for this build's own
@@ -160,6 +209,8 @@ class Stack:
         self._loop = loop
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
         self._calls: dict[int, Call] = {}
+        #: Every account added and not removed, for :meth:`move_to`.
+        self._accounts: list[Account] = []
         self._lock = threading.Lock()
         self._nat = nat
         self._turn = turn_server is not None
@@ -213,6 +264,23 @@ class Stack:
         # local instead.
         self._callback = ffi.callback("void(const sipral_event_t *, void *)")(
             self._on_event
+        )
+
+        if audio is None:
+            audio = AudioMode.DEVICE if Feature.AUDIO_DEVICE in features() else AudioMode.APPLICATION
+        #: Who pumps this stack's audio, an :class:`sipral.enums.AudioMode`.
+        self.audio_mode = AudioMode(audio)
+        #: The library's audio engine: devices, roles, gain, mute, the meter,
+        #: activation and the ring (device mode; see :class:`sipral.audio.Audio`).
+        self.audio = Audio(self)
+        #: Connections to the TURN server a write from the engine's thread
+        #: found broken, told to the stack from the poll thread: the engine's
+        #: thread must not call back into the stack.
+        self._turn_lost: list[str] = []
+        # Kept alive on the instance for the same reason as the event
+        # callback; the engine calls it from its own thread, once per packet.
+        self._audio_transmit = ffi.callback("void(const sipral_audio_transmit_t *, void *)")(
+            self._on_audio_transmit
         )
 
         # Everything else here is read once, inside `sipral_stack_create`,
@@ -277,9 +345,21 @@ class Stack:
         config.registrar_keepalive = _toggle(registrar_keepalive)
         config.registrar_keepalive_ms = registrar_keepalive_ms
         config.turn_transport = turn_transport
+        config.audio = int(self.audio_mode)
+        config.audio_activation = audio_activation
+        if self.audio_mode == AudioMode.DEVICE:
+            config.audio_transmit_callback = self._audio_transmit
+        config.audio_probe_ms = audio_probe_ms
+        config.audio_device_rate_hz = audio_device_rate_hz
 
         out_stack = ffi.new("sipral_handle_t *")
-        check(lib.sipral_stack_create(config, out_stack), "sipral_stack_create")
+        try:
+            check(lib.sipral_stack_create(config, out_stack), "sipral_stack_create")
+        except Exception:
+            # refused -- device mode on a build with no backend for this
+            # platform, say -- so the socket bound above has nothing to serve
+            self._socket.close()
+            raise
         self.handle = int(out_stack[0])
 
         self._selector = selectors.DefaultSelector()
@@ -338,8 +418,23 @@ class Stack:
         auth_user: str | None = None,
         auth_password: str | None = None,
         expires_seconds: int = 0,
+        session_timer: int = 0,
+        session_interval_seconds: int = 0,
+        privacy: int = 0,
+        trusted_peers: Sequence[str] | str | None = None,
     ) -> Account:
         """`sipral_account_add`. See :class:`sipral.account.Account`.
+
+        ``session_timer`` is an :class:`sipral.enums.SessionTimer`: ``0`` for
+        the stack's default, ``OFF``, or ``INTERVAL`` with
+        ``session_interval_seconds`` (90 or more, RFC 4028). ``privacy`` is
+        :class:`sipral.enums.Privacy` bits every call this account places
+        asks for (RFC 3323) -- ``Privacy.ID`` places them anonymous in
+        `From`. ``trusted_peers`` are the addresses (IP literals, a list or
+        one comma-separated string) whose `P-Asserted-Identity` this account
+        believes and toward which alone it asserts its own (RFC 3325): an
+        incoming call from anywhere else carries no asserted identity, and
+        :attr:`sipral.events.Event.identity` says which it was.
 
         ``registrar`` left out makes an account that never registers --
         `docs/08-ffi.md`'s "An account with no registrar never registers"
@@ -349,7 +444,7 @@ class Stack:
         add one account this way, pointed at the other's own
         :attr:`bind_address`.
         """
-        return Account.add(
+        account = Account.add(
             self,
             aor,
             registrar_address=registrar_address,
@@ -359,7 +454,14 @@ class Stack:
             auth_user=auth_user,
             auth_password=auth_password,
             expires_seconds=expires_seconds,
+            session_timer=session_timer,
+            session_interval_seconds=session_interval_seconds,
+            privacy=privacy,
+            trusted_peers=trusted_peers,
         )
+        with self._lock:
+            self._accounts.append(account)
+        return account
 
     def place_call(
         self,
@@ -537,6 +639,150 @@ class Stack:
             "sipral_call_reject_transfer",
         )
 
+    def redirect_call(
+        self,
+        event: _events.Event,
+        targets: Sequence[str] | str,
+        *,
+        status_code: int = 302,
+        reason: str | None = None,
+    ) -> None:
+        """Answer an incoming call nothing has answered with a redirection
+        (`sipral_call_redirect`): ``status_code`` 300 to 399, 302 Moved
+        Temporarily by default, with ``targets`` (URIs, a list or one
+        comma-separated string) in `Contact`. With ``reason`` -- RFC 5806's
+        ``unconditional``, ``user-busy``, ``no-answer``... -- a `Diversion`
+        names the address that was called, so the next phone says the call
+        was forwarded and why."""
+        listed = targets if isinstance(targets, str) else ", ".join(targets)
+        targets_bytes = listed.encode("utf-8")
+        reason_bytes = (reason or "").encode("utf-8")
+        _retry(
+            lambda: lib.sipral_call_redirect(
+                self.handle,
+                event.call,
+                status_code,
+                targets_bytes,
+                len(targets_bytes),
+                reason_bytes or ffi.NULL,
+                len(reason_bytes),
+                self.now_ms(),
+            ),
+            "sipral_call_redirect",
+        )
+
+    def call_identity(self, call: int | _events.Event, which: int) -> list[str]:
+        """Every entry of one identity list a call's INVITE carried --
+        ``which`` an :class:`sipral.enums.IdentityText` -- for a call that
+        has no :class:`sipral.call.Call` yet (``call`` its
+        `SIPRAL_EVENT_KIND_INCOMING_CALL` event, or its handle).
+        :meth:`sipral.call.Call.identity` is the same for one that has."""
+        handle = call.call if isinstance(call, _events.Event) else call
+        count = ffi.new("size_t *")
+        _retry(
+            lambda: lib.sipral_call_identity_count(self.handle, handle, which, count),
+            "sipral_call_identity_count",
+        )
+        texts = []
+        needed = ffi.new("size_t *")
+        for index in range(int(count[0])):
+            capacity = 256
+            while True:
+                buffer = ffi.new(f"char[{capacity}]")
+                status = lib.sipral_call_identity_text(
+                    self.handle, handle, which, index, buffer, capacity, needed
+                )
+                if status == lib.SIPRAL_STATUS_BUFFER_TOO_SMALL:
+                    capacity = int(needed[0])
+                    continue
+                break
+            check(status, "sipral_call_identity_text")
+            texts.append(ffi.string(buffer).decode("utf-8", "replace"))
+        return texts
+
+    def move_to(self, host: str, *, link: int = Link.WIRED) -> Recovery:
+        """The network under this stack changed, and ``host`` is this
+        machine's address on the new one.
+
+        The signalling socket is bound again at ``host`` and the main
+        transport told (`sipral_stack_transport_bind`), the change reported
+        (`sipral_stack_network_changed`, with ``link`` an
+        :class:`sipral.enums.Link`), and every account added without a
+        `Contact` of its own pointed at the new address
+        (`sipral_account_rebind`). What the stack decided comes back as a
+        :class:`sipral.enums.Recovery`. On ``Recovery.REBUILD`` every call
+        whose media was described at the old address gets
+        `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`, which
+        :meth:`sipral.call.Call.readdress` answers -- the far end is still
+        sending to an address this machine no longer has. An account added
+        with an explicit ``contact`` is the application's to rebind with
+        :meth:`sipral.account.Account.rebind`.
+        """
+        previous = parse_address(self.bind_address)[0]
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind((host, 0))
+        sock.setblocking(False)
+        bound = format_address(*sock.getsockname())
+        local = bound.encode("utf-8")
+        try:
+            _retry(
+                lambda: lib.sipral_stack_transport_bind(
+                    self.handle,
+                    lib.SIPRAL_TRANSPORT_MAIN,
+                    lib.SIPRAL_TRANSPORT_UDP,
+                    local,
+                    len(local),
+                    ffi.NULL,
+                    0,
+                    self.now_ms(),
+                    ffi.NULL,
+                ),
+                "sipral_stack_transport_bind",
+            )
+        except Exception:
+            sock.close()
+            raise
+        old = self._socket
+        self._selector.register(sock, selectors.EVENT_READ, data="main")
+        self._socket = sock
+        self.bind_address = bound
+        try:
+            self._selector.unregister(old)
+        except (KeyError, ValueError, OSError):
+            pass
+        old.close()
+
+        before = previous.encode("utf-8")
+        after = host.encode("utf-8")
+        recovery = ffi.new("uint32_t *")
+        _retry(
+            lambda: lib.sipral_stack_network_changed(
+                self.handle,
+                link,
+                before,
+                len(before),
+                ffi.NULL,
+                0,
+                1,
+                link,
+                after,
+                len(after),
+                ffi.NULL,
+                0,
+                1,
+                self.now_ms(),
+                recovery,
+            ),
+            "sipral_stack_network_changed",
+        )
+        with self._lock:
+            accounts = list(self._accounts)
+        for account in accounts:
+            if account.contact_given:
+                continue
+            account.rebind()
+        return Recovery(int(recovery[0]))
+
     def call_for(self, handle: int) -> Call | None:
         """The :class:`sipral.call.Call` already made for a call handle."""
         with self._lock:
@@ -555,6 +801,13 @@ class Stack:
         if self._turn_streamed:
             with self._nat_lock:
                 self._turn_sockets[call.handle] = call.media_address
+
+    def forget_account(self, account: Account) -> None:
+        """Stop tracking an account :meth:`sipral.account.Account.remove`
+        removed."""
+        with self._lock:
+            if account in self._accounts:
+                self._accounts.remove(account)
 
     def forget_call(self, handle: int) -> None:
         with self._lock:
@@ -619,6 +872,31 @@ class Stack:
             loop.call_soon_threadsafe(self.events.put_nowait, event)
         else:
             self.events.put_nowait(event)
+
+    def _on_audio_transmit(self, raw, _user_data: object) -> None:
+        """`audio_transmit_callback`, in device mode: one packet the engine
+        encoded from the microphone, sent from its call's media socket -- or,
+        marked TCP or TLS, written on that socket's connection to the TURN
+        server. Runs on the engine's own thread, once per frame per call, and
+        calls nothing in the library: an entry point reached from here could
+        wait on the engine that is waiting on this callback."""
+        try:
+            transmit = raw[0]
+            call = self.call_for(int(transmit.call))
+            if call is None:
+                return
+            payload = bytes(ffi.buffer(transmit.payload, transmit.payload_len))
+            if transmit.protocol in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
+                self.write_turn(call.media_address, payload, from_engine=True)
+                return
+            destination = ffi.buffer(transmit.destination, transmit.destination_len)[:]
+            host, port = parse_address(destination.decode("utf-8"))
+            call.media_socket.sendto(payload, (host, port))
+        except (OSError, ValueError):
+            # a socket closed by a readdress or a hangup racing this send, or
+            # a destination that is not host:port: the packet is lost, which
+            # the far end's jitter buffer already knows how to hide
+            pass
 
     def _drain_transmit(self) -> None:
         """`sipral_stack_poll_transmit`, until nothing is left to send.
@@ -835,12 +1113,13 @@ class Stack:
 
     # -- the TURN server over TCP or TLS -----------------------------------
 
-    def write_turn(self, local: str, payload: bytes) -> None:
+    def write_turn(self, local: str, payload: bytes, *, from_engine: bool = False) -> None:
         """Write ``payload`` on media socket ``local``'s connection to the
         TURN server, whole: what `sipral_stack_poll_stun`,
         `sipral_stack_poll_farewell` and a call's media hand out marked TCP
         or TLS. Thread-safe; a connection that fails here is closed and the
-        stack is told, which loses the relay on it."""
+        stack is told, which loses the relay on it -- from the poll thread
+        when the write came from the audio engine's (``from_engine``)."""
         with self._nat_lock:
             stream = self._turn_streams.get(local)
         if stream is None:
@@ -849,6 +1128,10 @@ class Stack:
             with stream.lock:
                 stream.sock.sendall(payload)
         except (OSError, ssl.SSLError):
+            if from_engine:
+                with self._nat_lock:
+                    self._turn_lost.append(local)
+                return
             self._lose_turn_stream(local, tell=True)
 
     def _act_on_turn_streams(self) -> None:
@@ -1043,6 +1326,10 @@ class Stack:
             self._drain_stun()
             self._drain_farewells()
             self._act_on_turn_streams()
+            with self._nat_lock:
+                lost, self._turn_lost = self._turn_lost, []
+            for local in lost:
+                self._lose_turn_stream(local, tell=True)
 
     def close(self) -> None:
         """`sipral_stack_destroy`, and everything this wrapper opened.

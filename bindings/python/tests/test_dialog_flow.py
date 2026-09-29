@@ -17,7 +17,7 @@ import socket
 import unittest
 
 from sipral import Stack
-from sipral.enums import EventKind
+from sipral.enums import AudioMode, EventKind
 
 
 def _header(name: str, message: str) -> str | None:
@@ -41,7 +41,7 @@ class ADialogsRequestsStayOnThePathTheInviteTook(unittest.IsolatedAsyncioTestCas
         self.audio.setblocking(False)
         self.addAsyncCleanup(self._close_sockets)
 
-        self.stack = Stack(loop=loop)
+        self.stack = Stack(loop=loop, audio=AudioMode.APPLICATION)
         self.addAsyncCleanup(self.stack.close)
 
     async def _close_sockets(self) -> None:

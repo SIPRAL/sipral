@@ -63,7 +63,17 @@ nomination. `ReferralAndLiteTests.cs` sends a REFER from outside any call by
 hand and proves the 403 without `referrals: true` and, with it, the 202, the
 NOTIFYs from `100 Trying` to the placed call's `200 OK` and the call itself;
 and puts a `SipralIce.Lite` stack under one that requires ICE, audio crossing
-both ways.
+both ways. `AudioEngineTests.cs` proves which mode a stack gets and — on a
+platform with devices, under manual activation so no microphone is opened —
+the device list, the roles, gain, mute, the meter and a device-mode call the
+application pumps nothing into; it hands the engine's transmit callback a
+packet and proves it leaves from the call's socket, and, with
+`SIPRAL_AUDIO_DEVICES=1` on a machine whose devices a test may open, carries
+a call through the real devices both ways. `IdentityTests.cs` plays the far
+end by hand for the caller's identity behind the trust gate, Answer-Mode and
+Alert-Info, `Reason` read and written, a 302 and the per-account options;
+`MoveTests.cs` moves a call from loopback to this host's routable address and
+hears it both ways after, and reads the suite a DTLS-SRTP call settled on.
 
 ## Use
 
@@ -85,18 +95,97 @@ account.Register();
 // can reach.
 
 var call = stack.PlaceCall(account, "sip:bob@example.invalid", mediaHost: "192.0.2.10");
-var media = await call.WaitForMediaAsync();
-media!.SendAudio(pcmSamples);          // 16-bit mono, one call at a time
-await foreach (var frame in media.Frames)
-{
-    // the far end's own audio, one frame per item
-}
+await call.WaitForMediaAsync();
 
 call.Hold();
 call.Resume();
 call.SendDtmf("123#");
 call.Hangup();
 ```
+
+That is a whole softphone on Windows and macOS: the stack is in **device
+mode** there by default, so the library opens the machine's own microphone
+and loudspeaker and pumps the call through them, and the code above has no
+audio in it. `stack.Audio` is what a person still decides (see "The
+devices" below). Where the library has no audio backend — Linux, or a build
+without one; `SipralStack.HasFeature(Sipral.FeatureAudioDevice)` says so —
+the default is **application mode**, and so is
+`new SipralStack(audio: SipralAudio.Application)` anywhere: the frames are
+the application's, which is what a voice agent, a recorder or a server
+wants:
+
+```csharp
+var media = await call.WaitForMediaAsync();
+media!.SendAudio(pcmSamples);          // 16-bit mono, one call at a time
+await foreach (var frame in media.Frames)
+{
+    // the far end's own audio, one frame per item
+}
+```
+
+### The devices
+
+`stack.Audio` (`SipralAudioEngine`) is the library's audio engine, in device
+mode. `Devices()` lists every device as a `SipralDeviceInfo` — `Id`, `Name`,
+the channel counts either way, whether it is the system's default, and
+whether it is still `Present`; an id is the engine's, survives `Refresh()`
+and is never reused, so a device unplugged keeps its row.
+`Select(SipralAudioRole.Microphone | Speaker | Ringer, device)` puts one role
+on a device and `Select(role, (uint?)null)` back on the system's route;
+`Selection(role)` reads back what was chosen and what the role is running on,
+which differ while a chosen device is unplugged — the choice is kept and
+comes back with the device. Windows takes all three roles; macOS runs the
+microphone and the loudspeaker as one unit, so there only the speaker is
+chosen. `SetGain(direction, ratio)` (`MicrophoneGain` and `Volume` as
+properties; 1 is unity, 4 the most) and `SetMuted(direction, muted)` belong
+to the direction and survive every device change; `Level(direction)` and
+`LevelDbfs(direction)` are the meter, cheap enough for a window's timer.
+`audioActivation: SipralAudioActivation.Manual` opens the devices only
+between `Activate()` and `Deactivate()` instead of with the first call and
+the last; `Ring(samples, rate)` plays a tone on the ringer until
+`StopRinging()`; `Info()` says what is open, whether the platform's own echo
+processing sits behind the microphone, and the render delay. A device
+arriving or leaving, or the default moving, is
+`SipralEventKind.AudioDevicesChanged`, with `args.Audio`: react to a
+`SipralAudioOrigin.System` one, never re-select on an `Engine` one. In
+device mode `CallMedia.Pumped` is true, `Frames` stays empty and `SendAudio`
+throws; the packets the engine encodes are handed back to this package,
+which sends them from the call's own media socket.
+
+### Who is calling, why a call ended, where it went
+
+Every call event's `args.CallInfo` carries `Identity`
+(`SipralCallerIdentity`: the `P-Asserted-Identity` and `verstat` — believed
+only from an address in the account's `trustedPeers`, and `Trusted` says
+whether this call came from one — the caller's `Privacy`, the top
+`Diversion` and how many `Diversion` and `History-Info` entries there were)
+and `Answering` (`SipralAnswering`: `Answer-Mode`, `Priv-Answer-Mode`,
+`AnswerAfterMs` when the call asks to be answered by itself — whether to is
+the application's policy — the ring source and the `Alert-Info` URI).
+`call.Identity(SipralIdentityText.Diversion)` or
+`stack.CallIdentity(args.Call, which)` reads a whole list. On
+`SipralEventKind.CallEnded`, `Cause` (`SipralEndCause`) is the `Reason` of
+the BYE, CANCEL or refusal: `Sip == 200` on a CANCEL is another phone
+answering, not a missed call. `call.HangupFor(q850Cause: 16, text: ...)`
+ends a call with a `Reason` of its own, and
+`stack.RedirectCall(args, new[] { "sip:desk@example.com" }, reason: "no-answer")`
+answers an incoming call 302 with a `Diversion`. `AddAccount` takes the
+per-account options: `sessionTimer` and `sessionIntervalSeconds` (RFC 4028),
+`privacy` (`Sipral.PrivacyId` places every call anonymous in `From`) and
+`trustedPeers`.
+
+### A call that moves with the network
+
+`stack.MoveTo(host)` is what an application calls when the platform says the
+address changed: the signalling socket is bound again there, the change
+reported, and every account added without a `contact` pointed at the new
+address (`Account.Rebind` does one by hand). On `SipralRecovery.Rebuild`
+each call whose media was described at the old address gets
+`SipralEventKind.CallAddressWanted`, and `call.Readdress(host)` offers it
+again from a socket there — a re-INVITE moving only `c=` and the `m=` port.
+A call running ICE is moved with `call.RestartIce()` instead.
+`call.SrtpSuite` is the transform a DTLS-SRTP handshake settled on —
+`SipralSrtpSuite.AeadAes256Gcm` between two ends of this stack.
 
 ### Behind a NAT
 
@@ -157,11 +246,16 @@ application's decision.
 hangs up on `"#"`), net8.0, builds and runs on any platform the SDK
 targets. It is both a runnable example of the layer above and the agent
 `scripts/lab.sh`'s own `csharp_agent` runs in the lab, headless, as
-`labuser-agent-csharp`.
+`labuser-agent-csharp` — in application mode on purpose, a voice agent's
+frames being its whole job and a container having no sound device.
 
-`samples/Sipral.Sample.Wpf` — a skeleton (not a product) desktop app:
-registration, a call, hold/resume, DTMF, and a placeholder device list a
-real application wires to whatever local audio API it already uses.
-`net8.0-windows`, builds only on Windows; `scripts/check.sh` does not
-build it on macOS or Linux for that reason, and covers the layer it sits
-on through the two steps above instead.
+`samples/Sipral.Sample.Wpf` — a softphone window with no audio code of its
+own: the stack runs in device mode, the microphone, speaker and ringer lists
+are the devices Windows has (refreshed when one arrives or leaves), with
+microphone gain, volume, mute, a meter per direction and the echo return
+loss the two meters read while the far end talks; registration, a call
+placed or answered with the caller shown as the network asserted them,
+hold/resume and DTMF. `net8.0-windows`, runs only on Windows;
+`scripts/check.sh` does not build it on macOS or Linux, and covers the
+layer it sits on through the two steps above instead
+(`dotnet build -p:EnableWindowsTargeting=true` compiles it elsewhere).

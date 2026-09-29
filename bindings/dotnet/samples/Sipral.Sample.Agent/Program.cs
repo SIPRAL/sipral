@@ -19,6 +19,11 @@
 // or answer/hold/resume/DTMF calls the WPF sample's UI makes, run here
 // without one, which is what scripts/lab.sh runs headless in a container
 // on the lab network as labuser-agent-csharp.
+//
+// The one sample that handles frames itself, because a voice agent's frames
+// are its whole job: its stack is created with audio: SipralAudio.Application,
+// which is also what a machine with no sound device runs. The WPF sample lets
+// the library open the devices instead and has no audio code at all.
 
 using System.Net;
 using System.Net.Sockets;
@@ -316,6 +321,7 @@ async Task<bool> RunDirectCallAsync()
 
     using var stack = new SipralStack(
         bindHost: host,
+        audio: SipralAudio.Application,
         ice: ice ?? 0,
         nat: stunServer is not null ? SipralNat.Stun : 0,
         stunServer: stunServer,
@@ -363,7 +369,7 @@ if (Environment.GetEnvironmentVariable("SIPRAL_PEER_HOST") is not null)
 var registrarAddress = Environment.GetEnvironmentVariable("SIPRAL_REGISTRAR_ADDRESS")
     ?? throw new InvalidOperationException("SIPRAL_REGISTRAR_ADDRESS is required");
 var bindHost = RouteTo(registrarAddress);
-using var stack = new SipralStack(bindHost: bindHost);
+using var stack = new SipralStack(bindHost: bindHost, audio: SipralAudio.Application);
 
 var registrar = Environment.GetEnvironmentVariable("SIPRAL_REGISTRAR");
 var account = stack.AddAccount(

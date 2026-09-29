@@ -28,8 +28,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     // counting how late any one of them might run under that kind of load.
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
 
-    private readonly SipralStack _alice = new();
-    private readonly SipralStack _bob = new();
+    private readonly SipralStack _alice = new(audio: SipralAudio.Application);
+    private readonly SipralStack _bob = new(audio: SipralAudio.Application);
 
     public void Dispose()
     {
@@ -208,7 +208,7 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     [Fact]
     public async Task EventsAreDeliveredOnThePollThreadNotTheCallersThread()
     {
-        using var stack = new SipralStack();
+        using var stack = new SipralStack(audio: SipralAudio.Application);
         int? handlerThreadId = null;
         var seen = new SemaphoreSlim(0);
         stack.EventReceived += (_, _) =>
@@ -247,7 +247,7 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     [Fact]
     public void BusyIsSurfacedRatherThanBlockedOn()
     {
-        using var stack = new SipralStack();
+        using var stack = new SipralStack(audio: SipralAudio.Application);
         var account = stack.AddAccount(
             "sip:alice@sipral.invalid", registrarAddress: "203.0.113.1:5060", registrar: "sip:registrar.invalid");
         account.Register(); // unreachable registrar: keeps the poll thread retransmitting
@@ -336,8 +336,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     [Fact]
     public async Task DisposeWhileEventsArePendingDoesNotUseAfterFree()
     {
-        var alice = new SipralStack();
-        var bob = new SipralStack();
+        var alice = new SipralStack(audio: SipralAudio.Application);
+        var bob = new SipralStack(audio: SipralAudio.Application);
         var aliceAccount = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
         bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);
         alice.PlaceCall(aliceAccount, $"sip:bob@{bob.BindAddress}");
@@ -364,7 +364,7 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     [Fact]
     public async Task ExceptionFromAnEventHandlerDoesNotCrashTheProcessAndPollingContinues()
     {
-        using var stack = new SipralStack();
+        using var stack = new SipralStack(audio: SipralAudio.Application);
         var afterThrow = new SemaphoreSlim(0);
         var threw = 0;
         stack.EventReceived += (_, args) =>

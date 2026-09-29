@@ -42,9 +42,20 @@ public sealed class SipralStack : IDisposable
     private const int AddressBytes = 128;
 
     private readonly StackSafeHandle _handle;
-    private readonly Socket _socket;
+    /// <summary>The signalling socket: replaced by <see cref="MoveTo"/>, read
+    /// by the poll thread, which takes it afresh on every pass.</summary>
+    private volatile Socket _socket;
     private readonly Stopwatch _origin = Stopwatch.StartNew();
     private readonly SipralEventCallback _callback;
+    /// <summary>Kept alive for as long as the stack, like
+    /// <see cref="_callback"/>: the audio engine calls it from its own
+    /// thread, once per packet, in device mode.</summary>
+    private readonly SipralAudioTransmitCallback _audioTransmit;
+    private readonly List<Account> _accounts = new();
+    /// <summary>Connections to the TURN server a write from the audio
+    /// engine's thread found broken, told to the stack from the poll thread:
+    /// the engine's thread must not call back into the stack.</summary>
+    private readonly ConcurrentQueue<string> _turnLost = new();
     private readonly Thread _pollThread;
     private readonly ManualResetEventSlim _closed = new(initialState: false);
     private readonly ConcurrentDictionary<ulong, Call> _calls = new();
@@ -118,8 +129,38 @@ public sealed class SipralStack : IDisposable
 
     private int _disposed;
 
-    /// <summary>The address this stack listens on, <c>host:port</c>.</summary>
-    public string BindAddress { get; }
+    /// <summary>The address this stack listens on, <c>host:port</c> — a new
+    /// one after <see cref="MoveTo"/>.</summary>
+    public string BindAddress { get; private set; }
+
+    /// <summary>Who pumps this stack's calls' audio: the library, from the
+    /// platform's own devices (<see cref="SipralAudio.Device"/>), or the
+    /// application, through <see cref="CallMedia"/>
+    /// (<see cref="SipralAudio.Application"/>).</summary>
+    public SipralAudio AudioMode { get; }
+
+    /// <summary>The library's audio engine, in device mode: devices, roles,
+    /// gain, mute, the meter, activation and the ring. On a stack in
+    /// application mode every member throws <see cref="SipralException"/>
+    /// with <see cref="SipralStatus.WrongState"/>.</summary>
+    public SipralAudioEngine Audio { get; }
+
+    /// <summary>What this build of the library has compiled in:
+    /// <c>sipral_capabilities_t::features</c>, the <c>Sipral.Feature*</c>
+    /// bits. <c>Sipral.FeatureAudioDevice</c> is set where the library can
+    /// open the platform's own audio devices (Windows, macOS, iOS) — where a
+    /// stack is created in device mode by default.</summary>
+    public static uint Features()
+    {
+        NativeLibraryLoader.EnsureRegistered();
+        var capabilities = SipralCapabilities.Sized();
+        SipralErrors.Check(NativeMethods.sipral_capabilities(ref capabilities), "sipral_capabilities");
+        return capabilities.Features;
+    }
+
+    /// <summary>Whether <see cref="Features"/> has <paramref name="bit"/>, one
+    /// of the <c>Sipral.Feature*</c> constants.</summary>
+    public static bool HasFeature(uint bit) => (Features() & bit) == bit;
 
     /// <summary>
     /// Every event this stack raises, in order — the
@@ -190,7 +231,32 @@ public sealed class SipralStack : IDisposable
     /// with the platform's trust, or, when
     /// <paramref name="turnTrustedCertificates"/> holds any, with those roots
     /// and nothing else: how a private CA or a self-signed server is
-    /// trusted. Nothing here turns checking off.</summary>
+    /// trusted. Nothing here turns checking off.
+    ///
+    /// <paramref name="audio"/> is who pumps the calls' audio.
+    /// <see cref="SipralAudio.Device"/> has the library open the platform's
+    /// own microphone and loudspeaker and run every call through them — the
+    /// application writes no audio code, and chooses devices, volume and
+    /// mute through <see cref="Audio"/> — while the packets it encodes still
+    /// leave from each call's own media socket, which this class sends for
+    /// it. <see cref="SipralAudio.Application"/> leaves the frames to
+    /// <see cref="CallMedia"/>: a voice agent, a recorder, a machine with no
+    /// sound device. Left <see langword="null"/>, it is device mode where
+    /// <see cref="Features"/> has <c>Sipral.FeatureAudioDevice</c> and
+    /// application mode elsewhere; <see cref="AudioMode"/> says which. Device
+    /// mode on a build without it throws with
+    /// <see cref="SipralStatus.NotSupported"/>.
+    /// <paramref name="audioActivation"/> is when device mode opens the
+    /// devices: <see cref="SipralAudioActivation.Automatic"/> with the first
+    /// call's media or the first ring, closed with the last;
+    /// <see cref="SipralAudioActivation.Manual"/> only between
+    /// <see cref="SipralAudioEngine.Activate"/> and
+    /// <see cref="SipralAudioEngine.Deactivate"/>.
+    /// <paramref name="audioProbeMs"/> bounds every platform call (<c>0</c>
+    /// for three seconds): a driver that does not answer is
+    /// <see cref="SipralStatus.DeviceTimedOut"/>, not a hang.
+    /// <paramref name="audioDeviceRateHz"/> is the rate the devices are asked
+    /// for (<c>0</c> for 48 000).</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -211,7 +277,11 @@ public sealed class SipralStack : IDisposable
         ulong registrarKeepaliveMs = 0,
         SipralTransport turnTransport = 0,
         string? turnServerName = null,
-        X509Certificate2Collection? turnTrustedCertificates = null)
+        X509Certificate2Collection? turnTrustedCertificates = null,
+        SipralAudio? audio = null,
+        SipralAudioActivation audioActivation = SipralAudioActivation.Automatic,
+        ulong audioProbeMs = 0,
+        uint audioDeviceRateHz = 0)
     {
         _nat = nat;
         _turn = turnServer is not null;
@@ -241,6 +311,9 @@ public sealed class SipralStack : IDisposable
         // `SipralTests.EventCallbackSurvivesGc` forces a collection while
         // a call is in flight to prove it.
         _callback = OnEvent;
+        _audioTransmit = OnAudioTransmit;
+        AudioMode = audio ?? (HasFeature(global::Sipral.Sipral.FeatureAudioDevice) ? SipralAudio.Device : SipralAudio.Application);
+        Audio = new SipralAudioEngine(this);
 
         var bindAddressBytes = Encoding.UTF8.GetBytes(BindAddress);
         var userAgentBytes = userAgent is null ? null : Encoding.UTF8.GetBytes(userAgent);
@@ -297,8 +370,22 @@ public sealed class SipralStack : IDisposable
             config.RegistrarKeepalive = ToggleOf(registrarKeepalive);
             config.RegistrarKeepaliveMs = registrarKeepaliveMs;
             config.TurnTransport = (uint)turnTransport;
+            config.Audio = (uint)AudioMode;
+            config.AudioActivation = (uint)audioActivation;
+            if (AudioMode == SipralAudio.Device)
+            {
+                config.AudioTransmitCallback = _audioTransmit;
+            }
+            config.AudioProbeMs = audioProbeMs;
+            config.AudioDeviceRateHz = audioDeviceRateHz;
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
+        }
+        if (status != SipralStatus.Ok)
+        {
+            // refused -- device mode on a build with no backend for this
+            // platform, say -- so the socket bound above serves nothing
+            _socket.Dispose();
         }
         SipralErrors.Check(status, "sipral_stack_create");
 
@@ -334,7 +421,20 @@ public sealed class SipralStack : IDisposable
     /// <paramref name="registrar"/> left out makes an account that never
     /// registers (<c>docs/08-ffi.md</c>, "An account with no registrar
     /// never registers"), with <paramref name="registrarAddress"/> as the
-    /// outbound proxy every request it places still goes to.</summary>
+    /// outbound proxy every request it places still goes to.
+    ///
+    /// <paramref name="sessionTimer"/> is the account's session timer (RFC
+    /// 4028): the stack's default, <see cref="SipralSessionTimer.Off"/>, or
+    /// <see cref="SipralSessionTimer.Interval"/> with
+    /// <paramref name="sessionIntervalSeconds"/>, 90 or more.
+    /// <paramref name="privacy"/> is the <c>Sipral.Privacy*</c> bits every
+    /// call this account places asks for (RFC 3323) —
+    /// <c>Sipral.PrivacyId</c> places them anonymous in <c>From</c>.
+    /// <paramref name="trustedPeers"/> are the addresses (IP literals) whose
+    /// <c>P-Asserted-Identity</c> this account believes and toward which
+    /// alone it asserts its own (RFC 3325): a call from anywhere else carries
+    /// no asserted identity, and <see cref="SipralCallerIdentity.Trusted"/>
+    /// says which it was.</summary>
     public Account AddAccount(
         string aor,
         string registrarAddress,
@@ -343,9 +443,28 @@ public sealed class SipralStack : IDisposable
         string? displayName = null,
         string? authUser = null,
         string? authPassword = null,
-        ulong expiresSeconds = 0)
+        ulong expiresSeconds = 0,
+        SipralSessionTimer sessionTimer = SipralSessionTimer.Default,
+        ulong sessionIntervalSeconds = 0,
+        uint privacy = 0,
+        IEnumerable<string>? trustedPeers = null)
     {
-        return Account.Add(this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds);
+        var account = Account.Add(
+            this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
+            sessionTimer, sessionIntervalSeconds, privacy, trustedPeers);
+        lock (_accounts)
+        {
+            _accounts.Add(account);
+        }
+        return account;
+    }
+
+    internal void ForgetAccount(Account account)
+    {
+        lock (_accounts)
+        {
+            _accounts.Remove(account);
+        }
     }
 
     /// <summary>
@@ -493,6 +612,113 @@ public sealed class SipralStack : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_call_reject_transfer(Handle, args.Call, code, NowMs), "sipral_call_reject_transfer");
     }
 
+    /// <summary>Answers an incoming call nothing has answered with a
+    /// redirection (<c>sipral_call_redirect</c>): <paramref name="statusCode"/>
+    /// 300 to 399, 302 by default, with <paramref name="targets"/> (URIs) in
+    /// <c>Contact</c>. With <paramref name="reason"/> — RFC 5806's
+    /// <c>unconditional</c>, <c>user-busy</c>, <c>no-answer</c>… — a
+    /// <c>Diversion</c> names the address that was called, so the next phone
+    /// says the call was forwarded and why.</summary>
+    public void RedirectCall(SipralEventArgs args, IEnumerable<string> targets, uint statusCode = 302, string? reason = null)
+    {
+        var listed = ToSBytes(string.Join(", ", targets));
+        var said = reason is null ? null : ToSBytes(reason);
+        SipralErrors.Call(
+            () => NativeMethods.sipral_call_redirect(
+                Handle, args.Call, statusCode, listed, (nuint)listed.Length, said!, (nuint)(said?.Length ?? 0), NowMs),
+            "sipral_call_redirect");
+    }
+
+    /// <summary>Every entry of one identity list a call's INVITE carried —
+    /// every asserted party, every <c>Diversion</c> and its reason, every
+    /// <c>History-Info</c> target and index, every <c>Alert-Info</c> URI —
+    /// for a call named by its handle (<see cref="SipralEventArgs.Call"/> for
+    /// one no <see cref="Call"/> answered yet). <see cref="Call.Identity"/>
+    /// is the same for one that has. <see cref="SipralCallerIdentity"/> has
+    /// the first of each.</summary>
+    public IReadOnlyList<string> CallIdentity(ulong call, SipralIdentityText which)
+    {
+        nuint count = 0;
+        SipralErrors.Call(() => NativeMethods.sipral_call_identity_count(Handle, call, (uint)which, out count), "sipral_call_identity_count");
+        var texts = new List<string>((int)count);
+        for (nuint index = 0; index < count; index++)
+        {
+            var buffer = new sbyte[256];
+            var status = NativeMethods.sipral_call_identity_text(Handle, call, (uint)which, index, buffer, (nuint)buffer.Length, out var needed);
+            if (status == SipralStatus.BufferTooSmall)
+            {
+                buffer = new sbyte[(int)needed];
+                status = NativeMethods.sipral_call_identity_text(Handle, call, (uint)which, index, buffer, (nuint)buffer.Length, out needed);
+            }
+            SipralErrors.Check(status, "sipral_call_identity_text");
+            // `needed` counts the NUL the text is copied out with
+            var bytes = new byte[Math.Max((int)needed - 1, 0)];
+            Buffer.BlockCopy(buffer, 0, bytes, 0, bytes.Length);
+            texts.Add(Encoding.UTF8.GetString(bytes));
+        }
+        return texts;
+    }
+
+    /// <summary>The network under this stack changed, and
+    /// <paramref name="host"/> is this machine's address on the new one.
+    ///
+    /// The signalling socket is bound again at <paramref name="host"/> and the
+    /// main transport told (<c>sipral_stack_transport_bind</c>), the change
+    /// reported (<c>sipral_stack_network_changed</c>), and every account added
+    /// without a <c>Contact</c> of its own pointed at the new address
+    /// (<c>sipral_account_rebind</c>). On <see cref="SipralRecovery.Rebuild"/>
+    /// every call whose media was described at the old address gets
+    /// <see cref="SipralEventKind.CallAddressWanted"/>, which
+    /// <see cref="Call.Readdress"/> answers — the far end is still sending to
+    /// an address this machine no longer has. An account added with an
+    /// explicit <c>contact</c> is the application's to
+    /// <see cref="Account.Rebind"/>.</summary>
+    public SipralRecovery MoveTo(string host, SipralLink link = SipralLink.Wired)
+    {
+        var previous = ParseAddress(BindAddress).Host;
+        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        socket.Bind(new IPEndPoint(IPAddress.Parse(host), 0));
+        socket.Blocking = false;
+        var bound = FormatAddress((IPEndPoint)socket.LocalEndPoint!);
+        var local = ToSBytes(bound);
+        try
+        {
+            SipralErrors.Call(
+                () => NativeMethods.sipral_stack_transport_bind(
+                    Handle, global::Sipral.Sipral.TransportMain, (uint)SipralTransport.Udp, local, (nuint)local.Length,
+                    null!, 0, NowMs, out _),
+                "sipral_stack_transport_bind");
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+        var old = _socket;
+        _socket = socket;
+        BindAddress = bound;
+        old.Dispose();
+
+        var before = ToSBytes(previous);
+        var after = ToSBytes(host);
+        uint recovery = 0;
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_network_changed(
+                Handle, (uint)link, before, (nuint)before.Length, null!, 0, 1,
+                (uint)link, after, (nuint)after.Length, null!, 0, 1, NowMs, out recovery),
+            "sipral_stack_network_changed");
+        List<Account> accounts;
+        lock (_accounts)
+        {
+            accounts = _accounts.ToList();
+        }
+        foreach (var account in accounts.Where(a => !a.ContactGiven))
+        {
+            account.Rebind();
+        }
+        return (SipralRecovery)recovery;
+    }
+
     internal Call? CallFor(ulong handle) => _calls.TryGetValue(handle, out var call) ? call : null;
 
     internal void RegisterCall(Call call) => _calls[call.Handle] = call;
@@ -588,6 +814,44 @@ public sealed class SipralStack : IDisposable
         _events.Writer.TryWrite(args);
     }
 
+    /// <summary><c>audio_transmit_callback</c>, in device mode: one packet the
+    /// engine encoded from the microphone, sent from its call's media socket
+    /// — or, marked TCP or TLS, written on that socket's connection to the
+    /// TURN server. Runs on the engine's own thread, once per frame per call,
+    /// and calls nothing in the library: an entry point reached from here
+    /// could wait on the engine that is waiting on this callback. Nothing may
+    /// throw out of it either, back across the native frame that called
+    /// it.</summary>
+    internal void OnAudioTransmit(IntPtr raw, IntPtr userData)
+    {
+        try
+        {
+            var transmit = Marshal.PtrToStructure<SipralAudioTransmit>(raw);
+            var call = CallFor(transmit.Call);
+            if (call is null)
+            {
+                return;
+            }
+            var payload = new byte[(int)transmit.PayloadLen];
+            Marshal.Copy(transmit.Payload, payload, 0, payload.Length);
+            if (OverStream(transmit.Protocol))
+            {
+                WriteTurn(call.MediaAddress, payload, fromEngine: true);
+                return;
+            }
+            var destination = Marshal.PtrToStringUTF8(transmit.Destination, (int)transmit.DestinationLen) ?? string.Empty;
+            var (host, port) = ParseAddress(destination);
+            call.MediaSocket.SendTo(payload, new IPEndPoint(IPAddress.Parse(host), port));
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException or FormatException
+                                       or ArgumentException)
+        {
+            // a socket closed by a readdress or a hangup racing this send, or
+            // a destination that is not host:port: the packet is lost, which
+            // the far end's jitter buffer already knows how to hide
+        }
+    }
+
     private void DrainTransmit()
     {
         while (true)
@@ -612,11 +876,11 @@ public sealed class SipralStack : IDisposable
             {
                 _socket.SendTo(payload, new IPEndPoint(IPAddress.Parse(host), port));
             }
-            catch (SocketException)
+            catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
             {
                 // Best effort, like the poll thread's Python counterpart:
                 // nothing here may throw, or this stack would never poll
-                // again.
+                // again. A socket `MoveTo` just replaced is one such.
             }
         }
     }
@@ -862,7 +1126,9 @@ public sealed class SipralStack : IDisposable
             {
                 stunSnapshot = _stunSockets.Values.ToList();
             }
-            var checkRead = new List<Socket>(stunSnapshot.Count + 1) { _socket };
+            // this pass's signalling socket: `MoveTo` may replace it meanwhile
+            var signalling = _socket;
+            var checkRead = new List<Socket>(stunSnapshot.Count + 1) { signalling };
             checkRead.AddRange(stunSnapshot);
             try
             {
@@ -887,12 +1153,12 @@ public sealed class SipralStack : IDisposable
 
             foreach (var sock in checkRead)
             {
-                if (ReferenceEquals(sock, _socket))
+                if (ReferenceEquals(sock, signalling))
                 {
                     try
                     {
                         EndPoint from = new IPEndPoint(IPAddress.Any, 0);
-                        var count = _socket.ReceiveFrom(_receiveBuffer, ref from);
+                        var count = signalling.ReceiveFrom(_receiveBuffer, ref from);
                         var fromText = ToSBytes(Encoding.UTF8.GetBytes(FormatAddress((IPEndPoint)from)));
                         // `transport` here is a transport *id* (Sipral.TransportMain,
                         // i.e. 0, for the one this stack was created with, or a
@@ -906,6 +1172,11 @@ public sealed class SipralStack : IDisposable
                     }
                     catch (SocketException)
                     {
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // `MoveTo` closed this socket after the select
+                        // found it ready; the next pass reads the new one
                     }
                 }
                 else
@@ -970,6 +1241,10 @@ public sealed class SipralStack : IDisposable
             DrainStun();
             DrainFarewells();
             ActOnTurnStreams();
+            while (_turnLost.TryDequeue(out var lost))
+            {
+                LoseTurnStream(lost, tell: true);
+            }
         }
     }
 
@@ -985,8 +1260,9 @@ public sealed class SipralStack : IDisposable
     /// <c>sipral_stack_poll_stun</c>, <c>sipral_stack_poll_farewell</c> and
     /// a call's media hand out marked TCP or TLS. Thread-safe; a connection
     /// that fails here is closed and the stack told, which loses the relay
-    /// on it.</summary>
-    internal void WriteTurn(string local, byte[] payload)
+    /// on it — told from the poll thread when the write came from the audio
+    /// engine's (<paramref name="fromEngine"/>).</summary>
+    internal void WriteTurn(string local, byte[] payload, bool fromEngine = false)
     {
         if (!_turnStreams.TryGetValue(local, out var stream))
         {
@@ -1002,6 +1278,11 @@ public sealed class SipralStack : IDisposable
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
         {
+            if (fromEngine)
+            {
+                _turnLost.Enqueue(local);
+                return;
+            }
             LoseTurnStream(local, tell: true);
         }
     }

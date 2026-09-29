@@ -22,7 +22,7 @@ import socket
 import unittest
 
 from sipral import Stack
-from sipral.enums import EventKind, Ice
+from sipral.enums import AudioMode, EventKind, Ice
 
 from .test_nat import _routable_address
 
@@ -92,7 +92,7 @@ class AReferralOutsideAnyDialog(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_stack_that_was_not_told_to_take_them_refuses_them_403(self) -> None:
         loop = asyncio.get_running_loop()
-        bob = Stack(loop=loop)
+        bob = Stack(loop=loop, audio=AudioMode.APPLICATION)
         self.addAsyncCleanup(self._close, bob)
         bob.add_account("sip:bob@sipral.invalid", registrar_address=self.referrer_address)
         host, port = bob.bind_address.rsplit(":", 1)
@@ -105,8 +105,8 @@ class AReferralOutsideAnyDialog(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_referral_taken_places_the_call_and_reports_it_to_the_referrer(self) -> None:
         loop = asyncio.get_running_loop()
-        carol = Stack(loop=loop)
-        bob = Stack(loop=loop, referrals=True)
+        carol = Stack(loop=loop, audio=AudioMode.APPLICATION)
+        bob = Stack(loop=loop, audio=AudioMode.APPLICATION, referrals=True)
         self.addAsyncCleanup(self._close, bob, carol)
         carol.add_account("sip:carol@sipral.invalid", registrar_address=bob.bind_address)
         bob.add_account("sip:bob@sipral.invalid", registrar_address=carol.bind_address)
@@ -182,8 +182,8 @@ class ALiteStackAnsweringAFullOne(unittest.IsolatedAsyncioTestCase):
         if host is None:
             self.skipTest("no routable address on this machine to gather a host candidate from")
         loop = asyncio.get_running_loop()
-        alice_stack = Stack(bind_host=host, loop=loop)
-        bob_stack = Stack(bind_host=host, loop=loop, ice=Ice.LITE)
+        alice_stack = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION)
+        bob_stack = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, ice=Ice.LITE)
         self.addAsyncCleanup(self._close, alice_stack, bob_stack)
         alice = alice_stack.add_account(
             "sip:alice@sipral.invalid", registrar_address=bob_stack.bind_address

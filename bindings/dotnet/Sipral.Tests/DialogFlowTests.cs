@@ -29,7 +29,7 @@ public sealed class DialogFlowTests : IDisposable
     private readonly Socket _server = MakeSocket();
     private readonly Socket _named = MakeSocket();
     private readonly Socket _audio = MakeSocket();
-    private readonly SipralStack _stack = new();
+    private readonly SipralStack _stack = new(audio: SipralAudio.Application);
 
     private static Socket MakeSocket()
     {

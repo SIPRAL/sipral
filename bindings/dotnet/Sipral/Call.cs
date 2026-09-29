@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -28,8 +29,11 @@ public sealed class Call : IDisposable
 {
     private readonly SipralStack _stack;
     private readonly CallSafeHandle _handle = new();
-    private readonly Socket _mediaSocket;
-    private readonly string _mediaAddress;
+    /// <summary>Replaced by <see cref="Readdress"/>; read from the audio
+    /// engine's thread in device mode.</summary>
+    private volatile Socket _mediaSocket;
+    private volatile string _mediaAddress;
+    private SipralSrtpSuite? _suite;
     private readonly Channel<SipralEventArgs> _events =
         Channel.CreateUnbounded<SipralEventArgs>(new UnboundedChannelOptions { SingleWriter = true });
     private readonly Channel<char> _dtmf =
@@ -89,7 +93,11 @@ public sealed class Call : IDisposable
             // STUN/TURN socket first, so the two never race to read the
             // same socket.
             _stack.ReleaseStunSocket(_mediaAddress);
-            Media = new CallMedia(_stack, Handle, _mediaSocket);
+            Media = new CallMedia(_stack, Handle, _mediaSocket, pumped: _stack.AudioMode == SipralAudio.Device);
+        }
+        if (args.Kind == SipralEventKind.MediaSecured && args.Media is { } secured)
+        {
+            _suite = secured.Suite;
         }
         if (args.Kind == SipralEventKind.CallEnded)
         {
@@ -176,6 +184,96 @@ public sealed class Call : IDisposable
     public void RestartIce()
     {
         SipralErrors.Call(() => NativeMethods.sipral_call_restart_ice(_stack.Handle, Handle, _stack.NowMs), "sipral_call_restart_ice");
+    }
+
+    /// <summary>This call's media socket: where device mode's encoded packets
+    /// leave from, and what <see cref="Readdress"/> replaces.</summary>
+    internal Socket MediaSocket => _mediaSocket;
+
+    /// <summary>This call's media socket as <c>host:port</c>: the address its
+    /// audio was described at, and the name of its connection to a TURN
+    /// server reached over TCP or TLS.</summary>
+    public string MediaAddress => _mediaAddress;
+
+    /// <summary>The SRTP transform a DTLS-SRTP handshake settled this call's
+    /// media on, as the last <see cref="SipralEventKind.MediaSecured"/> said —
+    /// from <see cref="SipralSrtpSuite.AesCm80"/> to RFC 7714's
+    /// <see cref="SipralSrtpSuite.AeadAes256Gcm"/>, which two ends of this
+    /// stack agree on — or <see langword="null"/> before the handshake and
+    /// for a call not keyed by one. A call keyed by SDES agreed its suite in
+    /// the SDP and raises no such event; <see cref="SipralMediaSnapshot"/>'s
+    /// <c>Secured</c> says it is encrypted.</summary>
+    public SipralSrtpSuite? SrtpSuite => _suite;
+
+    /// <summary><c>sipral_call_hangup_for</c>: ends the call saying why, as a
+    /// <c>Reason</c> (RFC 3326) on the BYE or the CANCEL —
+    /// <paramref name="sipCause"/> a SIP status, <paramref name="q850Cause"/>
+    /// a Q.850 cause (16 is normal clearing), either or both, with
+    /// <paramref name="text"/> beside them. The refusal of an incoming call
+    /// nothing answered carries only the Q.850 value (RFC 6432).</summary>
+    public void HangupFor(uint sipCause = 0, uint q850Cause = 0, string? text = null)
+    {
+        var said = text is null ? null : ToSBytes(text);
+        SipralErrors.Call(
+            () => NativeMethods.sipral_call_hangup_for(
+                _stack.Handle, Handle, sipCause, q850Cause, said!, (nuint)(said?.Length ?? 0), _stack.NowMs),
+            "sipral_call_hangup_for");
+    }
+
+    /// <summary>Every entry of one identity list this call's INVITE carried:
+    /// see <see cref="SipralStack.CallIdentity"/>.</summary>
+    public IReadOnlyList<string> Identity(SipralIdentityText which) => _stack.CallIdentity(Handle, which);
+
+    /// <summary>
+    /// Moves this call's audio to a new network: what
+    /// <see cref="SipralEventKind.CallAddressWanted"/> asks for once
+    /// <see cref="SipralStack.MoveTo"/> changed the stack's address.
+    ///
+    /// A media socket is bound at <paramref name="mediaHost"/>:<paramref name="mediaPort"/>
+    /// and the call offered at it (<c>sipral_call_media_readdress</c>): a
+    /// re-INVITE with the call's last description, only <c>c=</c> and the
+    /// <c>m=</c> port moved, and <paramref name="publicAddress"/>
+    /// (<c>host:port</c>) in their place when the socket sits behind a NAT
+    /// whose mapping the application knows. The new socket is the call's
+    /// from here, whatever the far end answers —
+    /// <see cref="SipralEventKind.SessionChanged"/> or
+    /// <see cref="SipralEventKind.SessionChangeFailed"/> — and the old one is
+    /// closed. <see cref="SipralStatus.WrongState"/> for a call running ICE,
+    /// which <see cref="RestartIce"/> moves instead, or one with a change
+    /// already on its way.
+    /// </summary>
+    public void Readdress(string mediaHost, int mediaPort = 0, string? publicAddress = null)
+    {
+        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        socket.Bind(new IPEndPoint(IPAddress.Parse(mediaHost), mediaPort));
+        socket.Blocking = false;
+        var address = SipralStack.FormatAddress((IPEndPoint)socket.LocalEndPoint!);
+        var addressBytes = ToSBytes(address);
+        var publicBytes = publicAddress is null ? null : ToSBytes(publicAddress);
+        try
+        {
+            SipralErrors.Call(
+                () => NativeMethods.sipral_call_media_readdress(
+                    _stack.Handle, Handle, addressBytes, (nuint)addressBytes.Length,
+                    publicBytes!, (nuint)(publicBytes?.Length ?? 0), _stack.NowMs),
+                "sipral_call_media_readdress");
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+        var old = _mediaSocket;
+        _mediaSocket = socket;
+        _mediaAddress = address;
+        if (Media is { } media)
+        {
+            media.Rebind(socket);
+        }
+        else
+        {
+            old.Dispose();
+        }
     }
 
     /// <summary><c>sipral_call_send_dtmf</c>.</summary>

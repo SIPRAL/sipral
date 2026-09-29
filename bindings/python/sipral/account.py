@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 from ._sipral_cffi import ffi, lib
 from .enums import RegistrationState
@@ -51,10 +51,24 @@ class Account:
     here safe to call with nothing further to pass.
     """
 
-    def __init__(self, stack: "Stack", handle: int, aor: str) -> None:
+    def __init__(
+        self,
+        stack: "Stack",
+        handle: int,
+        aor: str,
+        *,
+        registrar_address: str = "",
+        contact_given: bool = False,
+    ) -> None:
         self.stack = stack
         self.handle = handle
         self.aor = aor
+        #: Where this account's requests go, ``host:port``: the registrar or
+        #: the outbound proxy it was added with.
+        self.registrar_address = registrar_address
+        #: Whether it was added with a `Contact` of its own, which
+        #: :meth:`sipral.stack.Stack.move_to` then leaves to the application.
+        self.contact_given = contact_given
 
     @classmethod
     def add(
@@ -69,6 +83,10 @@ class Account:
         auth_user: str | None,
         auth_password: str | None,
         expires_seconds: int,
+        session_timer: int = 0,
+        session_interval_seconds: int = 0,
+        privacy: int = 0,
+        trusted_peers: Sequence[str] | str | None = None,
     ) -> "Account":
         aor_bytes = aor.encode("utf-8")
         registrar_address_bytes = registrar_address.encode("utf-8")
@@ -115,13 +133,53 @@ class Account:
             config.auth_password = auth_password_buf
             config.auth_password_len = len(auth_password_bytes)
         config.expires_seconds = expires_seconds
+        config.session_timer = session_timer
+        config.session_interval_seconds = session_interval_seconds
+        config.privacy = int(privacy)
+        peers = trusted_peers if isinstance(trusted_peers, str) else ", ".join(trusted_peers or ())
+        peers_bytes = peers.encode("utf-8")
+        peers_buf = ffi.new("char[]", peers_bytes) if peers_bytes else None
+        if peers_buf is not None:
+            config.trusted_peers = peers_buf
+            config.trusted_peers_len = len(peers_bytes)
 
         out_account = ffi.new("sipral_handle_t *")
         _call(
             lambda: lib.sipral_account_add(stack.handle, config, out_account),
             "sipral_account_add",
         )
-        return cls(stack, int(out_account[0]), aor)
+        return cls(
+            stack,
+            int(out_account[0]),
+            aor,
+            registrar_address=registrar_address,
+            contact_given=bool(contact),
+        )
+
+    def rebind(self, *, remote: str | None = None, contact: str | None = None) -> None:
+        """`sipral_account_rebind`: point this account at ``remote``
+        (``host:port``; the address it was added with when left out) and be
+        reachable at ``contact`` (the AOR's user at the stack's current
+        address when left out). What a network change asks for; the next
+        REGISTER -- sent at once when the stack is waiting for it -- uses
+        both."""
+        remote_bytes = (remote or self.registrar_address).encode("utf-8")
+        contact_bytes = (contact or _default_contact(self.aor, self.stack.bind_address)).encode(
+            "utf-8"
+        )
+        _call(
+            lambda: lib.sipral_account_rebind(
+                self.stack.handle,
+                self.handle,
+                lib.SIPRAL_TRANSPORT_MAIN,
+                remote_bytes,
+                len(remote_bytes),
+                contact_bytes,
+                len(contact_bytes),
+                self.stack.now_ms(),
+            ),
+            "sipral_account_rebind",
+        )
 
     def register(self) -> None:
         """`sipral_account_register`. A no-op account refuses this."""
@@ -159,3 +217,4 @@ class Account:
             lambda: lib.sipral_account_remove(self.stack.handle, self.handle),
             "sipral_account_remove",
         )
+        self.stack.forget_account(self)

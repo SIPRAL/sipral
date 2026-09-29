@@ -27,26 +27,40 @@ something this idiomatic layer has not grown yet.
             event = await call.events.get()
             ...
 
-See ``examples/agent.py`` for a complete voice agent.
+On a platform the library has an audio backend for (``features()`` has
+``Feature.AUDIO_DEVICE``: macOS, iOS, Windows) a stack opens the machine's
+own microphone and loudspeaker and pumps every call through them, so the
+code above is a whole softphone; ``stack.audio`` chooses the devices, the
+volume and the mute. ``Stack(audio=AudioMode.APPLICATION)`` hands the frames
+to the application instead: see ``examples/agent.py`` for a voice agent.
 """
 
 from __future__ import annotations
 
 from .account import Account
+from .audio import Audio, AudioDevice, AudioInfo
 from .call import Call
 from .errors import SipralError
-from .events import Event
+from .events import Answering, AudioNotice, CallerIdentity, EndCause, Event
 from .media import Media
-from .stack import Stack
+from .stack import Stack, features
 
 __version__ = "0.0.1"
 
 __all__ = [
     "Account",
+    "Answering",
+    "Audio",
+    "AudioDevice",
+    "AudioInfo",
+    "AudioNotice",
     "Call",
+    "CallerIdentity",
+    "EndCause",
     "Event",
     "Media",
     "SipralError",
     "Stack",
     "__version__",
+    "features",
 ]

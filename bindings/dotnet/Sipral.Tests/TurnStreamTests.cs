@@ -282,11 +282,11 @@ public sealed class TurnStreamTests
         X509Certificate2Collection? trusted, Func<SipralNatRelayEventInfo, Task> afterward)
     {
         using var alice = new SipralStack(
-            bindHost: host, nat: SipralNat.Stun, ice: SipralIce.Offered, codecs: "PCMU",
+            audio: SipralAudio.Application,bindHost: host, nat: SipralNat.Stun, ice: SipralIce.Offered, codecs: "PCMU",
             stunServer: stun.Address, turnServer: server.Address,
             turnUsername: "alice-turn", turnPassword: "turn-secret-7",
             turnTransport: transport, turnServerName: ServerName, turnTrustedCertificates: trusted);
-        using var bob = new SipralStack(bindHost: host, codecs: "PCMU");
+        using var bob = new SipralStack(audio: SipralAudio.Application, bindHost: host, codecs: "PCMU");
         var aliceAccount = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
         bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);
         var aliceEvents = alice.Events;

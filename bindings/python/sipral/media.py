@@ -53,9 +53,16 @@ class Media:
         stack: "Stack",
         call_handle: int,
         sock: socket_module.socket,
+        *,
+        pumped: bool = False,
     ) -> None:
         self.stack = stack
         self.call_handle = call_handle
+        #: Whether the library's own audio engine pumps this call (device
+        #: mode): then no frame crosses here -- :attr:`frames` stays empty and
+        #: :meth:`send_audio` is refused -- and this thread only reads the
+        #: socket and sends what RTCP and DTMF owe.
+        self.pumped = pumped
         self._socket = sock
         self._socket.setblocking(False)
         #: The socket's own `host:port`, which names its connection to a
@@ -90,6 +97,8 @@ class Media:
         self._active = True
         self._closed = threading.Event()
 
+        #: Held while the socket is read or replaced (:meth:`rebind`).
+        self._socket_lock = threading.Lock()
         self._selector = selectors.DefaultSelector()
         self._selector.register(self._socket, selectors.EVENT_READ)
 
@@ -210,8 +219,33 @@ class Media:
         takes. Thread-safe -- called from whatever thread the application
         runs its own audio loop or voice-agent callback on, not from
         :attr:`stack`'s poll thread.
+
+        Refused with `RuntimeError` in device mode, where the microphone is
+        the call's audio and nothing else is.
         """
+        if self.pumped:
+            raise RuntimeError(
+                "this call's audio is pumped by the library's own engine "
+                "(device mode); create the stack with audio=AudioMode.APPLICATION "
+                "to send frames of your own"
+            )
         self._to_send.put(bytes(pcm))
+
+    def rebind(self, sock: socket_module.socket) -> None:
+        """Carry this call's media on ``sock`` from now on, and close the
+        socket it had: what :meth:`sipral.call.Call.readdress` does once the
+        call was offered at ``sock``'s address. Thread-safe."""
+        sock.setblocking(False)
+        with self._socket_lock:
+            old = self._socket
+            try:
+                self._selector.unregister(old)
+            except (KeyError, ValueError, OSError):
+                pass
+            self._selector.register(sock, selectors.EVENT_READ)
+            self._socket = sock
+            self.local_address = _format_address(*sock.getsockname())
+        old.close()
 
     def close(self) -> None:
         """Stop the frame-rate thread, `sipral_media_release`, close the
@@ -238,13 +272,14 @@ class Media:
     def _drain_receive(self) -> None:
         out_arrival = ffi.new("uint32_t *")
         while True:
-            events = self._selector.select(0)
-            if not events:
-                return
-            try:
-                data, from_address = self._socket.recvfrom(2048)
-            except (BlockingIOError, OSError):
-                return
+            with self._socket_lock:
+                events = self._selector.select(0)
+                if not events:
+                    return
+                try:
+                    data, from_address = self._socket.recvfrom(2048)
+                except (BlockingIOError, OSError):
+                    return
             self.remote_address = _format_address(*from_address)
             from_text = self.remote_address.encode("utf-8")
             lib.sipral_media_receive(
@@ -326,16 +361,20 @@ class Media:
             self._drain_receive()
 
             if self._active:
-                status = lib.sipral_media_playback(
-                    self.handle, playback, self.frame_samples, out_written, out_source
-                )
-                if status == lib.SIPRAL_STATUS_OK and out_written[0] > 0:
-                    self._put_frame(bytes(ffi.buffer(playback, out_written[0] * 2)))
+                status = lib.SIPRAL_STATUS_OK
+                # in device mode the engine plays and captures; this thread
+                # still carries what RTCP and DTMF owe, which are not frames
+                if not self.pumped:
+                    status = lib.sipral_media_playback(
+                        self.handle, playback, self.frame_samples, out_written, out_source
+                    )
+                    if status == lib.SIPRAL_STATUS_OK and out_written[0] > 0:
+                        self._put_frame(bytes(ffi.buffer(playback, out_written[0] * 2)))
 
-                chunk = self._next_chunk()
-                capture_in = ffi.new(f"int16_t[{self.frame_samples}]")
-                ffi.buffer(capture_in)[: len(chunk)] = chunk
-                self._capture_once(capture_in)
+                    chunk = self._next_chunk()
+                    capture_in = ffi.new(f"int16_t[{self.frame_samples}]")
+                    ffi.buffer(capture_in)[: len(chunk)] = chunk
+                    self._capture_once(capture_in)
                 self._drain_packets(
                     lambda packet: lib.sipral_media_poll_rtcp(
                         self.handle, self.stack.now_ms(), packet

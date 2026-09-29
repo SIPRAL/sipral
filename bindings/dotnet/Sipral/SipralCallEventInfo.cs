@@ -6,7 +6,11 @@ namespace Sipral;
 /// <summary>What every call-shaped event carries — the fields of
 /// <c>sipral_call_event_t</c>, copied out while the callback that carried
 /// them was still live. Present when <see cref="SipralEvent.Kind"/> is one
-/// of the call kinds; <see langword="null"/> otherwise.</summary>
+/// of the call kinds; <see langword="null"/> otherwise.
+/// <see cref="Identity"/> and <see cref="Answering"/> are what the INVITE
+/// of an incoming call said, repeated on every event of it;
+/// <see cref="Cause"/> is why the far end ended the call, on
+/// <see cref="SipralEventKind.CallEnded"/>.</summary>
 public sealed record SipralCallEventInfo(
     SipralCallState State,
     SipralCallEndReason EndReason,
@@ -21,7 +25,64 @@ public sealed record SipralCallEventInfo(
     string? FromDisplay,
     string? ToUri,
     string? CallId,
-    uint Digit);
+    uint Digit,
+    SipralCallerIdentity Identity,
+    SipralAnswering Answering,
+    SipralEndCause? Cause);
+
+/// <summary>What an incoming INVITE said about who is calling, beyond its
+/// <c>From</c>. <see cref="AssertedUri"/>, <see cref="AssertedDisplay"/> and
+/// <see cref="Verstat"/> come only from a peer the account names in its
+/// trusted peers (RFC 3325 §8): <see cref="Trusted"/> says whether this call
+/// came from one. <see cref="Privacy"/> is the <c>Sipral.Privacy*</c> bits
+/// the caller's <c>Privacy</c> asked for. <see cref="DivertedFrom"/> and
+/// <see cref="DiversionReason"/> are the top-most <c>Diversion</c> (RFC
+/// 5806); the full lists, and every <c>History-Info</c> entry (RFC 7044),
+/// are read with <see cref="Call.Identity"/> or
+/// <see cref="SipralStack.CallIdentity"/>.</summary>
+public sealed record SipralCallerIdentity(
+    bool Trusted,
+    string? AssertedUri,
+    string? AssertedDisplay,
+    SipralVerstat Verstat,
+    uint Privacy,
+    string? DivertedFrom,
+    string? DiversionReason,
+    uint DiversionCount,
+    uint HistoryCount);
+
+/// <summary>How an incoming call asked to be answered (RFC 5373) and rung
+/// (<c>Alert-Info</c>, RFC 7462). <see cref="AnswerAfterMs"/> is set when the
+/// call asked to be answered without the user; whether to do so is the
+/// application's policy, never the stack's (RFC 5373 §4.2).</summary>
+public sealed record SipralAnswering(
+    SipralAnswerMode AnswerMode,
+    bool AnswerModeRequired,
+    SipralAnswerMode PrivAnswerMode,
+    bool PrivAnswerModeRequired,
+    ulong? AnswerAfterMs,
+    SipralRingSource RingSource,
+    string? AlertInfo);
+
+/// <summary>The <c>Reason</c> (RFC 3326) a call ended with: of the BYE, the
+/// CANCEL or the refusal. <see cref="Sip"/> 200 on a CANCEL is a forking
+/// proxy saying another phone answered — not a missed call.</summary>
+public sealed record SipralEndCause(uint Sip, uint Q850, string? Text);
+
+/// <summary>What <see cref="SipralEventKind.AudioDevicesChanged"/> carries,
+/// in device mode: what changed and who changed it. An application notes a
+/// <see cref="SipralAudioOrigin.System"/> change — a headset plugged in, the
+/// default moved — and never answers an <see cref="SipralAudioOrigin.Engine"/>
+/// one by selecting again: that is the engine doing what was asked, or
+/// falling back after a loss, and re-applying a choice on it loops.
+/// <see cref="Device"/> is an id <see cref="SipralAudioEngine.Devices"/>
+/// lists, or <see langword="null"/>.</summary>
+public sealed record SipralAudioEventInfo(
+    SipralAudioChange Change,
+    SipralAudioOrigin Origin,
+    SipralAudioRole? Role,
+    SipralAudioDirection? Direction,
+    uint? Device);
 
 /// <summary>What every media-shaped event carries — the fields of
 /// <c>sipral_media_event_t</c>. Present when <see cref="SipralEvent.Kind"/>

@@ -20,15 +20,15 @@ import unittest
 
 from sipral import Stack
 from sipral._sipral_cffi import ffi, lib
-from sipral.enums import CallState, EventKind
+from sipral.enums import AudioMode, CallState, EventKind
 from sipral.events import _statistics
 
 
 class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         loop = asyncio.get_running_loop()
-        self.alice_stack = Stack(loop=loop)
-        self.bob_stack = Stack(loop=loop)
+        self.alice_stack = Stack(loop=loop, audio=AudioMode.APPLICATION)
+        self.bob_stack = Stack(loop=loop, audio=AudioMode.APPLICATION)
         self.addAsyncCleanup(self._close_stacks)
 
     async def _close_stacks(self) -> None:

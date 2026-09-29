@@ -62,14 +62,17 @@ public sealed class SipralEventArgs : EventArgs
     public SipralReferralEventInfo? Referral { get; }
     /// <summary>Set for <see cref="SipralEventKind.TurnStream"/>.</summary>
     public SipralTurnStreamEventInfo? TurnStream { get; }
+    /// <summary>Set for <see cref="SipralEventKind.AudioDevicesChanged"/>.</summary>
+    public SipralAudioEventInfo? Audio { get; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
         SipralRegistrationEventInfo? registration, SipralCallEventInfo? callInfo,
         SipralMediaEventInfo? media, SipralTransferEventInfo? transfer, SipralResolveEventInfo? resolve,
         SipralNatEventInfo? nat, SipralNatRelayEventInfo? relay, SipralReferralEventInfo? referral,
-        SipralTurnStreamEventInfo? turnStream)
+        SipralTurnStreamEventInfo? turnStream, SipralAudioEventInfo? audio)
     {
+        Audio = audio;
         Kind = kind;
         KindName = kindName;
         Stack = stack;
@@ -92,7 +95,7 @@ public sealed class SipralEventArgs : EventArgs
         SipralEventKind.IncomingCall, SipralEventKind.CallProgress, SipralEventKind.CallForked,
         SipralEventKind.CallConfirmed, SipralEventKind.SessionChanged, SipralEventKind.SessionOffered,
         SipralEventKind.SessionChangeFailed, SipralEventKind.CallReplaced, SipralEventKind.CallEnded,
-        SipralEventKind.DtmfSent,
+        SipralEventKind.DtmfSent, SipralEventKind.CallAddressWanted,
     };
 
     private static readonly SipralEventKind[] MediaKinds =
@@ -128,6 +131,7 @@ public sealed class SipralEventArgs : EventArgs
         SipralNatRelayEventInfo? relay = null;
         SipralReferralEventInfo? referral = null;
         SipralTurnStreamEventInfo? turnStream = null;
+        SipralAudioEventInfo? audio = null;
 
         if (kind == SipralEventKind.RegistrationChanged)
         {
@@ -144,7 +148,29 @@ public sealed class SipralEventArgs : EventArgs
                 c.HeldHere != 0, c.HeldThere != 0,
                 ReadBytes(c.LocalSdp, c.LocalSdpLen), ReadBytes(c.RemoteSdp, c.RemoteSdpLen), c.RetryInMs,
                 ReadUtf8(c.FromUri, c.FromUriLen), ReadUtf8(c.FromDisplay, c.FromDisplayLen),
-                ReadUtf8(c.ToUri, c.ToUriLen), ReadUtf8(c.CallId, c.CallIdLen), c.Digit);
+                ReadUtf8(c.ToUri, c.ToUriLen), ReadUtf8(c.CallId, c.CallIdLen), c.Digit,
+                new SipralCallerIdentity(
+                    c.IdentityTrusted != 0, ReadUtf8(c.AssertedUri, c.AssertedUriLen),
+                    ReadUtf8(c.AssertedDisplay, c.AssertedDisplayLen), (SipralVerstat)c.Verstat, c.Privacy,
+                    ReadUtf8(c.DivertedFrom, c.DivertedFromLen), ReadUtf8(c.DiversionReason, c.DiversionReasonLen),
+                    c.DiversionCount, c.HistoryCount),
+                new SipralAnswering(
+                    (SipralAnswerMode)c.AnswerMode, c.AnswerModeRequired != 0,
+                    (SipralAnswerMode)c.PrivAnswerMode, c.PrivAnswerModeRequired != 0,
+                    c.HasAnswerAfter != 0 ? c.AnswerAfterMs : null, (SipralRingSource)c.RingSource,
+                    ReadUtf8(c.AlertInfo, c.AlertInfoLen)),
+                kind == SipralEventKind.CallEnded && (c.CauseSip != 0 || c.CauseQ850 != 0 || c.CauseTextLen != 0)
+                    ? new SipralEndCause(c.CauseSip, c.CauseQ850, ReadUtf8(c.CauseText, c.CauseTextLen))
+                    : null);
+        }
+        else if (kind == SipralEventKind.AudioDevicesChanged)
+        {
+            var a = evt.Payload.Audio;
+            audio = new SipralAudioEventInfo(
+                (SipralAudioChange)a.Change, (SipralAudioOrigin)a.Origin,
+                a.Role == 0 ? null : (SipralAudioRole)a.Role,
+                a.Direction == 0 ? null : (SipralAudioDirection)a.Direction,
+                a.Device == 0 ? null : a.Device);
         }
         else if (Array.IndexOf(MediaKinds, kind) >= 0)
         {
@@ -195,7 +221,7 @@ public sealed class SipralEventArgs : EventArgs
         }
 
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
-            registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream);
+            registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio);
     }
 
     internal static SipralStreamStatistics? ReadStatistics(IntPtr ptr)

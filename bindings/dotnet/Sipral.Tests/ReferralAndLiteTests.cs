@@ -133,7 +133,7 @@ public sealed class ReferralAndLiteTests : IDisposable
     [Fact]
     public async Task AStackThatWasNotToldToTakeThemRefusesThem403()
     {
-        var bob = Own(new SipralStack());
+        var bob = Own(new SipralStack(audio: SipralAudio.Application));
         bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: AddressOf(_referrer));
         _referrer.SendTo(Refer(bob.BindAddress, AddressOf(_referrer), "sip:carol@sipral.invalid"), EndpointOf(bob.BindAddress));
         var seen = await ReadAsync(s => s.Any(m => m.StartsWith("SIP/2.0 ", StringComparison.Ordinal)));
@@ -143,8 +143,8 @@ public sealed class ReferralAndLiteTests : IDisposable
     [Fact]
     public async Task AReferralTakenPlacesTheCallAndReportsItToTheReferrer()
     {
-        var carol = Own(new SipralStack());
-        var bob = Own(new SipralStack(referrals: true));
+        var carol = Own(new SipralStack(audio: SipralAudio.Application));
+        var bob = Own(new SipralStack(audio: SipralAudio.Application, referrals: true));
         carol.AddAccount("sip:carol@sipral.invalid", registrarAddress: bob.BindAddress);
         bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: carol.BindAddress);
 
@@ -196,8 +196,8 @@ public sealed class ReferralAndLiteTests : IDisposable
         {
             return; // no routable address on this machine to gather a host candidate from
         }
-        var alice = Own(new SipralStack(bindHost: host));
-        var bob = Own(new SipralStack(bindHost: host, ice: SipralIce.Lite));
+        var alice = Own(new SipralStack(audio: SipralAudio.Application, bindHost: host));
+        var bob = Own(new SipralStack(audio: SipralAudio.Application, bindHost: host, ice: SipralIce.Lite));
         var aliceAccount = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
         bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);
 
