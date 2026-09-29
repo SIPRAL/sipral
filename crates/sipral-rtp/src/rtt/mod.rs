@@ -17,6 +17,8 @@
 //!   marks what could not be recovered (§5), and hands out
 //!   [`TextEvent`]s.
 //! - [`RedPayload`] and [`write_red`] are the RFC 2198 payload itself.
+//! - [`TextFormat`] writes and reads the SDP that negotiates all this (§6
+//!   and the SDP examples of §7).
 //!
 //! Sans-I/O, like the rest of the crate: time is a [`Duration`] the caller
 //! supplies, packets come in and go out as values.
@@ -25,6 +27,7 @@
 
 mod receiver;
 mod red;
+mod sdp;
 mod sender;
 mod t140;
 
@@ -38,6 +41,7 @@ pub use receiver::{
 pub use red::{
     MAX_BLOCK_LEN, MAX_TIMESTAMP_OFFSET, RedError, RedPayload, RedundantBlock, write_red,
 };
+pub use sdp::{TextFormat, parse_cps, parse_red_fmtp};
 pub use sender::{BufferFull, DEFAULT_MAX_BUFFERED, SenderConfig, TextPacket, TextSender};
 pub use t140::TextEvent;
 
