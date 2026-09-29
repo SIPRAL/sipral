@@ -368,17 +368,20 @@ impl Endpoint {
             // SHOULD reject the original request with a 5xx response."
             let invite = sent.invite;
             self.reliable.forget(raw);
+            self.count_timeout();
             self.refuse_unacknowledged(invite, now);
             return;
         }
 
         let repeated = sent.message.clone();
+        let invite = sent.invite;
         self.note_wire(
             &repeated.as_raw(),
             Reason::ResponseRetransmitted,
             Direction::Outbound,
             flow,
         );
+        self.count_retransmission(false, Some(AnyTransactionId::InviteServer(invite)));
         self.queue(flow.transmit(repeated.bytes()));
         if let Some(sent) = self
             .reliable

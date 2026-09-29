@@ -296,6 +296,12 @@ registrar's INVITE in long after the REGISTER (`docs/06-nat.md`).
 interval, 1 000 to 120 000; nothing goes while the stack is suspended.
 `NatCheck.kt` proves both on the wire.
 
+A client holds 128 calls at once unless `maxDialogs` says otherwise: past
+it an incoming call is answered 503 and `placeCall` throws with
+`LIMIT_REACHED`. `maxServerTransactions` (256), `diagnosticDecisions` (64)
+and `diagnosticRecords` (32) are the other ceilings, zero for the default
+each (`docs/08-ffi.md`, "Limits, and what went out twice").
+
 `SipralTurnServer(..., transport = SipralTransport.TCP)` reaches the TURN
 server over TCP, for the network that lets no UDP out, and `TLS` over TLS
 (RFC 8656 §3.1), 5349 being the port for it: the client opens a `Socket` per

@@ -90,6 +90,12 @@ public enum SipralStatus: Int32, Sendable {
     /// `sipral_stack_config_t::audio_probe_ms`: a driver is stuck, and
     /// the engine is not waiting on it. What was asked was not done.
     case deviceTimedOut = 15
+    /// A limit the stack was created with refused new work: a call placed
+    /// while the calls this stack holds, has let in or has placed and
+    /// not yet heard back about already come to
+    /// `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
+    /// that ends makes room; raising the limit means a new stack.
+    case limitReached = 16
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -1901,7 +1907,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 29
+    public static let abiVersionMinor: UInt32 = 30
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2039,6 +2045,15 @@ public enum Sipral {
     /// `sipral_call_redirect`; and an account's `privacy` and
     /// `session_timer`.
     public static let featureCallerIdentity: UInt32 = 4096
+
+    /// See SIPRAL_FEATURE_DTMF. The ceilings a stack is created with
+    /// (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
+    /// `diagnostic_records` in `sipral_stack_config_t`, read back through
+    /// `sipral_stack_settings_t`), `SIPRAL_STATUS_LIMIT_REACHED` for a call
+    /// placed past `max_dialogs`, and the counters of what went out again,
+    /// what timed out and what was refused at a limit in
+    /// `sipral_counters_t`.
+    public static let featureLimits: UInt32 = 32768
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///

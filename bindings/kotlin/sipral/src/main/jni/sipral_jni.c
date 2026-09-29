@@ -1052,7 +1052,7 @@ Java_org_sipral_SipralNative_sipral_1capabilities(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlong configRegistrarKeepalive, jlong configRegistrarKeepaliveMs, jlong configTurnTransport, jlong configAudio, jlong configAudioActivation, jlong configAudioTransmitCallback, jlong configAudioProbeMs, jlong configAudioDeviceRateHz, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlong configRegistrarKeepalive, jlong configRegistrarKeepaliveMs, jlong configTurnTransport, jlong configAudio, jlong configAudioActivation, jlong configAudioTransmitCallback, jlong configAudioProbeMs, jlong configAudioDeviceRateHz, jlong configMaxDialogs, jlong configMaxServerTransactions, jlong configDiagnosticDecisions, jlong configDiagnosticRecords, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -1122,6 +1122,10 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     config_value.audio_transmit_user_data = (void *)(intptr_t)configAudioTransmitCallback;
     config_value.audio_probe_ms = (uint64_t)configAudioProbeMs;
     config_value.audio_device_rate_hz = (uint32_t)configAudioDeviceRateHz;
+    config_value.max_dialogs = (uint32_t)configMaxDialogs;
+    config_value.max_server_transactions = (uint32_t)configMaxServerTransactions;
+    config_value.diagnostic_decisions = (uint32_t)configDiagnosticDecisions;
+    config_value.diagnostic_records = (uint32_t)configDiagnosticRecords;
     sipral_handle_t stack_value = 0;
     sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
     if (configBindAddress) {
@@ -1168,7 +1172,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
     settings_value.size = sizeof settings_value;
     sipral_status_t status = sipral_stack_settings((sipral_handle_t)stack, &settings_value);
     {
-        jlong slots[15];
+        jlong slots[19];
         slots[0] = (jlong)settings_value.size;
         slots[1] = (jlong)settings_value.transport;
         slots[2] = (jlong)settings_value.retransmits;
@@ -1184,7 +1188,11 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
         slots[12] = (jlong)settings_value.g729_annex_b;
         slots[13] = (jlong)settings_value.referrals;
         slots[14] = (jlong)settings_value.registrar_keepalive_ms;
-        (*env)->SetLongArrayRegion(env, settings, 0, 15, slots);
+        slots[15] = (jlong)settings_value.max_dialogs;
+        slots[16] = (jlong)settings_value.max_server_transactions;
+        slots[17] = (jlong)settings_value.diagnostic_decisions;
+        slots[18] = (jlong)settings_value.diagnostic_records;
+        (*env)->SetLongArrayRegion(env, settings, 0, 19, slots);
     }
     return (jint)status;
 }
@@ -1230,7 +1238,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
     counters_value.size = sizeof counters_value;
     sipral_status_t status = sipral_stack_counters((sipral_handle_t)stack, &counters_value);
     {
-        jlong slots[25];
+        jlong slots[29];
         slots[0] = (jlong)counters_value.size;
         slots[1] = (jlong)counters_value.registrations_attempted;
         slots[2] = (jlong)counters_value.registrations_succeeded;
@@ -1256,7 +1264,11 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
         slots[22] = (jlong)counters_value.screened_refused_by_rate;
         slots[23] = (jlong)counters_value.screened_refused_by_crowding;
         slots[24] = (jlong)counters_value.screened_refused_by_replaces;
-        (*env)->SetLongArrayRegion(env, counters, 0, 25, slots);
+        slots[25] = (jlong)counters_value.requests_retransmitted;
+        slots[26] = (jlong)counters_value.responses_retransmitted;
+        slots[27] = (jlong)counters_value.transactions_timed_out;
+        slots[28] = (jlong)counters_value.requests_refused_at_limit;
+        (*env)->SetLongArrayRegion(env, counters, 0, 29, slots);
     }
     return (jint)status;
 }

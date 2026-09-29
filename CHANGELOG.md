@@ -12,6 +12,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A stack's limits are set and read over the C ABI (0.30).**
+  `sipral_stack_config_t` appends `max_dialogs`, `max_server_transactions`,
+  `diagnostic_decisions` and `diagnostic_records`, each zero for its
+  default (128, 256, 64, 32), and `sipral_stack_settings_t` reads them back.
+  A call placed past `max_dialogs` is `SIPRAL_STATUS_LIMIT_REACHED` (16)
+  with nothing sent; one that arrives past it is answered `503` with no
+  `Retry-After`. `SIPRAL_FEATURE_LIMITS` (`1 << 15`) says the build has
+  them; the four idiomatic layers take the four as constructor arguments.
+- **What went out twice is counted.** `Endpoint::retransmissions()` and
+  `sipral_counters_t` carry requests and responses sent again and
+  transactions that timed out, and the C struct also the requests refused
+  `503` at a limit; `Endpoint::transaction_retransmissions` answers for one
+  live transaction. A figure that climbs while calls still connect is a
+  lossy path, seen before it drops a call.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when
@@ -1149,6 +1163,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **An answered call's ACK is no longer recorded as missing.** The ACK to a
+  2xx arrives under a branch of its own and never reached the INVITE's
+  server transaction, so when RFC 6026's timer L ended it 32 seconds later
+  every answered call's D1 record said `transaction.unacknowledged`. The
+  dialog that takes the ACK now tells the transaction.
 - **A packet still on its way from where the far end was does not take a
   moved call back there.** After a re-INVITE moved the far end's media, the
   first packet read closed the stream's latch wherever it came from; one
@@ -2040,6 +2059,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **`max_dialogs` holds the calls this end places too.** A call counts
+  from its INVITE on, and one placed at the ceiling is
+  `SendError::LimitReached` before anything goes out; a refusal or timer B
+  gives the room back at once. A dialler that places more than 128 calls at
+  once raises the limit, as a server that answers them already did.
+- **`MediaEngine::poll_event` costs the sessions that have an event, not
+  every session.** A session puts its call on the engine's ready list when
+  it queues an event, and a poll takes from that list, so a stack holding
+  ten thousand calls pays nothing for the ones with nothing to say.
+- **A drain of `MediaEngine::poll_rtcp` looks at each session once.** Each
+  call picks up after the call the last report came from, where it used to
+  start from the first session every time: draining the reports due among
+  ten thousand calls cost 8.3 ms of the signalling thread every sweep on
+  the lab machine, more than the sweep interval.
 - **`AudioRoute` is `org.sipral.telecom.AudioRoute`.** It moved out of the
   Android helper into the JVM library beside `CallAudio`, which reports
   route changes with it; `SipralConnection.routes`, `route` and

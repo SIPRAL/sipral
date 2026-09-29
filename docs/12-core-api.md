@@ -762,9 +762,11 @@ pub struct EndpointConfig {
     /// 503 statelessly (§21.5.4) and `Event::Overloaded` says so. Defaults
     /// 256 and 128 — an order of magnitude past what a softphone reaches. An
     /// incoming call counts against `max_dialogs` from the moment its INVITE
-    /// is let in, not from the response of ours that makes its dialog; each
-    /// branch of a fork past the first dialog of our own INVITE, and past the
-    /// first 2xx to it, opens only while there is room.
+    /// is let in, not from the response of ours that makes its dialog, and a
+    /// call placed here from the moment its INVITE is sent — one placed at
+    /// the ceiling is `SendError::LimitReached`; each branch of a fork past
+    /// the first dialog of our own INVITE, and past the first 2xx to it,
+    /// opens only while there is room.
     pub max_server_transactions: usize,
     pub max_dialogs: usize,
     /// How much of the diagnostic record to keep: entries per call, and calls
@@ -1002,6 +1004,13 @@ impl Endpoint {
     /// How many messages the parser refused, whether they were answered 400
     /// or 513 or could not be answered at all; the record says which.
     pub const fn unreadable(&self) -> u64;
+    /// Requests and responses sent again, and transactions that timed out,
+    /// since the endpoint was created (`docs/17-observability.md`).
+    pub const fn retransmissions(&self) -> Retransmissions;
+    /// The same count of one live transaction's own repeats.
+    pub fn transaction_retransmissions(&self, id: impl Into<AnyTransactionId>) -> Option<u32>;
+    /// What the endpoint was configured with.
+    pub const fn config(&self) -> &EndpointConfig;
 
     // -- the diagnostic record --------------------------------------------------
     /// What this endpoint decided about one call, in order, with a stable code

@@ -288,6 +288,21 @@ private fun aRoamThatKeepsTheAddressMovesNothing(): String {
 }
 
 /** Everything above, for IdiomaticCheck.kt's main. */
+private fun aCallPlacedPastMaxDialogsIsRefused(): String {
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", maxDialogs = 1).use { alice ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { bob ->
+            val account = alice.addAccount(aor = "sip:alice@sipral.invalid", registrarAddress = bob.bindAddress)
+            alice.placeCall(account, "sip:bob@${bob.bindAddress}").use {
+                val refused = assertFailsWith<SipralException> {
+                    alice.placeCall(account, "sip:bob@${bob.bindAddress}")
+                }
+                assertEquals(SipralStatus.LIMIT_REACHED, refused.status)
+            }
+        }
+    }
+    return "a call past maxDialogs was refused"
+}
+
 internal suspend fun signallingChecks(): String = listOf(
     aHangupWithAReasonReachesTheFarEnd(),
     aCancelAsCompletedElsewhereIsNoMissedCall(),
@@ -299,4 +314,5 @@ internal suspend fun signallingChecks(): String = listOf(
     theSuiteASecuredCallRunsHasAName(),
     aCallMovedAfterTheNetworkChangedIsHeardAtItsNewSocket(),
     aRoamThatKeepsTheAddressMovesNothing(),
+    aCallPlacedPastMaxDialogsIsRefused(),
 ).joinToString(", ")

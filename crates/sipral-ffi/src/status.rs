@@ -88,6 +88,12 @@ codes! {
         /// `sipral_stack_config_t::audio_probe_ms`: a driver is stuck, and
         /// the engine is not waiting on it. What was asked was not done.
         DeviceTimedOut = 15,
+        /// A limit the stack was created with refused new work: a call placed
+        /// while the calls this stack holds, has let in or has placed and
+        /// not yet heard back about already come to
+        /// `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
+        /// that ends makes room; raising the limit means a new stack.
+        LimitReached = 16,
     }
 }
 
@@ -119,6 +125,7 @@ entry! {
             13 => c"no such device".as_ptr(),
             14 => c"device unusable".as_ptr(),
             15 => c"device timed out".as_ptr(),
+            16 => c"limit reached".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -160,6 +167,7 @@ mod tests {
             SipralStatus::NoSuchDevice,
             SipralStatus::DeviceUnusable,
             SipralStatus::DeviceTimedOut,
+            SipralStatus::LimitReached,
         ];
         for status in all {
             let code = status as i32;
@@ -170,7 +178,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in 0..=15 {
+        for code in 0..=16 {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -181,7 +189,7 @@ mod tests {
 
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
-        assert!(name(16).is_none());
+        assert!(name(17).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -209,5 +217,6 @@ mod tests {
         assert_eq!(SipralStatus::NoSuchDevice as i32, 13);
         assert_eq!(SipralStatus::DeviceUnusable as i32, 14);
         assert_eq!(SipralStatus::DeviceTimedOut as i32, 15);
+        assert_eq!(SipralStatus::LimitReached as i32, 16);
     }
 }

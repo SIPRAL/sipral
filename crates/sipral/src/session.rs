@@ -36,8 +36,8 @@
 //! pause it cares about is the far end's. And the recorder sees both, which is
 //! the whole point of it.
 
-use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "ice")]
@@ -64,6 +64,7 @@ use crate::event::MediaEvent;
 use crate::keying::{self, Opening, Shape};
 use crate::pipeline::{Coder, Decoded};
 use crate::record::{Recorder, RecordingSink};
+use crate::share::{Outbox, Ready};
 use crate::stats::StreamStatistics;
 
 /// The largest datagram this session will build.
@@ -341,7 +342,7 @@ pub struct MediaSession {
     /// The digits coming the other way, when the call negotiated a type for
     /// them.
     heard: Option<EventReceiver>,
-    events: VecDeque<MediaEvent>,
+    events: Outbox,
     /// D5: what became of every codec this call's catalogue could have used.
     codec_candidates: Vec<CodecCandidate>,
     /// A2, D6: which device this call's audio is on, carried rather than
@@ -555,7 +556,7 @@ impl MediaSession {
             render_delay: config.render_delay,
             dialling: Dialling::new(ticks_of(DIGIT_GAP, plan.codec.clock_rate())),
             heard: plan.dtmf.map(EventReceiver::new),
-            events: VecDeque::new(),
+            events: Outbox::default(),
             codec_candidates: candidates,
             device: config.device.clone(),
             #[cfg(feature = "dtls")]
@@ -690,6 +691,24 @@ impl MediaSession {
     #[must_use]
     pub fn poll_event(&mut self) -> Option<MediaEvent> {
         self.events.pop_front()
+    }
+
+    /// Have this session put `call` on the engine's list of calls with an
+    /// event waiting, from now on, whenever it queues one.
+    pub(crate) fn report_to(&mut self, call: sipral_ua::CallHandle, ready: Arc<Ready>) {
+        self.events.report_to(call, ready);
+    }
+
+    /// The engine found this session on its list: the next event, and
+    /// whether it has another after it.
+    pub(crate) fn take_for_engine(&mut self) -> (Option<MediaEvent>, bool) {
+        self.events.take_for_engine()
+    }
+
+    /// Queue an event as the session itself would.
+    #[cfg(test)]
+    pub(crate) fn push_event_for_test(&mut self, event: MediaEvent) {
+        self.events.push_back(event);
     }
 
     /// What the stream has cost, and what it is costing now.

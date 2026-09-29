@@ -153,6 +153,14 @@ constants! {
     /// `sipral_call_redirect`; and an account's `privacy` and
     /// `session_timer`.
     pub const SIPRAL_FEATURE_CALLER_IDENTITY: u32 = 1 << 12;
+    /// See [`SIPRAL_FEATURE_DTMF`]. The ceilings a stack is created with
+    /// (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
+    /// `diagnostic_records` in `sipral_stack_config_t`, read back through
+    /// `sipral_stack_settings_t`), `SIPRAL_STATUS_LIMIT_REACHED` for a call
+    /// placed past `max_dialogs`, and the counters of what went out again,
+    /// what timed out and what was refused at a limit in
+    /// `sipral_counters_t`.
+    pub const SIPRAL_FEATURE_LIMITS: u32 = 1 << 15;
 }
 
 record! {
@@ -271,6 +279,9 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.caller_identity {
         features |= SIPRAL_FEATURE_CALLER_IDENTITY;
     }
+    // the ceilings and counters are this crate's own surface over what every
+    // endpoint underneath has, so no build is without them
+    features |= SIPRAL_FEATURE_LIMITS;
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -304,11 +315,12 @@ entry! {
 mod tests {
     use super::{
         SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_CALL_READDRESS, SIPRAL_FEATURE_CALLER_IDENTITY,
-        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG,
-        SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING, SIPRAL_FEATURE_RTCP_MUX,
-        SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS, SIPRAL_FEATURE_TURN_STREAM,
-        SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS, SIPRAL_TRANSPORT_BIT_UDP,
-        SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS, SipralCapabilities, sipral_capabilities,
+        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_LIMITS,
+        SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING,
+        SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS,
+        SIPRAL_FEATURE_TURN_STREAM, SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS,
+        SIPRAL_TRANSPORT_BIT_UDP, SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS,
+        SipralCapabilities, sipral_capabilities,
     };
     use crate::error::last_error_text;
     use crate::status::SipralStatus;
@@ -463,6 +475,12 @@ mod tests {
             Capabilities::of_this_build().caller_identity
         );
         assert_eq!(SIPRAL_FEATURE_CALLER_IDENTITY, 1 << 12);
+    }
+
+    #[test]
+    fn every_build_has_the_limits_and_their_counters() {
+        assert_ne!(read().features & SIPRAL_FEATURE_LIMITS, 0);
+        assert_eq!(SIPRAL_FEATURE_LIMITS, 1 << 15);
     }
 
     #[test]

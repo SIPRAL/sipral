@@ -289,7 +289,10 @@ pub(crate) fn answer(proxy: SocketAddr) -> Result<String, String> {
         })
     };
     let [desk_port, mobile_port] = PHONE_PORTS;
-    // the desk never answers, and the mobile does: the second of the two
+    // the desk never answers, and the mobile does: the second of the two.
+    // Two whole stacks side by side are past clippy's sixteen kilobytes for
+    // an array on the stack, and a small part of what a thread has
+    #[allow(clippy::large_stack_arrays)]
     let mut phones = [
         phone(
             "desk",

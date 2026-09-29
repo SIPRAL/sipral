@@ -306,6 +306,12 @@ fn a_reliable_response_is_retransmitted_on_a_doubling_interval() {
     endpoint.handle_timeout(t0 + 3 * T1);
     assert_eq!(sent(&mut endpoint), first);
     assert_eq!(endpoint.poll_timeout(), Some(t0 + 3 * T1 + 4 * T1));
+    assert_eq!(
+        endpoint.retransmissions().responses,
+        2,
+        "each repeat is a response sent again"
+    );
+    assert_eq!(endpoint.transaction_retransmissions(transaction), Some(2));
 }
 
 #[test]
@@ -665,6 +671,11 @@ fn nothing_acknowledges_it_and_the_call_is_refused() {
             .and_then(|t| with(&t.payload, |m| m.status().map(StatusCode::get))),
         Some(500),
         "{out:?}"
+    );
+    assert_eq!(
+        endpoint.retransmissions().timeouts,
+        1,
+        "a reliable response never PRACKed is a timeout"
     );
 }
 

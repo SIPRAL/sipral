@@ -67,6 +67,34 @@ pub(super) enum Deadline {
     UnansweredNonInvite(TransactionId<NonInviteServer>),
 }
 
+/// What an endpoint has had to send twice, and what it stopped waiting for,
+/// since it was created.
+///
+/// Every figure only ever grows. Over UDP each one is a message the network
+/// lost, or delivered too late to count: a request goes out again when timer
+/// A or E fires with no answer, a response when timer G fires with no ACK or
+/// when the far end's own request arrives again because the answer to it did
+/// not. Over TCP and TLS nothing retransmits at the transaction layer
+/// (RFC 3261 §17.1.1.2), so there the first two stay at zero and only a
+/// timeout moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Retransmissions {
+    /// Requests sent again: timers A and E (§17.1.1.2, §17.1.2.2), and an
+    /// ACK repeated because the 2xx it acknowledges arrived again
+    /// (§13.2.2.4).
+    pub requests: u64,
+    /// Responses sent again: timer G (§17.2.1), a reliable provisional
+    /// response's own timer (RFC 3262 §3), and the last response of a server
+    /// transaction repeated because its request arrived again (§17.2.1,
+    /// §17.2.2).
+    pub responses: u64,
+    /// Transactions that ended because the far end never answered or never
+    /// acknowledged: timer B or F with no final response, timer H or L with
+    /// no ACK, and a reliable provisional response never PRACKed for 64·T1.
+    pub timeouts: u64,
+}
+
 /// One SIP endpoint: everything in flight, and nothing that does I/O.
 #[derive(Debug)]
 pub struct Endpoint {
@@ -116,6 +144,8 @@ pub struct Endpoint {
     /// How many messages the parser refused, answered or not. Only ever
     /// grows, for the same reason [`Endpoint::refused`] does.
     pub(super) unreadable: u64,
+    /// What had to go out twice, and what was never answered.
+    pub(super) retransmissions: Retransmissions,
     /// Calls let in under [`EndpointConfig::max_dialogs`] that have not opened
     /// their dialog yet.
     ///
@@ -179,6 +209,7 @@ impl Endpoint {
             known: Known::new(),
             refused: 0,
             unreadable: 0,
+            retransmissions: Retransmissions::default(),
             admitted: HashSet::new(),
             unanswered: HashMap::new(),
             diag: Records::new(config.diagnostics),
@@ -367,6 +398,12 @@ impl Endpoint {
             .map(|bound| (bound.protocol, bound.local))
     }
 
+    /// What this endpoint was configured with, as it stands.
+    #[must_use]
+    pub const fn config(&self) -> &EndpointConfig {
+        &self.config
+    }
+
     /// How many transactions and dialogs are live, for a caller that wants to
     /// know whether it can shut down.
     #[must_use]
@@ -399,6 +436,41 @@ impl Endpoint {
     #[must_use]
     pub const fn unreadable(&self) -> u64 {
         self.unreadable
+    }
+
+    /// What this endpoint has sent again, and how many transactions it gave
+    /// up on, since it was created: the numbers that say a path is losing
+    /// messages before any call fails on it.
+    #[must_use]
+    pub const fn retransmissions(&self) -> Retransmissions {
+        self.retransmissions
+    }
+
+    /// How many times one transaction has sent its request or its response
+    /// again, while it is live; `None` once it has ended or for a handle
+    /// that never named one.
+    #[must_use]
+    pub fn transaction_retransmissions(&self, id: impl Into<AnyTransactionId>) -> Option<u32> {
+        self.transactions.retransmissions(id.into())
+    }
+
+    /// Count a message that went out again: a request or a response, and the
+    /// transaction it belongs to when it belongs to one.
+    pub(super) fn count_retransmission(&mut self, request: bool, id: Option<AnyTransactionId>) {
+        let total = if request {
+            &mut self.retransmissions.requests
+        } else {
+            &mut self.retransmissions.responses
+        };
+        *total = total.saturating_add(1);
+        if let Some(id) = id {
+            self.transactions.count_retransmission(id);
+        }
+    }
+
+    /// Count a transaction the far end left unanswered or unacknowledged.
+    pub(super) const fn count_timeout(&mut self) {
+        self.retransmissions.timeouts = self.retransmissions.timeouts.saturating_add(1);
     }
 
     pub(crate) const fn store(&self) -> &Transactions {
@@ -635,6 +707,11 @@ impl Endpoint {
         now: Instant,
     ) -> Result<TransactionId<InviteClient>, SendError> {
         self.mark(now);
+        if self.dialogs_held() >= self.config.max_dialogs {
+            return Err(SendError::LimitReached {
+                limit: self.config.max_dialogs,
+            });
+        }
         let (message, flow) = self.build_request(request, credentials)?;
         let secure = flow.protocol.is_secure();
         let set = DialogSet::new(message.clone(), secure);
@@ -1115,7 +1192,7 @@ impl Endpoint {
             && let Some(dialog) = dialog
             && let Ok(seq) = request.as_raw().cseq().map(|cseq| cseq.seq)
         {
-            self.dialogs.answer_invite(dialog, seq);
+            self.dialogs.answer_invite(dialog, seq, transaction);
         }
         self.end_refused_early(transaction, early);
         // a dialog opened, or a final response said there will be none: the

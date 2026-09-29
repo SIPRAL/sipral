@@ -132,6 +132,10 @@ class Stack:
         audio_activation: int = 0,
         audio_probe_ms: int = 0,
         audio_device_rate_hz: int = 0,
+        max_dialogs: int = 0,
+        max_server_transactions: int = 0,
+        diagnostic_decisions: int = 0,
+        diagnostic_records: int = 0,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
 
@@ -161,6 +165,14 @@ class Stack:
         ``SIPRAL_STATUS_DEVICE_TIMED_OUT``, not a hang.
         ``audio_device_rate_hz`` is the rate the devices are asked for
         (``0`` for 48 000).
+
+        ``max_dialogs`` is the most calls the stack holds at once, either
+        way (``0`` for 128): one that arrives past it is answered 503, and
+        one placed past it raises ``SIPRAL_STATUS_LIMIT_REACHED``.
+        ``max_server_transactions`` is the most requests from other ends it
+        works on at once (``0`` for 256). ``diagnostic_decisions`` and
+        ``diagnostic_records`` bound the diagnostic record: decisions kept
+        per call (``0`` for 64) and calls kept (``0`` for 32).
 
         ``ice`` and ``nat`` are :class:`sipral.enums.Ice` /
         :class:`sipral.enums.Nat` values, or ``0`` for this build's own
@@ -351,6 +363,10 @@ class Stack:
             config.audio_transmit_callback = self._audio_transmit
         config.audio_probe_ms = audio_probe_ms
         config.audio_device_rate_hz = audio_device_rate_hz
+        config.max_dialogs = max_dialogs
+        config.max_server_transactions = max_server_transactions
+        config.diagnostic_decisions = diagnostic_decisions
+        config.diagnostic_records = diagnostic_records
 
         out_stack = ffi.new("sipral_handle_t *")
         try:

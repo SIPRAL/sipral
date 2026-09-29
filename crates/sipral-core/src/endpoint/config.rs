@@ -139,6 +139,13 @@ pub struct EndpointConfig {
     /// every INVITE that arrived before the first of them was answered would
     /// be let in, and answering them would pass the ceiling.
     ///
+    /// A call this end places counts from its INVITE on, for the same reason:
+    /// it is a dialog the moment anything answers it. One placed when the
+    /// dialogs, the calls let in and the calls placed and not yet answered
+    /// already come to this is refused with [`super::SendError::LimitReached`]
+    /// before anything goes out, and a refusal from the far end gives its
+    /// room back at once.
+    ///
     /// A fork is held to it too. The first dialog of an INVITE this end sent
     /// always opens, and so does the first 2xx to it, since between them they
     /// are the call the application placed: a forking proxy can ring one

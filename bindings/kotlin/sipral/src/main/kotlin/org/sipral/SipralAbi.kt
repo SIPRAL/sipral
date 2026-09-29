@@ -113,6 +113,14 @@ enum class SipralStatus(val value: Int) {
      * the engine is not waiting on it. What was asked was not done.
      */
     DEVICE_TIMED_OUT(15),
+    /**
+     * A limit the stack was created with refused new work: a call placed
+     * while the calls this stack holds, has let in or has placed and
+     * not yet heard back about already come to
+     * `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
+     * that ends makes room; raising the limit means a new stack.
+     */
+    LIMIT_REACHED(16),
     ;
 
     companion object {
@@ -2724,9 +2732,37 @@ data class SipralCounters(
      * replace (RFC 3891 §3).
      */
     val screenedRefusedByReplaces: Long,
+    /**
+     * Requests this stack sent again because nothing answered in time
+     * (RFC 3261 timers A and E), and ACKs sent again because the 2xx
+     * they acknowledge arrived again. Only ever over UDP: nothing
+     * retransmits over a stream. A figure that climbs while calls still
+     * connect is a path losing packets before it loses calls.
+     *
+     * Appended at the tail (task 8.10), with the three below.
+     */
+    val requestsRetransmitted: Long,
+    /**
+     * Responses sent again: timer G, a reliable provisional response's
+     * own timer, and the last answer repeated because the far end sent
+     * its request again, which is what it does when that answer did not
+     * reach it.
+     */
+    val responsesRetransmitted: Long,
+    /**
+     * Transactions that ended because the far end never answered or
+     * never acknowledged: timers B, F, H and L, and a reliable
+     * provisional response never PRACKed.
+     */
+    val transactionsTimedOut: Long,
+    /**
+     * Requests answered `503` because the stack was at
+     * `max_server_transactions`, or an INVITE was at `max_dialogs`.
+     */
+    val requestsRefusedAtLimit: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 25
+        const val SLOTS: Int = 29
 
         fun of(slots: LongArray): SipralCounters = SipralCounters(
             slots[0],
@@ -2754,6 +2790,10 @@ data class SipralCounters(
             slots[22],
             slots[23],
             slots[24],
+            slots[25],
+            slots[26],
+            slots[27],
+            slots[28],
         )
     }
 }
@@ -2909,9 +2949,32 @@ data class SipralStackSettings(
      * unmoved.
      */
     val registrarKeepaliveMs: Long,
+    /**
+     * The most calls the stack holds at once, with the default filled
+     * in.
+     *
+     * Appended at the tail (task 8.10), with the three below; the
+     * pinned `MIN_SIZE` is unmoved.
+     */
+    val maxDialogs: Long,
+    /**
+     * The most server transactions it works on at once, with the
+     * default filled in.
+     */
+    val maxServerTransactions: Long,
+    /**
+     * How many decisions a diagnostic record keeps, with the default
+     * filled in.
+     */
+    val diagnosticDecisions: Long,
+    /**
+     * How many diagnostic records the stack keeps, with the default
+     * filled in.
+     */
+    val diagnosticRecords: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 15
+        const val SLOTS: Int = 19
 
         fun of(slots: LongArray): SipralStackSettings = SipralStackSettings(
             slots[0],
@@ -2929,6 +2992,10 @@ data class SipralStackSettings(
             slots[12],
             slots[13],
             slots[14],
+            slots[15],
+            slots[16],
+            slots[17],
+            slots[18],
         )
     }
 }
@@ -4076,6 +4143,52 @@ class SipralStackConfig(
      * taken at its word.
      */
     val audioDeviceRateHz: Long = 0,
+    /**
+     * The most calls this stack holds at once, in either direction, or
+     * zero for 128: a softphone's ceiling, well past what one person
+     * can hold and well short of what a flood would make it keep. A
+     * call counts from its INVITE on — one that arrives from the
+     * moment it is let in, one placed here from the moment it is sent
+     * — until it ends or is refused.
+     *
+     * An INVITE that arrives past it is answered `503 Service
+     * Unavailable` before it rings, with no `Retry-After`: RFC 3261
+     * §21.5.4 has the client try another server either way, and a
+     * `Retry-After` would also have a proxy send this stack nothing at
+     * all for that long, every call refused for one too many. A
+     * call placed past it is `SIPRAL_STATUS_LIMIT_REACHED` and nothing
+     * goes out. A media server built on this library raises it to what
+     * its machine can carry; `docs/19-numbers.md` has what one costs.
+     *
+     * Appended at the tail (task 8.10), with the three below; the
+     * pinned `MIN_SIZE` is unmoved.
+     */
+    val maxDialogs: Long = 0,
+    /**
+     * The most requests from other ends this stack works on at once —
+     * its server transactions, RFC 3261 §17.2 — or zero for 256. Past
+     * it a request that would start another is answered `503` at once,
+     * statelessly and with no `Retry-After`, and every one already
+     * under way is still answered. A request inside a call is held to
+     * that call's own share instead, and a BYE never is.
+     */
+    val maxServerTransactions: Long = 0,
+    /**
+     * D1: how many decisions each call's diagnostic record keeps, or
+     * zero for 64. Past it the oldest go and the record counts them.
+     */
+    val diagnosticDecisions: Long = 0,
+    /**
+     * D1: how many calls have a diagnostic record at once, or zero for
+     * 32; the endpoint's own record is kept besides them. Past it the
+     * record written longest ago goes, and the stack counts it. Neither
+     * of the two refuses anything: they bound what the records cost, a
+     * quarter of a megabyte at the defaults. Every decision written
+     * looks through the records for its call, so this one is best kept
+     * in the hundreds even on a stack holding thousands of calls: the
+     * calls a support case is about are the ones written most recently.
+     */
+    val diagnosticRecords: Long = 0,
 )
 
 /**
@@ -6393,7 +6506,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 29)
+        agree(0, 30)
     }
 
     /**
@@ -6417,7 +6530,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -6569,7 +6682,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 29
+    const val ABI_VERSION_MINOR: Long = 30
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -6747,6 +6860,17 @@ object Sipral {
      * `session_timer`.
      */
     const val FEATURE_CALLER_IDENTITY: Long = 4096
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. The ceilings a stack is created with
+     * (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
+     * `diagnostic_records` in `sipral_stack_config_t`, read back through
+     * `sipral_stack_settings_t`), `SIPRAL_STATUS_LIMIT_REACHED` for a call
+     * placed past `max_dialogs`, and the counters of what went out again,
+     * what timed out and what was refused at a limit in
+     * `sipral_counters_t`.
+     */
+    const val FEATURE_LIMITS: Long = 32768
 
     /**
      * The buffer a caller has to bring for one outgoing packet.
@@ -7026,7 +7150,7 @@ object Sipral {
         val configAudioTransmitCallback = SipralAudioTransmitListeners.register(config.audioTransmitListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
             SipralAudioTransmitListeners.made(configAudioTransmitCallback, status, stackSlot[0])

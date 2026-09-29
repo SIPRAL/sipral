@@ -54,6 +54,9 @@ pub(crate) struct ClientEntry<M> {
     pub(crate) machine: M,
     /// Where this transaction's messages go.
     pub(crate) flow: Flow,
+    /// How many times its request has gone out again, or its ACK for a
+    /// refusal has.
+    pub(crate) retransmitted: u32,
     key: ClientKey,
 }
 
@@ -70,6 +73,8 @@ pub(crate) struct ServerEntry<M> {
     pub(crate) flow: Flow,
     /// The request that created it.
     pub(crate) request: OwnedMessage,
+    /// How many times a response it already sent has gone out again.
+    pub(crate) retransmitted: u32,
     key: ServerKey,
 }
 
@@ -209,6 +214,7 @@ impl Transactions {
         let raw = self.invite_clients.insert(ClientEntry {
             machine,
             flow,
+            retransmitted: 0,
             key: key.clone(),
         });
         let id = TransactionId::new(raw);
@@ -233,6 +239,7 @@ impl Transactions {
         let raw = self.non_invite_clients.insert(ClientEntry {
             machine,
             flow,
+            retransmitted: 0,
             key: key.clone(),
         });
         let id = TransactionId::new(raw);
@@ -258,6 +265,7 @@ impl Transactions {
             machine,
             flow,
             request: request.to_owned(),
+            retransmitted: 0,
             key: key.clone(),
         });
         let id = TransactionId::new(raw);
@@ -285,6 +293,7 @@ impl Transactions {
             machine,
             flow,
             request: request.to_owned(),
+            retransmitted: 0,
             key: key.clone(),
         });
         let id = TransactionId::new(raw);
@@ -293,6 +302,53 @@ impl Transactions {
             *self.merge.entry(counted).or_insert(0) += 1;
         }
         Ok(id)
+    }
+
+    /// Count one more retransmission against a transaction, if it is live.
+    pub(crate) fn count_retransmission(&mut self, id: AnyTransactionId) {
+        let counted = match id {
+            AnyTransactionId::InviteClient(id) => self
+                .invite_clients
+                .get_mut(id.raw)
+                .map(|entry| &mut entry.retransmitted),
+            AnyTransactionId::NonInviteClient(id) => self
+                .non_invite_clients
+                .get_mut(id.raw)
+                .map(|entry| &mut entry.retransmitted),
+            AnyTransactionId::InviteServer(id) => self
+                .invite_servers
+                .get_mut(id.raw)
+                .map(|entry| &mut entry.retransmitted),
+            AnyTransactionId::NonInviteServer(id) => self
+                .non_invite_servers
+                .get_mut(id.raw)
+                .map(|entry| &mut entry.retransmitted),
+        };
+        if let Some(counted) = counted {
+            *counted = counted.saturating_add(1);
+        }
+    }
+
+    /// How many retransmissions a live transaction has made.
+    pub(crate) fn retransmissions(&self, id: AnyTransactionId) -> Option<u32> {
+        match id {
+            AnyTransactionId::InviteClient(id) => self
+                .invite_clients
+                .get(id.raw)
+                .map(|entry| entry.retransmitted),
+            AnyTransactionId::NonInviteClient(id) => self
+                .non_invite_clients
+                .get(id.raw)
+                .map(|entry| entry.retransmitted),
+            AnyTransactionId::InviteServer(id) => self
+                .invite_servers
+                .get(id.raw)
+                .map(|entry| entry.retransmitted),
+            AnyTransactionId::NonInviteServer(id) => self
+                .non_invite_servers
+                .get(id.raw)
+                .map(|entry| entry.retransmitted),
+        }
     }
 
     /// Whether a client transaction is already running under the key this

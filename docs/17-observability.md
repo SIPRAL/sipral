@@ -70,7 +70,11 @@ what each one counts and why the queue behind it has a ceiling at all.
 `screened_refused_by_crowding` and `screened_refused_by_replaces` count
 INVITEs refused before the application ever saw them, read from
 `sipral_ua::UserAgent::refusals`; a Rust caller reads that method directly
-rather than going through a counter meant for the C ABI.
+rather than going through a counter meant for the C ABI. Four more, appended
+in ABI 0.30 — `requests_retransmitted`, `responses_retransmitted`,
+`transactions_timed_out` and `requests_refused_at_limit` — are read from the
+endpoint underneath, `Endpoint::retransmissions` and `Endpoint::refused`,
+below.
 
 ### Counters are monotonic, gauges are not — in the type, not only here
 
@@ -96,21 +100,31 @@ are not invented for this: `registrations_failed` reuses
 so a counter and a live event about the same failure are never able to
 disagree about its name.
 
-### What is deliberately not counted here: retransmissions
+### Retransmissions are the endpoint's to count
 
-D3's own list includes "retransmissions", and this is the one number on it
-that `Counters` does not have. `sipral-core` keeps a retransmission count
-privately, inside the client transaction state machine that paces timer A
-(`crates/sipral-core/src/transaction/invite_client.rs`), and never raises it
-as an event — nothing passes through `poll_event` that says "a request was
-retransmitted", only ever "a request was sent" or, on the far side of 64·T1,
-"the transaction gave up". Counting it here would mean reading that private
-state through a path this crate does not have, which is exactly the second
-path this design avoids everywhere else. The number is not missing by
-oversight; it is missing because raising it as an event is `sipral-core` and
-`sipral-ua` work this observability layer does not do, and a counter that
-always reads zero because nothing ever feeds it would be worse than no
-counter at all — a number that looks measured and is not.
+D3's own list includes "retransmissions", and `Counters` still does not have
+them: nothing passes through `poll_event` that says "a request was
+retransmitted", and raising one event per repeated datagram would put the
+busiest path of a lossy link through the event queue. The endpoint counts
+them where they happen instead. `sipral_core::endpoint::Endpoint::retransmissions`
+returns `Retransmissions { requests, responses, timeouts }`, each only ever
+growing:
+
+- `requests`: timers A and E, and an ACK sent again because the 2xx it
+  acknowledges arrived again (RFC 3261 §13.2.2.4);
+- `responses`: timer G, a reliable provisional response's own timer
+  (RFC 3262 §3), and the last response of a server transaction sent again
+  because its request arrived again;
+- `timeouts`: timers B, F, H and L with no answer or no ACK, and a reliable
+  provisional response never PRACKed within 64·T1.
+
+`Endpoint::transaction_retransmissions` answers the same for one live
+transaction. The C ABI copies the three, and `Endpoint::refused` beside them,
+into `sipral_counters_t`. Over TCP and TLS the first two stay at zero, since
+nothing retransmits at the transaction layer there. The D1 record carries the
+same events one by one (`request.retransmitted`, `response.retransmitted`,
+`transaction.unacknowledged`), so a figure that moved can be traced to the
+calls it moved on.
 
 ## D8: capability reporting
 

@@ -205,6 +205,14 @@ public final class SipralStack: @unchecked Sendable {
     /// the rate the devices are asked to run at (zero for 48 000); every call
     /// is resampled between its own rate and theirs.
     ///
+    /// `maxDialogs` is the most calls the stack holds at once, either way
+    /// (zero for 128): one that arrives past it is answered 503, and one
+    /// placed past it throws `.limitReached`. `maxServerTransactions` is the
+    /// most requests from other ends it works on at once (zero for 256).
+    /// `diagnosticDecisions` and `diagnosticRecords` bound the diagnostic
+    /// record: decisions kept per call (zero for 64) and calls kept (zero
+    /// for 32).
+    ///
     /// `network` is the network the stack starts on, what the first
     /// `networkChanged(to:)` compares with: a wired link at `bindHost`, on no
     /// interface in particular, unless the application knows better.
@@ -226,6 +234,10 @@ public final class SipralStack: @unchecked Sendable {
         registrarKeepaliveMs: UInt64 = 0,
         audioProbeMs: UInt64 = 0,
         audioDeviceRateHz: UInt32 = 0,
+        maxDialogs: UInt32 = 0,
+        maxServerTransactions: UInt32 = 0,
+        diagnosticDecisions: UInt32 = 0,
+        diagnosticRecords: UInt32 = 0,
         network: Network? = nil
     ) throws {
         let socket = try UDPSocket(host: bindHost, port: bindPort)
@@ -279,6 +291,10 @@ public final class SipralStack: @unchecked Sendable {
                     config.audio_activation = activation
                     config.audio_probe_ms = audioProbeMs
                     config.audio_device_rate_hz = audioDeviceRateHz
+                    config.max_dialogs = maxDialogs
+                    config.max_server_transactions = maxServerTransactions
+                    config.diagnostic_decisions = diagnosticDecisions
+                    config.diagnostic_records = diagnosticRecords
                     if audio.isDevice {
                         config.audio_transmit_callback = sipralAudioTransmitTrampoline
                         config.audio_transmit_user_data = boxPointer

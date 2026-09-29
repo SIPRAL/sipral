@@ -106,6 +106,15 @@ pub enum SendError {
     /// direction." Two that cross are answered 491 by whichever end receives
     /// the second one, so sending it buys nothing but a round trip.
     InviteInProgress,
+    /// A new call would take this end past
+    /// [`super::EndpointConfig::max_dialogs`]: the dialogs it holds, the
+    /// calls it has let in and not yet answered, and the calls it has placed
+    /// that nothing has answered yet, already come to `limit`. Nothing went
+    /// out. The same ceiling an incoming INVITE is answered 503 at.
+    LimitReached {
+        /// The ceiling in force.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for SendError {
@@ -123,6 +132,12 @@ impl fmt::Display for SendError {
             Self::WrongMethod => f.write_str("that method does not go out on this call"),
             Self::InviteInProgress => {
                 f.write_str("an INVITE is already in progress in this dialog")
+            }
+            Self::LimitReached { limit } => {
+                write!(
+                    f,
+                    "this end is at its limit on calls held at once ({limit})"
+                )
             }
         }
     }

@@ -887,6 +887,63 @@ is marked for it, and close it when told; `TurnStreamTests.swift`,
 `NatCheck.kt`, `test_turn_stream.py` and `TurnStreamTests.cs` prove each
 against a TURN server on TCP and on TLS, trusted and not.
 
+### Limits, and what went out twice
+
+ABI 0.30 hands the application the ceilings every endpoint underneath already
+had, and the counters that say how close to them a stack runs.
+`SIPRAL_FEATURE_LIMITS` (`1 << 15`) is set in every build.
+
+`sipral_stack_config_t` appends four members after `audio_device_rate_hz`,
+with the pinned `MIN_SIZE` unmoved, so a caller built against 0.29 gets every
+default. Each is zero for its default, and `sipral_stack_settings_t` appends
+the same four, read back with the default filled in:
+
+| Member | Default | Past it |
+|---|---|---|
+| `max_dialogs` | 128 | An INVITE that arrives is answered `503 Service Unavailable` before it rings. A call placed with `sipral_call_place` is `SIPRAL_STATUS_LIMIT_REACHED` (16), and nothing goes out. |
+| `max_server_transactions` | 256 | A request from another end that would start one more server transaction is answered `503` statelessly. A request inside a call is held to that call's own share instead, and a BYE never is. |
+| `diagnostic_decisions` | 64 | The oldest decision of that call's D1 record goes, and the record counts it. Nothing is refused. |
+| `diagnostic_records` | 32 | The record written longest ago goes, and the stack counts it. Nothing is refused. |
+
+A call counts against `max_dialogs` from its INVITE on, in both directions:
+one that arrives from the moment it is let in, one placed here from the
+moment it is sent, until it ends. A refusal from the far end gives the room
+back at once, and so does timer B on a call nothing answered, even while the
+INVITE's transaction still stands to absorb a repeated response. The first
+dialog of a call this end placed always opens, however full the stack has
+become since: the application asked for that call while there was room.
+
+Neither `503` carries a `Retry-After`. RFC 3261 §21.5.4 has the client try
+another server either way; what the header would add is a proxy that sends
+this stack nothing at all for that long (the same section's "SHOULD NOT
+forward any other requests to that server for the duration"), so one call
+too many would shut out every call behind it. A deployment that wants a
+proxy to back off for a while says so at the proxy. Every `503` either limit
+sends is counted in `sipral_counters_t::requests_refused_at_limit`.
+
+`sipral_counters_t` appends four totals, each only ever growing:
+
+- `requests_retransmitted`: requests sent again because nothing answered in
+  time (RFC 3261 timers A and E), and ACKs sent again because the 2xx they
+  acknowledge arrived again (§13.2.2.4);
+- `responses_retransmitted`: timer G, a reliable provisional response's own
+  timer (RFC 3262 §3), and the last response of a server transaction sent
+  again because its request arrived again — which is what the far end does
+  when that response did not reach it;
+- `transactions_timed_out`: transactions that ended because the far end never
+  answered or never acknowledged — timers B, F, H and L — and a reliable
+  provisional response never PRACKed within 64·T1;
+- `requests_refused_at_limit`, above.
+
+Over TCP and TLS nothing retransmits at the transaction layer, so there the
+first two stay at zero and only a timeout moves. Over UDP the first two
+climbing while calls still connect is a path losing packets before it loses
+calls: sampled twice a minute, the difference is the loss an application can
+show before anyone complains about it. The same figures are
+`Endpoint::retransmissions()` in Rust, where
+`Endpoint::transaction_retransmissions(id)` also answers for one live
+transaction.
+
 ## Media across the boundary
 
 The ABI is built over `crates/sipral`, the facade that joins signalling to

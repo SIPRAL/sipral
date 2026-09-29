@@ -560,6 +560,7 @@ impl Endpoint {
                                 Direction::Outbound,
                                 went_on,
                             );
+                            self.count_retransmission(true, None);
                             self.queue(went_on.transmit(ack.bytes()));
                         }
                         return;
@@ -587,7 +588,7 @@ impl Endpoint {
                 }
             }
             Fork::Refused => {
-                self.end_branches(set, DialogEndReason::Refused);
+                self.end_refused_set(set);
                 // the same carve-out the non-INVITE path makes, for the same
                 // reason and so that one counter does not mean two things
                 // depending on the method: a challenge is not a refusal, and
@@ -884,13 +885,20 @@ impl Endpoint {
                 let Some(entry) = self.transactions.invite_server_mut(id) else {
                     return;
                 };
-                let effects = if request.method() == Some(Method::Ack) {
+                let ack = request.method() == Some(Method::Ack);
+                let effects = if ack {
                     entry.machine.on_ack(now)
                 } else {
                     entry.machine.on_request()
                 };
                 let notify = effects.notify;
-                self.apply(effects, flow, AnyTransactionId::InviteServer(id));
+                // the INVITE again: whatever it gets back is the answer the
+                // far end did not hear the first time
+                if ack {
+                    self.apply(effects, flow, AnyTransactionId::InviteServer(id));
+                } else {
+                    self.apply_again(effects, flow, AnyTransactionId::InviteServer(id));
+                }
                 // RFC 6026 8.1: an ACK arriving in Accepted is the dialog's,
                 // and is passed up rather than absorbed
                 if notify == Some(Notify::Ack) {
@@ -902,7 +910,7 @@ impl Endpoint {
                     return;
                 };
                 let effects = entry.machine.on_request();
-                self.apply(effects, flow, AnyTransactionId::NonInviteServer(id));
+                self.apply_again(effects, flow, AnyTransactionId::NonInviteServer(id));
             }
         }
     }
@@ -938,6 +946,13 @@ impl Endpoint {
         };
         if !self.dialogs.take_ack(dialog, cseq.seq) {
             return;
+        }
+        if let Some(entry) = self
+            .dialogs
+            .answered_by(dialog)
+            .and_then(|answered| self.transactions.invite_server_mut(answered))
+        {
+            entry.machine.acknowledged_elsewhere();
         }
         self.push(Event::IncomingAck {
             dialog,
@@ -1161,9 +1176,14 @@ impl Endpoint {
     }
 
     /// What [`super::EndpointConfig::max_dialogs`] is measured against: the
-    /// dialogs held, and the calls let in that are still to open theirs.
+    /// dialogs held, the calls let in that are still to open theirs, and the
+    /// calls placed that nothing has answered yet, each of which opens one
+    /// the moment anything does.
     pub(super) fn dialogs_held(&self) -> usize {
-        self.dialogs.len().saturating_add(self.admitted.len())
+        self.dialogs
+            .len()
+            .saturating_add(self.admitted.len())
+            .saturating_add(self.dialogs.unopened())
     }
 
     /// The early dialog an INVITE of theirs opened, if it opened one.
@@ -1389,6 +1409,7 @@ impl Endpoint {
                     let call = over.then(|| self.call_of(id)).flatten();
                     self.apply_again(effects, flow, id);
                     if over {
+                        self.count_timeout();
                         self.invite_gave_up(
                             inner,
                             renegotiated,
@@ -1413,6 +1434,7 @@ impl Endpoint {
                     let dialog = over.then(|| self.dialog_of(id)).flatten();
                     self.apply_again(effects, flow, id);
                     if over {
+                        self.count_timeout();
                         self.note_failure(call.as_ref(), FailureReason::Timeout);
                         self.push(Event::RequestFailed {
                             transaction: inner,
@@ -1438,6 +1460,7 @@ impl Endpoint {
                     let call = unacknowledged.then(|| self.call_of(id)).flatten();
                     self.apply_again(effects, flow, id);
                     if unacknowledged {
+                        self.count_timeout();
                         self.note(
                             call.as_ref().map(CallId::as_bytes),
                             Decision::of(Reason::TransactionUnacknowledged)
@@ -1730,12 +1753,16 @@ impl Endpoint {
         let Some(message) = message else {
             return;
         };
-        let reason = match (id.role() == Role::Client, repeat) {
+        let client = id.role() == Role::Client;
+        let reason = match (client, repeat) {
             (true, false) => Reason::RequestSent,
             (true, true) => Reason::RequestRetransmitted,
             (false, false) => Reason::ResponseSent,
             (false, true) => Reason::ResponseRetransmitted,
         };
+        if repeat {
+            self.count_retransmission(client, Some(id));
+        }
         self.note_wire(&message.as_raw(), reason, Direction::Outbound, flow);
         self.queue(flow.transmit(message.bytes()));
     }
@@ -1813,6 +1840,13 @@ impl Endpoint {
             transaction: id,
             reason,
         });
+    }
+
+    /// The INVITE a set follows was refused: the call it placed stops
+    /// counting against `max_dialogs`, and every dialog it opened ends.
+    fn end_refused_set(&mut self, set: Raw) {
+        self.dialogs.refused(set);
+        self.end_branches(set, DialogEndReason::Refused);
     }
 
     /// Report and forget every dialog of a set that has just ended.

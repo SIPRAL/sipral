@@ -13,8 +13,8 @@ use super::tests::{
     register_request, sent, transmits,
 };
 use super::{
-    DialogEndReason, Endpoint, EndpointConfig, Event, Input, OutgoingResponse, TransportId,
-    TransportProtocol,
+    DialogEndReason, Endpoint, EndpointConfig, Event, Input, OutgoingResponse, Retransmissions,
+    TransportId, TransportProtocol,
 };
 use crate::auth::Credentials;
 use crate::diag::{Decision, Direction, RecordLimits, Wire};
@@ -544,4 +544,89 @@ fn the_whole_endpoint_serialises_to_one_document() {
     assert!(json.contains("\"reason\":\"request.sent\""), "{json}");
     assert!(json.contains("\"method\":\"OPTIONS\""), "{json}");
     assert!(json.ends_with("]}"), "{json}");
+}
+
+// -- counted, for an application that samples numbers ------------------------
+
+#[test]
+fn a_request_nothing_answers_is_counted_twice_over_and_then_as_a_timeout() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let options = endpoint
+        .request(&options_request(), t0)
+        .expect("the request goes");
+    transmits(&mut endpoint);
+    assert_eq!(endpoint.retransmissions(), Retransmissions::default());
+    assert_eq!(endpoint.transaction_retransmissions(options), Some(0));
+
+    // timer E: T1, then 2·T1 after that
+    endpoint.handle_timeout(t0 + T1);
+    endpoint.handle_timeout(t0 + 3 * T1);
+    assert_eq!(transmits(&mut endpoint).len(), 2);
+    let counted = endpoint.retransmissions();
+    assert_eq!(counted.requests, 2);
+    assert_eq!(counted.responses, 0);
+    assert_eq!(counted.timeouts, 0);
+    assert_eq!(endpoint.transaction_retransmissions(options), Some(2));
+
+    // timer F ends it, and the transaction's own count goes with it
+    endpoint.handle_timeout(t0 + 64 * T1);
+    let counted = endpoint.retransmissions();
+    assert_eq!(counted.timeouts, 1);
+    assert!(counted.requests >= 2, "nothing counted is ever taken back");
+    assert_eq!(endpoint.transaction_retransmissions(options), None);
+}
+
+#[test]
+fn a_response_sent_again_is_counted_whichever_side_asked_for_it() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let invite = incoming("INVITE", "1", "");
+    deliver(&mut endpoint, &invite, t0);
+    let transaction = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::IncomingInvite { transaction, .. } => Some(transaction),
+            _ => None,
+        })
+        .expect("the call arrived");
+    transmits(&mut endpoint);
+
+    // the INVITE again, before anything was decided: the 100 goes back,
+    // because the far end has not heard it
+    deliver(&mut endpoint, &invite, t0 + T1);
+    assert_eq!(transmits(&mut endpoint).len(), 1);
+    assert_eq!(endpoint.retransmissions().responses, 1);
+    assert_eq!(endpoint.transaction_retransmissions(transaction), Some(1));
+
+    endpoint
+        .respond_invite(
+            transaction,
+            &OutgoingResponse::new(StatusCode::BUSY_HERE),
+            t0 + T1,
+        )
+        .expect("the refusal goes");
+    transmits(&mut endpoint);
+    for step in 2..=65_u32 {
+        endpoint.handle_timeout(t0 + step * T1);
+    }
+    let repeated = transmits(&mut endpoint).len();
+    assert!(repeated > 1, "timer G repeats the refusal until timer H");
+
+    let counted = endpoint.retransmissions();
+    assert_eq!(
+        counted.responses,
+        u64::try_from(repeated).expect("a count") + 1,
+        "every refusal timer G sent, and the 100 before them"
+    );
+    assert_eq!(counted.requests, 0);
+    assert_eq!(counted.timeouts, 1, "timer H: the ACK never came");
+    // and the record agrees, entry for entry
+    let recorded = endpoint
+        .call_record(&CallId::new(b"incoming-1"))
+        .expect("a record for the call that arrived")
+        .decisions()
+        .filter(|decision| decision.reason.as_str() == "response.retransmitted")
+        .count();
+    assert_eq!(u64::try_from(recorded).expect("a count"), counted.responses);
 }

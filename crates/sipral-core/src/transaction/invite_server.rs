@@ -167,6 +167,16 @@ impl InviteServerMachine {
         }
     }
 
+    /// The dialog took the ACK to this transaction's 2xx, which arrived under
+    /// a branch of its own and so never reached [`Self::on_ack`]: timer L
+    /// ends the transaction quietly rather than as a 2xx nobody
+    /// acknowledged.
+    pub(crate) const fn acknowledged_elsewhere(&mut self) {
+        if matches!(self.state, InviteServerState::Accepted) {
+            self.acked = true;
+        }
+    }
+
     /// Fire whichever timer is due, earliest first.
     pub(crate) fn handle_timeout(&mut self, now: Instant) -> Option<(TimerName, Effects)> {
         let due = self.next_deadline().filter(|at| *at <= now)?;
