@@ -66,21 +66,31 @@
 //! The queues on both sides hold one frame (at least one tick) beyond the
 //! tick being mixed and no more: a writer that runs ahead loses its oldest
 //! samples, and they are counted in [`ParticipantStats`], so latency cannot
-//! build up behind a participant whose clock runs fast. A participant whose clock runs slow
-//! underruns, and the missing samples are mixed as silence and counted too.
-//! Keeping the two clocks in step is [`crate::drift`]'s job, in front of the
-//! mixer.
+//! build up behind a participant whose clock runs fast. A participant whose
+//! clock runs slow underruns, and the missing samples are mixed as silence
+//! and counted too. Keeping the two clocks in step is [`crate::drift`]'s job,
+//! in front of the mixer.
 //!
 //! # Allocation
 //!
 //! [`Mixer::new`] allocates the places and the shared scratch,
 //! [`Mixer::join`] the participant's queues and filters, and
-//! [`Mixer::start_recording`] the recording's. Nothing else allocates: pushing, pulling, mixing and changing controls are
+//! [`Mixer::start_recording`] the recording's. Nothing else allocates:
+//! pushing, pulling, mixing, reading the talkers and changing controls are
 //! allocation-free, and every per-tick cost is bounded by the number of
 //! participants. Leaving frees what joining allocated.
 //!
 //! All the arithmetic is integer, so the same input produces the same output
 //! on every platform.
+//!
+//! # Wiring it to calls
+//!
+//! One [`Mixer`] is one conference, driven from one thread. Each call leg
+//! joins at the rate its codec decodes to; what its jitter buffer releases is
+//! pushed, and what is pulled goes to its encoder. The tick comes from
+//! whatever clock the conference is to run on, and each leg whose far end
+//! runs on another clock goes through [`crate::drift`] on the way in and on
+//! the way out, or its queue slowly fills or runs dry.
 
 mod convert;
 pub mod limiter;

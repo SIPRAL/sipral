@@ -354,9 +354,7 @@ impl Participant {
         let dropped = self.output.push(frame);
         self.stats.output_dropped += count(dropped);
     }
-}
 
-impl Participant {
     /// Whether the conference should list this participant as talking.
     const fn heard_talking(&self) -> bool {
         self.talker.talking() && !self.controls.mute_in && !self.controls.listen_only
