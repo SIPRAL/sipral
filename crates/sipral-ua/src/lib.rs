@@ -49,6 +49,11 @@ mod announce;
 mod audit_tests;
 mod call;
 mod calls;
+/// The conference event package (RFC 4575): the document a focus notifies,
+/// and the merged picture of a conference kept from it — under its own path
+/// because its element types (`User`, `Endpoint`, `Media`) are the
+/// package's vocabulary, not this crate's.
+pub mod conference;
 mod contact;
 mod dialoginfo;
 /// Validation shared by every way a digit crosses this stack's boundary, and
@@ -98,6 +103,7 @@ pub use call::{
     CallEndReason, CallHandle, CallIdentity, CallState, Direction, ForkPolicy, OutgoingCall,
     OutgoingExtras,
 };
+pub use conference::{Conference, ConferenceInfo, ConferenceInfoError, ConferenceUpdate};
 pub use dialoginfo::{
     DialogEnded, DialogInfo, DialogInfoError, DialogInfoTable, DialogPhase, Initiated, Participant,
     WatchedDialog,
