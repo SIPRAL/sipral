@@ -100,17 +100,18 @@ impl TextFormat {
 
 /// Read a `red` format's `a=fmtp` value: how many redundant generations it
 /// carries, if every place names `t140_payload_type`. `None` when it lists
-/// anything else, or nothing.
+/// anything else, nothing, or more generations than a `u8` counts.
 #[must_use]
 pub fn parse_red_fmtp(value: &str, t140_payload_type: u8) -> Option<u8> {
-    let mut places = 0_u16;
+    // the first place is the primary, each one after it a generation
+    let mut generations: Option<u8> = None;
     for place in value.trim().split('/') {
         if place.trim().parse::<u8>().ok()? != t140_payload_type {
             return None;
         }
-        places += 1;
+        generations = Some(generations.map_or(Some(0), |counted| counted.checked_add(1))?);
     }
-    u8::try_from(places.checked_sub(1)?).ok()
+    generations
 }
 
 /// Read the `cps` parameter out of a `t140` format's `a=fmtp` value, a
@@ -198,6 +199,18 @@ mod tests {
         assert_eq!(parse_red_fmtp("98/98", 97), None);
         assert_eq!(parse_red_fmtp("", 98), None);
         assert_eq!(parse_red_fmtp("98//98", 98), None);
+    }
+
+    #[test]
+    fn a_red_fmtp_with_more_places_than_generations_can_count_is_refused() {
+        // 256 places, 255 generations: the most a u8 holds
+        let places = |count| vec!["98"; count].join("/");
+        assert_eq!(parse_red_fmtp(&places(256), 98), Some(255));
+        assert_eq!(parse_red_fmtp(&places(257), 98), None);
+        // and a count that runs past sixteen bits neither overflows nor
+        // wraps round to a small one
+        assert_eq!(parse_red_fmtp(&places(65_536), 98), None);
+        assert_eq!(parse_red_fmtp(&places(65_538), 98), None);
     }
 
     #[test]
