@@ -260,7 +260,10 @@ public sealed class SignallingTests
         authorityRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
         authorityRequest.CertificateExtensions.Add(
             new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
-        using var authority = authorityRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+        // one instant for both: a leaf may not outlive its issuer, and a
+        // second clock read can land past the authority's own end
+        var now = DateTimeOffset.UtcNow;
+        using var authority = authorityRequest.CreateSelfSigned(now.AddMinutes(-5), now.AddDays(1));
         using var leafKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var leafRequest = new CertificateRequest($"CN={ServerName}", leafKey, HashAlgorithmName.SHA256);
         var names = new SubjectAlternativeNameBuilder();
@@ -268,7 +271,7 @@ public sealed class SignallingTests
         leafRequest.CertificateExtensions.Add(names.Build());
         leafRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
             new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, critical: false));
-        using var signed = leafRequest.Create(authority, DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1),
+        using var signed = leafRequest.Create(authority, now.AddMinutes(-5), now.AddDays(1),
             new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
         using var withKey = signed.CopyWithPrivateKey(leafKey);
         using var leaf = new X509Certificate2(withKey.Export(X509ContentType.Pfx));
