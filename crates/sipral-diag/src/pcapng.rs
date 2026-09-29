@@ -6,7 +6,8 @@
 //!
 //! Only what Wireshark and `tshark` need to read a capture back: a Section
 //! Header Block, an Interface Description Block naming Ethernet, and one
-//! Enhanced Packet Block per packet. No options, no name resolution block, no
+//! Enhanced Packet Block per packet, with a direction when the packet has
+//! one (`epb_flags`) and no other option. No name resolution block, no
 //! second interface — a diagnostics export is one synthetic Ethernet segment
 //! carrying whatever a D2 recording held, not a capture of a real interface.
 
@@ -16,10 +17,21 @@ const SECTION_HEADER_BLOCK: u32 = 0x0A0D_0D0A;
 const INTERFACE_DESCRIPTION_BLOCK: u32 = 0x0000_0001;
 /// `0x00000006`, an Enhanced Packet Block.
 const ENHANCED_PACKET_BLOCK: u32 = 0x0000_0006;
+/// `epb_flags`, the Enhanced Packet Block option that carries direction.
+const EPB_FLAGS: u16 = 2;
 /// The byte-order magic that says this file is little-endian.
 const BYTE_ORDER_MAGIC: u32 = 0x1A2B_3C4D;
 /// `LINKTYPE_ETHERNET`.
 const LINKTYPE_ETHERNET: u16 = 1;
+
+/// Which way a packet went, as `epb_flags` spells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// Received by the end the capture is made at.
+    Inbound = 1,
+    /// Sent by it.
+    Outbound = 2,
+}
 
 /// Builds a pcapng byte stream, one packet at a time.
 ///
@@ -48,7 +60,28 @@ impl Writer {
     /// One packet, captured whole, at `timestamp_us` microseconds since the
     /// writer's origin.
     pub fn packet(&mut self, timestamp_us: u64, data: &[u8]) {
-        let mut body = Vec::with_capacity(20 + data.len());
+        let body = Self::packet_body(timestamp_us, data);
+        self.block(ENHANCED_PACKET_BLOCK, &body);
+    }
+
+    /// The same, carrying which way the packet went in the block's
+    /// `epb_flags` option (pcapng §4.3.1: bits 0–1, `01` inbound and `10`
+    /// outbound), which Wireshark shows and filters on as
+    /// `frame.packet_flags_direction`.
+    pub fn packet_in(&mut self, timestamp_us: u64, data: &[u8], direction: Direction) {
+        let mut body = Self::packet_body(timestamp_us, data);
+        // options start on a 32-bit boundary after the padded packet data
+        body.resize(body.len() + (4 - data.len() % 4) % 4, 0);
+        body.extend_from_slice(&EPB_FLAGS.to_le_bytes());
+        body.extend_from_slice(&4u16.to_le_bytes());
+        body.extend_from_slice(&(direction as u32).to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes()); // opt_endofopt
+        body.extend_from_slice(&0u16.to_le_bytes());
+        self.block(ENHANCED_PACKET_BLOCK, &body);
+    }
+
+    fn packet_body(timestamp_us: u64, data: &[u8]) -> Vec<u8> {
+        let mut body = Vec::with_capacity(20 + data.len() + 16);
         body.extend_from_slice(&0u32.to_le_bytes()); // interface id: the one IDB above
         let high = u32::try_from(timestamp_us >> 32).unwrap_or(u32::MAX);
         let low = u32::try_from(timestamp_us & 0xFFFF_FFFF).unwrap_or(u32::MAX);
@@ -58,7 +91,7 @@ impl Writer {
         body.extend_from_slice(&len.to_le_bytes()); // captured length
         body.extend_from_slice(&len.to_le_bytes()); // original length
         body.extend_from_slice(data);
-        self.block(ENHANCED_PACKET_BLOCK, &body);
+        body
     }
 
     /// The finished file.

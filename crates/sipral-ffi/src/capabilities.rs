@@ -161,6 +161,13 @@ constants! {
     /// what timed out and what was refused at a limit in
     /// `sipral_counters_t`.
     pub const SIPRAL_FEATURE_LIMITS: u32 = 1 << 15;
+    /// See [`SIPRAL_FEATURE_DTMF`]. The engine's log through a callback,
+    /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
+    /// snapshot of a stack's state for a crash report
+    /// (`sipral_stack_state`). Set in every build of this library, which
+    /// always carries the redaction both depend on; a bit so that a binding
+    /// asks before it shows a "send diagnostics" control.
+    pub const SIPRAL_FEATURE_LOGGING: u32 = 1 << 14;
 }
 
 record! {
@@ -282,6 +289,9 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     // the ceilings and counters are this crate's own surface over what every
     // endpoint underneath has, so no build is without them
     features |= SIPRAL_FEATURE_LIMITS;
+    if capabilities.logging {
+        features |= SIPRAL_FEATURE_LOGGING;
+    }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -315,7 +325,7 @@ entry! {
 mod tests {
     use super::{
         SIPRAL_FEATURE_AUDIO_DEVICE, SIPRAL_FEATURE_CALL_READDRESS, SIPRAL_FEATURE_CALLER_IDENTITY,
-        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_LIMITS,
+        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_ICE, SIPRAL_FEATURE_LIMITS, SIPRAL_FEATURE_LOGGING,
         SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS, SIPRAL_FEATURE_RECORDING,
         SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS,
         SIPRAL_FEATURE_TURN_STREAM, SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS,
@@ -475,6 +485,15 @@ mod tests {
             Capabilities::of_this_build().caller_identity
         );
         assert_eq!(SIPRAL_FEATURE_CALLER_IDENTITY, 1 << 12);
+    }
+
+    /// The log and the state snapshot come with the redaction this library
+    /// always carries, so every build of it says yes.
+    #[test]
+    fn logging_reads_present_in_every_build_of_this_library() {
+        assert!(Capabilities::of_this_build().logging);
+        assert_ne!(read().features & SIPRAL_FEATURE_LOGGING, 0);
+        assert_eq!(SIPRAL_FEATURE_LOGGING, 1 << 14);
     }
 
     #[test]

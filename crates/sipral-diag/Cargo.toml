@@ -17,5 +17,10 @@ sipral-core = { path = "../sipral-core", version = "0.0.1" }
 hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 
+[dev-dependencies]
+# the layer a registration is decided in, for the test that replays the
+# recording in the tree into it and exports both directions of the session
+sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
+
 [lints]
 workspace = true

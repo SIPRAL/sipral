@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+import Foundation
+import XCTest
+@testable import Sipral
+
+/// The log, the state snapshot and the RTP port range, carried through
+/// `SipralStack` -- the Swift counterpart of
+/// `bindings/python/tests/test_logging.py`.
+final class LoggingTests: XCTestCase {
+    /// A call the stack refuses: a stack with no RTP range has no port to
+    /// reserve.
+    private func refuse(_ stack: SipralStack) -> SipralStatus? {
+        do {
+            _ = try Sipral.stackRtpPortReserve(stack: stack.handle)
+            return .ok
+        } catch {
+            return (error as? SipralError)?.status
+        }
+    }
+
+    /// Every line a handler heard, from whichever thread delivered it.
+    private final class Heard: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [(SipralLogLevel, String, String, UInt64)] = []
+
+        func add(_ line: (SipralLogLevel, String, String, UInt64)) {
+            lock.lock(); defer { lock.unlock() }
+            lines.append(line)
+        }
+
+        var all: [(SipralLogLevel, String, String, UInt64)] {
+            lock.lock(); defer { lock.unlock() }
+            return lines
+        }
+    }
+
+    func testARefusedCallIsLoggedWithNobodyInIt() throws {
+        let features = try Sipral.capabilities().features
+        XCTAssertNotEqual(features & Sipral.featureLogging, 0)
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let heard = Heard()
+        try stack.setLog(level: .debug) { level, target, message, suppressed in
+            heard.add((level, target, message, suppressed))
+        }
+
+        XCTAssertEqual(refuse(stack), .wrongState)
+        let line = try XCTUnwrap(heard.all.first, "the refusal was never logged")
+        XCTAssertEqual(line.0, .debug)
+        XCTAssertEqual(line.1, "api")
+        XCTAssertTrue(line.2.hasPrefix("refused, WrongState"), line.2)
+        XCTAssertEqual(line.3, 0)
+        XCTAssertFalse(line.2.contains("127.0.0.1"), line.2)
+
+        try stack.setLog(level: .off, handler: nil)
+        let count = heard.all.count
+        XCTAssertEqual(refuse(stack), .wrongState)
+        XCTAssertEqual(heard.all.count, count, "a log turned off says nothing")
+    }
+
+    func testTheStateNamesTheAccountAndNotThePerson() throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        _ = try stack.addAccount(aor: "sip:alice@example.invalid", registrarAddress: "127.0.0.1:5999")
+        let text = try stack.state()
+        for expected in ["accounts: 1", "transports: 1", "counters: "] {
+            XCTAssertTrue(text.contains(expected), "\(expected) missing from:\n\(text)")
+        }
+        XCTAssertFalse(text.contains("alice"), text)
+        XCTAssertFalse(text.contains("127.0.0.1"), text)
+    }
+
+    func testACallIsCarriedOnEvenPortsFromEachStacksRange() async throws {
+        let alice = try SipralStack(audio: .application, rtpPortMin: 47200, rtpPortMax: 47219)
+        let bob = try SipralStack(audio: .application, rtpPortMin: 47300, rtpPortMax: 47319)
+        defer { alice.close(); bob.close() }
+        let account = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
+        _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
+        let bobEvents = Recorder(bob.events())
+
+        let aliceCall = try alice.placeCall(account: account, target: "sip:bob@\(bob.bindAddress)")
+        defer { aliceCall.close() }
+        let rang = await bobEvents.first(within: 5) { $0.kind == .incomingCall }
+        let bobCall = try bob.answerCall(try XCTUnwrap(rang, "the call never reached Bob"))
+        defer { bobCall.close() }
+
+        let deadline = DispatchTime.now() + 5
+        while (aliceCall.media == nil || bobCall.media == nil) && DispatchTime.now() < deadline {
+            usleep(20_000)
+        }
+        XCTAssertNotNil(aliceCall.media)
+        XCTAssertNotNil(bobCall.media)
+        for (call, low, high) in [(aliceCall, 47200, 47219), (bobCall, 47300, 47319)] {
+            let port = try XCTUnwrap(call.mediaAddress.split(separator: ":").last.flatMap { Int($0) })
+            XCTAssertTrue(port >= low && port < high && port % 2 == 0, "media on \(port)")
+        }
+    }
+
+    func testARangeWithNoPairLeftSaysSo() throws {
+        let stack = try SipralStack(audio: .application, rtpPortMin: 47400, rtpPortMax: 47401)
+        defer { stack.close() }
+        let first = try stack.openMediaSocket(host: "127.0.0.1")
+        defer { first.close() }
+        XCTAssertTrue(first.localAddress.hasSuffix(":47400"), first.localAddress)
+        XCTAssertThrowsError(try stack.openMediaSocket(host: "127.0.0.1")) { error in
+            XCTAssertEqual((error as? SipralError)?.status, .exhausted)
+        }
+    }
+}

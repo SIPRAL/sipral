@@ -264,19 +264,44 @@ diag-export --redact --delete session.sipralrec session.pcapng
 
 **What is in the file, precisely.** A D2 recording holds what *arrived* at
 the recorded stack and nothing this end sent — `sipral_stack_recording_start`
-is never offered a transmitted byte to keep — so the export is the far end's
-half of the conversation: every `Arrival::Datagram` and `Arrival::StreamData`
-frame becomes one UDP or TCP packet, addressed from the recorded remote to the
-recorded local (a `TransportBound` frame supplies a stream's addresses, since
-a `StreamData` frame carries none of its own), timestamped from the
-recording's own offsets. That is the truth of what a recording holds, not a
-limitation of the exporter; turning it into a full two-way flow needs the
-messages this end would have sent replayed back out through the actual engine
-(`sipral_core::replay::Driven`), which is not built yet. A recording never
+is never offered a transmitted byte to keep — so `diag-export`, which reads
+the file alone, writes the far end's half of the conversation: every
+`Arrival::Datagram` and `Arrival::StreamData` frame becomes one UDP or TCP
+packet, addressed from the recorded remote to the recorded local (a
+`TransportBound` frame supplies a stream's addresses, since a `StreamData`
+frame carries none of its own), timestamped from the recording's own offsets
+and marked inbound in its `epb_flags` option (pcapng §4.3.1), which Wireshark
+shows and filters on as `frame.packet_flags_direction`. A recording never
 carries RTP either (above), so there is no RTP or RTCP summary to place in the
-pcapng today — `sipral_diag::export::export`'s match over `Arrival` is
-exhaustive, so the day the format gains one, this stops compiling until it is
-taught what to do with it, rather than silently dropping it.
+pcapng — `sipral_diag::export::export`'s match over `Arrival` is exhaustive,
+so the day the format gains one, this stops compiling until it is taught what
+to do with it, rather than silently dropping it.
+
+**Both directions, from a replay.** `sipral_diag::export_replayed` writes the
+whole session: it feeds the recording back into a live layer —
+`sipral_core::replay::Driven`, the way `Replay` does (`docs/18-replay.md`) —
+and after every frame turns each message that layer writes in answer into a
+packet from this end, marked outbound and stamped with that frame's offset.
+The layer is built with `Recording::seed` and the configuration the recorded
+stack ran with, so every branch, tag and `Call-ID` it writes is the one the
+recorded stack wrote and the far end's recorded answers echo: the result is
+the capture a tap at this end would have taken, in the order it happened. A
+layer implements `sipral_diag::Replayed` — `Driven` plus `poll_transmit` and
+`cue` — and `Endpoint` already does. `cue` is where the application does
+again what the recording labelled it doing (`Recorder::cue`): placing the
+call, answering it, registering the account. Only the application knows what
+its labels mean, which is why the two-way export is a Rust entry point
+(`sipral::replayed_capture` beside the redacted exports below) and not a
+`diag-export` switch: a tool that cannot perform the cues would replay a
+session in which the application never acted, and the capture would show
+exactly that. A frame the layer refuses stops the export with
+`ExportError::Replay` rather than leaving a hole; a message this end writes on
+a transport the recording never bound has no address to be sent from and is
+left out rather than given an invented one. The file the recording in
+`fixtures/replay/` makes — REGISTER out, 401 in, REGISTER with credentials
+out, 200 in, the refresh out — was read back by `tshark` 4.4 on the lab VM
+with every packet decoded as SIP by method and status and its direction flag
+read, plain and redacted, and no expert warning.
 
 **Redaction, before any of this leaves the organisation.** GDPR's usual list
 for SIP traffic — a URI's user part, a display name, a phone number written
@@ -342,6 +367,13 @@ above.
   `diag-export --redact` would have written from it, packet addresses
   included. A message the parser cannot read stops it with a `RedactError`
   rather than going into the file unredacted.
+
+- **`replayed_capture`** takes the same `Recording`, a layer built to replay
+  it (a `sipral::Replayed`), the instant the replay starts from and a
+  `Redactor`, and returns the two-way pcapng
+  "Both directions, from a replay" above describes, both directions redacted
+  with the one redactor — this end's own `Authorization` dropped like any
+  other.
 
 Handing the same `Redactor` to the record first and then to the recording
 gives each address one pseudonym across both, so the decision that names the

@@ -438,6 +438,7 @@ fn outside(
     state: &mut StackState,
     local: SocketAddr,
 ) -> Result<(Option<SocketAddr>, crate::nat::HeldRelay), Fail> {
+    crate::stack::media_port_allowed(state, local)?;
     let public = crate::nat::Nat::public_for(state, local)?;
     let relay = crate::nat::Nat::relay_for(state, local)?;
     Ok((public, relay))
@@ -1157,6 +1158,7 @@ entry! {
         };
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
+            crate::stack::media_port_allowed(state, local)?;
             state
                 .engine
                 .readdress(&mut state.agent, id, local, public, now)

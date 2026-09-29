@@ -11733,3 +11733,184 @@ fn a_move_refused_for_a_change_in_progress_leaves_the_call_where_it_was() {
     assert!(pair.caller.engine.describes(caller_media()));
     assert!(!pair.caller.engine.describes(moved_media()));
 }
+
+// -- the log, the state snapshot and the RTP port range ----------------------
+
+/// Everything a log delivered, as level, target and line.
+#[cfg(feature = "redaction")]
+type Lines = Arc<Mutex<Vec<(crate::LogLevel, String, String)>>>;
+
+#[cfg(feature = "redaction")]
+fn logging(engine: &mut MediaEngine, level: crate::LogLevel) -> (crate::Log, Lines) {
+    let log = crate::Log::new(b"a secret of the application's");
+    let lines: Lines = Arc::default();
+    let into = Arc::clone(&lines);
+    log.enable(
+        level,
+        Arc::new(move |record: &crate::LogRecord<'_>| {
+            into.lock().expect("the lines").push((
+                record.level,
+                record.target.to_owned(),
+                record.message.to_owned(),
+            ));
+        }),
+    );
+    engine.set_log(log.clone());
+    (log, lines)
+}
+
+/// A call, from the INVITE arriving to the BYE, as the answering engine logs
+/// it: the events at info, every decision of the diagnostic record at debug
+/// and each of those once, and not one user part or address in any line.
+#[cfg(feature = "redaction")]
+#[test]
+fn a_call_is_logged_from_arrival_to_end_with_no_party_or_address_in_it() {
+    let mut pair = Pair::new(CodecCatalog::new());
+    let (log, lines) = logging(&mut pair.callee.engine, crate::LogLevel::Debug);
+    let call = pair.connect();
+    pair.caller.agent.hangup(call, pair.now).expect("the BYE");
+    pair.settle();
+    let _ = log.flush();
+
+    let heard = lines.lock().expect("the lines").clone();
+    let said = |target: &str, text: &str| {
+        heard
+            .iter()
+            .any(|(_, t, line)| t == target && line.contains(text))
+    };
+    assert!(said("call", "incoming on account"), "{heard:#?}");
+    assert!(said("call", "confirmed"), "{heard:#?}");
+    assert!(said("media", "media started"), "{heard:#?}");
+    assert!(said("call", "ended, RemoteHangup"), "{heard:#?}");
+    assert!(said("decision", "dialog.created"), "{heard:#?}");
+    assert!(said("decision", "response.sent"), "{heard:#?}");
+    for (_, _, line) in &heard {
+        for personal in ["alice", "bob", "192.0.2.1", "192.0.2.2"] {
+            assert!(!line.contains(personal), "{personal} in {line}");
+        }
+    }
+
+    let now = pair.now;
+    pair.callee.drain(now, false);
+    let _ = log.flush();
+    assert_eq!(
+        lines.lock().expect("the lines").len(),
+        heard.len(),
+        "a decision already logged is not logged again"
+    );
+}
+
+/// A log set to warnings hears nothing about a call that went well.
+#[cfg(feature = "redaction")]
+#[test]
+fn a_log_at_warn_is_silent_about_a_call_that_went_well() {
+    let mut pair = Pair::new(CodecCatalog::new());
+    let (log, lines) = logging(&mut pair.callee.engine, crate::LogLevel::Warn);
+    let _ = pair.connect();
+    let _ = log.flush();
+    assert!(lines.lock().expect("the lines").is_empty());
+}
+
+/// The whole engine, as a crash report carries it: every account, call and
+/// session, redacted, bounded, and taken without waiting for a session
+/// another thread is inside.
+#[cfg(feature = "redaction")]
+#[test]
+fn a_state_snapshot_names_every_account_call_and_session_redacted_and_bounded() {
+    let mut pair = Pair::new(CodecCatalog::new());
+    let call = pair.connect();
+    let state = pair.caller.engine.state(&pair.caller.agent, pair.now);
+    assert_eq!(state.accounts.len(), 1);
+    assert_eq!(state.calls.len(), 1);
+    assert_eq!(state.media.len(), 1);
+    assert!(state.media[0].stream.is_some());
+
+    let mut redactor = crate::Redactor::new(crate::RedactionMode::Hash(b"key".to_vec()));
+    let text = state.render("extra: 192.0.2.1\n", &mut redactor, 64 * 1024);
+    for expected in [
+        "accounts: 1",
+        "calls: 1",
+        "confirmed",
+        "media sessions: 1",
+        "active calls 1",
+        "extra: ",
+    ] {
+        assert!(text.contains(expected), "{expected} missing from {text}");
+    }
+    for personal in ["alice", "192.0.2.1", "192.0.2.2"] {
+        assert!(!text.contains(personal), "{personal} in {text}");
+    }
+    let short = state.render("", &mut redactor, 80);
+    assert!(
+        short.len() <= 80 && short.ends_with("[truncated]\n"),
+        "{short}"
+    );
+
+    let share = pair.caller.engine.share(call).expect("the call's media");
+    let busy = share
+        .with(|_session| pair.caller.engine.state(&pair.caller.agent, pair.now))
+        .expect("the session");
+    assert_eq!(
+        busy.media[0].stream, None,
+        "a busy session is not waited for"
+    );
+}
+
+/// RFC 3550 §11 as this stack uses it: even ports for RTP, the odd one above
+/// each kept for RTCP, round the range, and a clear refusal once every pair
+/// is taken.
+#[test]
+fn rtp_ports_are_handed_out_in_even_pairs_round_the_range_and_refused_when_none_is_free() {
+    let mut pair = Pair::new(CodecCatalog::new());
+    let engine = &mut pair.caller.engine;
+    assert_eq!(
+        engine.reserve_rtp_port(),
+        None,
+        "no range, nothing to hand out"
+    );
+    let range = crate::RtpPorts::new(30001, 30007).expect("three pairs");
+    engine.set_rtp_ports(Some(range));
+    let first: Vec<u16> = (0..3)
+        .map(|_| {
+            engine
+                .reserve_rtp_port()
+                .expect("a range")
+                .expect("a free pair")
+        })
+        .collect();
+    assert_eq!(first, [30002, 30004, 30006]);
+    assert_eq!(
+        engine.reserve_rtp_port(),
+        Some(Err(crate::PortsExhausted { range }))
+    );
+    assert!(engine.release_rtp_port(30004));
+    assert!(!engine.release_rtp_port(30004), "released once");
+    assert_eq!(engine.reserve_rtp_port(), Some(Ok(30004)));
+}
+
+/// A port a call took stays taken while the call describes its media there,
+/// and comes back once the call has ended.
+#[test]
+fn a_port_a_call_took_comes_back_when_the_call_ends() {
+    let mut pair = Pair::new(CodecCatalog::new());
+    // the caller's media is described at port 40000, the first of two pairs
+    pair.caller
+        .engine
+        .set_rtp_ports(Some(crate::RtpPorts::new(40000, 40003).expect("two pairs")));
+    assert_eq!(pair.caller.engine.reserve_rtp_port(), Some(Ok(40000)));
+    let call = pair.connect();
+    assert_eq!(pair.caller.engine.reserve_rtp_port(), Some(Ok(40002)));
+    assert!(
+        matches!(pair.caller.engine.reserve_rtp_port(), Some(Err(_))),
+        "the call holds 40000 and 40002 is reserved"
+    );
+    pair.caller.agent.hangup(call, pair.now).expect("the BYE");
+    pair.settle();
+    let now = pair.now;
+    pair.caller.drain(now, false);
+    assert_eq!(
+        pair.caller.engine.reserve_rtp_port(),
+        Some(Ok(40000)),
+        "the ended call gave its port back"
+    );
+}

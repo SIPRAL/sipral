@@ -56,6 +56,7 @@ __all__ = [
     "RingSource",
     "IdentityText",
     "SessionTimer",
+    "LogLevel",
 ]
 
 
@@ -248,3 +249,7 @@ IdentityText = _enum("IdentityText", "SIPRAL_IDENTITY_TEXT_")
 
 #: A `sipral_session_timer_t`: an account's session timer (RFC 4028).
 SessionTimer = _enum("SessionTimer", "SIPRAL_SESSION_TIMER_")
+
+#: A `sipral_log_level_t`: how loud a line of :meth:`sipral.Stack.set_log`
+#: is, and how much a stack delivers. ``OFF`` is what a stack starts with.
+LogLevel = _enum("LogLevel", "SIPRAL_LOG_LEVEL_")

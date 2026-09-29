@@ -961,6 +961,82 @@ show before anyone complains about it. The same figures are
 `Endpoint::transaction_retransmissions(id)` also answers for one live
 transaction.
 
+### The log, the state snapshot and the RTP port range
+
+Three things an application wants once a deployment is in the field, each
+behind `SIPRAL_FEATURE_LOGGING` (bit 14) or the stack's configuration; what
+they carry and why is `docs/17-observability.md`.
+
+```c
+typedef void (*sipral_log_callback_t)(const sipral_log_record_t *record, void *user_data);
+sipral_status_t sipral_stack_log(sipral_handle_t stack, uint32_t level,
+                                 sipral_log_callback_t callback, void *user_data);
+sipral_status_t sipral_stack_state(sipral_handle_t stack, char *buffer,
+                                   size_t capacity, size_t *out_len);
+sipral_status_t sipral_stack_rtp_port_reserve(sipral_handle_t stack, uint32_t *out_port);
+sipral_status_t sipral_stack_rtp_port_release(sipral_handle_t stack, uint32_t port);
+```
+
+**The log.** A stack's log is off until `sipral_stack_log` names a level —
+`SIPRAL_LOG_LEVEL_ERROR` (1) to `SIPRAL_LOG_LEVEL_TRACE` (5) — and a callback;
+the same call again changes either, and `SIPRAL_LOG_LEVEL_OFF` or a null
+callback turns it off. A level past trace is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+Each line arrives as a `sipral_log_record_t` the library fills (read `size`
+first): the stack, the level, a `target` word and the `message`, both UTF-8
+with a length and no NUL, and `suppressed`, how many lines the rate limit
+turned away before this one. The record and its strings live for the call
+alone. **The callback is called at the end of an entry point, on the thread
+that made the call, after the stack has been let go** — so, like the event
+callback, it may call back into the library, this stack included, and never
+answers `SIPRAL_STATUS_BUSY` to itself. One delivery runs at a time. Every
+line is already redacted; every refused call into the stack is a debug line
+under the target `api` with the status and the sentence
+`sipral_last_error_message` would give.
+
+**The state.** `sipral_stack_state` copies a text snapshot for a crash report
+into `buffer`: accounts and registrations, calls and their states,
+transports, media sessions, the last refused calls, the queues, the RTP range
+and the counters, redacted. It is never longer than `SIPRAL_STATE_TEXT_MAX`
+with its NUL; a smaller buffer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with the
+length needed. It is the one entry point that neither waits for nor refuses a
+stack another thread holds: it answers with the snapshot the last poll kept,
+and says so on its first line.
+
+**The RTP port range.** `sipral_stack_config_t::rtp_port_min` and
+`rtp_port_max`, both zero for none, appended at the struct's tail with the
+pin unmoved, and read back in `sipral_stack_settings_t`. A range needs both
+ends, at most 65535, the lower not above the upper, and at least one even
+port whose odd partner is inside it; anything else is
+`SIPRAL_STATUS_INVALID_ARGUMENT` at `sipral_stack_create`.
+`sipral_stack_rtp_port_reserve` writes a free even port, with the odd one
+above kept for RTCP; the application binds it and describes the call there
+with `media_address`. `SIPRAL_STATUS_EXHAUSTED` when every pair is reserved
+or described by a call the stack holds, and `SIPRAL_STATUS_WRONG_STATE` on a
+stack without a range. A port a call took comes back when the call ends or
+moves; one no call took goes back with `sipral_stack_rtp_port_release`. With a
+range set, every entry point that takes a `media_address` for the stack to
+run the media of — `sipral_call_place`, `sipral_call_ring_media`,
+`sipral_call_answer_media`, `sipral_call_accept_transfer` and
+`sipral_call_media_readdress` — refuses one whose port the range does not hand
+out; a call whose SDP the application writes itself is its own business.
+
+The four bindings carry all three on their stack class: Swift's
+`SipralStack.setLog(level:handler:)`, `state()`, and `rtpPortMin`/`rtpPortMax`
+with `openMediaSocket(host:port:)`; .NET's `SetLog`, `State()`,
+`rtpPortMin`/`rtpPortMax` and `OpenMediaSocket`; Kotlin's
+`SipralClient.setLog`, `state()`, `open(rtpPortMin, rtpPortMax)` and
+`openMediaSocket`; Python's `Stack.set_log`, `state()`,
+`rtp_port_min`/`rtp_port_max` and `open_media_socket`. A stack given a range
+binds every media socket it opens without an explicit port from it —
+reserving, binding, and on a port another process holds giving it back and
+trying the next — so a call placed, answered or moved through the idiomatic
+layer lands inside the range with no further code. `LoggingTests.swift`,
+`LoggingTests.cs`, `LoggingCheck.kt` and `test_logging.py` prove each: a
+refused call logged with nobody in it and silent once off, a state text with
+the account and not the person, two stacks on loopback whose call is carried
+on even ports from each one's range, and a one-pair range that says
+`EXHAUSTED` on the second socket.
+
 ## Media across the boundary
 
 The ABI is built over `crates/sipral`, the facade that joins signalling to

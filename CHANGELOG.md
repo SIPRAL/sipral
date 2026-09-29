@@ -44,6 +44,39 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `sipral_stack_stun_servers` replaces the list on a running stack, starts
   STUN on one created without it, or stops it.
 
+- **The engine's log, through a callback, off until asked for.**
+  `sipral_stack_log` (Rust: `sipral::Log`, `MediaEngine::set_log`) delivers
+  lines at error, warn, info, debug or trace, set and changed at run time:
+  registrations, calls and media at info, every event, every diagnostic
+  decision and every refused ABI call at debug, every SIP message whole at
+  trace. A token bucket and a bounded queue keep a flood from stalling the
+  stack, counting what they turn away on the next line; the callback runs
+  after the stack is let go, so it may call back into it; and every line is
+  redacted — no user part, number, IP address, credential or SDES key.
+  `SIPRAL_FEATURE_LOGGING` (bit 14) says a build has it. C ABI 0.30.
+- **A snapshot of the stack's state for a crash report.**
+  `sipral_stack_state` (Rust: `MediaEngine::state`, `EngineState::render`)
+  copies one bounded, redacted text of accounts and registrations, calls and
+  their states, transports, media sessions, the last refused calls, the
+  queues, the RTP range and the counters. Safe from any thread and never
+  waits: a stack busy elsewhere answers with the last snapshot a poll kept,
+  and says so.
+- **An RTP port range.** `rtp_port_min` and `rtp_port_max` in
+  `sipral_stack_config_t` (Rust: `RtpPorts`, `MediaEngine::reserve_rtp_port`)
+  hand out even ports with the odd one above kept for RTCP;
+  `sipral_stack_rtp_port_reserve` answers `SIPRAL_STATUS_EXHAUSTED` once every
+  pair is in use, a call's port comes back when it ends, and a call described
+  outside the range is refused. The Swift, .NET, Kotlin and Python stacks bind
+  every media socket from the range when given one, and carry the log and the
+  state as `setLog`/`SetLog`/`set_log` and `state()`/`State()`.
+- **A replayed session exported as one pcapng with both directions.**
+  `sipral_diag::export_replayed` (and `sipral::replayed_capture`, redacted)
+  replays a `.sipralrec` into a live layer and places every message this end
+  writes beside what arrived, each packet marked inbound or outbound in its
+  `epb_flags`; `diag-export`'s far-end-only files carry the inbound mark too.
+  Read back by `tshark` with every message decoded and its direction shown.
+  Redaction now also pseudonymises the user name of an SDP `o=` line, and
+  `sipral_diag::redact_text` applies the same rules to free text.
 - **The .NET and Python layers carry all of ABI 0.29, device mode first.**
   A stack opens the platform's own devices by default wherever the library
   can (Windows, macOS) and keeps application mode where it cannot or when

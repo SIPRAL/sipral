@@ -42,7 +42,10 @@ of the three was ever there.
 The same shape is why a recording is not tied to a layer.
 `sipral_core::replay::Driven` is those calls as a trait, `Endpoint` and
 `UserAgent` both implement it, and a session taken from a phone is therefore
-replayed into whichever layer the bug is thought to be in.
+replayed into whichever layer the bug is thought to be in. The same replay is
+how a recording becomes a capture of both directions:
+`sipral_diag::export_replayed` places every message the replayed layer writes
+beside what arrived, in one pcapng (`docs/14-diagnostics.md`).
 
 ## What a recording holds
 

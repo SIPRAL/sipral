@@ -2571,6 +2571,46 @@ enum class SipralSessionTimer(val value: Int) {
 }
 
 /**
+ * How loud a log line is, for sipral_stack_log and
+ * SipralLogRecord.level. Higher is more detailed: a stack logging
+ * at `SIPRAL_LOG_LEVEL_INFO` delivers errors, warnings and information.
+ */
+enum class SipralLogLevel(val value: Int) {
+    /**
+     * Nothing: the log is off. What a stack starts with.
+     */
+    OFF(0),
+    /**
+     * Something failed and the application is likely to see the effect.
+     */
+    ERROR(1),
+    /**
+     * Something went wrong that the stack worked around, or is about to
+     * matter: a registration refused, audio that stopped arriving.
+     */
+    WARN(2),
+    /**
+     * What an operator wants in a log file: a registration granted, a
+     * call arriving, confirmed or ending, media starting.
+     */
+    INFO(3),
+    /**
+     * Every event the stack raises, every decision its diagnostic record
+     * writes down, and every call into this ABI it refused.
+     */
+    DEBUG(4),
+    /**
+     * Every SIP message in and out, whole and redacted.
+     */
+    TRACE(5),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralLogLevel? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * The version of the ABI this library provides.
  *
  * Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -3022,9 +3062,20 @@ data class SipralStackSettings(
      * filled in.
      */
     val diagnosticRecords: Long,
+    /**
+     * The RTP port range, as given; both zero for none.
+     *
+     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val rtpPortMin: Long,
+    /**
+     * See `rtp_port_min`.
+     */
+    val rtpPortMax: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 19
+        const val SLOTS: Int = 21
 
         fun of(slots: LongArray): SipralStackSettings = SipralStackSettings(
             slots[0],
@@ -3046,6 +3097,8 @@ data class SipralStackSettings(
             slots[16],
             slots[17],
             slots[18],
+            slots[19],
+            slots[20],
         )
     }
 }
@@ -4257,6 +4310,25 @@ class SipralStackConfig(
      * unmoved.
      */
     val stunFallbacks: String? = null,
+    /**
+     * The lowest port of the range this stack hands RTP ports out of
+     * (`sipral_stack_rtp_port_reserve`), or zero with `rtp_port_max`
+     * for no range: the application picks every media port itself.
+     *
+     * RTP takes an even port and its RTCP the odd one above it (RFC 3550
+     * §11), so an odd `rtp_port_min` starts at the port above it and an
+     * even `rtp_port_max` is never handed out. A range that holds no
+     * such pair, one given upside down, or one bound given without the
+     * other is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     *
+     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val rtpPortMin: Long = 0,
+    /**
+     * The highest port of that range, or zero with `rtp_port_min`.
+     */
+    val rtpPortMax: Long = 0,
 )
 
 /**
@@ -6600,6 +6672,133 @@ internal object SipralAudioTransmitListeners {
 }
 
 /**
+ * One log line, as SipralLogCallback reads it.
+ *
+ * Filled by the library and handed over as a `const` pointer: read
+ * `size` before anything past it, and nothing once the callback has
+ * returned — the two strings are the library's and live for the call
+ * alone.
+ */
+class SipralLogRecord(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * The stack the line is about.
+     */
+    val stack: Long,
+    /**
+     * A `SipralLogLevel`, never `SIPRAL_LOG_LEVEL_OFF`.
+     */
+    val level: Long,
+    /**
+     * Which part of the stack wrote it — `registration`, `call`,
+     * `media`, `decision`, `sip`, `api` — as UTF-8, not NUL-terminated.
+     */
+    val target: String?,
+    /**
+     * The line, already redacted, as UTF-8, not NUL-terminated. A
+     * `SIPRAL_LOG_LEVEL_TRACE` line holding a whole message has line
+     * breaks in it.
+     */
+    val message: String?,
+    /**
+     * How many lines the rate limit or the queue ceiling turned away
+     * since the line before this one. Zero almost always.
+     */
+    val suppressed: Long,
+)
+
+/**
+ * Where a stack's log lines go. Installed with
+ * crate::log::sipral_stack_log.
+ *
+ * Called on whichever thread has just finished a call into this stack,
+ * after the stack has been let go and with nothing of the library held,
+ * so it may call back into the library — this stack included — as an
+ * ordinary call. One line at a time, and never on two threads at once.
+ * It must not unwind, for the reason nothing in this ABI may.
+ *
+ * `record` and everything it points at belong to the library and are
+ * valid for the duration of this one call and no longer.
+ *
+ * In Kotlin it is this interface, called on the thread that polls. The JNI
+ * shim attaches that thread to the JVM for the length of the call when it
+ * is not attached already. What a listener throws goes to that thread's
+ * uncaught exception handler, and the poll carries on once the handler
+ * returns. Android's default handler does not return: it ends the process.
+ */
+fun interface SipralLogListener {
+    fun onRecord(record: SipralLogRecord)
+}
+
+/**
+ * Every SipralLogListener a live handle was made with, under the key the JNI
+ * shim hands back with each event. The native side holds no reference
+ * to a listener at all: an event for a handle already destroyed finds
+ * nothing here and goes nowhere.
+ */
+internal object SipralLogListeners {
+    private val listening = HashMap<Long, SipralLogListener>()
+    private val handles = HashMap<Long, Long>()
+    private var last = 0L
+
+    /** Keep a listener, and say what key the shim will hand it back under: zero for none. */
+    fun register(listener: SipralLogListener?): Long {
+        if (listener == null) {
+            return 0
+        }
+        synchronized(this) {
+            // the key crosses as a C pointer, which is 32 bits wide on half of Android
+            check(last < Int.MAX_VALUE) { "every key a listener can be kept under has been handed out" }
+            last += 1
+            listening[last] = listener
+            return last
+        }
+    }
+
+    /**
+     * Hand a kept listener to a handle the caller already had, letting go of
+     * whatever that handle held before it. A key of zero is the call that
+     * removed the listener outright, and a call that failed leaves the handle
+     * with what it had.
+     */
+    fun installed(key: Long, status: Int, handle: Long) {
+        synchronized(this) {
+            if (status != SipralStatus.OK.value) {
+                listening.remove(key)
+                return
+            }
+            val before = if (key == 0L) handles.remove(handle) else handles.put(handle, key)
+            if (before != null) {
+                listening.remove(before)
+            }
+        }
+    }
+
+    /** Let go of the listener a destroyed handle was left with. */
+    fun gone(handle: Long) {
+        synchronized(this) {
+            val key = handles.remove(handle) ?: return
+            listening.remove(key)
+        }
+    }
+
+    /** Called by the JNI shim, once per event, on the thread that polls. */
+    @JvmStatic
+    fun deliver(key: Long, size: Long, stack: Long, level: Long, target: ByteArray?, message: ByteArray?, suppressed: Long) {
+        val listener = synchronized(this) { listening[key] } ?: return
+        try {
+            listener.onRecord(SipralLogRecord(size, stack, level, target?.let { String(it, Charsets.UTF_8) }, message?.let { String(it, Charsets.UTF_8) }, suppressed))
+        } catch (failure: Throwable) {
+            val thread = Thread.currentThread()
+            thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
+        }
+    }
+}
+
+/**
  * What a call across the boundary answered, when it did not answer
  * OK. The message is the calling thread's last error, read before
  * anything else on this thread could replace it.
@@ -6641,7 +6840,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configStunFallbacks: ByteArray?, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -6771,6 +6970,10 @@ internal object SipralNative {
     external fun sipral_audio_ring(stack: Long, samples: ShortArray, sampleRateHz: Long, looped: Long): Int
     external fun sipral_audio_stop_ringing(stack: Long): Int
     external fun sipral_audio_info(stack: Long, info: LongArray): Int
+    external fun sipral_stack_log(stack: Long, level: Long, callback: Long): Int
+    external fun sipral_stack_state(stack: Long, buffer: ByteArray, len: LongArray): Int
+    external fun sipral_stack_rtp_port_reserve(stack: Long, port: LongArray): Int
+    external fun sipral_stack_rtp_port_release(stack: Long, port: Long): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -6985,6 +7188,16 @@ object Sipral {
     const val FEATURE_LIMITS: Long = 32768
 
     /**
+     * See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
+     * with levels, rate-limited and redacted (`sipral_stack_log`), and a
+     * snapshot of a stack's state for a crash report
+     * (`sipral_stack_state`). Set in every build of this library, which
+     * always carries the redaction both depend on; a bit so that a binding
+     * asks before it shows a "send diagnostics" control.
+     */
+    const val FEATURE_LOGGING: Long = 16384
+
+    /**
      * The buffer a caller has to bring for one outgoing packet.
      *
      * Not a path MTU — RTP does not discover one — but the bound the session
@@ -7090,6 +7303,12 @@ object Sipral {
      * leaving every bit clear.
      */
     const val PRIVACY_NONE: Long = 32
+
+    /**
+     * The longest text sipral_stack_state writes, its NUL included: a
+     * buffer of this many bytes always has room.
+     */
+    const val STATE_TEXT_MAX: Long = 16384
 
     /**
      * The calling thread's last error, or an empty string when it has
@@ -7263,7 +7482,7 @@ object Sipral {
         val configAudioTransmitCallback = SipralAudioTransmitListeners.register(config.audioTransmitListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, configStunFallbacks, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
             SipralAudioTransmitListeners.made(configAudioTransmitCallback, status, stackSlot[0])
@@ -7321,6 +7540,7 @@ object Sipral {
         SipralEventListeners.gone(stack)
         SipralAudioTransmitListeners.gone(stack)
         SipralScreenListeners.gone(stack)
+        SipralLogListeners.gone(stack)
         check(status)
     }
 
@@ -10518,6 +10738,111 @@ object Sipral {
         val infoSlots = LongArray(SipralAudioInfo.SLOTS)
         check(SipralNative.sipral_audio_info(stack, infoSlots))
         return SipralAudioInfo.of(infoSlots)
+    }
+
+    /**
+     * Send this stack's log to `callback`, at `level` and louder — or turn
+     * it off with `SIPRAL_LOG_LEVEL_OFF` or a null callback.
+     *
+     * A stack is created with its log off, and a log that is off costs
+     * nothing: no line is formatted for it. Calling this again replaces the
+     * callback and the level, on this stack alone; lines already waiting go
+     * to the new callback. Turning the log off drops what was waiting.
+     *
+     * What each level carries, how lines are rate-limited and how they are
+     * redacted is in this module's documentation and in
+     * `docs/17-observability.md`. A level above `SIPRAL_LOG_LEVEL_TRACE` is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing.
+     *
+     * Safety
+     *
+     * `callback`, when not null, is called from inside later calls into this
+     * stack on whichever thread made them, once the stack has been let go
+     * (see SipralLogCallback). `user_data` is handed back to it untouched
+     * and must stay valid until the log is turned off or replaced and no
+     * thread is inside this stack any more.
+     */
+    fun stackLog(stack: Long, level: Long, listener: SipralLogListener?) {
+        // held across the call so that what SipralLogListeners records and what
+        // the library installed cannot disagree
+        synchronized(SipralLogListeners) {
+            val callback = SipralLogListeners.register(listener)
+            var status = -1
+            try {
+                status = SipralNative.sipral_stack_log(stack, level, callback)
+            } finally {
+                SipralLogListeners.installed(callback, status, stack)
+            }
+            check(status)
+        }
+    }
+
+    /**
+     * Copy a snapshot of everything this stack is holding into `buffer`, as
+     * text for a crash report: its accounts and their registrations, its
+     * calls and their states, its transports, its media sessions, the last
+     * calls into it that were refused, its queues, its RTP port range and
+     * its counters — redacted, and never longer than
+     * `SIPRAL_STATE_TEXT_MAX` bytes with the NUL, so a buffer that size
+     * always has room.
+     *
+     * Safe from any thread, including one the stack is busy on, and never
+     * waits. When no other thread is inside the stack the snapshot is taken
+     * there and then; when one is, what comes back is the last snapshot a
+     * poll kept — polls keep one at most once a second, and only when
+     * something happened — and its first line says so and when it was
+     * taken. A call's media session that a thread is in the middle of a
+     * frame on is reported as busy rather than waited for.
+     *
+     * `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_len`,
+     * when it does not fit; `out_len` may be null.
+     *
+     * Safety
+     *
+     * `buffer` must be writable for `capacity` bytes or be null with a
+     * capacity of zero, and `out_len` must point at one `size_t` or be null.
+     */
+    fun stackState(stack: Long, buffer: ByteArray): Long {
+        val lenSlot = LongArray(1)
+        check(SipralNative.sipral_stack_state(stack, buffer, lenSlot))
+        return lenSlot[0]
+    }
+
+    /**
+     * Reserve a free even port from this stack's RTP range, with the odd
+     * port above it kept for RTCP, and write it to `out_port`.
+     *
+     * `SIPRAL_STATUS_EXHAUSTED` when every pair in the range is taken —
+     * reserved, or described by a call this stack still holds — and the
+     * last error says how many pairs the range has. Nothing is reserved
+     * then. `SIPRAL_STATUS_WRONG_STATE` on a stack created without a range:
+     * its ports are the application's to choose.
+     *
+     * Safety
+     *
+     * `out_port` must point at one `uint32_t`.
+     */
+    fun stackRtpPortReserve(stack: Long): Long {
+        val portSlot = LongArray(1)
+        check(SipralNative.sipral_stack_rtp_port_reserve(stack, portSlot))
+        return portSlot[0]
+    }
+
+    /**
+     * Give back a port sipral_stack_rtp_port_reserve handed out that no
+     * call is using: the socket could not be bound there, or the call was
+     * refused. A port a call took comes back by itself when the call ends,
+     * and needs no release.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for a port that is not reserved,
+     * which is also what a second release of the same port is.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun stackRtpPortRelease(stack: Long, port: Long) {
+        check(SipralNative.sipral_stack_rtp_port_release(stack, port))
     }
 
 }

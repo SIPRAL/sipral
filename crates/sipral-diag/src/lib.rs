@@ -10,6 +10,9 @@
 //!   every message the recording holds, as a UDP or TCP packet between the
 //!   addresses and at the offsets the recording carries, so Wireshark's own
 //!   SIP dissector reads it as a call.
+//! - [`export_replayed()`]: the same, with the recording fed back into a
+//!   live layer and every message that layer writes in answer placed beside
+//!   what arrived — one capture of both directions of the session.
 //! - [`redact`]: the same messages with the personal data RFC 3261 and SDP
 //!   carry taken out first — user parts, display names, phone numbers and IP
 //!   literals become a stable pseudonym or a placeholder, and credentials are
@@ -21,12 +24,11 @@
 //! on throughout: a recording holds what *arrived* at the recorded stack and
 //! nothing it sent, because nothing here ever offered the recorder a
 //! transmitted byte to keep (`crates/sipral-ffi/src/diagnostics.rs`). A
-//! pcapng built from one is therefore the far end's half of the
-//! conversation — the truth of what is in the file, not a limitation of this
-//! exporter. Turning that into a full two-way flow needs the messages this
-//! end would have sent replayed back out through the actual engine
-//! (`sipral_core::replay::Driven`), which is a second, larger piece of work
-//! this crate does not attempt yet.
+//! pcapng built by [`export()`] is therefore the far end's half of the
+//! conversation — the truth of what is in the file. [`export_replayed()`]
+//! is the full two-way flow: the messages this end sent are not read from
+//! the file but written again, by replaying the recording into the actual
+//! engine (`sipral_core::replay::Driven`) under the seed the file carries.
 //!
 //! It also never contains audio — RTP arrives at `sipral-rtp` on another
 //! socket and is never part of a D2 [`Arrival`](sipral_core::replay::Arrival)
@@ -51,5 +53,7 @@ pub mod packet;
 pub mod pcapng;
 pub mod redact;
 
-pub use export::export;
-pub use redact::{Mode, RedactError, Redactor, redact_message, redact_record, redact_record_json};
+pub use export::{ExportError, Replayed, export, export_replayed};
+pub use redact::{
+    Mode, RedactError, Redactor, redact_message, redact_record, redact_record_json, redact_text,
+};

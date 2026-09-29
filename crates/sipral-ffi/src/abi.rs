@@ -545,6 +545,7 @@ pub const FILLED_BY_US: &[&str] = &[
     "SipralScreenRequest",
     "SipralProcessorFrame",
     "SipralAudioTransmit",
+    "SipralLogRecord",
 ];
 
 /// Everything this ABI publishes, and the only list a person maintains.
@@ -564,6 +565,7 @@ pub const SURFACE: Surface = Surface {
         crate::screening::SipralScreenCallback,
         crate::media::SipralProcessorCallback,
         crate::audio::SipralAudioTransmitCallback,
+        crate::log::SipralLogCallback,
     ],
     enumerations: &[
         crate::status::SipralStatus::ABI,
@@ -617,6 +619,7 @@ pub const SURFACE: Surface = Surface {
         crate::identity::SipralRingSource::ABI,
         crate::identity::SipralIdentityText::ABI,
         crate::identity::SipralSessionTimer::ABI,
+        crate::log::SipralLogLevel::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -662,6 +665,7 @@ pub const SURFACE: Surface = Surface {
         crate::audio::SipralAudioDevice::ABI,
         crate::audio::SipralAudioInfo::ABI,
         crate::audio::SipralAudioTransmit::ABI,
+        crate::log::SipralLogRecord::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -671,6 +675,7 @@ pub const SURFACE: Surface = Surface {
         crate::transport::ABI_CONSTANTS,
         crate::screening::ABI_CONSTANTS,
         crate::identity::ABI_CONSTANTS,
+        crate::log::ABI_CONSTANTS,
     ],
     functions: &[
         crate::error::sipral_last_error_message::ABI,
@@ -810,6 +815,10 @@ pub const SURFACE: Surface = Surface {
         crate::audio::sipral_audio_ring::ABI,
         crate::audio::sipral_audio_stop_ringing::ABI,
         crate::audio::sipral_audio_info::ABI,
+        crate::log::sipral_stack_log::ABI,
+        crate::log::sipral_stack_state::ABI,
+        crate::ports::sipral_stack_rtp_port_reserve::ABI,
+        crate::ports::sipral_stack_rtp_port_release::ABI,
     ],
 };
 
@@ -1034,6 +1043,7 @@ mod tests {
                 "SipralScreenCallback",
                 "SipralProcessorCallback",
                 "SipralAudioTransmitCallback",
+                "SipralLogCallback",
             ]
         );
     }

@@ -43,6 +43,8 @@ import org.sipral.SipralException
 import org.sipral.SipralHeader
 import org.sipral.SipralIce
 import org.sipral.SipralLink
+import org.sipral.SipralLogLevel
+import org.sipral.SipralLogListener
 import org.sipral.SipralNat
 import org.sipral.SipralRecovery
 import org.sipral.SipralSrtp
@@ -96,6 +98,9 @@ class SipralClient private constructor(
     /** Who runs this client's audio, as it was opened. */
     val audioMode: SipralAudioMode,
     network: SipralNetwork,
+    /** The RTP port range media sockets are bound in, as `min to max`, or
+     * null when the operating system picks. */
+    val rtpPorts: Pair<Int, Int>?,
 ) : AutoCloseable {
     internal var handle: Long = 0L
         private set
@@ -237,6 +242,15 @@ class SipralClient private constructor(
          * fails again, up to ten minutes, and `SIPRAL_EVENT_KIND_STUN_SERVER`
          * (read with [stunServerOf]) says when the server in use moves or
          * every one has failed.
+         *
+         * [rtpPortMin] and [rtpPortMax] are the range a firewall in front of
+         * this machine was opened for: every media socket this client opens
+         * without an explicit port then binds an even port from it, reserved
+         * with `sipral_stack_rtp_port_reserve`, with the odd one above kept
+         * for RTCP (RFC 3550 §11), and a call is refused a port outside it.
+         * Both `0` -- the default -- leave the ports to the operating system.
+         * Every pair taken throws `SipralStatus.EXHAUSTED` rather than binding
+         * outside the range.
          */
         fun open(
             bindHost: String = "127.0.0.1",
@@ -260,6 +274,8 @@ class SipralClient private constructor(
             network: SipralNetwork? = null,
             srtp: SipralSrtp? = null,
             stunFallbacks: List<String> = emptyList(),
+            rtpPortMin: Int = 0,
+            rtpPortMax: Int = 0,
         ): SipralClient {
             val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost))
             socket.soTimeout = 20
@@ -267,6 +283,7 @@ class SipralClient private constructor(
             val client = SipralClient(
                 socket, bindAddress, stunServer, turn?.address, turn, audio,
                 network ?: SipralNetwork(SipralLink.WIRED, address = bindHost),
+                if (rtpPortMin == 0 && rtpPortMax == 0) null else rtpPortMin to rtpPortMax,
             )
             try {
                 client.start(
@@ -343,6 +360,8 @@ class SipralClient private constructor(
             diagnosticDecisions = diagnosticDecisions,
             diagnosticRecords = diagnosticRecords,
             stunFallbacks = stunFallbacks.takeIf { it.isNotEmpty() }?.joinToString(","),
+            rtpPortMin = (rtpPorts?.first ?: 0).toLong(),
+            rtpPortMax = (rtpPorts?.second ?: 0).toLong(),
         )
         handle = Sipral.stackCreate(config)
         if (device) {
@@ -357,6 +376,87 @@ class SipralClient private constructor(
     /** Elapsed milliseconds since this stack was created -- what every
      * `now_ms` parameter below expects. */
     fun nowMs(): Long = (System.nanoTime() - origin) / 1_000_000
+
+    // -- media ports, the log and the state snapshot ---------------------------
+
+    /**
+     * A UDP socket for a call's media at [host]: at [port] when one is named,
+     * otherwise -- on a client with an RTP range -- at an even port reserved
+     * from it (`sipral_stack_rtp_port_reserve`), where one another process
+     * already holds is given back and the next tried, and elsewhere wherever
+     * the operating system puts it. `SipralStatus.EXHAUSTED` once every pair
+     * is taken.
+     */
+    fun openMediaSocket(host: String, port: Int = 0): DatagramSocket {
+        val range = rtpPorts
+        if (port != 0 || range == null) {
+            return DatagramSocket(port, InetAddress.getByName(host))
+        }
+        var failure: Exception? = null
+        repeat(maxOf(1, (range.second - range.first + 1) / 2)) {
+            val reserved = retryBusy { Sipral.stackRtpPortReserve(handle) }.toInt()
+            try {
+                return DatagramSocket(reserved, InetAddress.getByName(host))
+            } catch (taken: java.net.SocketException) {
+                giveBackPort(reserved)
+                failure = taken
+            }
+        }
+        throw failure ?: SipralException(SipralStatus.EXHAUSTED, "no RTP port could be bound")
+    }
+
+    /** `sipral_stack_rtp_port_release` for a port no call took, on a client
+     * with a range. Best effort: a port a call did take comes back by itself
+     * when the call ends. */
+    internal fun giveBackPort(port: Int) {
+        if (rtpPorts == null) {
+            return
+        }
+        try {
+            retryBusy { Sipral.stackRtpPortRelease(handle, port.toLong()) }
+        } catch (_: SipralException) {
+            // not reserved, so there is nothing to give back
+        }
+    }
+
+    /**
+     * Send this client's log to [handler] at [level] and louder, or turn it
+     * off with `SipralLogLevel.OFF` or a null handler (`sipral_stack_log`).
+     * The handler runs on whichever thread has just finished a call into the
+     * stack -- the poll thread, usually -- with the stack let go, so it may
+     * call back into it. Every line is already redacted: no user part,
+     * number, IP address or credential reaches it. Its arguments are the
+     * level, which part of the stack wrote the line, the line, and how many
+     * lines a flood had turned away before it.
+     */
+    fun setLog(level: SipralLogLevel, handler: ((SipralLogLevel, String, String, Long) -> Unit)?) {
+        val on = level != SipralLogLevel.OFF && handler != null
+        val listener = if (on) {
+            SipralLogListener { record ->
+                handler(
+                    SipralLogLevel.of(record.level.toInt()) ?: SipralLogLevel.DEBUG,
+                    record.target ?: "",
+                    record.message ?: "",
+                    record.suppressed,
+                )
+            }
+        } else {
+            null
+        }
+        retryBusy { Sipral.stackLog(handle, (if (on) level else SipralLogLevel.OFF).value.toLong(), listener) }
+    }
+
+    /**
+     * Everything this client's stack is holding, as the redacted text
+     * `sipral_stack_state` writes for a crash report: accounts, calls,
+     * transports, media sessions, the last refused calls, the queues, the
+     * RTP range and the counters. Safe from any thread, and never waits.
+     */
+    fun state(): String {
+        val buffer = ByteArray(Sipral.STATE_TEXT_MAX.toInt())
+        val length = Sipral.stackState(handle, buffer).toInt()
+        return String(buffer, 0, maxOf(0, length - 1), Charsets.UTF_8)
+    }
 
     // -- accounts and calls ------------------------------------------------
 
@@ -442,7 +542,7 @@ class SipralClient private constructor(
         ice: SipralIce? = null,
         headers: List<SipralHeader> = emptyList(),
     ): SipralCall {
-        val mediaSocket = DatagramSocket(mediaPort, InetAddress.getByName(mediaHost))
+        val mediaSocket = openMediaSocket(mediaHost, mediaPort)
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
         val config = SipralCallConfig(
             target = target,
@@ -483,7 +583,7 @@ class SipralClient private constructor(
         answerCall(callHandle, mediaHost, mediaPort, null)
 
     private fun answerCall(callHandle: Long, mediaHost: String, mediaPort: Int, incoming: SipralCallEvent?): SipralCall {
-        val mediaSocket = DatagramSocket(mediaPort, InetAddress.getByName(mediaHost))
+        val mediaSocket = openMediaSocket(mediaHost, mediaPort)
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
         val call = SipralCall(this, callHandle, mediaSocket, mediaAddress, incoming)
         track(call, callHandle, mediaAddress)
@@ -558,7 +658,7 @@ class SipralClient private constructor(
         srtp: Long = 0,
         ice: SipralIce? = null,
     ): SipralCall {
-        val mediaSocket = DatagramSocket(mediaPort, InetAddress.getByName(mediaHost))
+        val mediaSocket = openMediaSocket(mediaHost, mediaPort)
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
         val config = SipralCallConfig(
             mediaAddress = mediaAddress,
@@ -707,6 +807,7 @@ class SipralClient private constructor(
             stunSockets.remove(local)
             mediaSocket.close()
         }
+        giveBackPort(parseHostPort(local).port)
     }
 
     /**

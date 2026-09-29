@@ -274,7 +274,16 @@ public sealed class SipralStack : IDisposable
     /// one that failed is passed over for thirty seconds and twice as long
     /// each time it fails again, up to ten minutes, and
     /// <see cref="SipralEventKind.StunServer"/> says when the server in use
-    /// moves or every one has failed.</summary>
+    /// moves or every one has failed.
+    /// <paramref name="rtpPortMin"/> and <paramref name="rtpPortMax"/> are
+    /// the range a firewall in front of this machine was opened for: every
+    /// media socket this class opens without an explicit port then binds an
+    /// even port from it, reserved with <c>sipral_stack_rtp_port_reserve</c>,
+    /// with the odd one above kept for RTCP (RFC 3550 §11), and a call is
+    /// refused a port outside it. Both <c>0</c> — the default — leave the
+    /// ports to the operating system. Every pair taken throws with
+    /// <see cref="SipralStatus.Exhausted"/> rather than binding outside the
+    /// range.</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -304,8 +313,11 @@ public sealed class SipralStack : IDisposable
         uint maxServerTransactions = 0,
         uint diagnosticDecisions = 0,
         uint diagnosticRecords = 0,
-        IReadOnlyList<string>? stunFallbacks = null)
+        IReadOnlyList<string>? stunFallbacks = null,
+        ushort rtpPortMin = 0,
+        ushort rtpPortMax = 0)
     {
+        RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
         _nat = nat;
         _turn = turnServer is not null;
         _turnTransport = turnTransport;
@@ -411,6 +423,8 @@ public sealed class SipralStack : IDisposable
             config.DiagnosticRecords = diagnosticRecords;
             config.StunFallbacks = stunFallbacksPin.Pointer;
             config.StunFallbacksLen = (nuint)(stunFallbacksBytes?.Length ?? 0);
+            config.RtpPortMin = rtpPortMin;
+            config.RtpPortMax = rtpPortMax;
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }
@@ -436,6 +450,130 @@ public sealed class SipralStack : IDisposable
     public ulong NowMs => (ulong)_origin.ElapsedMilliseconds;
 
     internal ulong Handle => _handle.Value;
+
+    /// <summary>The RTP port range media sockets are bound in, or
+    /// <see langword="null"/> when the operating system picks.</summary>
+    public (ushort Min, ushort Max)? RtpPorts { get; }
+
+    /// <summary>A non-blocking UDP socket for a call's media, bound at
+    /// <paramref name="host"/>: at <paramref name="port"/> when one is named,
+    /// otherwise — on a stack with an RTP range — at an even port reserved
+    /// from it (<c>sipral_stack_rtp_port_reserve</c>), where one another
+    /// process already holds is given back and the next tried, and
+    /// elsewhere wherever the operating system puts it. Throws with
+    /// <see cref="SipralStatus.Exhausted"/> once every pair is taken.</summary>
+    public Socket OpenMediaSocket(string host, int port = 0)
+    {
+        if (port != 0 || RtpPorts is not { } range)
+        {
+            var named = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            named.Bind(new IPEndPoint(IPAddress.Parse(host), port));
+            named.Blocking = false;
+            return named;
+        }
+        SocketException? failure = null;
+        var attempts = Math.Max(1, (range.Max - range.Min + 1) / 2);
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            var reserved = 0u;
+            SipralErrors.Call(
+                () => NativeMethods.sipral_stack_rtp_port_reserve(Handle, out reserved),
+                "sipral_stack_rtp_port_reserve");
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            try
+            {
+                socket.Bind(new IPEndPoint(IPAddress.Parse(host), (int)reserved));
+            }
+            catch (SocketException error)
+            {
+                socket.Dispose();
+                GiveBackPort((int)reserved);
+                failure = error;
+                continue;
+            }
+            socket.Blocking = false;
+            return socket;
+        }
+        throw failure!;
+    }
+
+    /// <summary><c>sipral_stack_rtp_port_release</c> for a port no call
+    /// took, on a stack with a range. Best effort: a port a call did take
+    /// comes back by itself when the call ends.</summary>
+    internal void GiveBackPort(int port)
+    {
+        if (RtpPorts is null)
+        {
+            return;
+        }
+        try
+        {
+            SipralErrors.Call(
+                () => NativeMethods.sipral_stack_rtp_port_release(Handle, (uint)port),
+                "sipral_stack_rtp_port_release");
+        }
+        catch (SipralException)
+        {
+            // not reserved, so there is nothing to give back
+        }
+    }
+
+    /// <summary>Every log callback handed to <c>sipral_stack_log</c>, kept
+    /// for the stack's life: one that was replaced may still be delivering a
+    /// batch on the poll thread after <see cref="SetLog"/> returned.</summary>
+    private readonly List<SipralLogCallback> _logCallbacks = new();
+
+    /// <summary>Send this stack's log to <paramref name="handler"/> at
+    /// <paramref name="level"/> and louder, or turn it off with
+    /// <see cref="SipralLogLevel.Off"/> or a <see langword="null"/> handler
+    /// (<c>sipral_stack_log</c>). The handler runs on whichever thread has
+    /// just finished a call into the stack — the poll thread, usually — with
+    /// the stack let go, so it may call back into it. Every line is already
+    /// redacted: no user part, number, IP address or credential reaches it.
+    /// Its last argument counts the lines a flood had turned away before
+    /// this one.</summary>
+    public void SetLog(SipralLogLevel level, Action<SipralLogLevel, string, string, ulong>? handler)
+    {
+        if (handler is null || level == SipralLogLevel.Off)
+        {
+            SipralErrors.Call(
+                () => NativeMethods.sipral_stack_log(Handle, (uint)SipralLogLevel.Off, null!, IntPtr.Zero),
+                "sipral_stack_log");
+            return;
+        }
+        SipralLogCallback callback = (record, _) =>
+        {
+            var line = Marshal.PtrToStructure<SipralLogRecord>(record);
+            handler(
+                (SipralLogLevel)line.Level,
+                Marshal.PtrToStringUTF8(line.Target, (int)line.TargetLen),
+                Marshal.PtrToStringUTF8(line.Message, (int)line.MessageLen),
+                line.Suppressed);
+        };
+        lock (_logCallbacks)
+        {
+            _logCallbacks.Add(callback);
+        }
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_log(Handle, (uint)level, callback, IntPtr.Zero),
+            "sipral_stack_log");
+    }
+
+    /// <summary>Everything this stack is holding, as the redacted text
+    /// <c>sipral_stack_state</c> writes for a crash report: accounts, calls,
+    /// transports, media sessions, the last refused calls, the queues, the
+    /// RTP range and the counters. Safe from any thread, and never
+    /// waits.</summary>
+    public string State()
+    {
+        var buffer = new sbyte[(int)global::Sipral.Sipral.StateTextMax];
+        nuint length = 0;
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_state(Handle, buffer, (nuint)buffer.Length, out length),
+            "sipral_stack_state");
+        var bytes = (byte[])(Array)buffer;
+        return Encoding.UTF8.GetString(bytes, 0, (int)length - 1);
+    }
 
     /// <summary><c>host:port</c>, the text shape every address crosses
     /// this ABI as.</summary>
@@ -507,9 +645,7 @@ public sealed class SipralStack : IDisposable
     /// </summary>
     public Call PlaceCall(Account account, string target, string mediaHost = "127.0.0.1", int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0)
     {
-        var mediaSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        mediaSocket.Bind(new IPEndPoint(IPAddress.Parse(mediaHost), mediaPort));
-        mediaSocket.Blocking = false;
+        var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
         MapMediaSocket(mediaSocket, mediaAddress);
 
@@ -560,9 +696,7 @@ public sealed class SipralStack : IDisposable
     /// </summary>
     public Call AnswerCall(SipralEventArgs args, string mediaHost = "127.0.0.1", int mediaPort = 0)
     {
-        var mediaSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        mediaSocket.Bind(new IPEndPoint(IPAddress.Parse(mediaHost), mediaPort));
-        mediaSocket.Blocking = false;
+        var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
         MapMediaSocket(mediaSocket, mediaAddress);
 
@@ -605,9 +739,7 @@ public sealed class SipralStack : IDisposable
     /// </summary>
     public Call AcceptReferral(SipralEventArgs args, string mediaHost = "127.0.0.1", int mediaPort = 0, SipralSrtp srtp = 0, SipralIce ice = 0)
     {
-        var mediaSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        mediaSocket.Bind(new IPEndPoint(IPAddress.Parse(mediaHost), mediaPort));
-        mediaSocket.Blocking = false;
+        var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
         MapMediaSocket(mediaSocket, mediaAddress);
 
@@ -1057,6 +1189,7 @@ public sealed class SipralStack : IDisposable
     /// <see cref="CallMedia"/> now).</summary>
     internal void ForgetMediaSocket(string address)
     {
+        GiveBackPort(ParseAddress(address).Port);
         bool mapped;
         lock (_natLock)
         {

@@ -290,20 +290,19 @@ pub(crate) fn answer(proxy: SocketAddr) -> Result<String, String> {
     };
     let [desk_port, mobile_port] = PHONE_PORTS;
     // the desk never answers, and the mobile does: the second of the two.
-    // Two whole stacks side by side are past clippy's sixteen kilobytes for
-    // an array on the stack, and a small part of what a thread has
-    #[allow(clippy::large_stack_arrays)]
+    // Each boxed: a phone holds a whole engine, and two side by side are more
+    // than a stack frame should carry
     let mut phones = [
-        phone(
+        Box::new(phone(
             "desk",
             desk_port,
             [DESK_SEED, DESK_MEDIA_SEED, DESK_RELAY_SEED],
-        )?,
-        phone(
+        )?),
+        Box::new(phone(
             "mobile",
             mobile_port,
             [MOBILE_SEED, MOBILE_MEDIA_SEED, MOBILE_RELAY_SEED],
-        )?,
+        )?),
     ];
     for phone in &mut phones {
         let _ = phone.endpoint.agent.register(phone.account, Instant::now());
@@ -379,7 +378,7 @@ pub(crate) fn answer(proxy: SocketAddr) -> Result<String, String> {
     verdict
 }
 
-fn phones_unregistered(phones: &[Phone; 2]) -> String {
+fn phones_unregistered(phones: &[Box<Phone>; 2]) -> String {
     let names: Vec<&str> = phones
         .iter()
         .filter(|phone| !phone.registered)
@@ -392,7 +391,7 @@ fn phones_unregistered(phones: &[Phone; 2]) -> String {
 }
 
 /// What the phones proved, or the first thing they did not.
-fn phones_verdict(phones: &[Phone; 2], server: IpAddr) -> Result<String, String> {
+fn phones_verdict(phones: &[Box<Phone>; 2], server: IpAddr) -> Result<String, String> {
     let mut said = Vec::new();
     for phone in phones {
         if let Some(why) = &phone.failed {

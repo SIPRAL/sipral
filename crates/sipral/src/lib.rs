@@ -37,6 +37,13 @@
 //! - `redacted_call_record` and `redacted_recording`, behind the `redaction`
 //!   feature (on by default) — a call's D1 record and a D2 recording with the
 //!   personal data taken out, for a report that leaves the organisation.
+//!   Beside them, behind the same feature: [`Log`], the engine's log through
+//!   a sink the application installs, rate-limited and redacted; and
+//!   [`EngineState`], one bounded, redacted snapshot of accounts, calls,
+//!   media and counters for a crash report.
+//! - [`RtpPorts`] — the range a deployment's media ports come from, even
+//!   ports for RTP with the odd one above each kept for its RTCP, handed out
+//!   by [`MediaEngine::reserve_rtp_port`] and refused once none is free.
 //! - Everything `sipral-ua` exports, re-exported, so that an application
 //!   depends on this crate and nothing else.
 //!
@@ -151,15 +158,20 @@ mod headless;
 mod ice;
 mod join;
 mod keying;
+#[cfg(feature = "redaction")]
+mod log;
 #[cfg(feature = "stun")]
 mod nat;
 mod payloads;
 mod pipeline;
+mod ports;
 mod record;
 #[cfg(feature = "ice")]
 mod relay;
 mod session;
 mod share;
+#[cfg(feature = "redaction")]
+mod state;
 mod stats;
 #[cfg(test)]
 mod tests;
@@ -170,7 +182,8 @@ pub use codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME
 pub use counters::{CallDispositionCounts, Counter, Counters, Gauge, RegistrationFailureCounts};
 #[cfg(feature = "redaction")]
 pub use diagnostics::{
-    RedactError, RedactionMode, Redactor, redacted_call_record, redacted_recording,
+    ExportError, RedactError, RedactionMode, Redactor, Replayed, redact_text, redacted_call_record,
+    redacted_recording, replayed_capture,
 };
 #[cfg(feature = "dtls")]
 pub use dtls::Identity;
@@ -188,8 +201,11 @@ pub use ice::IcePolicy;
 pub use ice::{CandidateKind, PathCandidate, PathKind, PathOutcome};
 pub use join::{MixOutcome, mix_two};
 pub use keying::SrtpPolicy;
+#[cfg(feature = "redaction")]
+pub use log::{BURST, Log, LogLevel, LogRecord, LogSink, PER_SECOND, QUEUE_CEILING, Travel};
 #[cfg(feature = "stun")]
 pub use nat::{DEFAULT_REFRESH, Keep, MappingEvent, MappingState, Mappings, StunDatagram};
+pub use ports::{PortsExhausted, RtpPorts, RtpPortsError};
 pub use record::RecordingSink;
 #[cfg(feature = "ice")]
 pub use relay::{Relay, RelayDatagram, RelayEvent, Relays};
@@ -214,6 +230,8 @@ pub use sipral_nat::turn::Transport as TurnTransport;
 /// [`RelayEvent::Failed`] reports it.
 #[cfg(feature = "ice")]
 pub use sipral_nat::turn::TurnError as TurnFailure;
+#[cfg(feature = "redaction")]
+pub use state::{AccountState, CallSnapshot, EngineState, LISTED, MediaState, StreamState};
 pub use stats::StreamStatistics;
 
 /// What the negotiation produces and consumes, from the layer that owns the
