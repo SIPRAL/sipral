@@ -579,42 +579,47 @@ fn open_dialog(attributes: Attributes<'_>) -> Result<WatchedDialog, DialogInfoEr
 }
 
 /// A name with any namespace prefix taken off.
-fn local_name(name: &[u8]) -> &[u8] {
+pub(crate) fn local_name(name: &[u8]) -> &[u8] {
     match name.iter().rposition(|byte| *byte == b':') {
         Some(colon) => name.get(colon + 1..).unwrap_or(name),
         None => name,
     }
 }
 
-fn as_str(bytes: &[u8]) -> Result<&str, DialogInfoError> {
+pub(crate) fn as_str(bytes: &[u8]) -> Result<&str, DialogInfoError> {
     core::str::from_utf8(bytes).map_err(|_| DialogInfoError::NotUtf8)
 }
 
 // -- the tokeniser -----------------------------------------------------------
 
 /// One piece of markup.
-enum Node<'a> {
+pub(crate) enum Node<'a> {
+    /// A start tag, or an empty-element tag.
     Open(Element<'a>),
+    /// An end tag, by its name.
     Close(&'a [u8]),
+    /// Character data, with its references still unresolved.
     Text(&'a [u8]),
 }
 
-struct Element<'a> {
-    name: &'a [u8],
-    attributes: Attributes<'a>,
+pub(crate) struct Element<'a> {
+    /// The name as written, prefix included.
+    pub(crate) name: &'a [u8],
+    /// What the tag carries after its name.
+    pub(crate) attributes: Attributes<'a>,
     /// Written `<x/>`, so it closes itself.
-    empty: bool,
+    pub(crate) empty: bool,
 }
 
 /// The attributes of one element, read on demand.
 #[derive(Clone, Copy)]
-struct Attributes<'a> {
+pub(crate) struct Attributes<'a> {
     raw: &'a [u8],
 }
 
 impl Attributes<'_> {
     /// One attribute's value, with references resolved.
-    fn value(&self, name: &str) -> Result<Option<Vec<u8>>, DialogInfoError> {
+    pub(crate) fn value(&self, name: &str) -> Result<Option<Vec<u8>>, DialogInfoError> {
         let mut rest = self.raw;
         for _ in 0..MAX_ATTRIBUTES {
             let Some(found) = next_attribute(rest)? else {
@@ -629,7 +634,7 @@ impl Attributes<'_> {
     }
 
     /// The same, as text.
-    fn text(&self, name: &str) -> Result<Option<Box<str>>, DialogInfoError> {
+    pub(crate) fn text(&self, name: &str) -> Result<Option<Box<str>>, DialogInfoError> {
         match self.value(name)? {
             Some(value) => Ok(Some(Box::from(as_str(&value)?))),
             None => Ok(None),
@@ -679,17 +684,18 @@ fn next_attribute(raw: &[u8]) -> Result<Option<Attribute<'_>>, DialogInfoError> 
     }))
 }
 
-struct Reader<'a> {
+/// The tokeniser: one node at a time, with every refusal described above.
+pub(crate) struct Reader<'a> {
     rest: &'a [u8],
 }
 
 impl<'a> Reader<'a> {
-    const fn new(body: &'a [u8]) -> Self {
+    pub(crate) const fn new(body: &'a [u8]) -> Self {
         Self { rest: body }
     }
 
     /// The next node, or `None` at the end of the document.
-    fn next(&mut self) -> Result<Option<Node<'a>>, DialogInfoError> {
+    pub(crate) fn next(&mut self) -> Result<Option<Node<'a>>, DialogInfoError> {
         // at most one skipped construct per call is not enough: a document
         // starts with a declaration and may then carry comments
         for _ in 0..MAX_NODES {
@@ -805,7 +811,7 @@ fn tag_end(tag: &[u8]) -> Option<usize> {
 /// This is where a general-purpose reader would look a declaration up, and
 /// where the billion laughs would expand. There is no table to look in: an
 /// entity that is not one of these five is a document this refuses.
-fn unescape(raw: &[u8]) -> Result<Vec<u8>, DialogInfoError> {
+pub(crate) fn unescape(raw: &[u8]) -> Result<Vec<u8>, DialogInfoError> {
     if raw.len() > MAX_VALUE {
         return Err(DialogInfoError::TooLarge("value"));
     }
