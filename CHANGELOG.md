@@ -2303,6 +2303,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the pair through `sipral_media_mix` alone learned only from a later
   `SIPRAL_STATUS_WRONG_STATE`. It now arrives as
   `SIPRAL_EVENT_KIND_MEDIA_UNJOINED`, naming the surviving call.
+- **An INVITE retried with credentials is held to `max_dialogs`.** A proxy's `407` gives the call's room back, and the authenticated retry went out without looking, so a call placed in between took the stack one past its ceiling; the retry is now refused like a call placed afresh, the challenge kept for when there is room.
 
 ### Changed
 

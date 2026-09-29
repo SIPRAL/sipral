@@ -929,6 +929,12 @@ back at once, and so does timer B on a call nothing answered, even while the
 INVITE's transaction still stands to absorb a repeated response. The first
 dialog of a call this end placed always opens, however full the stack has
 become since: the application asked for that call while there was room.
+A call a proxy challenged (`401`, `407`) is the one exception to "from its
+INVITE on": the refusal gives its room back, so the INVITE sent again with
+credentials is held to the ceiling like a call placed afresh. When another
+call has taken the room in between, the retry is not sent and the call ends
+as the refusal that challenged it; the stack never holds one call past
+`max_dialogs`.
 
 Neither `503` carries a `Retry-After`. RFC 3261 §21.5.4 has the client try
 another server either way; what the header would add is a proxy that sends

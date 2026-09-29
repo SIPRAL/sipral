@@ -325,6 +325,21 @@ impl Endpoint {
             .as_raw()
             .method()
             .ok_or(AuthRetryError::NoChallenge)?;
+        // The refusal gave the call's room under max_dialogs back, and
+        // another call may have taken it since: a retry outside a dialog is
+        // a call placed again, held to the same ceiling as the first INVITE.
+        // Nothing has been drawn yet, so the challenge goes back and the
+        // same handle works once a call ends.
+        if method == Method::Invite
+            && held.dialog.is_none()
+            && self.dialogs_held() >= self.config.max_dialogs
+        {
+            let limit = self.config.max_dialogs;
+            self.challenges.remember(failed, held);
+            return Err(AuthRetryError::Unsendable(
+                super::error::SendError::LimitReached { limit },
+            ));
+        }
         let answers = self.answers_for(&held.request, credentials);
         if answers.is_empty() {
             return Err(AuthRetryError::NothingToAnswer);
