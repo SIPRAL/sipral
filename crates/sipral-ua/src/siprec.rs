@@ -43,7 +43,7 @@ use sipral_core::msg::{
 };
 use sipral_core::sdp::SessionDescription;
 
-use crate::dialoginfo::{DialogInfoError, Node, Reader, local_name, unescape};
+use crate::dialoginfo::{Attributes, DialogInfoError, Node, Reader, as_str, local_name, unescape};
 
 /// The media type of recording metadata (RFC 7866).
 pub const METADATA_CONTENT_TYPE: &str = "application/rs-metadata+xml";
@@ -894,7 +894,7 @@ impl Walk {
                 Node::Text(raw) => {
                     if self.target.is_some_and(|(_, depth)| depth == path.len()) {
                         let text = unescape(raw)?;
-                        let text = core::str::from_utf8(&text).map_err(|_| SiprecError::NotUtf8)?;
+                        let text = as_str(&text)?;
                         if self.text.len() + text.len() > MAX_TEXT {
                             return Err(SiprecError::TooLarge("text"));
                         }
@@ -918,7 +918,7 @@ impl Walk {
         &mut self,
         path: &[&[u8]],
         qualified: &[u8],
-        attributes: crate::dialoginfo::Attributes<'_>,
+        attributes: Attributes<'_>,
     ) -> Result<(), SiprecError> {
         let depth = path.len();
         let Some(&name) = path.last() else {
@@ -957,7 +957,7 @@ impl Walk {
     fn open_item(
         &mut self,
         name: &[u8],
-        attributes: crate::dialoginfo::Attributes<'_>,
+        attributes: Attributes<'_>,
     ) -> Result<Option<Target>, SiprecError> {
         let required = |attr: &'static str| -> Result<String, SiprecError> {
             attributes
@@ -1011,7 +1011,7 @@ impl Walk {
         &mut self,
         (depth, parent, name): (usize, &[u8], &[u8]),
         grandparent: Option<&[u8]>,
-        attributes: crate::dialoginfo::Attributes<'_>,
+        attributes: Attributes<'_>,
     ) -> Result<Option<Target>, SiprecError> {
         Ok(match (depth, parent, name) {
             (3, b"group", b"associate-time") => Some(Target::GroupAssociate),

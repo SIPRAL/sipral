@@ -586,6 +586,7 @@ pub(crate) fn local_name(name: &[u8]) -> &[u8] {
     }
 }
 
+/// Bytes the document holds as text, refused when they are not UTF-8.
 pub(crate) fn as_str(bytes: &[u8]) -> Result<&str, DialogInfoError> {
     core::str::from_utf8(bytes).map_err(|_| DialogInfoError::NotUtf8)
 }
@@ -876,7 +877,7 @@ fn push_character(name: &[u8], out: &mut Vec<u8>) -> Result<(), DialogInfoError>
 mod tests {
     use super::{
         Applied, DialogEnded, DialogInfo, DialogInfoError, DialogInfoTable, DialogPhase, Initiated,
-        MAX_DEPTH, MAX_VALUE,
+        MAX_DEPTH, MAX_NODES, MAX_VALUE, Node, Reader, as_str, local_name, unescape,
     };
     use std::time::Duration;
 
@@ -905,6 +906,129 @@ mod tests {
 
     fn parse(body: &[u8]) -> DialogInfo {
         DialogInfo::parse(body).expect("a document")
+    }
+
+    // -- the reader as the rest of the crate uses it --------------------------
+    //
+    // `conference`, `presence` and `siprec` read their documents over this
+    // tokeniser. Each capability they rely on is pinned here, so that a change
+    // made for `dialog-info` cannot quietly change theirs.
+
+    fn nodes(body: &[u8]) -> Vec<String> {
+        let mut reader = Reader::new(body);
+        let mut out = Vec::new();
+        while let Some(node) = reader.next().expect("a node") {
+            out.push(match node {
+                Node::Open(element) => format!(
+                    "open {}{}",
+                    String::from_utf8_lossy(element.name),
+                    if element.empty { " empty" } else { "" }
+                ),
+                Node::Close(name) => format!("close {}", String::from_utf8_lossy(name)),
+                Node::Text(raw) => format!("text {}", String::from_utf8_lossy(raw)),
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn the_reader_yields_tags_and_text_in_order_and_skips_what_is_not_content() {
+        let body = b"<?xml version='1.0'?><!-- a note --><a:x>one<y/></a:x>";
+        assert_eq!(
+            nodes(body),
+            ["open a:x", "text one", "open y empty", "close a:x"]
+        );
+        // whitespace between tags is not a node of its own
+        assert_eq!(
+            nodes(b"<x>\n  <y/>\n</x>"),
+            ["open x", "open y empty", "close x"]
+        );
+        assert!(nodes(b"").is_empty());
+    }
+
+    #[test]
+    fn the_reader_leaves_references_in_text_for_the_caller_to_resolve() {
+        assert_eq!(
+            nodes(b"<x>a &amp; b</x>"),
+            ["open x", "text a &amp; b", "close x"]
+        );
+    }
+
+    #[test]
+    fn the_reader_refuses_a_declaration_and_bounds_its_skipping() {
+        let mut reader = Reader::new(b"<!DOCTYPE x [<!ENTITY a 'b'>]><x/>");
+        assert!(matches!(reader.next(), Err(DialogInfoError::Refused(_))));
+        let mut reader = Reader::new(b"<![CDATA[<x/>]]>");
+        assert!(matches!(reader.next(), Err(DialogInfoError::Refused(_))));
+        let comments = "<!---->".repeat(MAX_NODES + 1);
+        let mut reader = Reader::new(comments.as_bytes());
+        assert_eq!(
+            reader.next().err(),
+            Some(DialogInfoError::TooLarge("element count"))
+        );
+    }
+
+    #[test]
+    fn attributes_are_found_by_local_name_and_resolved() {
+        let mut reader = Reader::new(b"<x a:id='1&lt;2' name=\"&#x41;&#66;\" bare='&amp;'/>");
+        let Some(Node::Open(element)) = reader.next().expect("a node") else {
+            panic!("not a start tag");
+        };
+        let attributes = element.attributes;
+        assert_eq!(attributes.value("id").expect("read"), Some(b"1<2".to_vec()));
+        assert_eq!(
+            attributes.text("name").expect("read").as_deref(),
+            Some("AB")
+        );
+        assert_eq!(attributes.text("bare").expect("read").as_deref(), Some("&"));
+        assert_eq!(attributes.value("missing").expect("read"), None);
+        // an attribute's value is not UTF-8, as text
+        let mut reader = Reader::new(b"<x v='\xff'/>");
+        let Some(Node::Open(element)) = reader.next().expect("a node") else {
+            panic!("not a start tag");
+        };
+        assert_eq!(element.attributes.text("v"), Err(DialogInfoError::NotUtf8));
+        assert_eq!(
+            element.attributes.value("v").expect("read"),
+            Some(vec![0xff])
+        );
+    }
+
+    #[test]
+    fn a_local_name_is_what_follows_the_last_colon() {
+        assert_eq!(local_name(b"x"), b"x");
+        assert_eq!(local_name(b"a:x"), b"x");
+        assert_eq!(local_name(b"a:b:x"), b"x");
+        assert_eq!(local_name(b"x:"), b"");
+    }
+
+    #[test]
+    fn unescape_resolves_the_predefined_and_character_references_only() {
+        assert_eq!(
+            unescape(b"&lt;&gt;&amp;&quot;&apos;&#233;&#x20AC;").expect("resolved"),
+            "<>&\"'\u{e9}\u{20ac}".as_bytes()
+        );
+        assert_eq!(unescape(b"plain").expect("resolved"), b"plain");
+        assert!(matches!(
+            unescape(b"&nbsp;"),
+            Err(DialogInfoError::Refused(_))
+        ));
+        assert!(matches!(
+            unescape(b"&#xD800;"),
+            Err(DialogInfoError::Refused(_))
+        ));
+        assert!(matches!(
+            unescape(b"&amp"),
+            Err(DialogInfoError::Malformed(_))
+        ));
+        let long = vec![b'a'; MAX_VALUE + 1];
+        assert_eq!(unescape(&long), Err(DialogInfoError::TooLarge("value")));
+    }
+
+    #[test]
+    fn as_str_refuses_what_is_not_utf8() {
+        assert_eq!(as_str(b"caf\xc3\xa9"), Ok("caf\u{e9}"));
+        assert_eq!(as_str(b"\xc3"), Err(DialogInfoError::NotUtf8));
     }
 
     #[test]

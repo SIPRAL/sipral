@@ -31,7 +31,7 @@
 use core::fmt::Write as _;
 
 use crate::conference::{TreeLimits, XmlNode, read_tree};
-use crate::dialoginfo::DialogInfoError;
+use crate::dialoginfo::{DialogInfoError, as_str};
 
 /// The body type (RFC 3863).
 pub const PIDF_TYPE: &str = "application/pidf+xml";
@@ -219,9 +219,7 @@ impl Activity {
                 return Ok(activity);
             }
         }
-        Ok(Self::Unlisted(Box::from(crate::dialoginfo::as_str(
-            node.name,
-        )?)))
+        Ok(Self::Unlisted(Box::from(as_str(node.name)?)))
     }
 }
 
