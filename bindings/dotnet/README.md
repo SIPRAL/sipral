@@ -303,7 +303,7 @@ using var stack = new SipralStack(
     signalling: SipralTransport.Tls,
     signallingServer: "198.51.100.10:5061",
     tlsServerName: "pbx.example.com",
-    tlsTrust: SipralTlsTrust.OnlyAuthority(X509Certificate2.CreateFromPemFile("pbx-ca.pem")));
+    tlsTrust: SipralTlsTrust.OnlyAuthority(X509Certificate2.CreateFromPem(File.ReadAllText("pbx-ca.pem"))));
 var account = stack.AddAccount("sip:alice@example.com", "198.51.100.10:5061", registrar: "sip:example.com");
 account.Register();
 await foreach (var args in stack.Events)

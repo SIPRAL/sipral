@@ -400,7 +400,7 @@ using var stack = new SipralStack(
     signalling: signalling,
     signallingServer: signalling == SipralTransport.Udp ? null : registrarAddress,
     tlsServerName: Environment.GetEnvironmentVariable("SIPRAL_TLS_SERVER_NAME"),
-    tlsTrust: tlsCa is null ? null : SipralTlsTrust.OnlyAuthority(X509Certificate2.CreateFromPemFile(tlsCa)),
+    tlsTrust: tlsCa is null ? null : SipralTlsTrust.OnlyAuthority(X509Certificate2.CreateFromPem(File.ReadAllText(tlsCa))),
     inviteLimit: Environment.GetEnvironmentVariable("SIPRAL_INVITE_LIMIT") == "voice-agent"
         ? SipralInviteLimit.VoiceAgent
         : null);
