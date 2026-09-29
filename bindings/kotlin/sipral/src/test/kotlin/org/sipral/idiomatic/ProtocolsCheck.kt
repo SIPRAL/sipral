@@ -41,6 +41,7 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralPresenceKind
 import org.sipral.SipralPublicationState
+import org.sipral.SipralSrtp
 import org.sipral.SipralStatus
 import org.sipral.SipralSubscriptionState
 
@@ -526,6 +527,72 @@ private suspend fun aCallIsRecordedToARecordingServerOverItsOwnConnection(): Str
     }
 }
 
+/**
+ * The recording session's offer for a call keyed with SDES (RFC 4568),
+ * placed from an account that does or does not let its encrypted calls be
+ * recorded in the clear.
+ */
+private suspend fun recordingOfferOfAnEncryptedCall(recordingInClear: Boolean): String {
+    val first = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0)).apply { soTimeout = 1 }
+    val second = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0)).apply { soTimeout = 1 }
+    try {
+        FakeRecordingServer(first.localPort to second.localPort).use { server ->
+            SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", codecs = "PCMU").use { alice ->
+                SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", codecs = "PCMU").use { bob ->
+                    val account = alice.addAccount(
+                        aor = "sip:alice@example.invalid",
+                        registrarAddress = bob.bindAddress,
+                        security = SipralAccountSecurity(srtp = SipralSrtp.REQUIRED, recordingInClear = recordingInClear),
+                    )
+                    bob.addAccount(
+                        aor = "sip:bob@example.invalid",
+                        registrarAddress = alice.bindAddress,
+                        security = SipralAccountSecurity(srtp = SipralSrtp.REQUIRED),
+                    )
+                    val (placed, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+                        alice.placeCall(account, target = "sip:bob@example.invalid")
+                    }
+                    placed.use {
+                        bob.answerCall(incoming).use { answered ->
+                            withTimeout(15_000) {
+                                while (placed.media == null || answered.media == null) {
+                                    delay(20)
+                                }
+                            }
+                            assertTrue(assertNotNull(placed.media).encryption().single().encrypted, "the call itself is keyed")
+                            placed.recordTo("sip:srs@127.0.0.1", destination = server.address)
+                            withTimeout(5_000) {
+                                while (server.requests.none { it.startsWith("INVITE ") }) {
+                                    delay(20)
+                                }
+                            }
+                            return server.requests.first { it.startsWith("INVITE ") }
+                        }
+                    }
+                }
+            }
+        }
+    } finally {
+        first.close()
+        second.close()
+    }
+}
+
+private suspend fun anEncryptedCallIsOfferedToItsRecorderAsSrtp(): String {
+    val offer = recordingOfferOfAnEncryptedCall(recordingInClear = false)
+    assertEquals(2, offer.split("RTP/SAVP").size - 1, offer)
+    assertTrue(offer.contains("a=crypto:"), offer)
+    return "an encrypted call offered to its recorder as SRTP"
+}
+
+private suspend fun anAccountThatAllowsItRecordsAnEncryptedCallInTheClear(): String {
+    val offer = recordingOfferOfAnEncryptedCall(recordingInClear = true)
+    assertEquals(2, offer.split("RTP/AVP").size - 1, offer)
+    assertFalse(offer.contains("RTP/SAVP"), offer)
+    assertFalse(offer.contains("a=crypto:"), offer)
+    return "an account that allows it records an encrypted call in the clear"
+}
+
 suspend fun protocolsChecks(): String = listOf(
     realTimeTextIsTypedAndReadBothWays(),
     aFarEndThatTookNoTextLeavesNoneToSend(),
@@ -536,4 +603,6 @@ suspend fun protocolsChecks(): String = listOf(
     presenceIsPublishedAndWhatTheCompositorGrantedIsTold(),
     aWatchedPresentityIsToldWithItsActivityAndNote(),
     aCallIsRecordedToARecordingServerOverItsOwnConnection(),
+    anEncryptedCallIsOfferedToItsRecorderAsSrtp(),
+    anAccountThatAllowsItRecordsAnEncryptedCallInTheClear(),
 ).joinToString("; ")

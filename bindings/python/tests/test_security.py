@@ -5,19 +5,21 @@
 through this package: two stacks on 127.0.0.1 with no registrar between
 them, one signing the call it places and the other verifying it.
 
-The full verification of a valid signature is proved against a test
-certificate authority in the Rust and C ABI tests and in the lab
-(`scripts/lab.sh security`); a certificate chain cannot be made here without
-a cryptography package this binding does not depend on. What this proves is
-the plumbing every half of it runs through: the account's signing key and
-URL reach the INVITE, the verifying stack asks for the certificate by
-`SIPRAL_EVENT_KIND_CALLER_VERIFICATION`, :meth:`Stack.stir_certificate`
-answers it, and a strict account refuses what does not verify.
+A certificate chain cannot be made here without a cryptography package this
+binding does not depend on, so a valid signature is verified against the
+chain the C ABI's tests keep in `bindings/fixtures/stir-provider-709J`, whose
+signing certificate names a service provider code and no number. Beside
+that, what this proves is the plumbing every half of it runs through: the
+account's signing key and URL reach the INVITE, the verifying stack asks for
+the certificate by `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
+:meth:`Stack.stir_certificate` answers it, and a strict account refuses what
+does not verify.
 """
 
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import unittest
 
 from sipral import Stack
@@ -39,6 +41,12 @@ _URL = "https://c.test/p"
 #: a P-256 private key as the bare scalar: any 32 octets below the group
 #: order are one, and these are nobody's
 _KEY = bytes([0x2B]) * 32
+#: the credentials `sipral_stir::testing` issues for the service provider
+#: code 709J, checked against it by the C ABI's own tests: a root, a chain
+#: whose signing certificate names that code and no number, and its key
+_PROVIDER = pathlib.Path(__file__).resolve().parents[2] / "fixtures" / "stir-provider-709J"
+#: a moment inside every certificate of that chain
+_WITHIN = 1_790_000_000
 
 
 class _TwoStacks(unittest.IsolatedAsyncioTestCase):
@@ -94,6 +102,45 @@ class ACallerIsVerifiedBeforeThePhoneRings(_TwoStacks):
         self.assertTrue(verdict.refused)
         ended = await self.next_event(self.caller, EventKind.CALL_ENDED)
         self.assertEqual(ended.fields["status_code"], 436)
+
+
+class AServiceProviderCodeCoversOnlyWhenTheStackSaysSo(_TwoStacks):
+    async def verdict(self, *, accept_service_provider_codes: bool):
+        self.caller.stir(None, unix_seconds=_WITHIN)
+        self.callee.stir(
+            (_PROVIDER / "anchor.pem").read_bytes(),
+            unix_seconds=_WITHIN,
+            accept_service_provider_codes=accept_service_provider_codes,
+        )
+        signing = self.caller.add_account(
+            "sip:+12155551212@a.test",
+            registrar_address=self.callee.bind_address,
+            stir_key=bytes.fromhex((_PROVIDER / "signing-scalar.hex").read_text().strip()),
+            stir_certificate_url=_URL,
+        )
+        self.callee.add_account(
+            "sip:12125551213@b.test",
+            registrar_address=self.caller.bind_address,
+        )
+        call = self.caller.place_call(
+            signing, f"sip:12125551213@{self.callee.bind_address}"
+        )
+        self.addAsyncCleanup(asyncio.to_thread, call.close)
+        wanted = await self.next_event(self.callee, EventKind.CALLER_VERIFICATION)
+        self.assertEqual(wanted.verification.stage, VerificationStage.CERTIFICATE_WANTED)
+        self.callee.stir_certificate(wanted.call, (_PROVIDER / "chain.pem").read_bytes())
+        verdict = await self.next_event(self.callee, EventKind.CALLER_VERIFICATION)
+        self.assertEqual(verdict.verification.stage, VerificationStage.VERIFIED)
+        return verdict.verification
+
+    async def test_a_certificate_naming_only_a_code_covers_no_number_by_default(self) -> None:
+        verdict = await self.verdict(accept_service_provider_codes=False)
+        self.assertEqual(verdict.outcome, VerificationOutcome.INVALID)
+        self.assertEqual(verdict.failure, VerificationFailure.NUMBER_NOT_COVERED)
+
+    async def test_a_stack_that_accepts_codes_verifies_the_caller(self) -> None:
+        verdict = await self.verdict(accept_service_provider_codes=True)
+        self.assertEqual(verdict.outcome, VerificationOutcome.VALID)
 
 
 class EachAccountHoldsItsCallsToItsOwnPolicy(_TwoStacks):

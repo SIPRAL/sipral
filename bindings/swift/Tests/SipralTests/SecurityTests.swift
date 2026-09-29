@@ -14,10 +14,10 @@ import XCTest
 /// through this layer -- the Swift counterpart of
 /// `bindings/python/tests/test_security.py`. Two stacks on loopback with no
 /// registrar between them, one signing the call it places and the other
-/// verifying it. The full verification of a valid signature is proved
-/// against a test certificate authority in the Rust and C ABI tests and in
-/// the lab (`scripts/lab.sh security`); what this proves is the plumbing
-/// every half of it runs through.
+/// verifying it. A valid signature is verified against the chain the C ABI's
+/// tests keep in `bindings/fixtures/stir-provider-709J`, whose signing
+/// certificate names a service provider code and no number; beside that,
+/// what this proves is the plumbing every half of it runs through.
 final class SecurityTests: XCTestCase {
     /// Short, and the stacks offer one codec: a signed INVITE is some five
     /// hundred octets longer than an unsigned one, and past RFC 3261
@@ -74,6 +74,68 @@ final class SecurityTests: XCTestCase {
             usleep(20_000)
         }
         XCTAssertTrue(call.ended, "the caller never heard the 436")
+    }
+
+    /// One of the credentials `sipral_stir::testing` issues for the service
+    /// provider code 709J, checked against it by the C ABI's own tests: a
+    /// root, a chain whose signing certificate names that code and no
+    /// number, and its key.
+    private func provider(_ name: String, here: String = #filePath) throws -> [UInt8] {
+        let url = URL(fileURLWithPath: here)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../../fixtures/stir-provider-709J/\(name)")
+        return [UInt8](try Data(contentsOf: url))
+    }
+
+    /// The verdict a stack reaches on a call signed under the provider
+    /// chain, taking service provider codes or not.
+    private func verdict(acceptServiceProviderCodes: Bool) async throws -> VerificationEventData {
+        // a moment inside every certificate of the chain
+        let within: UInt64 = 1_790_000_000
+        let caller = try SipralStack(audio: .application, codecs: "PCMU")
+        let callee = try SipralStack(audio: .application, codecs: "PCMU")
+        defer { caller.close(); callee.close() }
+        try caller.stir(anchors: nil, unixSeconds: within)
+        try callee.stir(
+            anchors: try provider("anchor.pem"), unixSeconds: within,
+            acceptServiceProviderCodes: acceptServiceProviderCodes
+        )
+        let hex = String(decoding: try provider("signing-scalar.hex"), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var scalar: [UInt8] = []
+        var at = hex.startIndex
+        while at < hex.endIndex {
+            let next = hex.index(at, offsetBy: 2)
+            scalar.append(try XCTUnwrap(UInt8(hex[at..<next], radix: 16)))
+            at = next
+        }
+        let account = try caller.addAccount(
+            aor: "sip:+12155551212@a.test", registrarAddress: callee.bindAddress,
+            security: AccountSecurity(stirKey: scalar, stirCertificateUrl: url)
+        )
+        _ = try callee.addAccount(aor: "sip:12125551213@b.test", registrarAddress: caller.bindAddress)
+        let calleeEvents = Recorder(callee.events())
+        let call = try caller.placeCall(account: account, target: "sip:12125551213@\(callee.bindAddress)")
+        defer { call.close() }
+        let wanted = await calleeEvents.first(within: 5) { $0.kind == .callerVerification }
+        let asking = try XCTUnwrap(wanted, "the certificate was never asked for")
+        XCTAssertEqual(try XCTUnwrap(asking.verificationData).stage, .certificateWanted)
+        try callee.stirCertificate(call: asking.call, chain: try provider("chain.pem"))
+        let judged = await calleeEvents.first(within: 5) {
+            $0.kind == .callerVerification && $0.verificationData?.stage == .verified
+        }
+        return try XCTUnwrap(try XCTUnwrap(judged, "no verdict").verificationData)
+    }
+
+    func testACertificateNamingOnlyACodeCoversNoNumberByDefault() async throws {
+        let judged = try await verdict(acceptServiceProviderCodes: false)
+        XCTAssertEqual(judged.outcome, .invalid)
+        XCTAssertEqual(judged.failure, .numberNotCovered)
+    }
+
+    func testAStackThatAcceptsCodesVerifiesTheCaller() async throws {
+        let judged = try await verdict(acceptServiceProviderCodes: true)
+        XCTAssertEqual(judged.outcome, .valid)
     }
 
     func testAnSdesCallReportsHowItIsProtected() async throws {

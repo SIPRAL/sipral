@@ -162,6 +162,12 @@ CERTIFICATE_WANTED` asks for the chain at `certificate_url`, which
 `stack.stir_certificate(event.call, chain)` hands over (`None` for one that
 could not be had); the verdict follows as the same kind, just before the
 call, and `event.identity.verification` carries it on every call event.
+A certificate covers the numbers its TNAuthList names (RFC 8226 §9); one that
+names a service provider code instead, as a SHAKEN certificate does, covers
+no caller until `stack.stir(anchors, accept_service_provider_codes=True)`
+says the deployment trusts its certified providers that far.
+`tests/test_security.py` proves both verdicts with the chain in
+`bindings/fixtures/stir-provider-709J`.
 
 `add_account(..., srtp=lib.SIPRAL_SRTP_REQUIRED, srtp_suites=[...])` holds
 every call of one account to its own SRTP policy and suites; a call may ask
@@ -370,7 +376,10 @@ a stream, since that INVITE is too large for a datagram, so on a stack
 signalling over TCP or TLS to the server — and once it answers, the copies
 of this end's audio and the far end's leave from them as the call runs.
 `call.recording_session` is its handle, and `call.stop_recording_to()` hangs
-it up. `tests/test_protocols.py` proves each: text and feedback between two
+it up. The copies of an encrypted call are offered as SRTP with SDES keys of
+their own (RFC 7866 §12.2), and a stream the server will not take that way
+gets nothing; `add_account(..., recording_in_clear=True)` lets that
+account's encrypted calls be recorded as plain RTP instead. `tests/test_protocols.py` proves each: text and feedback between two
 stacks on loopback, and the conference, presence and recording server
 played by hand.
 

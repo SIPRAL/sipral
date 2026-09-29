@@ -189,6 +189,12 @@ CertificateWanted` asks for the chain at `CertificateUrl`, which
 `stack.StirCertificate(args.Call, chain)` hands over (`null` for one that
 could not be had); the verdict follows as the same kind, just before the
 call, and `Identity.Verification` carries it on every call event.
+A certificate covers the numbers its TNAuthList names (RFC 8226 §9); one that
+names a service provider code instead, as a SHAKEN certificate does, covers
+no caller until `stack.Stir(anchors, acceptServiceProviderCodes: true)` says
+the deployment trusts its certified providers that far.
+`Sipral.Tests/SecurityTests.cs` proves both verdicts with the chain in
+`bindings/fixtures/stir-provider-709J`.
 `new AccountSecurity(SipralSrtp.Required, new[] { "AES_CM_128_HMAC_SHA1_80" })`
 holds every call of one account to its own SRTP policy and suites; a call
 may ask for more and never less. `call.Media.Encryption()` is the encryption
@@ -395,7 +401,10 @@ since that INVITE is too large for a datagram, so on a stack signalling over
 TCP or TLS to the server — and once it answers, the copies of this end's
 audio and the far end's leave from them as the call runs.
 `call.RecordingSession` is its handle, and `call.StopRecordingTo()` hangs it
-up. `Sipral.Tests/ProtocolTests.cs` proves each: text and feedback between
+up. The copies of an encrypted call are offered as SRTP with SDES keys of
+their own (RFC 7866 §12.2), and a stream the server will not take that way
+gets nothing; `new AccountSecurity(..., RecordingInClear: true)` lets that
+account's encrypted calls be recorded as plain RTP instead. `Sipral.Tests/ProtocolTests.cs` proves each: text and feedback between
 two stacks on loopback, and the conference, presence and recording server
 played by hand.
 

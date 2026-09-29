@@ -12,6 +12,7 @@ recording server.
 from __future__ import annotations
 
 import asyncio
+import base64
 import queue
 import socket
 import threading
@@ -24,6 +25,7 @@ from sipral import (
     SipralError,
     Stack,
 )
+from sipral._sipral_cffi import lib
 from sipral.enums import (
     Activity,
     AudioMode,
@@ -556,6 +558,76 @@ class Protocols(unittest.IsolatedAsyncioTestCase):
             call.record_to("sip:srs@example.com")
         self.assertEqual(refused.exception.status, Status.WRONG_STATE)
         await self.first(bob.events, EventKind.INCOMING_CALL)
+
+    async def recording_offer_of_an_encrypted_call(self, *, recording_in_clear: bool) -> str:
+        """The recording session's offer for a call keyed with SDES (RFC
+        4568), from an account that does or does not let its encrypted calls
+        be recorded in the clear."""
+        server = StreamPeer()
+        self.addCleanup(server.close)
+        rtp = self.peer()
+        stack = self.stack(signalling=Transport.TCP, signalling_server=server.address)
+        stack.add_account(
+            "sip:alice@sipral.invalid",
+            registrar_address=server.address,
+            srtp=int(lib.SIPRAL_SRTP_REQUIRED),
+            recording_in_clear=recording_in_clear,
+        )
+        self.assertTrue(await asyncio.to_thread(server.connected.wait, TIMEOUT))
+
+        # thirty octets of key and salt, nobody's
+        key = base64.b64encode(bytes(range(30))).decode()
+        sdp = (
+            "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"
+            f"m=audio {rtp.port} RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{key}\r\n"
+        )
+        server.send(
+            "INVITE sip:alice@sipral.invalid SIP/2.0\r\n"
+            f"Via: SIP/2.0/TCP {server.address};branch=z9hG4bK-keyed-1\r\n"
+            "Max-Forwards: 70\r\n"
+            "From: <sip:bob@example.com>;tag=bob\r\n"
+            "To: <sip:alice@sipral.invalid>\r\n"
+            "Call-ID: keyed-call\r\n"
+            "CSeq: 1 INVITE\r\n"
+            f"Contact: <sip:bob@{server.address};transport=tcp>\r\n"
+            "Content-Type: application/sdp\r\n"
+            f"Content-Length: {len(sdp)}\r\n\r\n" + sdp
+        )
+        incoming = await self.first(stack.events, EventKind.INCOMING_CALL)
+        call = stack.answer_call(incoming)
+        self.calls.append(call)
+        ok = await asyncio.to_thread(
+            server.message,
+            lambda m: m.startswith("SIP/2.0 200") and header("CSeq", m) == "1 INVITE",
+        )
+        self.assertIn("RTP/SAVP", ok, "the call itself is keyed")
+        server.send(
+            f"ACK {uri(header('Contact', ok))} SIP/2.0\r\n"
+            f"Via: SIP/2.0/TCP {server.address};branch=z9hG4bK-keyed-ack\r\n"
+            "Max-Forwards: 70\r\n"
+            "From: <sip:bob@example.com>;tag=bob\r\n"
+            f"To: {header('To', ok)}\r\n"
+            "Call-ID: keyed-call\r\n"
+            "CSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n"
+        )
+        while call.media is None:
+            await asyncio.wait_for(call.events.get(), timeout=TIMEOUT)
+        call.record_to("sip:srs@example.com")
+        return await asyncio.to_thread(
+            server.message, lambda m: m.startswith("INVITE sip:srs@example.com")
+        )
+
+    async def test_an_encrypted_call_is_offered_to_its_recorder_as_srtp(self) -> None:
+        offer = await self.recording_offer_of_an_encrypted_call(recording_in_clear=False)
+        self.assertEqual(offer.count("RTP/SAVP"), 2, offer)
+        self.assertIn("a=crypto:", offer)
+
+    async def test_an_account_that_allows_it_records_an_encrypted_call_in_the_clear(self) -> None:
+        offer = await self.recording_offer_of_an_encrypted_call(recording_in_clear=True)
+        self.assertEqual(offer.count("RTP/AVP"), 2, offer)
+        self.assertNotIn("RTP/SAVP", offer)
+        self.assertNotIn("a=crypto:", offer)
 
 
 if __name__ == "__main__":

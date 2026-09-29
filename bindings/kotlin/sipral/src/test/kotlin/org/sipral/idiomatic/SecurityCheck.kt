@@ -5,13 +5,15 @@
 // org.sipral.idiomatic -- the Kotlin counterpart of
 // bindings/python/tests/test_security.py. Two clients on loopback with no
 // registrar between them, one signing the call it places and the other
-// verifying it. The full verification of a valid signature is proved against
-// a test certificate authority in the Rust and C ABI tests and in the lab
-// (scripts/lab.sh security); what this proves is the plumbing every half of
-// it runs through. Run by IdiomaticCheck.kt's main, under -Xcheck:jni.
+// verifying it. A valid signature is verified against the chain the C ABI's
+// tests keep in bindings/fixtures/stir-provider-709J, whose signing
+// certificate names a service provider code and no number; beside that, what
+// this proves is the plumbing every half of it runs through. Run by
+// IdiomaticCheck.kt's main, under -Xcheck:jni.
 
 package org.sipral.idiomatic
 
+import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
@@ -145,8 +147,75 @@ private suspend fun sdesReported(): String {
     }
 }
 
+/**
+ * One of the credentials `sipral_stir::testing` issues for the service
+ * provider code 709J, checked against it by the C ABI's own tests: a root, a
+ * chain whose signing certificate names that code and no number, and its key.
+ * Found from the directory the JVM runs in, anywhere inside the checkout.
+ */
+private fun provider(name: String): ByteArray {
+    var at: File? = File(System.getProperty("user.dir")).absoluteFile
+    while (at != null) {
+        val wanted = File(at, "bindings/fixtures/stir-provider-709J/$name")
+        if (wanted.isFile) {
+            return wanted.readBytes()
+        }
+        at = at.parentFile
+    }
+    error("bindings/fixtures/stir-provider-709J/$name is not above ${System.getProperty("user.dir")}")
+}
+
+// a moment inside every certificate of the provider chain
+private const val WITHIN = 1_790_000_000L
+
+/** The verdict a client reaches on a call signed under the provider chain,
+ * taking service provider codes or not. */
+private suspend fun providerVerdict(acceptServiceProviderCodes: Boolean): SipralVerification {
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", codecs = "PCMU").use { caller ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", codecs = "PCMU").use { callee ->
+            caller.stir(null, unixSeconds = WITHIN)
+            callee.stir(
+                provider("anchor.pem"), unixSeconds = WITHIN, acceptServiceProviderCodes = acceptServiceProviderCodes,
+            )
+            val scalar = String(provider("signing-scalar.hex")).trim().chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            val account = caller.addAccount(
+                aor = "sip:+12155551212@a.test",
+                registrarAddress = callee.bindAddress,
+                security = SipralAccountSecurity(stirKey = scalar, stirCertificateUrl = URL),
+            )
+            callee.addAccount(aor = "sip:12125551213@b.test", registrarAddress = caller.bindAddress)
+            val (call, wanted) = callee.events.awaitNext(SipralEventKind.CALLER_VERIFICATION, timeoutMs = 10_000) {
+                caller.placeCall(account, "sip:12125551213@${callee.bindAddress}")
+            }
+            call.use {
+                assertEquals(SipralVerificationStage.CERTIFICATE_WANTED, assertNotNull(verificationOf(wanted)).stage)
+                val (_, judged) = callee.events.awaitNext(SipralEventKind.CALLER_VERIFICATION, timeoutMs = 10_000) {
+                    callee.stirCertificate(wanted.call, provider("chain.pem"))
+                }
+                val verdict = assertNotNull(verificationOf(judged))
+                assertEquals(SipralVerificationStage.VERIFIED, verdict.stage)
+                return verdict
+            }
+        }
+    }
+}
+
+private suspend fun aCodeCoversNoNumberByDefault(): String {
+    val verdict = providerVerdict(acceptServiceProviderCodes = false)
+    assertEquals(SipralVerificationOutcome.INVALID, verdict.outcome)
+    assertEquals(SipralVerificationFailure.NUMBER_NOT_COVERED, verdict.failure)
+    return "a certificate naming only a service provider code covered no number by default"
+}
+
+private suspend fun aClientThatAcceptsCodesVerifiesTheCaller(): String {
+    assertEquals(SipralVerificationOutcome.VALID, providerVerdict(acceptServiceProviderCodes = true).outcome)
+    return "a client that accepts service provider codes verified the caller"
+}
+
 /** Everything above, for IdiomaticCheck.kt's main. */
 internal suspend fun securityChecks(): String = listOf(
     signedAndRefused(),
     sdesReported(),
+    aCodeCoversNoNumberByDefault(),
+    aClientThatAcceptsCodesVerifiesTheCaller(),
 ).joinToString(", ")

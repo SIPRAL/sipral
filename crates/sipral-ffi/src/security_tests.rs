@@ -694,3 +694,28 @@ fn the_encryption_report_says_how_an_sdes_call_is_protected() {
     );
     assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
 }
+
+/// The four layers prove a service provider code's coverage with the files
+/// in `bindings/fixtures/stir-provider-709J`, having no certificate
+/// authority of their own: those files are the credentials
+/// `sipral_stir::testing` issues for the code `709J`, and stay so.
+#[test]
+fn the_layers_provider_fixture_is_the_testing_provider_credentials() {
+    let issued = sipral_stir::testing::provider_credentials("709J");
+    assert_eq!(
+        include_str!("../../../bindings/fixtures/stir-provider-709J/anchor.pem"),
+        issued.anchor
+    );
+    assert_eq!(
+        include_str!("../../../bindings/fixtures/stir-provider-709J/chain.pem"),
+        issued.chain
+    );
+    let hex = include_str!("../../../bindings/fixtures/stir-provider-709J/signing-scalar.hex")
+        .trim_end()
+        .as_bytes();
+    let scalar: Vec<u8> = hex
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII"), 16).expect("hex"))
+        .collect();
+    assert_eq!(scalar, issued.key);
+}

@@ -183,5 +183,57 @@ final class RecordingServerTests: XCTestCase {
             XCTAssertEqual((error as? SipralError)?.status, .wrongState, "nothing records the call now")
         }
     }
+
+    /// The recording session's offer for a call keyed with SDES (RFC 4568),
+    /// placed from an account that does or does not let its encrypted calls
+    /// be recorded in the clear.
+    private func recordingOfferOfAnEncryptedCall(recordingInClear: Bool) async throws -> String {
+        let first = try UDPSocket(host: "127.0.0.1", port: 0)
+        let second = try UDPSocket(host: "127.0.0.1", port: 0)
+        defer { first.close(); second.close() }
+        let server = try FakeRecordingServer(
+            streams: (UDPSocket.parse(first.localAddress).port, UDPSocket.parse(second.localAddress).port)
+        )
+        defer { server.stop() }
+
+        let alice = try SipralStack(audio: .application, codecs: "PCMU")
+        let bob = try SipralStack(audio: .application, codecs: "PCMU")
+        defer { alice.close(); bob.close() }
+        let aliceAccount = try alice.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress,
+            security: AccountSecurity(srtp: .required, recordingInClear: recordingInClear)
+        )
+        _ = try bob.addAccount(
+            aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress,
+            security: AccountSecurity(srtp: .required)
+        )
+        let bobEvents = Recorder(bob.events())
+        let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+        defer { aliceCall.close() }
+        let arrived = await bobEvents.first(within: 10) { $0.kind == .incomingCall }
+        let bobCall = try bob.answerCall(try XCTUnwrap(arrived, "no incoming call"))
+        defer { bobCall.close() }
+        let up = await eventually(within: 10) { aliceCall.media != nil && bobCall.media != nil }
+        XCTAssertTrue(up, "media never started")
+        XCTAssertEqual(try XCTUnwrap(aliceCall.media).encryption().first?.encrypted, true, "the call itself is keyed")
+
+        _ = try aliceCall.record(toServer: "sip:srs@127.0.0.1", destination: server.address)
+        let offered = await eventually(within: 5) { server.requests.contains { $0.hasPrefix("INVITE ") } }
+        XCTAssertTrue(offered, "the recording session was never offered")
+        return try XCTUnwrap(server.requests.first { $0.hasPrefix("INVITE ") })
+    }
+
+    func testAnEncryptedCallIsOfferedToItsRecorderAsSrtp() async throws {
+        let offer = try await recordingOfferOfAnEncryptedCall(recordingInClear: false)
+        XCTAssertEqual(offer.components(separatedBy: "RTP/SAVP").count - 1, 2, offer)
+        XCTAssertTrue(offer.contains("a=crypto:"), offer)
+    }
+
+    func testAnAccountThatAllowsItRecordsAnEncryptedCallInTheClear() async throws {
+        let offer = try await recordingOfferOfAnEncryptedCall(recordingInClear: true)
+        XCTAssertEqual(offer.components(separatedBy: "RTP/AVP").count - 1, 2, offer)
+        XCTAssertFalse(offer.contains("RTP/SAVP"), offer)
+        XCTAssertFalse(offer.contains("a=crypto:"), offer)
+    }
 }
 #endif

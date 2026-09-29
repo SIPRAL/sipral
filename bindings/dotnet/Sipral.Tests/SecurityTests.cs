@@ -3,7 +3,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Sipral;
@@ -17,9 +19,10 @@ namespace Sipral.Tests;
 /// them — the .NET counterpart of
 /// <c>bindings/python/tests/test_security.py</c>.
 ///
-/// The full verification of a valid signature is proved against a test
-/// certificate authority in the Rust and C ABI tests and in the lab
-/// (<c>scripts/lab.sh security</c>). What this proves is the plumbing every
+/// A valid signature is verified against the chain the C ABI's tests keep in
+/// <c>bindings/fixtures/stir-provider-709J</c>, whose signing certificate
+/// names a service provider code and no number. Beside that, what this
+/// proves is the plumbing every
 /// half of it runs through: the account's signing key and URL reach the
 /// INVITE, the verifying stack asks for the certificate by
 /// <see cref="SipralEventKind.CallerVerification"/>,
@@ -131,6 +134,60 @@ public sealed class SecurityTests : IDisposable
             call.Close();
             answered.Close();
         }
+    }
+
+    // a moment inside every certificate of the provider chain below
+    private const ulong Within = 1_790_000_000;
+
+    /// <summary>One of the credentials <c>sipral_stir::testing</c> issues
+    /// for the service provider code 709J, checked against it by the C ABI's
+    /// own tests: a root, a chain whose signing certificate names that code
+    /// and no number, and its key.</summary>
+    private static string Provider(string name, [CallerFilePath] string here = "") =>
+        Path.Combine(Path.GetDirectoryName(here)!, "..", "..", "fixtures", "stir-provider-709J", name);
+
+    private async Task<SipralVerificationEventInfo> VerdictAsync(bool acceptServiceProviderCodes)
+    {
+        _caller.Stir(null, unixSeconds: Within);
+        _callee.Stir(
+            File.ReadAllBytes(Provider("anchor.pem")), unixSeconds: Within,
+            acceptServiceProviderCodes: acceptServiceProviderCodes);
+        var key = Convert.FromHexString(File.ReadAllText(Provider("signing-scalar.hex")).Trim());
+        var signing = _caller.AddAccount(
+            "sip:+12155551212@a.test", registrarAddress: _callee.BindAddress,
+            security: new AccountSecurity(StirKey: key, StirCertificateUrl: Url));
+        _callee.AddAccount("sip:12125551213@b.test", registrarAddress: _caller.BindAddress);
+        var call = _caller.PlaceCall(signing, $"sip:12125551213@{_callee.BindAddress}");
+        try
+        {
+            var wanted = await FirstMatchingAsync(
+                _callee.Events, e => e.Kind == SipralEventKind.CallerVerification, Timeout);
+            Assert.Equal(SipralVerificationStage.CertificateWanted, wanted.Verification!.Stage);
+            _callee.StirCertificate(wanted.Call, File.ReadAllBytes(Provider("chain.pem")));
+            var verdict = (await FirstMatchingAsync(
+                _callee.Events, e => e.Kind == SipralEventKind.CallerVerification, Timeout)).Verification!;
+            Assert.Equal(SipralVerificationStage.Verified, verdict.Stage);
+            return verdict;
+        }
+        finally
+        {
+            call.Close();
+        }
+    }
+
+    [Fact]
+    public async Task ACertificateNamingOnlyACodeCoversNoNumberByDefault()
+    {
+        var verdict = await VerdictAsync(acceptServiceProviderCodes: false);
+        Assert.Equal(SipralVerificationOutcome.Invalid, verdict.Outcome);
+        Assert.Equal(SipralVerificationFailure.NumberNotCovered, verdict.Failure);
+    }
+
+    [Fact]
+    public async Task AStackThatAcceptsCodesVerifiesTheCaller()
+    {
+        var verdict = await VerdictAsync(acceptServiceProviderCodes: true);
+        Assert.Equal(SipralVerificationOutcome.Valid, verdict.Outcome);
     }
 
     [Fact]

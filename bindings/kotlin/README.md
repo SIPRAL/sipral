@@ -203,6 +203,12 @@ asks at `CERTIFICATE_WANTED` for the chain at `certificateUrl`, which
 `client.stirCertificate(event.call, chain)` hands over (null for one that
 could not be had); the verdict follows as the same kind, just before the
 call, and `SipralCallerIdentity.verification` carries it.
+A certificate covers the numbers its TNAuthList names (RFC 8226 §9); one that
+names a service provider code instead, as a SHAKEN certificate does, covers
+no caller until `client.stir(anchors, acceptServiceProviderCodes = true)`
+says the deployment trusts its certified providers that far.
+`SecurityCheck.kt` proves both verdicts with the chain in
+`bindings/fixtures/stir-provider-709J`.
 `SipralAccountSecurity(srtp = SipralSrtp.REQUIRED, srtpSuites =
 listOf("AES_CM_128_HMAC_SHA1_80"))` holds every call of one account to its
 own SRTP policy and suites; a call may ask for more and never less.
@@ -531,7 +537,11 @@ TCP connection to `destination` this client opens for it, or, with none,
 where the account sends -- a client signalling over TCP or TLS, since the
 INVITE is too large for UDP. Both parties' audio is copied from two sockets
 of its own; the session follows the call's holds and transfers and ends
-with it, and `stop()` hangs it up. `ProtocolsCheck.kt`, run with
+with it, and `stop()` hangs it up. The copies of an encrypted call are
+offered as SRTP with SDES keys of their own (RFC 7866 §12.2), and a stream
+the server will not take that way gets nothing;
+`SipralAccountSecurity(recordingInClear = true)` lets that account's
+encrypted calls be recorded as plain RTP instead. `ProtocolsCheck.kt`, run with
 `IdiomaticCheck.kt`, proves each of these on loopback, against a
 notifier, a compositor and a recording server played by the check itself.
 

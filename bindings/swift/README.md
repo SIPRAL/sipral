@@ -277,6 +277,12 @@ account that reports (the default) or is `.strict`:
 `stack.stirCertificate(call: event.call, chain:)` hands over (`nil` for one
 that could not be had); the verdict follows as the same kind, just before the
 call, and `callData.verification` carries it on every call event.
+A certificate covers the numbers its TNAuthList names (RFC 8226 §9); one that
+names a service provider code instead, as a SHAKEN certificate does, covers
+no caller until `stack.stir(anchors:acceptServiceProviderCodes: true)` says
+the deployment trusts its certified providers that far.
+`Tests/SipralTests/SecurityTests.swift` proves both verdicts with the chain in
+`bindings/fixtures/stir-provider-709J`.
 `AccountSecurity(srtp: .required, srtpSuites: ["AES_CM_128_HMAC_SHA1_80"])`
 holds every call of one account to its own SRTP policy and suites; a call may
 ask for more and never less. `call.media?.encryption()` is the encryption
@@ -586,7 +592,11 @@ the metadata (RFC 7865) and a stream per party, over a TCP connection to
 sends -- a stack signalling over TCP or TLS, since the INVITE is too large
 for UDP. Both parties' audio is copied from two sockets of its own; the
 session follows the call's holds and transfers and ends with it, and
-`stop()` hangs it up. `Tests/SipralTests/RecordingServerTests.swift` and
+`stop()` hangs it up. The copies of an encrypted call are offered as SRTP
+with SDES keys of their own (RFC 7866 §12.2), and a stream the server will
+not take that way gets nothing; `AccountSecurity(recordingInClear: true)`
+lets that account's encrypted calls be recorded as plain RTP instead.
+`Tests/SipralTests/RecordingServerTests.swift` and
 `ProtocolsTests.swift` prove each of these.
 
 ## A local conference

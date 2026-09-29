@@ -364,6 +364,76 @@ public sealed class ProtocolTests : IDisposable
         Assert.Equal(SipralStatus.WrongState, twice.Status);
     }
 
+    /// <summary>The recording session's offer for a call keyed with SDES
+    /// (RFC 4568), from an account that does or does not let its encrypted
+    /// calls be recorded in the clear.</summary>
+    private async Task<string> RecordingOfferOfAnEncryptedCallAsync(bool recordingInClear)
+    {
+        var server = Own(new StreamPeer());
+        var rtp = Own(new Peer());
+        var stack = Own(new SipralStack(
+            audio: SipralAudio.Application, codecs: "PCMU", signalling: SipralTransport.Tcp, signallingServer: server.Address));
+        stack.AddAccount(
+            "sip:alice@sipral.invalid", registrarAddress: server.Address,
+            security: new AccountSecurity(SipralSrtp.Required, RecordingInClear: recordingInClear));
+        await server.ConnectedAsync();
+
+        // thirty octets of key and salt, nobody's
+        var key = Convert.ToBase64String(Enumerable.Range(0, 30).Select(i => (byte)i).ToArray());
+        var sdp = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n" +
+                  $"m=audio {rtp.Port} RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n" +
+                  $"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{key}\r\n";
+        server.Send(
+            "INVITE sip:alice@sipral.invalid SIP/2.0\r\n" +
+            $"Via: SIP/2.0/TCP {server.Address};branch=z9hG4bK-keyed-1\r\n" +
+            "Max-Forwards: 70\r\n" +
+            "From: <sip:bob@example.com>;tag=bob\r\n" +
+            "To: <sip:alice@sipral.invalid>\r\n" +
+            "Call-ID: keyed-call\r\n" +
+            "CSeq: 1 INVITE\r\n" +
+            $"Contact: <sip:bob@{server.Address};transport=tcp>\r\n" +
+            "Content-Type: application/sdp\r\n" +
+            $"Content-Length: {Encoding.UTF8.GetByteCount(sdp)}\r\n\r\n" + sdp);
+        var incoming = await FirstMatchingAsync(stack.Events, e => e.Kind == SipralEventKind.IncomingCall);
+        var call = Own(stack.AnswerCall(incoming));
+        var ok = await server.MessageAsync(m => m.StartsWith("SIP/2.0 200", StringComparison.Ordinal) && Peer.Header("CSeq", m) == "1 INVITE");
+        Assert.Contains("RTP/SAVP", ok);
+        server.Send(
+            $"ACK {Peer.Uri(Peer.Header("Contact", ok)!)} SIP/2.0\r\n" +
+            $"Via: SIP/2.0/TCP {server.Address};branch=z9hG4bK-keyed-ack\r\n" +
+            "Max-Forwards: 70\r\n" +
+            "From: <sip:bob@example.com>;tag=bob\r\n" +
+            $"To: {Peer.Header("To", ok)}\r\n" +
+            "Call-ID: keyed-call\r\n" +
+            "CSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n");
+        using (var cts = new CancellationTokenSource(Timeout))
+        {
+            Assert.NotNull(await call.WaitForMediaAsync(cts.Token));
+        }
+        call.RecordTo("sip:srs@example.com");
+        return await server.MessageAsync(m => m.StartsWith("INVITE sip:srs@example.com", StringComparison.Ordinal));
+    }
+
+    private static int Count(string text, string wanted) =>
+        (text.Length - text.Replace(wanted, "", StringComparison.Ordinal).Length) / wanted.Length;
+
+    [Fact]
+    public async Task AnEncryptedCallIsOfferedToItsRecorderAsSrtp()
+    {
+        var offer = await RecordingOfferOfAnEncryptedCallAsync(recordingInClear: false);
+        Assert.Equal(2, Count(offer, "RTP/SAVP"));
+        Assert.Contains("a=crypto:", offer);
+    }
+
+    [Fact]
+    public async Task AnAccountThatAllowsItRecordsAnEncryptedCallInTheClear()
+    {
+        var offer = await RecordingOfferOfAnEncryptedCallAsync(recordingInClear: true);
+        Assert.Equal(2, Count(offer, "RTP/AVP"));
+        Assert.DoesNotContain("RTP/SAVP", offer);
+        Assert.DoesNotContain("a=crypto:", offer);
+    }
+
     [Fact]
     public async Task ACallWithNoMediaYetCannotBeRecorded()
     {
