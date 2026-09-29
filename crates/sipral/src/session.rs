@@ -551,26 +551,7 @@ impl MediaSession {
         coder.set_annex_b(annex_b);
         let discontinuous = coder.annex_b();
         let frame_ticks = agreed.frame_ticks(frame_ms);
-        let stream = StreamConfig {
-            ssrc: identity.ssrc,
-            payload_type: plan.codec.payload(),
-            accepted: accepted(plan),
-            clock_rate: plan.codec.clock_rate(),
-            sequence: identity.sequence,
-            timestamp: identity.timestamp,
-            remote: plan.remote,
-            // a stream that stops sending in its pauses, whether this end's
-            // own suppression or Annex B's DTX does it, marks each talk
-            // spurt's first packet
-            silence_suppression: config.silence_suppression || discontinuous,
-            playout: BufferConfig::new(frame_ticks),
-            cname: config
-                .cname
-                .clone()
-                .unwrap_or_else(|| format!("sipral@{}", plan.local.ip())),
-            rtcp_bandwidth: config.rtcp_bandwidth,
-            voip_metrics_xr: plan.voip_metrics_xr,
-        };
+        let stream = stream_config(plan, config, &identity, discontinuous, frame_ticks);
         // the first RTCP report's random factor draws from this call's own
         // seeded randomness like every later one does (RFC 3550 §6.2, §6.3.2)
         // rather than a fixed number, or every call opened from the same
@@ -3243,6 +3224,38 @@ impl MediaSession {
             .map_or(Duration::ZERO, |recorder| recorder.recorded());
         self.events
             .push_back(MediaEvent::RecordingStopped { reason, written });
+    }
+}
+
+/// The RTP stream a call opens on `plan`: its identity, what it takes in,
+/// where it sends, and how its reports are sized. `discontinuous` is Annex
+/// B's DTX, which marks talk spurts the way this end's own suppression does.
+fn stream_config(
+    plan: &MediaPlan,
+    config: &MediaConfig,
+    identity: &StreamIdentity,
+    discontinuous: bool,
+    frame_ticks: u32,
+) -> StreamConfig {
+    StreamConfig {
+        ssrc: identity.ssrc,
+        payload_type: plan.codec.payload(),
+        accepted: accepted(plan),
+        clock_rate: plan.codec.clock_rate(),
+        sequence: identity.sequence,
+        timestamp: identity.timestamp,
+        remote: plan.remote,
+        // a stream that stops sending in its pauses, whether this end's own
+        // suppression or Annex B's DTX does it, marks each talk spurt's first
+        // packet
+        silence_suppression: config.silence_suppression || discontinuous,
+        playout: BufferConfig::new(frame_ticks),
+        cname: config
+            .cname
+            .clone()
+            .unwrap_or_else(|| format!("sipral@{}", plan.local.ip())),
+        rtcp_bandwidth: config.rtcp_bandwidth,
+        voip_metrics_xr: plan.voip_metrics_xr,
     }
 }
 

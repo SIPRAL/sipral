@@ -275,7 +275,7 @@ impl OutgoingCall {
     /// and the metadata, `Content-Disposition: recording-session` (§9.1).
     ///
     /// # Errors
-    /// [`UaError::Recording`] for metadata that cannot be written.
+    /// [`UaError::Recording`](crate::UaError::Recording) for metadata that cannot be written.
     pub fn recording_session(
         mut self,
         metadata: &crate::siprec::RecordingMetadata,

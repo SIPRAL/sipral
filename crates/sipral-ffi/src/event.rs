@@ -2924,6 +2924,32 @@ const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
     }
 }
 
+/// Real-time text the far end typed on `call`, `missing` blocks of it lost:
+/// `text` borrows from the caller for the one delivery.
+fn text_received(
+    known: &mut Vocabulary<'_>,
+    call: CallHandle,
+    missing: u32,
+    text: Option<&str>,
+) -> SipralEvent {
+    let mut payload = SipralTextEvent {
+        text: std::ptr::null(),
+        text_len: 0,
+        missing,
+    };
+    if let Some(text) = text {
+        payload.text = text.as_ptr().cast::<c_char>();
+        payload.text_len = text.len();
+    }
+    let mut out = SipralEvent::of(
+        known.stack,
+        SipralEventKind::TextReceived,
+        payload!(text: payload),
+    );
+    out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
+    out
+}
+
 /// Say a media event the way C says it.
 ///
 /// `None` for one this ABI has no word for, as with a signalling event: the
@@ -2949,22 +2975,7 @@ pub(crate) fn media(
     // text has an arm of its own: `reason` is the text itself, which is what
     // `media_reason` built it to be
     if let MediaEvent::TextReceived { missing, .. } = *event {
-        let mut payload = SipralTextEvent {
-            text: std::ptr::null(),
-            text_len: 0,
-            missing,
-        };
-        if let Some(text) = reason {
-            payload.text = text.as_ptr().cast::<c_char>();
-            payload.text_len = text.len();
-        }
-        let mut out = SipralEvent::of(
-            known.stack,
-            SipralEventKind::TextReceived,
-            payload!(text: payload),
-        );
-        out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
-        return Some(out);
+        return Some(text_received(known, call, missing, reason));
     }
     let mut payload = SipralMediaEvent::empty();
     if let Some(stream) = encryption.filter(|_| reports_encryption(event)) {

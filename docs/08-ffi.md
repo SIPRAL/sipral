@@ -237,9 +237,10 @@ Rules for the ABI:
   to `..._TURN_STREAM`, `..._AUDIO_DEVICES_CHANGED`, `..._CALL_ADDRESS_WANTED`
   and `..._STUN_SERVER`, with 44 held for audio devices. ABI 0.31 was written
   in four branches at once, so its numbers were handed out before any of them
-  was: 50, 51 and 52 are `..._CONFERENCE_CHANGED`, `..._TEXT_RECEIVED` and
-  `..._PRESENCE_CHANGED`, and 47 to 49 and 53 are held for the other three.
-  The next free number is 54.
+  was: 47 is `..._CALLER_VERIFICATION`, 48 and 49 are `..._IN_BAND_DIGIT`
+  and `..._PROGRESS_DETECTED`, 50, 51 and 52 are `..._CONFERENCE_CHANGED`,
+  `..._TEXT_RECEIVED` and `..._PRESENCE_CHANGED`, and 53 is
+  `..._TRANSPORT_FAILED`. The next free number is 54.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
@@ -1104,8 +1105,8 @@ is wrong. A registration already running is not lost meanwhile: it goes to
 REGISTER due while the connection is being made again waits for the next
 rung, and one asked for after `sipral_stack_transport_bind` goes at once.
 
-Events 47 to 52 are held for other features of the same minor; a build that
-does not have them names none of the six, and never raises them.
+Event 53 came in the same minor as events 47 to 52, which belong to other
+features of it.
 
 ### The log, the state snapshot and the RTP port range
 
@@ -1764,8 +1765,7 @@ off for none). A digit heard in the audio is
 `SIPRAL_DTMF_RTP` does so by itself on a call that negotiated no telephone
 event, where it used to be `SIPRAL_STATUS_NOT_SUPPORTED`.
 `SIPRAL_FEATURE_IN_BAND_SIGNALS` (`1 << 18`) says the build has all three.
-Event 47 is reserved in this minor for the caller-identity verdict that
-arrives with it.
+Event 47, in the same minor, is the caller-identity verdict.
 
 **Configuration is answered, never absorbed.** A codec name this build has no
 encoder for is `SIPRAL_STATUS_NOT_SUPPORTED` where the order is set, with the

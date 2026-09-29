@@ -4005,36 +4005,18 @@ impl MediaEngine {
             // arrives is the ordinary state of affairs
             return;
         };
-        let plan = match local.media_plan(remote, 0) {
-            Ok(Some(plan)) => plan,
-            Ok(None) => {
-                self.fail(call, MediaError::StreamRefused);
-                return;
-            }
-            // a secured stream the far end described with no key: under a
-            // policy that requires one, that is the policy's refusal, and a
-            // call this end placed is hung up for it
-            Err(SdpError::CryptoMissing { .. }) if managed.catalog.srtp().requires() => {
-                if let Some(managed) = self.calls.get_mut(&call) {
+        let plan = match keyed_plan(&managed.catalog, local, remote) {
+            Ok(plan) => plan,
+            Err((error, refused)) => {
+                // the policy's own refusal: a call this end placed is hung
+                // up for it
+                if refused && let Some(managed) = self.calls.get_mut(&call) {
                     managed.refused_keying = true;
                 }
-                self.fail(call, MediaError::SrtpRequired);
-                return;
-            }
-            Err(error) => {
-                self.fail(call, MediaError::from(error));
+                self.fail(call, error);
                 return;
             }
         };
-        if let Err(error) = keying_holds(&managed.catalog, &plan, remote) {
-            if error == MediaError::SrtpRequired
-                && let Some(managed) = self.calls.get_mut(&call)
-            {
-                managed.refused_keying = true;
-            }
-            self.fail(call, error);
-            return;
-        }
         let codec = match Codec::of_plan(&plan) {
             Ok(codec) => codec,
             Err(error) => {
@@ -5081,6 +5063,31 @@ fn any_secure_stream(description: &SessionDescription) -> bool {
         .media
         .iter()
         .any(|stream| !stream.is_rejected() && keying::is_secure(&stream.proto))
+}
+
+/// What the two descriptions agreed, held to the call's SRTP policy: the
+/// plan, or the error to end the call's media with and whether it is the
+/// policy's own refusal ([`MediaError::SrtpRequired`]).
+fn keyed_plan(
+    catalog: &CodecCatalog,
+    local: &SessionDescription,
+    remote: &SessionDescription,
+) -> Result<MediaPlan, (MediaError, bool)> {
+    let plan = match local.media_plan(remote, 0) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return Err((MediaError::StreamRefused, false)),
+        // a secured stream the far end described with no key: under a
+        // policy that requires one, that is the policy's refusal
+        Err(SdpError::CryptoMissing { .. }) if catalog.srtp().requires() => {
+            return Err((MediaError::SrtpRequired, true));
+        }
+        Err(error) => return Err((MediaError::from(error), false)),
+    };
+    keying_holds(catalog, &plan, remote).map_err(|error| {
+        let refused = error == MediaError::SrtpRequired;
+        (error, refused)
+    })?;
+    Ok(plan)
 }
 
 /// Whether the keys a plan settled on are ones this call will run with.
