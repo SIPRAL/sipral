@@ -19,7 +19,7 @@
 //! so the playable length of a stream is its final granule position less the
 //! pre-skip. An encoder pads the end of the audio out to a whole frame;
 //! setting the last page's granule position below what its packets add up
-//! to tells a player to drop the padding (§4.5), and that is what
+//! to tells a player to drop the padding (§4.4), and that is what
 //! [`Writer::finish`] does when it is told the real length.
 //!
 //! # Latency
@@ -272,7 +272,7 @@ pub enum Error {
     PageDuration,
     /// A length that the last page cannot express: longer than the audio
     /// written, or short enough to reach back before the start of the last
-    /// page (§4.5).
+    /// page (§4.4).
     Length {
         /// The length asked for, in samples at 48 kHz after the pre-skip.
         requested: u64,
@@ -456,7 +456,7 @@ impl<W: Write> Writer<W> {
     /// `length` is how much audio there really is, in samples at 48 kHz
     /// after the pre-skip; the last page's granule position becomes the
     /// pre-skip plus that, so a player drops whatever the last packet was
-    /// padded with (§4.5). `None` keeps every sample the packets decode to.
+    /// padded with (§4.4). `None` keeps every sample the packets decode to.
     ///
     /// # Errors
     ///
