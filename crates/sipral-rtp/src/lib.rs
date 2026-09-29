@@ -47,6 +47,7 @@ mod rtcp;
 mod rtcp_stats;
 mod rtcp_timer;
 mod rtcp_xr;
+pub mod rtt;
 mod source;
 pub mod srtp;
 mod voip_metrics;
