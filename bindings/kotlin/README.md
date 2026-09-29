@@ -457,6 +457,84 @@ two seconds, past which a call is answered 480. A voice agent behind a
 trunk takes `SipralInviteLimit.VOICE_AGENT`, a hundred and twenty-eight at
 once and twenty a second.
 
+### Real-time text, RTCP feedback and linear audio
+
+```kotlin
+val call = client.placeCall(account, target = "sip:bob@example.com", text = true, feedback = true)
+// on the far end: client.answerCall(event, text = true, feedback = true)
+scope.launch { call.text.collect { println(it.text) } }
+call.media?.sendText("hello")
+```
+
+`text = true` binds a second socket beside the audio one and offers
+real-time text on it (RFC 4103, T.140 with redundancy); `answerCall(event,
+text = true)` takes the text an offer carries. Once both ends agree,
+`media.sendText` types (a new line and BACKSPACE included), `call.text`
+is what the far end typed, each a `SipralTextEvent` with how many blocks
+were lost past recovery (`textOf` reads one off any event), and
+`media.hasText` says whether it was agreed -- `NOT_NEGOTIATED` from
+`sendText` otherwise. It is not offered on a call keyed by SRTP or
+gathering ICE, where it would travel in the clear.
+
+`feedback = true` offers RTP/AVPF with Generic NACKs and reduced-size RTCP
+(RFC 4585, RFC 5506); a far end that knows only RTP/AVP refuses the
+profile, so it is off by default. An offer that asks is answered on the
+profile whatever this end says, and `answerCall(event, feedback = true)`
+adds the NACKs and reduced size. `media.rtcpFeedback()` says what was
+agreed, and `statistics()` counts the NACKs, the early and reduced-size
+packets.
+
+`codecs` on `placeCall` and `answerCall` orders one call's codecs:
+`"L16/16000"` or `"L16/8000"` offers linear audio, which no default offer
+carries.
+
+### Conferences and presence
+
+```kotlin
+account.watchPresence("sip:bob@example.com")
+account.publishPresence(SipralPublishedPresence(SipralBasic.OPEN, SipralActivity.ON_THE_PHONE, "In a call"))
+val watched = call.subscribeConference()   // a call whose far end is a focus
+client.events.collect { event ->
+    presenceOf(event)?.let { println("${it.entity} ${SipralBasic.of(it.basic.toInt())} ${it.note}") }
+    conferenceOf(event)?.let { watched.conference()?.let { room -> println(room.members.map { m -> m.entity }) } }
+}
+```
+
+`account.subscribe(target, package)` is any RFC 6665 subscription, kept and
+refreshed by the client until `SipralSubscription.end()`;
+`watchPresence(target)` is one to `presence`, told as
+`SIPRAL_EVENT_KIND_PRESENCE_CHANGED` and read with `presenceOf`, `kind`
+`WATCHED`. `publishPresence` publishes the account's own (RFC 3903): the
+first call publishes, every later one modifies, the client refreshes it,
+and the same kind with `kind` `PUBLICATION` says what the compositor
+granted or why it refused; `unpublishPresence()` takes it away. A call
+whose far end is a conference's focus (`isfocus`, RFC 4579) names it with
+`call.conferenceUri()`, and `call.subscribeConference()` watches it: each
+notification is a `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` (`conferenceOf`),
+and `SipralSubscription.conference()` reads the whole picture -- subject,
+counts, and every member with its endpoint and status. This end says it is
+a focus with `placeCall(focus = true)`, `answerCall(event, focus = true)`
+or `call.setFocus(true)`.
+
+### Recording to a recording server
+
+```kotlin
+val session = call.recordTo("sip:srs@recorder.example.com", destination = "198.51.100.20:5060")
+// ...
+session.stop()
+```
+
+`recordTo(server, destination, host)` records a call whose media has
+started to a SIPREC recording server (RFC 7866): an INVITE with
+`Require: siprec`, the metadata (RFC 7865) and a stream per party, over a
+TCP connection to `destination` this client opens for it, or, with none,
+where the account sends -- a client signalling over TCP or TLS, since the
+INVITE is too large for UDP. Both parties' audio is copied from two sockets
+of its own; the session follows the call's holds and transfers and ends
+with it, and `stop()` hangs it up. `ProtocolsCheck.kt`, run with
+`IdiomaticCheck.kt`, proves each of these on loopback, against a
+notifier, a compositor and a recording server played by the check itself.
+
 ## The ConnectionService helper
 
 Split in two, so that the part worth testing needs no Android:

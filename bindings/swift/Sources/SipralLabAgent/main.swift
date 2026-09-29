@@ -22,7 +22,9 @@
 // trusts (the system's when unset). A connection that fails is printed as
 // "transport failed error=<...> tls=<...>" with Security's own words, and
 // tried again. SIPRAL_INVITE_LIMIT=voice-agent takes a trunk's rush of calls
-// the default rate floor would answer 480.
+// the default rate floor would answer 480. SIPRAL_TEXT=echo takes the
+// real-time text a call offers, prints each piece as "text <...>" and types
+// it back.
 
 #if canImport(Darwin)
 import Darwin
@@ -116,13 +118,19 @@ struct CallStreams: Sendable {
     let forMedia: AsyncStream<SipralEvent>
     let forEnd: AsyncStream<SipralEvent>
     let digits: AsyncStream<Character>
+    let text: AsyncStream<TextEventData>
 
     init(_ call: Call) {
         forMedia = call.events()
         forEnd = call.events()
         digits = call.dtmf()
+        text = call.text()
     }
 }
+
+/// With SIPRAL_TEXT=echo, what the caller types in real-time text (RFC
+/// 4103) is printed and typed back to it.
+let echoesText = environmentValue("SIPRAL_TEXT") == "echo"
 
 /// The last statistics read while the call was up. Once the far end's BYE
 /// is answered the stack ends the call's media on its own poll thread, and a
@@ -163,6 +171,12 @@ func runCall(_ call: Call, _ streams: CallStreams) async {
             call.media?.sendAudio(respond(frame))
         }
     }
+    let textTask = Task {
+        for await typed in streams.text {
+            print("text \(typed.text.debugDescription)")
+            try? call.media?.sendText(typed.text)
+        }
+    }
 
     let termination = await withTaskGroup(of: Termination.self) { group -> Termination in
         group.addTask {
@@ -182,6 +196,7 @@ func runCall(_ call: Call, _ streams: CallStreams) async {
         return first
     }
     talkTask.cancel()
+    textTask.cancel()
 
     if termination == .hangupRequested {
         // The call is still up, so this last reading is the final count.
@@ -477,7 +492,7 @@ await withTaskGroup(of: Void.self) { group in
             print("transport failed error=\(snake(error)) tls=\(snake(tls)): \(failed.detail ?? "")")
         }
         if event.kind == .incomingCall {
-            guard let call = try? stack.takeIncomingCall(event, mediaHost: bindHost) else { continue }
+            guard let call = try? stack.takeIncomingCall(event, mediaHost: bindHost, text: echoesText) else { continue }
             let streams = CallStreams(call)
             do {
                 try call.answer()

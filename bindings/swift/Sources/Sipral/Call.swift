@@ -26,6 +26,9 @@ public final class Call: @unchecked Sendable {
     private let dtmfBroadcast = Broadcast<Character>(
         label: "org.sipral.call.dtmf", policy: .bufferingNewest(Call.eventBuffer)
     )
+    private let textBroadcast = Broadcast<TextEventData>(
+        label: "org.sipral.call.text", policy: .bufferingNewest(Call.eventBuffer)
+    )
 
     /// A new reader of every event this call's handle names, decoded whole.
     ///
@@ -65,6 +68,15 @@ public final class Call: @unchecked Sendable {
         dtmfBroadcast.stream()
     }
 
+    /// A new reader of the real-time text the far end types (RFC 4103):
+    /// each `SipralEventKind.textReceived`'s `textData`, in order, for a call
+    /// placed or taken with `text: true` whose far end agreed a text stream.
+    /// The same rules as `dtmf()`: every reader gets everything from the
+    /// moment it asks, and every stream finishes when the call ends.
+    public func text() -> AsyncStream<TextEventData> {
+        textBroadcast.stream()
+    }
+
     /// How many readers of `events()` are still being fed -- `internal` for
     /// the same reason as `debugMediaSocketDescriptor`.
     var debugEventReaders: Int { eventBroadcast.readerCount }
@@ -100,18 +112,36 @@ public final class Call: @unchecked Sendable {
     /// `answering()`; `nil` for a call this end placed.
     private let incoming: CallEventData?
 
+    /// The socket this call's real-time text travels on, when it was placed
+    /// or taken with `text: true`: the call's until `media` exists, and the
+    /// media's from then on.
+    private let textSocket: UDPSocket?
+
+    /// The call's real-time text socket, as `host:port`, when it has one.
+    public let textAddress: String?
+
+    /// The recording session copying this call to a recording server, while
+    /// one does.
+    private var _recordingSession: RecordingSession?
+    public var recordingSession: RecordingSession? { stateQueue.sync { _recordingSession } }
+
     /// The raw descriptor `close()` releases on the no-media path -- `internal`
     /// rather than `private` only so `SipralTests` can watch it directly, the
     /// way a white-box concurrency test has to; nothing outside this module
     /// reads it, so the public surface this package exposes is unchanged.
     var debugMediaSocketDescriptor: Int32 { mediaSocket.fd }
 
-    init(stack: SipralStack, handle: SipralHandle, mediaSocket: UDPSocket, incoming: CallEventData? = nil) {
+    init(
+        stack: SipralStack, handle: SipralHandle, mediaSocket: UDPSocket, incoming: CallEventData? = nil,
+        textSocket: UDPSocket? = nil
+    ) {
         self.stack = stack
         self.handle = handle
         self.mediaSocket = mediaSocket
         self._mediaAddress = mediaSocket.localAddress
         self.incoming = incoming
+        self.textSocket = textSocket
+        self.textAddress = textSocket?.localAddress
     }
 
     /// Writes to this call's media socket -- used by `SipralStack` for what
@@ -139,7 +169,8 @@ public final class Call: @unchecked Sendable {
             // the stack until now; from the media handle on, `Media` does.
             stack.mediaSocketTaken(mediaAddress)
             if let minted = try? Media(
-                stack: stack, callHandle: handle, socket: mediaSocket, pumpsFrames: !stack.audioMode.isDevice
+                stack: stack, callHandle: handle, socket: mediaSocket, pumpsFrames: !stack.audioMode.isDevice,
+                textSocket: textSocket
             ) {
                 setMedia(minted)
             }
@@ -148,7 +179,11 @@ public final class Call: @unchecked Sendable {
             stateQueue.sync { _ended = true }
             eventBroadcast.finish(after: event)
             dtmfBroadcast.finish()
+            textBroadcast.finish()
             return
+        }
+        if let typed = event.textData {
+            textBroadcast.send(typed)
         }
         eventBroadcast.send(event)
         let isDigit = event.kindRaw == SipralEventKind.digitReceived.rawValue
@@ -173,11 +208,41 @@ public final class Call: @unchecked Sendable {
 
     /// `sipral_call_answer_media`: accept, with this stack running the audio
     /// through the media socket this call already opened.
-    public func answer() throws {
-        try retryingBusy {
-            try Sipral.callAnswerMedia(
-                stack: stack.handle, call: handle, mediaAddress: mediaAddress, nowMs: stack.nowMs()
-            )
+    ///
+    /// A call taken with `text: true` takes the real-time text the offer
+    /// carries, on its own socket. `codecs` answers in that order of this
+    /// build's codecs instead of the stack's -- `L16/16000` for linear
+    /// audio -- and `focus` says this end is the focus of a conference
+    /// (`isfocus`, RFC 4579) on the answer. An offer that asked for RTCP
+    /// feedback is answered on RTP/AVPF whatever this says (RFC 4585 §4.1
+    /// leaves an answerer no other way to take the stream); `feedback` adds
+    /// what this end does with it, Generic NACKs and reduced-size RTCP. Any
+    /// of these answers through `sipral_call_answer_with`.
+    public func answer(codecs: String? = nil, focus: Bool = false, feedback: Bool = false) throws {
+        guard textSocket != nil || codecs != nil || focus || feedback else {
+            try retryingBusy {
+                try Sipral.callAnswerMedia(
+                    stack: stack.handle, call: handle, mediaAddress: mediaAddress, nowMs: stack.nowMs()
+                )
+            }
+            return
+        }
+        try CStrings.with([mediaAddress, textAddress, codecs]) { parts in
+            var config = sipral_call_config_t.sized()
+            config.media_address = parts[0].pointer
+            config.media_address_len = parts[0].count
+            config.text_address = parts[1].pointer
+            config.text_address_len = parts[1].count
+            config.codecs = parts[2].pointer
+            config.codecs_len = parts[2].count
+            config.focus = focus ? 1 : 0
+            config.feedback = feedback ? SipralToggle.on.rawValue : 0
+            // straight to the C entry point: the printed wrapper points
+            // `headers` at an empty array, and an answer is refused any
+            // `headers` at all
+            try retryingBusy {
+                try Sipral.check(sipral_call_answer_with(stack.handle, handle, &config, stack.nowMs()))
+            }
         }
     }
 
@@ -378,6 +443,116 @@ public final class Call: @unchecked Sendable {
         try retryingBusy { try Sipral.callConsentTone(stack: stack.handle, call: handle, tone: tone) }
     }
 
+    // MARK: - conferences
+
+    /// `sipral_call_set_focus`: say (`true`) or stop saying that this end is
+    /// the focus of a conference the call belongs to (RFC 4579 §4.2):
+    /// `isfocus` on the `Contact` of every message the call sends from here
+    /// on -- the answer, for a call not answered yet, and the next re-INVITE
+    /// or UPDATE for one that is up.
+    public func setFocus(_ focus: Bool) throws {
+        try retryingBusy { try Sipral.callSetFocus(stack: stack.handle, call: handle, focus: focus ? 1 : 0) }
+    }
+
+    /// `sipral_call_conference_uri`: the conference this call belongs to,
+    /// when its far end said it is a focus (`isfocus` on its `Contact`), and
+    /// `nil` when it said nothing of the kind.
+    public func conferenceUri() throws -> String? {
+        do {
+            return try ProtocolText.read { buffer in
+                try retryingBusy { try Sipral.callConferenceUri(stack: stack.handle, call: handle, buffer: &buffer) }
+            }
+        } catch let error as SipralError where error.status == .notAfocus {
+            return nil
+        }
+    }
+
+    /// `sipral_call_subscribe_conference`: subscribe to the conference
+    /// package of this call's focus (RFC 4579 §3.4), from the call's own
+    /// account. The subscription outlives the call; each notification is a
+    /// `SipralEventKind.conferenceChanged`, and `Subscription.conference()`
+    /// reads the picture. `.notAfocus` for a call whose far end is not one.
+    public func subscribeConference() throws -> Subscription {
+        let made = try retryingBusy {
+            try Sipral.callSubscribeConference(stack: stack.handle, call: handle, nowMs: stack.nowMs())
+        }
+        return Subscription(stack: stack, handle: made, package: "conference")
+    }
+
+    // MARK: - a recording server
+
+    /// `sipral_call_record_to`: record this call to the recording server
+    /// `server` (SIPREC, RFC 7866). The recording session -- an INVITE with
+    /// `Require: siprec`, the metadata (RFC 7865) and one send-only stream
+    /// per party -- goes from the call's account: to `destination`
+    /// (`host:port`) over a TCP connection this stack opens for it, or, with
+    /// no `destination`, where the account sends -- which RFC 3261 does not
+    /// let an INVITE this large reach over UDP, so the stack must then
+    /// signal over TCP or TLS. Two sockets are bound at `host` for the
+    /// copies of the audio. `.wrongState` before
+    /// `SipralEventKind.mediaStarted`, and for a call already recorded.
+    public func record(toServer server: String, destination: String? = nil, host: String = "127.0.0.1") throws -> RecordingSession {
+        guard let media else {
+            throw SipralError(status: .wrongState, message: "the call's media has not started")
+        }
+        let thisEnd = try UDPSocket(host: host, port: 0)
+        let farEnd: UDPSocket
+        do {
+            farEnd = try UDPSocket(host: host, port: 0)
+        } catch {
+            thisEnd.close()
+            throw error
+        }
+        let recording: SipralHandle
+        var link: UInt32?
+        do {
+            link = try destination.map { try stack.openRecordingLink(to: $0) }
+            recording = try CStrings.with([server, destination, thisEnd.localAddress, farEnd.localAddress]) { parts in
+                var config = sipral_record_config_t.sized()
+                config.server = parts[0].pointer
+                config.server_len = parts[0].count
+                config.destination = parts[1].pointer
+                config.destination_len = parts[1].count
+                config.transport = link ?? 0
+                config.this_end = parts[2].pointer
+                config.this_end_len = parts[2].count
+                config.far_end = parts[3].pointer
+                config.far_end_len = parts[3].count
+                return try retryingBusy {
+                    try Sipral.callRecordTo(stack: stack.handle, call: handle, config: config, nowMs: stack.nowMs())
+                }
+            }
+        } catch {
+            if let link {
+                stack.closeRecordingLink(link)
+            }
+            thisEnd.close()
+            farEnd.close()
+            throw error
+        }
+        media.copyRecording(thisEnd: thisEnd, farEnd: farEnd)
+        let session = RecordingSession(
+            handle: recording, thisEnd: thisEnd.localAddress, farEnd: farEnd.localAddress, call: self
+        )
+        stateQueue.sync { _recordingSession = session }
+        stack.recordingStarted(session.handle, of: self, link: link)
+        return session
+    }
+
+    /// `sipral_call_stop_recording_to`: stop recording this call to its
+    /// recording server; the recording session is hung up.
+    public func stopRecordingToServer() throws {
+        try retryingBusy { try Sipral.callStopRecordingTo(stack: stack.handle, call: handle, nowMs: stack.nowMs()) }
+        recordingEnded()
+    }
+
+    /// The recording session is over, whoever ended it: the copies stop and
+    /// their sockets close.
+    func recordingEnded() {
+        stateQueue.sync { _recordingSession = nil }
+        media?.stopCopyingRecording()
+    }
+
     /// Hang up if this call is still up, release its media, forget it.
     /// Idempotent, and safe to call regardless of how the call ended --
     /// including two callers racing to close the same call, such as a
@@ -403,10 +578,12 @@ public final class Call: @unchecked Sendable {
             media.close()
         } else {
             stack.giveBackMediaSocket(mediaSocket)
+            textSocket?.close()
         }
         stack.forgetCall(handle)
         eventBroadcast.finish()
         dtmfBroadcast.finish()
+        textBroadcast.finish()
     }
 }
 

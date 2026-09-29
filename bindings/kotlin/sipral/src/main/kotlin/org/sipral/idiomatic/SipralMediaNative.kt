@@ -69,6 +69,27 @@ internal object SipralMediaNative {
         outCall: LongArray,
     ): Int
 
+    /** `sipral_media_poll_text`: the next datagram due on the call's
+     * real-time text socket, filled the same way as [mediaPollRtcp]. */
+    external fun mediaPollText(
+        media: Long,
+        nowMs: Long,
+        outData: ByteArray,
+        outDestination: ByteArray?,
+        outLen: LongArray,
+    ): Int
+
+    /** `sipral_media_poll_recording`: the next copy for the recording
+     * server, filled the same way; `outFarEnd` comes back as 0 for a copy
+     * of this end's audio and 1 for the far end's. */
+    external fun mediaPollRecording(
+        media: Long,
+        outData: ByteArray,
+        outDestination: ByteArray?,
+        outLen: LongArray,
+        outFarEnd: LongArray,
+    ): Int
+
     /**
      * `sipral_media_path_candidate_at`, whose `sipral_path_candidate_t` a
      * caller part-fills with two address buffers the same way. `outLocal`

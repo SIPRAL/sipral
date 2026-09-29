@@ -47,6 +47,12 @@ public struct SipralEvent: Sendable {
     public internal(set) var progressData: ProgressEventData? = nil
     /// `payload.transport_failed`, for `SipralEventKind.transportFailed` only.
     public var transportFailedData: TransportFailedEventData? = nil
+    /// `payload.conference`, for `SipralEventKind.conferenceChanged` only.
+    public internal(set) var conferenceData: ConferenceEventData? = nil
+    /// `payload.text`, for `SipralEventKind.textReceived` only.
+    public internal(set) var textData: TextEventData? = nil
+    /// `payload.presence`, for `SipralEventKind.presenceChanged` only.
+    public internal(set) var presenceData: PresenceEventData? = nil
 }
 
 /// What a `SipralEventKind.callerVerification` carries
@@ -584,6 +590,38 @@ enum SipralEventDecoder {
                 detail: textC(lost.detail, lost.detail_len)
             )
         }
+        if kindRaw == SipralEventKind.conferenceChanged.rawValue {
+            let changed = raw.payload.conference
+            event.conferenceData = ConferenceEventData(
+                subscription: changed.subscription,
+                update: SipralConferenceUpdate(rawValue: changed.update),
+                version: changed.version,
+                users: changed.users
+            )
+        }
+        if kindRaw == SipralEventKind.textReceived.rawValue {
+            let typed = raw.payload.text
+            event.textData = TextEventData(text: textC(typed.text, typed.text_len) ?? "", missing: typed.missing)
+        }
+        if kindRaw == SipralEventKind.presenceChanged.rawValue {
+            event.presenceData = presenceData(raw.payload.presence)
+        }
         return event
+    }
+
+    private static func presenceData(_ told: sipral_presence_event_t) -> PresenceEventData {
+        PresenceEventData(
+            kind: SipralPresenceKind(rawValue: told.kind),
+            subscription: told.subscription,
+            basic: SipralBasic(rawValue: told.basic),
+            activity: SipralActivity(rawValue: told.activity),
+            entity: textC(told.entity, told.entity_len),
+            note: textC(told.note, told.note_len),
+            publicationState: SipralPublicationState(rawValue: told.publication_state),
+            failure: SipralPublishFailure(rawValue: told.failure),
+            statusCode: told.status_code,
+            expiresMs: told.expires_ms,
+            refreshInMs: told.refresh_in_ms
+        )
     }
 }
