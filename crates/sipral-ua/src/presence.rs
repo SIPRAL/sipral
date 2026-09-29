@@ -319,7 +319,8 @@ impl Presence {
     /// # Errors
     /// [`PresenceError::Unwritable`]: an empty entity, an identifier that is
     /// not an XML name, two tuples with one identifier, a priority above
-    /// 1000, or an unlisted activity whose name is not an XML name.
+    /// 1000, an unlisted activity whose name is not an XML name, or a value
+    /// holding a character no XML document can carry.
     pub fn to_xml(&self) -> Result<Vec<u8>, PresenceError> {
         if self.entity.is_empty() {
             return Err(PresenceError::Unwritable("an empty entity"));
@@ -333,7 +334,7 @@ impl Presence {
             push_raw(&mut out, " xmlns:rpid=\"", RPID_NS, "\"");
         }
         out.push_str(" entity=\"");
-        escape(&mut out, &self.entity);
+        escape(&mut out, &self.entity)?;
         out.push_str("\">\n");
         let mut ids: Vec<&str> = Vec::new();
         for tuple in &self.tuples {
@@ -341,7 +342,7 @@ impl Presence {
             ids.push(&tuple.id);
             write_tuple(&mut out, tuple)?;
         }
-        write_notes(&mut out, &self.notes, " ");
+        write_notes(&mut out, &self.notes, " ")?;
         if let Some(ref person) = self.person {
             checked_id(&person.id, &ids)?;
             write_person(&mut out, person)?;
@@ -451,7 +452,11 @@ fn qvalue(text: &str) -> Result<u16, PresenceError> {
 // -- writing -----------------------------------------------------------------
 
 /// Text or an attribute value, escaped for either place.
-fn escape(out: &mut String, text: &str) {
+///
+/// XML 1.0 §2.2 keeps the C0 controls other than tab, line feed and carriage
+/// return, and U+FFFE and U+FFFF, out of a document altogether, as
+/// references too: a value holding one cannot be written.
+fn escape(out: &mut String, text: &str) -> Result<(), PresenceError> {
     for character in text.chars() {
         match character {
             '&' => out.push_str("&amp;"),
@@ -459,9 +464,14 @@ fn escape(out: &mut String, text: &str) {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            '\t' | '\n' | '\r' => out.push(character),
+            '\u{0}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}' => {
+                return Err(PresenceError::Unwritable("a character XML cannot carry"));
+            }
             other => out.push(other),
         }
     }
+    Ok(())
 }
 
 fn push_raw(out: &mut String, before: &str, value: &str, after: &str) {
@@ -491,24 +501,25 @@ fn checked_id(id: &str, used: &[&str]) -> Result<(), PresenceError> {
     Ok(())
 }
 
-fn write_notes(out: &mut String, notes: &[Note], indent: &str) {
+fn write_notes(out: &mut String, notes: &[Note], indent: &str) -> Result<(), PresenceError> {
     for note in notes {
         out.push_str(indent);
         out.push_str("<note");
         if let Some(ref lang) = note.lang {
             out.push_str(" xml:lang=\"");
-            escape(out, lang);
+            escape(out, lang)?;
             out.push('"');
         }
         out.push('>');
-        escape(out, &note.text);
+        escape(out, &note.text)?;
         out.push_str("</note>\n");
     }
+    Ok(())
 }
 
 fn write_tuple(out: &mut String, tuple: &Tuple) -> Result<(), PresenceError> {
     out.push_str(" <tuple id=\"");
-    escape(out, &tuple.id);
+    escape(out, &tuple.id)?;
     out.push_str("\">\n  <status>");
     if let Some(basic) = tuple.basic {
         push_raw(out, "<basic>", basic.as_str(), "</basic>");
@@ -523,13 +534,13 @@ fn write_tuple(out: &mut String, tuple: &Tuple) -> Result<(), PresenceError> {
             let _ = write!(out, " priority=\"{}\"", format_qvalue(priority));
         }
         out.push('>');
-        escape(out, &contact.uri);
+        escape(out, &contact.uri)?;
         out.push_str("</contact>\n");
     }
-    write_notes(out, &tuple.notes, "  ");
+    write_notes(out, &tuple.notes, "  ")?;
     if let Some(ref timestamp) = tuple.timestamp {
         out.push_str("  <timestamp>");
-        escape(out, timestamp);
+        escape(out, timestamp)?;
         out.push_str("</timestamp>\n");
     }
     out.push_str(" </tuple>\n");
@@ -552,7 +563,7 @@ fn format_qvalue(thousandths: u16) -> String {
 
 fn write_person(out: &mut String, person: &Person) -> Result<(), PresenceError> {
     out.push_str(" <dm:person id=\"");
-    escape(out, &person.id);
+    escape(out, &person.id)?;
     out.push_str("\">\n");
     if !person.activities.is_empty() {
         out.push_str("  <rpid:activities>");
@@ -560,7 +571,7 @@ fn write_person(out: &mut String, person: &Person) -> Result<(), PresenceError> 
             match *activity {
                 Activity::Other(ref text) => {
                     out.push_str("<rpid:other>");
-                    escape(out, text);
+                    escape(out, text)?;
                     out.push_str("</rpid:other>");
                 }
                 Activity::Unlisted(ref name) => {
@@ -804,6 +815,33 @@ mod tests {
             presence.to_xml(),
             Err(PresenceError::Unwritable("a priority above 1"))
         );
+    }
+
+    #[test]
+    fn a_character_xml_cannot_carry_is_not_written() {
+        // XML 1.0 §2.2: no C0 control but tab, line feed and carriage return,
+        // and neither U+FFFE nor U+FFFF, even as a character reference
+        for bad in ["a\u{0}b", "a\u{1b}b", "a\u{7}", "\u{fffe}", "\u{ffff}"] {
+            let mut presence = Presence::new("pres:a@example.com");
+            presence.notes.push(Note::new(bad));
+            assert_eq!(
+                presence.to_xml(),
+                Err(PresenceError::Unwritable("a character XML cannot carry")),
+                "{bad:?}"
+            );
+            let mut presence = Presence::new(bad);
+            presence.tuples.push(Tuple::new("t", Basic::Open));
+            assert_eq!(
+                presence.to_xml(),
+                Err(PresenceError::Unwritable("a character XML cannot carry")),
+                "{bad:?} as the entity"
+            );
+        }
+        let mut presence = Presence::new("pres:a@example.com");
+        presence
+            .notes
+            .push(Note::new("tab\tline\nend \u{e000}\u{10ffff}"));
+        assert!(presence.to_xml().is_ok());
     }
 
     #[test]
