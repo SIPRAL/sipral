@@ -38,6 +38,9 @@ path = "../crates/sipral-dtls"
 [dependencies.sipral-media]
 path = "../crates/sipral-media"
 
+[dependencies.sipral-stir]
+path = "../crates/sipral-stir"
+
 # the facade, for `headless_media` alone: `HeadlessSession` is where the
 # socket's frames meet a codec's, and it lives nowhere below this crate.
 # Without libopus, DTLS or ICE, none of which that target reaches.
@@ -271,6 +274,13 @@ bench = false
 [[bin]]
 name = "multipart"
 path = "fuzz_targets/multipart.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stir_identity"
+path = "fuzz_targets/stir_identity.rs"
 test = false
 doc = false
 bench = false

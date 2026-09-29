@@ -12,6 +12,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **STIR/SHAKEN caller authentication, in its own crate.** `sipral-stir`
+  signs a caller's identity into an RFC 8224 Identity header field (a
+  PASSporT of RFC 8225 with RFC 8588's `shaken` claims, ES256, full or
+  compact form) and verifies one without I/O of its own: it names the
+  certificate to fetch, then takes the fetched chain, the trust anchors and
+  the time to the attestation level, calling number and origination
+  identifier, or to the one reason it fails with the SIP response RFC 8224
+  prescribes (403, 428, 436, 437, 438) and the `verstat` value to put on the
+  caller's identity. The chain is checked to a trust anchor with the
+  TNAuthList of RFC 8226 deciding which numbers it speaks for; freshness is
+  sixty seconds unless configured, revocation is left to the application,
+  and every input is bounded and fuzzed. Not yet reachable through the C
+  ABI or the bindings.
 - **Digits, call-progress tones and answering machines are heard in the
   audio itself.** `sipral_media::inband` works on 8 and 16 kHz PCM with no
   new dependency and no platform-specific instructions. `dtmf::DtmfDetector`
