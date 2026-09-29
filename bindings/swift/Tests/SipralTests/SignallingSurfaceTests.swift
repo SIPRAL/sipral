@@ -245,6 +245,10 @@ final class SignallingSurfaceTests: XCTestCase {
         try taken.answer()
         try await confirmed(placed, aliceEvents)
         defer { placed.close(); taken.close() }
+        // alice's confirmation says nothing about bob's end: his Media is made
+        // when his own call hears it is confirmed, on his event thread
+        let minted = await eventually(within: 5) { placed.media != nil && taken.media != nil }
+        XCTAssertTrue(minted, "a confirmed call has no Media at one end")
         let aliceMedia = try XCTUnwrap(placed.media)
         let bobMedia = try XCTUnwrap(taken.media)
         let flowing = await eventually(within: 5) { bobMedia.remoteAddress != nil }
