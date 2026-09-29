@@ -1070,6 +1070,7 @@ mod tests {
     use crate::error::last_error_text;
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
     use crate::media::tests::{Buffers, arrive, media_of, release};
+    use crate::media::SipralProcessorFrame;
     use crate::record::SipralRecordingOptions;
     use crate::stack::tests::{Observed, poll};
     use crate::stack::with_stack;
@@ -1581,6 +1582,75 @@ mod tests {
         assert!(
             loudness(&data[20 * 160..]) > 2_000,
             "call a is not in the file"
+        );
+        release(media_a);
+        assert_eq!(
+            unsafe { sipral_local_conference_destroy(conference) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// What a processor on a member's call saw when it called back into the
+    /// conference and into the stack from inside a tick.
+    struct Reentered {
+        conference: SipralHandle,
+        stack: SipralHandle,
+        said: Mutex<Vec<(SipralStatus, SipralStatus)>>,
+    }
+
+    unsafe extern "C" fn call_back_in(_frame: *const SipralProcessorFrame, user_data: *mut c_void) {
+        let reentered = unsafe { &*user_data.cast::<Reentered>() };
+        let mut info = info_zeroed();
+        let conference = unsafe { sipral_local_conference_info(reentered.conference, &raw mut info) };
+        let stack = unsafe { crate::stack::sipral_stack_poll(reentered.stack, 0, ptr::null_mut()) };
+        reentered.said.lock().unwrap().push((conference, stack));
+    }
+
+    /// A processor on a member's call runs inside the conference's tick,
+    /// with the conference held: calling back into the conference, or into
+    /// the stack, from there is told BUSY rather than waiting for itself.
+    #[test]
+    fn a_processor_inside_a_tick_is_told_busy_rather_than_waiting_for_itself() {
+        let mut observed = Observed::default();
+        let (stack, _, _, media_a, conference) = two_calls_in_one(&mut observed);
+        let reentered: &'static Reentered = Box::leak(Box::new(Reentered {
+            conference,
+            stack,
+            said: Mutex::new(Vec::new()),
+        }));
+        assert_eq!(
+            unsafe {
+                crate::media::sipral_call_attach_processor(
+                    media_a,
+                    Some(call_back_in),
+                    ptr::from_ref(reentered).cast_mut().cast::<c_void>(),
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for n in 0..3 {
+                let _ = tick(conference, 3_000 + n * 20, &[0; FRAME], FRAME);
+            }
+            let _ = done.send(());
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "a tick whose processor called back in never finished"
+        );
+        let said = reentered.said.lock().unwrap().clone();
+        assert!(!said.is_empty(), "the processor never ran inside a tick");
+        assert!(
+            said.iter()
+                .all(|seen| *seen == (SipralStatus::Busy, SipralStatus::Busy)),
+            "{said:?}"
         );
         release(media_a);
         assert_eq!(
