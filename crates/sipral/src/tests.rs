@@ -4069,6 +4069,94 @@ fn a_telephone_event_on_the_other_laws_number_is_still_a_digit() {
     );
 }
 
+/// A gateway that sends a key both ways — the two tones left in the audio
+/// and an RFC 4733 event beside them — pressed it once. A call listening in
+/// the audio as well reports it once, as the event, and the same audio with
+/// no event beside it is still heard as the key.
+#[test]
+fn a_key_a_gateway_sends_both_as_an_event_and_in_the_audio_is_reported_once() {
+    use sipral_media::inband::dtmf::Digit as Key;
+    use sipral_media::inband::generate::{DtmfGenerator, DtmfTone};
+
+    let now = Instant::now();
+    let (ours, theirs) = plan_pair(
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:101 telephone-event/8000\r\n",
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:101 telephone-event/8000\r\n",
+    );
+    let from: SocketAddr = "192.0.2.2:40002".parse().expect("an address");
+    let packet = |sequence: u16, timestamp: u32, payload_type: u8, payload: &[u8]| {
+        let mut datagram = vec![0x80, payload_type];
+        datagram.extend_from_slice(&sequence.to_be_bytes());
+        datagram.extend_from_slice(&timestamp.to_be_bytes());
+        datagram.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        datagram.extend_from_slice(payload);
+        datagram
+    };
+    let mut tone = vec![0_i16; 800];
+    let mut generator = DtmfGenerator::with_tone_at(
+        8_000,
+        DtmfTone {
+            tone_ms: 100,
+            pause_ms: 0,
+            ..DtmfTone::default()
+        },
+    );
+    generator.start(Key::Five);
+    generator.fill(&mut tone);
+    let audio = |frame: &[i16]| {
+        let mut octets = [0_u8; 160];
+        sipral_media::g711::Law::Mu.encode_into(frame, &mut octets);
+        octets
+    };
+    let silence = audio(&[0; 160]);
+
+    let heard = |with_event: bool| {
+        let mut receiver = session(&ours, &theirs, now);
+        receiver.set_dtmf_detection(crate::DtmfDetection::Always);
+        let mut sequence = 1_u16;
+        let mut timestamp = 0_u32;
+        let mut send = |receiver: &mut MediaSession, payload_type: u8, payload: &[u8], ticks| {
+            let mut datagram = packet(sequence, timestamp, payload_type, payload);
+            let _ = receiver.receive(&mut datagram, from, now);
+            sequence += 1;
+            timestamp += ticks;
+        };
+        // RFC 3550 A.1's probation, then the key in the audio
+        for _ in 0..6 {
+            send(&mut receiver, 0, &silence, 160);
+        }
+        for frame in tone.chunks(160) {
+            send(&mut receiver, 0, &audio(frame), 160);
+        }
+        // and the event of the same press, its closing packet three times
+        // (RFC 4733 §2.5.1.4): event 5, end bit, 800 ticks held
+        for index in 0..if with_event { 3 } else { 0 } {
+            let ticks = if index == 2 { 160 } else { 0 };
+            send(&mut receiver, 101, &[5, 0x8a, 0x03, 0x20], ticks);
+        }
+        for _ in 0..30 {
+            send(&mut receiver, 0, &silence, 160);
+        }
+        let mut played = vec![0_i16; receiver.frame_samples()];
+        let mut keys = Vec::new();
+        for _ in 0..60 {
+            let _ = receiver.playback(&mut played);
+            while let Some(event) = receiver.poll_event() {
+                if let MediaEvent::DigitReceived { digit, source, .. } = event {
+                    keys.push((digit, source));
+                }
+            }
+        }
+        keys
+    };
+    assert_eq!(heard(false), vec![(Some('5'), DigitSource::InBand)]);
+    assert_eq!(heard(true), vec![(Some('5'), DigitSource::Rtp)]);
+}
+
 /// An answer naming a codec this build has no decoder for is a reported
 /// failure, not a call that stands up with noise on it.
 #[test]
