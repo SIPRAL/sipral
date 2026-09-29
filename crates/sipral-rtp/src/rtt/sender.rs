@@ -768,6 +768,41 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_exactly_as_far_back_as_the_offset_field_reaches_is_allowed() {
+        let one = |interval| SenderConfig {
+            interval: Duration::from_millis(interval),
+            redundancy: Some(Redundancy {
+                payload_type: RED,
+                generations: 1,
+            }),
+            ..SenderConfig::new(T140, RED)
+        };
+        assert!(TextSender::new(one(16_383), SSRC, 0, 0).is_ok());
+        assert_eq!(
+            TextSender::new(one(16_384), SSRC, 0, 0).err(),
+            Some(ConfigError::RedundancyReach(1))
+        );
+    }
+
+    #[test]
+    fn a_copy_too_old_for_the_offset_field_goes_as_an_empty_block() {
+        let config = SenderConfig {
+            send_bom: false,
+            ..SenderConfig::new(T140, RED)
+        };
+        let mut tx = sender(config);
+        tx.push("a").unwrap();
+        tx.poll(ms(0)).unwrap();
+        tx.push("b").unwrap();
+        // polled far later than asked: "a" is 20 s back, past 16383 ms
+        let late = tx.poll(ms(20_000)).unwrap();
+        assert_eq!(
+            blocks(&late),
+            (vec![(0, vec![]), (0, vec![])], b"b".to_vec())
+        );
+    }
+
+    #[test]
     fn a_packet_is_a_datagram_rtp_can_read() {
         let mut tx = sender(SenderConfig::new(T140, RED));
         tx.push("x").unwrap();
