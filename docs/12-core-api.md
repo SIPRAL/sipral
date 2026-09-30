@@ -747,9 +747,18 @@ pub struct DatagramLimit {
     pub path_mtu: Option<u32>,                 // None: use the 1300-byte rule
     pub headroom_bytes: u32,                   // 200: room for a larger response
     pub max_datagram_bytes: u32,               // 1 300
+    pub without_stream_bytes: Option<u32>,     // None: §18.1.1 kept; see below
 }
 impl DatagramLimit {
     pub fn too_big_for_a_datagram(&self, request_bytes: usize) -> bool;
+    pub fn fits_without_stream(&self, request_bytes: usize) -> bool;
+}
+impl Endpoint {
+    /// The stream a `TransportWanted` asked for cannot be had. Under
+    /// `without_stream_bytes`, a request to that address up to that size goes
+    /// over the datagram from now on (`transport.kept.datagram`), until a
+    /// stream to it is bound. `true` when something held may now go.
+    pub fn no_stream_coming(&mut self) -> bool;
 }
 
 pub struct EndpointConfig {

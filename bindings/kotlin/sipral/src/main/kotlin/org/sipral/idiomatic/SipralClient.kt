@@ -58,6 +58,7 @@ import org.sipral.SipralStirConfig
 import org.sipral.SipralStatus
 import org.sipral.SipralToggle
 import org.sipral.SipralTransport
+import org.sipral.SipralTransportFailure
 import org.sipral.SipralTransportError
 
 private const val TRANSMIT_BYTES = 1 shl 16
@@ -334,7 +335,9 @@ class SipralClient private constructor(
          * (`sipral_stack_transport_bind`): the request the stack was holding
          * goes on it, and the call or registration carries on over it. When
          * that connection is refused or times out, or with false, the stack
-         * is told at once (`sipral_stack_transport_failed`), and what was
+         * is told at once (`sipral_stack_transport_failure`, whose detail
+         * names where the connection was going and whether it was refused,
+         * timed out or not tried), and what was
          * waiting ends rather than hanging: a call as unreachable, its
          * `causeSip` 513 and its `causeText` naming the size and the limit.
          * The event reaches [events] either way. [streamServer]
@@ -1240,7 +1243,11 @@ class SipralClient private constructor(
                 continue
             }
             if (!streamFallback) {
-                sayNoStream(nextLink.getAndIncrement(), SipralTransportError.CONNECTION_REFUSED)
+                sayNoStream(
+                    nextLink.getAndIncrement(),
+                    SipralTransportError.CONNECTION_REFUSED,
+                    "to $destination not tried: streamFallback is off",
+                )
                 continue
             }
             if (!streamsOpening.add(destination)) {
@@ -1268,7 +1275,11 @@ class SipralClient private constructor(
         } catch (refused: Exception) {
             socket.close()
             streamsOpening.remove(destination)
-            sayNoStream(id, classify(refused, handshaking = false).error)
+            val said = classify(refused, handshaking = false)
+            val server = streamServer ?: destination
+            val target = if (server == destination) destination else "$server (for $destination)"
+            val why = if (said.detail.isEmpty()) "" else ": ${said.detail}"
+            sayNoStream(id, said.error, "to $target ${verdict(said.error)}$why")
             return
         }
         streamLinks[id] = destination to socket
@@ -1282,22 +1293,49 @@ class SipralClient private constructor(
             retryBusy {
                 Sipral.stackTransportBind(handle, id, SipralTransport.TCP.value.toLong(), local, destination, nowMs())
             }
-        } catch (_: SipralException) {
+        } catch (refused: SipralException) {
             loseStreamLink(id, tell = false)
-            sayNoStream(id, SipralTransportError.OTHER)
+            sayNoStream(
+                id,
+                SipralTransportError.OTHER,
+                "to $destination connected, and the stack would not bind it: ${refused.message}",
+            )
             return
         }
         readStreamLink(id, socket)
     }
 
-    /** `sipral_stack_transport_failed` for a connection that was not made;
-     * never throwing on the way out. */
-    private fun sayNoStream(id: Long, error: SipralTransportError) {
+    /** `sipral_stack_transport_failure` for a connection that was not made;
+     * never throwing on the way out. [what] finishes a sentence that begins
+     * "TCP" -- where the connection was going and what became of it --
+     * carried to the event's detail. */
+    private fun sayNoStream(id: Long, error: SipralTransportError, what: String) {
         try {
-            retryBusy { Sipral.stackTransportFailed(handle, id, error.value.toLong(), nowMs()) }
+            retryBusy {
+                Sipral.stackTransportFailure(
+                    handle,
+                    SipralTransportFailure(
+                        transport = id,
+                        error = error.value.toLong(),
+                        tls = 0L,
+                        detail = sentence("TCP $what"),
+                    ),
+                    nowMs(),
+                )
+            }
         } catch (_: SipralException) {
             // nothing was waiting any more, or the stack is going away
         }
+    }
+
+    /** What became of a connection, in the words a log line reads. */
+    private fun verdict(error: SipralTransportError): String = when (error) {
+        SipralTransportError.CONNECTION_REFUSED -> "refused"
+        SipralTransportError.TIMED_OUT -> "timed out"
+        SipralTransportError.UNREACHABLE -> "unreachable"
+        SipralTransportError.CONNECTION_RESET -> "reset"
+        SipralTransportError.CLOSED -> "closed"
+        else -> "failed"
     }
 
     private fun writeStreamLink(id: Long, payload: ByteArray, len: Int) {

@@ -338,7 +338,9 @@ public sealed partial class SipralStack : IDisposable
     /// (<c>sipral_stack_transport_bind</c>): the request the stack was holding
     /// goes on it, and the call or registration carries on over it. When that
     /// connection is refused or times out, or with <see langword="false"/>,
-    /// the stack is told at once (<c>sipral_stack_transport_failed</c>), and
+    /// the stack is told at once (<c>sipral_stack_transport_failure</c>, whose
+    /// detail names where the connection was going and whether it was
+    /// refused, timed out or not tried), and
     /// what was waiting ends rather than hanging: a call as unreachable, its
     /// <see cref="SipralCallEventInfo.Cause"/> a SIP 513 whose text names the
     /// size and the limit. The event reaches <see cref="Events"/>

@@ -48,6 +48,10 @@ pub enum Reason {
     /// open, so the request was not emitted at all and the caller was asked to
     /// open one.
     TransportRefusedBySize,
+    /// The same rule set aside: too large for a datagram, the caller said no
+    /// stream could be had, and `DatagramLimit::without_stream_bytes` sent it
+    /// over the datagram anyway. Carries the size and that limit.
+    TransportKeptOnDatagram,
     /// A transport closed or failed, and everything running on it was failed
     /// with it.
     TransportLost,
@@ -141,6 +145,7 @@ impl Reason {
             Self::TransportSelected => "transport.selected",
             Self::TransportPromotedBySize => "transport.promoted.size",
             Self::TransportRefusedBySize => "transport.refused.size",
+            Self::TransportKeptOnDatagram => "transport.kept.datagram",
             Self::TransportLost => "transport.lost",
             Self::FlowDead => "transport.flow.dead",
             Self::RequestSent => "request.sent",
@@ -181,10 +186,11 @@ mod tests {
 
     /// Every variant this crate has, so that the tests below cannot silently
     /// stop covering one that was added afterwards.
-    const ALL: [Reason; 27] = [
+    const ALL: [Reason; 28] = [
         Reason::TransportSelected,
         Reason::TransportPromotedBySize,
         Reason::TransportRefusedBySize,
+        Reason::TransportKeptOnDatagram,
         Reason::TransportLost,
         Reason::FlowDead,
         Reason::RequestSent,

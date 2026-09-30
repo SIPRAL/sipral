@@ -89,8 +89,19 @@ impl Stack {
         catalog: CodecCatalog,
         now: Instant,
     ) -> Self {
-        let mut agent =
-            UserAgent::new(EndpointConfig::default(), [seed; 32]).expect("a user agent");
+        Self::configured(seed, local, media, catalog, EndpointConfig::default(), now)
+    }
+
+    /// The same, on an endpoint configured otherwise.
+    pub(crate) fn configured(
+        seed: u8,
+        local: SocketAddr,
+        media: SocketAddr,
+        catalog: CodecCatalog,
+        config: EndpointConfig,
+        now: Instant,
+    ) -> Self {
+        let mut agent = UserAgent::new(config, [seed; 32]).expect("a user agent");
         agent
             .receive(
                 Input::TransportBound {
@@ -2741,7 +2752,10 @@ fn an_offer_names_events_on_every_codec_clock_and_a_pcmu_call_dials_on_its_own()
     let events: Vec<String> = attribute_values(&offer, "rtpmap")
         .into_iter()
         .filter(|map| map.contains("telephone-event/"))
-        .map(|map| map.split_once(' ').map_or(map.clone(), |(_, rest)| rest.to_owned()))
+        .map(|map| {
+            map.split_once(' ')
+                .map_or(map.clone(), |(_, rest)| rest.to_owned())
+        })
         .collect();
     assert_eq!(
         events,
@@ -13975,12 +13989,21 @@ fn a_secure_call_challenged_with(
     now: Instant,
     nonce_bytes: usize,
 ) -> (Stack, CallHandle, Vec<Event>) {
+    a_secure_call_challenged_under(EndpointConfig::default(), now, nonce_bytes)
+}
+
+/// [`a_secure_call_challenged_with`], on an endpoint configured otherwise.
+fn a_secure_call_challenged_under(
+    config: EndpointConfig,
+    now: Instant,
+    nonce_bytes: usize,
+) -> (Stack, CallHandle, Vec<Event>) {
     let catalog = CodecCatalog::with_order(&["PCMU"])
         .expect("an order")
         .with_srtp(SrtpPolicy::Offered)
         .with_srtp_suites(&[crate::SrtpSuite::AeadAes256Gcm, crate::SrtpSuite::AesCm80])
         .expect("two suites");
-    let mut caller = Stack::new(1, caller_sip(), caller_media(), catalog, now);
+    let mut caller = Stack::configured(1, caller_sip(), caller_media(), catalog, config, now);
     let account = caller.agent.add_account(
         Account::new(
             uri("sip:alice@example.com"),
@@ -14133,6 +14156,76 @@ fn a_secure_call_nobody_opens_a_stream_for_ends_when_the_wait_runs_out() {
         Event::Signalling(UaEvent::CallEnded { call: ended, status: Some(status), .. })
             if *ended == call && status.get() == 513
     )));
+}
+
+/// A PBX on UDP alone and a stack told to set RFC 3261 §18.1.1 aside for it
+/// up to 2,000 bytes (`DatagramLimit::without_stream_bytes`): once the
+/// application says no stream is coming, the whole answer to the challenge —
+/// both suites — goes over the datagram, the record says so, and the call
+/// is keyed under the suite the PBX took.
+#[test]
+fn a_secure_call_no_stream_carries_goes_whole_over_the_datagram_when_allowed() {
+    use sipral_core::msg::HeaderName;
+    let now = Instant::now();
+    let mut config = EndpointConfig::default();
+    config.datagram_limit.without_stream_bytes = Some(2_000);
+    let (mut caller, call, _) = a_secure_call_challenged_under(config, now, 700);
+
+    caller.agent.stream_unavailable(now);
+    caller.drain(now, false);
+    let retry = caller
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("the INVITE went again over the datagram");
+    assert!(retry.len() > 1_300, "{} bytes", retry.len());
+    let text = String::from_utf8_lossy(&retry).into_owned();
+    assert_eq!(text.matches("a=crypto:").count(), 2, "{text}");
+    assert!(wire_header(&retry, HeaderName::Via).starts_with("SIP/2.0/UDP "));
+    let call_id =
+        sipral_core::dialog::CallId::new(wire_header(&retry, HeaderName::CallId).as_bytes());
+    let kept = caller
+        .agent
+        .endpoint()
+        .call_record(&call_id)
+        .expect("the call's record")
+        .decisions()
+        .find(|decision| decision.reason == sipral_core::diag::Reason::TransportKeptOnDatagram)
+        .and_then(|decision| decision.measure)
+        .expect("the record says the datagram carried it, and against what");
+    assert_eq!((kept.size, kept.limit), (retry.len(), 2_000));
+
+    let answer = format!(
+        "v=0\r\no=pbx 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=crypto:2 AES_CM_128_HMAC_SHA1_80 {THEIRS}\r\na=sendrecv\r\n"
+    );
+    let ok = format!(
+        "SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=pbx\r\nCall-ID: {}\r\n\
+         CSeq: {}\r\nContact: <sip:bob@192.0.2.2>\r\nContent-Type: application/sdp\r\n\
+         Content-Length: {}\r\n\r\n{answer}",
+        wire_header(&retry, HeaderName::Via),
+        wire_header(&retry, HeaderName::From),
+        wire_header(&retry, HeaderName::To),
+        wire_header(&retry, HeaderName::CallId),
+        wire_header(&retry, HeaderName::CSeq),
+        answer.len(),
+    );
+    caller.deliver(ok.as_bytes(), callee_sip(), now);
+    caller.drain(now, false);
+    assert!(
+        caller.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::CallConfirmed { call: confirmed, .. }) if *confirmed == call
+        )),
+        "the call is up"
+    );
+    assert!(
+        !caller
+            .heard
+            .iter()
+            .any(|event| matches!(event, Event::Signalling(UaEvent::CallEnded { .. })))
+    );
 }
 
 /// Where no stream comes, the INVITE goes again over the datagram with the

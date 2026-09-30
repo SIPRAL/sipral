@@ -891,6 +891,7 @@ fn cramped(now: Instant) -> Endpoint {
             path_mtu: None,
             headroom_bytes: 200,
             max_datagram_bytes: 450,
+            without_stream_bytes: None,
         },
         ..EndpointConfig::default()
     };

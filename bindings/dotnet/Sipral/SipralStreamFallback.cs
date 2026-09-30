@@ -8,6 +8,8 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using Sipral.Interop;
 using static Sipral.Interop.NativeText;
@@ -124,7 +126,8 @@ public sealed partial class SipralStack
             }
             if (!_streamFallback)
             {
-                SayNoStream(transport, SipralTransportError.ConnectionRefused);
+                SayNoStream(transport, SipralTransportError.ConnectionRefused,
+                    $"to {destination} not tried: streamFallback is off");
                 continue;
             }
             new Thread(() => OpenSipStream(transport, destination))
@@ -177,7 +180,13 @@ public sealed partial class SipralStack
                 _streamsOpening.Remove(destination);
             }
             var socket = ex as SocketException ?? ex.InnerException as SocketException;
-            SayNoStream(transport, socket is not null ? Refused(socket).Error : SipralTransportError.Other);
+            var refused = socket is not null ? Refused(socket) : null;
+            var error = refused?.Error ?? SipralTransportError.Other;
+            var server = _streamServer ?? destination;
+            var target = server == destination ? destination : $"{server} (for {destination})";
+            var said = refused?.Message ?? ex.Message;
+            SayNoStream(transport, error,
+                $"to {target} {Verdict(error)}{(said.Length == 0 ? "" : ": " + said)}");
             return;
         }
         lock (_streamLock)
@@ -204,7 +213,8 @@ public sealed partial class SipralStack
         catch (Exception ex) when (ex is SipralException or ObjectDisposedException)
         {
             LoseSipStream(transport, tell: false);
-            SayNoStream(transport, SipralTransportError.Other);
+            SayNoStream(transport, SipralTransportError.Other,
+                $"to {destination} connected, and the stack would not bind it: {ex.Message}");
             return;
         }
         ReadSipStream(stream);
@@ -314,20 +324,46 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary><c>sipral_stack_transport_failed</c> for a connection that
-    /// was not made; never throwing on the way out.</summary>
-    private void SayNoStream(uint transport, SipralTransportError error)
+    /// <summary><c>sipral_stack_transport_failure</c> for a connection that
+    /// was not made; never throwing on the way out. <paramref name="what"/>
+    /// finishes a sentence that begins "TCP" — where the connection was going
+    /// and what became of it — carried to the event's detail.</summary>
+    private void SayNoStream(uint transport, SipralTransportError error, string what)
     {
+        var detail = Encoding.UTF8.GetBytes(Sentence("TCP " + what));
+        var pinned = GCHandle.Alloc(detail, GCHandleType.Pinned);
         try
         {
-            SipralErrors.Call(() => NativeMethods.sipral_stack_transport_failed(Handle, transport, (uint)error, NowMs),
-                "sipral_stack_transport_failed");
+            var failure = SipralTransportFailure.Sized();
+            failure.Transport = transport;
+            failure.Error = (uint)error;
+            failure.Tls = (uint)SipralTlsFailure.None;
+            failure.Detail = pinned.AddrOfPinnedObject();
+            failure.DetailLen = (nuint)detail.Length;
+            SipralErrors.Call(() => NativeMethods.sipral_stack_transport_failure(Handle, in failure, NowMs),
+                "sipral_stack_transport_failure");
         }
         catch (Exception ex) when (ex is SipralException or ObjectDisposedException)
         {
             // nothing was waiting any more, or the stack is going away
         }
+        finally
+        {
+            pinned.Free();
+        }
     }
+
+    /// <summary>What became of a connection, in the words a log line
+    /// reads.</summary>
+    private static string Verdict(SipralTransportError error) => error switch
+    {
+        SipralTransportError.ConnectionRefused => "refused",
+        SipralTransportError.TimedOut => "timed out",
+        SipralTransportError.Unreachable => "unreachable",
+        SipralTransportError.ConnectionReset => "reset",
+        SipralTransportError.Closed => "closed",
+        _ => "failed",
+    };
 
     /// <summary>Closes every connection opened for a request too large for a
     /// datagram, for <see cref="Dispose"/>.</summary>

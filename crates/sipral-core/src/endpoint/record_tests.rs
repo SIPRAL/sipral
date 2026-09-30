@@ -186,6 +186,87 @@ fn a_request_that_cannot_arrive_is_written_down_rather_than_emitted() {
     assert_eq!(refused.address, Some(peer()));
 }
 
+/// An endpoint whose configuration sets §18.1.1 aside, up to `largest`, once
+/// no stream is coming, bound on UDP the way [`endpoint`] is.
+fn endpoint_without_stream(largest: Option<u32>, now: Instant) -> Endpoint {
+    let mut config = EndpointConfig::default();
+    config.datagram_limit.without_stream_bytes = largest;
+    let mut endpoint = Endpoint::new(config, [7; 32]).expect("an endpoint");
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            now,
+        )
+        .expect("binding UDP");
+    endpoint
+}
+
+/// A server that takes SIP over UDP alone: once the caller says the stream
+/// it was asked for cannot be had, a request up to the configured size goes
+/// over the datagram and the record says so with that limit; one past it is
+/// still refused; and a stream bound later is preferred again.
+#[test]
+fn with_no_stream_coming_a_request_under_the_configured_size_goes_over_the_datagram() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint_without_stream(Some(1_500), t0);
+    let big = options_request().header(HeaderName::Subject, &vec![b'x'; 1_100]);
+    let bigger = options_request().header(HeaderName::Subject, &vec![b'x'; 1_400]);
+
+    // §18.1.1 first: refused, and a stream asked for
+    assert!(endpoint.request(&big, t0).is_err());
+    assert!(transmits(&mut endpoint).is_empty());
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::TransportWanted { .. }))
+    );
+
+    // none is coming: the same request goes over the datagram
+    assert!(endpoint.no_stream_coming());
+    endpoint.request(&big, t0).expect("sent over the datagram");
+    let out = transmits(&mut endpoint);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].transport, UDP);
+    let size = out[0].payload.len();
+    assert!((1_301..=1_500).contains(&size), "{size} bytes");
+    let kept = only(
+        &record_of(&endpoint, &out[0].payload),
+        "transport.kept.datagram",
+    );
+    let measure = kept.measure.expect("a size and a limit");
+    assert_eq!((measure.size, measure.limit), (size, 1_500));
+    assert_eq!(kept.protocol, Some(TransportProtocol::Udp));
+
+    // past the configured size it is §18.1.1 again
+    assert!(endpoint.request(&bigger, t0).is_err());
+    assert!(transmits(&mut endpoint).is_empty());
+
+    // and a stream bound after all carries what is too big for a datagram
+    bind_tcp(&mut endpoint, t0);
+    endpoint.request(&big, t0).expect("promoted to the stream");
+    let out = transmits(&mut endpoint);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].transport, TCP);
+}
+
+/// Without the setting, being told no stream is coming changes nothing: the
+/// request is still refused the datagram (§18.1.1).
+#[test]
+fn without_the_setting_no_stream_coming_keeps_the_rule() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint_without_stream(None, t0);
+    let big = options_request().header(HeaderName::Subject, &vec![b'x'; 1_100]);
+    assert!(endpoint.request(&big, t0).is_err());
+    assert!(!endpoint.no_stream_coming());
+    assert!(endpoint.request(&big, t0).is_err());
+    assert!(transmits(&mut endpoint).is_empty());
+}
+
 // -- what a timer does -------------------------------------------------------
 
 #[test]

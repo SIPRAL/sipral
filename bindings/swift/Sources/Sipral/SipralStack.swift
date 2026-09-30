@@ -336,7 +336,9 @@ public final class SipralStack: @unchecked Sendable {
     /// (`sipral_stack_transport_bind`): the request the stack was holding
     /// goes on it, and the call or registration carries on over it. When
     /// that connection is refused or times out, or with `false`, the stack is
-    /// told at once (`sipral_stack_transport_failed`), and what was waiting
+    /// told at once (`sipral_stack_transport_failure`, whose detail --
+    /// `transportFailedData.detail` -- names where the connection was going
+    /// and whether it was refused, timed out or not tried), and what was waiting
     /// ends rather than hanging: a call as unreachable, its `endCause` a SIP
     /// 513 whose text names the size and the limit. The event reaches
     /// `events()` either way. `streamServer` (`host:port`) is where that
@@ -792,7 +794,7 @@ public final class SipralStack: @unchecked Sendable {
             }
             guard let id else { continue }
             guard streamFallback else {
-                sayNoStream(id, .connectionRefused)
+                sayNoStream(id, .connectionRefused, "to \(destination) not tried: streamFallback is off")
                 continue
             }
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -815,7 +817,11 @@ public final class SipralStack: @unchecked Sendable {
             )
         } catch {
             signallingQueue.sync { _ = streamsOpening.remove(destination) }
-            sayNoStream(id, (error as? SignallingRefusal)?.error ?? .other)
+            let refusal = error as? SignallingRefusal
+            let kind = refusal?.error ?? .other
+            let target = server == destination ? destination : "\(server) (for \(destination))"
+            let said = refusal?.detail ?? "\(error)"
+            sayNoStream(id, kind, "to \(target) \(Self.verdict(kind))\(said.isEmpty ? "" : ": \(said)")")
             return
         }
         let closing = isClosed
@@ -838,7 +844,7 @@ public final class SipralStack: @unchecked Sendable {
             }
         } catch {
             loseStreamLink(id, tell: false)
-            sayNoStream(id, .other)
+            sayNoStream(id, .other, "to \(destination) connected, and the stack would not bind it: \(error)")
             return
         }
         made.start(
@@ -847,11 +853,31 @@ public final class SipralStack: @unchecked Sendable {
         )
     }
 
-    /// `sipral_stack_transport_failed` for a connection that was not made,
-    /// never throwing on the way out.
-    private func sayNoStream(_ id: UInt32, _ error: SipralTransportError) {
-        _ = try? retryingBusy {
-            try Sipral.stackTransportFailed(stack: handle, transport: id, error: error.rawValue, nowMs: nowMs())
+    /// `sipral_stack_transport_failure` for a connection that was not made,
+    /// never throwing on the way out. `what` finishes a sentence that begins
+    /// "TCP" -- where it was going and what became of it -- and is carried
+    /// to `transportFailedData.detail`.
+    private func sayNoStream(_ id: UInt32, _ error: SipralTransportError, _ what: String) {
+        let detail = SignallingRefusal.sentence("TCP \(what)")
+        detail.withCString { text in
+            var failure = sipral_transport_failure_t.sized()
+            failure.transport = id
+            failure.error = error.rawValue
+            failure.detail = text
+            failure.detail_len = detail.utf8.count
+            _ = try? retryingBusy { try Sipral.stackTransportFailure(stack: handle, failure: failure, nowMs: nowMs()) }
+        }
+    }
+
+    /// What became of a connection, in the words a log line reads.
+    private static func verdict(_ error: SipralTransportError) -> String {
+        switch error {
+        case .connectionRefused: return "refused"
+        case .timedOut: return "timed out"
+        case .unreachable: return "unreachable"
+        case .connectionReset: return "reset"
+        case .closed: return "closed"
+        default: return "failed"
         }
     }
 

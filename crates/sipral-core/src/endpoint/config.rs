@@ -34,6 +34,22 @@ pub struct DatagramLimit {
     pub headroom_bytes: u32,
     /// The largest request to put in a datagram when the MTU is unknown. 1300.
     pub max_datagram_bytes: u32,
+    /// The largest request to send over the datagram anyway, once the caller
+    /// has said the stream §18.1.1 asked for cannot be had
+    /// ([`Endpoint::no_stream_coming`](super::Endpoint::no_stream_coming)).
+    ///
+    /// **A deliberate deviation from §18.1.1**, off (`None`) by default, for
+    /// a server that takes SIP over UDP alone: a PBX with no TCP listener
+    /// answers a request it cannot receive over a stream with nothing, while
+    /// the same PBX takes a 1,444-byte INVITE over UDP from every other phone
+    /// on its network. What the rule guards against is fragmentation on a
+    /// path whose MTU nobody measured; a caller that knows its path is better
+    /// served by [`DatagramLimit::path_mtu`], and this is for the one that
+    /// has only the server's word. A request past this size is still not
+    /// sent, and ends as it would without it. Each request that goes over
+    /// the datagram this way is recorded as `transport.kept.datagram`, with
+    /// its size and this limit.
+    pub without_stream_bytes: Option<u32>,
 }
 
 impl DatagramLimit {
@@ -42,7 +58,16 @@ impl DatagramLimit {
         path_mtu: None,
         headroom_bytes: 200,
         max_datagram_bytes: 1_300,
+        without_stream_bytes: None,
     };
+
+    /// Whether a request of this size goes over the datagram once no stream
+    /// is coming ([`DatagramLimit::without_stream_bytes`]).
+    #[must_use]
+    pub fn fits_without_stream(&self, request_bytes: usize) -> bool {
+        self.without_stream_bytes
+            .is_some_and(|largest| u32::try_from(request_bytes).is_ok_and(|size| size <= largest))
+    }
 
     /// The largest request that still goes in a datagram, and `None` when the
     /// configured MTU leaves room for none at all.
@@ -309,9 +334,24 @@ mod tests {
         assert_eq!(config.datagram_limit.max_datagram_bytes, 1_300);
         assert_eq!(config.datagram_limit.headroom_bytes, 200);
         assert_eq!(config.datagram_limit.path_mtu, None);
+        // §18.1.1 is kept unless a deployment says otherwise
+        assert_eq!(config.datagram_limit.without_stream_bytes, None);
+        assert!(!config.datagram_limit.fits_without_stream(1));
         assert_eq!(config.max_server_transactions, 256);
         assert_eq!(config.max_dialogs, 128);
         assert_eq!(config.diagnostics.max_decisions, 64);
         assert_eq!(config.diagnostics.max_records, 32);
+    }
+
+    #[test]
+    fn the_size_kept_on_the_datagram_without_a_stream_is_inclusive() {
+        let limit = DatagramLimit {
+            without_stream_bytes: Some(1_500),
+            ..DatagramLimit::DEFAULT
+        };
+        assert!(limit.fits_without_stream(1_500));
+        assert!(!limit.fits_without_stream(1_501));
+        // and it moves nothing about §18.1.1's own line
+        assert!(limit.too_big_for_a_datagram(1_301));
     }
 }

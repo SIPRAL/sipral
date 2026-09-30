@@ -73,6 +73,7 @@ parser took and whose fields could not be read.
 | `transport.selected` | The flow a request is about to leave on: which address, which protocol. |
 | `transport.promoted.size` | §18.1.1: the request would not fit a datagram, so it went over a stream instead. Carries **size and limit**. |
 | `transport.refused.size` | The same rule with nowhere to go. The request was **not emitted**; the caller was asked to open a connection. Carries size and limit. |
+| `transport.kept.datagram` | The same rule set aside, by configuration: the caller said no connection could be had, and `DatagramLimit::without_stream_bytes` let the request go over UDP anyway. Carries size and **that** limit. |
 | `transport.lost` | A transport closed or failed, and what was running on it was failed with it. |
 | `transport.flow.dead` | RFC 5626 §4.4.1: ten seconds with no pong on a flow that has answered one before, so the flow was taken down. |
 | `request.sent` | A request went on the wire, at the size the caller writes. |
