@@ -282,6 +282,10 @@ final class DatagramLimitTests: XCTestCase {
         let recording = try stack.openRecordingLink(to: pbx.address)
         defer { stack.closeRecordingLink(recording) }
         XCTAssertNotEqual(recording, SipralStack.firstLink, "the stream's id was taken again")
+        // the PBX counts a connection when its listener gets to it
+        for _ in 0..<150 where pbx.connections < 2 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         XCTAssertEqual(pbx.connections, 2)
 
         // the stream is still the one the stack reaches under its id: the
