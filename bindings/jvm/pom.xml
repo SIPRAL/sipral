@@ -70,6 +70,9 @@ own tests, and the loopback tests then fail at the first native call.
         <junit.version>5.13.4</junit.version>
 
         <sipral.root>${project.basedir}/../..</sipral.root>
+        <!-- Where the build writes; scripts/package/jvm.sh points it under
+             its own output directory. -->
+        <sipral.build>${project.basedir}/target</sipral.build>
         <sipral.kotlin.sources>${sipral.root}/bindings/kotlin/sipral/src/main/kotlin</sipral.kotlin.sources>
         <sipral.generated>${project.build.directory}/generated-sources/sipral-kotlin</sipral.generated>
         <sipral.natives>${project.build.directory}/natives</sipral.natives>
@@ -95,6 +98,7 @@ own tests, and the loopback tests then fail at the first native call.
     </dependencies>
 
     <build>
+        <directory>${sipral.build}</directory>
         <resources>
             <resource>
                 <directory>${sipral.natives}</directory>
