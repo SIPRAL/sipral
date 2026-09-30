@@ -230,7 +230,10 @@ pub use local_conference::{
     LocalConferenceConfig, MAX_CONFERENCE_MEMBERS, Member,
 };
 #[cfg(feature = "redaction")]
-pub use log::{BURST, Log, LogLevel, LogRecord, LogSink, PER_SECOND, QUEUE_CEILING, Travel};
+pub use log::{
+    BURST, Log, LogLevel, LogRecord, LogSink, MIN_SALT, PER_SECOND, QUEUE_CEILING, SaltTooShort,
+    Travel, pseudonym_key,
+};
 #[cfg(feature = "stun")]
 pub use nat::{DEFAULT_REFRESH, Keep, MappingEvent, MappingState, Mappings, StunDatagram};
 pub use ports::{PortsExhausted, RtpPorts, RtpPortsError};

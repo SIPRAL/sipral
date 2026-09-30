@@ -36,7 +36,18 @@
 //!   [`LogLevel::Trace`], which also drops `Authorization` and SDES keys. The
 //!   pseudonyms are keyed with a secret the application hands to
 //!   [`Log::new`], so they correlate within one log and reveal nothing
-//!   outside it.
+//!   outside it — or, made with [`Log::from_salt`], keyed with a salt the
+//!   application keeps for the installation, so the same address gets the
+//!   same pseudonym in every run and two runs' logs can be laid side by
+//!   side.
+//! - **A diagnostic trace, only when asked for.** [`Log::set_diagnostic`]
+//!   turns on the one mode that writes SIP messages whole — users, names
+//!   and addresses as they were sent — for an operator comparing two runs.
+//!   Even then [`sipral_diag::strip_secrets`] takes every `Authorization`
+//!   and `Proxy-Authorization` value and every SDP key (`a=crypto`, `k=`,
+//!   `a=key-mgmt`) out of each message first, bytes the parser refuses
+//!   included, and prose lines lose their credentials the same way. It is
+//!   off by default and is never turned on by anything but that call.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -45,7 +56,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
-use sipral_diag::{Mode, Redactor, redact_message, redact_text};
+use sipral_diag::{Mode, Redactor, redact_message, redact_text, strip_secrets, strip_secrets_text};
 
 /// How many lines the bucket lets through at once, before the rate below
 /// applies.
@@ -63,6 +74,52 @@ pub const QUEUE_CEILING: usize = 1024;
 /// key writes the same ones; the replacement only bounds the memory a
 /// long-running log keeps.
 const REDACTOR_REUSE: u32 = 4096;
+
+/// The shortest salt [`Log::from_salt`] takes: 128 bits, so that a pseudonym
+/// cannot be reversed by trying every salt as well as every address.
+pub const MIN_SALT: usize = 16;
+
+/// A salt shorter than [`MIN_SALT`] bytes, refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaltTooShort {
+    /// How many bytes it had.
+    pub len: usize,
+}
+
+impl fmt::Display for SaltTooShort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a pseudonym salt of {} bytes is under the {MIN_SALT} a salt needs",
+            self.len
+        )
+    }
+}
+
+impl std::error::Error for SaltTooShort {}
+
+/// The pseudonym key an installation's salt stands for: the key
+/// [`Log::from_salt`] keys its pseudonyms with, and the one a state snapshot
+/// ([`crate::EngineState`]) is redacted under to agree with it.
+///
+/// The salt is the application's to draw once, from the platform's
+/// generator, and to keep with the installation's other settings: the same
+/// salt gives the same key, so the same address or user gets the same
+/// pseudonym in every run, and two runs' traces compare line by line. It is
+/// a secret like any key — whoever holds it can test a guessed address
+/// against a pseudonym — and it must not be a seed that is written anywhere
+/// in clear.
+///
+/// # Errors
+/// [`SaltTooShort`] for a salt under [`MIN_SALT`] bytes.
+pub fn pseudonym_key(salt: &[u8]) -> Result<Vec<u8>, SaltTooShort> {
+    if salt.len() < MIN_SALT {
+        return Err(SaltTooShort { len: salt.len() });
+    }
+    let mut key = salt.to_vec();
+    key.extend_from_slice(b"sipral log and state pseudonyms");
+    Ok(key)
+}
 
 /// How loud a line is. Higher is more detailed: a sink set to
 /// [`LogLevel::Info`] receives errors, warnings and information.
@@ -171,6 +228,9 @@ struct Inner {
     key: Vec<u8>,
     redactor: Redactor,
     redactor_uses: u32,
+    /// Whether SIP messages are written whole, secrets aside
+    /// ([`Log::set_diagnostic`]).
+    diagnostic: bool,
 }
 
 struct Line {
@@ -243,8 +303,43 @@ impl Log {
                 key: key.to_vec(),
                 redactor: Redactor::new(Mode::Hash(key.to_vec())),
                 redactor_uses: 0,
+                diagnostic: false,
             }),
         }))
+    }
+
+    /// A log that is off, pseudonymising under the key `salt` stands for
+    /// ([`pseudonym_key`]): the same pseudonyms in every run of an
+    /// installation that keeps its salt.
+    ///
+    /// # Errors
+    /// [`SaltTooShort`] for a salt under [`MIN_SALT`] bytes.
+    pub fn from_salt(salt: &[u8]) -> Result<Self, SaltTooShort> {
+        Ok(Self::new(&pseudonym_key(salt)?))
+    }
+
+    /// Write SIP messages whole — or go back to redacting them.
+    ///
+    /// Off by default, and meant to stay off outside a diagnosis: with it
+    /// on, a trace line at [`LogLevel::Trace`] carries every user, display
+    /// name, number and address exactly as it went on the wire, and the peer
+    /// it went to, so that two runs can be compared where pseudonyms would
+    /// hide the difference. What never appears, in either mode, is a
+    /// credential or a key: [`sipral_diag::strip_secrets`] takes every
+    /// `Authorization` and `Proxy-Authorization` value, every `a=crypto`
+    /// `inline:` key, every `k=` key and every `a=key-mgmt` payload out of
+    /// each message first — a message the parser refuses included, which is
+    /// then written stripped rather than withheld — and prose lines lose
+    /// their credentials with [`sipral_diag::strip_secrets_text`], without
+    /// pseudonyms either.
+    pub fn set_diagnostic(&self, on: bool) {
+        self.inner().diagnostic = on;
+    }
+
+    /// Whether [`Log::set_diagnostic`] turned the diagnostic trace on.
+    #[must_use]
+    pub fn diagnostic(&self) -> bool {
+        self.inner().diagnostic
     }
 
     /// Deliver every line at `level` and louder to `sink`, replacing any sink
@@ -304,8 +399,12 @@ impl Log {
         now: Instant,
         message: impl FnOnce() -> String,
     ) {
-        self.admit(level, target, now, |redactor| {
-            redact_text(&message(), redactor)
+        self.admit(level, target, now, |redactor, diagnostic| {
+            if diagnostic {
+                strip_secrets_text(&message())
+            } else {
+                redact_text(&message(), redactor)
+            }
         });
     }
 
@@ -314,12 +413,22 @@ impl Log {
     /// every user part, display name and IP literal pseudonymised. Bytes the
     /// parser cannot read are not written at all — only their size — since
     /// nothing could promise every identifier in them was found.
+    ///
+    /// With the diagnostic trace on ([`Log::set_diagnostic`]), the message
+    /// and the peer are written as they are, with only the secrets taken out.
     pub fn sip_message(&self, travel: Travel, peer: SocketAddr, bytes: &[u8], now: Instant) {
-        self.admit(LogLevel::Trace, "sip", now, |redactor| {
+        self.admit(LogLevel::Trace, "sip", now, |redactor, diagnostic| {
             let way = match travel {
                 Travel::Received => "received from",
                 Travel::Sent => "sent to",
             };
+            if diagnostic {
+                return format!(
+                    "{way} {peer}, {} bytes:\n{}",
+                    bytes.len(),
+                    String::from_utf8_lossy(&strip_secrets(bytes))
+                );
+            }
             let peer = redact_text(&peer.to_string(), redactor);
             match redact_message(bytes, redactor) {
                 Ok(clean) => format!(
@@ -340,7 +449,7 @@ impl Log {
         level: LogLevel,
         target: &'static str,
         now: Instant,
-        write: impl FnOnce(&mut Redactor) -> String,
+        write: impl FnOnce(&mut Redactor, bool) -> String,
     ) {
         if !self.enabled(level) {
             return;
@@ -356,7 +465,8 @@ impl Log {
             inner.redactor = Redactor::new(Mode::Hash(inner.key.clone()));
             inner.redactor_uses = 1;
         }
-        let message = write(&mut inner.redactor);
+        let diagnostic = inner.diagnostic;
+        let message = write(&mut inner.redactor, diagnostic);
         let suppressed = std::mem::take(&mut inner.pending_suppressed);
         inner.queue.push_back(Line {
             level,
@@ -424,7 +534,10 @@ impl Drop for Delivering<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BURST, Log, LogLevel, LogRecord, PER_SECOND, QUEUE_CEILING, Travel};
+    use super::{
+        BURST, Log, LogLevel, LogRecord, MIN_SALT, PER_SECOND, QUEUE_CEILING, SaltTooShort, Travel,
+        pseudonym_key,
+    };
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -652,6 +765,161 @@ v=0\r\nc=IN IP4 198.51.100.4\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:QUJD\r
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             ["first", "second"]
+        );
+    }
+
+    /// Every credential and key a message can carry, in the spellings a peer
+    /// may use: the field names in any case and with space before the colon,
+    /// a value folded onto a second line, bare LF line ends, two keys on one
+    /// `a=crypto` line, `k=` and MIKEY.
+    fn secret_bearing() -> Vec<(Vec<u8>, &'static [&'static str])> {
+        const DIGEST: &[&str] = &["0badc0ffee", "d1gest-n0nce-kept?", "feedface", "5ecretpw"];
+        const SDES: &[&str] = &["Rmlyc3RLZXk", "U2Vjb25kS2V5", "S0VZ", "MIKEYDATA"];
+        let sdp = "v=0\r\no=alice 1 1 IN IP4 192.0.2.7\r\ns=-\r\nc=IN IP4 192.0.2.7\r\nt=0 0\r\n\
+k=base64:S0VZ\r\na=key-mgmt:mikey MIKEYDATA\r\nm=audio 4000 RTP/SAVP 0\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:Rmlyc3RLZXk|2^20|1:4;inline:U2Vjb25kS2V5|2^20|2:4\r\n";
+        let invite = format!(
+            "INVITE sip:bob@198.51.100.4 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.7:5060;branch=z9hG4bK1\r\n\
+From: \"Alice\" <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: c@d\r\n\
+CSeq: 2 INVITE\r\n\
+AUTHORIZATION : Digest username=\"alice\", response=\"0badc0ffee\",\r\n\x20\
+cnonce=\"d1gest-n0nce-kept?\"\r\n\
+Proxy-Authorization: Digest username=\"alice\", response=\"feedface\"\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{sdp}",
+            sdp.len()
+        );
+        let bare_lf = invite.replace("\r\n", "\n");
+        let broken = format!(
+            "{}\r\nproxy-authorization: Digest response=\"5ecretpw\"",
+            &invite[..60]
+        );
+        let both: Vec<&'static str> = DIGEST.iter().chain(SDES).copied().collect();
+        let both: &'static [&'static str] = Box::leak(both.into_boxed_slice());
+        vec![
+            (invite.into_bytes(), both),
+            (bare_lf.into_bytes(), both),
+            (broken.into_bytes(), &["5ecretpw"][..]),
+        ]
+    }
+
+    #[test]
+    fn no_credential_or_key_ever_reaches_a_line_in_either_mode() {
+        for diagnostic in [false, true] {
+            let log = Log::from_salt(b"an installation's salt").unwrap();
+            log.set_diagnostic(diagnostic);
+            let seen = listening(&log, LogLevel::Trace);
+            let mut now = Instant::now();
+            for (message, secrets) in secret_bearing() {
+                now += Duration::from_millis(20);
+                log.sip_message(
+                    Travel::Sent,
+                    "198.51.100.4:5060".parse().unwrap(),
+                    &message,
+                    now,
+                );
+                log.sip_message(
+                    Travel::Received,
+                    "198.51.100.4:5060".parse().unwrap(),
+                    &message,
+                    now,
+                );
+                log.line(LogLevel::Warn, "api", now, || {
+                    String::from_utf8_lossy(&message).into_owned()
+                });
+                let _ = log.flush();
+                for (_, _, line, _) in seen.lock().unwrap().drain(..) {
+                    for secret in secrets {
+                        assert!(
+                            !line.contains(secret),
+                            "{secret} with diagnostic {diagnostic}: {line}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_diagnostic_trace_is_off_until_asked_for_and_then_writes_messages_whole() {
+        let log = Log::new(b"key");
+        assert!(!log.diagnostic());
+        let seen = listening(&log, LogLevel::Trace);
+        let (message, _) = secret_bearing().remove(0);
+        let peer = "198.51.100.4:5060".parse().unwrap();
+        let now = Instant::now();
+        log.sip_message(Travel::Sent, peer, &message, now);
+        log.set_diagnostic(true);
+        assert!(log.diagnostic());
+        log.sip_message(Travel::Sent, peer, &message, now);
+        log.sip_message(Travel::Received, peer, b"garbage from 198.51.100.4", now);
+        log.line(LogLevel::Info, "call", now, || {
+            "calling sip:bob@198.51.100.4 with Authorization: Digest response=\"f00d\"".to_owned()
+        });
+        assert_eq!(log.flush(), 4);
+        let lines: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|line| line.2.clone())
+            .collect();
+        assert!(!lines[0].contains("alice") && !lines[0].contains("198.51.100.4"));
+        for whole in [
+            "sent to 198.51.100.4:5060,",
+            "From: \"Alice\" <sip:alice@example.com>;tag=1",
+            "o=alice 1 1 IN IP4 192.0.2.7",
+            "AUTHORIZATION: REDACTED\r\nProxy-Authorization: REDACTED\r\n",
+        ] {
+            assert!(lines[1].contains(whole), "{whole:?} not in {}", lines[1]);
+        }
+        assert!(
+            lines[2].ends_with("garbage from 198.51.100.4"),
+            "bytes the parser refuses are written, stripped: {}",
+            lines[2]
+        );
+        assert_eq!(
+            lines[3],
+            "calling sip:bob@198.51.100.4 with Authorization: REDACTED"
+        );
+
+        log.set_diagnostic(false);
+        log.sip_message(Travel::Sent, peer, &message, now);
+        assert_eq!(log.flush(), 1);
+        let back = seen.lock().unwrap().last().unwrap().2.clone();
+        assert!(
+            !back.contains("alice") && !back.contains("198.51.100.4"),
+            "{back}"
+        );
+    }
+
+    #[test]
+    fn one_salt_gives_the_same_pseudonyms_in_every_run() {
+        // the trial: loopback's pseudonym changed on every start, so two runs
+        // could not be compared
+        let run = |salt: &[u8]| {
+            let log = Log::from_salt(salt).unwrap();
+            let seen = listening(&log, LogLevel::Info);
+            log.line(LogLevel::Info, "t", Instant::now(), || {
+                "127.0.0.1 and sip:alice@192.0.2.1".to_owned()
+            });
+            let _ = log.flush();
+            let line = seen.lock().unwrap()[0].2.clone();
+            assert!(
+                !line.contains("127.0.0.1") && !line.contains("alice"),
+                "{line}"
+            );
+            line
+        };
+        let salt = [7_u8; MIN_SALT];
+        assert_eq!(run(&salt), run(&salt), "the same salt, another run");
+        assert_ne!(run(&salt), run(&[8_u8; MIN_SALT]), "another installation");
+        assert_eq!(pseudonym_key(&salt), pseudonym_key(&salt));
+        assert_eq!(
+            Log::from_salt(&[7_u8; MIN_SALT - 1]).err(),
+            Some(SaltTooShort { len: MIN_SALT - 1 })
         );
     }
 }

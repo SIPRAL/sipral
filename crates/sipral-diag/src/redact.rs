@@ -332,8 +332,13 @@ pub fn redact_record_json(json: &str, red: &mut Redactor) -> String {
 #[must_use]
 pub fn redact_text(text: &str, red: &mut Redactor) -> String {
     let mut out = String::with_capacity(text.len());
+    let mut folding = false;
     for line in text.split_inclusive('\n') {
+        if folded(line, &mut folding) {
+            continue;
+        }
         let (kept, secret) = split_credentials(line);
+        folding = secret.is_some();
         redact_uris_and_addresses(kept, red, &mut out);
         if let Some(tail) = secret {
             if kept.to_ascii_lowercase().ends_with("authorization:") {
@@ -346,15 +351,30 @@ pub fn redact_text(text: &str, red: &mut Redactor) -> String {
     out
 }
 
+/// Whether `line` continues a credential the line before it was cut at —
+/// RFC 3261 §7.3.1's folding, a line that starts with a space or a tab — and
+/// so goes with it. A line that does not continue one ends the folding.
+fn folded(line: &str, folding: &mut bool) -> bool {
+    let continues = *folding && line.starts_with([' ', '\t']);
+    *folding = continues;
+    continues
+}
+
 /// A line cut where a credential starts: what may be kept, and — when a
 /// credential was found — the line ending that follows it, so the output
 /// keeps the line structure the input had.
 fn split_credentials(line: &str) -> (&str, Option<&str>) {
-    const MARKERS: [&str; 4] = [
+    // the three RFC 4566 §5.12 methods that carry a key, and RFC 4567's
+    // key management attribute, beside the credentials and the SDES key
+    const MARKERS: [&str; 8] = [
         "proxy-authorization:",
         "authorization:",
         "digest ",
         "inline:",
+        "k=clear:",
+        "k=base64:",
+        "k=uri:",
+        "a=key-mgmt:",
     ];
     let lower = line.to_ascii_lowercase();
     let cut = MARKERS
@@ -447,8 +467,8 @@ fn redact_body(body: &[u8], red: &mut Redactor) -> Vec<u8> {
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
         let lower = line.trim_start().to_ascii_lowercase();
-        if lower.starts_with("a=crypto:") {
-            out.push_str(&redact_crypto_line(line));
+        if let Some(stripped) = strip_key_line(line) {
+            out.push_str(&stripped);
         } else if lower.starts_with("o=") {
             out.push_str(&redact_origin_line(line, red));
         } else {
@@ -476,19 +496,139 @@ fn redact_origin_line(line: &str, red: &mut Redactor) -> String {
     )
 }
 
-fn redact_crypto_line(line: &str) -> String {
-    let Some(pos) = line.find("inline:") else {
-        return line.to_string();
+/// A session description line with the key material it carries dropped, or
+/// `None` for a line that carries none.
+///
+/// - `a=crypto:` (RFC 4568 §9.1): every `inline:` key-salt, however many
+///   key parameters the line lists after `;`, keeping each one's lifetime
+///   and `MKI:length` after its `|`.
+/// - `k=` (RFC 4566 §5.12): the key after the method, or the whole value
+///   when no method is written; `k=prompt` carries none and is kept.
+/// - `a=key-mgmt:` (RFC 4567 §3): the key management data after the
+///   protocol identifier, which for MIKEY carries the keys themselves.
+fn strip_key_line(line: &str) -> Option<String> {
+    let indent = line.len() - line.trim_start().len();
+    let (lead, body) = line.split_at(indent);
+    let ending = &body[body.trim_end_matches(['\r', '\n']).len()..];
+    let content = body.trim_end_matches(['\r', '\n']);
+    let lower = content.to_ascii_lowercase();
+    let stripped = if lower.starts_with("a=crypto:") {
+        let mut out = String::with_capacity(content.len());
+        let mut rest = content;
+        while let Some(at) = rest.to_ascii_lowercase().find("inline:") {
+            let (before, marked) = rest.split_at(at + "inline:".len());
+            out.push_str(before);
+            out.push_str("REDACTED");
+            let end = marked
+                .find(|c: char| c.is_whitespace() || matches!(c, '|' | ';'))
+                .unwrap_or(marked.len());
+            rest = marked.get(end..).unwrap_or("");
+        }
+        out.push_str(rest);
+        out
+    } else if lower.starts_with("k=") {
+        let value = content.get(2..).unwrap_or("");
+        match value.split_once(':') {
+            _ if value.trim().eq_ignore_ascii_case("prompt") => content.to_string(),
+            Some((method, _)) => format!("k={method}:REDACTED"),
+            None => "k=REDACTED".to_string(),
+        }
+    } else if lower.starts_with("a=key-mgmt:") {
+        let value = content.get("a=key-mgmt:".len()..).unwrap_or("");
+        let protocol = value.split_whitespace().next().unwrap_or("");
+        format!("a=key-mgmt:{protocol} REDACTED")
+    } else {
+        return None;
     };
-    let (before, after_marker) = line.split_at(pos);
-    let after_key = after_marker.get(7..).unwrap_or(""); // past "inline:"
-    // the key runs up to whitespace or the `|` that introduces the lifetime
-    // and MKI:length that may follow it (RFC 4568 §9.1) — both are kept
-    let end = after_key
-        .find(|c: char| c.is_whitespace() || c == '|')
-        .unwrap_or(after_key.len());
-    let rest = after_key.get(end..).unwrap_or("");
-    format!("{before}inline:REDACTED{rest}")
+    Some(format!("{lead}{stripped}{ending}"))
+}
+
+/// A whole SIP message with its secrets taken out and nothing else touched:
+/// the value of every `Authorization` and `Proxy-Authorization` field, folded
+/// continuation lines included, and every key a session description carries
+/// (`a=crypto` `inline:` keys, `k=`, `a=key-mgmt`; see [`redact_message`]'s
+/// body pass). Users, display names and addresses stay as they are.
+///
+/// For a diagnostic trace an operator turned on to compare two runs of the
+/// same installation, where a pseudonym would hide exactly what is being
+/// compared. It reads lines rather than parsing, so bytes the parser refuses
+/// — which is when a trace is wanted most — are stripped the same way: a
+/// credential field is recognised by its name at the start of any line, in
+/// any case, and a key line anywhere in the body, a multipart one included.
+/// `Content-Length` is left as it arrived, so a body whose keys were taken
+/// out is shorter than it says.
+#[must_use]
+pub fn strip_secrets(message: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(message.len());
+    let mut folding = false;
+    for line in message.split_inclusive(|byte| *byte == b'\n') {
+        let continues = line
+            .first()
+            .is_some_and(|byte| matches!(*byte, b' ' | b'\t'));
+        if folding && continues {
+            continue;
+        }
+        folding = false;
+        if let Some(name) = credential_field(line) {
+            out.extend_from_slice(name);
+            out.extend_from_slice(b": REDACTED");
+            out.extend_from_slice(line_ending(line));
+            folding = true;
+            continue;
+        }
+        match std::str::from_utf8(line).ok().and_then(strip_key_line) {
+            Some(stripped) => out.extend_from_slice(stripped.as_bytes()),
+            None => out.extend_from_slice(line),
+        }
+    }
+    out
+}
+
+/// Free text with its credentials cut and nothing pseudonymised:
+/// [`redact_text`]'s credential pass alone, for the lines of a diagnostic
+/// trace.
+#[must_use]
+pub fn strip_secrets_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut folding = false;
+    for line in text.split_inclusive('\n') {
+        if folded(line, &mut folding) {
+            continue;
+        }
+        let (kept, secret) = split_credentials(line);
+        folding = secret.is_some();
+        out.push_str(kept);
+        if let Some(tail) = secret {
+            if kept.to_ascii_lowercase().ends_with("authorization:") {
+                out.push(' ');
+            }
+            out.push_str("REDACTED");
+            out.push_str(tail);
+        }
+    }
+    out
+}
+
+/// The name of an `Authorization` or `Proxy-Authorization` field starting
+/// `line`, as written, when it is one: the name, optional whitespace, then
+/// the colon (RFC 3261 §7.3.1).
+fn credential_field(line: &[u8]) -> Option<&[u8]> {
+    let colon = line.iter().position(|byte| *byte == b':')?;
+    let name = line.get(..colon)?.trim_ascii_end();
+    (name.eq_ignore_ascii_case(b"authorization")
+        || name.eq_ignore_ascii_case(b"proxy-authorization"))
+    .then_some(name)
+}
+
+/// The `\r\n` or `\n` a line ends with, or nothing for the last one.
+fn line_ending(line: &[u8]) -> &[u8] {
+    if line.ends_with(b"\r\n") {
+        b"\r\n"
+    } else if line.ends_with(b"\n") {
+        b"\n"
+    } else {
+        b""
+    }
 }
 
 fn redact_header_value(
@@ -687,7 +827,10 @@ fn scan_ip_literals_str(text: &str, red: &mut Redactor) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mode, Redactor, redact_message, redact_record_json, redact_text};
+    use super::{
+        Mode, Redactor, redact_message, redact_record_json, redact_text, strip_secrets,
+        strip_secrets_text,
+    };
 
     fn hash_redactor() -> Redactor {
         Redactor::new(Mode::Hash(b"organisation-secret".to_vec()))
@@ -861,6 +1004,132 @@ Content-Length: {}\r\n\r\n{sdp}",
         let out = redact(msg.as_bytes(), &mut hash_redactor());
         assert!(!out.contains("d0RmdmcmVCspeE6PJ5+cJVEDBRLM"));
         assert!(out.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:REDACTED|2^20|1:32"));
+    }
+
+    /// A session description carrying every kind of key this stack knows of:
+    /// two key parameters on one `a=crypto` line (RFC 4568 §9.1 allows a
+    /// list), a `k=` line and a MIKEY `a=key-mgmt`.
+    const KEYED_SDP: &str = "v=0\r\no=alice 1 1 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nk=base64:S0VZLUxJTkUtU0VDUkVU\r\n\
+a=key-mgmt:mikey AQAFgM0XflABAAAAAAAAAAAAAAsAyO7-SECRET-MIKEY\r\n\
+m=audio 40000 RTP/SAVP 0\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:Rmlyc3RLZXlTZWNyZXQx|2^20|1:4;inline:U2Vjb25kS2V5U2VjcmV0|2^20|2:4\r\n\
+a=crypto:2 AES_CM_128_HMAC_SHA1_32 INLINE:VGhpcmRLZXlTZWNyZXQz\r\n";
+
+    const KEYS: [&str; 5] = [
+        "Rmlyc3RLZXlTZWNyZXQx",
+        "U2Vjb25kS2V5U2VjcmV0",
+        "VGhpcmRLZXlTZWNyZXQz",
+        "S0VZLUxJTkUtU0VDUkVU",
+        "SECRET-MIKEY",
+    ];
+
+    fn keyed_invite() -> String {
+        format!(
+            "INVITE sip:bob@198.51.100.4 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK1\r\n\
+From: \"Alice\" <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a@b\r\n\
+CSeq: 1 INVITE\r\n\
+Authorization: Digest username=\"alice\", realm=\"pbx\", nonce=\"n1\",\r\n\x20\
+uri=\"sip:bob@198.51.100.4\", response=\"0badc0ffee\"\r\n\
+proxy-authorization  : Digest username=\"alice\", response=\"feedface\"\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{KEYED_SDP}",
+            KEYED_SDP.len()
+        )
+    }
+
+    #[test]
+    fn every_key_on_a_line_and_every_kind_of_key_line_is_dropped() {
+        // the redaction every export and every trace line goes through
+        let out = redact(keyed_invite().as_bytes(), &mut hash_redactor());
+        for key in KEYS {
+            assert!(!out.contains(key), "{key} in {out}");
+        }
+        assert!(
+            out.contains("inline:REDACTED|2^20|1:4;inline:REDACTED|2^20|2:4"),
+            "{out}"
+        );
+        assert!(out.contains("k=base64:REDACTED\r\n"), "{out}");
+        assert!(out.contains("a=key-mgmt:mikey REDACTED\r\n"), "{out}");
+    }
+
+    #[test]
+    fn stripping_takes_the_secrets_and_leaves_everyone_in_the_message() {
+        let message = keyed_invite();
+        let out = String::from_utf8(strip_secrets(message.as_bytes())).unwrap();
+        for secret in KEYS
+            .iter()
+            .chain(&["0badc0ffee", "feedface", "nonce=", "uri=\"sip"])
+        {
+            assert!(!out.contains(secret), "{secret} in {out}");
+        }
+        // the whole message otherwise: users, names and addresses as sent
+        for kept in [
+            "INVITE sip:bob@198.51.100.4 SIP/2.0\r\n",
+            "Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK1\r\n",
+            "From: \"Alice\" <sip:alice@example.com>;tag=1\r\n",
+            "Authorization: REDACTED\r\nproxy-authorization: REDACTED\r\nContent-Type",
+            "o=alice 1 1 IN IP4 192.0.2.9\r\n",
+            "a=crypto:2 AES_CM_128_HMAC_SHA1_32 INLINE:REDACTED\r\n",
+        ] {
+            assert!(out.contains(kept), "{kept:?} not in {out}");
+        }
+    }
+
+    #[test]
+    fn stripping_reads_lines_so_a_message_the_parser_refuses_loses_its_secrets_too() {
+        let garbage = b"NOT SIP AT ALL\nAUTHORIZATION:Digest response=\"cafebabe\"\n\
+\tresponse2=\"deadbeef\"\nsomething: else\n\xff\xfe\na=crypto:1 X inline:QUJDREVG\nk=prompt\nk=Y2xlYXJrZXk";
+        let out = strip_secrets(garbage);
+        let text = String::from_utf8_lossy(&out);
+        for secret in ["cafebabe", "deadbeef", "QUJDREVG", "Y2xlYXJrZXk"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        assert!(
+            text.contains("AUTHORIZATION: REDACTED\nsomething: else\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("k=prompt\n"),
+            "a key the user types is no key"
+        );
+        assert!(text.ends_with("k=REDACTED"), "{text}");
+        assert!(
+            out.windows(2).any(|pair| pair == b"\xff\xfe"),
+            "bytes kept as they were"
+        );
+    }
+
+    #[test]
+    fn free_text_loses_a_folded_credential_and_every_sdp_key() {
+        // a message logged as prose: the second line of a folded
+        // Authorization value, and the key lines, go with it
+        let text = "Authorization: Digest username=\"a\",\r\n\tresponse=\"f00dcafe\"\r\n\
+Via: next\r\nk=base64:S0VZS0VZ\r\na=key-mgmt:mikey TUlLRVk=\r\n k=clear:cGxhaW4=\r\n";
+        for out in [
+            redact_text(text, &mut hash_redactor()),
+            strip_secrets_text(text),
+        ] {
+            for secret in ["f00dcafe", "S0VZS0VZ", "TUlLRVk", "cGxhaW4"] {
+                assert!(!out.contains(secret), "{secret} in {out}");
+            }
+            assert!(out.contains("Via: next\r\n"), "{out}");
+        }
+    }
+
+    #[test]
+    fn stripping_free_text_cuts_credentials_and_pseudonymises_nothing() {
+        let text = "refused sip:alice@192.0.2.7 with Authorization: Digest response=\"f00d\"\n\
+SDES inline:QUJD|2^20\nplain line";
+        let out = strip_secrets_text(text);
+        assert_eq!(
+            out,
+            "refused sip:alice@192.0.2.7 with Authorization: REDACTED\nSDES inline:REDACTED\n\
+plain line"
+        );
     }
 
     #[test]
