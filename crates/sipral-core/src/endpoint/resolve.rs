@@ -216,7 +216,7 @@ impl Endpoint {
 /// through; resolving its host instead sends the request to a different
 /// machine that happens to be named in the same URI. The response path applies
 /// the same rule to a `Via` in `via.rs`, and the two must not disagree.
-fn target_host(sip: &crate::msg::SipUriRef<'_>) -> Host {
+pub(super) fn target_host(sip: &crate::msg::SipUriRef<'_>) -> Host {
     let Some(maddr) = sip.maddr() else {
         return Host::from_ref(sip.host);
     };

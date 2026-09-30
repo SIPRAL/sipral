@@ -178,6 +178,8 @@ pub struct UserAgent {
     pub(crate) recording_server: bool,
     /// The registrar flows kept open through a NAT ([`crate::keepalive`]).
     pub(crate) keepalives: crate::keepalive::Keepalives,
+    /// The addresses of the accounts that find their server by name.
+    pub(crate) locations: crate::locate::Locations,
     /// 64·T1, read off the configuration once. RFC 6665 §4.1.2.4's Timer N is
     /// the only deadline this layer takes from the transaction timings, and
     /// the endpoint does not hand its configuration back out.
@@ -303,6 +305,7 @@ impl UserAgent {
             info_handed_over: false,
             recording_server: false,
             keepalives: crate::keepalive::Keepalives::default(),
+            locations: crate::locate::Locations::default(),
             timer_n,
             sdp_limits,
             life: Machine::default(),
@@ -385,6 +388,7 @@ impl UserAgent {
         self.fire_lifecycle_timers(now);
         self.fire_announce_timers(now);
         self.fire_keepalives(now);
+        self.fire_locations(now);
         #[cfg(feature = "stir")]
         self.fire_stir_timers(now);
         self.fire_publication_timers(now);
@@ -487,6 +491,7 @@ impl UserAgent {
             .chain(self.lifecycle_deadline())
             .chain(self.announce_deadline())
             .chain(self.keepalive_deadline())
+            .chain(self.location_deadline())
             .chain(self.verification_deadline())
             .chain(self.publication_deadline())
             .chain(self.stream_deadline)
@@ -609,6 +614,7 @@ impl UserAgent {
         self.registrations.remove(&account);
         self.owners.retain(|_, owner| *owner != account);
         self.forget_keepalive(account);
+        self.forget_location(account);
         self.forget_publications(account);
     }
 
@@ -746,12 +752,29 @@ impl UserAgent {
         // every REGISTER goes through here -- the application's, a refresh, a
         // retry, a wake's, a push's -- so this is the one place an account
         // with no registrar is turned away, before anything is built
-        let Some(registrar) = config.registrar.as_ref() else {
+        if config.registrar.is_none() {
             return Err(UaError::NoRegistrar);
-        };
+        }
         // and the one place the fields the account was configured with are
         // checked, for the same reason
         HeadersFor::Registration.check_each(&config.extra)?;
+        // an account that finds its registrar by name and holds no address
+        // for it sends nothing until a lookup has named one (RFC 3263)
+        if self.register_waits_for_location(account, unregistering, now) {
+            if let Some(reg) = self.registrations.get_mut(&account)
+                && reg.transaction.is_none()
+            {
+                reg.due = None;
+                if !unregistering {
+                    reg.state = RegistrationState::Registering;
+                }
+            }
+            return Ok(());
+        }
+        let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
+        let Some(registrar) = config.registrar.as_ref() else {
+            return Err(UaError::NoRegistrar);
+        };
         let reg = self
             .registrations
             .get(&account)
@@ -934,6 +957,8 @@ impl UserAgent {
         // last, so that every change this round finished — answered, refused,
         // or given up on after a challenge — has let go of its call first
         self.send_waiting_holds(now);
+        // a trunk that finds its proxy by name starts looking once it can
+        self.settle_locations(now);
         // and after every registration this round won or lost
         self.settle_keepalives(now);
         // last of all: whatever this round left waiting for a stream is
@@ -1267,8 +1292,12 @@ impl UserAgent {
     fn on_request_failed(&mut self, account: AccountId, reason: FailureReason, now: Instant) {
         // §10.2.7: "the UAC SHOULD NOT immediately re-attempt a registration to
         // the same registrar" after a timeout. Neither is a dead transport a
-        // reason to stop for good
+        // reason to stop for good. A different server is another matter: RFC
+        // 3263 §4.3 tries the next address a located registrar's name gave
         let _ = reason;
+        if self.fail_over_registration(account, now) {
+            return;
+        }
         self.retry_later(account, None, None, None, now);
     }
 

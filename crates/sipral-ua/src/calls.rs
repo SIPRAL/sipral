@@ -107,6 +107,9 @@ impl UserAgent {
         // before anything is kept or built, so a refused field leaves no call
         // behind and nothing on the wire
         HeadersFor::Call.check_each(&outgoing.extra)?;
+        if outgoing.destination.is_none() && config.destination().is_none() {
+            return Err(UaError::NotLocated);
+        }
         let asked = config.session_interval;
         let from = config.caller_value();
         let mut call = Call::outgoing(
@@ -162,7 +165,8 @@ impl UserAgent {
         let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
         let (transport, remote) = outgoing
             .destination
-            .unwrap_or((config.transport, config.remote));
+            .or_else(|| config.destination())
+            .ok_or(UaError::NotLocated)?;
         let from = config.caller_value();
         let identifying = identifying_fields(config, &outgoing.extra, remote);
         // read fresh rather than kept from when the call was placed (RFC 5627

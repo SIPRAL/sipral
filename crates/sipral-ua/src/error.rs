@@ -80,6 +80,11 @@ pub enum UaError {
     /// takes: under a second, or over the two minutes RFC 4787 REQ-5 has a
     /// NAT keep a UDP flow for.
     InvalidKeepalive(core::time::Duration),
+    /// The account finds its server by RFC 3263
+    /// ([`Account::located`](crate::Account::located)) and no lookup has
+    /// answered yet, so a request that names no destination of its own has
+    /// nowhere to go. Nothing was sent.
+    NotLocated,
     /// A redirect was asked for with a status outside 300 to 399, or one
     /// other than 380 with nowhere to redirect to (RFC 3261 §21.3).
     NotARedirection(sipral_core::msg::StatusCode),
@@ -137,6 +142,9 @@ impl fmt::Display for UaError {
                 f,
                 "a registrar keep-alive every {} ms is outside 1 000 to 120 000 ms",
                 interval.as_millis()
+            ),
+            Self::NotLocated => f.write_str(
+                "the account's server has not been located yet: no DNS answer has named an address",
             ),
             Self::NotARedirection(status) if (300..400).contains(&status.get()) => write!(
                 f,

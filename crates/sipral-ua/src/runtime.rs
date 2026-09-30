@@ -47,7 +47,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sipral_core::endpoint::{EndpointConfig, Event, Host, Input, TransportId, TransportProtocol};
+use sipral_core::endpoint::{
+    AddressFamily, Answer, EndpointConfig, Event, Host, Input, Query, Record, RecordType,
+    TransportId, TransportProtocol,
+};
 use sipral_core::msg::HostRef;
 
 use crate::agent::UserAgent;
@@ -344,6 +347,14 @@ impl Runtime {
                         );
                     }
                 }
+                // RFC 3263 for an account that names its server: the
+                // addresses from the system resolver, and nothing for NAPTR
+                // and SRV, which `std::net` cannot ask — the locator then
+                // uses the host's own addresses at the transport's port
+                UaEvent::LookupWanted { account, query } => {
+                    let answer = self.answer_lookup(&query);
+                    let _ = self.agent.looked_up(account, &query, answer, now);
+                }
                 // opened here, and reported anyway: the two sizes on it are
                 // the only place the application ever sees how large the
                 // request that did not fit was
@@ -544,6 +555,38 @@ impl Runtime {
             || registrars
                 .iter()
                 .all(|(host, port)| (self.resolver)(host, *port, None).is_err())
+    }
+}
+
+impl Runtime {
+    /// The system resolver's answer to one RFC 3263 query. It gives no
+    /// time-to-live, so every address is held for the shortest the locator
+    /// allows, [`crate::locate::MIN_TTL`].
+    fn answer_lookup(&self, query: &Query) -> Answer {
+        let family = match query.record {
+            RecordType::A => AddressFamily::Ipv4,
+            RecordType::Aaaa => AddressFamily::Ipv6,
+            RecordType::Naptr | RecordType::Srv => return Answer::Nothing,
+        };
+        match (self.resolver)(&Host::Name(query.name.clone()), Some(0), None) {
+            Err(_) => Answer::Failed,
+            Ok(addresses) => {
+                let records: Vec<Record> = addresses
+                    .into_iter()
+                    .map(|address| address.ip())
+                    .filter(|address| AddressFamily::of(*address) == family)
+                    .map(|address| Record::Address {
+                        address,
+                        ttl: crate::locate::MIN_TTL,
+                    })
+                    .collect();
+                if records.is_empty() {
+                    Answer::Nothing
+                } else {
+                    Answer::Records(records)
+                }
+            }
+        }
     }
 }
 
@@ -961,6 +1004,49 @@ mod tests {
             recorder.seen
         );
         (runtime, recorder)
+    }
+
+    /// A registrar given by name: the loop answers the account's lookups with
+    /// the system resolver — nothing for SRV, the addresses for the host —
+    /// and the REGISTER reaches the address the name stands for.
+    #[test]
+    fn a_registrar_given_by_name_is_located_and_registered_with() {
+        let far = std::net::UdpSocket::bind("127.0.0.1:0").expect("a registrar");
+        far.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("a read timeout");
+        let port = far.local_addr().expect("its address").port();
+        let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
+        let mut runtime =
+            Runtime::bind(EndpointConfig::default(), [19; 32], local).expect("a loopback socket");
+        runtime.resolver = knows_the_registrar;
+        let transport = runtime.transport();
+        let t0 = Instant::now();
+        let id = runtime.agent().add_account(Account::located(
+            Uri::parse_str("sip:alice@registrar.example").expect("a URI"),
+            Uri::parse_str(&format!("sip:registrar.example:{port}")).expect("a URI"),
+            Uri::parse_str("sip:alice@127.0.0.1").expect("a URI"),
+            transport,
+        ));
+        runtime
+            .agent()
+            .register(id, t0)
+            .expect("the REGISTER waits");
+        let mut recorder = Recorder::default();
+        runtime.turn(&mut recorder, t0).expect("a turn");
+        let mut buffer = [0_u8; 4_096];
+        let (read, _) = far.recv_from(&mut buffer).expect("the REGISTER arrives");
+        assert!(
+            buffer
+                .get(..read)
+                .unwrap_or_default()
+                .starts_with(b"REGISTER sip:registrar.example:"),
+            "{:?}",
+            recorder.seen
+        );
+        assert_eq!(
+            runtime.agent().located_targets(id),
+            [SocketAddr::from(([127, 0, 0, 1], port))]
+        );
     }
 
     /// Registered, then the resolver goes: the loop that asked for a name

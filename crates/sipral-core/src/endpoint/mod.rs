@@ -25,6 +25,7 @@ mod driver;
 mod error;
 mod event;
 mod inbound;
+mod locate;
 mod outgoing;
 mod prack;
 #[cfg(test)]
@@ -56,5 +57,8 @@ pub use error::{
     AckError, AuthRetryError, CancelError, PrackError, ReceiveError, RespondError, SendError,
 };
 pub use event::{DialogEndReason, Event, FailureReason, TerminationReason};
+pub use locate::{
+    AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
+};
 pub use outgoing::{ENDPOINT_FIELDS, OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse};
 pub use transport::{Host, Input, Transmit, TransportErrorKind, TransportId, TransportProtocol};

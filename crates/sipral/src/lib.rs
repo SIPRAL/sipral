@@ -286,6 +286,10 @@ pub use sipral_ua::Direction as CallDirection;
 /// What [`UserAgent::stop_recording`] hands back, for `redacted_recording`
 /// to be named against.
 pub use sipral_ua::Recording;
+/// RFC 3263 for an account that names its registrar or its outbound proxy
+/// ([`Account::located`]): the lookups [`UaEvent::LookupWanted`] asks for, the
+/// answers [`UserAgent::looked_up`] takes, and the procedure itself.
+pub use sipral_ua::locate::{MAX_TTL as MAX_LOCATION_TTL, MIN_TTL as MIN_LOCATION_TTL};
 /// The whole user agent, so that a softphone depends on this crate and nothing
 /// else: accounts, registration, calls, hold, transfer, and the five calls
 /// that drive them.
@@ -296,6 +300,9 @@ pub use sipral_ua::{
     Refusals, RegistrationFailure, RegistrationState, Replacing, STREAM_WAIT, Screen, Screening,
     StatusCode, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit,
     TransportId, TransportProtocol, UaError, UaEvent, Uri, UserAgent,
+};
+pub use sipral_ua::{
+    AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
 };
 /// Who is on a call and how it asked to be answered, why it ended, and where
 /// to send it instead: RFC 3325's asserted identity behind a per-account

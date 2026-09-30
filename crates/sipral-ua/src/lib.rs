@@ -73,6 +73,7 @@ mod identity;
 /// bounds a binding checks its own setting against.
 pub mod keepalive;
 mod lifecycle;
+pub mod locate;
 mod message;
 mod mwi;
 mod options;
@@ -169,6 +170,12 @@ pub use verification::{
 /// What a caller needs from the layer below to drive this one, re-exported so
 /// that an application does not have to name `sipral-core` to use a phone.
 pub use sipral_core::auth::Credentials;
+/// RFC 3263's lookups, as [`UaEvent::LookupWanted`] asks for them and
+/// [`UserAgent::looked_up`] takes their answers, and the procedure itself for
+/// an application that locates something of its own.
+pub use sipral_core::endpoint::{
+    AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
+};
 pub use sipral_core::endpoint::{
     EndpointConfig, Input, ReceiveError, Transmit, TransportId, TransportProtocol,
 };

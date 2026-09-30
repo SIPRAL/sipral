@@ -325,7 +325,10 @@ impl UserAgent {
         ) {
             return None;
         }
-        let config = self.accounts.get(&account)?;
+        let config = self
+            .accounts
+            .get(&account)
+            .filter(|config| config.located)?;
         let every = if let Some(own) = config.keepalive {
             own
         } else {
