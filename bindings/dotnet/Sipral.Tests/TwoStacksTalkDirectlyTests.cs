@@ -249,8 +249,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     {
         using var stack = new SipralStack(audio: SipralAudio.Application);
         var account = stack.AddAccount(
-            "sip:alice@sipral.invalid", registrarAddress: "203.0.113.1:5060", registrar: "sip:registrar.invalid");
-        account.Register(); // unreachable registrar: keeps the poll thread retransmitting
+            "sip:alice@sipral.invalid", registrarAddress: "127.0.0.1:9", registrar: "sip:registrar.invalid");
+        account.Register(); // a registrar nobody answers on this machine: keeps the poll thread retransmitting
 
         var sawBusy = 0;
         var sawOk = 0;
@@ -377,8 +377,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         };
 
         var account = stack.AddAccount(
-            "sip:alice@sipral.invalid", registrarAddress: "203.0.113.1:5060", registrar: "sip:registrar.invalid");
-        account.Register(); // unreachable registrar: keeps the poll thread producing further events to retry on
+            "sip:alice@sipral.invalid", registrarAddress: "127.0.0.1:9", registrar: "sip:registrar.invalid");
+        account.Register(); // a registrar nobody answers on this machine: keeps the poll thread producing further events to retry on
 
         Assert.True(await afterThrow.WaitAsync(Timeout), "the poll thread should still be delivering events after a handler threw");
     }

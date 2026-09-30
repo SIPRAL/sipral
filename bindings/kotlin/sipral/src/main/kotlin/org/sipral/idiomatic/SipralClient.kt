@@ -335,7 +335,7 @@ class SipralClient private constructor(
          * (`sipral_stack_transport_bind`): the request the stack was holding
          * goes on it, and the call or registration carries on over it. When
          * that connection is refused or times out, or with false, the stack
-         * is told at once (`sipral_stack_transport_failure`, whose detail
+         * is told at once (`sipral_stack_transport_failed_with`, whose detail
          * names where the connection was going and whether it was refused,
          * timed out or not tried), and what was
          * waiting ends rather than hanging: a call as unreachable, its
@@ -1312,14 +1312,14 @@ class SipralClient private constructor(
         readStreamLink(id, socket)
     }
 
-    /** `sipral_stack_transport_failure` for a connection that was not made;
+    /** `sipral_stack_transport_failed_with` for a connection that was not made;
      * never throwing on the way out. [what] finishes a sentence that begins
      * "TCP" -- where the connection was going and what became of it --
      * carried to the event's detail. */
     private fun sayNoStream(id: Long, error: SipralTransportError, what: String) {
         try {
             retryBusy {
-                Sipral.stackTransportFailure(
+                Sipral.stackTransportFailedWith(
                     handle,
                     SipralTransportFailure(
                         transport = id,

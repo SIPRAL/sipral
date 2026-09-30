@@ -329,7 +329,7 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary><c>sipral_stack_transport_failure</c> for a connection that
+    /// <summary><c>sipral_stack_transport_failed_with</c> for a connection that
     /// was not made; never throwing on the way out. <paramref name="what"/>
     /// finishes a sentence that begins "TCP" — where the connection was going
     /// and what became of it — carried to the event's detail.</summary>
@@ -345,8 +345,8 @@ public sealed partial class SipralStack
             failure.Tls = (uint)SipralTlsFailure.None;
             failure.Detail = pinned.AddrOfPinnedObject();
             failure.DetailLen = (nuint)detail.Length;
-            SipralErrors.Call(() => NativeMethods.sipral_stack_transport_failure(Handle, in failure, NowMs),
-                "sipral_stack_transport_failure");
+            SipralErrors.Call(() => NativeMethods.sipral_stack_transport_failed_with(Handle, in failure, NowMs),
+                "sipral_stack_transport_failed_with");
         }
         catch (Exception ex) when (ex is SipralException or ObjectDisposedException)
         {

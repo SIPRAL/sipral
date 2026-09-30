@@ -360,7 +360,7 @@ class Stack:
         (`sipral_stack_transport_bind`): the request the stack was holding
         goes on it, and the call or registration carries on over it. When
         that connection is refused or times out, or with ``False``, the
-        stack is told at once (`sipral_stack_transport_failure`, whose detail
+        stack is told at once (`sipral_stack_transport_failed_with`, whose detail
         names where the connection was going and whether it was refused,
         timed out or not tried), and what
         was waiting ends rather than hanging: a call as unreachable, its
@@ -1971,7 +1971,7 @@ class Stack:
         self._selector.register(sock, selectors.EVENT_READ, data=("sip", transport))
 
     def _say_no_stream(self, transport: int, error: int, what: str) -> None:
-        """`sipral_stack_transport_failure` for a connection that was not
+        """`sipral_stack_transport_failed_with` for a connection that was not
         made; never raising on the way out. ``what`` finishes a sentence
         that begins "TCP" -- where the connection was going and what became
         of it -- carried to the event's detail."""
@@ -1989,8 +1989,8 @@ class Stack:
         failure.detail_len = len(detail)
         try:
             _retry(
-                lambda: lib.sipral_stack_transport_failure(self.handle, failure, self.now_ms()),
-                "sipral_stack_transport_failure",
+                lambda: lib.sipral_stack_transport_failed_with(self.handle, failure, self.now_ms()),
+                "sipral_stack_transport_failed_with",
             )
         except Exception:  # noqa: BLE001 -- nothing was waiting any more
             pass

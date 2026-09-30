@@ -346,7 +346,7 @@ public final class SipralStack: @unchecked Sendable {
     /// (`sipral_stack_transport_bind`): the request the stack was holding
     /// goes on it, and the call or registration carries on over it. When
     /// that connection is refused or times out, or with `false`, the stack is
-    /// told at once (`sipral_stack_transport_failure`, whose detail --
+    /// told at once (`sipral_stack_transport_failed_with`, whose detail --
     /// `transportFailedData.detail` -- names where the connection was going
     /// and whether it was refused, timed out or not tried), and what was waiting
     /// ends rather than hanging: a call as unreachable, its `endCause` a SIP
@@ -877,7 +877,7 @@ public final class SipralStack: @unchecked Sendable {
         )
     }
 
-    /// `sipral_stack_transport_failure` for a connection that was not made,
+    /// `sipral_stack_transport_failed_with` for a connection that was not made,
     /// never throwing on the way out. `what` finishes a sentence that begins
     /// "TCP" -- where it was going and what became of it -- and is carried
     /// to `transportFailedData.detail`.
@@ -889,7 +889,7 @@ public final class SipralStack: @unchecked Sendable {
             failure.error = error.rawValue
             failure.detail = text
             failure.detail_len = detail.utf8.count
-            _ = try? retryingBusy { try Sipral.stackTransportFailure(stack: handle, failure: failure, nowMs: nowMs()) }
+            _ = try? retryingBusy { try Sipral.stackTransportFailedWith(stack: handle, failure: failure, nowMs: nowMs()) }
         }
     }
 
