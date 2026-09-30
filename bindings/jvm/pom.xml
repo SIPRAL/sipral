@@ -67,7 +67,7 @@ own tests, and the loopback tests then fail at the first native call.
              Kotlin 2.1 or later compiles against them. -->
         <kotlin.target>2.2</kotlin.target>
         <coroutines.version>1.11.0</coroutines.version>
-        <junit.version>5.13.4</junit.version>
+        <junit.version>6.1.3</junit.version>
 
         <sipral.root>${project.basedir}/../..</sipral.root>
         <!-- Where the build writes; scripts/package/jvm.sh points it under
@@ -243,7 +243,7 @@ own tests, and the loopback tests then fail at the first native call.
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.14.1</version>
+                <version>3.16.0</version>
                 <executions>
                     <execution>
                         <id>default-compile</id>
@@ -273,14 +273,14 @@ own tests, and the loopback tests then fail at the first native call.
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-resources-plugin</artifactId>
-                <version>3.3.1</version>
+                <version>3.5.0</version>
             </plugin>
 
             <!-- The loader's own tests, against target/classes. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.4</version>
+                <version>3.6.0</version>
                 <configuration>
                     <redirectTestOutputToFile>true</redirectTestOutputToFile>
                 </configuration>
@@ -292,7 +292,7 @@ own tests, and the loopback tests then fail at the first native call.
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
-                <version>3.5.4</version>
+                <version>3.6.0</version>
                 <configuration>
                     <argLine>-Xcheck:jni</argLine>
                     <redirectTestOutputToFile>true</redirectTestOutputToFile>
@@ -310,7 +310,7 @@ own tests, and the loopback tests then fail at the first native call.
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
-                <version>3.4.2</version>
+                <version>3.5.1</version>
                 <configuration>
                     <archive>
                         <manifestEntries>
@@ -325,7 +325,7 @@ own tests, and the loopback tests then fail at the first native call.
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-source-plugin</artifactId>
-                <version>3.3.1</version>
+                <version>3.4.0</version>
                 <executions>
                     <execution>
                         <id>sources</id>
@@ -342,7 +342,7 @@ own tests, and the loopback tests then fail at the first native call.
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>flatten-maven-plugin</artifactId>
-                <version>1.7.3</version>
+                <version>1.8.0</version>
                 <configuration>
                     <flattenMode>ossrh</flattenMode>
                     <outputDirectory>${project.build.directory}</outputDirectory>

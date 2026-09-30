@@ -90,7 +90,7 @@ LIBS=(libsipral_ffi.so libsipral_jni.so)
 JNI_SOURCES=(sipral_jni.c idiomatic_media.c audio_routes.c)
 # The oldest glibc either pair may ask for, manylinux_2_28's.
 GLIBC_MINOR_MAX=28
-JUNIT_PLATFORM_VERSION="1.13.4"
+JUNIT_PLATFORM_VERSION="6.1.3"
 
 # Whether $1 is a 64-bit little-endian ELF shared object for machine $2, read
 # from its own header: EI_CLASS at 4, EI_DATA at 5, e_type at 16, e_machine
