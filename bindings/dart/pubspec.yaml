@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+
+name: sipral
+description: >-
+  Sipral - Session Initiation Protocol Rust Audio Layer. The Dart and Flutter
+  binding over the C ABI, through dart:ffi.
+version: 0.0.1
+homepage: https://sipral.org
+repository: https://github.com/SIPRAL/sipral
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  ffi: ^2.1.0
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0

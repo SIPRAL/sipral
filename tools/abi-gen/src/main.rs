@@ -11,6 +11,7 @@
 
 mod c;
 mod csharp;
+mod dart;
 mod kotlin;
 mod model;
 mod names;
@@ -60,6 +61,10 @@ fn outputs() -> Result<Vec<(PathBuf, String)>, Refused> {
         (
             here.join("bindings/python/sipral/_sipral_cffi.py"),
             python::binding(&SURFACE)?,
+        ),
+        (
+            here.join("bindings/dart/lib/src/sipral_abi.dart"),
+            dart::binding(&SURFACE)?,
         ),
         (
             here.join("bindings/c/abi-sizes.txt"),

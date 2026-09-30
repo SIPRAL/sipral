@@ -43,7 +43,7 @@ use crate::model::{
     screaming, snake, upper_camel, words,
 };
 use crate::names::{Spelling, audit};
-use crate::{c, csharp, kotlin, python, swift};
+use crate::{c, csharp, dart, kotlin, python, swift};
 
 /// Where the golden files live.
 fn golden_path(name: &str) -> PathBuf {
@@ -759,6 +759,11 @@ fn the_python_binding_is_what_it_was() {
     golden("synthetic.py", &python::binding(&SYNTHETIC).unwrap());
 }
 
+#[test]
+fn the_dart_binding_is_what_it_was() {
+    golden("synthetic.dart", &dart::binding(&SYNTHETIC).unwrap());
+}
+
 /// The .NET static constructor and the call Swift's `abiMismatch` makes on
 /// its own behalf are read from the declarations, not written into the back
 /// end. Written in, they named `AbiCheck`, `AbiVersionMajor` and
@@ -770,6 +775,7 @@ fn the_load_check_is_read_from_the_declarations() {
         ("C#", csharp::binding(&NOTHING)),
         ("Swift", swift::binding(&NOTHING)),
         ("Python", python::binding(&NOTHING)),
+        ("Dart", dart::binding(&NOTHING)),
     ] {
         match printed {
             Ok(text) => {
@@ -817,6 +823,26 @@ fn the_load_check_is_read_from_the_declarations() {
         assert!(
             printed.contains(declared),
             "Swift calls what it does not declare: {declared}"
+        );
+    }
+
+    let printed = dart::binding(&SYNTHETIC).unwrap();
+    assert!(
+        printed.contains(
+            "    final status = sipral.abiCheck(abiVersionMajor, abiVersionMinor);\n    \
+             if (status != SipralStatus.ok) {\n"
+        ),
+        "{printed}"
+    );
+    for declared in [
+        "late final int Function(int major, int minor) abiCheck = library.lookupFunction<",
+        "static const int abiVersionMajor = 0;",
+        "static const int abiVersionMinor = 8;",
+        "static const int ok = 0;",
+    ] {
+        assert!(
+            printed.contains(declared),
+            "Dart calls what it does not declare: {declared}"
         );
     }
 }
@@ -891,6 +917,7 @@ fn a_load_check_shaped_wrong_is_refused() {
         for (language, printed) in [
             ("C#", csharp::binding(surface)),
             ("Swift", swift::binding(surface)),
+            ("Dart", dart::binding(surface)),
         ] {
             match printed {
                 Ok(text) => panic!(
@@ -916,9 +943,16 @@ const NOTHING: Surface = Surface {
     functions: &[],
 };
 
-/// The four back ends, to be asked the same question four times.
-fn spellings() -> [&'static dyn Spelling; 4] {
-    [&c::Names, &csharp::Names, &kotlin::Names, &swift::Names]
+/// The back ends that derive names of their own, to be asked the same
+/// question each.
+fn spellings() -> [&'static dyn Spelling; 5] {
+    [
+        &c::Names,
+        &csharp::Names,
+        &kotlin::Names,
+        &swift::Names,
+        &dart::Names,
+    ]
 }
 
 /// What a back end said when it refused.
@@ -947,6 +981,7 @@ fn the_real_surface_prints_in_every_language() {
         csharp::binding(surface),
         kotlin::binding(surface),
         kotlin::shim(surface),
+        dart::binding(surface),
     ] {
         let printed = printed.unwrap_or_else(|why: Refused| panic!("{why}"));
         assert!(printed.len() > 1_000, "a file with nothing in it");
@@ -1221,6 +1256,8 @@ fn a_constant_is_readable_in_every_language() {
     let csharp = csharp::binding(surface).unwrap();
     let kotlin = kotlin::binding(surface).unwrap();
     let header = c::header(surface).unwrap();
+    let dart = dart::binding(surface).unwrap();
+    assert!(dart.contains("static const int featureOpus = 64;"));
     assert!(swift.contains("public static let featureOpus: UInt32 = 64"));
     assert!(csharp.contains("public const uint FeatureOpus = 64;"));
     assert!(kotlin.contains("const val FEATURE_OPUS: Long = 64"));
@@ -1239,6 +1276,7 @@ fn a_constant_is_readable_in_every_language() {
             ("C#", &csharp),
             ("Kotlin", &kotlin),
             ("C", &header),
+            ("Dart", &dart),
         ] {
             assert!(
                 !printed.contains(mangled),
@@ -3554,4 +3592,111 @@ fn every_method_the_shim_calls_fits_the_jvm() {
         seen > 0,
         "the shim looked up no method, so nothing was measured"
     );
+}
+
+/// A member, a parameter and a value whose names are words Dart reserves.
+const DART_KEYWORDS: Surface = Surface {
+    aliases: &[Alias {
+        name: "SipralHandle",
+        doc: &[],
+        stands: Stands::For("u64"),
+    }],
+    records: &[Record {
+        name: "SipralRange",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[
+            member("size", "usize"),
+            member("is", "u32"),
+            member("in", "u32"),
+        ],
+        size: 16,
+    }],
+    functions: &[
+        Function {
+            name: "sipral_stack_wait",
+            doc: &[" Wait."],
+            parameters: &[member("stack", "SipralHandle"), member("var", "u32")],
+            returns: "SipralStatus",
+        },
+        ABI_CHECK,
+    ],
+    constants: &[VERSION],
+    enumerations: &[STATUS],
+    ..NOTHING
+};
+
+#[test]
+fn a_word_dart_reserves_is_printed_with_a_dollar_after_it() {
+    // C takes all three; Dart takes none of them plain
+    assert!(audit(&DART_KEYWORDS, &c::Names).is_ok());
+    assert!(audit(&DART_KEYWORDS, &dart::Names).is_ok());
+    let printed = dart::binding(&DART_KEYWORDS).unwrap();
+    for escaped in [
+        "  external int is$;",
+        "  external int in$;",
+        "int Function(int stack, int var$) stackWait",
+        "  static const int default$ = 3;",
+    ] {
+        assert!(
+            printed.contains(escaped),
+            "Dart lost an escape: {escaped}\n{printed}"
+        );
+    }
+    // and the real surface's own: SipralToggle::Default
+    let printed = dart::binding(&sipral_ffi::abi::SURFACE).unwrap();
+    assert!(
+        printed.contains("static const int default$ = 0;"),
+        "Dart lost its escape"
+    );
+}
+
+/// A record with no members, which dart:ffi has no layout for.
+const EMPTY_RECORD: Surface = Surface {
+    records: &[Record {
+        name: "SipralNothing",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[],
+        size: 0,
+    }],
+    functions: &[ABI_CHECK],
+    constants: &[VERSION],
+    enumerations: &[STATUS],
+    ..NOTHING
+};
+
+#[test]
+fn a_record_dart_cannot_lay_out_is_refused_by_name() {
+    let why = dart::binding(&EMPTY_RECORD).unwrap_err().to_string();
+    assert!(
+        why.contains("SipralNothing") && why.contains("no members"),
+        "{why}"
+    );
+}
+
+/// Each shape a field or a signature takes in Dart, read off the synthetic
+/// surface: an alias in a signature and its integer in a field, an
+/// enumeration as its width, a union by value, a callback as a pointer to a
+/// native function, and a callback that answers with a number.
+#[test]
+fn every_shape_crosses_into_dart_as_dart_ffi_spells_it() {
+    let printed = dart::binding(&SYNTHETIC).unwrap();
+    for shape in [
+        "typedef SipralHandle = ffi.Uint64;",
+        "final class SipralEventPayload extends ffi.Union {",
+        "  external SipralEventPayload payload;",
+        "  external ffi.Pointer<ffi.NativeFunction<SipralEventCallback>> eventCallback;",
+        "  @ffi.Uint32()\n  external int echo;",
+        "  @ffi.Float()\n  external double loss;",
+        "  @ffi.Size()\n  external int bindAddressLen;",
+        "  external ffi.Pointer<ffi.Char> bindAddress;",
+        "typedef SipralScreenCallback = ffi.Uint32 Function(ffi.Pointer<SipralScreenEvent> event, \
+         ffi.Pointer<ffi.Void> userData);",
+        "typedef SipralScreenCallbackDart = int Function(ffi.Pointer<SipralScreenEvent> event, \
+         ffi.Pointer<ffi.Void> userData);",
+        "        'sipral_event_t': ffi.sizeOf<SipralEvent>(),",
+    ] {
+        assert!(printed.contains(shape), "missing: {shape}\n{printed}");
+    }
 }
