@@ -43,7 +43,9 @@ The cost is honest: the caller writes the event loop. `sipral-ua` ships a
 reference loop for people who do not want to, off by default and described
 below. The bindings ship more than the declarations: each has a handwritten
 idiomatic layer over the printed C ABI (Swift classes and async events, a C#
-layer over P/Invoke, Kotlin coroutines, Python) — `bindings/README.md` lists
+layer over P/Invoke, Kotlin coroutines, Python), and `bindings/react-native`
+is a React Native TurboModule over the Swift and Kotlin layers rather than
+over the ABI — `bindings/README.md` lists
 which files are generated and which are written by hand, and
 [08-ffi.md](08-ffi.md) covers each one.
 

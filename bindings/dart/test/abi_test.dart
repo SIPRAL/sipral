@@ -29,9 +29,10 @@ void main() {
     expect(layouts.length, greaterThan(50));
     // 64-bit pointers, or 32-bit ones with a 64-bit integer aligned to four
     // (i386 everywhere but Windows) or to eight (ARM, Windows x86)
-    final column = ffi.sizeOf<ffi.IntPtr>() == 8
-        ? 1
-        : ffi.Abi.current() == ffi.Abi.linuxIA32 ||
+    final column =
+        ffi.sizeOf<ffi.IntPtr>() == 8
+            ? 1
+            : ffi.Abi.current() == ffi.Abi.linuxIA32 ||
                 ffi.Abi.current() == ffi.Abi.androidIA32
             ? 2
             : 3;
@@ -46,10 +47,16 @@ void main() {
           SipralStatus.ok,
           reason: '$name is not a struct the library knows',
         );
-        expect(lengths[0], lengths[column],
-            reason: '$name as dart:ffi lays it out');
-        expect(out.value, lengths[column],
-            reason: '$name as the library compiled it');
+        expect(
+          lengths[0],
+          lengths[column],
+          reason: '$name as dart:ffi lays it out',
+        );
+        expect(
+          out.value,
+          lengths[column],
+          reason: '$name as the library compiled it',
+        );
       }
     });
   });

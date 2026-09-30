@@ -35,6 +35,9 @@ public struct SipralEvent: Sendable {
     public let relayData: RelayEventData?
     /// `payload.referral`, for `SipralEventKind.referral` only.
     public let referralData: ReferralEventData?
+    /// `payload.transfer`, for `SipralEventKind.transferRequested`,
+    /// `.transferProgress` and `.transferDone` only.
+    public internal(set) var transferData: TransferEventData? = nil
     /// `payload.turn_stream`, for `SipralEventKind.turnStream` only.
     public let turnStreamData: TurnStreamEventData?
     /// `payload.audio`, for `SipralEventKind.audioDevicesChanged` only.
@@ -155,6 +158,18 @@ public struct ReferralEventData: Sendable {
     public let attended: Bool
     public let target: String?
     public let referredBy: String?
+}
+
+/// A transfer inside a call (`sipral_transfer_event_t`). At
+/// `.transferRequested` the far end asks this end to call `target`: take it
+/// with `SipralStack.acceptReferral`, refuse it with
+/// `SipralStack.rejectReferral`, as a referral is. At `.transferProgress`
+/// and `.transferDone` it reports on a `Call.transfer(to:)` this end asked
+/// for, `statusCode` being what the far end's new call is doing.
+public struct TransferEventData: Sendable, Equatable {
+    public let statusCode: UInt32
+    public let attended: Bool
+    public let target: String?
 }
 
 /// What a STUN server said about one of this stack's sockets
@@ -600,6 +615,16 @@ enum SipralEventDecoder {
         )
         if kindRaw == SipralEventKind.progressDetected.rawValue {
             event.progressData = progressData(raw.payload.progress)
+        }
+        if kindRaw == SipralEventKind.transferRequested.rawValue
+            || kindRaw == SipralEventKind.transferProgress.rawValue
+            || kindRaw == SipralEventKind.transferDone.rawValue {
+            let transfer = raw.payload.transfer
+            event.transferData = TransferEventData(
+                statusCode: transfer.status_code,
+                attended: transfer.attended != 0,
+                target: textC(transfer.target, transfer.target_len)
+            )
         }
         if kindRaw == SipralEventKind.transportWanted.rawValue {
             let wanted = raw.payload.transport_wanted

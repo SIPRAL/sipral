@@ -45,7 +45,9 @@ Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
 (the idiomatic layer `SipralAbi.swift` is written against, the same way
 the Python files above are written against `_sipral_cffi.py`),
 `swift/Tests/SipralTests/`, `swift/Sources/SipralLabAgent/`,
-`swift/Sources/SipralSampleMac/`, and the readmes. Everything the packages
+`swift/Sources/SipralSampleMac/`, `react-native/` (the React Native package,
+over the Swift and Kotlin layers rather than the ABI), and the readmes.
+Everything the packages
 build from declarations rather than write themselves is generated.
 
 `c/sipral.c` is the Swift package's one translation unit, and exists so that

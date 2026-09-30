@@ -1,0 +1,637 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+//
+// The API an application writes against: a client, its accounts and its
+// calls, each with the state the native events last reported and a typed
+// emitter. What a call cannot do in the state it is in is refused here,
+// before anything crosses to native code, with the same `wrongState` the
+// library would answer -- so a button pressed twice, or after the far end
+// hung up, is one rejected promise and not a request sent into a call that
+// is gone.
+
+import type {EventSubscription} from 'react-native';
+import type {NativeEvent, Spec} from './NativeSipral';
+import {SipralError, fromNative} from './errors';
+import {TypedEmitter} from './emitter';
+import type {Subscription} from './emitter';
+import type {
+  AccountOptions,
+  CallDirection,
+  CallState,
+  EndReason,
+  OpenOptions,
+  PlaceCallOptions,
+  RegistrationState,
+} from './types';
+
+export interface RegistrationChangedEvent {
+  account: SipralAccount;
+  state: RegistrationState;
+  /** The registrar's final answer, or zero. */
+  statusCode: number;
+  /** When the next attempt goes, for "retrying"; zero otherwise. */
+  retryInMs: number;
+}
+
+export interface IncomingCallEvent {
+  call: SipralCall;
+  from: string;
+  fromDisplay: string;
+  to: string;
+}
+
+export interface CallStateEvent {
+  call: SipralCall;
+  state: CallState;
+  /** A provisional or final response, where the event carries one; zero otherwise. */
+  statusCode: number;
+}
+
+export interface CallEndedEvent {
+  call: SipralCall;
+  reason: EndReason;
+  statusCode: number;
+}
+
+export interface HoldChangedEvent {
+  call: SipralCall;
+  /** This end put the call on hold. */
+  heldHere: boolean;
+  /** The far end put the call on hold. */
+  heldThere: boolean;
+}
+
+export interface TransferRequestedEvent {
+  call: SipralCall;
+  /** Who the far end asks this end to call. */
+  target: string;
+  /** Whether it names a call to replace, which makes it attended rather than blind. */
+  attended: boolean;
+}
+
+export interface TransferReportEvent {
+  call: SipralCall;
+  /** What the call placed to the transfer's target is doing. */
+  statusCode: number;
+}
+
+export interface DigitEvent {
+  call: SipralCall;
+  digit: string;
+}
+
+/** Everything a client's emitter carries. */
+export interface ClientEvents {
+  registrationChanged: RegistrationChangedEvent;
+  incomingCall: IncomingCallEvent;
+  callProgress: CallStateEvent;
+  callConfirmed: CallStateEvent;
+  holdChanged: HoldChangedEvent;
+  callEnded: CallEndedEvent;
+  transferRequested: TransferRequestedEvent;
+  transferProgress: TransferReportEvent;
+  transferDone: TransferReportEvent;
+  digitReceived: DigitEvent;
+  /** Every event, typed or not, as the native half handed it over. */
+  event: NativeEvent;
+}
+
+/** What one call's own emitter carries: the client's, for this call only. */
+export interface CallEvents {
+  progress: CallStateEvent;
+  confirmed: CallStateEvent;
+  holdChanged: HoldChangedEvent;
+  ended: CallEndedEvent;
+  transferRequested: TransferRequestedEvent;
+  transferProgress: TransferReportEvent;
+  transferDone: TransferReportEvent;
+  digit: DigitEvent;
+}
+
+/** What one account's own emitter carries. */
+export interface AccountEvents {
+  registrationChanged: RegistrationChangedEvent;
+}
+
+const DTMF = /^[0-9A-Da-d*#]+$/;
+
+async function crossing<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (failure) {
+    throw fromNative(failure);
+  }
+}
+
+export class SipralAccount {
+  private readonly emitter = new TypedEmitter<AccountEvents>();
+  private removed = false;
+  private state: RegistrationState = 'idle';
+
+  /** @internal Made by `SipralClient.addAccount`. */
+  constructor(
+    private readonly client: SipralClient,
+    /** The library's handle, as the native half named it. */
+    readonly id: string,
+    readonly aor: string,
+  ) {}
+
+  /** What the last registration event said. */
+  get registrationState(): RegistrationState {
+    return this.state;
+  }
+
+  on<K extends keyof AccountEvents>(name: K, listener: (payload: AccountEvents[K]) => void): Subscription {
+    return this.emitter.on(name, listener);
+  }
+
+  register(): Promise<void> {
+    return this.client.run(() => this.usable(), (native) => native.register(this.id));
+  }
+
+  unregister(): Promise<void> {
+    return this.client.run(() => this.usable(), (native) => native.unregister(this.id));
+  }
+
+  /**
+   * Resolve once the account is registered, reject with the event that
+   * said it will not be. Registering is asked for here too.
+   */
+  registerAndWait(timeoutMs = 30_000): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        subscription.remove();
+        reject(new SipralError('wrongState', `${this.aor} was not registered within ${timeoutMs} ms`));
+      }, timeoutMs);
+      const subscription = this.on('registrationChanged', (event) => {
+        if (event.state === 'registered' || event.state === 'restored') {
+          clearTimeout(timer);
+          subscription.remove();
+          resolve();
+        } else if (event.state === 'failed' || event.state === 'unverified') {
+          clearTimeout(timer);
+          subscription.remove();
+          reject(new SipralError('wrongState', `${this.aor} registration ${event.state}, ${event.statusCode}`));
+        }
+      });
+      this.register().catch((failure: unknown) => {
+        clearTimeout(timer);
+        subscription.remove();
+        reject(failure);
+      });
+    });
+  }
+
+  async remove(): Promise<void> {
+    await this.client.run(() => this.usable(), (native) => native.removeAccount(this.id));
+    this.removed = true;
+    this.client.forgetAccount(this.id);
+    this.emitter.removeAllListeners();
+  }
+
+  /** @internal */
+  deliver(event: RegistrationChangedEvent): void {
+    this.state = event.state;
+    this.emitter.emit('registrationChanged', event);
+  }
+
+  private usable(): void {
+    if (this.removed) {
+      throw new SipralError('wrongState', `${this.aor} was removed`);
+    }
+  }
+}
+
+export class SipralCall {
+  private readonly emitter = new TypedEmitter<CallEvents>();
+  private current: CallState;
+  private answered = false;
+  private finished = false;
+  private held = {here: false, there: false};
+  private reason: EndReason | undefined;
+
+  /** @internal Made by the client, for a call placed or one that arrived. */
+  constructor(
+    private readonly client: SipralClient,
+    /** The library's handle, as the native half named it. */
+    readonly id: string,
+    readonly direction: CallDirection,
+    /** Who the call is with: the target dialled, or the caller's URI. */
+    public remote: string,
+  ) {
+    this.current = direction === 'incoming' ? 'incoming' : 'calling';
+  }
+
+  get state(): CallState {
+    return this.current;
+  }
+
+  /** Whether the call has ended; nothing more can be done with it. */
+  get ended(): boolean {
+    return this.finished;
+  }
+
+  /** Why it ended, once it has. */
+  get endReason(): EndReason | undefined {
+    return this.reason;
+  }
+
+  /** Whether this end has the call on hold. */
+  get heldHere(): boolean {
+    return this.held.here;
+  }
+
+  /** Whether the far end has the call on hold. */
+  get heldThere(): boolean {
+    return this.held.there;
+  }
+
+  on<K extends keyof CallEvents>(name: K, listener: (payload: CallEvents[K]) => void): Subscription {
+    return this.emitter.on(name, listener);
+  }
+
+  /** Answer a call that arrived. The audio runs on the phone's own devices. */
+  async answer(): Promise<void> {
+    await this.client.run(
+      () => {
+        this.alive();
+        if (this.direction !== 'incoming' || this.answered) {
+          throw new SipralError('wrongState', `call ${this.id} is not waiting to be answered`);
+        }
+      },
+      (native) => native.answer(this.id),
+    );
+    this.answered = true;
+  }
+
+  /** Turn away a call that arrived, with a final response: 486 Busy Here unless said otherwise. */
+  async reject(code = 486): Promise<void> {
+    await this.client.run(
+      () => {
+        this.alive();
+        if (this.direction !== 'incoming' || this.answered) {
+          throw new SipralError('wrongState', `call ${this.id} is not waiting to be answered`);
+        }
+        if (!Number.isInteger(code) || code < 300 || code > 699) {
+          throw new SipralError('invalidArgument', `${code} is not a final refusal, 300 to 699`);
+        }
+      },
+      (native) => native.reject(this.id, code),
+    );
+    this.answered = true;
+  }
+
+  /** End the call, in whatever state it is: cancelled, refused or hung up. */
+  hangup(): Promise<void> {
+    return this.client.run(() => this.alive(), (native) => native.hangup(this.id));
+  }
+
+  hold(): Promise<void> {
+    return this.client.run(() => this.established(), (native) => native.hold(this.id));
+  }
+
+  resume(): Promise<void> {
+    return this.client.run(() => this.established(), (native) => native.resume(this.id));
+  }
+
+  /**
+   * A blind transfer: ask the far end to call `target` instead. This end
+   * stays in the call until "transferDone" says how it went.
+   */
+  transfer(target: string): Promise<void> {
+    return this.client.run(
+      () => {
+        this.established();
+        if (target.trim() === '') {
+          throw new SipralError('invalidArgument', 'a transfer needs a target');
+        }
+      },
+      (native) => native.transfer(this.id, target),
+    );
+  }
+
+  /**
+   * Take a transfer the far end asked for ("transferRequested"): the call it
+   * asks for is placed, and is what this resolves with.
+   */
+  async acceptTransfer(): Promise<SipralCall> {
+    const placed = await this.client.run(() => this.alive(), (native) => native.acceptTransfer(this.id));
+    return this.client.callFor(placed, 'outgoing', '');
+  }
+
+  /** Refuse a transfer the far end asked for, 603 Decline unless said otherwise. */
+  rejectTransfer(code = 603): Promise<void> {
+    return this.client.run(
+      () => {
+        this.alive();
+        if (!Number.isInteger(code) || code < 300 || code > 699) {
+          throw new SipralError('invalidArgument', `${code} is not a final refusal, 300 to 699`);
+        }
+      },
+      (native) => native.rejectTransfer(this.id, code),
+    );
+  }
+
+  /** Send DTMF: 0-9, A-D, * and #, in the audio's own events (RFC 4733). */
+  sendDtmf(digits: string): Promise<void> {
+    return this.client.run(
+      () => {
+        this.established();
+        if (!DTMF.test(digits)) {
+          throw new SipralError('invalidArgument', `"${digits}" has a character no keypad has`);
+        }
+      },
+      (native) => native.sendDtmf(this.id, digits),
+    );
+  }
+
+  /** @internal */
+  deliver(event: NativeEvent): void {
+    switch (event.kind) {
+      case 'callProgress':
+      case 'callConfirmed': {
+        const state = (event.callState as CallState | undefined) ?? (event.kind === 'callConfirmed' ? 'confirmed' : this.current);
+        this.current = state;
+        const payload = {call: this, state, statusCode: event.statusCode ?? 0};
+        this.emitter.emit(event.kind === 'callConfirmed' ? 'confirmed' : 'progress', payload);
+        this.client.emit(event.kind, payload);
+        break;
+      }
+      case 'sessionChanged': {
+        const here = event.heldHere ?? this.held.here;
+        const there = event.heldThere ?? this.held.there;
+        if (event.callState !== undefined) {
+          this.current = event.callState as CallState;
+        }
+        if (here !== this.held.here || there !== this.held.there) {
+          this.held = {here, there};
+          const payload = {call: this, heldHere: here, heldThere: there};
+          this.emitter.emit('holdChanged', payload);
+          this.client.emit('holdChanged', payload);
+        }
+        break;
+      }
+      case 'callEnded': {
+        this.finished = true;
+        this.current = 'terminated';
+        this.reason = (event.endReason as EndReason | undefined) ?? 'none';
+        const payload = {call: this, reason: this.reason, statusCode: event.statusCode ?? 0};
+        this.emitter.emit('ended', payload);
+        this.client.emit('callEnded', payload);
+        this.emitter.removeAllListeners();
+        break;
+      }
+      case 'transferRequested': {
+        const payload = {call: this, target: event.target ?? '', attended: event.attended ?? false};
+        this.emitter.emit('transferRequested', payload);
+        this.client.emit('transferRequested', payload);
+        break;
+      }
+      case 'transferProgress':
+      case 'transferDone': {
+        const payload = {call: this, statusCode: event.statusCode ?? 0};
+        this.emitter.emit(event.kind, payload);
+        this.client.emit(event.kind, payload);
+        break;
+      }
+      case 'digitReceived': {
+        if (event.digit !== undefined && event.digit !== '') {
+          const payload = {call: this, digit: event.digit};
+          this.emitter.emit('digit', payload);
+          this.client.emit('digitReceived', payload);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  private alive(): void {
+    if (this.finished) {
+      throw new SipralError('wrongState', `call ${this.id} has ended`);
+    }
+  }
+
+  private established(): void {
+    this.alive();
+    if (this.current !== 'confirmed') {
+      throw new SipralError('wrongState', `call ${this.id} is ${this.current}, not confirmed`);
+    }
+  }
+}
+
+/**
+ * One Sipral stack on the phone. There is one per application: the native
+ * module holds it, and a second `open` while one is open is refused.
+ */
+export class SipralClient {
+  private static opened: SipralClient | undefined;
+
+  private readonly emitter = new TypedEmitter<ClientEvents>();
+  private readonly accounts = new Map<string, SipralAccount>();
+  private readonly calls = new Map<string, SipralCall>();
+  private subscription: EventSubscription | undefined;
+  private closed = false;
+  private address = '';
+
+  private constructor(private readonly native: Spec) {}
+
+  /**
+   * Open the stack. Events are listened for before the native half is asked
+   * to open, so that nothing it raises while opening is missed.
+   */
+  static async open(options: OpenOptions, native: Spec): Promise<SipralClient> {
+    if (SipralClient.opened !== undefined) {
+      throw new SipralError('wrongState', 'a client is already open; close it first');
+    }
+    if (typeof options.bindHost !== 'string' || options.bindHost.trim() === '') {
+      throw new SipralError('invalidArgument', 'bindHost is the address of this phone the server can reach');
+    }
+    const signalling = options.signalling ?? 'udp';
+    if (signalling !== 'udp' && options.signallingServer === undefined) {
+      throw new SipralError('invalidArgument', `SIP over ${signalling} needs signallingServer, host:port`);
+    }
+    const client = new SipralClient(native);
+    SipralClient.opened = client;
+    client.subscription = native.onEvent((event) => client.dispatch(event));
+    try {
+      client.address = await native.open({
+        bindHost: options.bindHost,
+        bindPort: options.bindPort,
+        userAgent: options.userAgent,
+        codecs: options.codecs,
+        signalling,
+        signallingServer: options.signallingServer,
+        stunServer: options.stunServer,
+        manualAudio: options.audioActivation === 'manual',
+      });
+    } catch (failure) {
+      client.release();
+      throw fromNative(failure);
+    }
+    return client;
+  }
+
+  /** The address the stack signals from, as the native half bound it. */
+  get bindAddress(): string {
+    return this.address;
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
+  on<K extends keyof ClientEvents>(name: K, listener: (payload: ClientEvents[K]) => void): Subscription {
+    return this.emitter.on(name, listener);
+  }
+
+  once<K extends keyof ClientEvents>(name: K, listener: (payload: ClientEvents[K]) => void): Subscription {
+    return this.emitter.once(name, listener);
+  }
+
+  async addAccount(options: AccountOptions): Promise<SipralAccount> {
+    const id = await this.run(
+      () => {
+        if (options.aor.trim() === '' || options.registrarAddress.trim() === '') {
+          throw new SipralError('invalidArgument', 'an account needs its aor and its registrarAddress');
+        }
+      },
+      (native) => native.addAccount({...options}),
+    );
+    const account = new SipralAccount(this, id, options.aor);
+    this.accounts.set(id, account);
+    return account;
+  }
+
+  /** The accounts added and not removed. */
+  get accountList(): SipralAccount[] {
+    return [...this.accounts.values()];
+  }
+
+  /** The calls that have not ended. */
+  get callList(): SipralCall[] {
+    return [...this.calls.values()];
+  }
+
+  async placeCall(account: SipralAccount, target: string, options: PlaceCallOptions = {}): Promise<SipralCall> {
+    const id = await this.run(
+      () => {
+        if (!this.accounts.has(account.id)) {
+          throw new SipralError('wrongState', `${account.aor} is not an account of this client`);
+        }
+        if (target.trim() === '') {
+          throw new SipralError('invalidArgument', 'a call needs a target');
+        }
+      },
+      (native) => native.placeCall(account.id, target, {...options}),
+    );
+    return this.callFor(id, 'outgoing', target);
+  }
+
+  /** The audio devices: the library runs them, this only says when and whether the microphone is heard. */
+  readonly audio = {
+    activate: (): Promise<void> => this.run(() => undefined, (native) => native.activateAudio()),
+    deactivate: (): Promise<void> => this.run(() => undefined, (native) => native.deactivateAudio()),
+    setMuted: (muted: boolean): Promise<void> => this.run(() => undefined, (native) => native.setMuted(muted)),
+  };
+
+  /** Close the stack. Every call and account of it is gone afterwards. */
+  async close(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    this.release();
+    await crossing(() => this.native.close());
+  }
+
+  /** @internal Check `guard` here, then cross; a closed client refuses before either. */
+  async run<T>(guard: () => void, action: (native: Spec) => Promise<T>): Promise<T> {
+    if (this.closed) {
+      throw new SipralError('closed', 'this client is closed');
+    }
+    guard();
+    return crossing(() => action(this.native));
+  }
+
+  /** @internal */
+  emit<K extends keyof ClientEvents>(name: K, payload: ClientEvents[K]): void {
+    this.emitter.emit(name, payload);
+  }
+
+  /** @internal */
+  forgetAccount(id: string): void {
+    this.accounts.delete(id);
+  }
+
+  /**
+   * @internal The call a handle names. An event can name a call before the
+   * promise that made it has resolved -- the far end answers a placed call
+   * that fast on a quiet network -- so the first to arrive makes it and the
+   * other finds it.
+   */
+  callFor(id: string, direction: CallDirection, remote: string): SipralCall {
+    let call = this.calls.get(id);
+    if (call === undefined) {
+      call = new SipralCall(this, id, direction, remote);
+      this.calls.set(id, call);
+    } else if (call.remote === '' && remote !== '') {
+      call.remote = remote;
+    }
+    return call;
+  }
+
+  private dispatch(event: NativeEvent): void {
+    if (this.closed) {
+      return;
+    }
+    this.emitter.emit('event', event);
+    if (event.kind === 'registrationChanged') {
+      const account = this.accounts.get(event.account);
+      if (account !== undefined) {
+        const payload = {
+          account,
+          state: (event.registrationState as RegistrationState | undefined) ?? 'unknown',
+          statusCode: event.statusCode ?? 0,
+          retryInMs: event.retryInMs ?? 0,
+        };
+        account.deliver(payload);
+        this.emitter.emit('registrationChanged', payload);
+      }
+      return;
+    }
+    if (event.call === '') {
+      return;
+    }
+    if (event.kind === 'incomingCall') {
+      const call = this.callFor(event.call, 'incoming', event.fromUri ?? '');
+      this.emitter.emit('incomingCall', {
+        call,
+        from: event.fromUri ?? '',
+        fromDisplay: event.fromDisplay ?? '',
+        to: event.toUri ?? '',
+      });
+      return;
+    }
+    const call = this.calls.get(event.call) ?? (event.kind === 'callEnded' ? undefined : this.callFor(event.call, 'outgoing', ''));
+    if (call === undefined) {
+      return;
+    }
+    call.deliver(event);
+    if (event.kind === 'callEnded') {
+      this.calls.delete(event.call);
+    }
+  }
+
+  private release(): void {
+    this.closed = true;
+    this.subscription?.remove();
+    this.subscription = undefined;
+    this.accounts.clear();
+    this.calls.clear();
+    this.emitter.removeAllListeners();
+    if (SipralClient.opened === this) {
+      SipralClient.opened = undefined;
+    }
+  }
+}

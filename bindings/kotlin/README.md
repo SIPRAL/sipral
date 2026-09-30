@@ -94,6 +94,7 @@ val call = client.placeCall(account, "sip:bob@example.com", mediaHost = "192.0.2
 call.waitConfirmed()        // heard at once: the client is in device mode wherever the library has an engine
 call.hold(); call.resume()
 call.sendDtmf("123#")
+call.transfer("sip:carol@example.com")   // blind: TRANSFER_DONE, read with transferOf, says how it went
 call.hangup(SipralHangupReason.NORMAL_CLEARING)   // or hangup(), with no Reason
 client.close()
 ```
