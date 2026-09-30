@@ -93,15 +93,16 @@ offering ICE asks for `a=rtcp-mux` — and the whole INVITE that carries them is
 measured against the 1300 bytes RFC 3261 §18.1.1 lets a request take over a
 datagram by `an_invite_with_every_candidate_is_measured_against_the_datagram_floor`
 in `crates/sipral/src/tests.rs`: every codec the default catalogue offers
-(Opus, G.722, PCMU, PCMA, telephone-event), SRTP, the three candidates, and
+(Opus, G.722, PCMU, PCMA, and telephone-event on each of the two clocks they
+run on, RFC 4733 §2.5.1.2), SRTP, the three candidates, and
 the headers every INVITE this stack writes carries (`Via` with `rport`,
 `Contact`, `Supported`, `Allow`, `Session-Expires`), from test addresses in
 the documentation ranges. Keyed by SDES, whose offer names two suites and so
-carries two `a=crypto` lines, it is **1375 bytes**, 75 over; keyed by
-DTLS-SRTP, with its `a=fingerprint` and `a=setup`, it is **1338**, 38 over.
+carries two `a=crypto` lines, it is **1428 bytes**, 128 over; keyed by
+DTLS-SRTP, with its `a=fingerprint` and `a=setup`, it is **1391**, 91 over.
 The endpoint sends neither on UDP — it answers `NeedsStreamTransport` and asks
 for a stream, as it does for any request past the floor. The test holds both
-between 1301 and 1400, so neither moves far without this paragraph being read
+between 1301 and 1450, so neither moves far without this paragraph being read
 again. Three things the measurement leaves out push a real INVITE further:
 longer addresses than the documentation ranges' (up to six bytes more for each
 of the dozen an INVITE names), a longer user and domain, and the credentials

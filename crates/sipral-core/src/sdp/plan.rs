@@ -339,7 +339,7 @@ impl MediaCapabilities {
         self
     }
 
-    /// The payload type a named event would get: the first number in the
+    /// The payload type the first named event gets: the first number in the
     /// dynamic range no codec has taken.
     ///
     /// `None` when this build does not do DTMF, and also when the codec list
@@ -347,12 +347,43 @@ impl MediaCapabilities {
     /// anyone will hold but is a list somebody can hand us.
     #[must_use]
     pub fn dtmf_payload(&self) -> Option<u8> {
+        self.dtmf_payloads().first().map(|&(payload, _)| payload)
+    }
+
+    /// Every named-event payload type an offer carries, with its clock rate:
+    /// one per clock rate among the codecs, in the order the codecs first
+    /// name each rate, each on the next dynamic number no codec has taken.
+    ///
+    /// One per rate because the events share the timestamp base of the audio
+    /// they are sent beside ("the same sequence number and timestamp base as
+    /// the regular audio channel", RFC 4733 §2.5.1.2), so an event at 48 kHz
+    /// is no use to a call that settles on PCMU at 8 kHz: an offer of Opus,
+    /// G.722 and PCMU names `telephone-event/48000` and
+    /// `telephone-event/8000` (G.722's RTP clock is 8 kHz, RFC 3551 §4.5.2),
+    /// and the answer's choice of codec picks between them. Empty when this
+    /// build does not do DTMF; shorter than the rates when the dynamic range
+    /// runs out.
+    #[must_use]
+    pub fn dtmf_payloads(&self) -> Vec<(u8, u32)> {
         if !self.dtmf {
-            return None;
+            return Vec::new();
         }
-        DYNAMIC_PAYLOADS
+        let mut clocks: Vec<u32> = Vec::new();
+        for clock in self.codecs.iter().map(NegotiatedCodec::clock_rate) {
+            if !clocks.contains(&clock) {
+                clocks.push(clock);
+            }
+        }
+        if clocks.is_empty() {
+            clocks.push(8_000);
+        }
+        let mut free = DYNAMIC_PAYLOADS
             .clone()
-            .find(|payload| !self.codecs.iter().any(|codec| codec.payload() == *payload))
+            .filter(|payload| !self.codecs.iter().any(|codec| codec.payload() == *payload));
+        clocks
+            .into_iter()
+            .map_while(|clock| free.next().map(|payload| (payload, clock)))
+            .collect()
     }
 
     /// The `m=` block for one stream of an offer.
@@ -362,15 +393,13 @@ impl MediaCapabilities {
     /// name everything.
     #[must_use]
     pub fn offer(&self, media: &str, port: u16, direction: Direction) -> MediaDescription {
-        let dtmf = self.dtmf_payload();
+        let dtmf = self.dtmf_payloads();
         let mut formats: Vec<String> = self
             .codecs
             .iter()
             .map(|codec| codec.payload().to_string())
             .collect();
-        if let Some(payload) = dtmf {
-            formats.push(payload.to_string());
-        }
+        formats.extend(dtmf.iter().map(|(payload, _)| payload.to_string()));
 
         let mut stream = MediaDescription::new(media, port, self.srtp.proto(), formats);
         for codec in &self.codecs {
@@ -384,14 +413,10 @@ impl MediaCapabilities {
                 ));
             }
         }
-        if let Some(payload) = dtmf {
+        for (payload, clock_rate) in dtmf {
             // "they MUST use the same sequence number and timestamp base as
-            // the regular audio channel" (RFC 4733 §2.5.1.2), so the events
-            // run on the clock of the codec they interleave with
-            let clock_rate = self
-                .codecs
-                .first()
-                .map_or(8_000, NegotiatedCodec::clock_rate);
+            // the regular audio channel" (RFC 4733 §2.5.1.2), so each rate
+            // among the codecs has events on its own clock
             let map = RtpMap {
                 payload,
                 encoding: TELEPHONE_EVENT.to_owned(),
@@ -513,7 +538,7 @@ impl SessionDescription {
         let payloads = common_payloads(ours, theirs);
         let (codec, codec_in) =
             agreed_codec(ours, theirs, &payloads).ok_or(SdpError::NoCodec { stream })?;
-        let dtmf = agreed_dtmf(ours, theirs, &payloads);
+        let dtmf = agreed_dtmf(ours, theirs, &payloads, codec.clock_rate());
 
         // "An agent MUST be capable of receiving SDP with a connection address
         // of 0.0.0.0, in which case it means that neither RTP nor RTCP should
@@ -729,15 +754,31 @@ fn agreed_codec(
 }
 
 /// The named events both carry: the peer's number, and ours.
+///
+/// The ones on the agreed codec's clock (`clock_rate`), because they share
+/// its timestamp base (RFC 4733 §2.5.1.2); a pair of descriptions that
+/// agreed events only on another clock still gets the first of them, which
+/// is what this end did before it offered one per rate, and what a peer that
+/// names a single rate for every codec expects.
 fn agreed_dtmf(
     ours: &MediaDescription,
     theirs: &MediaDescription,
     payloads: &[Common],
+    clock_rate: u32,
 ) -> Option<Common> {
-    payloads.iter().copied().find(|common| {
-        mapping(ours, theirs, common.theirs)
-            .is_some_and(|map| map.encoding.eq_ignore_ascii_case(TELEPHONE_EVENT))
-    })
+    let events: Vec<(Common, u32)> = payloads
+        .iter()
+        .filter_map(|common| {
+            mapping(ours, theirs, common.theirs)
+                .filter(|map| map.encoding.eq_ignore_ascii_case(TELEPHONE_EVENT))
+                .map(|map| (*common, map.clock_rate))
+        })
+        .collect();
+    events
+        .iter()
+        .find(|(_, clock)| *clock == clock_rate)
+        .or_else(|| events.first())
+        .map(|&(common, _)| common)
 }
 
 fn rtcp_plan(
@@ -1030,6 +1071,63 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
             .expect("a plan")
             .expect("up");
         assert_eq!((same.codec.payload(), same.codec_in), (111, 111));
+    }
+
+    /// An offer of Opus, G.722 and PCMU carries named events at 48 kHz and at
+    /// 8 kHz; the codec the answer settles on picks the events on its own
+    /// clock (RFC 4733 §2.5.1.2), in either role.
+    #[test]
+    fn the_named_events_agreed_are_the_ones_on_the_codecs_clock() {
+        let written = MediaCapabilities::new(vec![
+            opus(),
+            NegotiatedCodec::new(RtpMap::parse("9 G722/8000").expect("G722")),
+            pcmu(),
+        ])
+        .with_dtmf(true)
+        .offer("audio", 4000, Direction::SendRecv);
+        let mut offer = ours(4000, "0", "");
+        offer.media = vec![written];
+        let events = |description: &SessionDescription| {
+            description.media[0]
+                .attributes
+                .iter()
+                .filter_map(|attribute| attribute.value.clone())
+                .filter(|value| value.contains("telephone-event"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            events(&offer),
+            ["96 telephone-event/48000", "97 telephone-event/8000"]
+        );
+
+        // a PBX that takes PCMU and names its events at 8 kHz on its own number
+        let pcmu_answer = theirs(5000, "0 101", "a=rtpmap:101 telephone-event/8000\r\n");
+        let plan = offer.media_plan(&pcmu_answer, 0).expect("a plan").expect("up");
+        assert_eq!(plan.codec.rtpmap.encoding, "PCMU");
+        assert_eq!((plan.dtmf, plan.dtmf_in), (Some(101), Some(97)));
+
+        // one that takes G.722 and echoes both sets: the 8 kHz ones
+        let g722_answer = theirs(
+            5000,
+            "9 96 97",
+            "a=rtpmap:96 telephone-event/48000\r\na=rtpmap:97 telephone-event/8000\r\n",
+        );
+        let plan = offer.media_plan(&g722_answer, 0).expect("a plan").expect("up");
+        assert_eq!(plan.codec.rtpmap.encoding, "G722");
+        assert_eq!((plan.dtmf, plan.dtmf_in), (Some(97), Some(97)));
+
+        // and Opus, the 48 kHz ones
+        let opus_answer = theirs(
+            5000,
+            "111 97 96",
+            "a=rtpmap:111 opus/48000/2\r\na=rtpmap:97 telephone-event/8000\r\n\
+             a=rtpmap:96 telephone-event/48000\r\n",
+        );
+        let plan = offer.media_plan(&opus_answer, 0).expect("a plan").expect("up");
+        assert_eq!((plan.dtmf, plan.dtmf_in), (Some(96), Some(96)));
+        // the same, seen from the end that answered
+        let back = opus_answer.media_plan(&offer, 0).expect("a plan").expect("up");
+        assert_eq!((back.dtmf, back.dtmf_in), (Some(96), Some(96)));
     }
 
     #[test]
@@ -1761,16 +1859,22 @@ KDR=1 UNENCRYPTED_SRTCP",
 
         assert_eq!(stream.proto, "RTP/AVP");
         assert_eq!(stream.port, 5004);
-        assert_eq!(stream.payload_types().collect::<Vec<_>>(), [111, 0, 96]);
+        assert_eq!(
+            stream.payload_types().collect::<Vec<_>>(),
+            [111, 0, 96, 97]
+        );
         assert_eq!(stream.rtpmap(111).expect("opus").encoding, "opus");
         assert_eq!(stream.fmtp(111), Some("useinbandfec=1"));
         assert_eq!(stream.rtpmap(0).expect("PCMU").encoding, "PCMU");
         assert!(stream.fmtp(0).is_none());
-        // the events run on the clock of the codec they interleave with
-        let events = stream.rtpmap(96).expect("telephone-event");
-        assert_eq!(events.encoding, "telephone-event");
-        assert_eq!(events.clock_rate, 48_000);
-        assert_eq!(stream.fmtp(96), Some("0-15"));
+        // the events run on the clock of the codec they interleave with:
+        // one set for Opus's 48 kHz, one for PCMU's 8 kHz
+        for (payload, clock) in [(96, 48_000), (97, 8_000)] {
+            let events = stream.rtpmap(payload).expect("telephone-event");
+            assert_eq!(events.encoding, "telephone-event");
+            assert_eq!(events.clock_rate, clock);
+            assert_eq!(stream.fmtp(payload), Some("0-15"));
+        }
         assert!(stream.has_rtcp_mux());
         assert_eq!(
             stream.attribute("rtcp-xr").and_then(|a| a.value.as_deref()),
@@ -1796,12 +1900,15 @@ KDR=1 UNENCRYPTED_SRTCP",
         ])
         .with_dtmf(true);
         assert_eq!(taken.dtmf_payload(), Some(98));
+        // Opus's clock and G.722's, whose RTP clock is 8 kHz whatever it
+        // samples at (RFC 3551 §4.5.2)
+        assert_eq!(taken.dtmf_payloads(), [(98, 48_000), (99, 8_000)]);
         assert_eq!(
             taken
                 .offer("audio", 5004, Direction::SendRecv)
                 .formats
                 .len(),
-            3
+            4
         );
 
         // a build that does not do DTMF writes no events at all

@@ -2724,6 +2724,71 @@ fn a_digit_dialled_on_one_end_is_heard_once_on_the_other() {
     );
 }
 
+/// An offer of Opus beside the eight-kilohertz codecs names its events on
+/// both clocks, so a call that settles on PCMU still has events on PCMU's
+/// clock (RFC 4733 §2.5.1.2), and a digit dialled on it is heard once, at
+/// its length.
+#[cfg(feature = "opus")]
+#[test]
+fn an_offer_names_events_on_every_codec_clock_and_a_pcmu_call_dials_on_its_own() {
+    let mut pair = Pair::asymmetric(
+        CodecCatalog::new(),
+        CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+    );
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let offer = one_stream(&pair.callee.offer_received().expect("the offer"));
+    let events: Vec<String> = attribute_values(&offer, "rtpmap")
+        .into_iter()
+        .filter(|map| map.contains("telephone-event/"))
+        .map(|map| map.split_once(' ').map_or(map.clone(), |(_, rest)| rest.to_owned()))
+        .collect();
+    assert_eq!(
+        events,
+        ["telephone-event/48000", "telephone-event/8000"],
+        "one set of events per clock the offer's codecs run on"
+    );
+
+    let frame = {
+        let mut session = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media");
+        assert_eq!(session.codec(), Codec::Pcmu);
+        session
+            .send_dtmf(Digit::from_char('5').expect("a key"), DEFAULT_DIGIT)
+            .expect("the call negotiated events to send the digit with");
+        session.frame_samples()
+    };
+    let mut samples = vec![0_i16; frame];
+    let mut phase = 0_u32;
+    for _ in 0..20 {
+        tone(&mut samples, 8_000, &mut phase);
+        pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    pair.callee.drain(pair.now, false);
+    let heard: Vec<_> = pair
+        .callee
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::DigitReceived { digit, held, .. } => Some((*digit, *held)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(heard.first().and_then(|(digit, _)| *digit), Some('5'));
+    assert!(
+        heard
+            .first()
+            .is_some_and(|(_, held)| held.is_some_and(|held| held >= Duration::from_millis(80))),
+        "the digit was reported as lasting {:?}",
+        heard.first().map(|(_, held)| *held)
+    );
+}
+
 /// 8.3.11-bis(d): an RFC 4733 digit sent at the default lasts the same
 /// hundred milliseconds an INFO sent without a length carries. The far end
 /// reads the length off the closing packet's duration, 800 ticks at eight
@@ -6932,11 +6997,11 @@ fn invite_with_every_candidate(srtp: SrtpPolicy) -> Result<Vec<u8>, usize> {
 fn an_invite_with_every_candidate_is_measured_against_the_datagram_floor() {
     let sdes = invite_with_every_candidate(SrtpPolicy::Offered)
         .expect_err("SDES with every candidate needs a stream");
-    assert!((1301..=1400).contains(&sdes), "{sdes} bytes with SDES");
+    assert!((1301..=1450).contains(&sdes), "{sdes} bytes with SDES");
 
     let dtls = invite_with_every_candidate(SrtpPolicy::DtlsOffered)
         .expect_err("DTLS-SRTP with every candidate needs a stream");
-    assert!((1301..=1400).contains(&dtls), "{dtls} bytes with DTLS-SRTP");
+    assert!((1301..=1450).contains(&dtls), "{dtls} bytes with DTLS-SRTP");
 }
 
 #[cfg(feature = "ice")]
