@@ -359,6 +359,9 @@ struct Copy {
     sequence: Option<u16>,
     timestamp: Option<u32>,
     base: (u16, u32),
+    /// The original's source that numbering was fixed by, on an SRTP
+    /// recording session: another source numbers its packets afresh.
+    source: Option<u32>,
 }
 
 impl Copy {
@@ -397,6 +400,7 @@ impl Copy {
         self.sequence = None;
         self.timestamp = None;
         self.base = next;
+        self.source = None;
     }
 }
 
@@ -523,6 +527,7 @@ impl Tap {
                         sequence: None,
                         timestamp: None,
                         base: next.unwrap_or((sequence, timestamp)),
+                        source: None,
                     });
                 }
             }
@@ -602,12 +607,33 @@ impl Tap {
         let Some(copy) = self.copies.get_mut(stream).and_then(Option::as_mut) else {
             return;
         };
+        let after = self.next.get(stream).copied().flatten();
+        // RFC 3711 §3.3.1: an SRTP sender's index only moves forward, and a
+        // receiver finds it from the sequence numbers. Another source's
+        // numbers are carried on from where the copies got to, so they do
+        // not jump.
+        if self.protection.required {
+            if copy.source.is_some_and(|source| source != header.ssrc)
+                && let Some(after) = after
+            {
+                copy.resume(after);
+            }
+            copy.source = Some(header.ssrc);
+        }
         let Some((mut packet, (sequence, timestamp))) =
             copy.packet(header, payload, self.payload_type)
         else {
             return;
         };
         if self.protection.required {
+            // and a packet that arrived after one numbered past it is not
+            // copied: protected behind the last, it would either repeat that
+            // index under the same key (§9.1) or read to the server as a
+            // rollover it never saw, and every copy after it would fail its
+            // check there
+            if after.is_some_and(|(after, _)| sequence.wrapping_sub(after) >= 0x8000) {
+                return;
+            }
             let Some(protector) = self.protection.of(stream) else {
                 return;
             };
@@ -821,5 +847,64 @@ mod tests {
         tap.protect([Some((1, key(1))), None]);
         send(&mut tap, 20);
         assert_eq!(copied, 65_536 + 35, "every packet was copied");
+    }
+
+    /// The far end's packets as the network hands them over — one late,
+    /// one twice, then from a source that numbers its packets afresh — and
+    /// what a recording server keyed for the copies opens of them: every
+    /// copy it is sent, rather than nothing from the late packet on.
+    #[test]
+    fn the_far_end_reordered_or_renumbered_leaves_every_protected_copy_open_to_the_server() {
+        use sipral_rtp::srtp::{Master, Policy, Protector, Suite, Unprotector};
+
+        let master = || Master::new(&[3; 16], &[4; 14]);
+        let mut tap = Tap::new(
+            &record_to(),
+            destinations(),
+            (0, 0),
+            [(1, 0, 0), (2, 100, 0)],
+        );
+        tap.protect([
+            None,
+            Some((1, Protector::new(Policy::new(Suite::AesCm80), master()))),
+        ]);
+        let mut server = Unprotector::new(Policy::new(Suite::AesCm80), master());
+        let from = |source: u32, sequence: u16| {
+            let mut bytes = packet(0, sequence);
+            if let Some(field) = bytes.get_mut(8..12) {
+                field.copy_from_slice(&source.to_be_bytes());
+            }
+            bytes
+        };
+        let arriving = [
+            (1, 10),
+            (1, 11),
+            (1, 13),
+            (1, 12),
+            (1, 14),
+            (1, 14),
+            (1, 15),
+            (7, 40_000),
+            (7, 40_001),
+            (9, 2),
+            (9, 3),
+        ];
+        let mut opened = Vec::new();
+        for (source, sequence) in arriving {
+            tap.received(&from(source, sequence));
+            while let Some(copy) = tap.poll() {
+                let mut bytes = copy.payload.to_vec();
+                assert!(
+                    server.unprotect_rtp(&mut bytes).is_ok(),
+                    "the copy of {sequence} from {source} does not open"
+                );
+                opened.push(RtpPacket::parse(&bytes).expect("RTP").header().sequence);
+            }
+        }
+        assert_eq!(
+            opened,
+            [100, 101, 103, 104, 105, 106, 107, 108, 109],
+            "the late and the repeated packets are left out, and a new source carries on"
+        );
     }
 }

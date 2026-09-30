@@ -2630,7 +2630,11 @@ at zero and, past a wrap of the sequence numbers, send an index the key had
 already covered. Copies that move to a call that
 replaced the recorded one, or to a stream the server took back, carry their
 numbering on rather than starting it over, so no SRTP index goes out twice
-under one key (RFC 3711 §9.1). An unencrypted call is recorded as plain
+under one key (RFC 3711 §9.1). So do copies of a far end that starts a new
+source, and a packet that arrives after one numbered past it is not copied:
+protected behind the last, it would repeat that index or read to the server
+as a rollover it never saw, and every copy after it would fail there. An
+unencrypted call is recorded as plain
 `RTP/AVP`, and so is an encrypted one on an account that says it may be
 (`AccountSrtp::recording_in_clear`, `recording_in_clear` in
 `sipral_account_config_t`). A recording offered in the clear, for a call that
