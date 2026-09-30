@@ -1054,5 +1054,9 @@ fn a_duplex_reopen_waits_for_the_old_unit_even_behind_a_slow_pump() {
         .select(Role::Speaker, Selection::Device(headset))
         .unwrap();
     assert_eq!(engine.running_on(Role::Speaker), Some(headset));
-    assert_eq!(fake.units_at_most(), 1, "the new unit opened beside the old");
+    assert_eq!(
+        fake.units_at_most(),
+        1,
+        "the new unit opened beside the old"
+    );
 }

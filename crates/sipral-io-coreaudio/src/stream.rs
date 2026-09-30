@@ -76,7 +76,10 @@ const SLOWEST_DEVICE_RATE_HZ: u32 = 8_000;
 /// than handed a buffer that is too small (see `Shared::record`).
 fn capture_capacity(format: StreamFormat) -> usize {
     let slice = usize::try_from(MAX_FRAMES_PER_SLICE).unwrap_or(0);
-    let ratio = format.sample_rate_hz().div_ceil(SLOWEST_DEVICE_RATE_HZ).max(1);
+    let ratio = format
+        .sample_rate_hz()
+        .div_ceil(SLOWEST_DEVICE_RATE_HZ)
+        .max(1);
     slice.saturating_mul(usize::try_from(ratio).unwrap_or(1))
 }
 
@@ -2421,7 +2424,11 @@ mod tests {
             .expect("an input named like that");
         let default_input = default_device(Direction::Input).expect("the default input");
         let default_output = default_device(Direction::Output).expect("the default output");
-        assert_ne!(Some(input.id), default_input, "pick an input that is not the default");
+        assert_ne!(
+            Some(input.id),
+            default_input,
+            "pick an input that is not the default"
+        );
 
         let format = StreamFormat::with_frame_millis(48_000, 20).expect("a twenty ms frame");
         let config =
@@ -2446,7 +2453,11 @@ mod tests {
         while stream.read(&mut frame) {
             arrived += 1;
         }
-        println!("{arrived} frames from {}; {}", input.name, stream.counters());
+        println!(
+            "{arrived} frames from {}; {}",
+            input.name,
+            stream.counters()
+        );
         assert!(arrived > 0, "nothing came from the chosen microphone");
         stream.close().expect("close");
     }

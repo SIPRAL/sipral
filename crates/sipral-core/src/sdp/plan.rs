@@ -1102,7 +1102,10 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
 
         // a PBX that takes PCMU and names its events at 8 kHz on its own number
         let pcmu_answer = theirs(5000, "0 101", "a=rtpmap:101 telephone-event/8000\r\n");
-        let plan = offer.media_plan(&pcmu_answer, 0).expect("a plan").expect("up");
+        let plan = offer
+            .media_plan(&pcmu_answer, 0)
+            .expect("a plan")
+            .expect("up");
         assert_eq!(plan.codec.rtpmap.encoding, "PCMU");
         assert_eq!((plan.dtmf, plan.dtmf_in), (Some(101), Some(97)));
 
@@ -1112,7 +1115,10 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
             "9 96 97",
             "a=rtpmap:96 telephone-event/48000\r\na=rtpmap:97 telephone-event/8000\r\n",
         );
-        let plan = offer.media_plan(&g722_answer, 0).expect("a plan").expect("up");
+        let plan = offer
+            .media_plan(&g722_answer, 0)
+            .expect("a plan")
+            .expect("up");
         assert_eq!(plan.codec.rtpmap.encoding, "G722");
         assert_eq!((plan.dtmf, plan.dtmf_in), (Some(97), Some(97)));
 
@@ -1123,10 +1129,16 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
             "a=rtpmap:111 opus/48000/2\r\na=rtpmap:97 telephone-event/8000\r\n\
              a=rtpmap:96 telephone-event/48000\r\n",
         );
-        let plan = offer.media_plan(&opus_answer, 0).expect("a plan").expect("up");
+        let plan = offer
+            .media_plan(&opus_answer, 0)
+            .expect("a plan")
+            .expect("up");
         assert_eq!((plan.dtmf, plan.dtmf_in), (Some(96), Some(96)));
         // the same, seen from the end that answered
-        let back = opus_answer.media_plan(&offer, 0).expect("a plan").expect("up");
+        let back = opus_answer
+            .media_plan(&offer, 0)
+            .expect("a plan")
+            .expect("up");
         assert_eq!((back.dtmf, back.dtmf_in), (Some(96), Some(96)));
     }
 
@@ -1859,10 +1871,7 @@ KDR=1 UNENCRYPTED_SRTCP",
 
         assert_eq!(stream.proto, "RTP/AVP");
         assert_eq!(stream.port, 5004);
-        assert_eq!(
-            stream.payload_types().collect::<Vec<_>>(),
-            [111, 0, 96, 97]
-        );
+        assert_eq!(stream.payload_types().collect::<Vec<_>>(), [111, 0, 96, 97]);
         assert_eq!(stream.rtpmap(111).expect("opus").encoding, "opus");
         assert_eq!(stream.fmtp(111), Some("useinbandfec=1"));
         assert_eq!(stream.rtpmap(0).expect("PCMU").encoding, "PCMU");

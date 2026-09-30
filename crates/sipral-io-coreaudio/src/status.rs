@@ -111,7 +111,9 @@ impl fmt::Display for Error {
         match *self {
             Self::Call { call, status } => write!(f, "{call} returned {status}"),
             Self::UnitMissing => f.write_str("no voice-processing I/O unit on this system"),
-            Self::Busy => f.write_str("a voice-processing I/O unit is already open in this process"),
+            Self::Busy => {
+                f.write_str("a voice-processing I/O unit is already open in this process")
+            }
             Self::Draining { waited_millis } => write!(
                 f,
                 "a device callback was still running after {waited_millis} ms, so nothing was freed"
