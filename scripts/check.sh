@@ -1320,6 +1320,70 @@ else
     pass "no bindings/c/abi-sizes.txt in the last commit to hold the pins to"
 fi
 
+# A member put into a hole between two members, or moved, changes no length
+# and no pin, and bindings/c/abi-layout.c is printed again with it, so
+# nothing above notices. It is the same fault as a member in tail padding:
+# a caller built against the header before it never wrote those bytes, and
+# the library reads them as a value it set. So every member's offset on
+# every layout is held to the last commit's, a member the last commit did
+# not have must start at or past the length the struct had there, and a
+# member it had must still be there. The union is left out: its members all
+# sit at zero, and an arm added to it is how a new event gets a payload.
+layout_facts() {
+    printf '%s\n' "$1" | awk '
+        /^_Static_assert\(sizeof\(/ {
+            name = $0; sub(/^_Static_assert\(sizeof\(/, "", name); sub(/\).*/, "", name)
+            nums = $0; sub(/.*SIPRAL_LAYOUT\(/, "", nums); sub(/\).*/, "", nums); gsub(/,/, "", nums)
+            print name, "sizeof", nums
+        }
+        /^_Static_assert\(offsetof\(/ && !/ \+ sizeof/ {
+            pair = $0; sub(/^_Static_assert\(offsetof\(/, "", pair); sub(/\).*/, "", pair)
+            split(pair, p, ", ")
+            nums = $0; sub(/.*SIPRAL_LAYOUT\(/, "", nums); sub(/\).*/, "", nums); gsub(/,/, "", nums)
+            print p[1], p[2], nums
+        }'
+}
+if published_layout=$(git show HEAD:bindings/c/abi-layout.c 2>/dev/null); then
+    unions=$(grep -E '^union [a-z_0-9]+ \{' "$HEADER" | awk '{ print $2 "_t" }' | tr '\n' ' ')
+    misplaced=$(awk -v unions="$unions" '
+        BEGIN { split(unions, list, " "); for (i in list) union[list[i]] = 1 }
+        FNR == NR { was[$1 " " $2] = $3 " " $4 " " $5; next }
+        $1 in union { next }
+        !(($1 " sizeof") in was) { next }
+        {
+            key = $1 " " $2
+            now = $3 " " $4 " " $5
+            seen[key] = 1
+            if ($2 == "sizeof") next
+            if (key in was) {
+                if (was[key] != now) print $1 "::" $2 " moved from " was[key] " to " now
+                next
+            }
+            split(was[$1 " sizeof"], size, " ")
+            if ($3 < size[1] || $4 < size[2] || $5 < size[3])
+                print $1 "::" $2 " at " now " starts inside the length the last commit declared, " was[$1 " sizeof"]
+        }
+        END {
+            for (key in was) {
+                split(key, part, " ")
+                if (part[2] != "sizeof" && !(key in seen) && !(part[1] in union) && ((part[1] " sizeof") in seen))
+                    print part[1] "::" part[2] " went away"
+            }
+        }' <(layout_facts "$published_layout") <(layout_facts "$(cat bindings/c/abi-layout.c)"))
+    read -r was_major _ <<<"$(version_of "$(git show HEAD:"$HEADER" 2>/dev/null)")"
+    read -r is_major _ <<<"$(version_of "$(cat "$HEADER")")"
+    if [ -z "$misplaced" ]; then
+        pass "every member the last commit declared is where it was, and every new one is past the old length"
+    elif [ -n "$was_major" ] && [ "$is_major" -gt "$was_major" ]; then
+        pass "members moved, and the ABI major with them ($was_major to $is_major)"
+    else
+        fail "a member moved, went away, or was put inside a length callers already declare, within ABI major $is_major:"
+        printf '%s\n' "$misplaced" | sed 's/^/        /'
+    fi
+else
+    pass "no bindings/c/abi-layout.c in the last commit to hold the offsets to"
+fi
+
 # Sixteen fuzz targets in a workspace of its own, on a nightly pin of its
 # own, and nothing else here reads them: `cargo test --workspace`, `cargo
 # fmt --all` and the clippy run above all stop at the workspace boundary. A

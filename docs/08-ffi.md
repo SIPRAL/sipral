@@ -2829,7 +2829,13 @@ for 64-bit and 32-bit Windows. Every generated binding carries the same table
 and its own size test holds its own layout of each record, and the library's
 answer from `sipral_abi_struct_size`, to the number for the layout it runs
 on. The gate also holds the pins to the last commit: a pin that moved or went
-away within one major fails it.
+away within one major fails it. And it holds every member's offset, on every
+layout, to the last commit's `abi-layout.c`: a member that moved or went away
+fails it, and so does a new member that starts inside the length the struct
+had there. That is the one fault the three checks above cannot see — a member
+slipped into a hole between two others changes no length and no pin, and the
+assertions are printed again with it — and it is the tail-padding fault over
+again: a caller built against the header before it never wrote those bytes.
 
 Turning a caller away is still the right answer when the member is one the
 call cannot proceed without: `media_seed` is one of those, and
