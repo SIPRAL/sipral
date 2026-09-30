@@ -234,7 +234,8 @@ machine's devices: the list, the choices and the settings always, and what
 opens the devices -- activation, the ring, a call in device mode -- only with
 `SIPRAL_AUDIO_DEVICES=1`, since on macOS the voice-processing unit needs the
 microphone granted to the JVM's process and takes the process down without
-it.
+it. On a Mac with the virtual loopback device `BlackHole 2ch` those put every
+role on it, so nothing sounds through the machine's loudspeaker.
 
 Three structs the generated shim has no way to build from Kotlin —
 `sipral_media_packet_t`, `sipral_transmit_t` and `sipral_path_candidate_t`,

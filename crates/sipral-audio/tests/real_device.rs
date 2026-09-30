@@ -12,6 +12,10 @@
 //! ```
 //!
 //! On macOS the first run asks the person for the microphone once.
+//!
+//! On a machine with the virtual loopback device `BlackHole 2ch`, every role
+//! no variable names goes on it, so that a run never sounds through the
+//! machine's loudspeaker; without it, the roles stay on the system's route.
 
 // a test says what it means; the no-panic discipline is for the library
 #![allow(
@@ -28,9 +32,69 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sipral_audio::{
-    Activation, CallAudio, CallGone, Config, Direction, Engine, Outgoing, Role, Selection,
-    Transport,
+    Activation, CallAudio, CallGone, Config, DeviceHandle, DeviceInfo, Direction, Engine, Outgoing,
+    Role, Selection, Transport,
 };
+
+/// The virtual loopback device these tests play and record on when the
+/// machine has one: it plays nowhere, and hands back what it was given.
+const QUIET_DEVICE: &str = "BlackHole 2ch";
+
+/// The device `role` goes on when no variable names one: the quiet device
+/// when the machine has it and it can serve the role, and `None` — the
+/// system's route — otherwise.
+fn quiet(listed: &[DeviceInfo], role: Role) -> Option<DeviceHandle> {
+    listed
+        .iter()
+        .find(|device| device.present && device.name == QUIET_DEVICE && device.serves(role))
+        .map(|device| device.handle)
+}
+
+/// Every role on the quiet device, when the machine has it.
+fn all_on_the_quiet_device(engine: &mut Engine, listed: &[DeviceInfo]) {
+    for role in [Role::Speaker, Role::Microphone, Role::Ringer] {
+        if let Some(handle) = quiet(listed, role) {
+            engine
+                .select(role, Selection::Device(handle))
+                .unwrap_or_else(|error| panic!("{role} on {QUIET_DEVICE}: {error}"));
+        }
+    }
+}
+
+fn listed_device(number: u32, name: &str, inputs: u32, outputs: u32) -> DeviceInfo {
+    DeviceInfo {
+        handle: DeviceHandle::new(number).unwrap(),
+        identity: format!("uid-{number}"),
+        name: name.to_owned(),
+        input_channels: inputs,
+        output_channels: outputs,
+        default_input: false,
+        default_output: number == 1,
+        present: true,
+    }
+}
+
+#[test]
+fn every_role_goes_on_the_quiet_device_when_the_machine_has_it_and_nowhere_new_otherwise() {
+    let laptop = vec![
+        listed_device(1, "MacBook Air Speakers", 0, 2),
+        listed_device(2, "MacBook Air Microphone", 1, 0),
+    ];
+    for role in [Role::Speaker, Role::Microphone, Role::Ringer] {
+        assert_eq!(quiet(&laptop, role), None, "{role}");
+    }
+    let mut desk = laptop.clone();
+    desk.push(listed_device(3, QUIET_DEVICE, 2, 2));
+    for role in [Role::Speaker, Role::Microphone, Role::Ringer] {
+        assert_eq!(quiet(&desk, role), DeviceHandle::new(3), "{role}");
+    }
+    let mut gone = desk.clone();
+    gone[2].present = false;
+    assert_eq!(quiet(&gone, Role::Speaker), None, "a device that has gone");
+    let mut lookalike = laptop;
+    lookalike.push(listed_device(4, "BlackHole 16ch", 16, 16));
+    assert_eq!(quiet(&lookalike, Role::Speaker), None, "another device");
+}
 
 /// A call that plays a tone and keeps what the microphone gave it.
 struct ToneCall {
@@ -106,6 +170,7 @@ fn the_devices_are_listed_and_a_call_is_pumped_through_them() {
         .refresh()
         .expect("the platform lists its devices")
         .to_vec();
+    all_on_the_quiet_device(&mut engine, &listed);
     for device in &listed {
         println!(
             "{}: {:?} in={} out={} default_in={} default_out={} present={} [{}]",
@@ -216,8 +281,9 @@ fn the_devices_are_listed_and_a_call_is_pumped_through_them() {
 /// ```
 ///
 /// `SIPRAL_AUDIO_SPEAKER`, `SIPRAL_AUDIO_MIC` and `SIPRAL_AUDIO_RINGER` put
-/// each role on a device named like that; the loudspeaker goes on the
-/// system's default output otherwise.
+/// each role on a device named like that; each goes on the quiet device
+/// otherwise, and the loudspeaker on the system's default output on a
+/// machine without one.
 #[test]
 #[ignore = "opens the machine's real devices and plays a tone"]
 fn the_device_mode_sequence_runs_three_times() {
@@ -227,7 +293,9 @@ fn the_device_mode_sequence_runs_three_times() {
         .expect("the platform lists its devices")
         .to_vec();
     let named = |role: Role, variable: &str| {
-        let wanted = std::env::var(variable).ok()?;
+        let Ok(wanted) = std::env::var(variable) else {
+            return quiet(&listed, role);
+        };
         listed
             .iter()
             .find(|device| device.serves(role) && device.name.contains(&wanted))
@@ -293,7 +361,8 @@ fn the_device_mode_sequence_runs_three_times() {
 /// room in it, and what the platform's own processing takes off it.
 ///
 /// `SIPRAL_AUDIO_MIC` and `SIPRAL_AUDIO_SPEAKER` name the devices by a
-/// fragment of their names; without them the system's route is measured.
+/// fragment of their names; without them the quiet device is measured, and
+/// the system's route on a machine without one.
 #[test]
 #[ignore = "opens the machine's real devices and plays a tone"]
 fn echo_return_loss_through_the_loudspeaker_to_microphone_path() {
@@ -307,6 +376,11 @@ fn echo_return_loss_through_the_loudspeaker_to_microphone_path() {
         (Role::Speaker, "SIPRAL_AUDIO_SPEAKER"),
     ] {
         let Ok(wanted) = std::env::var(variable) else {
+            if let Some(handle) = quiet(&listed, role) {
+                engine
+                    .select(role, Selection::Device(handle))
+                    .unwrap_or_else(|error| panic!("{role} on {QUIET_DEVICE}: {error}"));
+            }
             continue;
         };
         let device = listed

@@ -125,6 +125,11 @@ pub use stream::{Capture, Playback, Stream, StreamConfig, StreamKind, voice_unit
 #[cfg(target_os = "macos")]
 mod hal;
 
+/// Where a test that opens the real devices plays: a virtual loopback device
+/// when the machine has one.
+#[cfg(test)]
+mod quiet;
+
 #[cfg(target_os = "macos")]
 pub use hal::{
     DeviceMonitor, default_device, device_with_uid, devices, is_alive, latency, render_delay,

@@ -37,6 +37,36 @@ from sipral.enums import (
 
 _HAS_DEVICES = Feature.AUDIO_DEVICE in features()
 
+# The virtual loopback device a test that opens the devices plays and records
+# on when the machine has one: it plays nowhere and hands back what it was
+# given, so that a run never sounds through the machine's loudspeaker.
+# Without it the test runs on the system's route, as it always did.
+QUIET_DEVICE = "BlackHole 2ch"
+
+
+def quiet_device(devices: list[AudioDevice], role: int) -> AudioDevice | None:
+    """The device ``role`` goes on in a test that opens the devices: the
+    quiet one when the machine has it and it serves the role, else None."""
+    for device in devices:
+        serves = device.is_microphone if role == AudioRole.MICROPHONE else device.is_speaker
+        if device.present and device.name == QUIET_DEVICE and serves:
+            return device
+    return None
+
+
+class TheQuietDeviceIsChosenWhereTheMachineHasIt(unittest.TestCase):
+    def test_every_role_goes_on_it_and_nowhere_new_without_it(self) -> None:
+        def device(number: int, name: str, inputs: int, outputs: int, present: bool = True):
+            return AudioDevice(number, name, inputs, outputs, False, number == 1, present)
+
+        laptop = [device(1, "MacBook Air Speakers", 0, 2), device(2, "MacBook Air Microphone", 1, 0)]
+        roles = (AudioRole.SPEAKER, AudioRole.MICROPHONE, AudioRole.RINGER)
+        for role in roles:
+            self.assertIsNone(quiet_device(laptop, role))
+            self.assertEqual(quiet_device(laptop + [device(3, QUIET_DEVICE, 2, 2)], role).id, 3)
+        self.assertIsNone(quiet_device(laptop + [device(3, QUIET_DEVICE, 2, 2, False)], roles[0]))
+        self.assertIsNone(quiet_device(laptop + [device(4, "BlackHole 16ch", 16, 16)], roles[0]))
+
 
 class AStackPicksWhoPumpsItsAudio(unittest.TestCase):
     def test_the_default_is_the_devices_wherever_the_build_can_open_them(self) -> None:
@@ -256,6 +286,11 @@ class ACallOnRealDevicesCarriesAudioBothWays(unittest.IsolatedAsyncioTestCase):
     async def test_the_far_end_is_heard_and_hears(self) -> None:
         loop = asyncio.get_running_loop()
         alice = Stack(loop=loop, audio=AudioMode.DEVICE)
+        devices = alice.audio.refresh()
+        for role in (AudioRole.SPEAKER, AudioRole.MICROPHONE, AudioRole.RINGER):
+            quiet = quiet_device(devices, role)
+            if quiet is not None:
+                alice.audio.select(role, quiet)
         bob = Stack(loop=loop, audio=AudioMode.APPLICATION)
         self.addAsyncCleanup(asyncio.to_thread, bob.close)
         self.addAsyncCleanup(asyncio.to_thread, alice.close)

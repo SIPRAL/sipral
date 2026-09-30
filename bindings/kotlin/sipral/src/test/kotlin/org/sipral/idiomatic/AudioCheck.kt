@@ -44,6 +44,44 @@ private val opensDevices: Boolean get() = System.getenv("SIPRAL_AUDIO_DEVICES") 
 private fun deviceClient(activation: SipralAudioActivation = SipralAudioActivation.MANUAL) =
     SipralClient.open(audio = SipralAudioMode.Device(activation), bindHost = "127.0.0.1")
 
+/** The virtual loopback device a check that opens the devices plays and
+ * records on when the machine has one: it plays nowhere and hands back what it
+ * was given, so that a run never sounds through the machine's loudspeaker.
+ * Without it the check runs on the system's route, as it always did. */
+internal const val QUIET_DEVICE = "BlackHole 2ch"
+
+private val everyRole = listOf(SipralAudioRole.SPEAKER, SipralAudioRole.MICROPHONE, SipralAudioRole.RINGER)
+
+/** The device [role] goes on in a check that opens the devices: the quiet one
+ * when the machine has it and it serves the role, and null otherwise. */
+internal fun quietDevice(devices: List<SipralAudioDeviceInfo>, role: SipralAudioRole): SipralAudioDeviceInfo? =
+    devices.firstOrNull { it.isPresent && it.name == QUIET_DEVICE && it.canServe(role) }
+
+/** A client whose devices a check is going to open, every role on the quiet
+ * device when the machine has one. */
+private fun openingClient(activation: SipralAudioActivation): SipralClient {
+    val client = deviceClient(activation)
+    val audio = assertNotNull(client.audio)
+    val devices = audio.refresh()
+    for (role in everyRole) {
+        quietDevice(devices, role)?.let { audio.select(role, it) }
+    }
+    return client
+}
+
+private fun theQuietDeviceIsChosenWhereTheMachineHasIt(): String {
+    fun device(id: Long, name: String, inputs: Int, outputs: Int, present: Boolean = true) =
+        SipralAudioDeviceInfo(id, name, inputs, outputs, false, id == 1L, present)
+    val laptop = listOf(device(1, "MacBook Air Speakers", 0, 2), device(2, "MacBook Air Microphone", 1, 0))
+    for (role in everyRole) {
+        assertNull(quietDevice(laptop, role))
+        assertEquals(3L, quietDevice(laptop + device(3, QUIET_DEVICE, 2, 2), role)?.id)
+    }
+    assertNull(quietDevice(laptop + device(3, QUIET_DEVICE, 2, 2, present = false), SipralAudioRole.SPEAKER))
+    assertNull(quietDevice(laptop + device(4, "BlackHole 16ch", 16, 16), SipralAudioRole.SPEAKER))
+    return "the quiet device chosen where the machine has it, and nothing new where it has not"
+}
+
 private suspend fun until(withinMs: Long, done: () -> Boolean): Boolean {
     val deadline = System.currentTimeMillis() + withinMs
     while (!done()) {
@@ -116,7 +154,7 @@ private fun gainAndMuteSurviveAChangeOfDevice(): String {
 }
 
 private suspend fun activationRingAndTheEnginesOwnChoice(): String {
-    deviceClient(SipralAudioActivation.MANUAL).use { client ->
+    openingClient(SipralAudioActivation.MANUAL).use { client ->
         val audio = assertNotNull(client.audio)
         audio.setMuted(SipralAudioDirection.OUTPUT, true)
         assertFalse(audio.status().isActive)
@@ -124,7 +162,11 @@ private suspend fun activationRingAndTheEnginesOwnChoice(): String {
         val open = audio.status()
         assertTrue(open.isActive)
         assertNotEquals(0, open.speakerRateHz)
-        val speaker = assertNotNull(audio.refresh().firstOrNull { it.isPresent && it.canServe(SipralAudioRole.SPEAKER) })
+        val devices = audio.refresh()
+        val speaker = assertNotNull(
+            quietDevice(devices, SipralAudioRole.SPEAKER)
+                ?: devices.firstOrNull { it.isPresent && it.canServe(SipralAudioRole.SPEAKER) },
+        )
         val (_, selected) = client.events.awaitNext(
             timeoutMs = 10_000,
             matches = { audioOf(it)?.changeKind == SipralAudioChange.SELECTED },
@@ -137,7 +179,7 @@ private suspend fun activationRingAndTheEnginesOwnChoice(): String {
         audio.deactivate()
         assertFalse(audio.status().isActive)
     }
-    deviceClient(SipralAudioActivation.AUTOMATIC).use { client ->
+    openingClient(SipralAudioActivation.AUTOMATIC).use { client ->
         val audio = assertNotNull(client.audio)
         audio.setMuted(SipralAudioDirection.OUTPUT, true)
         audio.ring(ShortArray(800), 8_000)
@@ -149,7 +191,7 @@ private suspend fun activationRingAndTheEnginesOwnChoice(): String {
 }
 
 private suspend fun aCallInDeviceModeIsPumpedByTheEngine(): String {
-    deviceClient(SipralAudioActivation.AUTOMATIC).use { bob ->
+    openingClient(SipralAudioActivation.AUTOMATIC).use { bob ->
         SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { alice ->
             val audio = assertNotNull(bob.audio)
             audio.setGain(SipralAudioDirection.OUTPUT, 0.05)
@@ -194,7 +236,11 @@ private fun anAndroidContextIsCheckedByTheShim(): String {
 /** Everything above, for IdiomaticCheck.kt's main: the settings wherever
  * there is an engine, what opens the devices only when asked. */
 internal suspend fun audioChecks(): String {
-    val said = mutableListOf(thePlatformDefault(), anAndroidContextIsCheckedByTheShim())
+    val said = mutableListOf(
+        thePlatformDefault(),
+        anAndroidContextIsCheckedByTheShim(),
+        theQuietDeviceIsChosenWhereTheMachineHasIt(),
+    )
     if (!hasEngine) {
         return (said + "no audio engine in this build for this platform").joinToString(", ")
     }

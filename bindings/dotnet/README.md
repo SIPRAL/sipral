@@ -69,7 +69,9 @@ the device list, the roles, gain, mute, the meter and a device-mode call the
 application pumps nothing into; it hands the engine's transmit callback a
 packet and proves it leaves from the call's socket, and, with
 `SIPRAL_AUDIO_DEVICES=1` on a machine whose devices a test may open, carries
-a call through the real devices both ways. `IdentityTests.cs` plays the far
+a call through the real devices both ways — on `BlackHole 2ch` where the
+machine has that virtual loopback device, so nothing sounds through its
+loudspeaker. `IdentityTests.cs` plays the far
 end by hand for the caller's identity behind the trust gate, Answer-Mode and
 Alert-Info, `Reason` read and written, a 302 and the per-account options;
 `MoveTests.cs` moves a call from loopback to this host's routable address and

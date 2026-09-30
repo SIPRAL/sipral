@@ -30,6 +30,36 @@ public sealed class AudioEngineTests
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
     private static readonly bool HasDevices = SipralStack.HasFeature(global::Sipral.Sipral.FeatureAudioDevice);
 
+    /// <summary>The virtual loopback device a test that opens the devices
+    /// plays and records on when the machine has one: it plays nowhere and
+    /// hands back what it was given, so that a run never sounds through the
+    /// machine's loudspeaker. Without it the test runs on the system's route,
+    /// as it always did.</summary>
+    internal const string QuietDeviceName = "BlackHole 2ch";
+
+    /// <summary>The device <paramref name="role"/> goes on in a test that
+    /// opens the devices: the quiet one when the machine has it and it serves
+    /// the role, and null otherwise.</summary>
+    internal static SipralDeviceInfo? QuietDevice(
+        System.Collections.Generic.IEnumerable<SipralDeviceInfo> devices, SipralAudioRole role) =>
+        devices.FirstOrDefault(device => device.Present && device.Name == QuietDeviceName
+            && (role == SipralAudioRole.Microphone ? device.IsMicrophone : device.IsSpeaker));
+
+    [Fact]
+    public void TheQuietDeviceIsChosenWhereTheMachineHasItAndNothingNewOtherwise()
+    {
+        static SipralDeviceInfo Device(uint id, string name, uint inputs, uint outputs, bool present = true) =>
+            new(id, name, inputs, outputs, false, id == 1, present);
+        var laptop = new[] { Device(1, "MacBook Air Speakers", 0, 2), Device(2, "MacBook Air Microphone", 1, 0) };
+        foreach (var role in new[] { SipralAudioRole.Speaker, SipralAudioRole.Microphone, SipralAudioRole.Ringer })
+        {
+            Assert.Null(QuietDevice(laptop, role));
+            Assert.Equal(3u, QuietDevice(laptop.Append(Device(3, QuietDeviceName, 2, 2)), role)?.Id);
+        }
+        Assert.Null(QuietDevice(laptop.Append(Device(3, QuietDeviceName, 2, 2, present: false)), SipralAudioRole.Speaker));
+        Assert.Null(QuietDevice(laptop.Append(Device(4, "BlackHole 16ch", 16, 16)), SipralAudioRole.Speaker));
+    }
+
     [Fact]
     public void TheDefaultIsTheDevicesWhereverTheBuildCanOpenThem()
     {
@@ -300,6 +330,14 @@ public sealed class AudioEngineTests
             return;
         }
         using var alice = new SipralStack(audio: SipralAudio.Device);
+        var devices = alice.Audio!.Refresh();
+        foreach (var role in new[] { SipralAudioRole.Speaker, SipralAudioRole.Microphone, SipralAudioRole.Ringer })
+        {
+            if (QuietDevice(devices, role) is { } quiet)
+            {
+                alice.Audio.Select(role, quiet);
+            }
+        }
         using var bob = new SipralStack(audio: SipralAudio.Application);
         var (call, answered) = await ConnectAsync(alice, bob);
         try

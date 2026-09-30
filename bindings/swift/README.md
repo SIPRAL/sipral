@@ -113,6 +113,10 @@ asked about the microphone once:
 SIPRAL_AUDIO_DEVICES=1 xcrun --toolchain default swift test --filter AudioDeviceModeTests
 ```
 
+On a Mac with the virtual loopback device `BlackHole 2ch`, those tests put
+every role on it, so nothing sounds through the machine's loudspeaker;
+without it they run on the system's route.
+
 `scripts/check.sh` runs both steps from `bindings/` — `swift build` then,
 only if the release library is there to link against, `swift test` — and
 skips both with a stated reason where SwiftPM cannot read the manifest at

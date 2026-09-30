@@ -2231,7 +2231,7 @@ mod tests {
     /// default output for one half and the default input for the other, with
     /// the delay theirs.
     #[cfg(target_os = "macos")]
-    fn on_the_system_route(stream: &Stream) {
+    fn on_the_route_asked_for(stream: &Stream, quiet: Option<&crate::device::Device>) {
         use crate::device::Direction;
         use crate::hal::{default_device, render_delay};
 
@@ -2240,9 +2240,14 @@ mod tests {
             stream.device(),
             stream.capture_device()
         );
-        let (Ok(Some(speaker)), Ok(Some(microphone))) = (
-            default_device(Direction::Output),
-            default_device(Direction::Input),
+        let (Ok(Some(speaker)), Ok(Some(microphone))) = quiet.map_or_else(
+            || {
+                (
+                    default_device(Direction::Output),
+                    default_device(Direction::Input),
+                )
+            },
+            |quiet| (Ok(Some(quiet.id)), Ok(Some(quiet.id))),
         ) else {
             return;
         };
@@ -2264,20 +2269,48 @@ mod tests {
         );
     }
 
-    /// The default route end to end, everything in the one function on
-    /// purpose: a process has room for one voice-processing unit, the test
-    /// harness runs its tests on several threads, and a second unit is
-    /// refused while the first is open.
+    /// A voice stream on `route`, both halves, and a player beside it on
+    /// the same device: the quiet one when the machine has it
+    /// ([`crate::quiet`]), the system's route otherwise.
+    #[cfg(target_os = "macos")]
+    fn on(route: &DeviceChoice, mut config: StreamConfig) -> StreamConfig {
+        config.device = route.clone();
+        config.capture_device = route.clone();
+        config
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn on<R>(_route: &R, config: StreamConfig) -> StreamConfig {
+        config
+    }
+
+    /// The default route end to end — the quiet device when this machine has
+    /// one, so that nothing sounds through its loudspeaker — everything in
+    /// the one function on purpose: a process has room for one
+    /// voice-processing unit, the test harness runs its tests on several
+    /// threads, and a second unit is refused while the first is open.
     #[test]
     #[ignore = "opens the real default device"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one voice unit per process: the whole sequence is one test on purpose"
+    )]
     fn a_loopback_on_the_default_device_moves_frames() {
         use super::{Stream, StreamConfig};
         use std::thread;
         use std::time::{Duration, Instant};
 
+        #[cfg(target_os = "macos")]
+        let (route, quiet) = crate::quiet::route().expect("the device list");
+        #[cfg(target_os = "macos")]
+        println!("on {route}");
+        #[cfg(not(target_os = "macos"))]
+        let route = ();
+
         for rate in [16_000, 32_000, 48_000] {
             let wanted = StreamFormat::with_frame_millis(rate, 20).expect("a twenty ms frame");
-            let mut stream = Stream::open(StreamConfig::new(wanted)).expect("open at that rate");
+            let mut stream =
+                Stream::open(on(&route, StreamConfig::new(wanted))).expect("open at that rate");
             assert_eq!(stream.format(), wanted);
             stream.start().expect("start");
             stream.stop().expect("stop");
@@ -2289,7 +2322,8 @@ mod tests {
         }
 
         let format = StreamFormat::narrowband();
-        let mut stream = Stream::open(StreamConfig::new(format)).expect("open the default device");
+        let mut stream =
+            Stream::open(on(&route, StreamConfig::new(format))).expect("open the default device");
         println!("opened at {format}");
         println!("{}", stream.render_delay());
         assert!(
@@ -2298,7 +2332,7 @@ mod tests {
             stream.latency()
         );
         #[cfg(target_os = "macos")]
-        on_the_system_route(&stream);
+        on_the_route_asked_for(&stream, quiet.as_ref());
         stream.start().expect("start the device");
 
         // the process's one voice unit is this one: a second is refused
@@ -2306,11 +2340,11 @@ mod tests {
         // beside it and runs
         assert_eq!(super::voice_units_open(), 1);
         assert!(matches!(
-            Stream::open(StreamConfig::new(format)),
+            Stream::open(on(&route, StreamConfig::new(format))),
             Err(Error::Busy)
         ));
-        let mut beside =
-            Stream::open(StreamConfig::playback(format)).expect("a player beside the call");
+        let mut beside = Stream::open(on(&route, StreamConfig::playback(format)))
+            .expect("a player beside the call");
         beside.start().expect("start the player");
         assert!(beside.write(&vec![0; format.frame_samples()]));
         thread::sleep(Duration::from_millis(100));
@@ -2430,9 +2464,15 @@ mod tests {
             "pick an input that is not the default"
         );
 
+        // the speaker on the quiet device when the machine has one, so that
+        // nothing sounds through its loudspeaker
+        let (route, quiet) = crate::quiet::route().expect("the device list");
         let format = StreamFormat::with_frame_millis(48_000, 20).expect("a twenty ms frame");
-        let config =
-            StreamConfig::new(format).capturing_from(input.uid.clone().expect("a uid to save"));
+        let config = StreamConfig {
+            device: route,
+            ..StreamConfig::new(format)
+        }
+        .capturing_from(input.uid.clone().expect("a uid to save"));
         let mut stream = Stream::open(config).expect("open with the microphone apart");
         println!(
             "speaker on {:?}, microphone on {:?}",
@@ -2440,7 +2480,10 @@ mod tests {
             stream.capture_device()
         );
         assert_eq!(stream.capture_device(), Ok(input.id));
-        assert_eq!(stream.device().ok(), default_output);
+        assert_eq!(
+            stream.device().ok(),
+            quiet.map_or(default_output, |quiet| Some(quiet.id))
+        );
         assert_eq!(
             default_device(Direction::Input),
             Ok(default_input),

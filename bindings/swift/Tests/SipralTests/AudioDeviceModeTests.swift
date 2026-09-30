@@ -5,6 +5,19 @@ import Foundation
 import XCTest
 @testable import Sipral
 
+/// The virtual loopback device the tests that open the devices play and
+/// record on when the machine has one: it plays nowhere and hands back what
+/// it was given, so that a run never sounds through the machine's
+/// loudspeaker. Without it they run on the system's route, as they always
+/// did.
+let quietDeviceName = "BlackHole 2ch"
+
+/// The device `role` goes on in a test that opens the devices: the quiet one
+/// when the machine has it and it serves the role, and nil otherwise.
+func quietDevice(in devices: [AudioDevice], for role: SipralAudioRole) -> AudioDevice? {
+    devices.first { $0.isPresent && $0.name == quietDeviceName && $0.canServe(role) }
+}
+
 /// `AudioMode.device` on this machine's real devices: the library's engine
 /// listed, chosen, turned up and down, opened and closed, and carrying a call
 /// against a stack in `.application` mode on 127.0.0.1.
@@ -28,12 +41,41 @@ final class AudioDeviceModeTests: XCTestCase {
         return try SipralStack(audio: .device(activation: activation))
     }
 
-    /// A stack whose devices this test is going to open.
+    /// A stack whose devices this test is going to open, every role on the
+    /// quiet device when the machine has one.
     private func openingStack(_ activation: SipralAudioActivation) throws -> SipralStack {
         guard ProcessInfo.processInfo.environment["SIPRAL_AUDIO_DEVICES"] == "1" else {
             throw XCTSkip("opens the real devices: SIPRAL_AUDIO_DEVICES=1, with the microphone granted")
         }
-        return try deviceStack(activation)
+        let stack = try deviceStack(activation)
+        #if os(macOS)
+        let audio = try XCTUnwrap(stack.audio)
+        let devices = try audio.refresh()
+        for role in [SipralAudioRole.speaker, .microphone, .ringer] {
+            if let quiet = quietDevice(in: devices, for: role) {
+                try audio.select(quiet, for: role)
+            }
+        }
+        #endif
+        return stack
+    }
+
+    func testTheQuietDeviceIsChosenWhenTheMachineHasItAndNothingNewOtherwise() {
+        func device(_ id: UInt32, _ name: String, _ inputs: Int, _ outputs: Int) -> AudioDevice {
+            AudioDevice(
+                id: id, name: name, inputChannels: inputs, outputChannels: outputs,
+                isDefaultInput: false, isDefaultOutput: id == 1, isPresent: true)
+        }
+        let laptop = [device(1, "MacBook Air Speakers", 0, 2), device(2, "MacBook Air Microphone", 1, 0)]
+        for role in [SipralAudioRole.speaker, .microphone, .ringer] {
+            XCTAssertNil(quietDevice(in: laptop, for: role), "\(role)")
+            XCTAssertEqual(quietDevice(in: laptop + [device(3, quietDeviceName, 2, 2)], for: role)?.id, 3)
+        }
+        let gone = AudioDevice(
+            id: 3, name: quietDeviceName, inputChannels: 2, outputChannels: 2,
+            isDefaultInput: false, isDefaultOutput: false, isPresent: false)
+        XCTAssertNil(quietDevice(in: laptop + [gone], for: .speaker), "a device that went")
+        XCTAssertNil(quietDevice(in: laptop + [device(4, "BlackHole 16ch", 16, 16)], for: .speaker))
     }
 
     func testThePlatformDefaultIsDeviceModeWhereTheLibraryHasAnEngine() throws {
@@ -153,7 +195,9 @@ final class AudioDeviceModeTests: XCTestCase {
         try audio.setMuted(true, for: .output)
         let events = Recorder(stack.events())
         try audio.activate()
-        let speaker = try XCTUnwrap(try audio.refresh().first { $0.isPresent && $0.canServe(.speaker) })
+        let devices = try audio.refresh()
+        let speaker = try XCTUnwrap(
+            quietDevice(in: devices, for: .speaker) ?? devices.first { $0.isPresent && $0.canServe(.speaker) })
         try audio.select(speaker, for: .speaker)
 
         let selected = await events.first(within: 5) {
