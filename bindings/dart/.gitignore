@@ -1,0 +1,3 @@
+# Dart tooling state and the resolved dependency versions, never committed.
+.dart_tool/
+pubspec.lock
