@@ -2975,7 +2975,10 @@ What changed at 0.33, against the audit of 30 September 2026:
   on `sipral_stack_transport_bind`) and
   the `sdp` beside a `media_address` are absent when their length is zero,
   whatever the pointer, like every other optional text: a binding that hands
-  every string over as a buffer had no way to leave one out.
+  every string over as a buffer had no way to leave one out. The members
+  `sipral_call_ring_media` and `sipral_call_accept_transfer` refuse as "not
+  read here" count as set by the same rule, their length, and not by their
+  pointer.
 - Every callback crosses the generated .NET binding as a function pointer
   (`IntPtr`), in a struct and as a parameter, so no struct holds a delegate;
   the generated Swift wrappers take an optional callback and an optional

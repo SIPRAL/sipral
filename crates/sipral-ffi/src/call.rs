@@ -336,13 +336,15 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
             ),
         )
     }
-    if !config.target.is_null() || config.target_len != 0 {
+    // a member of no bytes is absent whatever its pointer, as the header's
+    // conventions say of every optional piece of text, bytes or records
+    if config.target_len != 0 {
         return Err(refused("target"));
     }
-    if !config.sdp.is_null() || config.sdp_len != 0 {
+    if config.sdp_len != 0 {
         return Err(refused("sdp"));
     }
-    if !config.destination.is_null() || config.destination_len != 0 {
+    if config.destination_len != 0 {
         return Err(refused("destination"));
     }
     if config.transport != 0 {
@@ -351,7 +353,7 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
     if config.keep_all_forks != 0 {
         return Err(refused("keep_all_forks"));
     }
-    if !config.headers.is_null() || config.headers_len != 0 {
+    if config.headers_len != 0 {
         return Err(refused("headers"));
     }
     unsafe {
@@ -1890,7 +1892,9 @@ entry! {
             return Err(fail(SipralStatus::InvalidArgument, "out_placed is null"));
         }
         let config = unsafe { read_versioned(config) }?;
-        if !config.target.is_null() || config.target_len != 0 {
+        // absent when its length is zero, whatever the pointer, like every
+        // optional piece of text in this ABI
+        if config.target_len != 0 {
             return Err(fail(
                 SipralStatus::InvalidArgument,
                 "target is not read here: sipral_call_accept_transfer places the call the far \
@@ -6477,6 +6481,32 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// A member the call does not read is refused when it is set, and one of
+    /// no bytes is not set, whatever its pointer: the header's conventions
+    /// promise that of every optional piece of text, bytes or records, and a
+    /// binding that hands every string over as a buffer has no null to pass.
+    #[test]
+    fn ringing_media_config_reads_an_empty_member_as_absent_whatever_its_pointer() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        let mut config = ring_media_config();
+        (config.target, config.target_len) = as_text("");
+        config.sdp = OFFER.as_ptr();
+        config.sdp_len = 0;
+        (config.destination, config.destination_len) = as_text("");
+        config.headers = std::ptr::NonNull::<crate::header::SipralHeader>::dangling().as_ptr();
+        config.headers_len = 0;
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert!(start_line(&one(handle)).starts_with("SIP/2.0 183"));
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     /// A REFER outside any dialog (RFC 3515 §4.1): a switchboard asking this
     /// end's line to ring Carol.
     fn referral(branch: &str) -> Vec<u8> {
@@ -6532,6 +6562,30 @@ Content-Length: 0\r\n\r\n"
         poll(handle, 1_000);
         assert_eq!(start_line(&one(handle)), "SIP/2.0 403 Forbidden");
         assert!(observed.referrals.is_empty(), "and nobody is asked");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// `target` on a transfer's config is refused when it is set; one of no
+    /// bytes is not set, whatever its pointer, as the header's conventions
+    /// say of every optional text.
+    #[test]
+    fn a_transfer_config_with_an_empty_target_pointer_is_taken() {
+        let mut observed = Observed::default();
+        let (handle, referral) = referred(&mut observed, "empty");
+        let mut config = managed_transfer_config();
+        (config.target, config.target_len) = as_text("");
+        let mut placed = SIPRAL_HANDLE_NONE;
+        let status = unsafe {
+            sipral_call_accept_transfer(
+                handle,
+                referral,
+                ptr::from_ref(&config),
+                &raw mut placed,
+                1_100,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_ne!(placed, SIPRAL_HANDLE_NONE);
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
