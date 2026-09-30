@@ -12,8 +12,10 @@ import 'package:sipral/sipral.dart';
 import 'package:test/test.dart';
 
 /// Poll [probe] every 20 ms until it holds, or fail after [within].
-Future<void> until(bool Function() probe,
-    {Duration within = const Duration(seconds: 15)}) async {
+Future<void> until(
+  bool Function() probe, {
+  Duration within = const Duration(seconds: 15),
+}) async {
   final deadline = DateTime.now().add(within);
   while (!probe()) {
     if (DateTime.now().isAfter(deadline)) {
@@ -42,14 +44,19 @@ void main() {
       'sip:alice@sipral.invalid',
       registrarAddress: bob.bindAddress,
     );
-    bob.addAccount('sip:bob@sipral.invalid',
-        registrarAddress: alice.bindAddress);
+    bob.addAccount(
+      'sip:bob@sipral.invalid',
+      registrarAddress: alice.bindAddress,
+    );
 
     // subscribed before the INVITE can arrive, so it cannot be missed
-    final ringing = bob.events
-        .firstWhere((event) => event.kind == SipralEventKind.incomingCall);
-    final callA =
-        await alice.placeCall(fromAlice, 'sip:bob@${bob.bindAddress}');
+    final ringing = bob.events.firstWhere(
+      (event) => event.kind == SipralEventKind.incomingCall,
+    );
+    final callA = await alice.placeCall(
+      fromAlice,
+      'sip:bob@${bob.bindAddress}',
+    );
     final incoming = await ringing.timeout(const Duration(seconds: 15));
     expect(incoming.callState, isNotNull);
     final callB = await bob.answerCall(incoming);
@@ -76,7 +83,8 @@ void main() {
     // audio queued on one end is played out as frames on the other
     final heard = mediaB.frames.first.timeout(const Duration(seconds: 15));
     mediaA.sendAudio(
-        Int16List.fromList(List.filled(mediaA.frameSamples * 5, 1000)));
+      Int16List.fromList(List.filled(mediaA.frameSamples * 5, 1000)),
+    );
     expect((await heard).length, mediaB.frameSamples);
 
     final digits = <String>[];
@@ -103,15 +111,22 @@ void main() {
       'sip:alice@sipral.invalid',
       registrarAddress: bob.bindAddress,
     );
-    bob.addAccount('sip:bob@sipral.invalid',
-        registrarAddress: alice.bindAddress);
-    final ringing = bob.events
-        .firstWhere((event) => event.kind == SipralEventKind.incomingCall);
+    bob.addAccount(
+      'sip:bob@sipral.invalid',
+      registrarAddress: alice.bindAddress,
+    );
+    final ringing = bob.events.firstWhere(
+      (event) => event.kind == SipralEventKind.incomingCall,
+    );
     final call = await alice.placeCall(fromAlice, 'sip:bob@${bob.bindAddress}');
-    bob.rejectCall(await ringing.timeout(const Duration(seconds: 15)),
-        code: 486);
+    bob.rejectCall(
+      await ringing.timeout(const Duration(seconds: 15)),
+      code: 486,
+    );
     await expectLater(
-        call.confirmed(timeout: const Duration(seconds: 15)), throwsStateError);
+      call.confirmed(timeout: const Duration(seconds: 15)),
+      throwsStateError,
+    );
     await call.whenEnded(timeout: const Duration(seconds: 15));
     call.close();
   });
@@ -120,7 +135,8 @@ void main() {
     expect(
       () => alice.addAccount('not a uri', registrarAddress: 'nowhere'),
       throwsA(
-          isA<SipralException>().having((e) => e.detail, 'detail', isNotEmpty)),
+        isA<SipralException>().having((e) => e.detail, 'detail', isNotEmpty),
+      ),
     );
   });
 }

@@ -47,8 +47,10 @@ final class SipralCall {
 
   /// Each digit the far end sends, RFC 4733 or SIP INFO alike.
   Stream<String> get digits => events
-      .where((event) =>
-          event.kind == SipralEventKind.digitReceived && event.digit != null)
+      .where(
+        (event) =>
+            event.kind == SipralEventKind.digitReceived && event.digit != null,
+      )
       .map((event) => event.digit!);
 
   /// Where the call is, a `SipralCallState` value; `terminated` once it has
@@ -138,7 +140,8 @@ final class SipralCall {
       case SipralEventKind.callEnded:
         if (!_confirmed.isCompleted) {
           _confirmed.completeError(
-              StateError('sipral: the call ended before it was confirmed'));
+            StateError('sipral: the call ended before it was confirmed'),
+          );
           // nobody may be waiting for a confirmation that never came
           _confirmed.future.ignore();
         }

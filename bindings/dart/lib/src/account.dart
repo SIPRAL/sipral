@@ -28,14 +28,14 @@ final class SipralAccount {
   /// Where the account's registration is now, a `SipralRegistrationState`
   /// value.
   int get registrationState => using((arena) {
-        final out = arena<ffi.Uint32>();
-        _check(
-          stack._sipral,
-          'sipral_account_registration_state',
-          stack._sipral.accountRegistrationState(stack.handle, handle, out),
-        );
-        return out.value;
-      });
+    final out = arena<ffi.Uint32>();
+    _check(
+      stack._sipral,
+      'sipral_account_registration_state',
+      stack._sipral.accountRegistrationState(stack.handle, handle, out),
+    );
+    return out.value;
+  });
 
   /// Start registering, and keep the binding refreshed.
   void register() {

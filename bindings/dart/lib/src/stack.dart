@@ -12,7 +12,7 @@ part of 'idiomatic.dart';
 /// layer opened. Everything happens on the isolate that opened it.
 final class SipralStack {
   SipralStack._(this._sipral, this._socket)
-      : bindAddress = _formatAddress(_socket.address, _socket.port);
+    : bindAddress = _formatAddress(_socket.address, _socket.port);
 
   /// Bind a socket on [bindHost]:[bindPort] (0 for any port) and create a
   /// stack on it, in application mode: this layer carries each call's PCM.
@@ -164,8 +164,11 @@ final class SipralStack {
         ..displayName = display.$1
         ..displayNameLen = display.$2;
       final out = arena<SipralHandle>();
-      _check(_sipral, 'sipral_account_add',
-          _sipral.accountAdd(_handle, config, out));
+      _check(
+        _sipral,
+        'sipral_account_add',
+        _sipral.accountAdd(_handle, config, out),
+      );
       return out.value;
     });
     final account = SipralAccount._(this, handle, aor);
@@ -225,8 +228,13 @@ final class SipralStack {
       media.close();
       rethrow;
     }
-    final call =
-        SipralCall._(this, handle, media, mediaAddress, incoming: false);
+    final call = SipralCall._(
+      this,
+      handle,
+      media,
+      mediaAddress,
+      incoming: false,
+    );
     _calls[handle] = call;
     _poll();
     return call;
@@ -241,12 +249,20 @@ final class SipralStack {
     _ensureOpen();
     if (incoming.kind != SipralEventKind.incomingCall) {
       throw ArgumentError.value(
-          incoming, 'incoming', 'is not an incoming call');
+        incoming,
+        'incoming',
+        'is not an incoming call',
+      );
     }
     final media = await RawDatagramSocket.bind(mediaHost, 0);
     final mediaAddress = _formatAddress(media.address, media.port);
-    final call =
-        SipralCall._(this, incoming.call, media, mediaAddress, incoming: true);
+    final call = SipralCall._(
+      this,
+      incoming.call,
+      media,
+      mediaAddress,
+      incoming: true,
+    );
     _calls[incoming.call] = call;
     try {
       using((arena) {
@@ -255,7 +271,12 @@ final class SipralStack {
           _sipral,
           'sipral_call_answer_media',
           _sipral.callAnswerMedia(
-              _handle, incoming.call, text.$1, text.$2, nowMs()),
+            _handle,
+            incoming.call,
+            text.$1,
+            text.$2,
+            nowMs(),
+          ),
         );
       });
     } catch (_) {
@@ -382,13 +403,15 @@ final class SipralStack {
           _transmit.ref.len == 0) {
         return;
       }
-      final to =
-          _parseAddress(_decode(_transmitTo, _transmit.ref.destinationLen));
+      final to = _parseAddress(
+        _decode(_transmitTo, _transmit.ref.destinationLen),
+      );
       if (to != null) {
         _socket.send(
-            Uint8List.fromList(_transmitData.asTypedList(_transmit.ref.len)),
-            to.$1,
-            to.$2);
+          Uint8List.fromList(_transmitData.asTypedList(_transmit.ref.len)),
+          to.$1,
+          to.$2,
+        );
       }
     }
   }
