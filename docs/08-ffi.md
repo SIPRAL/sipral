@@ -2016,6 +2016,11 @@ the same for the structs and the enumerations, `constants!` and `alias!` for
 what is left, and `event_kinds!` hands over its reserved numbers along with its
 kinds. `crates/sipral-ffi/src/abi.rs` is where those macros and the descriptors
 live, and `abi::SURFACE` is what the generator reads. Nothing reads Rust source.
+A parameter or a member that holds an enumeration's number is declared
+`Number<SipralCodec>` rather than `u32`: the alias is the enumeration's own
+integer, which `codes!` names through the `Enumerated` trait it implements, so
+the Rust reads a number exactly as before, and the spelling carries the name
+the header prints the `typedef` from.
 
 **Two other designs, and why not.** A generator that parses the Rust would be
 a second compiler with a worse front end: the first `cfg`, the first type alias,
@@ -2217,7 +2222,8 @@ it gets there. Link the `.dylib`, or link the archive knowing what is in it.
 
 A Swift Package whose C target is the generated header, and whose Swift target
 is `SipralAbi.swift`, printed beside it. A status is a thrown `SipralError`
-carrying the last message; a pointer and a length are a `String` or an array
+carrying the last message, the number, and its name when this binding has
+one; a pointer and a length are a `String` or an array
 held alive across the call; an array of records going in is an array of a
 struct the binding prints, made into the C array inside the call; a buffer the
 caller brings is an `inout` array; a struct the library fills in whole is what
@@ -2977,3 +2983,22 @@ What changed at 0.33, against the audit of 30 September 2026:
   `sipral_stack_destroy` from the audio transmit callback is
   `SIPRAL_STATUS_BUSY` rather than a thread waiting for itself to end.
 - `stdbool.h` is no longer included: nothing in the surface is a `bool`.
+- Every parameter and member that holds an enumeration's number is declared
+  with that enumeration's `typedef` — `sipral_call_state(..., sipral_call_state_t
+  *out_state)`, `sipral_codec_info_t::codec` as a `sipral_codec_t` — where it
+  was a `uint32_t` with the enumeration named only in its comment. The
+  declaration in `crates/sipral-ffi` says it with `Number<E>`, which is `E`'s
+  integer and nothing else, so a number no enumerator has is still read as a
+  number and refused where it is used; a test fails the build for a `u32`
+  member whose documentation names an enumeration. The typedef is the same
+  width, so nothing a caller or a binding hands over changed; the generated
+  Swift, .NET, Kotlin and Dart wrappers keep the plain integer, and the name
+  travels in the generator's model for a binding that wants to type it.
+- The header speaks C: a link's path into the crate is taken off, a type
+  named in code quotes is spelled the C way (`sipral_toggle_t`, not
+  `SipralToggle`), and `tools/abi-gen` refuses to print a header that still
+  names a module, a macro or a crate below this one.
+- The generated Swift `SipralError` carries the number it was thrown with,
+  `code`, and a `status` that is nil for a number a newer library returned
+  and this binding has no name for; it used to call every such status
+  `.panic`.

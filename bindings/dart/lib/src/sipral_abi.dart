@@ -40,14 +40,14 @@ typedef SipralHandle = ffi.Uint64;
 /// it, with the `user_data` the stack was created with, and never on two
 /// threads at once for one stack. It must not unwind. Nothing is held
 /// while it runs, so it may call back into the library, the stack it was
-/// given included: see crate::stack.
+/// given included (`docs/08-ffi.md`, "The shape").
 typedef SipralEventCallback = ffi.Void Function(ffi.Pointer<SipralEvent> event, ffi.Pointer<ffi.Void> userData);
 
 /// The Dart function a `NativeCallable<SipralEventCallback>` is built from.
 typedef SipralEventCallbackDart = void Function(ffi.Pointer<SipralEvent> event, ffi.Pointer<ffi.Void> userData);
 
 /// The screening policy: consulted once for every INVITE, before it has
-/// any effect. Installed with crate::screening::sipral_stack_screen.
+/// any effect. Installed with sipral_stack_screen.
 ///
 /// **It runs with the stack's own lock held**, which is the opposite of
 /// SipralEventCallback and is the
@@ -92,7 +92,7 @@ typedef SipralScreenCallbackDart = int Function(ffi.Pointer<SipralScreenRequest>
 /// says which. Installed with sipral_media_attach_processor.
 ///
 /// **It runs with this call's media locked**, which is the opposite of
-/// crate::event::SipralEventCallback and the reason
+/// SipralEventCallback and the reason
 /// sipral_media_attach_processor's own doc comment says so before it
 /// says anything else — read it there. In consequence: **this callback
 /// must not call back into the media handle it was attached through**,
@@ -114,7 +114,7 @@ typedef SipralAudioTransmitCallback = ffi.Void Function(ffi.Pointer<SipralAudioT
 typedef SipralAudioTransmitCallbackDart = void Function(ffi.Pointer<SipralAudioTransmit> transmit, ffi.Pointer<ffi.Void> userData);
 
 /// Where a stack's log lines go. Installed with
-/// crate::log::sipral_stack_log.
+/// sipral_stack_log.
 ///
 /// Called on whichever thread has just finished a call into this stack,
 /// after the stack has been let go and with nothing of the library held,
@@ -390,25 +390,22 @@ abstract final class SipralToggle {
 /// `sipral_call_config_t::srtp` (a per-call override).
 ///
 /// Zero is not one of them, and it is not the same absence on the two
-/// structs: on the stack it means this build's own built-in default
-/// (`SrtpPolicy::default()`, which is SipralSrtp.notOffered); on a
-/// call it means the stack's own setting, whatever that came to. The three
-/// values mean exactly what `sipral::SrtpPolicy`'s three variants mean —
-/// see there for what each writes and what each answers.
+/// structs: on the stack it means this build's own built-in default,
+/// which is SipralSrtp.notOffered; on a call it means the stack's own
+/// setting, whatever that came to. `docs/05-media.md` says what each
+/// value writes and what each answers.
 abstract final class SipralSrtp {
-  /// SrtpPolicy::NotOffered: do not offer it, but answer an offer
-  /// that arrives on the secure profile with keys anyway.
+  /// Do not offer it, but answer an offer that arrives on the secure
+  /// profile with keys anyway.
   static const int notOffered = 1;
 
-  /// SrtpPolicy::Offered: offer it, and answer a plain offer
-  /// plainly.
+  /// Offer it, and answer a plain offer plainly.
   static const int offered = 2;
 
-  /// SrtpPolicy::Required: offer it, and let no stream on this call
-  /// carry audio unencrypted.
+  /// Offer it, and let no stream on this call carry audio unencrypted.
   static const int required = 3;
 
-  /// SrtpPolicy::DtlsOffered: offer DTLS-SRTP (RFC 5764) on
+  /// Offer DTLS-SRTP (RFC 5764) on
   /// `UDP/TLS/RTP/SAVP`, and answer a plain offer plainly.
   ///
   /// What `Offered` is for SDES, with the difference that matters: the
@@ -423,13 +420,13 @@ abstract final class SipralSrtp {
   /// `SIPRAL_FEATURE_DTLS_SRTP`.
   static const int dtls = 4;
 
-  /// SrtpPolicy::DtlsRequired: offer DTLS-SRTP, and let no stream on
+  /// Offer DTLS-SRTP, and let no stream on
   /// this call carry audio any other way — an answer carrying
   /// `a=crypto` included, since that key travelled in a body this
   /// policy exists to avoid trusting.
   static const int dtlsRequired = 5;
 
-  /// SrtpPolicy::DtlsOrSdes: DTLS-SRTP, falling back to SDES for a
+  /// DTLS-SRTP, falling back to SDES for a
   /// peer that has no DTLS, and never unencrypted. The offer is one
   /// `RTP/SAVP` stream carrying both the fingerprint and the crypto
   /// lines, and the answer decides which keys the call; an offer that
@@ -446,19 +443,19 @@ abstract final class SipralSrtp {
 /// `sipral_call_config_t::ice` (a per-call override).
 ///
 /// Zero is not one of them, and it is not the same absence on the two
-/// structs: on the stack it means this build's own built-in default
-/// (`IcePolicy::default()`, which is SipralIce.off); on a call it
-/// means the stack's own setting, whatever that came to.
+/// structs: on the stack it means this build's own built-in default,
+/// which is SipralIce.off; on a call it means the stack's own
+/// setting, whatever that came to.
 ///
 /// A call that offers ICE also asks for RFC 5761 multiplexing, whatever
 /// `offer_rtcp_mux` says, because an ICE stream with a second component
 /// needs a second address and this ABI names one.
 abstract final class SipralIce {
-  /// IcePolicy::Off: do not offer it, and do not answer a peer that
+  /// Do not offer it, and do not answer a peer that
   /// does. The default, and `docs/06-nat.md` says why at length.
   static const int off = 1;
 
-  /// IcePolicy::Offered: offer it, and use it against a peer that
+  /// Offer it, and use it against a peer that
   /// offers it back.
   ///
   /// A peer that does not — an Asterisk with `ice_support=no`, which is
@@ -472,7 +469,7 @@ abstract final class SipralIce {
   /// `SIPRAL_FEATURE_ICE`.
   static const int offered = 2;
 
-  /// IcePolicy::Required: offer it, and let no stream on this call
+  /// Offer it, and let no stream on this call
   /// carry audio on a path ICE did not check.
   ///
   /// Each of the three ways a peer can fail to do ICE ends the call's
@@ -480,7 +477,7 @@ abstract final class SipralIce {
   /// back. That is the whole difference between this and `Offered`.
   static const int required = 3;
 
-  /// IcePolicy::Lite: be an ICE-lite endpoint (RFC 8445 §2.5) —
+  /// Be an ICE-lite endpoint (RFC 8445 §2.5) —
   /// write `a=ice-lite` and one host candidate, answer the checks a
   /// full peer sends, and put the audio on the pair it nominates.
   ///
@@ -1595,9 +1592,8 @@ abstract final class SipralDigitSource {
 }
 
 /// What a SipralEventKind.recovery reports happened, for
-/// `payload.recovery.state`. Names for the two ways `sipral_ua`'s
-/// lifecycle machine settles: a registrar answered again, or a recovery
-/// ladder ran out of rungs.
+/// `payload.recovery.state`: the two ways a recovery settles — a
+/// registrar answered again, or the ladder ran out of rungs.
 abstract final class SipralRecoveryOutcome {
   /// Never written by this build.
   static const int unknown = 0;
@@ -1612,10 +1608,9 @@ abstract final class SipralRecoveryOutcome {
 /// The last rung a recovery ladder tried before it gave up, for
 /// SipralEventKind.recovery's `payload.recovery.rung`. Meaningful
 /// only when `payload.recovery.state` is
-/// SipralRecoveryOutcome.gaveUp. Names for `sipral_ua::Rung`, minus
-/// Rung::GiveUp itself: `sipral_ua` reports the rung before it that
-/// asked for something and went unanswered, not the give-up rung that
-/// follows it.
+/// SipralRecoveryOutcome.gaveUp. The ladder's own last step, giving
+/// up, has no name here: what is reported is the rung before it that
+/// asked for something and went unanswered.
 abstract final class SipralRecoveryRung {
   /// The ladder did not give up.
   static const int none = 0;
@@ -1635,7 +1630,7 @@ abstract final class SipralRecoveryRung {
 }
 
 /// Why a recovery ladder gave up, for SipralEventKind.recovery's
-/// `payload.recovery.reason`. Names for `sipral_ua::RecoveryFailure`.
+/// `payload.recovery.reason`.
 abstract final class SipralRecoveryFailure {
   /// The ladder did not give up.
   static const int none = 0;
@@ -2620,7 +2615,7 @@ abstract final class SipralConferenceText {
   static const int userEndpoint = 6;
 }
 
-/// What a crate::event::SipralEventKind::PresenceChanged is about.
+/// What a SipralEventKind.presenceChanged is about.
 /// Names for `sipral_presence_event_t::kind`.
 abstract final class SipralPresenceKind {
   /// Never written by this build.
@@ -3172,7 +3167,7 @@ final class SipralStackConfig extends ffi.Struct {
   /// zero for this build's own built-in default, which is
   /// `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks `stun_server` where each
   /// socket appears from and writes the answer where a far end reads
-  /// it — see crate::nat. Any other value is
+  /// it — see `docs/06-nat.md`. Any other value is
   /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
   @ffi.Uint32()
   external int nat;
@@ -3207,7 +3202,7 @@ final class SipralStackConfig extends ffi.Struct {
   /// not a name. The relay becomes the relayed ICE candidate of the call
   /// placed, rung or answered on that socket — the path of last resort,
   /// used only when no cheaper pair answers — and goes back to the
-  /// server when the call ends. See crate::nat.
+  /// server when the call ends. See `docs/06-nat.md`.
   ///
   /// Optional, and only with `SIPRAL_NAT_STUN`, since it rides on the
   /// same media-socket calls; it may be the same address as
@@ -3268,7 +3263,7 @@ final class SipralStackConfig extends ffi.Struct {
   /// Registrars ignore the datagram (RFC 3261 §7.5). Nothing is sent
   /// while the stack is suspended (`sipral_stack_suspending`), for a
   /// stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
-  /// own address. `sipral_ua`'s `keepalive` module has the reasons.
+  /// own address; `docs/06-nat.md` has the reasons.
   @ffi.Uint32()
   external int registrarKeepalive;
 
@@ -3300,7 +3295,7 @@ final class SipralStackConfig extends ffi.Struct {
   /// `sipral_media_capture` and `sipral_media_playback`, as every
   /// stack was before this member existed. `SIPRAL_AUDIO_DEVICE` has
   /// the library open the platform's devices and pump every managed
-  /// call itself — see crate::audio — and needs
+  /// call itself — see the `sipral_audio_*` entry points — and needs
   /// `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
   /// platform this build has no backend for, which
   /// `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
@@ -3449,7 +3444,7 @@ final class SipralPollResult extends ffi.Struct {
 
   /// Bytes the stack produced and this build had nowhere to send.
   ///
-  /// Zero since crate::transport gave them somewhere to go: what the stack
+  /// Zero since `sipral_stack_poll_transmit` gave them somewhere to go: what the stack
   /// writes waits in it until `sipral_stack_poll_transmit` takes it, and a
   /// poll no longer empties the queue on its way past. The member stays
   /// because a released one always does, and because a build that has to drop
@@ -3943,8 +3938,8 @@ final class SipralCallConfig extends ffi.Struct {
   ///
   /// The application owns the socket, so it is the only one that can say. Set
   /// it and the offer is written from this stack's codec order, the answer is
-  /// read, and the call gets a media session that `crate::media` and
-  /// `crate::record` reach. Leave it null and set `sdp` instead for a call
+  /// read, and the call gets a media session that the `sipral_media_*`
+  /// entry points reach. Leave it null and set `sdp` instead for a call
   /// where the application describes its own session and runs its own RTP.
   external ffi.Pointer<ffi.Char> mediaAddress;
 
@@ -4643,7 +4638,7 @@ final class SipralMediaPacket extends ffi.Struct {
 /// frame to process, or a request to forget what has been learned.
 ///
 /// Filled by the library and handed to the callback as a `const`
-/// pointer, the same shape crate::screening::SipralScreenRequest is:
+/// pointer, the same shape SipralScreenRequest is:
 /// read `size` before anything past it, and read nothing once the
 /// callback has returned — `near_end`, `far_end` and `out` borrow from
 /// buffers that belong to this one call and are not this ABI's to keep
@@ -5786,7 +5781,7 @@ final class SipralProgressEvent extends ffi.Struct {
   external int sitMs3;
 }
 
-/// What a crate::event::SipralEventKind::ConferenceChanged carries.
+/// What a SipralEventKind.conferenceChanged carries.
 final class SipralConferenceEvent extends ffi.Struct {
   /// Which subscription.
   @ffi.Uint64()
@@ -5806,7 +5801,7 @@ final class SipralConferenceEvent extends ffi.Struct {
   external int users;
 }
 
-/// What a crate::event::SipralEventKind::TextReceived carries.
+/// What a SipralEventKind.textReceived carries.
 ///
 /// The text points into the event and is valid for as long as the
 /// callback is.
@@ -5825,7 +5820,7 @@ final class SipralTextEvent extends ffi.Struct {
   external int missing;
 }
 
-/// What a crate::event::SipralEventKind::PresenceChanged carries.
+/// What a SipralEventKind.presenceChanged carries.
 ///
 /// The text points into the event and is valid for as long as the
 /// callback is.
@@ -6118,7 +6113,7 @@ final class SipralSuspending extends ffi.Struct {
 /// had any effect at all.
 ///
 /// Filled by the library and handed to the callback as a `const`
-/// pointer, the same shape crate::event::SipralEvent is: read `size`
+/// pointer, the same shape SipralEvent is: read `size`
 /// before anything past it, and read nothing once the callback has
 /// returned, since `message` — and `source`, when it is not null —
 /// borrow from a request that is still in the middle of being processed
@@ -7716,8 +7711,8 @@ final class Sipral {
   /// A poll is also where the stack writes: a retransmission falls due, a
   /// registration is refreshed, a transaction gives up and says so. What it
   /// wrote is taken with `sipral_stack_poll_transmit`, which is drained after
-  /// every poll and left alone by the next one — see crate::transport for
-  /// the loop in full.
+  /// every poll and left alone by the next one — see `docs/08-ffi.md`,
+  /// "Signalling across the boundary", for the loop in full.
   ///
   /// Safety
   ///
@@ -7799,10 +7794,9 @@ final class Sipral {
   /// A `burst` of zero, or an `every_ms` of zero, is
   /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing: the first admits
   /// no call ever, the first or the one after a week of quiet, and the
-  /// second earns a token in no time, which is a limit that never limits —
-  /// Rate::unlimited is how the Rust API says that on purpose, and
-  /// there is deliberately no way to ask for it from C, since a deployment
-  /// that wants no floor at all can simply never call this.
+  /// second earns a token in no time, which is a limit that never limits.
+  /// There is deliberately no way to ask for that from C, since a
+  /// deployment that wants no floor at all can simply never call this.
   ///
   /// The floor is asked before sipral_stack_screen's own policy is: a
   /// source that has exhausted it never reaches the callback at all, and is
@@ -8144,7 +8138,8 @@ final class Sipral {
   ///
   /// With `media_address` set, the offer is this stack's to write and the
   /// call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
-  /// and `crate::media` carries the packets from then on. `config.srtp`
+  /// and the `sipral_media_*` entry points carry the packets from then on.
+  /// `config.srtp`
   /// overrides `sipral_stack_config_t::srtp` for such a call; it is read for
   /// no other kind.
   ///
@@ -9240,7 +9235,7 @@ final class Sipral {
 
   /// The RTCP goodbye of a call whose media has ended (task 8.4.21).
   ///
-  /// `MediaEngine::release` builds the BYE RFC 3550 §6.3.7 owes the far end
+  /// The library builds the BYE RFC 3550 §6.3.7 owes the far end
   /// the moment a call's session stops, but by then the call's media
   /// handle is already gone — every `sipral_media_` entry point on it
   /// answers `SIPRAL_STATUS_WRONG_STATE` — so this is a stack-level call
@@ -9434,7 +9429,7 @@ final class Sipral {
   /// SipralEventKind.transportWanted
   /// reads back the id it just gave one of those two configs.
   ///
-  /// `protocol` is a crate::stack::SipralTransport.
+  /// `protocol` is a SipralTransport.
   /// Rebinding an existing transport takes zero to mean "whatever it
   /// already speaks" and anything else has to agree with that or this is
   /// `SIPRAL_STATUS_INVALID_ARGUMENT` — a stack retransmits or does not
@@ -10479,16 +10474,16 @@ final class Sipral {
 
   /// Start recording the signalling this stack is fed from here on
   /// (`docs/18-replay.md`), with the same seed `sipral_stack_create` built
-  /// it with. Read crate::diagnostics before reaching for this: what it
-  /// records and what it deliberately never does is written down there
-  /// once rather than repeated at each of these three entry points.
+  /// it with. Read `docs/18-replay.md` before reaching for this: it records
+  /// what arrives, exactly as it arrived, and never what this end sent.
   ///
   /// `note` is one line of prose for whoever opens the file later, or null
   /// for none.
   ///
-  /// A recording already running is replaced, not refused: see
-  /// crate::diagnostics for why that is the right answer here and the
-  /// wrong one for `sipral_media_record_start`.
+  /// A recording already running is replaced, not refused. Nothing is
+  /// written until `sipral_stack_recording_stop`, so a second start costs
+  /// only the frames taken since the first; `sipral_media_record_start`
+  /// refuses a second start because its file is already open on disk.
   ///
   /// Safety
   ///

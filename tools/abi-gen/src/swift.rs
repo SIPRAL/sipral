@@ -756,10 +756,7 @@ fn plumbing(check: &crate::model::LoadCheck<'_>) -> String {
          \x20   static let abiMismatch: SipralError? = {{\n\
          \x20       let status = {call}({major}, {minor})\n\
          \x20       guard status != SIPRAL_STATUS_OK else {{ return nil }}\n\
-         \x20       return SipralError(\n\
-         \x20           status: SipralStatus(rawValue: status) ?? .panic,\n\
-         \x20           message: rawLastErrorMessage()\n\
-         \x20       )\n\
+         \x20       return SipralError(code: status, message: rawLastErrorMessage())\n\
          \x20   }}()\n\n\
          \x20   /// Throws what `abiMismatch` found, if it found one. Every call\n\
          \x20   /// below reaches this before it reaches C, so a binding loaded\n\
@@ -774,10 +771,7 @@ fn plumbing(check: &crate::model::LoadCheck<'_>) -> String {
          \x20   /// Turn a status into a thrown error, and nothing into nothing.\n\
          \x20   static func check(_ status: sipral_status_t) throws {{\n\
          \x20       guard status != SIPRAL_STATUS_OK else {{ return }}\n\
-         \x20       throw SipralError(\n\
-         \x20           status: SipralStatus(rawValue: status) ?? .panic,\n\
-         \x20           message: rawLastErrorMessage()\n\
-         \x20       )\n\
+         \x20       throw SipralError(code: status, message: rawLastErrorMessage())\n\
          \x20   }}\n\n",
         call = check.function.name,
         major = constant(check.major),
@@ -806,12 +800,28 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
          /// `ok`. The message is the calling thread's last error, read before\n\
          /// anything else on this thread could replace it.\n\
          public struct SipralError: Error, CustomStringConvertible, Sendable {\n\
-         \x20   /// The code C would have switched on.\n\
-         \x20   public let status: SipralStatus\n\
+         \x20   /// The number C would have switched on, whether or not this\n\
+         \x20   /// binding has a name for it.\n\
+         \x20   public let code: Int32\n\
+         \x20   /// Its name, or nil for a status a newer library returned that\n\
+         \x20   /// this binding was printed too early to know: a failure like\n\
+         \x20   /// any other, and not one it may be mistaken for.\n\
+         \x20   public let status: SipralStatus?\n\
          \x20   /// The sentence that goes with it.\n\
          \x20   public let message: String\n\n\
+         \x20   /// An error with a status this binding names.\n\
+         \x20   public init(status: SipralStatus, message: String) {\n\
+         \x20       self.init(code: status.rawValue, message: message)\n\
+         \x20   }\n\n\
+         \x20   /// An error with whatever number the library answered.\n\
+         \x20   public init(code: Int32, message: String) {\n\
+         \x20       self.code = code\n\
+         \x20       self.status = SipralStatus(rawValue: code)\n\
+         \x20       self.message = message\n\
+         \x20   }\n\n\
          \x20   public var description: String {\n\
-         \x20       message.isEmpty ? \"\\(status)\" : \"\\(status): \\(message)\"\n\
+         \x20       let name = status.map { \"\\($0)\" } ?? \"status \\(code)\"\n\
+         \x20       return message.isEmpty ? name : \"\\(name): \\(message)\"\n\
          \x20   }\n\
          }\n\n",
     );

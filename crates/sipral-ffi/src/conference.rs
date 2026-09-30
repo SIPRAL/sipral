@@ -28,7 +28,7 @@ use std::ffi::c_char;
 use sipral_ua::conference::{Conference, EndpointStatus, User};
 use sipral_ua::{ConferenceUpdate, SubscriptionHandle, UaError, UserAgent};
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
 use crate::call::ua_failed;
 use crate::diagnostics::copy_out;
 use crate::error::{Fail, entry, fail};
@@ -114,7 +114,7 @@ record! {
         /// Which subscription.
         pub subscription: SipralHandle,
         /// A [`SipralConferenceUpdate`].
-        pub update: u32,
+        pub update: Number<SipralConferenceUpdate>,
         /// The version of the document the picture is at now; zero once the
         /// conference ended.
         pub version: u32,
@@ -172,7 +172,7 @@ record! {
         /// from.
         pub endpoints: u32,
         /// A [`SipralEndpointStatus`]: where the first of them is.
-        pub status: u32,
+        pub status: Number<SipralEndpointStatus>,
         /// How many media streams the first of them has.
         pub media: u32,
         /// Zero. Rounds the struct up to a whole multiple of its alignment on
@@ -352,7 +352,7 @@ entry! {
         stack: SipralHandle,
         subscription: SipralHandle,
         index: usize,
-        which: u32,
+        which: Number<SipralConferenceText>,
         buffer: *mut c_char,
         capacity: usize,
         out_needed: *mut usize,

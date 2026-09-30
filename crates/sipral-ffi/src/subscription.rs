@@ -68,7 +68,7 @@ use sipral_ua::{
     SubscriptionHandle, SubscriptionState, WatchedDialog,
 };
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
 use crate::call::ua_failed;
 use crate::diagnostics::copy_out;
 use crate::error::{Fail, entry, fail};
@@ -426,7 +426,7 @@ entry! {
     fn sipral_subscription_state(
         stack: SipralHandle,
         subscription: SipralHandle,
-        out_state: *mut u32,
+        out_state: *mut Number<SipralSubscriptionState>,
     ) {
         if out_state.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_state is null"));
@@ -553,11 +553,11 @@ record! {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// A [`SipralDialogPhase`].
-        pub phase: u32,
+        pub phase: Number<SipralDialogPhase>,
         /// A [`SipralDialogDirection`].
-        pub direction: u32,
+        pub direction: Number<SipralDialogDirection>,
         /// A [`SipralDialogEnded`], and zero while the dialog has not.
-        pub ended: u32,
+        pub ended: Number<SipralDialogEnded>,
         /// The SIP status behind how it ended, when the notifier sent one.
         /// Zero otherwise.
         pub status_code: u32,
@@ -646,7 +646,7 @@ entry! {
     fn sipral_subscription_lamp(
         stack: SipralHandle,
         subscription: SipralHandle,
-        out_phase: *mut u32,
+        out_phase: *mut Number<SipralDialogPhase>,
     ) {
         if out_phase.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_phase is null"));
@@ -757,7 +757,7 @@ entry! {
         stack: SipralHandle,
         subscription: SipralHandle,
         index: usize,
-        which: u32,
+        which: Number<SipralDialogText>,
         buffer: *mut c_char,
         capacity: usize,
         out_needed: *mut usize,

@@ -135,7 +135,7 @@ use std::slice;
 
 use sipral_core::endpoint::{Input, ReceiveError, Transmit, TransportErrorKind, TransportId};
 
-use crate::abi::{codes, constants, record};
+use crate::abi::{Number, codes, constants, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
 use crate::media::{SIPRAL_ADDRESS_BYTES, address};
@@ -253,7 +253,7 @@ record! {
         /// request that outgrew a datagram go out on a stream instead, and the
         /// transport it ends up on is the one this says. Zero for a protocol this
         /// ABI has no number for.
-        pub protocol: u32,
+        pub protocol: Number<SipralTransport>,
         /// Where to write the message. Nothing is written unless the whole of it
         /// fits.
         pub data: *mut u8,
@@ -316,11 +316,11 @@ record! {
         /// [`sipral_stack_transport_bind`] added.
         pub transport: u32,
         /// A [`SipralTransportError`].
-        pub error: u32,
+        pub error: Number<SipralTransportError>,
         /// A [`SipralTlsFailure`]; `SIPRAL_TLS_FAILURE_NONE` for anything
         /// that was not TLS refusing, and only that on a transport that does
         /// not speak TLS.
-        pub tls: u32,
+        pub tls: Number<SipralTlsFailure>,
         /// The platform's own words for it, not NUL-terminated. Null with a
         /// length of zero for none.
         pub detail: *const c_char,
@@ -351,12 +351,12 @@ record! {
         /// [`sipral_stack_transport_bind`] added.
         pub transport: u32,
         /// What it spoke, as a `SipralTransport`.
-        pub protocol: u32,
+        pub protocol: Number<SipralTransport>,
         /// A [`SipralTransportError`]: what the application said went wrong,
         /// `SIPRAL_TRANSPORT_ERROR_CLOSED` for a connection that closed.
-        pub error: u32,
+        pub error: Number<SipralTransportError>,
         /// A [`SipralTlsFailure`]: why TLS refused, when that is what it was.
-        pub tls: u32,
+        pub tls: Number<SipralTlsFailure>,
         /// The platform's own sentence, as the application handed it over.
         /// Null with a length of zero when it gave none.
         pub detail: *const c_char,
@@ -742,7 +742,7 @@ entry! {
     fn sipral_stack_transport_bind(
         stack: SipralHandle,
         transport: u32,
-        protocol: u32,
+        protocol: Number<SipralTransport>,
         local: *const c_char,
         local_len: usize,
         remote: *const c_char,
@@ -850,7 +850,7 @@ entry! {
     fn sipral_stack_transport_failed(
         stack: SipralHandle,
         transport: u32,
-        error: u32,
+        error: Number<SipralTransportError>,
         now_ms: u64,
     ) {
         let error = error_named(error)?;

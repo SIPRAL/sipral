@@ -25,7 +25,7 @@ use std::ffi::c_char;
 use sipral_ua::presence::{Activity, Basic, Note, Person, Presence, Tuple};
 use sipral_ua::{PublishEvent, PublishFailure};
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
 use crate::call::ua_failed;
 use crate::error::{Fail, entry, fail};
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
@@ -138,11 +138,11 @@ record! {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
         /// A [`SipralBasic`], open or closed. Required.
-        pub basic: u32,
+        pub basic: Number<SipralBasic>,
         /// A [`SipralActivity`]; [`SipralActivity::None`] publishes no
         /// person at all. [`SipralActivity::Other`] is refused: there is no
         /// name to publish it under.
-        pub activity: u32,
+        pub activity: Number<SipralActivity>,
         /// A note a buddy list shows beside the name, UTF-8 and not
         /// NUL-terminated, or null for none.
         pub note: *const c_char,
@@ -171,17 +171,17 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralPresenceEvent {
         /// A [`SipralPresenceKind`].
-        pub kind: u32,
+        pub kind: Number<SipralPresenceKind>,
         /// [`SipralPresenceKind::Watched`]: which subscription.
         /// `SIPRAL_HANDLE_NONE` for a publication, whose account is the
         /// event's `account`.
         pub subscription: SipralHandle,
         /// [`SipralPresenceKind::Watched`]: a [`SipralBasic`], open when any
         /// of the presentity's tuples is open.
-        pub basic: u32,
+        pub basic: Number<SipralBasic>,
         /// [`SipralPresenceKind::Watched`]: a [`SipralActivity`], the first
         /// the person listed.
-        pub activity: u32,
+        pub activity: Number<SipralActivity>,
         /// [`SipralPresenceKind::Watched`]: the presentity, as the document
         /// named it. Not NUL-terminated.
         pub entity: *const c_char,
@@ -193,10 +193,10 @@ record! {
         /// How many bytes of it.
         pub note_len: usize,
         /// [`SipralPresenceKind::Publication`]: a [`SipralPublicationState`].
-        pub publication_state: u32,
+        pub publication_state: Number<SipralPublicationState>,
         /// [`SipralPresenceKind::Publication`]: a [`SipralPublishFailure`]
         /// when the state is [`SipralPublicationState::Failed`].
-        pub failure: u32,
+        pub failure: Number<SipralPublishFailure>,
         /// [`SipralPresenceKind::Publication`]: the status the compositor
         /// answered with, when one did.
         pub status_code: u32,

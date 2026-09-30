@@ -43,7 +43,7 @@ use sipral_core::endpoint::TransportId;
 use sipral_core::msg::Uri;
 use sipral_ua::{Link, Network, Recovery, SnapshotError};
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
 use crate::call::ua_failed;
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
@@ -339,20 +339,20 @@ entry! {
     /// at one `uint32_t` or be null.
     fn sipral_stack_network_changed(
         stack: SipralHandle,
-        from_link: u32,
+        from_link: Number<SipralLink>,
         from_address: *const c_char,
         from_address_len: usize,
         from_interface: *const c_char,
         from_interface_len: usize,
         from_resolves: u32,
-        to_link: u32,
+        to_link: Number<SipralLink>,
         to_address: *const c_char,
         to_address_len: usize,
         to_interface: *const c_char,
         to_interface_len: usize,
         to_resolves: u32,
         now_ms: u64,
-        out_recovery: *mut u32,
+        out_recovery: *mut Number<SipralRecovery>,
     ) {
         let from = unsafe {
             network_of(

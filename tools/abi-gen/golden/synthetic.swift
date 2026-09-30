@@ -35,13 +35,31 @@ public enum SipralToggle: UInt32, Sendable {
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
 public struct SipralError: Error, CustomStringConvertible, Sendable {
-    /// The code C would have switched on.
-    public let status: SipralStatus
+    /// The number C would have switched on, whether or not this
+    /// binding has a name for it.
+    public let code: Int32
+    /// Its name, or nil for a status a newer library returned that
+    /// this binding was printed too early to know: a failure like
+    /// any other, and not one it may be mistaken for.
+    public let status: SipralStatus?
     /// The sentence that goes with it.
     public let message: String
 
+    /// An error with a status this binding names.
+    public init(status: SipralStatus, message: String) {
+        self.init(code: status.rawValue, message: message)
+    }
+
+    /// An error with whatever number the library answered.
+    public init(code: Int32, message: String) {
+        self.code = code
+        self.status = SipralStatus(rawValue: code)
+        self.message = message
+    }
+
     public var description: String {
-        message.isEmpty ? "\(status)" : "\(status): \(message)"
+        let name = status.map { "\($0)" } ?? "status \(code)"
+        return message.isEmpty ? name : "\(name): \(message)"
     }
 }
 
@@ -244,10 +262,7 @@ public enum Sipral {
     static let abiMismatch: SipralError? = {
         let status = sipral_abi_check(abiVersionMajor, abiVersionMinor)
         guard status != SIPRAL_STATUS_OK else { return nil }
-        return SipralError(
-            status: SipralStatus(rawValue: status) ?? .panic,
-            message: rawLastErrorMessage()
-        )
+        return SipralError(code: status, message: rawLastErrorMessage())
     }()
 
     /// Throws what `abiMismatch` found, if it found one. Every call
@@ -264,10 +279,7 @@ public enum Sipral {
     /// Turn a status into a thrown error, and nothing into nothing.
     static func check(_ status: sipral_status_t) throws {
         guard status != SIPRAL_STATUS_OK else { return }
-        throw SipralError(
-            status: SipralStatus(rawValue: status) ?? .panic,
-            message: rawLastErrorMessage()
-        )
+        throw SipralError(code: status, message: rawLastErrorMessage())
     }
 
     /// Every struct and union the header declares, with how long tools/abi-gen
@@ -280,7 +292,7 @@ public enum Sipral {
     public static let recordLayouts: [(name: String, imported: Int, p64: Int, p32a4: Int, p32a8: Int)] = [
         ("sipral_counters_t", MemoryLayout<sipral_counters_t>.size, 24, 16, 24),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
-        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 64, 32, 32),
+        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 64, 36, 36),
         ("sipral_media_packet_t", MemoryLayout<sipral_media_packet_t>.size, 56, 28, 28),
         ("sipral_registration_event_t", MemoryLayout<sipral_registration_event_t>.size, 8, 8, 8),
         ("sipral_media_event_t", MemoryLayout<sipral_media_event_t>.size, 32, 16, 16),
@@ -326,6 +338,27 @@ public enum Sipral {
         let status = sipral_stack_counters(stack, &counters)
         try check(status)
         return counters
+    }
+
+    /// Turn the echo on or off, and say what it was.
+    public static func stackSetEcho(stack: SipralHandle, echo: UInt32) throws -> UInt32 {
+        try ensureAbi()
+        var was = UInt32()
+        let status = sipral_stack_set_echo(stack, echo, &was)
+        try check(status)
+        return was
+    }
+
+    /// Every setting it has, one SipralToggle each.
+    public static func stackToggles(stack: SipralHandle, outToggles: inout [UInt32]) throws -> Int {
+        try ensureAbi()
+        var count = Int()
+        let status =
+            outToggles.withUnsafeMutableBufferPointer { p1 in
+                sipral_stack_toggles(stack, p1.baseAddress, p1.count, &count)
+            }
+        try check(status)
+        return count
     }
 
     /// Hand it bytes to send.

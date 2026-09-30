@@ -11,7 +11,9 @@ Two layers, the way every binding here is two layers:
   end from `sipral_ffi::abi::SURFACE`, the same declarations the header and
   the .NET, Kotlin and Python bindings are printed from, over the `CSipral`
   C target (`c/include/sipral.h`, this package's own copy of the header).
-  A status is a thrown `SipralError` carrying the last message; a pointer
+  A status is a thrown `SipralError` carrying the last message, the number
+  (`code`) and its name (`status`, nil for one a newer library returned
+  that this binding does not know); a pointer
   and a length are a `String` or an array held alive across the call; a
   struct the library fills in whole is what the call returns. Regenerated
   by `cargo run -p sipral-abi-gen`, never edited by hand.

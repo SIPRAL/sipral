@@ -138,6 +138,10 @@ class SipralStackConfig(
     val bindAddress: String? = null,
     val echo: Long = 0,
     /**
+     * A SipralToggle, read as a number and checked where it is used.
+     */
+    val record: Long = 0,
+    /**
      * Header fields to send, `headers_len` of them.
      */
     val headers: List<SipralHeader>? = null,
@@ -531,8 +535,10 @@ internal object SipralNative {
     external fun sipral_abi_check(major: Long, minor: Long): Int
     external fun sipral_last_error_message(buffer: ByteArray, needed: LongArray): Int
     external fun sipral_status_name(code: Long): String?
-    external fun sipral_stack_create(configEventCallback: Long, configBindAddress: ByteArray?, configEcho: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configBindAddress: ByteArray?, configEcho: Long, configRecord: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, stack: LongArray): Int
     external fun sipral_stack_counters(stack: Long, counters: LongArray): Int
+    external fun sipral_stack_set_echo(stack: Long, echo: Long, was: LongArray): Int
+    external fun sipral_stack_toggles(stack: Long, outToggles: IntArray, count: LongArray): Int
     external fun sipral_stack_send(stack: Long, message: ByteArray): Int
     external fun sipral_stack_label(stack: Long, headersBytes: ByteArray?, headersLengths: LongArray?): Int
     external fun sipral_stack_describe(stack: Long, note: ByteArray): Int
@@ -595,7 +601,7 @@ object Sipral {
     val recordLayouts: Map<String, IntArray> = mapOf(
         "sipral_counters_t" to intArrayOf(24, 16, 24),
         "sipral_header_t" to intArrayOf(32, 16, 16),
-        "sipral_stack_config_t" to intArrayOf(64, 32, 32),
+        "sipral_stack_config_t" to intArrayOf(64, 36, 36),
         "sipral_media_packet_t" to intArrayOf(56, 28, 28),
         "sipral_registration_event_t" to intArrayOf(8, 8, 8),
         "sipral_media_event_t" to intArrayOf(32, 16, 16),
@@ -655,7 +661,7 @@ object Sipral {
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, configBindAddress, config.echo, configHeadersBytes, configHeadersLengths, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, configBindAddress, config.echo, config.record, configHeadersBytes, configHeadersLengths, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
         }
@@ -670,6 +676,24 @@ object Sipral {
         val countersSlots = LongArray(SipralCounters.SLOTS)
         check(SipralNative.sipral_stack_counters(stack, countersSlots))
         return SipralCounters.of(countersSlots)
+    }
+
+    /**
+     * Turn the echo on or off, and say what it was.
+     */
+    fun stackSetEcho(stack: Long, echo: Long): Long {
+        val wasSlot = LongArray(1)
+        check(SipralNative.sipral_stack_set_echo(stack, echo, wasSlot))
+        return wasSlot[0]
+    }
+
+    /**
+     * Every setting it has, one SipralToggle each.
+     */
+    fun stackToggles(stack: Long, outToggles: IntArray): Long {
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_stack_toggles(stack, outToggles, countSlot))
+        return countSlot[0]
     }
 
     /**

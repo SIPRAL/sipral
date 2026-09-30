@@ -116,17 +116,20 @@ use sipral_ua::{
     AccountId, AnnouncementId, CallHandle, CallIdentity, SubscriptionHandle, UaEvent, UserAgent,
 };
 
-use crate::abi::{codes, record};
-use crate::audio::SipralAudioTransmitCallback;
+use crate::abi::{Number, codes, record};
+use crate::audio::{SipralAudio, SipralAudioActivation, SipralAudioTransmitCallback};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
 use crate::handle::{
     HandleTable, Kind, Refused, SIPRAL_HANDLE_NONE, STACK_TAGS, SipralHandle, StackTag, StackTags,
 };
+use crate::inband::SipralDtmfDetection;
 use crate::media::{
-    SipralStreamStats, catalog_of, ice_policy, srtp_policy, stream_stats, toggle_of, toggled,
+    SipralIce, SipralSrtp, SipralStreamStats, SipralToggle, catalog_of, ice_policy, srtp_policy,
+    stream_stats, toggle_of, toggled,
 };
 use crate::names::Names;
+use crate::nat::SipralNat;
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
 use crate::versioned::{Versioned, declared_size, read_versioned, write_versioned};
@@ -289,7 +292,7 @@ record! {
         /// Handed back to the callback untouched. The library never reads it.
         pub event_user_data: *mut c_void,
         /// A [`SipralTransport`].
-        pub transport: u32,
+        pub transport: Number<SipralTransport>,
         /// The address the far end reaches this one at, as `host:port`, UTF-8 and
         /// not NUL-terminated.
         ///
@@ -364,23 +367,23 @@ record! {
         pub frame_ms: u32,
         /// Whether to offer RFC 4733 named events, as a `SipralToggle`. On by
         /// default: a phone that cannot send a digit cannot navigate a menu.
-        pub offer_dtmf: u32,
+        pub offer_dtmf: Number<SipralToggle>,
         /// Whether to ask for RFC 5761 multiplexing, as a `SipralToggle`.
         ///
         /// Off by default. §5.1.1 only permits it where both ends asked, and the
         /// equipment this stack is deployed against does not; asking unasked costs
         /// a line in every offer and buys a port on the calls where nobody answers.
-        pub offer_rtcp_mux: u32,
+        pub offer_rtcp_mux: Number<SipralToggle>,
         /// Whether to stop sending during silence, as a `SipralToggle`.
         ///
         /// Off by default. It halves the bandwidth of a call in which one person is
         /// listening, and it costs the far end's own stall watchdog a reason to
         /// fire — this stack sends no comfort noise of its own to say the silence
         /// is deliberate, so a gap looks the same from there as a stream that died.
-        pub silence_suppression: u32,
+        pub silence_suppression: Number<SipralToggle>,
         /// Whether inbound audio that stops is reported, as a `SipralToggle`. On by
         /// default; this is B5.
-        pub media_stall_watchdog: u32,
+        pub media_stall_watchdog: Number<SipralToggle>,
         /// How long inbound audio may stop before that is reported, in
         /// milliseconds, or zero for this build's own figure.
         ///
@@ -419,21 +422,21 @@ record! {
         /// is `SIPRAL_SRTP_NOT_OFFERED` — nothing here offers encryption
         /// until it is asked to. Any other value is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-        pub srtp: u32,
+        pub srtp: Number<SipralSrtp>,
         /// What every call on this stack does about ICE unless
         /// `sipral_call_config_t::ice` says otherwise for it: a `SipralIce`,
         /// or zero for this build's own built-in default, which is
         /// `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
         /// for the reason `docs/06-nat.md` tabulates. Any other value is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-        pub ice: u32,
+        pub ice: Number<SipralIce>,
         /// What this stack does about a NAT in front of it: a `SipralNat`, or
         /// zero for this build's own built-in default, which is
         /// `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks `stun_server` where each
         /// socket appears from and writes the answer where a far end reads
-        /// it — see [`crate::nat`]. Any other value is
+        /// it — see `docs/06-nat.md`. Any other value is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-        pub nat: u32,
+        pub nat: Number<SipralNat>,
         /// The STUN server `SIPRAL_NAT_STUN` asks, as `host:port`: an
         /// address, not a name, since resolving one is the application's.
         /// Required with `SIPRAL_NAT_STUN` and refused without it, since a
@@ -453,13 +456,13 @@ record! {
         /// keeps the stack's setting. Nothing changes for a call that does
         /// not run G.729, so the setting is taken whatever `codecs` names:
         /// a call's own order may name G.729 when the stack's does not.
-        pub g729_annex_b: u32,
+        pub g729_annex_b: Number<SipralToggle>,
         /// A TURN server (RFC 8656) to allocate a relay on for every media
         /// socket `sipral_stack_nat_map` names, as `host:port`: an address,
         /// not a name. The relay becomes the relayed ICE candidate of the call
         /// placed, rung or answered on that socket — the path of last resort,
         /// used only when no cheaper pair answers — and goes back to the
-        /// server when the call ends. See [`crate::nat`].
+        /// server when the call ends. See `docs/06-nat.md`.
         ///
         /// Optional, and only with `SIPRAL_NAT_STUN`, since it rides on the
         /// same media-socket calls; it may be the same address as
@@ -494,7 +497,7 @@ record! {
         /// `SIPRAL_EVENT_KIND_REFERRAL`, and the application takes it with
         /// `sipral_call_accept_transfer` or refuses it with
         /// `sipral_call_reject_transfer`, one request at a time.
-        pub referrals: u32,
+        pub referrals: Number<SipralToggle>,
         /// Whether an account behind a NAT keeps its registrar's UDP flow
         /// open, as a `SipralToggle`. **On by default.** An account is
         /// behind a NAT when `SIPRAL_NAT_STUN`'s answer about the signalling
@@ -509,8 +512,8 @@ record! {
         /// Registrars ignore the datagram (RFC 3261 §7.5). Nothing is sent
         /// while the stack is suspended (`sipral_stack_suspending`), for a
         /// stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
-        /// own address. `sipral_ua`'s `keepalive` module has the reasons.
-        pub registrar_keepalive: u32,
+        /// own address; `docs/06-nat.md` has the reasons.
+        pub registrar_keepalive: Number<SipralToggle>,
         /// How often, in milliseconds, or zero for twenty-five seconds (RFC
         /// 5626 §4.4.2's interval for UDP). Each interval is drawn between
         /// 80% and 100% of it. From 1 000 to 120 000 — past two minutes a
@@ -529,21 +532,21 @@ record! {
         /// asks, with the platform's own TLS as it does for SIP. Anything
         /// else, or a value other than zero with no `turn_server`, is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
-        pub turn_transport: u32,
+        pub turn_transport: Number<SipralTransport>,
         /// Who pumps this stack's audio: a `SipralAudio`. Zero, and
         /// `SIPRAL_AUDIO_APPLICATION`, is the application, through
         /// `sipral_media_capture` and `sipral_media_playback`, as every
         /// stack was before this member existed. `SIPRAL_AUDIO_DEVICE` has
         /// the library open the platform's devices and pump every managed
-        /// call itself — see [`crate::audio`] — and needs
+        /// call itself — see the `sipral_audio_*` entry points — and needs
         /// `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
         /// platform this build has no backend for, which
         /// `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
-        pub audio: u32,
+        pub audio: Number<SipralAudio>,
         /// When the devices are opened, in device mode: a
         /// `SipralAudioActivation`, or zero for
         /// `SIPRAL_AUDIO_ACTIVATION_AUTOMATIC`.
-        pub audio_activation: u32,
+        pub audio_activation: Number<SipralAudioActivation>,
         /// Where the packets the engine encodes go, in device mode: called
         /// on the engine's thread with one `sipral_audio_transmit_t` per
         /// packet, to be sent from the call's media socket. Required with
@@ -606,7 +609,7 @@ record! {
         /// Here rather than after `rtp_port_max`, where it was appended: six
         /// four-byte members in a row keep the struct free of padding at its
         /// end on a 64-bit target and on 32-bit ARM alike.
-        pub dtmf_detection: u32,
+        pub dtmf_detection: Number<SipralDtmfDetection>,
         /// The STUN servers to turn to, in this order, when `stun_server`
         /// fails: `host:port` addresses separated by commas, not names.
         /// Optional, and only beside a `stun_server`. A server fails when it
@@ -670,7 +673,7 @@ record! {
         pub events_unclaimed: usize,
         /// Bytes the stack produced and this build had nowhere to send.
         ///
-        /// Zero since [`crate::transport`] gave them somewhere to go: what the stack
+        /// Zero since `sipral_stack_poll_transmit` gave them somewhere to go: what the stack
         /// writes waits in it until `sipral_stack_poll_transmit` takes it, and a
         /// poll no longer empties the queue on its way past. The member stays
         /// because a released one always does, and because a build that has to drop
@@ -710,7 +713,7 @@ record! {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// The [`SipralTransport`] this stack speaks.
-        pub transport: u32,
+        pub transport: Number<SipralTransport>,
         /// Whether this stack retransmits anything itself.
         ///
         /// Zero on a transport that delivers for us, which is every one but UDP.
@@ -730,21 +733,21 @@ record! {
         pub frame_ms: u32,
         /// Whether named events are offered, as a `SipralToggle`. Never the
         /// default value: this says what the setting came to, not what was passed.
-        pub offer_dtmf: u32,
+        pub offer_dtmf: Number<SipralToggle>,
         /// Whether RTCP multiplexing is asked for, as a `SipralToggle`.
-        pub offer_rtcp_mux: u32,
+        pub offer_rtcp_mux: Number<SipralToggle>,
         /// Whether sending stops during silence, as a `SipralToggle`.
-        pub silence_suppression: u32,
+        pub silence_suppression: Number<SipralToggle>,
         /// How long inbound audio may stop before it is reported, with the default
         /// filled in. Zero when the watchdog is off, which is the one case where
         /// there is no figure to give.
         pub media_stall_ms: u64,
         /// Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
         /// default filled in.
-        pub g729_annex_b: u32,
+        pub g729_annex_b: Number<SipralToggle>,
         /// Whether a REFER outside any dialog reaches the application, as a
         /// `SipralToggle`, with the default — off — filled in.
-        pub referrals: u32,
+        pub referrals: Number<SipralToggle>,
         /// How often an account behind a NAT sends to its registrar, in
         /// milliseconds, with the default filled in. Zero when
         /// `registrar_keepalive` was turned off, which is the one case where
@@ -967,17 +970,19 @@ impl Delivery {
     }
 }
 
-// Safety: the pointers in `event` point into the three owners beside it and
+// Safety: the pointers in `event` point into the four owners beside it and
 // nowhere else, and each of those may move to another thread and be read from
-// one: a `String` and a record of plain numbers can, and `UaEvent` is `Send`
-// and `Sync` — asserted just below, so a member that ever stops being either
-// fails the build here rather than making this a lie. A delivery is read by
-// one thread, the one delivering it, and dropped by that thread.
+// one: a `String` and a record of plain numbers can, and `UaEvent` and the
+// `CallIdentity` behind the `Arc` are `Send` and `Sync` — asserted just below,
+// so a member that ever stops being either fails the build here rather than
+// making this a lie. A delivery is read by one thread, the one delivering it,
+// and dropped by that thread.
 unsafe impl Send for Delivery {}
 
 const _: () = {
     const fn crosses_threads<T: Send + Sync>() {}
     crosses_threads::<UaEvent>();
+    crosses_threads::<CallIdentity>();
 };
 
 /// Everything one stack is.
@@ -1952,8 +1957,8 @@ entry! {
     /// A poll is also where the stack writes: a retransmission falls due, a
     /// registration is refreshed, a transaction gives up and says so. What it
     /// wrote is taken with `sipral_stack_poll_transmit`, which is drained after
-    /// every poll and left alone by the next one — see [`crate::transport`] for
-    /// the loop in full.
+    /// every poll and left alone by the next one — see `docs/08-ffi.md`,
+    /// "Signalling across the boundary", for the loop in full.
     ///
     /// # Safety
     ///

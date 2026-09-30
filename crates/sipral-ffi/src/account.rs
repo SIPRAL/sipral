@@ -31,13 +31,15 @@ use sipral_core::auth::Credentials;
 use sipral_core::msg::{HeaderName, Uri};
 use sipral_ua::{Account, HeadersFor, Push};
 
-use crate::abi::record;
+use crate::abi::{Number, record};
 use crate::call::ua_failed;
 use crate::error::{Fail, entry, fail};
-use crate::event::registration_state;
+use crate::event::{SipralRegistrationState, registration_state};
 use crate::handle::SipralHandle;
 use crate::header::{SipralHeader, supplied};
-use crate::media::media_failed;
+use crate::identity::SipralSessionTimer;
+use crate::media::{SipralSrtp, media_failed};
+use crate::security::{SipralAttestation, SipralStirVerification};
 use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{required_text, text};
@@ -171,7 +173,7 @@ record! {
         /// A [`SipralSessionTimer`](crate::identity::SipralSessionTimer): how
         /// this account's calls ask for a session timer (RFC 4028). Zero is
         /// the stack's default, thirty minutes.
-        pub session_timer: u32,
+        pub session_timer: Number<SipralSessionTimer>,
         /// The interval to ask for under `SIPRAL_SESSION_TIMER_INTERVAL`, in
         /// seconds: at least 90, RFC 4028 §5's floor. Read for nothing else.
         pub session_interval_seconds: u64,
@@ -198,7 +200,7 @@ record! {
         /// it may name a stricter policy of its own and never a looser one
         /// (`SIPRAL_STATUS_SECURITY_POLICY`), and an INVITE it cannot answer
         /// under it is refused with 488. ABI 0.31, like every member below.
-        pub srtp: u32,
+        pub srtp: Number<SipralSrtp>,
         /// The SRTP suites this account's calls run, most preferred first,
         /// as RFC 4568 §6.2 and RFC 7714 §14.2 name them and separated by
         /// commas: `AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80`. The `a=crypto`
@@ -213,7 +215,7 @@ record! {
         /// `Identity` header fields of the calls it receives (RFC 8224 §6.2).
         /// Zero reports, once `sipral_stack_stir` has given the stack trust
         /// anchors.
-        pub stir_verification: u32,
+        pub stir_verification: Number<SipralStirVerification>,
         /// The P-256 private key this account signs its calls with (RFC 8224
         /// §6.1): the bare 32-octet scalar, or an `EC PRIVATE KEY` or
         /// `PRIVATE KEY` in DER or PEM. Null and zero signs nothing. Needs the
@@ -241,7 +243,7 @@ record! {
         pub stir_origid_len: usize,
         /// A `SipralAttestation`: the level it claims (RFC 8588 §4), zero for
         /// full attestation, `A`.
-        pub stir_attestation: u32,
+        pub stir_attestation: Number<SipralAttestation>,
         /// A `SipralToggle`: whether an encrypted call of this account may be
         /// recorded to a recording server (`sipral_call_record_to`) in the
         /// clear. Off by default: the copies of an encrypted call are offered
@@ -671,7 +673,7 @@ entry! {
     fn sipral_account_registration_state(
         stack: SipralHandle,
         account: SipralHandle,
-        out_state: *mut u32,
+        out_state: *mut Number<SipralRegistrationState>,
     ) {
         if out_state.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_state is null"));

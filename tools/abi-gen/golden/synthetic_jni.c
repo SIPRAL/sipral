@@ -509,7 +509,7 @@ Java_org_sipral_SipralNative_sipral_1status_1name(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jbyteArray configBindAddress, jlong configEcho, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jbyteArray configBindAddress, jlong configEcho, jlong configRecord, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -523,6 +523,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     config_value.bind_address = (const char *)configBindAddress_data;
     config_value.bind_address_len = (size_t)configBindAddress_size;
     config_value.echo = (sipral_toggle_t)configEcho;
+    config_value.record = (sipral_toggle_t)configRecord;
     sipral_handle_t stack_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -570,6 +571,39 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
             slots[2] = (jlong)bits;
         }
         (*env)->SetLongArrayRegion(env, counters, 0, 3, slots);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1set_1echo(JNIEnv *env, jobject self, jlong stack, jlong echo, jlongArray was)
+{
+    (void)env;
+    (void)self;
+    sipral_toggle_t was_value = 0;
+    sipral_status_t status = sipral_stack_set_echo((sipral_handle_t)stack, (sipral_toggle_t)echo, &was_value);
+    {
+        jlong slot = (jlong)was_value;
+        (*env)->SetLongArrayRegion(env, was, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1toggles(JNIEnv *env, jobject self, jlong stack, jintArray outToggles, jlongArray count)
+{
+    (void)env;
+    (void)self;
+    jint *outToggles_data = outToggles ? (*env)->GetIntArrayElements(env, outToggles, NULL) : NULL;
+    jsize outToggles_size = outToggles ? (*env)->GetArrayLength(env, outToggles) : 0;
+    size_t count_value = 0;
+    sipral_status_t status = sipral_stack_toggles((sipral_handle_t)stack, (sipral_toggle_t *)outToggles_data, (size_t)outToggles_size, &count_value);
+    if (outToggles) {
+        (*env)->ReleaseIntArrayElements(env, outToggles, outToggles_data, 0);
+    }
+    {
+        jlong slot = (jlong)count_value;
+        (*env)->SetLongArrayRegion(env, count, 0, 1, &slot);
     }
     return (jint)status;
 }

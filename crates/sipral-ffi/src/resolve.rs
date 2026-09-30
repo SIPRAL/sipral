@@ -41,10 +41,11 @@
 use std::ffi::c_char;
 use std::net::SocketAddr;
 
+use crate::abi::Number;
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
 use crate::media::address;
-use crate::stack::{handle_failed, with_stack, with_stack_at};
+use crate::stack::{SipralTransport, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::required_text;
 
@@ -121,7 +122,7 @@ entry! {
         dialog: SipralHandle,
         addresses: *const c_char,
         addresses_len: usize,
-        protocol: u32,
+        protocol: Number<SipralTransport>,
     ) {
         let list = unsafe { required_text(addresses, addresses_len, "addresses") }?;
         let addresses = addresses_in(list)?;

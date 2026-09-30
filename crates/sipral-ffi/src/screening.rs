@@ -298,10 +298,9 @@ entry! {
     /// A `burst` of zero, or an `every_ms` of zero, is
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing: the first admits
     /// no call ever, the first or the one after a week of quiet, and the
-    /// second earns a token in no time, which is a limit that never limits —
-    /// [`Rate::unlimited`] is how the Rust API says that on purpose, and
-    /// there is deliberately no way to ask for it from C, since a deployment
-    /// that wants no floor at all can simply never call this.
+    /// second earns a token in no time, which is a limit that never limits.
+    /// There is deliberately no way to ask for that from C, since a
+    /// deployment that wants no floor at all can simply never call this.
     ///
     /// The floor is asked before [`sipral_stack_screen`]'s own policy is: a
     /// source that has exhausted it never reaches the callback at all, and is

@@ -895,31 +895,28 @@ enum {
  * `sipral_call_config_t::srtp` (a per-call override).
  *
  * Zero is not one of them, and it is not the same absence on the two
- * structs: on the stack it means this build's own built-in default
- * (`SrtpPolicy::default()`, which is SIPRAL_SRTP_NOT_OFFERED); on a
- * call it means the stack's own setting, whatever that came to. The three
- * values mean exactly what `sipral::SrtpPolicy`'s three variants mean —
- * see there for what each writes and what each answers.
+ * structs: on the stack it means this build's own built-in default,
+ * which is SIPRAL_SRTP_NOT_OFFERED; on a call it means the stack's own
+ * setting, whatever that came to. `docs/05-media.md` says what each
+ * value writes and what each answers.
  */
 typedef uint32_t sipral_srtp_t;
 enum {
     /**
-     * SrtpPolicy::NotOffered: do not offer it, but answer an offer
-     * that arrives on the secure profile with keys anyway.
+     * Do not offer it, but answer an offer that arrives on the secure
+     * profile with keys anyway.
      */
     SIPRAL_SRTP_NOT_OFFERED = 1,
     /**
-     * SrtpPolicy::Offered: offer it, and answer a plain offer
-     * plainly.
+     * Offer it, and answer a plain offer plainly.
      */
     SIPRAL_SRTP_OFFERED = 2,
     /**
-     * SrtpPolicy::Required: offer it, and let no stream on this call
-     * carry audio unencrypted.
+     * Offer it, and let no stream on this call carry audio unencrypted.
      */
     SIPRAL_SRTP_REQUIRED = 3,
     /**
-     * SrtpPolicy::DtlsOffered: offer DTLS-SRTP (RFC 5764) on
+     * Offer DTLS-SRTP (RFC 5764) on
      * `UDP/TLS/RTP/SAVP`, and answer a plain offer plainly.
      *
      * What `Offered` is for SDES, with the difference that matters: the
@@ -935,14 +932,14 @@ enum {
      */
     SIPRAL_SRTP_DTLS = 4,
     /**
-     * SrtpPolicy::DtlsRequired: offer DTLS-SRTP, and let no stream on
+     * Offer DTLS-SRTP, and let no stream on
      * this call carry audio any other way — an answer carrying
      * `a=crypto` included, since that key travelled in a body this
      * policy exists to avoid trusting.
      */
     SIPRAL_SRTP_DTLS_REQUIRED = 5,
     /**
-     * SrtpPolicy::DtlsOrSdes: DTLS-SRTP, falling back to SDES for a
+     * DTLS-SRTP, falling back to SDES for a
      * peer that has no DTLS, and never unencrypted. The offer is one
      * `RTP/SAVP` stream carrying both the fingerprint and the crypto
      * lines, and the answer decides which keys the call; an offer that
@@ -961,9 +958,9 @@ enum {
  * `sipral_call_config_t::ice` (a per-call override).
  *
  * Zero is not one of them, and it is not the same absence on the two
- * structs: on the stack it means this build's own built-in default
- * (`IcePolicy::default()`, which is SIPRAL_ICE_OFF); on a call it
- * means the stack's own setting, whatever that came to.
+ * structs: on the stack it means this build's own built-in default,
+ * which is SIPRAL_ICE_OFF; on a call it means the stack's own
+ * setting, whatever that came to.
  *
  * A call that offers ICE also asks for RFC 5761 multiplexing, whatever
  * `offer_rtcp_mux` says, because an ICE stream with a second component
@@ -972,12 +969,12 @@ enum {
 typedef uint32_t sipral_ice_t;
 enum {
     /**
-     * IcePolicy::Off: do not offer it, and do not answer a peer that
+     * Do not offer it, and do not answer a peer that
      * does. The default, and `docs/06-nat.md` says why at length.
      */
     SIPRAL_ICE_OFF = 1,
     /**
-     * IcePolicy::Offered: offer it, and use it against a peer that
+     * Offer it, and use it against a peer that
      * offers it back.
      *
      * A peer that does not — an Asterisk with `ice_support=no`, which is
@@ -992,7 +989,7 @@ enum {
      */
     SIPRAL_ICE_OFFERED = 2,
     /**
-     * IcePolicy::Required: offer it, and let no stream on this call
+     * Offer it, and let no stream on this call
      * carry audio on a path ICE did not check.
      *
      * Each of the three ways a peer can fail to do ICE ends the call's
@@ -1001,7 +998,7 @@ enum {
      */
     SIPRAL_ICE_REQUIRED = 3,
     /**
-     * IcePolicy::Lite: be an ICE-lite endpoint (RFC 8445 §2.5) —
+     * Be an ICE-lite endpoint (RFC 8445 §2.5) —
      * write `a=ice-lite` and one host candidate, answer the checks a
      * full peer sends, and put the audio on the pair it nominates.
      *
@@ -2359,9 +2356,8 @@ enum {
 
 /**
  * What a SIPRAL_EVENT_KIND_RECOVERY reports happened, for
- * `payload.recovery.state`. Names for the two ways `sipral_ua`'s
- * lifecycle machine settles: a registrar answered again, or a recovery
- * ladder ran out of rungs.
+ * `payload.recovery.state`: the two ways a recovery settles — a
+ * registrar answered again, or the ladder ran out of rungs.
  */
 typedef uint32_t sipral_recovery_outcome_t;
 enum {
@@ -2383,10 +2379,9 @@ enum {
  * The last rung a recovery ladder tried before it gave up, for
  * SIPRAL_EVENT_KIND_RECOVERY's `payload.recovery.rung`. Meaningful
  * only when `payload.recovery.state` is
- * SIPRAL_RECOVERY_OUTCOME_GAVE_UP. Names for `sipral_ua::Rung`, minus
- * Rung::GiveUp itself: `sipral_ua` reports the rung before it that
- * asked for something and went unanswered, not the give-up rung that
- * follows it.
+ * SIPRAL_RECOVERY_OUTCOME_GAVE_UP. The ladder's own last step, giving
+ * up, has no name here: what is reported is the rung before it that
+ * asked for something and went unanswered.
  */
 typedef uint32_t sipral_recovery_rung_t;
 enum {
@@ -2415,7 +2410,7 @@ enum {
 
 /**
  * Why a recovery ladder gave up, for SIPRAL_EVENT_KIND_RECOVERY's
- * `payload.recovery.reason`. Names for `sipral_ua::RecoveryFailure`.
+ * `payload.recovery.reason`.
  */
 typedef uint32_t sipral_recovery_failure_t;
 enum {
@@ -3793,7 +3788,7 @@ enum {
 };
 
 /**
- * What a crate::event::SipralEventKind::PresenceChanged is about.
+ * What a SIPRAL_EVENT_KIND_PRESENCE_CHANGED is about.
  * Names for `sipral_presence_event_t::kind`.
  */
 typedef uint32_t sipral_presence_kind_t;
@@ -3997,13 +3992,13 @@ enum {
  * it, with the `user_data` the stack was created with, and never on two
  * threads at once for one stack. It must not unwind. Nothing is held
  * while it runs, so it may call back into the library, the stack it was
- * given included: see crate::stack.
+ * given included (`docs/08-ffi.md`, "The shape").
  */
 typedef void (*sipral_event_callback_t)(const sipral_event_t *event, void *user_data);
 
 /**
  * The screening policy: consulted once for every INVITE, before it has
- * any effect. Installed with crate::screening::sipral_stack_screen.
+ * any effect. Installed with sipral_stack_screen.
  *
  * **It runs with the stack's own lock held**, which is the opposite of
  * sipral_event_callback_t and is the
@@ -4047,7 +4042,7 @@ typedef uint32_t (*sipral_screen_callback_t)(const sipral_screen_request_t *requ
  * says which. Installed with sipral_media_attach_processor.
  *
  * **It runs with this call's media locked**, which is the opposite of
- * crate::event::SipralEventCallback and the reason
+ * sipral_event_callback_t and the reason
  * sipral_media_attach_processor's own doc comment says so before it
  * says anything else — read it there. In consequence: **this callback
  * must not call back into the media handle it was attached through**,
@@ -4067,7 +4062,7 @@ typedef void (*sipral_audio_transmit_callback_t)(const sipral_audio_transmit_t *
 
 /**
  * Where a stack's log lines go. Installed with
- * crate::log::sipral_stack_log.
+ * sipral_stack_log.
  *
  * Called on whichever thread has just finished a call into this stack,
  * after the stack has been let go and with nothing of the library held,
@@ -4327,7 +4322,7 @@ struct sipral_stack_config {
     /**
      * A sipral_transport_t.
      */
-    uint32_t transport;
+    sipral_transport_t transport;
     /**
      * The address the far end reaches this one at, as `host:port`, UTF-8 and
      * not NUL-terminated.
@@ -4425,32 +4420,32 @@ struct sipral_stack_config {
      */
     uint32_t frame_ms;
     /**
-     * Whether to offer RFC 4733 named events, as a `SipralToggle`. On by
+     * Whether to offer RFC 4733 named events, as a `sipral_toggle_t`. On by
      * default: a phone that cannot send a digit cannot navigate a menu.
      */
-    uint32_t offer_dtmf;
+    sipral_toggle_t offer_dtmf;
     /**
-     * Whether to ask for RFC 5761 multiplexing, as a `SipralToggle`.
+     * Whether to ask for RFC 5761 multiplexing, as a `sipral_toggle_t`.
      *
      * Off by default. §5.1.1 only permits it where both ends asked, and the
      * equipment this stack is deployed against does not; asking unasked costs
      * a line in every offer and buys a port on the calls where nobody answers.
      */
-    uint32_t offer_rtcp_mux;
+    sipral_toggle_t offer_rtcp_mux;
     /**
-     * Whether to stop sending during silence, as a `SipralToggle`.
+     * Whether to stop sending during silence, as a `sipral_toggle_t`.
      *
      * Off by default. It halves the bandwidth of a call in which one person is
      * listening, and it costs the far end's own stall watchdog a reason to
      * fire — this stack sends no comfort noise of its own to say the silence
      * is deliberate, so a gap looks the same from there as a stream that died.
      */
-    uint32_t silence_suppression;
+    sipral_toggle_t silence_suppression;
     /**
-     * Whether inbound audio that stops is reported, as a `SipralToggle`. On by
+     * Whether inbound audio that stops is reported, as a `sipral_toggle_t`. On by
      * default; this is B5.
      */
-    uint32_t media_stall_watchdog;
+    sipral_toggle_t media_stall_watchdog;
     /**
      * How long inbound audio may stop before that is reported, in
      * milliseconds, or zero for this build's own figure.
@@ -4494,30 +4489,30 @@ struct sipral_stack_config {
     /**
      * What every call on this stack does about SRTP unless
      * `sipral_call_config_t::srtp` says otherwise for it: a
-     * `SipralSrtp`, or zero for this build's own built-in default, which
+     * `sipral_srtp_t`, or zero for this build's own built-in default, which
      * is `SIPRAL_SRTP_NOT_OFFERED` — nothing here offers encryption
      * until it is asked to. Any other value is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
      */
-    uint32_t srtp;
+    sipral_srtp_t srtp;
     /**
      * What every call on this stack does about ICE unless
-     * `sipral_call_config_t::ice` says otherwise for it: a `SipralIce`,
+     * `sipral_call_config_t::ice` says otherwise for it: a `sipral_ice_t`,
      * or zero for this build's own built-in default, which is
      * `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
      * for the reason `docs/06-nat.md` tabulates. Any other value is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
      */
-    uint32_t ice;
+    sipral_ice_t ice;
     /**
-     * What this stack does about a NAT in front of it: a `SipralNat`, or
+     * What this stack does about a NAT in front of it: a `sipral_nat_t`, or
      * zero for this build's own built-in default, which is
      * `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks `stun_server` where each
      * socket appears from and writes the answer where a far end reads
-     * it — see crate::nat. Any other value is
+     * it — see `docs/06-nat.md`. Any other value is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
      */
-    uint32_t nat;
+    sipral_nat_t nat;
     /**
      * The STUN server `SIPRAL_NAT_STUN` asks, as `host:port`: an
      * address, not a name, since resolving one is the application's.
@@ -4533,7 +4528,7 @@ struct sipral_stack_config {
     /**
      * Whether G.729's Annex B — silence compression: SID frames and
      * nothing in a pause, and the comfort noise both ends make from
-     * them — is allowed on this stack's calls, as a `SipralToggle`. On
+     * them — is allowed on this stack's calls, as a `sipral_toggle_t`. On
      * by default, which is what `G729` means with no parameter (RFC
      * 4856 §2.1.9): an offer says `annexb=yes`, and an answer says
      * `yes` only where the offer allowed it. Off, both say `annexb=no`,
@@ -4543,14 +4538,14 @@ struct sipral_stack_config {
      * not run G.729, so the setting is taken whatever `codecs` names:
      * a call's own order may name G.729 when the stack's does not.
      */
-    uint32_t g729_annex_b;
+    sipral_toggle_t g729_annex_b;
     /**
      * A TURN server (RFC 8656) to allocate a relay on for every media
      * socket `sipral_stack_nat_map` names, as `host:port`: an address,
      * not a name. The relay becomes the relayed ICE candidate of the call
      * placed, rung or answered on that socket — the path of last resort,
      * used only when no cheaper pair answers — and goes back to the
-     * server when the call ends. See crate::nat.
+     * server when the call ends. See `docs/06-nat.md`.
      *
      * Optional, and only with `SIPRAL_NAT_STUN`, since it rides on the
      * same media-socket calls; it may be the same address as
@@ -4589,7 +4584,7 @@ struct sipral_stack_config {
      * Whether a REFER outside any dialog — somebody asking this end to
      * place a call it is not in, which is what click-to-dial from a
      * switchboard or a CRM sends (RFC 3515 §4.1) — reaches the
-     * application, as a `SipralToggle`. **Off by default**, and then
+     * application, as a `sipral_toggle_t`. **Off by default**, and then
      * every one is refused 403 before anything reads it: a peer that can
      * make a phone dial is a peer that can make it dial a premium-rate
      * number, and this stack authenticates no peer to tell the two
@@ -4598,10 +4593,10 @@ struct sipral_stack_config {
      * `sipral_call_accept_transfer` or refuses it with
      * `sipral_call_reject_transfer`, one request at a time.
      */
-    uint32_t referrals;
+    sipral_toggle_t referrals;
     /**
      * Whether an account behind a NAT keeps its registrar's UDP flow
-     * open, as a `SipralToggle`. **On by default.** An account is
+     * open, as a `sipral_toggle_t`. **On by default.** An account is
      * behind a NAT when `SIPRAL_NAT_STUN`'s answer about the signalling
      * socket named an address that is not the socket's own; each such
      * account on a UDP transport then sends a double CRLF, alone in a
@@ -4614,9 +4609,9 @@ struct sipral_stack_config {
      * Registrars ignore the datagram (RFC 3261 §7.5). Nothing is sent
      * while the stack is suspended (`sipral_stack_suspending`), for a
      * stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
-     * own address. `sipral_ua`'s `keepalive` module has the reasons.
+     * own address; `docs/06-nat.md` has the reasons.
      */
-    uint32_t registrar_keepalive;
+    sipral_toggle_t registrar_keepalive;
     /**
      * How often, in milliseconds, or zero for twenty-five seconds (RFC
      * 5626 §4.4.2's interval for UDP). Each interval is drawn between
@@ -4628,7 +4623,7 @@ struct sipral_stack_config {
     uint64_t registrar_keepalive_ms;
     /**
      * How every media socket reaches `turn_server`, as a
-     * `SipralTransport`: `SIPRAL_TRANSPORT_UDP`, or zero for it;
+     * `sipral_transport_t`: `SIPRAL_TRANSPORT_UDP`, or zero for it;
      * `SIPRAL_TRANSPORT_TCP` for the network that blocks UDP outright;
      * `SIPRAL_TRANSPORT_TLS` for the one that lets one port out — 5349
      * is TURN's (RFC 8656 §4.1) — or for an application that wants the
@@ -4639,25 +4634,25 @@ struct sipral_stack_config {
      * else, or a value other than zero with no `turn_server`, is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`.
      */
-    uint32_t turn_transport;
+    sipral_transport_t turn_transport;
     /**
-     * Who pumps this stack's audio: a `SipralAudio`. Zero, and
+     * Who pumps this stack's audio: a `sipral_audio_t`. Zero, and
      * `SIPRAL_AUDIO_APPLICATION`, is the application, through
      * `sipral_media_capture` and `sipral_media_playback`, as every
      * stack was before this member existed. `SIPRAL_AUDIO_DEVICE` has
      * the library open the platform's devices and pump every managed
-     * call itself — see crate::audio — and needs
+     * call itself — see the `sipral_audio_*` entry points — and needs
      * `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
      * platform this build has no backend for, which
      * `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
      */
-    uint32_t audio;
+    sipral_audio_t audio;
     /**
      * When the devices are opened, in device mode: a
-     * `SipralAudioActivation`, or zero for
+     * `sipral_audio_activation_t`, or zero for
      * `SIPRAL_AUDIO_ACTIVATION_AUTOMATIC`.
      */
-    uint32_t audio_activation;
+    sipral_audio_activation_t audio_activation;
     /**
      * Where the packets the engine encodes go, in device mode: called
      * on the engine's thread with one `sipral_audio_transmit_t` per
@@ -4738,7 +4733,7 @@ struct sipral_stack_config {
      * four-byte members in a row keep the struct free of padding at its
      * end on a 64-bit target and on 32-bit ARM alike.
      */
-    uint32_t dtmf_detection;
+    sipral_dtmf_detection_t dtmf_detection;
     /**
      * The STUN servers to turn to, in this order, when `stun_server`
      * fails: `host:port` addresses separated by commas, not names.
@@ -4801,7 +4796,7 @@ struct sipral_poll_result {
     /**
      * Bytes the stack produced and this build had nowhere to send.
      *
-     * Zero since crate::transport gave them somewhere to go: what the stack
+     * Zero since `sipral_stack_poll_transmit` gave them somewhere to go: what the stack
      * writes waits in it until `sipral_stack_poll_transmit` takes it, and a
      * poll no longer empties the queue on its way past. The member stays
      * because a released one always does, and because a build that has to drop
@@ -4839,7 +4834,7 @@ struct sipral_stack_settings {
     /**
      * The sipral_transport_t this stack speaks.
      */
-    uint32_t transport;
+    sipral_transport_t transport;
     /**
      * Whether this stack retransmits anything itself.
      *
@@ -4870,18 +4865,18 @@ struct sipral_stack_settings {
      */
     uint32_t frame_ms;
     /**
-     * Whether named events are offered, as a `SipralToggle`. Never the
+     * Whether named events are offered, as a `sipral_toggle_t`. Never the
      * default value: this says what the setting came to, not what was passed.
      */
-    uint32_t offer_dtmf;
+    sipral_toggle_t offer_dtmf;
     /**
-     * Whether RTCP multiplexing is asked for, as a `SipralToggle`.
+     * Whether RTCP multiplexing is asked for, as a `sipral_toggle_t`.
      */
-    uint32_t offer_rtcp_mux;
+    sipral_toggle_t offer_rtcp_mux;
     /**
-     * Whether sending stops during silence, as a `SipralToggle`.
+     * Whether sending stops during silence, as a `sipral_toggle_t`.
      */
-    uint32_t silence_suppression;
+    sipral_toggle_t silence_suppression;
     /**
      * How long inbound audio may stop before it is reported, with the default
      * filled in. Zero when the watchdog is off, which is the one case where
@@ -4889,15 +4884,15 @@ struct sipral_stack_settings {
      */
     uint64_t media_stall_ms;
     /**
-     * Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
+     * Whether G.729's Annex B is allowed, as a `sipral_toggle_t`, with the
      * default filled in.
      */
-    uint32_t g729_annex_b;
+    sipral_toggle_t g729_annex_b;
     /**
      * Whether a REFER outside any dialog reaches the application, as a
-     * `SipralToggle`, with the default — off — filled in.
+     * `sipral_toggle_t`, with the default — off — filled in.
      */
-    uint32_t referrals;
+    sipral_toggle_t referrals;
     /**
      * How often an account behind a NAT sends to its registrar, in
      * milliseconds, with the default filled in. Zero when
@@ -5155,7 +5150,7 @@ struct sipral_account_config {
      * this account's calls ask for a session timer (RFC 4028). Zero is
      * the stack's default, thirty minutes.
      */
-    uint32_t session_timer;
+    sipral_session_timer_t session_timer;
     /**
      * The interval to ask for under `SIPRAL_SESSION_TIMER_INTERVAL`, in
      * seconds: at least 90, RFC 4028 §5's floor. Read for nothing else.
@@ -5185,14 +5180,14 @@ struct sipral_account_config {
      */
     size_t trusted_peers_len;
     /**
-     * A `SipralSrtp`: what this account's calls do about SRTP, over the
+     * A `sipral_srtp_t`: what this account's calls do about SRTP, over the
      * stack's own `srtp` — offered, required, DTLS-SRTP, or DTLS-SRTP
      * falling back to SDES — or zero for the stack's. A call placed from
      * it may name a stricter policy of its own and never a looser one
      * (`SIPRAL_STATUS_SECURITY_POLICY`), and an INVITE it cannot answer
      * under it is refused with 488. ABI 0.31, like every member below.
      */
-    uint32_t srtp;
+    sipral_srtp_t srtp;
     /**
      * The SRTP suites this account's calls run, most preferred first,
      * as RFC 4568 §6.2 and RFC 7714 §14.2 name them and separated by
@@ -5208,12 +5203,12 @@ struct sipral_account_config {
      */
     size_t srtp_suites_len;
     /**
-     * A `SipralStirVerification`: what this account does with the
+     * A `sipral_stir_verification_t`: what this account does with the
      * `Identity` header fields of the calls it receives (RFC 8224 §6.2).
      * Zero reports, once `sipral_stack_stir` has given the stack trust
      * anchors.
      */
-    uint32_t stir_verification;
+    sipral_stir_verification_t stir_verification;
     /**
      * The P-256 private key this account signs its calls with (RFC 8224
      * §6.1): the bare 32-octet scalar, or an `EC PRIVATE KEY` or
@@ -5256,12 +5251,12 @@ struct sipral_account_config {
      */
     size_t stir_origid_len;
     /**
-     * A `SipralAttestation`: the level it claims (RFC 8588 §4), zero for
+     * A `sipral_attestation_t`: the level it claims (RFC 8588 §4), zero for
      * full attestation, `A`.
      */
-    uint32_t stir_attestation;
+    sipral_attestation_t stir_attestation;
     /**
-     * A `SipralToggle`: whether an encrypted call of this account may be
+     * A `sipral_toggle_t`: whether an encrypted call of this account may be
      * recorded to a recording server (`sipral_call_record_to`) in the
      * clear. Off by default: the copies of an encrypted call are offered
      * to the server as SRTP, with SDES keys in the recording session's
@@ -5331,8 +5326,8 @@ struct sipral_call_config {
      *
      * The application owns the socket, so it is the only one that can say. Set
      * it and the offer is written from this stack's codec order, the answer is
-     * read, and the call gets a media session that `crate::media` and
-     * `crate::record` reach. Leave it null and set `sdp` instead for a call
+     * read, and the call gets a media session that the `sipral_media_*`
+     * entry points reach. Leave it null and set `sdp` instead for a call
      * where the application describes its own session and runs its own RTP.
      */
     const char *media_address;
@@ -5358,7 +5353,7 @@ struct sipral_call_config {
     size_t headers_len;
     /**
      * What this call does about SRTP, overriding
-     * `sipral_stack_config_t::srtp` for it: a `SipralSrtp`, or zero to
+     * `sipral_stack_config_t::srtp` for it: a `sipral_srtp_t`, or zero to
      * take the stack's own setting. Any other value is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
      *
@@ -5367,7 +5362,7 @@ struct sipral_call_config {
      * call placed with `sdp` is a session the application wrote, and
      * SRTP in it is the application's own line to write or not.
      */
-    uint32_t srtp;
+    sipral_srtp_t srtp;
     /**
      * Which transport the INVITE goes out on, read only together with
      * `destination`: SIPRAL_TRANSPORT_MAIN
@@ -5406,7 +5401,7 @@ struct sipral_call_config {
     size_t codecs_len;
     /**
      * What this call does about ICE, overriding
-     * `sipral_stack_config_t::ice` for it: a `SipralIce`, or zero to
+     * `sipral_stack_config_t::ice` for it: a `sipral_ice_t`, or zero to
      * take the stack's own setting. Any other value is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
      *
@@ -5415,7 +5410,7 @@ struct sipral_call_config {
      * with `sdp` is a session the application wrote, and the candidates
      * in it are already the application's own to write or not.
      */
-    uint32_t ice;
+    sipral_ice_t ice;
     /**
      * Where this call's real-time text arrives (RFC 4103): a second
      * socket the application bound, as an address and a port. Set, the
@@ -5435,7 +5430,7 @@ struct sipral_call_config {
      */
     size_t text_address_len;
     /**
-     * Whether this call asks for RTCP feedback: a `SipralToggle`. On
+     * Whether this call asks for RTCP feedback: a `sipral_toggle_t`. On
      * offers RTP/AVPF (RFC 4585) with Generic NACKs and reduced-size
      * RTCP (RFC 5506), and runs RFC 4585's timing when the answer takes
      * it; zero leaves it off, as it is by default, because a far end
@@ -5446,7 +5441,7 @@ struct sipral_call_config {
      * NACKs and reduced-size RTCP it asks for are agreed only when this
      * is on, on the answer too.
      */
-    uint32_t feedback;
+    sipral_toggle_t feedback;
     /**
      * Nonzero to say this end is the focus of a conference (RFC 4579
      * §3.3): `isfocus` goes on the Contact of every message this call
@@ -5468,7 +5463,7 @@ struct sipral_codec_info {
     /**
      * A sipral_codec_t.
      */
-    uint32_t codec;
+    sipral_codec_t codec;
     /**
      * The RTP timestamp clock, in hertz, which is what goes on the
      * `a=rtpmap` line.
@@ -5517,18 +5512,18 @@ struct sipral_codec_candidate {
     /**
      * A sipral_codec_t: the candidate itself.
      */
-    uint32_t codec;
+    sipral_codec_t codec;
     /**
      * A sipral_codec_outcome_t: what became of it.
      */
-    uint32_t outcome;
+    sipral_codec_outcome_t outcome;
     /**
      * A sipral_codec_t: what beat it, when `outcome` is
      * `SIPRAL_CODEC_OUTCOME_OUTRANKED`. `SIPRAL_CODEC_UNKNOWN`
      * otherwise, because nothing beat a codec that was never named and
      * nothing beat the one that won.
      */
-    uint32_t outranked_by;
+    sipral_codec_t outranked_by;
     /**
      * Zero. Rounds the struct up to a whole multiple of its alignment on
      * every target, so that a member a later version appends starts at or
@@ -5564,11 +5559,11 @@ struct sipral_path_candidate {
     /**
      * A sipral_path_kind_t.
      */
-    uint32_t kind;
+    sipral_path_kind_t kind;
     /**
      * A sipral_path_outcome_t.
      */
-    uint32_t outcome;
+    sipral_path_outcome_t outcome;
     /**
      * For `SIPRAL_PATH_OUTCOME_REFUSED`, the STUN error code the far end
      * answered with; for `SIPRAL_PATH_OUTCOME_RELAY_REFUSED` and
@@ -5579,12 +5574,12 @@ struct sipral_path_candidate {
     /**
      * A sipral_candidate_kind_t: what `local` is.
      */
-    uint32_t local_kind;
+    sipral_candidate_kind_t local_kind;
     /**
      * A sipral_candidate_kind_t: what `remote` is, when it is a
      * candidate at all.
      */
-    uint32_t remote_kind;
+    sipral_candidate_kind_t remote_kind;
     /**
      * Zero. Keeps the members after it where a 32-bit and a 64-bit target
      * both put them without padding at the end of the struct, so that a
@@ -5645,7 +5640,7 @@ struct sipral_media_info {
     /**
      * A sipral_codec_t: what the two ends agreed on.
      */
-    uint32_t codec;
+    sipral_codec_t codec;
     /**
      * The payload type on the wire. It is the offer's own number and not
      * necessarily ours: the two ends pick their own numbers for a format
@@ -5673,7 +5668,7 @@ struct sipral_media_info {
     /**
      * A sipral_direction_t.
      */
-    uint32_t direction;
+    sipral_direction_t direction;
     /**
      * Whether this end is meant to be sending. Zero while it holds the far
      * end, or while the far end has refused to receive.
@@ -5694,7 +5689,7 @@ struct sipral_media_info {
     /**
      * A sipral_rtcp_t.
      */
-    uint32_t rtcp;
+    sipral_rtcp_t rtcp;
     /**
      * Whether the stream is keyed.
      */
@@ -5764,7 +5759,7 @@ struct sipral_stream_stats {
      * A sipral_codec_t: what the call settled on, which is the first thing
      * anybody looking at a bad call wants to know.
      */
-    uint32_t codec;
+    sipral_codec_t codec;
     /**
      * Whether a round-trip time is known. Zero until a report has come back,
      * which on a short call may be never: the first one is deliberately
@@ -6034,7 +6029,7 @@ struct sipral_media_packet {
      */
     size_t destination_len;
     /**
-     * What to send it over, as a `SipralTransport`.
+     * What to send it over, as a `sipral_transport_t`.
      * `SIPRAL_TRANSPORT_UDP` is a datagram from the call's media socket,
      * which is everything unless the stack reaches its TURN server over
      * TCP or TLS (`turn_transport`); then what goes through the relay
@@ -6042,7 +6037,7 @@ struct sipral_media_packet {
      * written, as they are and in order, on the media socket's
      * connection to it — never sent as a datagram.
      */
-    uint32_t protocol;
+    sipral_transport_t protocol;
     /**
      * Zero. Rounds the struct up to a whole multiple of its alignment on
      * every target, so that a member a later version appends starts at or
@@ -6058,7 +6053,7 @@ struct sipral_media_packet {
  * frame to process, or a request to forget what has been learned.
  *
  * Filled by the library and handed to the callback as a `const`
- * pointer, the same shape crate::screening::SipralScreenRequest is:
+ * pointer, the same shape sipral_screen_request_t is:
  * read `size` before anything past it, and read nothing once the
  * callback has returned — `near_end`, `far_end` and `out` borrow from
  * buffers that belong to this one call and are not this ABI's to keep
@@ -6137,14 +6132,14 @@ struct sipral_transmit {
      */
     uint32_t transport;
     /**
-     * What that transport speaks, as a `SipralTransport`.
+     * What that transport speaks, as a `sipral_transport_t`.
      *
      * Carried because it is the message's and not the socket's: §18.1.1 lets a
      * request that outgrew a datagram go out on a stream instead, and the
      * transport it ends up on is the one this says. Zero for a protocol this
      * ABI has no number for.
      */
-    uint32_t protocol;
+    sipral_transport_t protocol;
     /**
      * Where to write the message. Nothing is written unless the whole of it
      * fits.
@@ -6217,13 +6212,13 @@ struct sipral_transport_failure {
     /**
      * A sipral_transport_error_t.
      */
-    uint32_t error;
+    sipral_transport_error_t error;
     /**
      * A sipral_tls_failure_t; `SIPRAL_TLS_FAILURE_NONE` for anything
      * that was not TLS refusing, and only that on a transport that does
      * not speak TLS.
      */
-    uint32_t tls;
+    sipral_tls_failure_t tls;
     /**
      * The platform's own words for it, not NUL-terminated. Null with a
      * length of zero for none.
@@ -6242,11 +6237,11 @@ struct sipral_registration_event {
     /**
      * A sipral_registration_state_t.
      */
-    uint32_t state;
+    sipral_registration_state_t state;
     /**
      * A sipral_registration_failure_t, zero when nothing failed.
      */
-    uint32_t failure;
+    sipral_registration_failure_t failure;
     /**
      * The status the registrar answered with, or zero when none arrived.
      */
@@ -6276,11 +6271,11 @@ struct sipral_call_event {
     /**
      * A sipral_call_state_t.
      */
-    uint32_t state;
+    sipral_call_state_t state;
     /**
      * A sipral_call_end_reason_t, zero while the call is alive.
      */
-    uint32_t end_reason;
+    sipral_call_end_reason_t end_reason;
     /**
      * The status a response carried, or zero.
      */
@@ -6414,7 +6409,7 @@ struct sipral_call_event {
      * A sipral_verstat_t: what the
      * network concluded about the caller's number.
      */
-    uint32_t verstat;
+    sipral_verstat_t verstat;
     /**
      * The `SIPRAL_PRIVACY_*` bits the caller's `Privacy` asked for.
      */
@@ -6449,7 +6444,7 @@ struct sipral_call_event {
      * A sipral_answer_mode_t: the
      * INVITE's `Answer-Mode` (RFC 5373).
      */
-    uint32_t answer_mode;
+    sipral_answer_mode_t answer_mode;
     /**
      * Whether that field said `;require`: the caller would rather the
      * call be refused, with a 403, than answered any other way.
@@ -6479,7 +6474,7 @@ struct sipral_call_event {
      * A sipral_ring_source_t: whether
      * the ring says the caller is internal or external.
      */
-    uint32_t ring_source;
+    sipral_ring_source_t ring_source;
     /**
      * The first `Alert-Info` URI, without the angle brackets. Null and
      * zero when none. `sipral_call_identity_text` reads the rest.
@@ -6496,18 +6491,18 @@ struct sipral_call_event {
      * `verstat`, which is what a network before this end concluded,
      * this is what this end checked itself. ABI 0.31.
      */
-    uint32_t verification;
+    sipral_verification_outcome_t verification;
     /**
      * A sipral_attestation_t: the
      * level a valid SHAKEN PASSporT claimed.
      */
-    uint32_t attestation;
+    sipral_attestation_t attestation;
     /**
      * A sipral_verification_failure_t:
      * why the verdict did not hold. `sipral_call_identity_text` reads
      * the number it was signed for, its `origid` and its certificate URL.
      */
-    uint32_t verification_failure;
+    sipral_verification_failure_t verification_failure;
 };
 
 /**
@@ -6544,12 +6539,12 @@ struct sipral_media_event {
      * A sipral_codec_t: what the negotiation
      * settled on, zero where the event is not about a codec.
      */
-    uint32_t codec;
+    sipral_codec_t codec;
     /**
      * A sipral_direction_t: which way audio
      * may flow, as seen from here.
      */
-    uint32_t direction;
+    sipral_direction_t direction;
     /**
      * How long the stream has been silent, for a stall and for its recovery.
      */
@@ -6563,7 +6558,7 @@ struct sipral_media_event {
      * A sipral_media_fault_t, zero when
      * nothing failed.
      */
-    uint32_t fault;
+    sipral_media_fault_t fault;
     /**
      * The sentence behind `fault`, as UTF-8. Not NUL-terminated, and null
      * when nothing failed.
@@ -6600,12 +6595,12 @@ struct sipral_media_event {
      * this call's media is protected with, for
      * SIPRAL_EVENT_KIND_MEDIA_SECURED and zero on every other kind.
      */
-    uint32_t suite;
+    sipral_srtp_suite_t suite;
     /**
      * A sipral_digit_source_t: which of the two ways this stack accepts a
      * digit reported this one, for SIPRAL_EVENT_KIND_DIGIT_RECEIVED.
      */
-    uint32_t source;
+    sipral_digit_source_t source;
     /**
      * Whether the RFC 6035 PUBLISH left this end, for
      * SIPRAL_EVENT_KIND_QUALITY_REPORT_SENT and zero on every other
@@ -6620,7 +6615,7 @@ struct sipral_media_event {
      * report of the call's stream: this, `encrypted`, `authenticated`,
      * and `suite` from then on. ABI 0.31.
      */
-    uint32_t key_exchange;
+    sipral_key_exchange_t key_exchange;
     /**
      * Whether the stream is encrypted, now. Zero at the start of a
      * DTLS-SRTP call, whose keys arrive with
@@ -6643,17 +6638,17 @@ struct sipral_recovery_event {
     /**
      * A sipral_recovery_outcome_t.
      */
-    uint32_t state;
+    sipral_recovery_outcome_t state;
     /**
      * A sipral_recovery_rung_t: the last rung tried. Zero unless `state`
      * is SIPRAL_RECOVERY_OUTCOME_GAVE_UP.
      */
-    uint32_t rung;
+    sipral_recovery_rung_t rung;
     /**
      * A sipral_recovery_failure_t. Zero unless `state` is
      * SIPRAL_RECOVERY_OUTCOME_GAVE_UP.
      */
-    uint32_t reason;
+    sipral_recovery_failure_t reason;
     /**
      * Bindings the ladder never proved. Meaningful only when `state` is
      * SIPRAL_RECOVERY_OUTCOME_GAVE_UP.
@@ -6676,7 +6671,7 @@ struct sipral_transport_wanted_event {
      * protocol like that, so this is the layer below having grown one
      * rather than a caller mistake.
      */
-    uint32_t protocol;
+    sipral_transport_t protocol;
     /**
      * Where to, as `host:port`. Not NUL-terminated.
      */
@@ -6717,12 +6712,12 @@ struct sipral_subscription_event {
     /**
      * A sipral_subscription_state_t.
      */
-    uint32_t state;
+    sipral_subscription_state_t state;
     /**
      * A sipral_subscription_end_t:
      * why it is not live. Zero while it is.
      */
-    uint32_t reason;
+    sipral_subscription_end_t reason;
     /**
      * The SIP status a response gave for it, when one did. Zero
      * otherwise.
@@ -6815,7 +6810,7 @@ struct sipral_resolve_event {
      * neither — which leaves §4.1's NAPTR step to the caller, and is
      * also what a protocol this build has no number for reads as.
      */
-    uint32_t protocol;
+    sipral_transport_t protocol;
 };
 
 /**
@@ -6916,7 +6911,7 @@ struct sipral_nat_event {
     /**
      * A sipral_nat_mapping_t.
      */
-    uint32_t mapping;
+    sipral_nat_mapping_t mapping;
     /**
      * Nonzero for a signalling socket — a transport of this stack's —
      * and zero for a media socket sipral_stack_nat_map named.
@@ -6975,7 +6970,7 @@ struct sipral_nat_relay_event {
     /**
      * A sipral_nat_relay_t.
      */
-    uint32_t outcome;
+    sipral_nat_relay_t outcome;
     /**
      * For `SIPRAL_NAT_RELAY_FAILED`, the STUN error code the server
      * refused with — 401 for a credential it does not accept, 486 for a
@@ -7071,12 +7066,12 @@ struct sipral_turn_stream_event {
     /**
      * A sipral_turn_stream_t.
      */
-    uint32_t state;
+    sipral_turn_stream_t state;
     /**
-     * What to open, as a `SipralTransport`: `SIPRAL_TRANSPORT_TCP` or
+     * What to open, as a `sipral_transport_t`: `SIPRAL_TRANSPORT_TCP` or
      * `SIPRAL_TRANSPORT_TLS`, what `turn_transport` named.
      */
-    uint32_t protocol;
+    sipral_transport_t protocol;
     /**
      * The media socket, as `sipral_stack_nat_map` named it: the
      * connection's own name in the three calls that take one.
@@ -7101,22 +7096,22 @@ struct sipral_turn_stream_event {
  */
 struct sipral_audio_event {
     /**
-     * A `SipralAudioChange`.
+     * A `sipral_audio_change_t`.
      */
-    uint32_t change;
+    sipral_audio_change_t change;
     /**
-     * A `SipralAudioOrigin`.
+     * A `sipral_audio_origin_t`.
      */
-    uint32_t origin;
+    sipral_audio_origin_t origin;
     /**
-     * A `SipralAudioRole`, for a change about one role; zero otherwise.
+     * A `sipral_audio_role_t`, for a change about one role; zero otherwise.
      */
-    uint32_t role;
+    sipral_audio_role_t role;
     /**
-     * A `SipralAudioDirection`, for `SIPRAL_AUDIO_CHANGE_DEFAULT_CHANGED`;
+     * A `sipral_audio_direction_t`, for `SIPRAL_AUDIO_CHANGE_DEFAULT_CHANGED`;
      * zero otherwise.
      */
-    uint32_t direction;
+    sipral_audio_direction_t direction;
     /**
      * The device the change is about — the one a role landed on, or
      * the one that went — or zero.
@@ -7135,7 +7130,7 @@ struct sipral_stun_server_event {
     /**
      * A sipral_stun_server_state_t.
      */
-    uint32_t state;
+    sipral_stun_server_state_t state;
     /**
      * For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server in use now; for
      * `SIPRAL_STUN_SERVER_STATE_ALL_FAILED`, the last one that failed.
@@ -7165,27 +7160,27 @@ struct sipral_verification_event {
      * A sipral_verification_stage_t:
      * the certificate is wanted, or the verdict is in.
      */
-    uint32_t stage;
+    sipral_verification_stage_t stage;
     /**
      * A sipral_verification_outcome_t,
      * for a verdict.
      */
-    uint32_t outcome;
+    sipral_verification_outcome_t outcome;
     /**
      * A sipral_verification_failure_t:
      * why it did not hold.
      */
-    uint32_t failure;
+    sipral_verification_failure_t failure;
     /**
      * A sipral_attestation_t: the
      * level a valid SHAKEN PASSporT claimed.
      */
-    uint32_t attestation;
+    sipral_attestation_t attestation;
     /**
      * A sipral_verstat_t: the `verstat`
      * this verdict comes to (3GPP TS 24.229).
      */
-    uint32_t verstat;
+    sipral_verstat_t verstat;
     /**
      * The response RFC 8224 §6.2.2 prescribes for the failure, zero for
      * a valid one. Sent only when `refused` is set.
@@ -7241,19 +7236,19 @@ struct sipral_progress_event {
     /**
      * A sipral_progress_kind_t.
      */
-    uint32_t what;
+    sipral_progress_kind_t what;
     /**
      * A sipral_progress_tone_t, for a tone.
      */
-    uint32_t tone;
+    sipral_progress_tone_t tone;
     /**
      * A sipral_amd_verdict_t, for who answered.
      */
-    uint32_t verdict;
+    sipral_amd_verdict_t verdict;
     /**
      * A sipral_amd_reason_t, for who answered.
      */
-    uint32_t reason;
+    sipral_amd_reason_t reason;
     /**
      * When, in milliseconds: a tone's first burst from the first frame
      * listened to; the decision after answer; the beep's end after
@@ -7308,7 +7303,7 @@ struct sipral_progress_event {
 };
 
 /**
- * What a crate::event::SipralEventKind::ConferenceChanged carries.
+ * What a SIPRAL_EVENT_KIND_CONFERENCE_CHANGED carries.
  */
 struct sipral_conference_event {
     /**
@@ -7318,7 +7313,7 @@ struct sipral_conference_event {
     /**
      * A sipral_conference_update_t.
      */
-    uint32_t update;
+    sipral_conference_update_t update;
     /**
      * The version of the document the picture is at now; zero once the
      * conference ended.
@@ -7331,7 +7326,7 @@ struct sipral_conference_event {
 };
 
 /**
- * What a crate::event::SipralEventKind::TextReceived carries.
+ * What a SIPRAL_EVENT_KIND_TEXT_RECEIVED carries.
  *
  * The text points into the event and is valid for as long as the
  * callback is.
@@ -7354,7 +7349,7 @@ struct sipral_text_event {
 };
 
 /**
- * What a crate::event::SipralEventKind::PresenceChanged carries.
+ * What a SIPRAL_EVENT_KIND_PRESENCE_CHANGED carries.
  *
  * The text points into the event and is valid for as long as the
  * callback is.
@@ -7363,7 +7358,7 @@ struct sipral_presence_event {
     /**
      * A sipral_presence_kind_t.
      */
-    uint32_t kind;
+    sipral_presence_kind_t kind;
     /**
      * SIPRAL_PRESENCE_KIND_WATCHED: which subscription.
      * `SIPRAL_HANDLE_NONE` for a publication, whose account is the
@@ -7374,12 +7369,12 @@ struct sipral_presence_event {
      * SIPRAL_PRESENCE_KIND_WATCHED: a sipral_basic_t, open when any
      * of the presentity's tuples is open.
      */
-    uint32_t basic;
+    sipral_basic_t basic;
     /**
      * SIPRAL_PRESENCE_KIND_WATCHED: a sipral_activity_t, the first
      * the person listed.
      */
-    uint32_t activity;
+    sipral_activity_t activity;
     /**
      * SIPRAL_PRESENCE_KIND_WATCHED: the presentity, as the document
      * named it. Not NUL-terminated.
@@ -7401,12 +7396,12 @@ struct sipral_presence_event {
     /**
      * SIPRAL_PRESENCE_KIND_PUBLICATION: a sipral_publication_state_t.
      */
-    uint32_t publication_state;
+    sipral_publication_state_t publication_state;
     /**
      * SIPRAL_PRESENCE_KIND_PUBLICATION: a sipral_publish_failure_t
      * when the state is SIPRAL_PUBLICATION_STATE_FAILED.
      */
-    uint32_t failure;
+    sipral_publish_failure_t failure;
     /**
      * SIPRAL_PRESENCE_KIND_PUBLICATION: the status the compositor
      * answered with, when one did.
@@ -7437,18 +7432,18 @@ struct sipral_transport_failed_event {
      */
     uint32_t transport;
     /**
-     * What it spoke, as a `SipralTransport`.
+     * What it spoke, as a `sipral_transport_t`.
      */
-    uint32_t protocol;
+    sipral_transport_t protocol;
     /**
      * A sipral_transport_error_t: what the application said went wrong,
      * `SIPRAL_TRANSPORT_ERROR_CLOSED` for a connection that closed.
      */
-    uint32_t error;
+    sipral_transport_error_t error;
     /**
      * A sipral_tls_failure_t: why TLS refused, when that is what it was.
      */
-    uint32_t tls;
+    sipral_tls_failure_t tls;
     /**
      * The platform's own sentence, as the application handed it over.
      * Null with a length of zero when it gave none.
@@ -7471,11 +7466,11 @@ struct sipral_local_conference_event {
     /**
      * A sipral_local_conference_change_t.
      */
-    uint32_t change;
+    sipral_local_conference_change_t change;
     /**
      * A sipral_departure_t, for `SIPRAL_LOCAL_CONFERENCE_CHANGE_LEFT`.
      */
-    uint32_t departure;
+    sipral_departure_t departure;
     /**
      * Who joined or left: a call, or the conference's own handle for
      * this end. `SIPRAL_HANDLE_NONE` for the other changes.
@@ -7693,7 +7688,7 @@ struct sipral_suspending {
  * had any effect at all.
  *
  * Filled by the library and handed to the callback as a `const`
- * pointer, the same shape crate::event::SipralEvent is: read `size`
+ * pointer, the same shape sipral_event_t is: read `size`
  * before anything past it, and read nothing once the callback has
  * returned, since `message` — and `source`, when it is not null —
  * borrow from a request that is still in the middle of being processed
@@ -7830,15 +7825,15 @@ struct sipral_watched_dialog {
     /**
      * A sipral_dialog_phase_t.
      */
-    uint32_t phase;
+    sipral_dialog_phase_t phase;
     /**
      * A sipral_dialog_direction_t.
      */
-    uint32_t direction;
+    sipral_dialog_direction_t direction;
     /**
      * A sipral_dialog_ended_t, and zero while the dialog has not.
      */
-    uint32_t ended;
+    sipral_dialog_ended_t ended;
     /**
      * The SIP status behind how it ended, when the notifier sent one.
      * Zero otherwise.
@@ -8007,13 +8002,13 @@ struct sipral_audio_transmit {
      */
     sipral_handle_t call;
     /**
-     * How it leaves, as a `SipralTransport`: `SIPRAL_TRANSPORT_UDP` is
+     * How it leaves, as a `sipral_transport_t`: `SIPRAL_TRANSPORT_UDP` is
      * a datagram from the media socket; `SIPRAL_TRANSPORT_TCP` and
      * `SIPRAL_TRANSPORT_TLS` are bytes to write, in order, on the
      * socket's connection to its TURN server, as `sipral_media_capture`
      * marks them.
      */
-    uint32_t protocol;
+    sipral_transport_t protocol;
     /**
      * Zero. Keeps the members after it where a 32-bit and a 64-bit target
      * both put them without padding at the end of the struct, so that a
@@ -8058,9 +8053,9 @@ struct sipral_log_record {
      */
     sipral_handle_t stack;
     /**
-     * A `SipralLogLevel`, never `SIPRAL_LOG_LEVEL_OFF`.
+     * A `sipral_log_level_t`, never `SIPRAL_LOG_LEVEL_OFF`.
      */
-    uint32_t level;
+    sipral_log_level_t level;
     /**
      * Which part of the stack wrote it — `registration`, `call`,
      * `media`, `decision`, `sip`, `api` — as UTF-8, not NUL-terminated.
@@ -8131,7 +8126,7 @@ struct sipral_stir_config {
      */
     uint64_t unix_seconds;
     /**
-     * A `SipralToggle`: whether a certificate whose TNAuthList names a
+     * A `sipral_toggle_t`: whether a certificate whose TNAuthList names a
      * service provider code (RFC 8226 §9) has authority over every
      * calling number. Off by default, when only the numbers and ranges a
      * certificate names are its own: a code names a provider, not
@@ -8140,7 +8135,7 @@ struct sipral_stir_config {
      * whose certificates carry codes and no numbers, makes by turning
      * this on. ABI 0.32.
      */
-    uint32_t accept_service_provider_codes;
+    sipral_toggle_t accept_service_provider_codes;
     /**
      * Zero. Rounds the struct up to a whole multiple of its alignment on
      * every target, so that a member a later version appends starts at or
@@ -8165,7 +8160,7 @@ struct sipral_stream_encryption {
     /**
      * A sipral_media_kind_t: what the stream carries.
      */
-    uint32_t media;
+    sipral_media_kind_t media;
     /**
      * Whether what it sends is encrypted and what it takes
      * authenticated, now. Zero while it waits for the handshake that
@@ -8175,11 +8170,11 @@ struct sipral_stream_encryption {
     /**
      * A sipral_key_exchange_t: how its keys were exchanged.
      */
-    uint32_t key_exchange;
+    sipral_key_exchange_t key_exchange;
     /**
      * A sipral_srtp_suite_t: the transform it runs, once it runs one.
      */
-    uint32_t suite;
+    sipral_srtp_suite_t suite;
     /**
      * Whether the key exchange authenticated the far end: set for a
      * DTLS-SRTP stream once its handshake finished, the far end's
@@ -8207,23 +8202,23 @@ struct sipral_progress_config {
      */
     size_t size;
     /**
-     * A `SipralToggle`: on (the default) listens with what follows,
+     * A `sipral_toggle_t`: on (the default) listens with what follows,
      * off stops listening and reads nothing else.
      */
-    uint32_t listen;
+    sipral_toggle_t listen;
     /**
      * A sipral_tone_region_t. Europe by default.
      */
-    uint32_t region;
+    sipral_tone_region_t region;
     /**
-     * A `SipralToggle`: whether to decide who answered. On by default.
+     * A `sipral_toggle_t`: whether to decide who answered. On by default.
      */
-    uint32_t answering_machine;
+    sipral_toggle_t answering_machine;
     /**
-     * A `SipralToggle`: whether to listen for the beep after a verdict
+     * A `sipral_toggle_t`: whether to listen for the beep after a verdict
      * of a machine. On by default.
      */
-    uint32_t beep;
+    sipral_toggle_t beep;
     /**
      * How long after the verdict to listen for the beep. Thirty
      * seconds by default.
@@ -8292,10 +8287,10 @@ struct sipral_consent_tone {
      */
     size_t size;
     /**
-     * A `SipralToggle`: on (the default) beeps as what follows says,
+     * A `sipral_toggle_t`: on (the default) beeps as what follows says,
      * off plays no tone and reads nothing else.
      */
-    uint32_t enabled;
+    sipral_toggle_t enabled;
     /**
      * Its frequency, from 300 to 3400 Hz. 1400 by default.
      */
@@ -8315,9 +8310,9 @@ struct sipral_consent_tone {
      */
     uint32_t interval_ms;
     /**
-     * A `SipralToggle`: whether this end hears it too. On by default.
+     * A `sipral_toggle_t`: whether this end hears it too. On by default.
      */
-    uint32_t local;
+    sipral_toggle_t local;
 };
 
 /**
@@ -8334,11 +8329,11 @@ struct sipral_recording_options {
     /**
      * A sipral_recording_format_t.
      */
-    uint32_t format;
+    sipral_recording_format_t format;
     /**
      * A sipral_recording_layout_t.
      */
-    uint32_t layout;
+    sipral_recording_layout_t layout;
     /**
      * The rate the file is written at, in hertz, or zero for the rate the
      * call's codec hears at when the recording starts (48 kHz for Ogg
@@ -8423,7 +8418,7 @@ struct sipral_conference_user {
     /**
      * A sipral_endpoint_status_t: where the first of them is.
      */
-    uint32_t status;
+    sipral_endpoint_status_t status;
     /**
      * How many media streams the first of them has.
      */
@@ -8453,13 +8448,13 @@ struct sipral_presence {
     /**
      * A sipral_basic_t, open or closed. Required.
      */
-    uint32_t basic;
+    sipral_basic_t basic;
     /**
      * A sipral_activity_t; SIPRAL_ACTIVITY_NONE publishes no
      * person at all. SIPRAL_ACTIVITY_OTHER is refused: there is no
      * name to publish it under.
      */
-    uint32_t activity;
+    sipral_activity_t activity;
     /**
      * A note a buddy list shows beside the name, UTF-8 and not
      * NUL-terminated, or null for none.
@@ -8546,11 +8541,11 @@ struct sipral_local_conference_config {
      */
     uint32_t max_members;
     /**
-     * A `SipralToggle`: whether this end takes part. On unless it is
+     * A `sipral_toggle_t`: whether this end takes part. On unless it is
      * `SIPRAL_TOGGLE_OFF`; a conference without this end only bridges
      * its calls.
      */
-    uint32_t local;
+    sipral_toggle_t local;
     /**
      * The rate of this end's frames in application mode, in hertz —
      * 8000, 16000, 32000 or 48000 — or zero for 16000. A tick's frame is
@@ -8865,8 +8860,8 @@ sipral_status_t sipral_stack_destroy(sipral_handle_t stack);
  * A poll is also where the stack writes: a retransmission falls due, a
  * registration is refreshed, a transaction gives up and says so. What it
  * wrote is taken with `sipral_stack_poll_transmit`, which is drained after
- * every poll and left alone by the next one — see crate::transport for
- * the loop in full.
+ * every poll and left alone by the next one — see `docs/08-ffi.md`,
+ * "Signalling across the boundary", for the loop in full.
  *
  * Safety
  *
@@ -8948,10 +8943,9 @@ sipral_status_t sipral_stack_screen(sipral_handle_t stack, sipral_screen_callbac
  * A `burst` of zero, or an `every_ms` of zero, is
  * `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing: the first admits
  * no call ever, the first or the one after a week of quiet, and the
- * second earns a token in no time, which is a limit that never limits —
- * Rate::unlimited is how the Rust API says that on purpose, and
- * there is deliberately no way to ask for it from C, since a deployment
- * that wants no floor at all can simply never call this.
+ * second earns a token in no time, which is a limit that never limits.
+ * There is deliberately no way to ask for that from C, since a
+ * deployment that wants no floor at all can simply never call this.
  *
  * The floor is asked before sipral_stack_screen's own policy is: a
  * source that has exhausted it never reaches the callback at all, and is
@@ -9030,7 +9024,7 @@ sipral_status_t sipral_subscription_end(sipral_handle_t stack, sipral_handle_t s
  *
  * `out_state` must point at one `uint32_t`.
  */
-sipral_status_t sipral_subscription_state(sipral_handle_t stack, sipral_handle_t subscription, uint32_t *out_state);
+sipral_status_t sipral_subscription_state(sipral_handle_t stack, sipral_handle_t subscription, sipral_subscription_state_t *out_state);
 
 /**
  * What a lamp for this subscription should show (A1).
@@ -9051,7 +9045,7 @@ sipral_status_t sipral_subscription_state(sipral_handle_t stack, sipral_handle_t
  *
  * `out_phase` must point at one `uint32_t`.
  */
-sipral_status_t sipral_subscription_lamp(sipral_handle_t stack, sipral_handle_t subscription, uint32_t *out_phase);
+sipral_status_t sipral_subscription_lamp(sipral_handle_t stack, sipral_handle_t subscription, sipral_dialog_phase_t *out_phase);
 
 /**
  * How many dialogs this subscription has been told about.
@@ -9098,7 +9092,7 @@ sipral_status_t sipral_subscription_dialog_at(sipral_handle_t stack, sipral_hand
  * capacity of zero, and `out_needed` must point at one `size_t` or be
  * null.
  */
-sipral_status_t sipral_subscription_dialog_text(sipral_handle_t stack, sipral_handle_t subscription, size_t index, uint32_t which, char *buffer, size_t capacity, size_t *out_needed);
+sipral_status_t sipral_subscription_dialog_text(sipral_handle_t stack, sipral_handle_t subscription, size_t index, sipral_dialog_text_t which, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * Send an instant message outside any dialog (RFC 3428 §3).
@@ -9272,7 +9266,7 @@ sipral_status_t sipral_account_register(sipral_handle_t stack, sipral_handle_t a
 sipral_status_t sipral_account_unregister(sipral_handle_t stack, sipral_handle_t account, uint64_t now_ms);
 
 /**
- * Where an account's registration is, as a `SipralRegistrationState`.
+ * Where an account's registration is, as a `sipral_registration_state_t`.
  *
  * An account configured with no registrar answers
  * `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, always.
@@ -9281,7 +9275,7 @@ sipral_status_t sipral_account_unregister(sipral_handle_t stack, sipral_handle_t
  *
  * `out_state` must point at one `uint32_t`.
  */
-sipral_status_t sipral_account_registration_state(sipral_handle_t stack, sipral_handle_t account, uint32_t *out_state);
+sipral_status_t sipral_account_registration_state(sipral_handle_t stack, sipral_handle_t account, sipral_registration_state_t *out_state);
 
 /**
  * Place a call, and write its handle to `out_call`.
@@ -9293,7 +9287,8 @@ sipral_status_t sipral_account_registration_state(sipral_handle_t stack, sipral_
  *
  * With `media_address` set, the offer is this stack's to write and the
  * call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
- * and `crate::media` carries the packets from then on. `config.srtp`
+ * and the `sipral_media_*` entry points carry the packets from then on.
+ * `config.srtp`
  * overrides `sipral_stack_config_t::srtp` for such a call; it is read for
  * no other kind.
  *
@@ -9670,7 +9665,7 @@ sipral_status_t sipral_call_redirect(sipral_handle_t stack, sipral_handle_t call
  *
  * `out_count` must point at one `size_t`.
  */
-sipral_status_t sipral_call_identity_count(sipral_handle_t stack, sipral_handle_t call, uint32_t which, size_t *out_count);
+sipral_status_t sipral_call_identity_count(sipral_handle_t stack, sipral_handle_t call, sipral_identity_text_t which, size_t *out_count);
 
 /**
  * One piece of one entry of a call's identity lists, copied into the
@@ -9694,7 +9689,7 @@ sipral_status_t sipral_call_identity_count(sipral_handle_t stack, sipral_handle_
  * `buffer` must be writable for `capacity` bytes or null with a capacity
  * of zero, and `out_needed` must point at one `size_t` or be null.
  */
-sipral_status_t sipral_call_identity_text(sipral_handle_t stack, sipral_handle_t call, size_t index, uint32_t which, char *buffer, size_t capacity, size_t *out_needed);
+sipral_status_t sipral_call_identity_text(sipral_handle_t stack, sipral_handle_t call, size_t index, sipral_identity_text_t which, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * Join two active calls into a local conference of three: from here on,
@@ -9819,7 +9814,7 @@ sipral_status_t sipral_call_reject_session(sipral_handle_t stack, sipral_handle_
  *
  * `digits` must be readable for `digits_len` bytes.
  */
-sipral_status_t sipral_call_send_dtmf(sipral_handle_t stack, sipral_handle_t call, const char *digits, size_t digits_len, uint32_t via, uint32_t duration_ms, uint64_t now_ms);
+sipral_status_t sipral_call_send_dtmf(sipral_handle_t stack, sipral_handle_t call, const char *digits, size_t digits_len, sipral_dtmf_t via, uint32_t duration_ms, uint64_t now_ms);
 
 /**
  * Ask the far end to call somebody else, and hang up when it has
@@ -9922,7 +9917,7 @@ sipral_status_t sipral_call_accept_transfer(sipral_handle_t stack, sipral_handle
 sipral_status_t sipral_call_reject_transfer(sipral_handle_t stack, sipral_handle_t call, uint32_t code, uint64_t now_ms);
 
 /**
- * Where a call is, as a `SipralCallState`.
+ * Where a call is, as a `sipral_call_state_t`.
  *
  * A call that is over answers `SIPRAL_CALL_STATE_TERMINATED` until the
  * poll that delivers `SIPRAL_EVENT_KIND_CALL_ENDED` retires its handle, and
@@ -9934,7 +9929,7 @@ sipral_status_t sipral_call_reject_transfer(sipral_handle_t stack, sipral_handle
  *
  * `out_state` must point at one `uint32_t`.
  */
-sipral_status_t sipral_call_state(sipral_handle_t stack, sipral_handle_t call, uint32_t *out_state);
+sipral_status_t sipral_call_state(sipral_handle_t stack, sipral_handle_t call, sipral_call_state_t *out_state);
 
 /**
  * Which way a call is held: `out_here` is set when this end asked the far
@@ -9962,7 +9957,7 @@ sipral_status_t sipral_call_hold_state(sipral_handle_t stack, sipral_handle_t ca
  *
  * Reads no memory the caller owns, and is safe to call from any thread.
  */
-const char *sipral_codec_name(uint32_t codec);
+const char *sipral_codec_name(sipral_codec_t codec);
 
 /**
  * How many codecs this build contains.
@@ -10004,7 +9999,7 @@ sipral_status_t sipral_codec_at(size_t index, sipral_codec_info_t *out_info);
  * `out_codecs` must be writable for `capacity` `uint32_t` or null with a
  * capacity of zero, and `out_count` must point at one `size_t` or be null.
  */
-sipral_status_t sipral_stack_codec_order(sipral_handle_t stack, uint32_t *out_codecs, size_t capacity, size_t *out_count);
+sipral_status_t sipral_stack_codec_order(sipral_handle_t stack, sipral_codec_t *out_codecs, size_t capacity, size_t *out_count);
 
 /**
  * A handle on one call's media, written to `out_media`.
@@ -10168,7 +10163,7 @@ sipral_status_t sipral_media_statistics(sipral_handle_t media, uint64_t now_ms, 
  * for `from_len`, and `out_arrival` must point at one `uint32_t` or be
  * null.
  */
-sipral_status_t sipral_media_receive(sipral_handle_t media, uint8_t *data, size_t len, const char *from, size_t from_len, uint64_t now_ms, uint32_t *out_arrival);
+sipral_status_t sipral_media_receive(sipral_handle_t media, uint8_t *data, size_t len, const char *from, size_t from_len, uint64_t now_ms, sipral_arrival_t *out_arrival);
 
 /**
  * Take the frame that is due for the earpiece, and say where it came from.
@@ -10186,7 +10181,7 @@ sipral_status_t sipral_media_receive(sipral_handle_t media, uint8_t *data, size_
  * point at one `size_t` or be null, and `out_source` at one `uint32_t` or
  * be null.
  */
-sipral_status_t sipral_media_playback(sipral_handle_t media, int16_t *samples, size_t capacity, size_t *out_written, uint32_t *out_source);
+sipral_status_t sipral_media_playback(sipral_handle_t media, int16_t *samples, size_t capacity, size_t *out_written, sipral_playback_t *out_source);
 
 /**
  * Put one frame from the microphone on the wire.
@@ -10389,7 +10384,7 @@ sipral_status_t sipral_media_poll_transmit(sipral_handle_t media, uint64_t now_m
 /**
  * The RTCP goodbye of a call whose media has ended (task 8.4.21).
  *
- * `MediaEngine::release` builds the BYE RFC 3550 §6.3.7 owes the far end
+ * The library builds the BYE RFC 3550 §6.3.7 owes the far end
  * the moment a call's session stops, but by then the call's media
  * handle is already gone — every `sipral_media_` entry point on it
  * answers `SIPRAL_STATUS_WRONG_STATE` — so this is a stack-level call
@@ -10583,7 +10578,7 @@ sipral_status_t sipral_stack_receive_stream(sipral_handle_t stack, uint32_t tran
  * SIPRAL_EVENT_KIND_TRANSPORT_WANTED
  * reads back the id it just gave one of those two configs.
  *
- * `protocol` is a crate::stack::SipralTransport.
+ * `protocol` is a sipral_transport_t.
  * Rebinding an existing transport takes zero to mean "whatever it
  * already speaks" and anything else has to agree with that or this is
  * `SIPRAL_STATUS_INVALID_ARGUMENT` — a stack retransmits or does not
@@ -10612,7 +10607,7 @@ sipral_status_t sipral_stack_receive_stream(sipral_handle_t stack, uint32_t tran
  * `remote_len`, and `out_transport_id`, when it is not null, must point
  * at one `uint32_t`.
  */
-sipral_status_t sipral_stack_transport_bind(sipral_handle_t stack, uint32_t transport, uint32_t protocol, const char *local, size_t local_len, const char *remote, size_t remote_len, uint64_t now_ms, uint32_t *out_transport_id);
+sipral_status_t sipral_stack_transport_bind(sipral_handle_t stack, uint32_t transport, sipral_transport_t protocol, const char *local, size_t local_len, const char *remote, size_t remote_len, uint64_t now_ms, uint32_t *out_transport_id);
 
 /**
  * Say that a transport failed, and that whatever was written to it did not
@@ -10647,7 +10642,7 @@ sipral_status_t sipral_stack_transport_bind(sipral_handle_t stack, uint32_t tran
  *
  * Safe to call with any handle value. Reads no memory the caller owns.
  */
-sipral_status_t sipral_stack_transport_failed(sipral_handle_t stack, uint32_t transport, uint32_t error, uint64_t now_ms);
+sipral_status_t sipral_stack_transport_failed(sipral_handle_t stack, uint32_t transport, sipral_transport_error_t error, uint64_t now_ms);
 
 /**
  * Say that a transport failed, and why, in the words of the TLS library
@@ -10963,7 +10958,7 @@ sipral_status_t sipral_stack_turn_closed(sipral_handle_t stack, const char *loca
  * Reads no memory the caller owns, and is safe to call from any
  * thread.
  */
-const char *sipral_event_kind_name(uint32_t kind);
+const char *sipral_event_kind_name(sipral_event_kind_t kind);
 
 /**
  * How many lines a header field is on, in a whole SIP message.
@@ -11112,7 +11107,7 @@ sipral_status_t sipral_stack_resumed(sipral_handle_t stack, uint64_t now_ms);
  * beside it or null with a length of zero, and `out_recovery` must point
  * at one `uint32_t` or be null.
  */
-sipral_status_t sipral_stack_network_changed(sipral_handle_t stack, uint32_t from_link, const char *from_address, size_t from_address_len, const char *from_interface, size_t from_interface_len, uint32_t from_resolves, uint32_t to_link, const char *to_address, size_t to_address_len, const char *to_interface, size_t to_interface_len, uint32_t to_resolves, uint64_t now_ms, uint32_t *out_recovery);
+sipral_status_t sipral_stack_network_changed(sipral_handle_t stack, sipral_link_t from_link, const char *from_address, size_t from_address_len, const char *from_interface, size_t from_interface_len, uint32_t from_resolves, sipral_link_t to_link, const char *to_address, size_t to_address_len, const char *to_interface, size_t to_interface_len, uint32_t to_resolves, uint64_t now_ms, sipral_recovery_t *out_recovery);
 
 /**
  * There is no usable interface.
@@ -11320,7 +11315,7 @@ sipral_status_t sipral_account_time_to_ready(sipral_handle_t stack, sipral_handl
  *
  * `addresses` must be readable for `addresses_len` bytes.
  */
-sipral_status_t sipral_stack_resolved(sipral_handle_t stack, sipral_handle_t dialog, const char *addresses, size_t addresses_len, uint32_t protocol);
+sipral_status_t sipral_stack_resolved(sipral_handle_t stack, sipral_handle_t dialog, const char *addresses, size_t addresses_len, sipral_transport_t protocol);
 
 /**
  * Point an account's registration at another address.
@@ -11438,7 +11433,7 @@ sipral_status_t sipral_subscription_conference_user_at(sipral_handle_t stack, si
  * capacity of zero, and `out_needed` must point at one `size_t` or be
  * null.
  */
-sipral_status_t sipral_subscription_conference_text(sipral_handle_t stack, sipral_handle_t subscription, size_t index, uint32_t which, char *buffer, size_t capacity, size_t *out_needed);
+sipral_status_t sipral_subscription_conference_text(sipral_handle_t stack, sipral_handle_t subscription, size_t index, sipral_conference_text_t which, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * Say, or stop saying, that this end is the focus of a conference the
@@ -11628,16 +11623,16 @@ sipral_status_t sipral_media_poll_recording(sipral_handle_t media, sipral_media_
 /**
  * Start recording the signalling this stack is fed from here on
  * (`docs/18-replay.md`), with the same seed `sipral_stack_create` built
- * it with. Read crate::diagnostics before reaching for this: what it
- * records and what it deliberately never does is written down there
- * once rather than repeated at each of these three entry points.
+ * it with. Read `docs/18-replay.md` before reaching for this: it records
+ * what arrives, exactly as it arrived, and never what this end sent.
  *
  * `note` is one line of prose for whoever opens the file later, or null
  * for none.
  *
- * A recording already running is replaced, not refused: see
- * crate::diagnostics for why that is the right answer here and the
- * wrong one for `sipral_media_record_start`.
+ * A recording already running is replaced, not refused. Nothing is
+ * written until `sipral_stack_recording_stop`, so a second start costs
+ * only the frames taken since the first; `sipral_media_record_start`
+ * refuses a second start because its file is already open on disk.
  *
  * Safety
  *
@@ -11745,7 +11740,7 @@ sipral_status_t sipral_audio_device_at(sipral_handle_t stack, size_t index, sipr
  *
  * Reads no memory the caller owns.
  */
-sipral_status_t sipral_audio_select(sipral_handle_t stack, uint32_t role, uint32_t device);
+sipral_status_t sipral_audio_select(sipral_handle_t stack, sipral_audio_role_t role, uint32_t device);
 
 /**
  * What a role was asked to be on, and what it is running on: the id
@@ -11757,7 +11752,7 @@ sipral_status_t sipral_audio_select(sipral_handle_t stack, uint32_t role, uint32
  *
  * Each out parameter must point at one `uint32_t` or be null.
  */
-sipral_status_t sipral_audio_selection(sipral_handle_t stack, uint32_t role, uint32_t *out_selected, uint32_t *out_running);
+sipral_status_t sipral_audio_selection(sipral_handle_t stack, sipral_audio_role_t role, uint32_t *out_selected, uint32_t *out_running);
 
 /**
  * Set the gain of one direction, as a fixed-point ratio with 256 for
@@ -11771,7 +11766,7 @@ sipral_status_t sipral_audio_selection(sipral_handle_t stack, uint32_t role, uin
  *
  * Reads no memory the caller owns.
  */
-sipral_status_t sipral_audio_set_gain(sipral_handle_t stack, uint32_t direction, uint32_t gain);
+sipral_status_t sipral_audio_set_gain(sipral_handle_t stack, sipral_audio_direction_t direction, uint32_t gain);
 
 /**
  * The gain of one direction, in the steps `sipral_audio_set_gain` takes.
@@ -11780,7 +11775,7 @@ sipral_status_t sipral_audio_set_gain(sipral_handle_t stack, uint32_t direction,
  *
  * `out_gain` must point at one `uint32_t`.
  */
-sipral_status_t sipral_audio_gain(sipral_handle_t stack, uint32_t direction, uint32_t *out_gain);
+sipral_status_t sipral_audio_gain(sipral_handle_t stack, sipral_audio_direction_t direction, uint32_t *out_gain);
 
 /**
  * Mute one direction, or unmute it, kept across every device change. A
@@ -11791,7 +11786,7 @@ sipral_status_t sipral_audio_gain(sipral_handle_t stack, uint32_t direction, uin
  *
  * Reads no memory the caller owns.
  */
-sipral_status_t sipral_audio_set_muted(sipral_handle_t stack, uint32_t direction, uint32_t muted);
+sipral_status_t sipral_audio_set_muted(sipral_handle_t stack, sipral_audio_direction_t direction, uint32_t muted);
 
 /**
  * Whether one direction is muted: one or zero into `out_muted`.
@@ -11800,7 +11795,7 @@ sipral_status_t sipral_audio_set_muted(sipral_handle_t stack, uint32_t direction
  *
  * `out_muted` must point at one `uint32_t`.
  */
-sipral_status_t sipral_audio_muted(sipral_handle_t stack, uint32_t direction, uint32_t *out_muted);
+sipral_status_t sipral_audio_muted(sipral_handle_t stack, sipral_audio_direction_t direction, uint32_t *out_muted);
 
 /**
  * The meter of one direction: the loudest sample of the last tenth of a
@@ -11812,7 +11807,7 @@ sipral_status_t sipral_audio_muted(sipral_handle_t stack, uint32_t direction, ui
  *
  * `out_peak` must point at one `uint32_t`.
  */
-sipral_status_t sipral_audio_level(sipral_handle_t stack, uint32_t direction, uint32_t *out_peak);
+sipral_status_t sipral_audio_level(sipral_handle_t stack, sipral_audio_direction_t direction, uint32_t *out_peak);
 
 /**
  * Open the devices and start the pump now, whatever the calls are
@@ -11896,7 +11891,7 @@ sipral_status_t sipral_audio_info(sipral_handle_t stack, sipral_audio_info_t *ou
  * and must stay valid until the log is turned off or replaced and no
  * thread is inside this stack any more.
  */
-sipral_status_t sipral_stack_log(sipral_handle_t stack, uint32_t level, sipral_log_callback_t callback, void *user_data);
+sipral_status_t sipral_stack_log(sipral_handle_t stack, sipral_log_level_t level, sipral_log_callback_t callback, void *user_data);
 
 /**
  * Copy a snapshot of everything this stack is holding into `buffer`, as
@@ -12035,7 +12030,7 @@ sipral_status_t sipral_media_encryption_at(sipral_handle_t media, size_t index, 
  *
  * Safe to call with any handle values.
  */
-sipral_status_t sipral_call_dtmf_detection(sipral_handle_t stack, sipral_handle_t call, uint32_t mode);
+sipral_status_t sipral_call_dtmf_detection(sipral_handle_t stack, sipral_handle_t call, sipral_dtmf_detection_t mode);
 
 /**
  * Listen for call progress on this call and decide who answers it, as
@@ -12164,7 +12159,7 @@ sipral_status_t sipral_local_conference_remove(sipral_handle_t conference, sipra
  *
  * Safe to call with any handle values.
  */
-sipral_status_t sipral_local_conference_set_muted(sipral_handle_t conference, sipral_handle_t member, uint32_t direction, uint32_t muted);
+sipral_status_t sipral_local_conference_set_muted(sipral_handle_t conference, sipral_handle_t member, sipral_audio_direction_t direction, uint32_t muted);
 
 /**
  * Set the level of one way of a member, from the next tick, in the
@@ -12176,7 +12171,7 @@ sipral_status_t sipral_local_conference_set_muted(sipral_handle_t conference, si
  *
  * Safe to call with any handle values.
  */
-sipral_status_t sipral_local_conference_set_gain(sipral_handle_t conference, sipral_handle_t member, uint32_t direction, uint32_t gain);
+sipral_status_t sipral_local_conference_set_gain(sipral_handle_t conference, sipral_handle_t member, sipral_audio_direction_t direction, uint32_t gain);
 
 /**
  * How the conference stands.

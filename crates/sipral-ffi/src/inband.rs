@@ -32,10 +32,10 @@ use sipral::{
     ToneRegion,
 };
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
-use crate::media::{media_failed, toggled};
+use crate::media::{SipralToggle, media_failed, toggled};
 use crate::stack::{StackState, handle_failed, with_stack};
 use crate::status::SipralStatus;
 use crate::versioned::{Versioned, read_versioned};
@@ -83,14 +83,14 @@ record! {
         pub size: usize,
         /// A `SipralToggle`: on (the default) listens with what follows,
         /// off stops listening and reads nothing else.
-        pub listen: u32,
+        pub listen: Number<SipralToggle>,
         /// A [`SipralToneRegion`]. Europe by default.
-        pub region: u32,
+        pub region: Number<SipralToneRegion>,
         /// A `SipralToggle`: whether to decide who answered. On by default.
-        pub answering_machine: u32,
+        pub answering_machine: Number<SipralToggle>,
         /// A `SipralToggle`: whether to listen for the beep after a verdict
         /// of a machine. On by default.
-        pub beep: u32,
+        pub beep: Number<SipralToggle>,
         /// How long after the verdict to listen for the beep. Thirty
         /// seconds by default.
         pub beep_window_ms: u32,
@@ -146,7 +146,7 @@ record! {
         pub size: usize,
         /// A `SipralToggle`: on (the default) beeps as what follows says,
         /// off plays no tone and reads nothing else.
-        pub enabled: u32,
+        pub enabled: Number<SipralToggle>,
         /// Its frequency, from 300 to 3400 Hz. 1400 by default.
         pub frequency_hz: u32,
         /// How far below 0 dBm0 it sounds, from 3 to 40 dB: 18 is a beep at
@@ -158,7 +158,7 @@ record! {
         /// most ten minutes. Fifteen seconds by default.
         pub interval_ms: u32,
         /// A `SipralToggle`: whether this end hears it too. On by default.
-        pub local: u32,
+        pub local: Number<SipralToggle>,
     }
 }
 
@@ -326,7 +326,7 @@ entry! {
     /// # Safety
     ///
     /// Safe to call with any handle values.
-    fn sipral_call_dtmf_detection(stack: SipralHandle, call: SipralHandle, mode: u32) {
+    fn sipral_call_dtmf_detection(stack: SipralHandle, call: SipralHandle, mode: Number<SipralDtmfDetection>) {
         let detection = detection_of(mode, "mode")?;
         with_stack(stack, |state| {
             let id = engine_call(state, call)?;

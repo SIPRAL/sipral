@@ -38,10 +38,10 @@ use sipral_ua::{
     Attestation, CallerVerification, StirVerification, VerificationFailure, VerificationOutcome,
 };
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
-use crate::media::{SipralSrtpSuite, with_media};
+use crate::media::{SipralSrtpSuite, SipralToggle, with_media};
 use crate::stack::{handle_failed, with_stack_at};
 use crate::status::SipralStatus;
 use crate::versioned::{Versioned, read_versioned, write_versioned};
@@ -235,7 +235,7 @@ record! {
         /// the providers the anchors certify — the one a SHAKEN deployment,
         /// whose certificates carry codes and no numbers, makes by turning
         /// this on. ABI 0.32.
-        pub accept_service_provider_codes: u32,
+        pub accept_service_provider_codes: Number<SipralToggle>,
         /// Zero. Rounds the struct up to a whole multiple of its alignment on
         /// every target, so that a member a later version appends starts at or
         /// past the length a caller built against this header declares, never
@@ -266,15 +266,15 @@ record! {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// A [`SipralMediaKind`]: what the stream carries.
-        pub media: u32,
+        pub media: Number<SipralMediaKind>,
         /// Whether what it sends is encrypted and what it takes
         /// authenticated, now. Zero while it waits for the handshake that
         /// keys it.
         pub encrypted: u32,
         /// A [`SipralKeyExchange`]: how its keys were exchanged.
-        pub key_exchange: u32,
+        pub key_exchange: Number<SipralKeyExchange>,
         /// A [`SipralSrtpSuite`]: the transform it runs, once it runs one.
-        pub suite: u32,
+        pub suite: Number<SipralSrtpSuite>,
         /// Whether the key exchange authenticated the far end: set for a
         /// DTLS-SRTP stream once its handshake finished, the far end's
         /// certificate having matched its signalled fingerprint; never for

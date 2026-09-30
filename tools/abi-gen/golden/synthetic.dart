@@ -122,6 +122,10 @@ final class SipralStackConfig extends ffi.Struct {
   @ffi.Uint32()
   external int echo;
 
+  /// A SipralToggle, read as a number and checked where it is used.
+  @ffi.Uint32()
+  external int record;
+
   /// Header fields to send, `headers_len` of them.
   external ffi.Pointer<SipralHeader> headers;
 
@@ -351,7 +355,7 @@ final class Sipral {
   static Map<String, List<int>> recordLayouts() => {
         'sipral_counters_t': [ffi.sizeOf<SipralCounters>(), 24, 16, 24],
         'sipral_header_t': [ffi.sizeOf<SipralHeader>(), 32, 16, 16],
-        'sipral_stack_config_t': [ffi.sizeOf<SipralStackConfig>(), 64, 32, 32],
+        'sipral_stack_config_t': [ffi.sizeOf<SipralStackConfig>(), 64, 36, 36],
         'sipral_media_packet_t': [ffi.sizeOf<SipralMediaPacket>(), 56, 28, 28],
         'sipral_registration_event_t': [ffi.sizeOf<SipralRegistrationEvent>(), 8, 8, 8],
         'sipral_media_event_t': [ffi.sizeOf<SipralMediaEvent>(), 32, 16, 16],
@@ -385,6 +389,16 @@ final class Sipral {
   late final int Function(int stack, ffi.Pointer<SipralCounters> outCounters) stackCounters = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralCounters> outCounters),
       int Function(int stack, ffi.Pointer<SipralCounters> outCounters)>('sipral_stack_counters');
+
+  /// Turn the echo on or off, and say what it was.
+  late final int Function(int stack, int echo, ffi.Pointer<ffi.Uint32> outWas) stackSetEcho = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Uint32 echo, ffi.Pointer<ffi.Uint32> outWas),
+      int Function(int stack, int echo, ffi.Pointer<ffi.Uint32> outWas)>('sipral_stack_set_echo');
+
+  /// Every setting it has, one SipralToggle each.
+  late final int Function(int stack, ffi.Pointer<ffi.Uint32> outToggles, int capacity, ffi.Pointer<ffi.Size> outCount) stackToggles = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Uint32> outToggles, ffi.Size capacity, ffi.Pointer<ffi.Size> outCount),
+      int Function(int stack, ffi.Pointer<ffi.Uint32> outToggles, int capacity, ffi.Pointer<ffi.Size> outCount)>('sipral_stack_toggles');
 
   /// Hand it bytes to send.
   late final int Function(int stack, ffi.Pointer<ffi.Uint8> message, int messageLen) stackSend = library.lookupFunction<

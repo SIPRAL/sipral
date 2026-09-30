@@ -192,16 +192,16 @@ entry! {
 entry! {
     /// Start recording the signalling this stack is fed from here on
     /// (`docs/18-replay.md`), with the same seed `sipral_stack_create` built
-    /// it with. Read [`crate::diagnostics`] before reaching for this: what it
-    /// records and what it deliberately never does is written down there
-    /// once rather than repeated at each of these three entry points.
+    /// it with. Read `docs/18-replay.md` before reaching for this: it records
+    /// what arrives, exactly as it arrived, and never what this end sent.
     ///
     /// `note` is one line of prose for whoever opens the file later, or null
     /// for none.
     ///
-    /// A recording already running is replaced, not refused: see
-    /// [`crate::diagnostics`] for why that is the right answer here and the
-    /// wrong one for `sipral_media_record_start`.
+    /// A recording already running is replaced, not refused. Nothing is
+    /// written until `sipral_stack_recording_stop`, so a second start costs
+    /// only the frames taken since the first; `sipral_media_record_start`
+    /// refuses a second start because its file is already open on disk.
     ///
     /// # Safety
     ///

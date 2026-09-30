@@ -56,11 +56,11 @@ use std::time::Instant;
 use sipral::TurnTransport;
 use sipral_core::endpoint::{Transmit, TransportId, TransportProtocol};
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::SipralEvent;
 use crate::handle::SipralHandle;
-use crate::stack::{SipralStackConfig, StackState, with_stack, with_stack_at};
+use crate::stack::{SipralStackConfig, SipralTransport, StackState, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::text;
 #[cfg(feature = "stun")]
@@ -120,7 +120,7 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralNatEvent {
         /// A [`SipralNatMapping`].
-        pub mapping: u32,
+        pub mapping: Number<SipralNatMapping>,
         /// Nonzero for a signalling socket — a transport of this stack's —
         /// and zero for a media socket [`sipral_stack_nat_map`] named.
         pub signalling: u32,
@@ -177,7 +177,7 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralNatRelayEvent {
         /// A [`SipralNatRelay`].
-        pub outcome: u32,
+        pub outcome: Number<SipralNatRelay>,
         /// For `SIPRAL_NAT_RELAY_FAILED`, the STUN error code the server
         /// refused with — 401 for a credential it does not accept, 486 for a
         /// user at its allocation quota, 508 for a server with nothing left —
@@ -237,10 +237,10 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralTurnStreamEvent {
         /// A [`SipralTurnStream`].
-        pub state: u32,
+        pub state: Number<SipralTurnStream>,
         /// What to open, as a `SipralTransport`: `SIPRAL_TRANSPORT_TCP` or
         /// `SIPRAL_TRANSPORT_TLS`, what `turn_transport` named.
-        pub protocol: u32,
+        pub protocol: Number<SipralTransport>,
         /// The media socket, as `sipral_stack_nat_map` named it: the
         /// connection's own name in the three calls that take one.
         pub local: *const c_char,
@@ -281,7 +281,7 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralStunServerEvent {
         /// A [`SipralStunServerState`].
-        pub state: u32,
+        pub state: Number<SipralStunServerState>,
         /// For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server in use now; for
         /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED`, the last one that failed.
         pub server: *const c_char,

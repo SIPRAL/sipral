@@ -36,20 +36,29 @@ use sipral_ua::{
     RegistrationFailure, RegistrationState, Rung, UaEvent, UserAgent,
 };
 
-use crate::abi::{alias, codes, record};
+use crate::abi::{Number, alias, codes, record};
 use crate::audio::SipralAudioEvent;
 use crate::conference::SipralConferenceEvent;
 use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+use crate::identity::{SipralAnswerMode, SipralRingSource, SipralVerstat};
 use crate::local_conference::SipralLocalConferenceEvent;
-use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
+use crate::media::{
+    SipralCodec, SipralDirection, SipralMediaFault, SipralSrtpSuite, SipralStreamStats,
+    direction_of, fault_of, named_codec,
+};
 use crate::names::Names;
 use crate::nat::{
     SipralNatEvent, SipralNatRelayEvent, SipralStunServerEvent, SipralTurnStreamEvent,
 };
 use crate::presence::SipralPresenceEvent;
 use crate::realtime_text::SipralTextEvent;
-use crate::subscription::{SipralSubscriptionState, named_end, named_state};
+use crate::security::{
+    SipralAttestation, SipralKeyExchange, SipralVerificationFailure, SipralVerificationOutcome,
+    SipralVerificationStage,
+};
+use crate::stack::SipralTransport;
+use crate::subscription::{SipralSubscriptionEnd, SipralSubscriptionState, named_end, named_state};
 use crate::transport::SipralTransportFailedEvent;
 
 /// Declare the event number space, once.
@@ -129,6 +138,10 @@ macro_rules! event_kinds {
             };
         }
 
+        impl $crate::abi::Enumerated for SipralEventKind {
+            type Raw = u32;
+        }
+
         entry! {
             /// The short name of an event kind, as a static NUL-terminated
             /// string, or null for a number this build has no kind for.
@@ -143,7 +156,9 @@ macro_rules! event_kinds {
             ///
             /// Reads no memory the caller owns, and is safe to call from any
             /// thread.
-            fn sipral_event_kind_name(kind: u32) -> *const c_char, on_panic = std::ptr::null(), {
+            fn sipral_event_kind_name(
+                kind: Number<SipralEventKind>,
+            ) -> *const c_char, on_panic = std::ptr::null(), {
                 match kind {
                     $($number => $name.as_ptr(),)*
                     _ => std::ptr::null(),
@@ -1000,9 +1015,8 @@ codes! {
 
 codes! {
     /// What a [`SipralEventKind::Recovery`] reports happened, for
-    /// `payload.recovery.state`. Names for the two ways `sipral_ua`'s
-    /// lifecycle machine settles: a registrar answered again, or a recovery
-    /// ladder ran out of rungs.
+    /// `payload.recovery.state`: the two ways a recovery settles — a
+    /// registrar answered again, or the ladder ran out of rungs.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralRecoveryOutcome: u32 {
         /// Never written by this build.
@@ -1018,10 +1032,9 @@ codes! {
     /// The last rung a recovery ladder tried before it gave up, for
     /// [`SipralEventKind::Recovery`]'s `payload.recovery.rung`. Meaningful
     /// only when `payload.recovery.state` is
-    /// [`SipralRecoveryOutcome::GaveUp`]. Names for `sipral_ua::Rung`, minus
-    /// [`Rung::GiveUp`] itself: `sipral_ua` reports the rung before it that
-    /// asked for something and went unanswered, not the give-up rung that
-    /// follows it.
+    /// [`SipralRecoveryOutcome::GaveUp`]. The ladder's own last step, giving
+    /// up, has no name here: what is reported is the rung before it that
+    /// asked for something and went unanswered.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralRecoveryRung: u32 {
         /// The ladder did not give up.
@@ -1040,7 +1053,7 @@ codes! {
 
 codes! {
     /// Why a recovery ladder gave up, for [`SipralEventKind::Recovery`]'s
-    /// `payload.recovery.reason`. Names for `sipral_ua::RecoveryFailure`.
+    /// `payload.recovery.reason`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralRecoveryFailure: u32 {
         /// The ladder did not give up.
@@ -1060,9 +1073,9 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralRegistrationEvent {
         /// A [`SipralRegistrationState`].
-        pub state: u32,
+        pub state: Number<SipralRegistrationState>,
         /// A [`SipralRegistrationFailure`], zero when nothing failed.
-        pub failure: u32,
+        pub failure: Number<SipralRegistrationFailure>,
         /// The status the registrar answered with, or zero when none arrived.
         pub status_code: u32,
         /// The binding's granted lifetime, zero unless it is live.
@@ -1083,9 +1096,9 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralCallEvent {
         /// A [`SipralCallState`].
-        pub state: u32,
+        pub state: Number<SipralCallState>,
         /// A [`SipralCallEndReason`], zero while the call is alive.
-        pub end_reason: u32,
+        pub end_reason: Number<SipralCallEndReason>,
         /// The status a response carried, or zero.
         pub status_code: u32,
         /// The other call this event is also about: the sibling of a fork, or the
@@ -1163,7 +1176,7 @@ record! {
         pub asserted_display_len: usize,
         /// A [`SipralVerstat`](crate::identity::SipralVerstat): what the
         /// network concluded about the caller's number.
-        pub verstat: u32,
+        pub verstat: Number<SipralVerstat>,
         /// The `SIPRAL_PRIVACY_*` bits the caller's `Privacy` asked for.
         pub privacy: u32,
         /// Who the call was last diverted from: the top-most `Diversion`
@@ -1182,7 +1195,7 @@ record! {
         pub history_count: u32,
         /// A [`SipralAnswerMode`](crate::identity::SipralAnswerMode): the
         /// INVITE's `Answer-Mode` (RFC 5373).
-        pub answer_mode: u32,
+        pub answer_mode: Number<SipralAnswerMode>,
         /// Whether that field said `;require`: the caller would rather the
         /// call be refused, with a 403, than answered any other way.
         pub answer_mode_required: u32,
@@ -1200,7 +1213,7 @@ record! {
         pub answer_after_ms: u64,
         /// A [`SipralRingSource`](crate::identity::SipralRingSource): whether
         /// the ring says the caller is internal or external.
-        pub ring_source: u32,
+        pub ring_source: Number<SipralRingSource>,
         /// The first `Alert-Info` URI, without the angle brackets. Null and
         /// zero when none. `sipral_call_identity_text` reads the rest.
         pub alert_info: *const u8,
@@ -1211,14 +1224,14 @@ record! {
         /// account that verifies; zero when nothing was verified. Unlike
         /// `verstat`, which is what a network before this end concluded,
         /// this is what this end checked itself. ABI 0.31.
-        pub verification: u32,
+        pub verification: Number<SipralVerificationOutcome>,
         /// A [`SipralAttestation`](crate::security::SipralAttestation): the
         /// level a valid SHAKEN PASSporT claimed.
-        pub attestation: u32,
+        pub attestation: Number<SipralAttestation>,
         /// A [`SipralVerificationFailure`](crate::security::SipralVerificationFailure):
         /// why the verdict did not hold. `sipral_call_identity_text` reads
         /// the number it was signed for, its `origid` and its certificate URL.
-        pub verification_failure: u32,
+        pub verification_failure: Number<SipralVerificationFailure>,
     }
 }
 
@@ -1275,10 +1288,10 @@ record! {
     pub struct SipralMediaEvent {
         /// A [`SipralCodec`](crate::media::SipralCodec): what the negotiation
         /// settled on, zero where the event is not about a codec.
-        pub codec: u32,
+        pub codec: Number<SipralCodec>,
         /// A [`SipralDirection`](crate::media::SipralDirection): which way audio
         /// may flow, as seen from here.
-        pub direction: u32,
+        pub direction: Number<SipralDirection>,
         /// How long the stream has been silent, for a stall and for its recovery.
         pub silent_for_ms: u64,
         /// How much audio reached the file, for a recording that stopped by
@@ -1286,7 +1299,7 @@ record! {
         pub recorded_ms: u64,
         /// A [`SipralMediaFault`](crate::media::SipralMediaFault), zero when
         /// nothing failed.
-        pub fault: u32,
+        pub fault: Number<SipralMediaFault>,
         /// The sentence behind `fault`, as UTF-8. Not NUL-terminated, and null
         /// when nothing failed.
         pub reason: *const c_char,
@@ -1309,10 +1322,10 @@ record! {
         /// A [`SipralSrtpSuite`](crate::media::SipralSrtpSuite): the transform
         /// this call's media is protected with, for
         /// [`SipralEventKind::MediaSecured`] and zero on every other kind.
-        pub suite: u32,
+        pub suite: Number<SipralSrtpSuite>,
         /// A [`SipralDigitSource`]: which of the two ways this stack accepts a
         /// digit reported this one, for [`SipralEventKind::DigitReceived`].
-        pub source: u32,
+        pub source: Number<SipralDigitSource>,
         /// Whether the RFC 6035 PUBLISH left this end, for
         /// [`SipralEventKind::QualityReportSent`] and zero on every other
         /// kind. Not whether a collector accepted it.
@@ -1323,7 +1336,7 @@ record! {
         /// and [`SipralEventKind::MediaSecured`], which carry the encryption
         /// report of the call's stream: this, `encrypted`, `authenticated`,
         /// and `suite` from then on. ABI 0.31.
-        pub key_exchange: u32,
+        pub key_exchange: Number<SipralKeyExchange>,
         /// Whether the stream is encrypted, now. Zero at the start of a
         /// DTLS-SRTP call, whose keys arrive with
         /// [`SipralEventKind::MediaSecured`].
@@ -1341,13 +1354,13 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralProgressEvent {
         /// A [`SipralProgressKind`].
-        pub what: u32,
+        pub what: Number<SipralProgressKind>,
         /// A [`SipralProgressTone`], for a tone.
-        pub tone: u32,
+        pub tone: Number<SipralProgressTone>,
         /// A [`SipralAmdVerdict`], for who answered.
-        pub verdict: u32,
+        pub verdict: Number<SipralAmdVerdict>,
         /// A [`SipralAmdReason`], for who answered.
-        pub reason: u32,
+        pub reason: Number<SipralAmdReason>,
         /// When, in milliseconds: a tone's first burst from the first frame
         /// listened to; the decision after answer; the beep's end after
         /// answer.
@@ -1384,13 +1397,13 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralRecoveryEvent {
         /// A [`SipralRecoveryOutcome`].
-        pub state: u32,
+        pub state: Number<SipralRecoveryOutcome>,
         /// A [`SipralRecoveryRung`]: the last rung tried. Zero unless `state`
         /// is [`SipralRecoveryOutcome::GaveUp`].
-        pub rung: u32,
+        pub rung: Number<SipralRecoveryRung>,
         /// A [`SipralRecoveryFailure`]. Zero unless `state` is
         /// [`SipralRecoveryOutcome::GaveUp`].
-        pub reason: u32,
+        pub reason: Number<SipralRecoveryFailure>,
         /// Bindings the ladder never proved. Meaningful only when `state` is
         /// [`SipralRecoveryOutcome::GaveUp`].
         pub unverified: u32,
@@ -1427,10 +1440,10 @@ record! {
         /// this ABI when a fork made one nobody asked for.
         pub subscription: SipralHandle,
         /// A [`SipralSubscriptionState`].
-        pub state: u32,
+        pub state: Number<SipralSubscriptionState>,
         /// A [`SipralSubscriptionEnd`](crate::subscription::SipralSubscriptionEnd):
         /// why it is not live. Zero while it is.
-        pub reason: u32,
+        pub reason: Number<SipralSubscriptionEnd>,
         /// The SIP status a response gave for it, when one did. Zero
         /// otherwise.
         pub status_code: u32,
@@ -1471,7 +1484,7 @@ record! {
         /// either — nothing this build originates ever measures against a
         /// protocol like that, so this is the layer below having grown one
         /// rather than a caller mistake.
-        pub protocol: u32,
+        pub protocol: Number<SipralTransport>,
         /// Where to, as `host:port`. Not NUL-terminated.
         pub destination: *const c_char,
         /// How many bytes of it.
@@ -1512,7 +1525,7 @@ record! {
         /// [`SipralTransport`](crate::stack::SipralTransport), or zero for
         /// neither — which leaves §4.1's NAPTR step to the caller, and is
         /// also what a protocol this build has no number for reads as.
-        pub protocol: u32,
+        pub protocol: Number<SipralTransport>,
     }
 }
 
@@ -1583,19 +1596,19 @@ record! {
     pub struct SipralVerificationEvent {
         /// A [`SipralVerificationStage`](crate::security::SipralVerificationStage):
         /// the certificate is wanted, or the verdict is in.
-        pub stage: u32,
+        pub stage: Number<SipralVerificationStage>,
         /// A [`SipralVerificationOutcome`](crate::security::SipralVerificationOutcome),
         /// for a verdict.
-        pub outcome: u32,
+        pub outcome: Number<SipralVerificationOutcome>,
         /// A [`SipralVerificationFailure`](crate::security::SipralVerificationFailure):
         /// why it did not hold.
-        pub failure: u32,
+        pub failure: Number<SipralVerificationFailure>,
         /// A [`SipralAttestation`](crate::security::SipralAttestation): the
         /// level a valid SHAKEN PASSporT claimed.
-        pub attestation: u32,
+        pub attestation: Number<SipralAttestation>,
         /// A [`SipralVerstat`](crate::identity::SipralVerstat): the `verstat`
         /// this verdict comes to (3GPP TS 24.229).
-        pub verstat: u32,
+        pub verstat: Number<SipralVerstat>,
         /// The response RFC 8224 §6.2.2 prescribes for the failure, zero for
         /// a valid one. Sent only when `refused` is set.
         pub response_code: u32,
@@ -1730,7 +1743,7 @@ alias! {
     /// it, with the `user_data` the stack was created with, and never on two
     /// threads at once for one stack. It must not unwind. Nothing is held
     /// while it runs, so it may call back into the library, the stack it was
-    /// given included: see [`crate::stack`].
+    /// given included (`docs/08-ffi.md`, "The shape").
     pub type SipralEventCallback = fn(event: *const SipralEvent, user_data: *mut c_void);
 }
 

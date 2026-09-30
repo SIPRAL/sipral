@@ -45,7 +45,7 @@ use sipral_audio::{
     Outgoing, Role, SelectError, Selection, Transport,
 };
 
-use crate::abi::{alias, codes, record};
+use crate::abi::{Number, alias, codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
 use crate::stack::{SipralStackConfig, SipralTransport, audio_of};
@@ -270,7 +270,7 @@ record! {
         /// `SIPRAL_TRANSPORT_TLS` are bytes to write, in order, on the
         /// socket's connection to its TURN server, as `sipral_media_capture`
         /// marks them.
-        pub protocol: u32,
+        pub protocol: Number<SipralTransport>,
         /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
         /// both put them without padding at the end of the struct, so that a
         /// member a later version appends starts past the length a caller built
@@ -302,14 +302,14 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralAudioEvent {
         /// A `SipralAudioChange`.
-        pub change: u32,
+        pub change: Number<SipralAudioChange>,
         /// A `SipralAudioOrigin`.
-        pub origin: u32,
+        pub origin: Number<SipralAudioOrigin>,
         /// A `SipralAudioRole`, for a change about one role; zero otherwise.
-        pub role: u32,
+        pub role: Number<SipralAudioRole>,
         /// A `SipralAudioDirection`, for `SIPRAL_AUDIO_CHANGE_DEFAULT_CHANGED`;
         /// zero otherwise.
-        pub direction: u32,
+        pub direction: Number<SipralAudioDirection>,
         /// The device the change is about — the one a role landed on, or
         /// the one that went — or zero.
         pub device: u32,
@@ -719,7 +719,7 @@ entry! {
     /// # Safety
     ///
     /// Reads no memory the caller owns.
-    fn sipral_audio_select(stack: SipralHandle, role: u32, device: u32) {
+    fn sipral_audio_select(stack: SipralHandle, role: Number<SipralAudioRole>, device: u32) {
         let role = role_of(role)?;
         let selection = match DeviceHandle::new(device) {
             Some(handle) => Selection::Device(handle),
@@ -760,7 +760,7 @@ entry! {
     /// Each out parameter must point at one `uint32_t` or be null.
     fn sipral_audio_selection(
         stack: SipralHandle,
-        role: u32,
+        role: Number<SipralAudioRole>,
         out_selected: *mut u32,
         out_running: *mut u32,
     ) {
@@ -799,7 +799,7 @@ entry! {
     /// # Safety
     ///
     /// Reads no memory the caller owns.
-    fn sipral_audio_set_gain(stack: SipralHandle, direction: u32, gain: u32) {
+    fn sipral_audio_set_gain(stack: SipralHandle, direction: Number<SipralAudioDirection>, gain: u32) {
         let direction = direction_of(direction)?;
         let steps = u16::try_from(gain).unwrap_or(GAIN_MOST).min(GAIN_MOST);
         let ratio = f32::from(steps) / f32::from(GAIN_UNITY);
@@ -816,7 +816,7 @@ entry! {
     /// # Safety
     ///
     /// `out_gain` must point at one `uint32_t`.
-    fn sipral_audio_gain(stack: SipralHandle, direction: u32, out_gain: *mut u32) {
+    fn sipral_audio_gain(stack: SipralHandle, direction: Number<SipralAudioDirection>, out_gain: *mut u32) {
         if out_gain.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_gain is null"));
         }
@@ -841,7 +841,7 @@ entry! {
     /// # Safety
     ///
     /// Reads no memory the caller owns.
-    fn sipral_audio_set_muted(stack: SipralHandle, direction: u32, muted: u32) {
+    fn sipral_audio_set_muted(stack: SipralHandle, direction: Number<SipralAudioDirection>, muted: u32) {
         let direction = direction_of(direction)?;
         with_engine(stack, |engine| {
             engine.set_muted(direction, muted != 0);
@@ -856,7 +856,7 @@ entry! {
     /// # Safety
     ///
     /// `out_muted` must point at one `uint32_t`.
-    fn sipral_audio_muted(stack: SipralHandle, direction: u32, out_muted: *mut u32) {
+    fn sipral_audio_muted(stack: SipralHandle, direction: Number<SipralAudioDirection>, out_muted: *mut u32) {
         if out_muted.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_muted is null"));
         }
@@ -876,7 +876,7 @@ entry! {
     /// # Safety
     ///
     /// `out_peak` must point at one `uint32_t`.
-    fn sipral_audio_level(stack: SipralHandle, direction: u32, out_peak: *mut u32) {
+    fn sipral_audio_level(stack: SipralHandle, direction: Number<SipralAudioDirection>, out_peak: *mut u32) {
         if out_peak.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_peak is null"));
         }

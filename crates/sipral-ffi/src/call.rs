@@ -36,12 +36,12 @@ use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, OutgoingExtras, UaError};
 #[cfg(test)]
 use sipral_ua::dtmf::{DEFAULT_DTMF_MS, MAX_DTMF_MS};
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralCallState, call_state};
 use crate::handle::SipralHandle;
 use crate::header::{SipralHeader, supplied};
-use crate::media::{address, media_failed};
+use crate::media::{SipralIce, SipralSrtp, SipralToggle, address, media_failed};
 use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
@@ -84,8 +84,8 @@ record! {
         ///
         /// The application owns the socket, so it is the only one that can say. Set
         /// it and the offer is written from this stack's codec order, the answer is
-        /// read, and the call gets a media session that `crate::media` and
-        /// `crate::record` reach. Leave it null and set `sdp` instead for a call
+        /// read, and the call gets a media session that the `sipral_media_*`
+        /// entry points reach. Leave it null and set `sdp` instead for a call
         /// where the application describes its own session and runs its own RTP.
         pub media_address: *const c_char,
         /// How many bytes of it.
@@ -111,7 +111,7 @@ record! {
         /// `media_address` set — and otherwise not this ABI's to act on: a
         /// call placed with `sdp` is a session the application wrote, and
         /// SRTP in it is the application's own line to write or not.
-        pub srtp: u32,
+        pub srtp: Number<SipralSrtp>,
         /// Which transport the INVITE goes out on, read only together with
         /// `destination`: [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN)
         /// for zero, or a further number
@@ -151,7 +151,7 @@ record! {
         /// `media_address` set — for the reason `srtp` gives: a call placed
         /// with `sdp` is a session the application wrote, and the candidates
         /// in it are already the application's own to write or not.
-        pub ice: u32,
+        pub ice: Number<SipralIce>,
         /// Where this call's real-time text arrives (RFC 4103): a second
         /// socket the application bound, as an address and a port. Set, the
         /// offer or answer carries an `m=text` stream for T.140 with its
@@ -176,7 +176,7 @@ record! {
         /// leaves an answerer no other way to take the stream; the Generic
         /// NACKs and reduced-size RTCP it asks for are agreed only when this
         /// is on, on the answer too.
-        pub feedback: u32,
+        pub feedback: Number<SipralToggle>,
         /// Nonzero to say this end is the focus of a conference (RFC 4579
         /// §3.3): `isfocus` goes on the Contact of every message this call
         /// sends from here on.
@@ -678,7 +678,8 @@ entry! {
     ///
     /// With `media_address` set, the offer is this stack's to write and the
     /// call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
-    /// and `crate::media` carries the packets from then on. `config.srtp`
+    /// and the `sipral_media_*` entry points carry the packets from then on.
+    /// `config.srtp`
     /// overrides `sipral_stack_config_t::srtp` for such a call; it is read for
     /// no other kind.
     ///
@@ -1614,7 +1615,7 @@ entry! {
         call: SipralHandle,
         digits: *const c_char,
         digits_len: usize,
-        via: u32,
+        via: Number<SipralDtmf>,
         duration_ms: u32,
         now_ms: u64,
     ) {
@@ -2061,7 +2062,7 @@ entry! {
     /// # Safety
     ///
     /// `out_state` must point at one `uint32_t`.
-    fn sipral_call_state(stack: SipralHandle, call: SipralHandle, out_state: *mut u32) {
+    fn sipral_call_state(stack: SipralHandle, call: SipralHandle, out_state: *mut Number<SipralCallState>) {
         if out_state.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_state is null"));
         }

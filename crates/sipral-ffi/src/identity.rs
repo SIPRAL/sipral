@@ -27,7 +27,7 @@ use sipral_ua::{
     AnswerMode, AnswerModeField, CallIdentity, Privacy, Reason, Redirect, RingSource, Verstat,
 };
 
-use crate::abi::{codes, constants};
+use crate::abi::{Number, codes, constants};
 use crate::call::ua_failed;
 use crate::diagnostics::copy_out;
 use crate::error::{Fail, entry, fail};
@@ -370,7 +370,7 @@ entry! {
     fn sipral_call_identity_count(
         stack: SipralHandle,
         call: SipralHandle,
-        which: u32,
+        which: Number<SipralIdentityText>,
         out_count: *mut usize,
     ) {
         if out_count.is_null() {
@@ -410,7 +410,7 @@ entry! {
         stack: SipralHandle,
         call: SipralHandle,
         index: usize,
-        which: u32,
+        which: Number<SipralIdentityText>,
         buffer: *mut c_char,
         capacity: usize,
         out_needed: *mut usize,

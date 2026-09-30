@@ -60,7 +60,7 @@ use std::time::Duration;
 
 use sipral::{RecordingFormat, RecordingLayout, RecordingOptions};
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
 use crate::media::{media_failed, with_media};
@@ -103,9 +103,9 @@ record! {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
         /// A [`SipralRecordingFormat`].
-        pub format: u32,
+        pub format: Number<SipralRecordingFormat>,
         /// A [`SipralRecordingLayout`].
-        pub layout: u32,
+        pub layout: Number<SipralRecordingLayout>,
         /// The rate the file is written at, in hertz, or zero for the rate the
         /// call's codec hears at when the recording starts (48 kHz for Ogg
         /// Opus on a call at a rate Opus does not take). WAV takes 8000 to

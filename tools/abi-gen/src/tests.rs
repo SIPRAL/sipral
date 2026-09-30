@@ -299,6 +299,11 @@ const CONFIG: Record = Record {
         member("bind_address_len", "usize"),
         member("echo", "SipralToggle"),
         Member {
+            name: "record",
+            rust_type: "Number < SipralToggle >",
+            doc: &[" A [`SipralToggle`], read as a number and checked where it is used."],
+        },
+        Member {
             name: "headers",
             rust_type: "*const SipralHeader",
             doc: &[" Header fields to send, `headers_len` of them."],
@@ -444,6 +449,27 @@ const FUNCTIONS: &[Function] = &[
         parameters: &[
             member("stack", "SipralHandle"),
             member("out_counters", "*mut SipralCounters"),
+        ],
+        returns: "SipralStatus",
+    },
+    Function {
+        name: "sipral_stack_set_echo",
+        doc: &[" Turn the echo on or off, and say what it was."],
+        parameters: &[
+            member("stack", "SipralHandle"),
+            member("echo", "Number<SipralToggle>"),
+            member("out_was", "* mut crate :: abi :: Number < SipralToggle >"),
+        ],
+        returns: "SipralStatus",
+    },
+    Function {
+        name: "sipral_stack_toggles",
+        doc: &[" Every setting it has, one [`SipralToggle`] each."],
+        parameters: &[
+            member("stack", "SipralHandle"),
+            member("out_toggles", "*mut Number<SipralToggle>"),
+            member("capacity", "usize"),
+            member("out_count", "*mut usize"),
         ],
         returns: "SipralStatus",
     },
@@ -1307,12 +1333,145 @@ fn a_type_spelled_with_a_space_is_the_same_type() {
     );
 }
 
+/// A number of an enumeration is that enumeration's `typedef` in C and the
+/// plain integer everywhere a binding builds its own values, so nothing a
+/// binding hands over changes with the name.
+#[test]
+fn a_number_of_an_enumeration_is_its_typedef_in_c_and_its_integer_elsewhere() {
+    let header = c::header(&SYNTHETIC).unwrap();
+    assert!(
+        header.contains(
+            "sipral_status_t sipral_stack_set_echo(sipral_handle_t stack, sipral_toggle_t echo, \
+             sipral_toggle_t *out_was);"
+        ),
+        "{header}"
+    );
+    assert!(header.contains("    sipral_toggle_t record;\n"), "{header}");
+    let python = python::binding(&SYNTHETIC).unwrap();
+    assert!(
+        python.contains("sipral_toggle_t echo, sipral_toggle_t *out_was);"),
+        "{python}"
+    );
+    let swift = swift::binding(&SYNTHETIC).unwrap();
+    assert!(
+        swift.contains(
+            "public static func stackSetEcho(stack: SipralHandle, echo: UInt32) throws -> UInt32 {"
+        ),
+        "{swift}"
+    );
+    let dotnet = csharp::binding(&SYNTHETIC).unwrap();
+    assert!(dotnet.contains("uint echo, out uint was"), "{dotnet}");
+}
+
+/// Two surfaces a `Number` cannot be printed from: one naming an enumeration
+/// that is not there, and one naming an enumeration that is not a `u32`.
+const NUMBER_OF_NOTHING: Surface = Surface {
+    functions: &[Function {
+        name: "sipral_stack_mode",
+        doc: &[],
+        parameters: &[member("mode", "Number<SipralMode>")],
+        returns: "SipralStatus",
+    }],
+    enumerations: &[STATUS],
+    ..NOTHING
+};
+
+const NUMBER_OF_A_SIGNED: Surface = Surface {
+    functions: &[Function {
+        name: "sipral_stack_named",
+        doc: &[],
+        parameters: &[member("code", "Number<SipralStatus>")],
+        returns: "SipralStatus",
+    }],
+    enumerations: &[STATUS],
+    ..NOTHING
+};
+
+#[test]
+fn a_number_of_something_the_header_cannot_spell_is_refused() {
+    let why = c::header(&NUMBER_OF_NOTHING)
+        .expect_err("no SipralMode")
+        .to_string();
+    assert!(
+        why.contains("sipral_stack_mode::mode holds a Number<SipralMode>"),
+        "{why}"
+    );
+    let why = c::header(&NUMBER_OF_A_SIGNED)
+        .expect_err("an i32")
+        .to_string();
+    assert!(
+        why.contains("crosses as a u32, and SipralStatus is a i32"),
+        "{why}"
+    );
+    let why = Type::read("Number<u32>")
+        .expect_err("not an enumeration")
+        .to_string();
+    assert!(why.contains("not one of the ABI's enumerations"), "{why}");
+}
+
+/// A signed length has no spelling in C that keeps the sign, so it is
+/// refused rather than printed as a `size_t`.
+#[test]
+fn a_signed_length_is_refused_rather_than_printed_unsigned() {
+    let why = Type::read("isize").expect_err("isize").to_string();
+    assert!(why.contains("no rule for"), "{why}");
+    assert!(Type::read("usize").unwrap().is_length());
+}
+
+/// A function whose documentation reaches into the crate three ways: a link
+/// with a path, a type in code quotes, and a module.
+const RUST_IN_THE_DOC: Surface = Surface {
+    functions: &[Function {
+        name: "sipral_stack_echo",
+        doc: &[
+            " Answers with a [`crate::media::SipralToggle`], as a `SipralToggle`.",
+            " See [`crate::stack`].",
+        ],
+        parameters: &[member("stack", "SipralHandle")],
+        returns: "SipralStatus",
+    }],
+    enumerations: &[STATUS, TOGGLE],
+    ..NOTHING
+};
+
+#[test]
+fn documentation_is_printed_in_c_terms_or_refused() {
+    let lines = c::lines(
+        &RUST_IN_THE_DOC,
+        &[" Answers with a [`crate::media::SipralToggle`], as a `SipralToggle`."],
+    );
+    assert_eq!(
+        lines,
+        [" Answers with a sipral_toggle_t, as a `sipral_toggle_t`."],
+        "the path stays on the link, or the quoted name is the Rust one"
+    );
+    let why = c::header(&RUST_IN_THE_DOC)
+        .expect_err("a module named in the header")
+        .to_string();
+    assert!(why.contains("says `crate::`"), "{why}");
+    assert!(why.contains("See crate::stack."), "{why}");
+}
+
 // ------------------------------------------------------------ what a surface reaches
 
 /// What one type is, in the terms the back ends branch on rather than in the
 /// spelling the declaration used.
 fn kind_of(surface: &Surface, ty: &Type) -> String {
-    let base = match &ty.base {
+    let number = ty
+        .enumeration
+        .as_ref()
+        .map(|name| format!("a number of {}", named_kind(surface, name)));
+    let base = number.unwrap_or_else(|| kind_of_base(surface, &ty.base));
+    match ty.pointer {
+        None => base,
+        Some(Writable::No) => format!("*const {base}"),
+        Some(Writable::Yes) => format!("*mut {base}"),
+    }
+}
+
+/// What a type is once any pointer is off it.
+fn kind_of_base(surface: &Surface, base: &Base) -> String {
+    match base {
         Base::Opaque => "c_void".to_owned(),
         Base::Char => "c_char".to_owned(),
         Base::Float(bits) => format!("f{bits}"),
@@ -1321,11 +1480,6 @@ fn kind_of(surface: &Surface, ty: &Type) -> String {
             format!("{}{bits}", if *signed { "i" } else { "u" })
         }
         Base::Named(name) => named_kind(surface, name),
-    };
-    match ty.pointer {
-        None => base,
-        Some(Writable::No) => format!("*const {base}"),
-        Some(Writable::Yes) => format!("*mut {base}"),
     }
 }
 
@@ -1795,7 +1949,7 @@ fn a_struct_going_in_is_a_kotlin_class_the_shim_copies_in() {
     assert!(
         printed.contains(
             "external fun sipral_stack_create(configEventCallback: Long, configBindAddress: \
-             ByteArray?, configEcho: Long, configHeadersBytes: ByteArray?, \
+             ByteArray?, configEcho: Long, configRecord: Long, configHeadersBytes: ByteArray?, \
              configHeadersLengths: LongArray?, stack: LongArray): Int"
         ),
         "{printed}"

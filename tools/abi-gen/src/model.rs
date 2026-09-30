@@ -113,6 +113,10 @@ pub(crate) struct Type {
     pub(crate) pointer: Option<Writable>,
     /// What it is, or what it points at.
     pub(crate) base: Base,
+    /// The enumeration whose numbers it holds, when the declaration said so
+    /// with `Number<E>`. The base is then `E`'s integer, which is what every
+    /// binding hands over; the name is what C spells it with.
+    pub(crate) enumeration: Option<String>,
 }
 
 /// Whether a pointer may be written through.
@@ -161,8 +165,10 @@ impl Int {
             Some(("i", rest)) => (true, rest),
             _ => return None,
         };
+        // `isize` has no C spelling here: `size_t` is unsigned, and printing a
+        // signed length as one is a sign lost without a word
         if rest == "size" {
-            return Some(Self { bits: 0, signed });
+            return (!signed).then_some(Self::SIZE);
         }
         rest.parse().ok().map(|bits| Self { bits, signed })
     }
@@ -190,6 +196,27 @@ impl Type {
                  generator therefore does not print"
             )));
         }
+        let packed: String = rest.chars().filter(|c| !c.is_whitespace()).collect();
+        let last = packed.rsplit("::").next().unwrap_or(&packed);
+        if let Some(inner) = last.strip_prefix("Number<") {
+            let Some(name) = inner
+                .strip_suffix('>')
+                .filter(|name| name.starts_with("Sipral"))
+            else {
+                return Err(Refused::about(&format!(
+                    "{spelling} is a Number of something that is not one of the ABI's \
+                     enumerations"
+                )));
+            };
+            return Ok(Self {
+                pointer,
+                base: Base::Int(Int {
+                    bits: 32,
+                    signed: false,
+                }),
+                enumeration: Some(name.to_owned()),
+            });
+        }
         let base = match rest {
             "c_void" => Base::Opaque,
             "c_char" => Base::Char,
@@ -206,7 +233,11 @@ impl Type {
                 }
             },
         };
-        Ok(Self { pointer, base })
+        Ok(Self {
+            pointer,
+            base,
+            enumeration: None,
+        })
     }
 
     /// Whether this is `usize`, which is the length beside every buffer.
@@ -338,7 +369,50 @@ pub(crate) fn user_pointer() -> Type {
     Type {
         pointer: Some(Writable::Yes),
         base: Base::Opaque,
+        enumeration: None,
     }
+}
+
+/// Refuse a `Number<E>` whose `E` is not an enumeration the surface declares
+/// with the width the number crosses as.
+///
+/// `Number<E>` reads as a `u32` before the surface is at hand, since the alias
+/// is `E`'s integer and every enumeration a parameter holds is one; one of
+/// another width would be printed as a `u32` beside a `typedef` that says
+/// otherwise, so it is refused here, once, rather than by the first back end
+/// to print it.
+pub(crate) fn numbers_named(surface: &Surface) -> Result<(), Refused> {
+    let members = surface
+        .records
+        .iter()
+        .flat_map(|record| record.fields.iter().map(move |field| (record.name, field)))
+        .chain(surface.functions.iter().flat_map(|function| {
+            function
+                .parameters
+                .iter()
+                .map(move |parameter| (function.name, parameter))
+        }));
+    for (owner, member) in members {
+        let ty = Type::read(member.rust_type)
+            .map_err(|why| Refused::about(&format!("{owner}::{}: {why}", member.name)))?;
+        let Some(name) = ty.enumeration else {
+            continue;
+        };
+        let Some(enumeration) = surface.enumerations.iter().find(|e| e.name == name) else {
+            return Err(Refused::about(&format!(
+                "{owner}::{} holds a Number<{name}>, and the surface declares no enumeration \
+                 {name}",
+                member.name
+            )));
+        };
+        if enumeration.width != "u32" {
+            return Err(Refused::about(&format!(
+                "{owner}::{} holds a Number<{name}>, which crosses as a u32, and {name} is a {}",
+                member.name, enumeration.width
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Whether a parameter, or a member, is a callback the surface declares.
@@ -830,6 +904,12 @@ pub(crate) fn plain_named(doc: &[&str], rename: &dyn Fn(&str) -> String) -> Vec<
                 break;
             };
             text.push_str(before);
+            // `crate::event::SipralEventKind` is a path rustdoc needs and no
+            // other reader has; the item at its end is what the link names
+            let inside = inside
+                .strip_prefix("crate::")
+                .and_then(|rest| rest.split_once("::"))
+                .map_or(inside, |(_, item)| item);
             text.push_str(&rename(inside));
             let after = open + close + 2;
             rest = rest.get(after..).unwrap_or("");
@@ -841,6 +921,7 @@ pub(crate) fn plain_named(doc: &[&str], rename: &dyn Fn(&str) -> String) -> Vec<
             }
         }
         text.push_str(rest);
+        let text = rust_names_renamed(&text, rename);
         let text = text.trim_end();
         // a markdown heading is rustdoc's; every language below reads it as a
         // line of prose
@@ -851,6 +932,40 @@ pub(crate) fn plain_named(doc: &[&str], rename: &dyn Fn(&str) -> String) -> Vec<
     while out.last().is_some_and(String::is_empty) {
         out.pop();
     }
+    out
+}
+
+/// A line with every `` `SipralFoo` `` in code quotes that is not a link
+/// spelled the way `rename` spells a link to it, in its quotes still.
+///
+/// A declaration's prose says "as a `SipralToggle`" as often as it links one,
+/// and a reader of the header meets that name nowhere else; a quoted name
+/// `rename` does not know comes back as it was.
+fn rust_names_renamed(line: &str, rename: &dyn Fn(&str) -> String) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('`') {
+        let (before, quoted) = rest.split_at(open);
+        out.push_str(before);
+        let Some(close) = quoted[1..].find('`') else {
+            out.push_str(quoted);
+            return out;
+        };
+        let inside = &quoted[1..=close];
+        let rust_name = inside.starts_with("Sipral")
+            && inside
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == ':');
+        if rust_name {
+            out.push('`');
+            out.push_str(&rename(inside));
+            out.push('`');
+        } else {
+            out.push_str(&quoted[..close + 2]);
+        }
+        rest = &quoted[close + 2..];
+    }
+    out.push_str(rest);
     out
 }
 

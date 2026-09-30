@@ -68,10 +68,10 @@ use sipral::{
 };
 use sipral_core::sdp::SdpError;
 
-use crate::abi::{alias, codes, constants, record};
+use crate::abi::{Number, alias, codes, constants, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::{HandleTable, Kind, SipralHandle};
-use crate::stack::{StackState, handle_failed, instant_at, with_stack};
+use crate::stack::{SipralTransport, StackState, handle_failed, instant_at, with_stack};
 use crate::status::SipralStatus;
 use crate::text::required_text;
 use crate::versioned::{Versioned, read_versioned, write_versioned};
@@ -131,23 +131,20 @@ codes! {
     /// `sipral_call_config_t::srtp` (a per-call override).
     ///
     /// Zero is not one of them, and it is not the same absence on the two
-    /// structs: on the stack it means this build's own built-in default
-    /// (`SrtpPolicy::default()`, which is [`SipralSrtp::NotOffered`]); on a
-    /// call it means the stack's own setting, whatever that came to. The three
-    /// values mean exactly what `sipral::SrtpPolicy`'s three variants mean —
-    /// see there for what each writes and what each answers.
+    /// structs: on the stack it means this build's own built-in default,
+    /// which is [`SipralSrtp::NotOffered`]; on a call it means the stack's own
+    /// setting, whatever that came to. `docs/05-media.md` says what each
+    /// value writes and what each answers.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralSrtp: u32 {
-        /// [`SrtpPolicy::NotOffered`]: do not offer it, but answer an offer
-        /// that arrives on the secure profile with keys anyway.
+        /// Do not offer it, but answer an offer that arrives on the secure
+        /// profile with keys anyway.
         NotOffered = 1,
-        /// [`SrtpPolicy::Offered`]: offer it, and answer a plain offer
-        /// plainly.
+        /// Offer it, and answer a plain offer plainly.
         Offered = 2,
-        /// [`SrtpPolicy::Required`]: offer it, and let no stream on this call
-        /// carry audio unencrypted.
+        /// Offer it, and let no stream on this call carry audio unencrypted.
         Required = 3,
-        /// [`SrtpPolicy::DtlsOffered`]: offer DTLS-SRTP (RFC 5764) on
+        /// Offer DTLS-SRTP (RFC 5764) on
         /// `UDP/TLS/RTP/SAVP`, and answer a plain offer plainly.
         ///
         /// What `Offered` is for SDES, with the difference that matters: the
@@ -161,12 +158,12 @@ codes! {
         /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
         /// `SIPRAL_FEATURE_DTLS_SRTP`.
         Dtls = 4,
-        /// [`SrtpPolicy::DtlsRequired`]: offer DTLS-SRTP, and let no stream on
+        /// Offer DTLS-SRTP, and let no stream on
         /// this call carry audio any other way — an answer carrying
         /// `a=crypto` included, since that key travelled in a body this
         /// policy exists to avoid trusting.
         DtlsRequired = 5,
-        /// [`SrtpPolicy::DtlsOrSdes`]: DTLS-SRTP, falling back to SDES for a
+        /// DTLS-SRTP, falling back to SDES for a
         /// peer that has no DTLS, and never unencrypted. The offer is one
         /// `RTP/SAVP` stream carrying both the fingerprint and the crypto
         /// lines, and the answer decides which keys the call; an offer that
@@ -185,19 +182,19 @@ codes! {
     /// `sipral_call_config_t::ice` (a per-call override).
     ///
     /// Zero is not one of them, and it is not the same absence on the two
-    /// structs: on the stack it means this build's own built-in default
-    /// (`IcePolicy::default()`, which is [`SipralIce::Off`]); on a call it
-    /// means the stack's own setting, whatever that came to.
+    /// structs: on the stack it means this build's own built-in default,
+    /// which is [`SipralIce::Off`]; on a call it means the stack's own
+    /// setting, whatever that came to.
     ///
     /// A call that offers ICE also asks for RFC 5761 multiplexing, whatever
     /// `offer_rtcp_mux` says, because an ICE stream with a second component
     /// needs a second address and this ABI names one.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralIce: u32 {
-        /// [`IcePolicy::Off`]: do not offer it, and do not answer a peer that
+        /// Do not offer it, and do not answer a peer that
         /// does. The default, and `docs/06-nat.md` says why at length.
         Off = 1,
-        /// [`IcePolicy::Offered`]: offer it, and use it against a peer that
+        /// Offer it, and use it against a peer that
         /// offers it back.
         ///
         /// A peer that does not — an Asterisk with `ice_support=no`, which is
@@ -210,14 +207,14 @@ codes! {
         /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
         /// `SIPRAL_FEATURE_ICE`.
         Offered = 2,
-        /// [`IcePolicy::Required`]: offer it, and let no stream on this call
+        /// Offer it, and let no stream on this call
         /// carry audio on a path ICE did not check.
         ///
         /// Each of the three ways a peer can fail to do ICE ends the call's
         /// media with `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling
         /// back. That is the whole difference between this and `Offered`.
         Required = 3,
-        /// [`IcePolicy::Lite`]: be an ICE-lite endpoint (RFC 8445 §2.5) —
+        /// Be an ICE-lite endpoint (RFC 8445 §2.5) —
         /// write `a=ice-lite` and one host candidate, answer the checks a
         /// full peer sends, and put the audio on the pair it nominates.
         ///
@@ -574,7 +571,7 @@ record! {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// A [`SipralCodec`].
-        pub codec: u32,
+        pub codec: Number<SipralCodec>,
         /// The RTP timestamp clock, in hertz, which is what goes on the
         /// `a=rtpmap` line.
         pub clock_rate: u32,
@@ -621,14 +618,14 @@ record! {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// A [`SipralCodec`]: the candidate itself.
-        pub codec: u32,
+        pub codec: Number<SipralCodec>,
         /// A [`SipralCodecOutcome`]: what became of it.
-        pub outcome: u32,
+        pub outcome: Number<SipralCodecOutcome>,
         /// A [`SipralCodec`]: what beat it, when `outcome` is
         /// `SIPRAL_CODEC_OUTCOME_OUTRANKED`. `SIPRAL_CODEC_UNKNOWN`
         /// otherwise, because nothing beat a codec that was never named and
         /// nothing beat the one that won.
-        pub outranked_by: u32,
+        pub outranked_by: Number<SipralCodec>,
         /// Zero. Rounds the struct up to a whole multiple of its alignment on
         /// every target, so that a member a later version appends starts at or
         /// past the length a caller built against this header declares, never
@@ -669,19 +666,19 @@ record! {
         /// computes it; zero for a relay.
         pub priority: u64,
         /// A [`SipralPathKind`].
-        pub kind: u32,
+        pub kind: Number<SipralPathKind>,
         /// A [`SipralPathOutcome`].
-        pub outcome: u32,
+        pub outcome: Number<SipralPathOutcome>,
         /// For `SIPRAL_PATH_OUTCOME_REFUSED`, the STUN error code the far end
         /// answered with; for `SIPRAL_PATH_OUTCOME_RELAY_REFUSED` and
         /// `SIPRAL_PATH_OUTCOME_LOST`, the TURN server's, zero when it gave
         /// none. Zero otherwise.
         pub code: u32,
         /// A [`SipralCandidateKind`]: what `local` is.
-        pub local_kind: u32,
+        pub local_kind: Number<SipralCandidateKind>,
         /// A [`SipralCandidateKind`]: what `remote` is, when it is a
         /// candidate at all.
-        pub remote_kind: u32,
+        pub remote_kind: Number<SipralCandidateKind>,
         /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
         /// both put them without padding at the end of the struct, so that a
         /// member a later version appends starts past the length a caller built
@@ -737,7 +734,7 @@ record! {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// A [`SipralCodec`]: what the two ends agreed on.
-        pub codec: u32,
+        pub codec: Number<SipralCodec>,
         /// The payload type on the wire. It is the offer's own number and not
         /// necessarily ours: the two ends pick their own numbers for a format
         /// with no static one, so a peer that numbers it 111 has said what we
@@ -753,7 +750,7 @@ record! {
         /// what [`sipral_media_capture`] wants.
         pub frame_samples: usize,
         /// A [`SipralDirection`].
-        pub direction: u32,
+        pub direction: Number<SipralDirection>,
         /// Whether this end is meant to be sending. Zero while it holds the far
         /// end, or while the far end has refused to receive.
         pub sending: u32,
@@ -764,7 +761,7 @@ record! {
         /// The payload type they travel under, when they were.
         pub dtmf_payload_type: u32,
         /// A [`SipralRtcp`].
-        pub rtcp: u32,
+        pub rtcp: Number<SipralRtcp>,
         /// Whether the stream is keyed.
         pub secured: u32,
         /// Whether a recording is running on this call.
@@ -824,7 +821,7 @@ record! {
         pub size: usize,
         /// A [`SipralCodec`]: what the call settled on, which is the first thing
         /// anybody looking at a bad call wants to know.
-        pub codec: u32,
+        pub codec: Number<SipralCodec>,
         /// Whether a round-trip time is known. Zero until a report has come back,
         /// which on a short call may be never: the first one is deliberately
         /// delayed (RFC 3550 §6.2) and a peer that sends no RTCP never provides
@@ -1005,7 +1002,7 @@ record! {
         /// says that instead, `destination` is the server, and the bytes are
         /// written, as they are and in order, on the media socket's
         /// connection to it — never sent as a datagram.
-        pub protocol: u32,
+        pub protocol: Number<SipralTransport>,
         /// Zero. Rounds the struct up to a whole multiple of its alignment on
         /// every target, so that a member a later version appends starts at or
         /// past the length a caller built against this header declares, never
@@ -1697,7 +1694,7 @@ entry! {
     /// # Safety
     ///
     /// Reads no memory the caller owns, and is safe to call from any thread.
-    fn sipral_codec_name(codec: u32) -> *const c_char, on_panic = std::ptr::null(), {
+    fn sipral_codec_name(codec: Number<SipralCodec>) -> *const c_char, on_panic = std::ptr::null(), {
         match codec {
             1 => c"PCMU".as_ptr(),
             2 => c"PCMA".as_ptr(),
@@ -1780,7 +1777,7 @@ entry! {
     /// capacity of zero, and `out_count` must point at one `size_t` or be null.
     fn sipral_stack_codec_order(
         stack: SipralHandle,
-        out_codecs: *mut u32,
+        out_codecs: *mut Number<SipralCodec>,
         capacity: usize,
         out_count: *mut usize,
     ) {
@@ -2171,7 +2168,7 @@ entry! {
         from: *const c_char,
         from_len: usize,
         now_ms: u64,
-        out_arrival: *mut u32,
+        out_arrival: *mut Number<SipralArrival>,
     ) {
         if data.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "data is null"));
@@ -2246,7 +2243,7 @@ entry! {
         samples: *mut i16,
         capacity: usize,
         out_written: *mut usize,
-        out_source: *mut u32,
+        out_source: *mut Number<SipralPlayback>,
     ) {
         if samples.is_null() && capacity != 0 {
             return Err(fail(SipralStatus::InvalidArgument, "samples is null"));
@@ -2775,7 +2772,7 @@ entry! {
 entry! {
     /// The RTCP goodbye of a call whose media has ended (task 8.4.21).
     ///
-    /// `MediaEngine::release` builds the BYE RFC 3550 §6.3.7 owes the far end
+    /// The library builds the BYE RFC 3550 §6.3.7 owes the far end
     /// the moment a call's session stops, but by then the call's media
     /// handle is already gone — every `sipral_media_` entry point on it
     /// answers `SIPRAL_STATUS_WRONG_STATE` — so this is a stack-level call

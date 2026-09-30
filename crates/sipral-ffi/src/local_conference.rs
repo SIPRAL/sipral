@@ -47,7 +47,8 @@ use sipral::{
 };
 use sipral_audio::{CallAudio, CallGone, CallId, Outgoing};
 
-use crate::abi::{codes, record};
+use crate::abi::{Number, codes, record};
+use crate::audio::SipralAudioDirection;
 use crate::error::{Fail, entry, fail};
 use crate::handle::{HandleTable, Kind, SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{SipralMediaPacket, SipralToggle, media_failed, prepare, put};
@@ -113,7 +114,7 @@ record! {
         /// A `SipralToggle`: whether this end takes part. On unless it is
         /// `SIPRAL_TOGGLE_OFF`; a conference without this end only bridges
         /// its calls.
-        pub local: u32,
+        pub local: Number<SipralToggle>,
         /// The rate of this end's frames in application mode, in hertz —
         /// 8000, 16000, 32000 or 48000 — or zero for 16000. A tick's frame is
         /// twenty milliseconds of it. In device mode the audio engine
@@ -230,9 +231,9 @@ record! {
         /// The conference.
         pub conference: SipralHandle,
         /// A [`SipralLocalConferenceChange`].
-        pub change: u32,
+        pub change: Number<SipralLocalConferenceChange>,
         /// A [`SipralDeparture`], for `SIPRAL_LOCAL_CONFERENCE_CHANGE_LEFT`.
-        pub departure: u32,
+        pub departure: Number<SipralDeparture>,
         /// Who joined or left: a call, or the conference's own handle for
         /// this end. `SIPRAL_HANDLE_NONE` for the other changes.
         pub member: SipralHandle,
@@ -683,7 +684,7 @@ entry! {
     fn sipral_local_conference_set_muted(
         conference: SipralHandle,
         member: SipralHandle,
-        direction: u32,
+        direction: Number<SipralAudioDirection>,
         muted: u32,
     ) {
         let direction = direction_of(direction)?;
@@ -708,7 +709,7 @@ entry! {
     fn sipral_local_conference_set_gain(
         conference: SipralHandle,
         member: SipralHandle,
-        direction: u32,
+        direction: Number<SipralAudioDirection>,
         gain: u32,
     ) {
         let direction = direction_of(direction)?;

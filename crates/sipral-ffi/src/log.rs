@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use sipral::{Log, LogLevel, LogRecord, RedactionMode, Redactor};
 
-use crate::abi::{alias, codes, constants, record};
+use crate::abi::{Number, alias, codes, constants, record};
 use crate::diagnostics::copy_out;
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
@@ -103,7 +103,7 @@ record! {
         /// The stack the line is about.
         pub stack: SipralHandle,
         /// A `SipralLogLevel`, never `SIPRAL_LOG_LEVEL_OFF`.
-        pub level: u32,
+        pub level: Number<SipralLogLevel>,
         /// Which part of the stack wrote it — `registration`, `call`,
         /// `media`, `decision`, `sip`, `api` — as UTF-8, not NUL-terminated.
         pub target: *const c_char,
@@ -193,7 +193,7 @@ entry! {
     /// thread is inside this stack any more.
     fn sipral_stack_log(
         stack: SipralHandle,
-        level: u32,
+        level: Number<SipralLogLevel>,
         callback: SipralLogCallback,
         user_data: *mut c_void,
     ) {

@@ -138,6 +138,10 @@ public struct SipralStackConfig
     public nuint BindAddressLen;
     public SipralToggle Echo;
     /// <summary>
+    /// A SipralToggle, read as a number and checked where it is used.
+    /// </summary>
+    public uint Record;
+    /// <summary>
     /// Header fields to send, `headers_len` of them.
     /// </summary>
     public IntPtr Headers;
@@ -465,6 +469,12 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_stack_counters(ulong stack, ref SipralCounters outCounters);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_set_echo(ulong stack, uint echo, out uint was);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_toggles(ulong stack, uint[] outToggles, nuint capacity, out nuint count);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_send(ulong stack, byte[] message, nuint messageLen);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -572,7 +582,7 @@ public static class Sipral
     {
         ("sipral_counters_t", Marshal.SizeOf<SipralCounters>(), 24, 16, 24),
         ("sipral_header_t", Marshal.SizeOf<SipralHeader>(), 32, 16, 16),
-        ("sipral_stack_config_t", Marshal.SizeOf<SipralStackConfig>(), 64, 32, 32),
+        ("sipral_stack_config_t", Marshal.SizeOf<SipralStackConfig>(), 64, 36, 36),
         ("sipral_media_packet_t", Marshal.SizeOf<SipralMediaPacket>(), 56, 28, 28),
         ("sipral_registration_event_t", Marshal.SizeOf<SipralRegistrationEvent>(), 8, 8, 8),
         ("sipral_media_event_t", Marshal.SizeOf<SipralMediaEvent>(), 32, 16, 16),
@@ -653,6 +663,24 @@ public static class Sipral
         var counters = SipralCounters.Sized();
         Check(NativeMethods.sipral_stack_counters(stack, ref counters));
         return counters;
+    }
+
+    /// <summary>
+    /// Turn the echo on or off, and say what it was.
+    /// </summary>
+    public static uint StackSetEcho(ulong stack, uint echo)
+    {
+        Check(NativeMethods.sipral_stack_set_echo(stack, echo, out var was));
+        return was;
+    }
+
+    /// <summary>
+    /// Every setting it has, one SipralToggle each.
+    /// </summary>
+    public static nuint StackToggles(ulong stack, uint[] outToggles)
+    {
+        Check(NativeMethods.sipral_stack_toggles(stack, outToggles, (nuint)outToggles.Length, out var count));
+        return count;
     }
 
     /// <summary>

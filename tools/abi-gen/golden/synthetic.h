@@ -19,9 +19,13 @@
  * crosses: it is SIPRAL_STATUS_PANIC.
  *
  * Enumerations. Each is a typedef of a fixed-width integer and the
- * names as constants, so no compiler picks a width. Values are only
- * ever added, never renumbered. In the enumerations that start at 1
- * zero names nothing: read it as absent.
+ * names as constants, so no compiler picks a width. Every parameter
+ * and member that holds one is declared with its typedef, and one
+ * declared as a plain integer holds a count, a flag or a number the
+ * comment names. Values are only ever added, never renumbered: a
+ * number an older header has no name for is read as one the caller
+ * does not know. In the enumerations that start at 1 zero names
+ * nothing: read it as absent.
  *
  * Structs that carry `size`. Zero the whole struct, padding included,
  * then set `size` to its sizeof, on a struct handed in and on one the
@@ -254,6 +258,10 @@ struct sipral_stack_config {
     size_t bind_address_len;
     sipral_toggle_t echo;
     /**
+     * A sipral_toggle_t, read as a number and checked where it is used.
+     */
+    sipral_toggle_t record;
+    /**
      * Header fields to send, `headers_len` of them.
      */
     const sipral_header_t *headers;
@@ -407,6 +415,16 @@ sipral_status_t sipral_stack_create(const sipral_stack_config_t *config, sipral_
  * Read sipral_counters_t off it.
  */
 sipral_status_t sipral_stack_counters(sipral_handle_t stack, sipral_counters_t *out_counters);
+
+/**
+ * Turn the echo on or off, and say what it was.
+ */
+sipral_status_t sipral_stack_set_echo(sipral_handle_t stack, sipral_toggle_t echo, sipral_toggle_t *out_was);
+
+/**
+ * Every setting it has, one sipral_toggle_t each.
+ */
+sipral_status_t sipral_stack_toggles(sipral_handle_t stack, sipral_toggle_t *out_toggles, size_t capacity, size_t *out_count);
 
 /**
  * Hand it bytes to send.

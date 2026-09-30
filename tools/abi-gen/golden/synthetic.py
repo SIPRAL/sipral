@@ -180,6 +180,10 @@ struct sipral_stack_config {
     size_t bind_address_len;
     sipral_toggle_t echo;
     /**
+     * A sipral_toggle_t, read as a number and checked where it is used.
+     */
+    sipral_toggle_t record;
+    /**
      * Header fields to send, `headers_len` of them.
      */
     const sipral_header_t *headers;
@@ -333,6 +337,16 @@ sipral_status_t sipral_stack_create(const sipral_stack_config_t *config, sipral_
  * Read sipral_counters_t off it.
  */
 sipral_status_t sipral_stack_counters(sipral_handle_t stack, sipral_counters_t *out_counters);
+
+/**
+ * Turn the echo on or off, and say what it was.
+ */
+sipral_status_t sipral_stack_set_echo(sipral_handle_t stack, sipral_toggle_t echo, sipral_toggle_t *out_was);
+
+/**
+ * Every setting it has, one sipral_toggle_t each.
+ */
+sipral_status_t sipral_stack_toggles(sipral_handle_t stack, sipral_toggle_t *out_toggles, size_t capacity, size_t *out_count);
 
 /**
  * Hand it bytes to send.
@@ -491,7 +505,7 @@ if _abi_status != lib.SIPRAL_STATUS_OK:
 RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_counters_t": (24, 16, 24),
     "sipral_header_t": (32, 16, 16),
-    "sipral_stack_config_t": (64, 32, 32),
+    "sipral_stack_config_t": (64, 36, 36),
     "sipral_media_packet_t": (56, 28, 28),
     "sipral_registration_event_t": (8, 8, 8),
     "sipral_media_event_t": (32, 16, 16),

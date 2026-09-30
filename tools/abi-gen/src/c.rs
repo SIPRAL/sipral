@@ -14,8 +14,8 @@ use std::fmt::Write as _;
 use sipral_ffi::abi::{Alias, Code, Enumeration, Function, Record, Shape, Stands, Surface, Value};
 
 use crate::model::{
-    Base, Int, Linked, Read, Refused, Role, Type, Writable, callback_answer, linked, plain_named,
-    read_all, screaming, snake,
+    Base, Int, Linked, Read, Refused, Role, Type, Writable, callback_answer, linked, numbers_named,
+    plain_named, read_all, screaming, snake,
 };
 use crate::names::{Layout, Named, Spelling, audit};
 
@@ -48,7 +48,20 @@ pub(crate) fn named(name: &str) -> String {
 
 /// The C spelling of a type, with the pointer put where C puts it.
 pub(crate) fn spell(ty: &Type) -> String {
-    let base = match &ty.base {
+    let base = match (&ty.enumeration, &ty.base) {
+        (Some(enumeration), _) => named(enumeration),
+        (None, base) => spell_base(base),
+    };
+    match ty.pointer {
+        None => base,
+        Some(Writable::No) => format!("const {base} *"),
+        Some(Writable::Yes) => format!("{base} *"),
+    }
+}
+
+/// What a type is in C once any pointer is off it.
+fn spell_base(base: &Base) -> String {
+    match base {
         Base::Opaque => "void".to_owned(),
         Base::Char => "char".to_owned(),
         Base::Float(32) => "float".to_owned(),
@@ -59,11 +72,6 @@ pub(crate) fn spell(ty: &Type) -> String {
             format!("{sign}{bits}_t")
         }
         Base::Named(name) => named(name),
-    };
-    match ty.pointer {
-        None => base,
-        Some(Writable::No) => format!("const {base} *"),
-        Some(Writable::Yes) => format!("{base} *"),
     }
 }
 
@@ -248,6 +256,7 @@ pub(crate) fn structures(out: &mut String, surface: &Surface) -> Result<(), Refu
 /// Print the header.
 pub(crate) fn header(surface: &Surface) -> Result<String, Refused> {
     audit(surface, &Names)?;
+    numbers_named(surface)?;
     let mut out = String::new();
     out.push_str(
         "/* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial\n\
@@ -271,9 +280,13 @@ pub(crate) fn header(surface: &Surface) -> Result<String, Refused> {
          \x20* crosses: it is SIPRAL_STATUS_PANIC.\n\
          \x20*\n\
          \x20* Enumerations. Each is a typedef of a fixed-width integer and the\n\
-         \x20* names as constants, so no compiler picks a width. Values are only\n\
-         \x20* ever added, never renumbered. In the enumerations that start at 1\n\
-         \x20* zero names nothing: read it as absent.\n\
+         \x20* names as constants, so no compiler picks a width. Every parameter\n\
+         \x20* and member that holds one is declared with its typedef, and one\n\
+         \x20* declared as a plain integer holds a count, a flag or a number the\n\
+         \x20* comment names. Values are only ever added, never renumbered: a\n\
+         \x20* number an older header has no name for is read as one the caller\n\
+         \x20* does not know. In the enumerations that start at 1 zero names\n\
+         \x20* nothing: read it as absent.\n\
          \x20*\n\
          \x20* Structs that carry `size`. Zero the whole struct, padding included,\n\
          \x20* then set `size` to its sizeof, on a struct handed in and on one the\n\
@@ -372,7 +385,31 @@ pub(crate) fn header(surface: &Surface) -> Result<String, Refused> {
 
     out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
     out.push_str("#endif /* SIPRAL_H */\n");
+    no_rust_in(&out)?;
     Ok(out)
+}
+
+/// What only a Rust reader can follow, and a line of the header that says it.
+///
+/// A path into the crate, a macro's name, or a crate below this one names
+/// something a C programmer has no way to look up: the documentation was
+/// written beside the Rust declaration, and a sentence that sends its reader
+/// to a module is one that was never read as C. The generator takes a link's
+/// path off and spells a quoted type the C way; what is left is prose to
+/// rewrite at the declaration.
+fn no_rust_in(header: &str) -> Result<(), Refused> {
+    const RUST_ONLY: &[&str] = &["crate::", "entry!", "sipral_ua", "sipral_core", "Self::"];
+    for (number, line) in header.lines().enumerate() {
+        if let Some(found) = RUST_ONLY.iter().find(|rust| line.contains(*rust)) {
+            return Err(Refused::about(&format!(
+                "line {} of the header says `{found}`, which names something only the Rust \
+                 source has: {}; say it in C terms in the declaration's documentation",
+                number + 1,
+                line.trim()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `SipralStatus` gives `SIPRAL_STATUS`, which every one of its names starts

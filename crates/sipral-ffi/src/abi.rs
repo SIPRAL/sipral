@@ -277,6 +277,25 @@ pub struct Surface {
     pub functions: &'static [Function],
 }
 
+/// An enumeration [`codes`] declared, and the plain integer its numbers cross
+/// as.
+pub trait Enumerated {
+    /// The integer the `repr` fixes it to.
+    type Raw;
+}
+
+/// A parameter or a member that holds one of `E`'s numbers.
+///
+/// It is `E`'s integer and nothing else, so a caller's number is read as a
+/// number and checked where it is used, the way every value that crosses is:
+/// a Rust enumeration built from a number no variant has is undefined
+/// behaviour before any check could run. What the alias adds is the name.
+/// The header spells the parameter with the enumeration's own `typedef` —
+/// `sipral_codec_t codec` rather than `uint32_t codec` — so the declaration a
+/// caller compiles against says which numbers go there, and a binding
+/// generated from it can know without a list kept by hand.
+pub type Number<E> = <E as Enumerated>::Raw;
+
 /// Declare a `#[repr(C)]` struct or union that crosses the boundary.
 ///
 /// The declaration is emitted exactly as it is written, and a [`Record`]
@@ -437,6 +456,10 @@ macro_rules! codes {
                 }),*],
                 reserved: &[],
             };
+        }
+
+        impl $crate::abi::Enumerated for $name {
+            type Raw = $width;
         }
     };
     ($($declaration:tt)*) => {
@@ -1038,6 +1061,54 @@ mod tests {
                 names.contains(referenced),
                 "{owner} takes a {referenced}, which the surface does not declare"
             );
+        }
+    }
+
+    /// Whether `doc` names `name` as a type: the word itself, not a longer
+    /// name it begins and not a path to one of its values.
+    fn names_the_type(doc: &str, name: &str) -> bool {
+        doc.match_indices(name).any(|(at, _)| {
+            let before = doc[..at].chars().next_back();
+            let after = &doc[at + name.len()..];
+            before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+                && after
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+        })
+    }
+
+    /// A `u32` member whose documentation says which enumeration it holds is
+    /// declared as that enumeration's [`Number`](super::Number), so the header
+    /// spells it with the `typedef` and a binding can tell which numbers go
+    /// there without reading the prose.
+    #[test]
+    fn a_member_documented_as_an_enumeration_is_declared_as_one() {
+        let enumerations: Vec<_> = SURFACE
+            .enumerations
+            .iter()
+            .filter(|enumeration| enumeration.width == "u32")
+            .collect();
+        for record in SURFACE.records {
+            for member in record
+                .fields
+                .iter()
+                .filter(|member| member.rust_type == "u32")
+            {
+                let doc = member.doc.join(" ");
+                for enumeration in &enumerations {
+                    let c_name = format!("{}_t", snake(enumeration.name));
+                    assert!(
+                        !names_the_type(&doc, enumeration.name) && !names_the_type(&doc, &c_name),
+                        "{}::{} is documented as a {} and declared as a plain u32; declare it as \
+                         Number<{}>",
+                        record.name,
+                        member.name,
+                        enumeration.name,
+                        enumeration.name
+                    );
+                }
+            }
         }
     }
 
