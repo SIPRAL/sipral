@@ -9,7 +9,8 @@
 //! and this module keeps an address for it. The procedure is
 //! [`Locator`]'s; the lookups are the application's resolver's, asked for
 //! with [`UaEvent::LookupWanted`] and answered with [`UserAgent::looked_up`],
-//! the same division as the endpoint's own [`Event::ResolveNeeded`] for a
+//! the same division as the endpoint's own
+//! [`Event::ResolveNeeded`](sipral_core::endpoint::Event::ResolveNeeded) for a
 //! dialog: the core decides what to ask and what the answers mean, and never
 //! does I/O.
 //!
@@ -22,15 +23,16 @@
 //! its DNS says so, without a restart and without a failed request first.
 //!
 //! **Failing over.** RFC 3263 §4.3 keeps every address the answer named, in
-//! order, and "if the transport in the first server proved to be unusable,
-//! then the client SHOULD retry the request ... [with] a different server".
-//! A REGISTER that times out, or whose transport fails, is sent again at once
-//! to the next address; RFC 3261 §10.2.7's "SHOULD NOT immediately re-attempt
-//! a registration to the same registrar" is about the one that failed. Once
-//! every address has failed, the account backs off as it always does
-//! (RFC 5626 §4.5), and the attempt after the wait looks the name up again.
-//! A final response from the registrar — a 404, a 503 — is an answer from the
-//! right server and moves nothing.
+//! order, and has the client try the next one when the first "proved to be
+//! unusable" — no answer, a transport that failed — or answered 503. A
+//! REGISTER that times out, whose transport fails, or that is answered 503
+//! is sent again at once to the next address; RFC 3261 §10.2.7's "SHOULD NOT
+//! immediately re-attempt a registration to the same registrar" is about the
+//! one that failed. Once every address has failed, the account backs off as
+//! it always does (RFC 5626 §4.5), and the attempt after the wait looks the
+//! name up again. Any other final response — a 404, a 500 — is an answer
+//! from the right server and moves nothing. (§4.3's wording is recalled
+//! rather than quoted here.)
 //!
 //! **A time-to-live.** Honoured, but with a floor of [`MIN_TTL`] so that a
 //! zone publishing zero does not turn an account into a stream of lookups,
@@ -695,6 +697,51 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, UaEvent::Registered { .. }))
         );
+    }
+
+    #[test]
+    fn a_register_answered_503_goes_to_the_next_address_and_a_404_does_not() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(located("sip:pbx.example.com"));
+        agent.register(id, t0).unwrap();
+        let dns = pbx(3_600);
+        let seen = settle(&mut agent, id, &dns, t0);
+        let (_, request) = seen.sent.last().unwrap();
+        let busy = String::from_utf8_lossy(&granted(request))
+            .replace("SIP/2.0 200 OK", "SIP/2.0 503 Service Unavailable");
+        deliver(&mut agent, addr("192.0.2.40:5080"), busy.as_bytes(), t0);
+        let seen = settle(&mut agent, id, &dns, t0);
+        assert_eq!(seen.registers(), [addr("198.51.100.41:5080")]);
+        assert!(
+            !seen
+                .events
+                .iter()
+                .any(|event| matches!(event, UaEvent::RegistrationFailed { .. })),
+            "a failover is not a failure"
+        );
+
+        let (_, request) = seen.sent.last().unwrap();
+        let missing = String::from_utf8_lossy(&granted(request))
+            .replace("SIP/2.0 200 OK", "SIP/2.0 404 Not Found");
+        deliver(
+            &mut agent,
+            addr("198.51.100.41:5080"),
+            missing.as_bytes(),
+            t0,
+        );
+        let seen = settle(&mut agent, id, &dns, t0);
+        assert!(
+            seen.registers().is_empty(),
+            "a 404 is the right server's answer"
+        );
+        assert!(seen.events.iter().any(|event| matches!(
+            event,
+            UaEvent::RegistrationFailed {
+                reason: RegistrationFailure::Rejected,
+                ..
+            }
+        )));
     }
 
     #[test]

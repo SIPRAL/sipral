@@ -1142,6 +1142,10 @@ impl UserAgent {
                 Some(status),
                 Some(response.clone()),
             ),
+            // RFC 3263 §4.3 treats a 503 like a server that did not answer:
+            // the next address a located registrar's name gave is tried at
+            // once, and only when none is left does the account back off
+            503 if self.fail_over_registration(account, now) => {}
             500..=599 => self.retry_later(
                 account,
                 Some(status),

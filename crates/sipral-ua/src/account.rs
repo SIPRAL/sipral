@@ -368,8 +368,8 @@ impl Account {
     /// with a port skips SRV, and one with a numeric host asks nothing.
     ///
     /// The first REGISTER waits for the first answer. Every address found is
-    /// kept, and a REGISTER that times out or whose transport fails moves to
-    /// the next at once (§4.3); once none is left, or once the shortest
+    /// kept, and a REGISTER that times out, whose transport fails or that is
+    /// answered 503 moves to the next at once (§4.3); once none is left, or once the shortest
     /// time-to-live of the answer runs out, the name is looked up again, so a
     /// registrar that changes address is followed without a restart (see
     /// [`crate::locate`]). Until the first answer, a call, a MESSAGE, a
