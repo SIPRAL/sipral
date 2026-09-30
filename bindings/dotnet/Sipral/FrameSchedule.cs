@@ -25,6 +25,10 @@ internal sealed class FrameSchedule
     private readonly Func<double> _now;
     private double _due;
 
+    /// <summary>The time given up by starting over: how far behind the
+    /// thread was each time its work ended past the next due time.</summary>
+    internal double SecondsGivenUp { get; private set; }
+
     /// <param name="frameSeconds">How long one frame is.</param>
     /// <param name="now">A monotonic clock in seconds.</param>
     internal FrameSchedule(double frameSeconds, Func<double> now)
@@ -45,6 +49,7 @@ internal sealed class FrameSchedule
         {
             return TimeSpan.FromSeconds(remaining);
         }
+        SecondsGivenUp += now - _due;
         _due = now;
         return TimeSpan.Zero;
     }

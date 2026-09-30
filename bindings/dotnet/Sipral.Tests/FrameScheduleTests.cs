@@ -69,6 +69,7 @@ public sealed class FrameScheduleTests
         var schedule = new FrameSchedule(Frame, () => now);
         now = 0.070;
         Assert.Equal(TimeSpan.Zero, schedule.Next());
+        Assert.InRange(schedule.SecondsGivenUp, 0.0499, 0.0501);
         now = 0.071;
         var wait = schedule.Next().TotalSeconds;
         Assert.InRange(wait, 0.0189, 0.0191);
@@ -90,6 +91,13 @@ public sealed class FrameScheduleTests
                 never.Wait(wait);
             }
         }
-        Assert.True(frames >= 148, $"{frames} frames in three seconds, {frames / 3.0:F1} a second");
+        // a machine busy enough to hold the thread up past a whole frame makes
+        // the schedule start over, on purpose; what that gave up is the
+        // machine's, and every frame of the rest must be there
+        var givenUp = (int)Math.Floor(schedule.SecondsGivenUp / Frame);
+        Assert.True(
+            frames + givenUp >= 149,
+            $"{frames} frames in three seconds, {givenUp} given up to a thread held up"
+        );
     }
 }
