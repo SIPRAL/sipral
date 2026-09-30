@@ -30,6 +30,8 @@ export type SipralErrorCode =
   | 'transportDown'
   | 'conferenceRefused'
   | 'clockBehind'
+  | 'certificateRefused'
+  | 'unreachableAddress'
   /** The client was closed, or never opened. */
   | 'closed'
   /** The platform refused: a socket that would not bind, an address that would not parse. */
@@ -59,6 +61,8 @@ const LIBRARY_CODES: ReadonlySet<string> = new Set<SipralErrorCode>([
   'transportDown',
   'conferenceRefused',
   'clockBehind',
+  'certificateRefused',
+  'unreachableAddress',
   'closed',
   'platform',
 ]);

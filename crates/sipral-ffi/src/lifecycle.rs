@@ -770,6 +770,13 @@ mod tests {
             stir_origid_len: 0,
             stir_attestation: 0,
             recording_in_clear: 0,
+            keepalive_ms: 0,
+            server_uri: ptr::null(),
+            server_uri_len: 0,
+            tls_pin_sha256: ptr::null(),
+            tls_pin_sha256_len: 0,
+            server_naptr: 0,
+            reserved: 0,
         }
     }
 

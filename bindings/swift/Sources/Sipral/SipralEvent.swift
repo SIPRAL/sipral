@@ -69,6 +69,9 @@ public struct SipralEvent: Sendable {
     public internal(set) var recoveryData: RecoveryEventData? = nil
     /// `payload.resolve`, for `SipralEventKind.resolveNeeded` only.
     public internal(set) var resolveData: ResolveEventData? = nil
+    /// `payload.locate`, for `SipralEventKind.lookupWanted`, `.located` and
+    /// `.locateFailed` only.
+    public internal(set) var locateData: LocateEventData? = nil
     /// `payload.message`, for `SipralEventKind.messageReceived`,
     /// `.messageSent` and `.messagesWaiting` only.
     public internal(set) var messageData: MessageEventData? = nil
@@ -109,6 +112,20 @@ public struct ResolveEventData: Sendable {
     public let port: UInt32
     /// A `SipralTransport` raw value.
     public let protocolRaw: UInt32
+}
+
+/// What `SipralEventKind.lookupWanted`, `.located` and `.locateFailed` carry
+/// (`sipral_locate_event_t`): the DNS query an account's server is located
+/// with, every address it was located at, or why it was not.
+public struct LocateEventData: Sendable {
+    /// A `SipralDnsRecordType` raw value: what to ask `name` for.
+    public let recordRaw: UInt32
+    /// A `SipralLocateFailure` raw value.
+    public let failureRaw: UInt32
+    public let name: String?
+    /// `host:port` separated by commas, the one in use first.
+    public let targets: String?
+    public let retryInMs: UInt64
 }
 
 /// What `SipralEventKind.messageReceived`, `.messageSent` and
@@ -770,6 +787,18 @@ enum SipralEventDecoder {
                 host: textC(told.host, told.host_len),
                 port: told.port,
                 protocolRaw: told.protocol
+            )
+        }
+        if kindRaw == SipralEventKind.lookupWanted.rawValue
+            || kindRaw == SipralEventKind.located.rawValue
+            || kindRaw == SipralEventKind.locateFailed.rawValue {
+            let told = raw.payload.locate
+            event.locateData = LocateEventData(
+                recordRaw: told.record,
+                failureRaw: told.failure,
+                name: textC(told.name, told.name_len),
+                targets: textC(told.targets, told.targets_len),
+                retryInMs: told.retry_in_ms
             )
         }
         if kindRaw == SipralEventKind.messageReceived.rawValue

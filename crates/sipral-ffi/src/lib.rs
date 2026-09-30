@@ -60,6 +60,7 @@
 
 pub mod abi;
 pub mod account;
+pub mod advertise;
 pub mod announce;
 pub mod audio;
 pub mod call;
@@ -80,11 +81,13 @@ pub mod lifecycle;
 #[cfg(test)]
 mod load;
 pub mod local_conference;
+pub mod locate;
 pub mod log;
 pub mod media;
 pub mod message;
 mod names;
 pub mod nat;
+pub mod pin;
 pub mod ports;
 pub mod presence;
 pub mod realtime_text;

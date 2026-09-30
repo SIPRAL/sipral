@@ -417,11 +417,34 @@ impl Log {
     /// With the diagnostic trace on ([`Log::set_diagnostic`]), the message
     /// and the peer are written as they are, with only the secrets taken out.
     pub fn sip_message(&self, travel: Travel, peer: SocketAddr, bytes: &[u8], now: Instant) {
+        self.message(travel, Some(peer), bytes, now);
+    }
+
+    /// [`Log::sip_message`], for a message that arrived on, or went out on,
+    /// a connection whose far end was never named to this stack: the line
+    /// says "on a connection" where the peer would be.
+    pub fn sip_message_on_a_connection(&self, travel: Travel, bytes: &[u8], now: Instant) {
+        self.message(travel, None, bytes, now);
+    }
+
+    fn message(&self, travel: Travel, peer: Option<SocketAddr>, bytes: &[u8], now: Instant) {
         self.admit(LogLevel::Trace, "sip", now, |redactor, diagnostic| {
-            let way = match travel {
-                Travel::Received => "received from",
-                Travel::Sent => "sent to",
+            let way = match (travel, peer.is_some()) {
+                (Travel::Received, true) => "received from",
+                (Travel::Sent, true) => "sent to",
+                (Travel::Received, false) => "received",
+                (Travel::Sent, false) => "sent",
             };
+            let peer = peer.map_or_else(
+                || String::from("on a connection"),
+                |peer| {
+                    if diagnostic {
+                        peer.to_string()
+                    } else {
+                        redact_text(&peer.to_string(), redactor)
+                    }
+                },
+            );
             if diagnostic {
                 return format!(
                     "{way} {peer}, {} bytes:\n{}",
@@ -429,7 +452,6 @@ impl Log {
                     String::from_utf8_lossy(&strip_secrets(bytes))
                 );
             }
-            let peer = redact_text(&peer.to_string(), redactor);
             match redact_message(bytes, redactor) {
                 Ok(clean) => format!(
                     "{way} {peer}, {} bytes:\n{}",
@@ -892,6 +914,35 @@ Content-Length: {}\r\n\r\n{sdp}",
         assert!(
             !back.contains("alice") && !back.contains("198.51.100.4"),
             "{back}"
+        );
+    }
+
+    #[test]
+    fn a_message_on_a_connection_with_no_named_far_end_says_so_rather_than_naming_one() {
+        let log = Log::new(b"key");
+        let seen = listening(&log, LogLevel::Trace);
+        let now = Instant::now();
+        let message = b"OPTIONS sip:bob@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        log.sip_message_on_a_connection(Travel::Received, message, now);
+        log.set_diagnostic(true);
+        log.sip_message_on_a_connection(Travel::Sent, message, now);
+        assert_eq!(log.flush(), 2);
+        let lines: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|line| line.2.clone())
+            .collect();
+        assert!(
+            lines[0].starts_with("received on a connection, 58 bytes:\n"),
+            "{}",
+            lines[0]
+        );
+        assert!(!lines[0].contains("bob"), "{}", lines[0]);
+        assert!(
+            lines[1].starts_with("sent on a connection, 58 bytes:\nOPTIONS sip:bob@example.com"),
+            "{}",
+            lines[1]
         );
     }
 

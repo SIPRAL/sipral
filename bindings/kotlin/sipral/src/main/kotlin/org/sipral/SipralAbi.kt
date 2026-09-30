@@ -191,6 +191,24 @@ enum class SipralStatus(val value: Int) {
      * that keeps getting this has a clock that went backwards.
      */
     CLOCK_BEHIND(24),
+    /**
+     * The TLS server's certificate is not the one the account pins
+     * (ABI 0.34): `sipral_account_check_certificate` compared its
+     * SHA-256 fingerprint with `sipral_account_config_t::tls_pin_sha256`
+     * and they differ. Refuse the handshake: with a pin, the
+     * fingerprint is the whole verdict (`docs/22-tls.md`).
+     */
+    CERTIFICATE_REFUSED(25),
+    /**
+     * This end was about to advertise an address the peer cannot reach
+     * it at (ABI 0.34): a loopback address, in a `Contact` or a session
+     * description, handed to a peer that is not on this machine, or the
+     * unspecified address in a `Contact`. Nothing was sent; the last
+     * error names both addresses. Bind to, and advertise, the address
+     * of the interface that routes to the peer —
+     * `sipral_advertised_address` finds it.
+     */
+    UNREACHABLE_ADDRESS(26),
     ;
 
     companion object {
@@ -406,6 +424,18 @@ enum class SipralSrtp(val value: Int) {
      * `SIPRAL_FEATURE_DTLS_SRTP`.
      */
     DTLS_OR_SDES(6),
+    /**
+     * Offer SDES on plain `RTP/AVP`: the call is encrypted when the
+     * answer takes one of the `a=crypto` lines and plain when it takes
+     * none — the "SRTP optional" of desk phones, for a server that may
+     * or may not encrypt and answers an offer on `RTP/SAVP` with 488
+     * when it does not. RFC 4568 writes the attribute for the secure
+     * profiles, so this is interoperability rather than a standard.
+     * Answering, an offer on `RTP/AVP` carrying a line this end takes
+     * is answered with a key, and anything else as under `Offered`.
+     * ABI 0.34.
+     */
+    BEST_EFFORT(7),
     ;
 
     companion object {
@@ -1662,6 +1692,33 @@ enum class SipralEventKind(val value: Int) {
      * `SIPRAL_HANDLE_NONE`: a conference is neither.
      */
     LOCAL_CONFERENCE_CHANGED(54),
+    /**
+     * A DNS lookup is wanted to locate an account's server by RFC 3263
+     * (ABI 0.34): the account named its registrar or its outbound proxy
+     * with `server_uri` rather than an address.
+     *
+     * `payload.locate` names the query: `name`, and `record`, what to
+     * ask it for. Ask the platform's resolver and hand the answer to
+     * `sipral_account_looked_up` — every one, a failure included, since
+     * the procedure waits for each. Several may be outstanding at once,
+     * one per host an SRV answer named. `account` is the account.
+     */
+    LOOKUP_WANTED(55),
+    /**
+     * An account's server was located, or located again once the last
+     * answer's time-to-live ran out (ABI 0.34): `payload.locate.targets`
+     * is every address the answer named, first the one the account's
+     * requests go to now. `account` is the account.
+     */
+    LOCATED(56),
+    /**
+     * A lookup of an account's server named no address (ABI 0.34):
+     * `payload.locate.failure` says why, and `retry_in_ms` when the name
+     * is looked up again. A REGISTER that was waiting for it is reported
+     * failed as well, and backs off; an address an earlier answer named
+     * stays in use meanwhile. `account` is the account.
+     */
+    LOCATE_FAILED(57),
     ;
 
     companion object {
@@ -1762,6 +1819,15 @@ enum class SipralRegistrationFailure(val value: Int) {
      * caller's to resolve.
      */
     REDIRECTED(4),
+    /**
+     * The account's `Contact` names an address the registrar cannot
+     * reach this end at — loopback, to a registrar that is not, or the
+     * unspecified address — and nothing was sent (ABI 0.34). Trying
+     * again cannot help until the account is given one it can:
+     * `sipral_account_rebind`, with an address `sipral_advertised_address`
+     * found.
+     */
+    UNREACHABLE_CONTACT(5),
     ;
 
     companion object {
@@ -3735,6 +3801,103 @@ enum class SipralDeparture(val value: Int) {
 }
 
 /**
+ * Which kind of DNS record a lookup asks for. Names for
+ * `sipral_locate_event_t::record` and `sipral_account_looked_up`'s
+ * `record`.
+ */
+enum class SipralDnsRecordType(val value: Int) {
+    /**
+     * Not a lookup: the value on a `SIPRAL_EVENT_KIND_LOCATED` or a
+     * `SIPRAL_EVENT_KIND_LOCATE_FAILED`.
+     */
+    NONE(0),
+    /**
+     * RFC 3403: which services a domain offers, and under which names.
+     */
+    NAPTR(1),
+    /**
+     * RFC 2782: which hosts, at which ports, serve one service.
+     */
+    SRV(2),
+    /**
+     * An IPv4 address.
+     */
+    A(3),
+    /**
+     * An IPv6 address.
+     */
+    AAAA(4),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralDnsRecordType? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What the application's resolver said to a lookup. Names for
+ * `sipral_account_looked_up`'s `answer`.
+ */
+enum class SipralDnsAnswer(val value: Int) {
+    /**
+     * The records it returned, in `records`. None at all reads as
+     * `SIPRAL_DNS_ANSWER_NOTHING`.
+     */
+    RECORDS(1),
+    /**
+     * The name has no record of that kind, or does not exist at all.
+     * Also the right answer from a resolver that cannot ask for the
+     * kind: a platform lookup that only knows addresses answers every
+     * NAPTR and SRV query with this, and the host's own addresses are
+     * asked for next.
+     */
+    NOTHING(2),
+    /**
+     * The resolver could not answer: no server reachable, a timeout, a
+     * server failure.
+     */
+    FAILED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralDnsAnswer? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Why a lookup of an account's server named no address. Names for
+ * `sipral_locate_event_t::failure`.
+ */
+enum class SipralLocateFailure(val value: Int) {
+    /**
+     * Nothing failed.
+     */
+    NONE(0),
+    /**
+     * The DNS answered, and what it answered names no address of the
+     * family the account's transport can reach: no record, or an SRV
+     * target of `.`.
+     */
+    NOT_FOUND(1),
+    /**
+     * The resolver failed on every lookup that could have given an
+     * address.
+     */
+    UNANSWERED(2),
+    /**
+     * The transport has no RFC 3263 procedure: WebSocket names no SRV
+     * service and no default port, so only a numeric host, or a host
+     * with a port, can be located for it.
+     */
+    UNSUPPORTED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralLocateFailure? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * The version of the ABI this library provides.
  *
  * Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -4184,9 +4347,18 @@ data class SipralStackSettings(
      * See `rtp_port_min`.
      */
     val rtpPortMax: Long,
+    /**
+     * The path MTU as given, zero for unknown (ABI 0.34).
+     */
+    val pathMtu: Long,
+    /**
+     * The largest request sent over UDP once no stream is coming, as
+     * given; zero for never (ABI 0.34).
+     */
+    val datagramWithoutStreamBytes: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 21
+        const val SLOTS: Int = 23
 
         fun of(slots: LongArray): SipralStackSettings = SipralStackSettings(
             slots[0],
@@ -4210,6 +4382,8 @@ data class SipralStackSettings(
             slots[18],
             slots[19],
             slots[20],
+            slots[21],
+            slots[22],
         )
     }
 }
@@ -5326,6 +5500,65 @@ data class SipralLocalConferenceMember(
 }
 
 /**
+ * What sipral_account_check_certificate found: whether the account's
+ * pin decided, and what the certificate's dates say.
+ *
+ * Set `size` to `sizeof(sipral_pinned_certificate_t)` before the call.
+ */
+data class SipralPinnedCertificate(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * The certificate's `notBefore`, in seconds since 1 January 1970,
+     * or zero when its DER could not be read that far.
+     */
+    val notBefore: Long,
+    /**
+     * Its `notAfter`, the same way.
+     */
+    val notAfter: Long,
+    /**
+     * One when the account pins a certificate and this is it: accept
+     * the handshake, whoever signed it. Zero when the account pins
+     * none: the platform's own checks apply, as they would without
+     * this call.
+     */
+    val pinned: Long,
+    /**
+     * One when `unix_seconds` is past `not_after`. Accepted all the
+     * same: its dates were written by the holder of the pinned key, and
+     * a PBX whose self-signed certificate lapsed would otherwise go
+     * silent. Worth a warning.
+     */
+    val expired: Long,
+    /**
+     * One when `unix_seconds` is before `not_before`: a clock set wrong,
+     * or a certificate minted with a future date. Accepted too.
+     */
+    val notYetValid: Long,
+    /**
+     * Zero.
+     */
+    val reserved: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 7
+
+        fun of(slots: LongArray): SipralPinnedCertificate = SipralPinnedCertificate(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+            slots[4],
+            slots[5],
+            slots[6],
+        )
+    }
+}
+
+/**
  * One header field an application hands over: a name and a value, UTF-8,
  * neither NUL-terminated.
  *
@@ -5806,6 +6039,80 @@ class SipralStackConfig(
      * The highest port of that range, or zero with `rtp_port_min`.
      */
     val rtpPortMax: Long = 0,
+    /**
+     * The SRTP suites every call on this stack offers and accepts,
+     * unless its account names its own
+     * (`sipral_account_config_t::srtp_suites`): the names RFC 4568
+     * section 6.2 and RFC 7714 section 14.2 give them, separated by
+     * commas, most preferred first. Null for this build's own order
+     * (ABI 0.34).
+     *
+     * An SDES offer names these, in this order, and an answer takes
+     * the offerer's first that is among them; a DTLS-SRTP handshake
+     * offers the ones with a protection profile. Every `a=crypto` line
+     * is in the INVITE, so past two or three suites an offer over UDP
+     * needs a stream (RFC 3261 section 18.1.1). A name this library
+     * does not run, or one named twice, is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     */
+    val srtpSuites: String? = null,
+    /**
+     * The MTU of the path toward the server, in bytes, when the
+     * deployment knows it; zero for unknown (ABI 0.34). RFC 3261
+     * section 18.1.1 moves a request to a stream when it comes within
+     * 200 bytes of the MTU, and with the MTU unknown past 1300 bytes: a
+     * path known to carry more lets a larger request stay on UDP. Under
+     * 576 is `SIPRAL_STATUS_INVALID_ARGUMENT` — an IPv4 host must take
+     * that much (RFC 791).
+     */
+    val pathMtu: Long = 0,
+    /**
+     * The largest request to send over UDP anyway, once no stream to
+     * its server can be had, in bytes; zero for never (ABI 0.34).
+     *
+     * **A deliberate deviation from RFC 3261 section 18.1.1**, for a
+     * server that takes SIP over UDP alone: such a PBX answers nothing
+     * to a request it cannot receive over a stream, and takes a
+     * 1,444-byte INVITE over UDP from every other phone on its network.
+     * A request past the section's line asks for a stream as always
+     * (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`); once the application says
+     * none is coming (`sipral_stack_transport_failed` on the number it
+     * was going to bind) or the wait runs out, what was waiting goes
+     * over UDP up to this size, and each such request is written to the
+     * call's diagnostic record as `transport.kept.datagram` with its
+     * size and this limit. A stream bound later is preferred again. A
+     * request past this size ends as it would without it. At most
+     * 65 507, what one UDP datagram carries over IPv4; a figure not past
+     * the section's own line changes nothing.
+     */
+    val datagramWithoutStreamBytes: Long = 0,
+    /**
+     * A salt the application keeps for the installation, keying the
+     * pseudonyms this stack's log and state text write for users,
+     * numbers and addresses, so that the same value has the same
+     * pseudonym in every run and two runs' traces compare line by line
+     * (ABI 0.34). At least 16 bytes, drawn once from the platform's
+     * generator; null for pseudonyms keyed from `media_seed`, which are
+     * fresh every run. It is a secret like a key: whoever holds it can
+     * test a guessed address against a pseudonym. Copied.
+     */
+    val pseudonymSalt: ByteArray? = null,
+    /**
+     * A `SipralToggle`: whether the log's trace writes SIP messages
+     * whole, with the peer they went to, instead of pseudonymised; off
+     * by default (ABI 0.34). For a diagnosis only: every user, display
+     * name, number and address is then written as it went on the wire.
+     * What is never written, in either mode, is a credential or a key:
+     * every `Authorization` and `Proxy-Authorization` value, every
+     * `a=crypto` `inline:` key, every `k=` key and every `a=key-mgmt`
+     * payload is taken out first. `sipral_stack_diagnostic_trace`
+     * turns it on and off while the stack runs.
+     */
+    val diagnosticTrace: Long = 0,
+    /**
+     * Zero.
+     */
+    val reserved: Long = 0,
 )
 
 /**
@@ -5841,8 +6148,9 @@ class SipralAccountConfig(
      * Where this account's requests go, as `host:port`: the registrar's
      * address for an account that registers, and the outbound proxy for
      * one configured with no registrar. A call that names no destination
-     * of its own goes here either way, so it is required either way. An
-     * address, not a name: RFC 3263 resolution is the caller's.
+     * of its own goes here either way, so it is required unless
+     * `server_uri` names the server instead. An address, not a name: a
+     * server known by name is `server_uri`'s.
      */
     val registrarAddress: String? = null,
     /**
@@ -6042,6 +6350,68 @@ class SipralAccountConfig(
      * may have left unwritten, and are never read.
      */
     val recordingInClear: Long = 0,
+    /**
+     * How often, in milliseconds, this account keeps its flow to its
+     * registrar — to its outbound proxy, for one that never registers —
+     * open, whatever STUN found; zero for never, which leaves it to
+     * `sipral_stack_config_t::registrar_keepalive` (ABI 0.34).
+     *
+     * For a network whose NAT forgets a UDP flow sooner than the
+     * REGISTER refresh comes round, with STUN off. On UDP a double CRLF
+     * goes out alone in a datagram, which a registrar ignores (RFC 3261
+     * §7.5); on TCP or TLS the connection is pinged at this interval
+     * instead of the stack's own (RFC 5626 §4.4.1). Each interval is
+     * drawn between 80% and 100% of it. From 1 000 to 120 000, and
+     * anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     */
+    val keepaliveMs: Long = 0,
+    /**
+     * The server this account's requests go to, as a URI whose host RFC
+     * 3263 locates — `sip:pbx.example.com`, `sips:example.com:5061` —
+     * in place of `registrar_address`: exactly one of the two is given
+     * (ABI 0.34). The registrar for an account that registers (usually
+     * the same URI as `registrar`), the outbound proxy for one that
+     * does not.
+     *
+     * The lookups are the application's resolver's, asked for with
+     * `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and answered with
+     * `sipral_account_looked_up`; the order they go in, the SRV ranking
+     * and the fallback to the host's own addresses are the stack's.
+     * The first REGISTER waits for the first answer, and a call placed
+     * before it with no `destination` of its own is
+     * `SIPRAL_STATUS_WRONG_STATE`. A REGISTER that times out, whose
+     * transport fails or that is answered 503 moves to the next address
+     * found at once (§4.3); the name is looked up again when the
+     * answer's time-to-live runs out, and when the stack's recovery
+     * asks for an address. A host with a port skips SRV, and a numeric
+     * host asks nothing.
+     */
+    val serverUri: String? = null,
+    /**
+     * The SHA-256 fingerprint of the one TLS server certificate this
+     * account trusts, in place of a trust anchor, for a PBX that serves
+     * a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
+     * either case, with a colon between each byte or none, optionally
+     * after `sha-256 ` or `SHA256=` — the forms `openssl x509
+     * -fingerprint -sha256` and RFC 8122 print. Null for none.
+     *
+     * TLS is the application's, so this is what its certificate
+     * verifier asks, with `sipral_account_check_certificate`: with a
+     * pin, the fingerprint is the whole verdict, and no chain, trust
+     * anchor or host name is consulted (`docs/22-tls.md`).
+     */
+    val tlsPinSha256: String? = null,
+    /**
+     * A `SipralToggle`: whether `server_uri`'s domain is asked for NAPTR
+     * records before SRV (RFC 3263 §4.1). Off by default: most domains
+     * publish none, and the account's transport is already chosen.
+     * Refused without a `server_uri` (ABI 0.34).
+     */
+    val serverNaptr: Long = 0,
+    /**
+     * Zero.
+     */
+    val reserved: Long = 0,
 )
 
 /**
@@ -7755,6 +8125,47 @@ data class SipralLocalConferenceEvent(
 )
 
 /**
+ * What a SipralEventKind.LOOKUP_WANTED,
+ * a SipralEventKind.LOCATED
+ * and a SipralEventKind.LOCATE_FAILED
+ * carry, the account being `sipral_event_t::account`.
+ *
+ * One struct for the three, the way `sipral_subscription_event_t`
+ * answers for two kinds: a member meaningless on one kind is zero or
+ * null there. Every pointer is the library's, valid for the duration of
+ * the callback.
+ */
+data class SipralLocateEvent(
+    /**
+     * A SipralDnsRecordType: what to ask `name` for, on a lookup.
+     */
+    val record: Long,
+    /**
+     * A SipralLocateFailure: why a lookup named no address.
+     */
+    val failure: Long,
+    /**
+     * The name to ask, on a lookup: `_sip._udp.example.com`, or a
+     * host. Handed back to sipral_account_looked_up with the answer.
+     * UTF-8, not NUL-terminated.
+     */
+    val name: String?,
+    /**
+     * Where the account's server was located: every address the answer
+     * named, as `host:port` separated by commas, in RFC 3263 section
+     * 4.3's order from the one the account's requests go to now. UTF-8,
+     * not NUL-terminated.
+     */
+    val targets: String?,
+    /**
+     * When the name is looked up again after a failure, in
+     * milliseconds. An address an earlier answer named stays in use
+     * meanwhile.
+     */
+    val retryInMs: Long,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -7859,6 +8270,11 @@ class SipralEventPayload(
      * For SipralEventKind.LOCAL_CONFERENCE_CHANGED.
      */
     val localConference: SipralLocalConferenceEvent,
+    /**
+     * For SipralEventKind.LOOKUP_WANTED, SipralEventKind.LOCATED
+     * and SipralEventKind.LOCATE_FAILED.
+     */
+    val locate: SipralLocateEvent,
 )
 
 class SipralEvent(
@@ -8192,6 +8608,24 @@ class SipralEvent(
      * For SipralEventKind.LOCAL_CONFERENCE_CHANGED.
      */
     private val payloadLocalConferenceNumbers: LongArray? = null,
+    /**
+     * The name to ask, on a lookup: `_sip._udp.example.com`, or a
+     * host. Handed back to sipral_account_looked_up with the answer.
+     * UTF-8, not NUL-terminated.
+     */
+    private val payloadLocateName: String? = null,
+    /**
+     * Where the account's server was located: every address the answer
+     * named, as `host:port` separated by commas, in RFC 3263 section
+     * 4.3's order from the one the account's requests go to now. UTF-8,
+     * not NUL-terminated.
+     */
+    private val payloadLocateTargets: String? = null,
+    /**
+     * For SipralEventKind.LOOKUP_WANTED, SipralEventKind.LOCATED
+     * and SipralEventKind.LOCATE_FAILED.
+     */
+    private val payloadLocateNumbers: LongArray? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -8219,6 +8653,7 @@ class SipralEvent(
             SipralPresenceEvent((payloadPresenceNumbers?.get(0) ?: 0L), (payloadPresenceNumbers?.get(1) ?: 0L), (payloadPresenceNumbers?.get(2) ?: 0L), (payloadPresenceNumbers?.get(3) ?: 0L), payloadPresenceEntity, payloadPresenceNote, (payloadPresenceNumbers?.get(4) ?: 0L), (payloadPresenceNumbers?.get(5) ?: 0L), (payloadPresenceNumbers?.get(6) ?: 0L), (payloadPresenceNumbers?.get(7) ?: 0L), (payloadPresenceNumbers?.get(8) ?: 0L)),
             SipralTransportFailedEvent((payloadTransportFailedNumbers?.get(0) ?: 0L), (payloadTransportFailedNumbers?.get(1) ?: 0L), (payloadTransportFailedNumbers?.get(2) ?: 0L), (payloadTransportFailedNumbers?.get(3) ?: 0L), payloadTransportFailedDetail),
             SipralLocalConferenceEvent((payloadLocalConferenceNumbers?.get(0) ?: 0L), (payloadLocalConferenceNumbers?.get(1) ?: 0L), (payloadLocalConferenceNumbers?.get(2) ?: 0L), (payloadLocalConferenceNumbers?.get(3) ?: 0L), (payloadLocalConferenceNumbers?.get(4) ?: 0L), (payloadLocalConferenceNumbers?.get(5) ?: 0L), (payloadLocalConferenceNumbers?.get(6) ?: 0L)),
+            SipralLocateEvent((payloadLocateNumbers?.get(0) ?: 0L), (payloadLocateNumbers?.get(1) ?: 0L), payloadLocateName, payloadLocateTargets, (payloadLocateNumbers?.get(2) ?: 0L)),
         )
 }
 
@@ -8290,10 +8725,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?, payloadLocateName: ByteArray?, payloadLocateTargets: ByteArray?, payloadLocateNumbers: LongArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName?.let { String(it, Charsets.UTF_8) }, payloadLocateTargets?.let { String(it, Charsets.UTF_8) }, payloadLocateNumbers))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -8844,7 +9279,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 33)
+        agree(0, 34)
     }
 
     /**
@@ -8868,7 +9303,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configDtmfDetection: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configDtmfDetection: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, configSrtpSuites: ByteArray?, configPathMtu: Long, configDatagramWithoutStreamBytes: Long, configPseudonymSalt: ByteArray?, configDiagnosticTrace: Long, configReserved: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -8887,7 +9322,7 @@ internal object SipralNative {
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, configRecordingInClear: Long, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, configRecordingInClear: Long, configKeepaliveMs: Long, configServerUri: ByteArray?, configTlsPinSha256: ByteArray?, configServerNaptr: Long, configReserved: Long, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
@@ -9039,6 +9474,10 @@ internal object SipralNative {
     external fun sipral_local_conference_poll_transmit(conference: Long, call: LongArray, packet: Long): Int
     external fun sipral_local_conference_record_start(conference: Long, path: ByteArray, optionsFormat: Long, optionsLayout: Long, optionsSampleRate: Long, optionsBitrate: Long, optionsCheckpointMs: Long, optionsReserved: Long): Int
     external fun sipral_local_conference_record_stop(conference: Long): Int
+    external fun sipral_account_looked_up(stack: Long, account: Long, name: ByteArray, record: Long, answer: Long, records: ByteArray, nowMs: Long): Int
+    external fun sipral_account_check_certificate(stack: Long, account: Long, certificate: ByteArray, unixSeconds: Long, pinned: LongArray): Int
+    external fun sipral_advertised_address(bound: ByteArray, peer: ByteArray, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_stack_diagnostic_trace(stack: Long, on: Long): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -9062,7 +9501,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 33
+    const val ABI_VERSION_MINOR: Long = 34
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9518,11 +9957,11 @@ object Sipral {
         "sipral_abi_version_t" to intArrayOf(24, 20, 20),
         "sipral_capabilities_t" to intArrayOf(24, 16, 16),
         "sipral_counters_t" to intArrayOf(232, 228, 232),
-        "sipral_stack_config_t" to intArrayOf(368, 248, 256),
+        "sipral_stack_config_t" to intArrayOf(416, 280, 288),
         "sipral_poll_result_t" to intArrayOf(48, 28, 32),
-        "sipral_stack_settings_t" to intArrayOf(112, 104, 112),
+        "sipral_stack_settings_t" to intArrayOf(120, 112, 120),
         "sipral_header_t" to intArrayOf(32, 16, 16),
-        "sipral_account_config_t" to intArrayOf(392, 208, 216),
+        "sipral_account_config_t" to intArrayOf(440, 240, 248),
         "sipral_call_config_t" to intArrayOf(152, 84, 84),
         "sipral_codec_info_t" to intArrayOf(32, 28, 28),
         "sipral_codec_candidate_t" to intArrayOf(24, 20, 20),
@@ -9556,6 +9995,7 @@ object Sipral {
         "sipral_presence_event_t" to intArrayOf(88, 64, 72),
         "sipral_transport_failed_event_t" to intArrayOf(32, 24, 24),
         "sipral_local_conference_event_t" to intArrayOf(40, 40, 40),
+        "sipral_locate_event_t" to intArrayOf(48, 32, 32),
         "sipral_event_payload_t" to intArrayOf(328, 208, 216),
         "sipral_event_t" to intArrayOf(384, 248, 264),
         "sipral_suspending_t" to intArrayOf(32, 16, 16),
@@ -9579,6 +10019,7 @@ object Sipral {
         "sipral_local_conference_config_t" to intArrayOf(24, 20, 20),
         "sipral_local_conference_info_t" to intArrayOf(56, 48, 48),
         "sipral_local_conference_member_t" to intArrayOf(40, 36, 40),
+        "sipral_pinned_certificate_t" to intArrayOf(40, 36, 40),
     )
 
     /**
@@ -9748,12 +10189,13 @@ object Sipral {
         val configTurnUsername = config.turnUsername?.toByteArray(Charsets.UTF_8)
         val configTurnPassword = config.turnPassword?.toByteArray(Charsets.UTF_8)
         val configStunFallbacks = config.stunFallbacks?.toByteArray(Charsets.UTF_8)
+        val configSrtpSuites = config.srtpSuites?.toByteArray(Charsets.UTF_8)
         val stackSlot = LongArray(1)
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         val configAudioTransmitCallback = SipralAudioTransmitListeners.register(config.audioTransmitListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, config.dtmfDetection, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, config.dtmfDetection, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, configSrtpSuites, config.pathMtu, config.datagramWithoutStreamBytes, config.pseudonymSalt, config.diagnosticTrace, config.reserved, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
             SipralAudioTransmitListeners.made(configAudioTransmitCallback, status, stackSlot[0])
@@ -10286,8 +10728,10 @@ object Sipral {
         val configStirCertificateUrl = config.stirCertificateUrl?.toByteArray(Charsets.UTF_8)
         val configStirOrig = config.stirOrig?.toByteArray(Charsets.UTF_8)
         val configStirOrigid = config.stirOrigid?.toByteArray(Charsets.UTF_8)
+        val configServerUri = config.serverUri?.toByteArray(Charsets.UTF_8)
+        val configTlsPinSha256 = config.tlsPinSha256?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, config.recordingInClear, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, config.recordingInClear, config.keepaliveMs, configServerUri, configTlsPinSha256, config.serverNaptr, config.reserved, accountSlot))
         return accountSlot[0]
     }
 
@@ -13882,6 +14326,125 @@ object Sipral {
      */
     fun localConferenceRecordStop(conference: Long) {
         check(SipralNative.sipral_local_conference_record_stop(conference))
+    }
+
+    /**
+     * Hand the resolver's answer to a
+     * SIPRAL_EVENT_KIND_LOOKUP_WANTED
+     * back to the account that asked.
+     *
+     * `name` and `record` are the event's, as it named them; `answer` is a
+     * SipralDnsAnswer. With `SIPRAL_DNS_ANSWER_RECORDS`, `records` is
+     * what the resolver returned, every record of the kind asked for,
+     * separated by commas, each its fields separated by spaces: the
+     * time-to-live in seconds, then the data as a zone file writes it —
+     * an address for A and AAAA (`300 192.0.2.40`); priority, weight,
+     * port and target for SRV (`300 10 60 5060 sip1.example.com`); order,
+     * preference, flags, service and replacement for NAPTR, the regular
+     * expression left out since RFC 3263 follows none (`300 10 50 S
+     * SIP+D2U _sip._udp.example.com`). Null or empty for none, which
+     * reads as `SIPRAL_DNS_ANSWER_NOTHING`. Text, rather than an array of
+     * structs, because it is what a platform resolver prints and what
+     * every binding hands over as it is.
+     *
+     * Answer every lookup, a resolver that failed included: the procedure
+     * waits for each. An answer to a lookup nothing is waiting for any
+     * more — the account was located since, or it has been asked for
+     * again — is `SIPRAL_STATUS_OK` and changes nothing, as is one for an
+     * account that locates nothing.
+     *
+     * Safety
+     *
+     * `name` must be readable for `name_len` bytes and `records` for
+     * `records_len`.
+     */
+    fun accountLookedUp(stack: Long, account: Long, name: String, record: Long, answer: Long, records: String, nowMs: Long) {
+        val nameBytes = name.toByteArray(Charsets.UTF_8)
+        val recordsBytes = records.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_account_looked_up(stack, account, nameBytes, record, answer, recordsBytes, nowMs))
+    }
+
+    /**
+     * Check the certificate a TLS server presented against the one the
+     * account pins, from inside the application's certificate verifier.
+     *
+     * `certificate` is the DER encoding of the leaf, the first certificate
+     * the server sent, and `unix_seconds` the wall clock, which only the
+     * dates reported in `out_pinned` are read against. The fingerprint
+     * is SHA-256 over those exact bytes, compared in constant time.
+     *
+     * `SIPRAL_STATUS_OK` with `pinned` set: the certificate is the pinned
+     * one, and the handshake is to be accepted whatever its chain, its name
+     * or its dates. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: the account pins a
+     * certificate and this is another; refuse the handshake, and nothing is
+     * written. `SIPRAL_STATUS_OK` with `pinned` zero: the account pins
+     * nothing, and the platform's own checks decide.
+     *
+     * Safety
+     *
+     * `certificate` must be readable for `certificate_len` bytes, and
+     * `out_pinned` must point at a `sipral_pinned_certificate_t` whose
+     * `size` member says how long it is.
+     */
+    fun accountCheckCertificate(stack: Long, account: Long, certificate: ByteArray, unixSeconds: Long): SipralPinnedCertificate {
+        val pinnedSlots = LongArray(SipralPinnedCertificate.SLOTS)
+        check(SipralNative.sipral_account_check_certificate(stack, account, certificate, unixSeconds, pinnedSlots))
+        return SipralPinnedCertificate.of(pinnedSlots)
+    }
+
+    /**
+     * The address to advertise — in a `Contact`, a `bind_address`, a
+     * `media_address` — for a socket bound at `bound` whose traffic goes to
+     * `peer`, as `host:port`, written into `buffer` with a NUL after it.
+     *
+     * A socket bound to a specific address advertises it, unless it is a
+     * loopback address and `peer` is not: `SIPRAL_STATUS_UNREACHABLE_ADDRESS`,
+     * with nothing written. A socket bound to the wildcard address
+     * (`0.0.0.0:5060`, `[::]:5060`) advertises the address of the
+     * operating system's route toward `peer`, with its own port; the route
+     * is found by connecting a datagram socket and closing it, and nothing
+     * is sent. No route to `peer` at all is `SIPRAL_STATUS_TRANSPORT_DOWN`.
+     * `peer` is the registrar for the signalling socket, and the far end —
+     * or the registrar, while the far end is not known yet — for a media
+     * socket. Both are `host:port` addresses, not names.
+     *
+     * Callable from any thread at any time: it names no stack. Text out as
+     * every such call writes it: `out_needed` receives the length with the
+     * NUL counted, `buffer` may be null with a `capacity` of zero to ask for
+     * it, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes nothing.
+     *
+     * Safety
+     *
+     * `bound` and `peer` must be readable for their lengths, `buffer` must
+     * be writable for `capacity` bytes or be null with a capacity of zero,
+     * and `out_needed` must point at one `size_t` or be null.
+     */
+    fun advertisedAddress(bound: String, peer: String, buffer: ByteArray): Long {
+        val boundBytes = bound.toByteArray(Charsets.UTF_8)
+        val peerBytes = peer.toByteArray(Charsets.UTF_8)
+        val neededSlot = LongArray(1)
+        check(SipralNative.sipral_advertised_address(boundBytes, peerBytes, buffer, neededSlot))
+        return neededSlot[0]
+    }
+
+    /**
+     * Turn the diagnostic trace on or off while the stack runs: `on` is a
+     * `SipralToggle`, and zero leaves it as it is (ABI 0.34).
+     *
+     * On, the trace level of `sipral_stack_log` writes every SIP message
+     * whole, with the peer it went to or came from, and prose lines
+     * without pseudonyms: for a diagnosis, where pseudonyms would hide the
+     * difference between two runs. What is never written, on or off, is a
+     * credential or a key — `sipral_stack_config_t::diagnostic_trace` has
+     * the list. Off, the trace is pseudonymised as it always was. Nothing
+     * is written at all unless the log is at `SIPRAL_LOG_LEVEL_TRACE`.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun stackDiagnosticTrace(stack: Long, on: Long) {
+        check(SipralNative.sipral_stack_diagnostic_trace(stack, on))
     }
 
 }

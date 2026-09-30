@@ -577,6 +577,20 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "protocol": int(resolve.protocol),
         }
 
+    if kind in (
+        lib.SIPRAL_EVENT_KIND_LOOKUP_WANTED,
+        lib.SIPRAL_EVENT_KIND_LOCATED,
+        lib.SIPRAL_EVENT_KIND_LOCATE_FAILED,
+    ):
+        locate = payload.locate
+        return {
+            "record": int(locate.record),
+            "failure": int(locate.failure),
+            "name": _text(locate.name, locate.name_len),
+            "targets": _text(locate.targets, locate.targets_len),
+            "retry_in_ms": int(locate.retry_in_ms),
+        }
+
     if kind == lib.SIPRAL_EVENT_KIND_TRANSFER_REQUESTED or kind in (
         lib.SIPRAL_EVENT_KIND_TRANSFER_PROGRESS,
         lib.SIPRAL_EVENT_KIND_TRANSFER_DONE,

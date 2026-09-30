@@ -3065,3 +3065,104 @@ What changed at 0.33, against the audit of 30 September 2026:
   `code`, and a `status` that is nil for a number a newer library returned
   and this binding has no name for; it used to call every such status
   `.panic`.
+
+## What ABI 0.34 added
+
+The first minor after the freeze, grown the way the freeze allows and no
+other: every member is appended after the last one its struct had at 0.33,
+every number is the next free one, and the gate held every pin and every
+member's offset on all three layouts to the 0.33 tree. A 0.33 header is
+refused at load by the exact-minor rule, as any header of another minor is;
+a struct declared at its 0.33 length is still taken, its new members read as
+zero.
+
+**Stack configuration** (`sipral_stack_config_t`, after `rtp_port_max`):
+
+- `srtp_suites` — the SRTP suites every call of the stack offers and accepts
+  unless its account names its own, in the account's comma-separated form.
+- `path_mtu` — the path MTU toward the server when the deployment knows it,
+  zero for unknown; under 576 is refused. RFC 3261 §18.1.1 moves a request
+  to a stream within 200 bytes of it rather than past 1300 bytes.
+- `datagram_without_stream_bytes` — a deliberate deviation from §18.1.1 for
+  a server that takes SIP over UDP alone: once the application says the
+  stream `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for is not coming
+  (`sipral_stack_transport_failed` on the number it would have bound) or the
+  wait runs out, what was waiting goes over UDP up to this size. Zero is off;
+  past 65 507 is refused. `sipral_stack_settings_t` reads both figures back.
+- `pseudonym_salt` — at least 16 bytes an installation keeps, keying the
+  pseudonyms of the log and the state text so that two runs compare line by
+  line; without it they are keyed from `media_seed` and differ every run.
+- `diagnostic_trace` — a `sipral_toggle_t`: the trace writes SIP messages
+  whole, with the peer, credentials and keys taken out;
+  `sipral_stack_diagnostic_trace` turns it on and off while the stack runs.
+- `reserved`, so that the struct ends where its last member does.
+
+`SIPRAL_SRTP_BEST_EFFORT` (7) offers SDES on plain `RTP/AVP`: keyed when the
+answer takes a line, plain when it takes none, for a PBX that answers an
+`RTP/SAVP` offer with 488 (`docs/05-media.md`).
+
+The signal that a request went over UDP past the line is not an event. No
+event this ABI has carries a reason a transport choice could be written in —
+`SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asks the application for a stream, and
+`SIPRAL_EVENT_KIND_TRANSPORT_FAILED` says one was lost — and reusing either
+would have an application open a connection or mourn one that nothing
+lost. It is the decision `transport.kept.datagram`, with the request's size
+and the limit, in the call's diagnostic record
+(`sipral_call_record_json`, `sipral_stack_diagnostics_json`).
+
+**Account configuration** (`sipral_account_config_t`, after
+`recording_in_clear`):
+
+- `keepalive_ms` — the account keeps its flow to its registrar, or to its
+  outbound proxy, open at this interval whatever STUN found: a double CRLF
+  on UDP, a ping on a stream (RFC 5626 §4.4.1). 1 000 to 120 000; zero is
+  off.
+- `server_uri` — the server the account's requests go to, as a URI whose
+  host RFC 3263 locates, in place of `registrar_address`; exactly one of
+  the two is given. `server_naptr` asks NAPTR before SRV.
+- `tls_pin_sha256` — the SHA-256 fingerprint of the one TLS certificate the
+  account trusts, in the forms `openssl` and RFC 8122 print.
+- `reserved`.
+
+**Locating a server.** The lookups are the application's resolver's, one at
+a time. `SIPRAL_EVENT_KIND_LOOKUP_WANTED` (55) names a query in
+`payload.locate` — `name`, and `record`, a `sipral_dns_record_type_t` —
+and `sipral_account_looked_up` hands the answer back: a
+`sipral_dns_answer_t` and, with `SIPRAL_DNS_ANSWER_RECORDS`, the records as
+text, comma-separated, each its time-to-live and then its data as a zone file
+writes it (`300 10 60 5060 sip1.example.com` for SRV). Text rather than an
+array of structs, because it is what a platform resolver prints and what
+every binding hands over as it is, and because an array element can never
+grow. `SIPRAL_EVENT_KIND_LOCATED` (56) gives every address found, first the
+one in use; `SIPRAL_EVENT_KIND_LOCATE_FAILED` (57) gives why, as a
+`sipral_locate_failure_t`, and when the name is asked again. Until the first
+answer a call with no `destination` of its own is
+`SIPRAL_STATUS_WRONG_STATE`. When the recovery ladder climbs to
+`WantAddress` (`docs/16-lifecycle.md`), every account whose server is a name
+is looked up again, and the ladder climbs on at once when the answers are in,
+as it does when the application answers with `sipral_account_rebind`.
+
+**A pinned certificate.** `sipral_account_check_certificate` takes the DER
+bytes of the leaf a TLS server presented, from inside the application's
+certificate verifier, and answers `SIPRAL_STATUS_CERTIFICATE_REFUSED` (25)
+when the account pins another, or `SIPRAL_STATUS_OK` with
+`sipral_pinned_certificate_t::pinned` set and the certificate's dates, an
+expired one included; `pinned` zero means the account pins nothing and the
+platform decides (`docs/22-tls.md`). `sipral_pinned_certificate_t` is the
+one new versioned struct, pinned at its `reserved`.
+
+**An address a peer can reach.** A loopback address advertised to a peer
+that is not on this machine, in a `Contact` or a session description, or the
+unspecified address in a `Contact`, is refused with nothing sent:
+`SIPRAL_STATUS_UNREACHABLE_ADDRESS` (26) from the call that would have sent
+it, and `SIPRAL_REGISTRATION_FAILURE_UNREACHABLE_CONTACT` (5) for a REGISTER
+the stack sends on its own. `sipral_advertised_address` gives the address to
+advertise for a socket bound at `bound` toward `peer` — the route's address
+for a wildcard bind — as text out; it names no stack and may be called from
+anywhere.
+
+**The trace of a stream.** A connection's reads are not messages. With the
+log at `SIPRAL_LOG_LEVEL_TRACE`, every message the endpoint frames off a
+TCP or TLS connection is traced whole, one line per message, with the far
+end the connection was bound to, or "on a connection" for one bound without
+it; the byte count of each read is no longer written.

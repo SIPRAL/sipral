@@ -125,8 +125,8 @@ use crate::handle::{
 };
 use crate::inband::SipralDtmfDetection;
 use crate::media::{
-    SipralIce, SipralSrtp, SipralStreamStats, SipralToggle, catalog_of, ice_policy, srtp_policy,
-    stream_stats, toggle_of, toggled,
+    SipralIce, SipralSrtp, SipralStreamStats, SipralToggle, catalog_of, ice_policy, media_failed,
+    srtp_policy, stream_stats, toggle_of, toggled,
 };
 use crate::names::Names;
 use crate::nat::SipralNat;
@@ -637,6 +637,72 @@ record! {
         pub rtp_port_min: u32,
         /// The highest port of that range, or zero with `rtp_port_min`.
         pub rtp_port_max: u32,
+        /// The SRTP suites every call on this stack offers and accepts,
+        /// unless its account names its own
+        /// (`sipral_account_config_t::srtp_suites`): the names RFC 4568
+        /// section 6.2 and RFC 7714 section 14.2 give them, separated by
+        /// commas, most preferred first. Null for this build's own order
+        /// (ABI 0.34).
+        ///
+        /// An SDES offer names these, in this order, and an answer takes
+        /// the offerer's first that is among them; a DTLS-SRTP handshake
+        /// offers the ones with a protection profile. Every `a=crypto` line
+        /// is in the INVITE, so past two or three suites an offer over UDP
+        /// needs a stream (RFC 3261 section 18.1.1). A name this library
+        /// does not run, or one named twice, is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        pub srtp_suites: *const c_char,
+        /// How many bytes of it.
+        pub srtp_suites_len: usize,
+        /// The MTU of the path toward the server, in bytes, when the
+        /// deployment knows it; zero for unknown (ABI 0.34). RFC 3261
+        /// section 18.1.1 moves a request to a stream when it comes within
+        /// 200 bytes of the MTU, and with the MTU unknown past 1300 bytes: a
+        /// path known to carry more lets a larger request stay on UDP. Under
+        /// 576 is `SIPRAL_STATUS_INVALID_ARGUMENT` — an IPv4 host must take
+        /// that much (RFC 791).
+        pub path_mtu: u32,
+        /// The largest request to send over UDP anyway, once no stream to
+        /// its server can be had, in bytes; zero for never (ABI 0.34).
+        ///
+        /// **A deliberate deviation from RFC 3261 section 18.1.1**, for a
+        /// server that takes SIP over UDP alone: such a PBX answers nothing
+        /// to a request it cannot receive over a stream, and takes a
+        /// 1,444-byte INVITE over UDP from every other phone on its network.
+        /// A request past the section's line asks for a stream as always
+        /// (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`); once the application says
+        /// none is coming (`sipral_stack_transport_failed` on the number it
+        /// was going to bind) or the wait runs out, what was waiting goes
+        /// over UDP up to this size, and each such request is written to the
+        /// call's diagnostic record as `transport.kept.datagram` with its
+        /// size and this limit. A stream bound later is preferred again. A
+        /// request past this size ends as it would without it. At most
+        /// 65 507, what one UDP datagram carries over IPv4; a figure not past
+        /// the section's own line changes nothing.
+        pub datagram_without_stream_bytes: u32,
+        /// A salt the application keeps for the installation, keying the
+        /// pseudonyms this stack's log and state text write for users,
+        /// numbers and addresses, so that the same value has the same
+        /// pseudonym in every run and two runs' traces compare line by line
+        /// (ABI 0.34). At least 16 bytes, drawn once from the platform's
+        /// generator; null for pseudonyms keyed from `media_seed`, which are
+        /// fresh every run. It is a secret like a key: whoever holds it can
+        /// test a guessed address against a pseudonym. Copied.
+        pub pseudonym_salt: *const u8,
+        /// How many bytes of it.
+        pub pseudonym_salt_len: usize,
+        /// A `SipralToggle`: whether the log's trace writes SIP messages
+        /// whole, with the peer they went to, instead of pseudonymised; off
+        /// by default (ABI 0.34). For a diagnosis only: every user, display
+        /// name, number and address is then written as it went on the wire.
+        /// What is never written, in either mode, is a credential or a key:
+        /// every `Authorization` and `Proxy-Authorization` value, every
+        /// `a=crypto` `inline:` key, every `k=` key and every `a=key-mgmt`
+        /// payload is taken out first. `sipral_stack_diagnostic_trace`
+        /// turns it on and off while the stack runs.
+        pub diagnostic_trace: Number<SipralToggle>,
+        /// Zero.
+        pub reserved: u32,
     }
 }
 
@@ -769,6 +835,11 @@ record! {
         pub rtp_port_min: u32,
         /// See `rtp_port_min`.
         pub rtp_port_max: u32,
+        /// The path MTU as given, zero for unknown (ABI 0.34).
+        pub path_mtu: u32,
+        /// The largest request sent over UDP once no stream is coming, as
+        /// given; zero for never (ABI 0.34).
+        pub datagram_without_stream_bytes: u32,
     }
 }
 
@@ -1461,6 +1532,47 @@ fn limits_for(endpoint: &mut EndpointConfig, config: &SipralStackConfig) {
         given(config.diagnostic_records, endpoint.diagnostics.max_records);
 }
 
+/// The smallest datagram an IPv4 host must take whole (RFC 791), and so the
+/// smallest path MTU a deployment can say it has.
+const MIN_PATH_MTU: u32 = 576;
+
+/// The most one UDP datagram carries over IPv4: 65 535 less the IP and UDP
+/// headers.
+const MAX_UDP_PAYLOAD: u32 = 65_507;
+
+/// What the stack is told of its path to the server, and of a server that
+/// takes UDP alone: the two figures RFC 3261 section 18.1.1's line is drawn
+/// from, each zero for the endpoint's own default.
+fn datagrams_for(endpoint: &mut EndpointConfig, config: &SipralStackConfig) -> Result<(), Fail> {
+    match config.path_mtu {
+        0 => {}
+        mtu if mtu < MIN_PATH_MTU => {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!(
+                    "path_mtu is {mtu}, and no IPv4 path carries less than {MIN_PATH_MTU} bytes \
+                     (RFC 791)"
+                ),
+            ));
+        }
+        mtu => endpoint.datagram_limit.path_mtu = Some(mtu),
+    }
+    match config.datagram_without_stream_bytes {
+        0 => {}
+        bytes if bytes > MAX_UDP_PAYLOAD => {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!(
+                    "datagram_without_stream_bytes is {bytes}, and one UDP datagram carries at \
+                     most {MAX_UDP_PAYLOAD}"
+                ),
+            ));
+        }
+        bytes => endpoint.datagram_limit.without_stream_bytes = Some(bytes),
+    }
+    Ok(())
+}
+
 /// A count as the caller reads one: saturating, since a figure past what a
 /// `u32` holds was never one a caller could have given.
 fn count(value: usize) -> u32 {
@@ -1550,7 +1662,10 @@ unsafe fn engine_for(
     media_seed: [u8; SEED_BYTES],
 ) -> Result<MediaEngine, Fail> {
     let named = unsafe { text(config.codecs, config.codecs_len, "codecs") }?;
-    let catalog = catalog_of(
+    let suites = crate::security::srtp_suites(unsafe {
+        text(config.srtp_suites, config.srtp_suites_len, "srtp_suites")
+    }?)?;
+    let mut catalog = catalog_of(
         named,
         config.frame_ms,
         toggled(config.offer_dtmf, "offer_dtmf", true)?,
@@ -1559,6 +1674,11 @@ unsafe fn engine_for(
         ice_policy(config.ice, "ice")?,
         toggled(config.g729_annex_b, "g729_annex_b", true)?,
     )?;
+    if let Some(suites) = suites {
+        catalog = catalog
+            .with_srtp_suites(&suites)
+            .map_err(|error| media_failed(&error))?;
+    }
     let clock = WallClock::from_unix(origin, config.media_clock_unix_seconds, 0);
     Ok(MediaEngine::new(catalog, media, clock, media_seed))
 }
@@ -1636,14 +1756,32 @@ pub(crate) unsafe fn create_on(
     let mut endpoint = EndpointConfig::default();
     endpoint.timers = timers;
     limits_for(&mut endpoint, &config);
+    datagrams_for(&mut endpoint, &config)?;
+    let salt = unsafe {
+        bytes(
+            config.pseudonym_salt,
+            config.pseudonym_salt_len,
+            "pseudonym_salt",
+        )
+    }?;
+    let diagnostic = toggled(config.diagnostic_trace, "diagnostic_trace", false)?;
 
     let origin = Instant::now();
     let clock = crate::audio::Clock::new(origin);
     let audio = unsafe { crate::audio::configured(&config, &clock) }?;
     let mut engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
     engine.set_rtp_ports(rtp_ports);
-    let pseudonyms = crate::log::pseudonym_key(&media_seed);
+    let pseudonyms = match salt {
+        Some(salt) => sipral::pseudonym_key(salt).map_err(|error| {
+            fail(
+                SipralStatus::InvalidArgument,
+                format!("pseudonym_salt: {error}"),
+            )
+        })?,
+        None => crate::log::pseudonym_key(&media_seed),
+    };
     let log = crate::log::log_for(&pseudonyms);
+    log.set_diagnostic(diagnostic);
     engine.set_log(log.clone());
     let mut agent = UserAgent::new(endpoint, seed)
         .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))?;
@@ -1877,6 +2015,11 @@ entry! {
                     .engine
                     .rtp_ports()
                     .map_or(0, |range| u32::from(range.max())),
+                path_mtu: limits.datagram_limit.path_mtu.unwrap_or(0),
+                datagram_without_stream_bytes: limits
+                    .datagram_limit
+                    .without_stream_bytes
+                    .unwrap_or(0),
             })
         })?;
         unsafe { write_versioned(out_settings, settings) }?;
@@ -2522,6 +2665,9 @@ pub(crate) mod tests {
         /// What every local conference event carried, in the order they
         /// arrived.
         pub(crate) local_conferences: Vec<crate::local_conference::SipralLocalConferenceEvent>,
+        /// What every lookup, location and failed location carried, in the
+        /// order they arrived.
+        pub(crate) locating: Vec<crate::locate::tests::Locating>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -2909,6 +3055,16 @@ pub(crate) mod tests {
                 .local_conferences
                 .push(unsafe { event.payload.local_conference });
         }
+        if matches!(
+            event.kind,
+            SipralEventKind::LookupWanted
+                | SipralEventKind::Located
+                | SipralEventKind::LocateFailed
+        ) {
+            observed
+                .locating
+                .push(unsafe { crate::locate::tests::locating(event) });
+        }
         if event.kind == SipralEventKind::TransportFailed {
             let lost = unsafe { event.payload.transport_failed };
             let detail = if lost.detail.is_null() {
@@ -3023,6 +3179,14 @@ pub(crate) mod tests {
             diagnostic_records: 0,
             rtp_port_min: 0,
             rtp_port_max: 0,
+            srtp_suites: ptr::null(),
+            srtp_suites_len: 0,
+            path_mtu: 0,
+            datagram_without_stream_bytes: 0,
+            pseudonym_salt: ptr::null(),
+            pseudonym_salt_len: 0,
+            diagnostic_trace: 0,
+            reserved: 0,
             dtmf_detection: 0,
         }
     }
@@ -3205,6 +3369,8 @@ pub(crate) mod tests {
             diagnostic_records: u32::MAX,
             rtp_port_min: u32::MAX,
             rtp_port_max: u32::MAX,
+            path_mtu: u32::MAX,
+            datagram_without_stream_bytes: u32::MAX,
         }
     }
 
@@ -3226,6 +3392,98 @@ pub(crate) mod tests {
         assert_eq!(read.timer_t1_ms, 500, "the default, not the zero given");
         assert_eq!(read.timer_t2_ms, 4_000);
         assert_eq!(read.timer_t4_ms, 5_000);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The two figures §18.1.1's line is drawn from read back as given, and
+    /// one no path or datagram could have is refused.
+    #[test]
+    fn the_datagram_figures_read_back_as_given_and_impossible_ones_are_refused() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let read = read_settings(handle);
+        assert_eq!((read.path_mtu, read.datagram_without_stream_bytes), (0, 0));
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let mut given = config(record, &mut observed);
+        given.path_mtu = 1_500;
+        given.datagram_without_stream_bytes = 1_800;
+        let (status, handle) = create(&given);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let read = read_settings(handle);
+        assert_eq!(
+            (read.path_mtu, read.datagram_without_stream_bytes),
+            (1_500, 1_800)
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        for (mtu, without) in [(575, 0), (0, 65_508)] {
+            let mut observed = Observed::default();
+            let mut wrong = config(record, &mut observed);
+            wrong.path_mtu = mtu;
+            wrong.datagram_without_stream_bytes = without;
+            assert_eq!(
+                create(&wrong).0,
+                SipralStatus::InvalidArgument,
+                "{mtu} {without}"
+            );
+        }
+    }
+
+    /// The suites a stack names are the ones every call of it offers, in
+    /// that order; a suite this library does not run is refused.
+    #[test]
+    fn the_stack_srtp_suites_are_what_its_calls_offer() {
+        let suites = "AES_256_CM_HMAC_SHA1_80,AES_CM_128_HMAC_SHA1_80";
+        let mut observed = Observed::default();
+        let (handle, account) = crate::call::tests::media_line(&mut observed, |config| {
+            config.srtp = crate::media::SipralSrtp::Offered as u32;
+            config.srtp_suites = suites.as_ptr().cast();
+            config.srtp_suites_len = suites.len();
+        });
+        let (status, _) =
+            crate::call::tests::place(handle, account, &crate::call::tests::managed_config(), 0);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = String::from_utf8(crate::call::tests::one(handle)).expect("UTF-8");
+        let offered: Vec<&str> = invite
+            .lines()
+            .filter_map(|line| line.strip_prefix("a=crypto:"))
+            .map(|line| line.split(' ').nth(1).unwrap_or(""))
+            .collect();
+        assert_eq!(
+            offered,
+            ["AES_256_CM_HMAC_SHA1_80", "AES_CM_128_HMAC_SHA1_80"]
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let mut wrong = config(record, &mut observed);
+        let unknown = "AES_CM_128_HMAC_SHA1_80,NULL_HMAC_SHA1_80";
+        wrong.srtp_suites = unknown.as_ptr().cast();
+        wrong.srtp_suites_len = unknown.len();
+        assert_eq!(create(&wrong).0, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("srtp_suites"),
+            "{}",
+            last_error_text()
+        );
+    }
+
+    /// Best effort offers SDES on the plain profile, which a server that
+    /// does no SRTP takes rather than refuses.
+    #[test]
+    fn best_effort_offers_its_keys_on_the_plain_profile() {
+        let mut observed = Observed::default();
+        let (handle, account) = crate::call::tests::media_line(&mut observed, |config| {
+            config.srtp = crate::media::SipralSrtp::BestEffort as u32;
+        });
+        let (status, _) =
+            crate::call::tests::place(handle, account, &crate::call::tests::managed_config(), 0);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = String::from_utf8(crate::call::tests::one(handle)).expect("UTF-8");
+        assert!(invite.contains(" RTP/AVP "), "{invite}");
+        assert!(invite.contains("a=crypto:"), "{invite}");
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
@@ -3527,6 +3785,7 @@ pub(crate) mod tests {
             crate::media::SipralSrtp::NotOffered as u32,
             crate::media::SipralSrtp::Offered as u32,
             crate::media::SipralSrtp::Required as u32,
+            crate::media::SipralSrtp::BestEffort as u32,
         ];
         if cfg!(feature = "dtls") {
             taken.extend(handshake);
@@ -3553,7 +3812,7 @@ pub(crate) mod tests {
 
         let mut observed = Observed::default();
         let mut config = config(record, &mut observed);
-        config.srtp = 7;
+        config.srtp = 8;
         let (status, handle) = create(&config);
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert_eq!(handle, SIPRAL_HANDLE_NONE, "nothing was built");

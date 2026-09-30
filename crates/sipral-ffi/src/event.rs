@@ -43,6 +43,7 @@ use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::identity::{SipralAnswerMode, SipralRingSource, SipralVerstat};
 use crate::local_conference::SipralLocalConferenceEvent;
+use crate::locate::SipralLocateEvent;
 use crate::media::{
     SipralCodec, SipralDirection, SipralMediaFault, SipralSrtpSuite, SipralStreamStats,
     direction_of, fault_of, named_codec,
@@ -703,6 +704,27 @@ event_kinds! {
         /// `sipral_local_conference_talker_at`. `account` and `call` are
         /// `SIPRAL_HANDLE_NONE`: a conference is neither.
         54 = LocalConferenceChanged, c"local conference changed";
+        /// A DNS lookup is wanted to locate an account's server by RFC 3263
+        /// (ABI 0.34): the account named its registrar or its outbound proxy
+        /// with `server_uri` rather than an address.
+        ///
+        /// `payload.locate` names the query: `name`, and `record`, what to
+        /// ask it for. Ask the platform's resolver and hand the answer to
+        /// `sipral_account_looked_up` — every one, a failure included, since
+        /// the procedure waits for each. Several may be outstanding at once,
+        /// one per host an SRV answer named. `account` is the account.
+        55 = LookupWanted, c"lookup wanted";
+        /// An account's server was located, or located again once the last
+        /// answer's time-to-live ran out (ABI 0.34): `payload.locate.targets`
+        /// is every address the answer named, first the one the account's
+        /// requests go to now. `account` is the account.
+        56 = Located, c"located";
+        /// A lookup of an account's server named no address (ABI 0.34):
+        /// `payload.locate.failure` says why, and `retry_in_ms` when the name
+        /// is looked up again. A REGISTER that was waiting for it is reported
+        /// failed as well, and backs off; an address an earlier answer named
+        /// stays in use meanwhile. `account` is the account.
+        57 = LocateFailed, c"locate failed";
     }
 }
 
@@ -778,6 +800,9 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::PresenceChanged, "presence"),
     (SipralEventKind::TransportFailed, "transport_failed"),
     (SipralEventKind::LocalConferenceChanged, "local_conference"),
+    (SipralEventKind::LookupWanted, "locate"),
+    (SipralEventKind::Located, "locate"),
+    (SipralEventKind::LocateFailed, "locate"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -860,6 +885,13 @@ codes! {
         /// The registrar moved. Following it needs an address, which is the
         /// caller's to resolve.
         Redirected = 4,
+        /// The account's `Contact` names an address the registrar cannot
+        /// reach this end at — loopback, to a registrar that is not, or the
+        /// unspecified address — and nothing was sent (ABI 0.34). Trying
+        /// again cannot help until the account is given one it can:
+        /// `sipral_account_rebind`, with an address `sipral_advertised_address`
+        /// found.
+        UnreachableContact = 5,
     }
 }
 
@@ -1700,6 +1732,9 @@ record! {
         pub transport_failed: SipralTransportFailedEvent,
         /// For [`SipralEventKind::LocalConferenceChanged`].
         pub local_conference: SipralLocalConferenceEvent,
+        /// For [`SipralEventKind::LookupWanted`], [`SipralEventKind::Located`]
+        /// and [`SipralEventKind::LocateFailed`].
+        pub locate: SipralLocateEvent,
     }
 }
 
@@ -2036,7 +2071,76 @@ pub(crate) fn translate(
     if let Some(out) = about_conference_or_presence(known, event) {
         return Some(out);
     }
+    if let Some(out) = about_a_location(known, event, transport) {
+        return Some(out);
+    }
     about_lifecycle(known, event)
+}
+
+/// An account's server being located by RFC 3263: a lookup wanted, the
+/// addresses found, or none found. The query's name borrows from `event`;
+/// the addresses are `targets`, the text [`text_to_point_at`] built for this
+/// event, since a list of `SocketAddr`s has no bytes of its own.
+fn about_a_location(
+    known: &mut Vocabulary<'_>,
+    event: &UaEvent,
+    targets: Option<&str>,
+) -> Option<SipralEvent> {
+    let empty = SipralLocateEvent {
+        record: crate::locate::SipralDnsRecordType::None as u32,
+        failure: crate::locate::SipralLocateFailure::None as u32,
+        name: std::ptr::null(),
+        name_len: 0,
+        targets: std::ptr::null(),
+        targets_len: 0,
+        retry_in_ms: 0,
+    };
+    let (account, kind, payload) = match *event {
+        UaEvent::LookupWanted { account, ref query } => (
+            account,
+            SipralEventKind::LookupWanted,
+            SipralLocateEvent {
+                record: crate::locate::named_record(query.record) as u32,
+                name: query.name.as_ptr().cast::<c_char>(),
+                name_len: query.name.len(),
+                ..empty
+            },
+        ),
+        UaEvent::Located { account, .. } => {
+            let (targets, targets_len) = targets.map_or((std::ptr::null(), 0), |text| {
+                (text.as_ptr().cast::<c_char>(), text.len())
+            });
+            (
+                account,
+                SipralEventKind::Located,
+                SipralLocateEvent {
+                    targets,
+                    targets_len,
+                    ..empty
+                },
+            )
+        }
+        UaEvent::LocateFailed {
+            account,
+            reason,
+            retry_in,
+        } => (
+            account,
+            SipralEventKind::LocateFailed,
+            SipralLocateEvent {
+                failure: crate::locate::named_failure(reason) as u32,
+                retry_in_ms: millis(retry_in),
+                ..empty
+            },
+        ),
+        _ => return None,
+    };
+    let mut out = SipralEvent::of(known.stack, kind, payload!(locate: payload));
+    out.account = known
+        .accounts
+        .name_of(account)
+        .unwrap_or(SIPRAL_HANDLE_NONE);
+    Some(out)
 }
 
 /// Who is calling, as a signature says: the certificate the verification
@@ -2567,6 +2671,13 @@ pub(crate) fn text_to_point_at(event: &UaEvent) -> Option<String> {
             Some(destination.to_string())
         }
         UaEvent::Unclaimed(Event::ResolveNeeded { ref host, .. }) => Some(host.to_string()),
+        UaEvent::Located { ref targets, .. } => Some(
+            targets
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
         _ => None,
     }
 }
@@ -3346,6 +3457,7 @@ fn registration_failure(failure: RegistrationFailure) -> SipralRegistrationFailu
         RegistrationFailure::BadCredentials => SipralRegistrationFailure::BadCredentials,
         RegistrationFailure::Unreachable => SipralRegistrationFailure::Unreachable,
         RegistrationFailure::Redirected => SipralRegistrationFailure::Redirected,
+        RegistrationFailure::UnreachableContact => SipralRegistrationFailure::UnreachableContact,
         _ => SipralRegistrationFailure::None,
     }
 }
@@ -3493,9 +3605,10 @@ mod tests {
     use super::{
         SipralAnnounceEvent, SipralCallEndReason, SipralCallEvent, SipralCallState, SipralEvent,
         SipralEventKind, SipralEventPayload, SipralRegistrationFailure, SipralRegistrationState,
-        call_state, end_reason, millis, registration_state, sipral_event_kind_name,
+        call_state, end_reason, millis, registration_failure, registration_state,
+        sipral_event_kind_name,
     };
-    use sipral_ua::{CallEndReason, CallState, RegistrationState};
+    use sipral_ua::{CallEndReason, CallState, RegistrationFailure, RegistrationState};
     use std::ffi::CStr;
     use std::time::Duration;
 
@@ -3665,6 +3778,35 @@ mod tests {
     }
 
     #[test]
+    fn every_registration_failure_has_its_own_word() {
+        for (failure, expected) in [
+            (
+                RegistrationFailure::Rejected,
+                SipralRegistrationFailure::Rejected,
+            ),
+            (
+                RegistrationFailure::BadCredentials,
+                SipralRegistrationFailure::BadCredentials,
+            ),
+            (
+                RegistrationFailure::Unreachable,
+                SipralRegistrationFailure::Unreachable,
+            ),
+            (
+                RegistrationFailure::Redirected,
+                SipralRegistrationFailure::Redirected,
+            ),
+            (
+                RegistrationFailure::UnreachableContact,
+                SipralRegistrationFailure::UnreachableContact,
+            ),
+        ] {
+            assert_eq!(registration_failure(failure), expected);
+        }
+        assert_eq!(SipralRegistrationFailure::UnreachableContact as u32, 5);
+    }
+
+    #[test]
     fn nothing_that_means_absent_shares_a_number_with_something_that_does_not() {
         assert_eq!(SipralRegistrationState::Unknown as u32, 0);
         assert_eq!(SipralRegistrationFailure::None as u32, 0);
@@ -3729,7 +3871,10 @@ mod tests {
         assert_eq!(SipralEventKind::PresenceChanged as u32, 52);
         assert_eq!(SipralEventKind::TransportFailed as u32, 53);
         assert_eq!(SipralEventKind::LocalConferenceChanged as u32, 54);
-        assert_eq!(SipralEventKind::ALL.len(), 52, "and there are no others");
+        assert_eq!(SipralEventKind::LookupWanted as u32, 55);
+        assert_eq!(SipralEventKind::Located as u32, 56);
+        assert_eq!(SipralEventKind::LocateFailed as u32, 57);
+        assert_eq!(SipralEventKind::ALL.len(), 55, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -3833,7 +3978,10 @@ mod tests {
             Some("local conference changed"),
             "54 is live"
         );
-        assert_eq!(name(55), None, "past the last kind");
+        assert_eq!(name(55).as_deref(), Some("lookup wanted"), "55 is live");
+        assert_eq!(name(56).as_deref(), Some("located"), "56 is live");
+        assert_eq!(name(57).as_deref(), Some("locate failed"), "57 is live");
+        assert_eq!(name(58), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

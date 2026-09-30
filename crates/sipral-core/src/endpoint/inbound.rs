@@ -146,6 +146,7 @@ impl Endpoint {
         // a connected transport has one far end; the destination of anything
         // written to it is ignored by the caller, and carried so a log line
         // says where it went
+        let named_far_end = bound.remote;
         let remote = bound.remote.unwrap_or(advertised);
         let Some(mut framer) = self
             .transports
@@ -160,6 +161,19 @@ impl Endpoint {
         while outcome.is_ok() {
             match framer.next_message(mode) {
                 Ok(Some(Framed::Message(message))) => {
+                    if let Some(tap) = self.stream_tap.as_mut() {
+                        tap.push(super::StreamMessage {
+                            transport,
+                            remote: named_far_end,
+                            // the framer's buffer runs on past it into
+                            // whatever arrived behind it
+                            bytes: message
+                                .as_bytes()
+                                .get(..message.len())
+                                .unwrap_or_default()
+                                .into(),
+                        });
+                    }
                     let flow = Self::flow_for(&message, transport, remote, None, protocol);
                     self.dispatch(&message, flow, advertised, now);
                 }

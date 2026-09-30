@@ -48,7 +48,7 @@
     X(sipral_progress_config) X(sipral_consent_tone)                          \
     X(sipral_recording_options) X(sipral_transport_failure)                   \
     X(sipral_local_conference_config) X(sipral_local_conference_info)         \
-    X(sipral_local_conference_member)
+    X(sipral_local_conference_member) X(sipral_pinned_certificate)
 
 static int failures;
 
@@ -1202,6 +1202,17 @@ static sipral_status_t transmit_at(struct fixture *fixture, size_t declared)
     return sipral_stack_poll_transmit(fixture->stack, &transmit);
 }
 
+/* The fixture's account pins no certificate, so the answer is that the
+ * platform decides; the length is what is being tried. */
+static sipral_status_t pinned_certificate_at(struct fixture *fixture, size_t declared)
+{
+    static const uint8_t leaf[] = { 0x30, 0x03, 0x02, 0x01, 0x07 };
+    sipral_pinned_certificate_t pinned = { 0 };
+    pinned.size = declared;
+    return sipral_account_check_certificate(fixture->stack, fixture->account, leaf, sizeof leaf,
+                                            0, &pinned);
+}
+
 static const struct {
     const char *name;
     sipral_status_t (*at)(struct fixture *fixture, size_t declared);
@@ -1240,6 +1251,7 @@ static const struct {
     { "sipral_local_conference_config_t", local_conference_config_at },
     { "sipral_local_conference_info_t", local_conference_info_at },
     { "sipral_local_conference_member_t", local_conference_member_at },
+    { "sipral_pinned_certificate_t", pinned_certificate_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])
@@ -1862,6 +1874,129 @@ static int going_to(sipral_handle_t stack, const char *start, char *into, size_t
         memcpy(into, destination_buffer, strlen(destination_buffer) + 1);
         found = 1;
     }
+}
+
+/* What the locate events of ABI 0.34 carried, copied out while the callback
+ * ran. */
+static char lookup_name[256];
+static uint32_t lookup_record;
+static char located_targets[256];
+
+static void on_locate_event(const sipral_event_t *event, void *user_data)
+{
+    (void)user_data;
+    if (event->kind == SIPRAL_EVENT_KIND_LOOKUP_WANTED) {
+        size_t len = event->payload.locate.name_len;
+        if (len >= sizeof lookup_name) {
+            len = sizeof lookup_name - 1;
+        }
+        memcpy(lookup_name, event->payload.locate.name, len);
+        lookup_name[len] = '\0';
+        lookup_record = event->payload.locate.record;
+    } else if (event->kind == SIPRAL_EVENT_KIND_LOCATED) {
+        size_t len = event->payload.locate.targets_len;
+        if (len >= sizeof located_targets) {
+            len = sizeof located_targets - 1;
+        }
+        memcpy(located_targets, event->payload.locate.targets, len);
+        located_targets[len] = '\0';
+    }
+}
+
+/* ABI 0.34, from C: a registrar named by a URI and located with the
+ * application's resolver, a certificate pin, the address to advertise, the
+ * figures RFC 3261 section 18.1.1 is drawn from, and the diagnostic trace. */
+static void what_0_34_added(void)
+{
+    static const char server[] = "sip:pbx.example.com:5080";
+    static const char pin[] =
+        "SHA256=00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:"
+        "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF";
+    static const char suites[] = "AES_CM_128_HMAC_SHA1_80";
+    static const uint8_t salt[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    static const uint8_t leaf[] = { 0x30, 0x03, 0x02, 0x01, 0x07 };
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for the ABI 0.34 stack", 0);
+        return;
+    }
+    lookup_name[0] = '\0';
+    located_targets[0] = '\0';
+
+    sipral_stack_config_t config = fixture_stack_config(sizeof config, entropy, media_seed);
+    config.event_callback = on_locate_event;
+    config.srtp_suites = suites;
+    config.srtp_suites_len = strlen(suites);
+    config.path_mtu = 1500;
+    config.datagram_without_stream_bytes = 1800;
+    config.pseudonym_salt = salt;
+    config.pseudonym_salt_len = sizeof salt;
+    config.diagnostic_trace = SIPRAL_TOGGLE_ON;
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    expect("the ABI 0.34 stack would not start",
+           sipral_stack_create(&config, &stack) == SIPRAL_STATUS_OK);
+    if (stack == SIPRAL_HANDLE_NONE) {
+        return;
+    }
+    sipral_stack_settings_t settings = { 0 };
+    settings.size = sizeof settings;
+    expect("the path MTU and the UDP limit did not read back as given",
+           sipral_stack_settings(stack, &settings) == SIPRAL_STATUS_OK &&
+               settings.path_mtu == 1500 && settings.datagram_without_stream_bytes == 1800);
+    expect("the diagnostic trace would not turn off",
+           sipral_stack_diagnostic_trace(stack, SIPRAL_TOGGLE_OFF) == SIPRAL_STATUS_OK);
+
+    sipral_account_config_t account_config = fixture_account_config(sizeof account_config);
+    account_config.registrar_address = NULL;
+    account_config.registrar_address_len = 0;
+    account_config.server_uri = server;
+    account_config.server_uri_len = strlen(server);
+    account_config.keepalive_ms = 30000;
+    account_config.tls_pin_sha256 = pin;
+    account_config.tls_pin_sha256_len = strlen(pin);
+    sipral_handle_t account = SIPRAL_HANDLE_NONE;
+    expect("the located account was refused",
+           sipral_account_add(stack, &account_config, &account) == SIPRAL_STATUS_OK);
+    expect("the located account would not register",
+           sipral_account_register(stack, account, 0) == SIPRAL_STATUS_OK);
+    sipral_poll_result_t poll = { 0 };
+    poll.size = sizeof poll;
+    sipral_stack_poll(stack, 0, &poll);
+    /* a port skips SRV: the host's own address is what is asked */
+    expect("the lookup asked for is not the host's address",
+           strcmp(lookup_name, "pbx.example.com") == 0 &&
+               lookup_record == SIPRAL_DNS_RECORD_TYPE_A);
+    static const char answer[] = "300 203.0.113.50";
+    expect("the resolver's answer was refused",
+           sipral_account_looked_up(stack, account, lookup_name, strlen(lookup_name),
+                                    lookup_record, SIPRAL_DNS_ANSWER_RECORDS, answer,
+                                    strlen(answer), 0) == SIPRAL_STATUS_OK);
+    sipral_stack_poll(stack, 0, &poll);
+    expect("the account was not located where the answer said",
+           strcmp(located_targets, "203.0.113.50:5080") == 0);
+    char destination[SIPRAL_ADDRESS_BYTES] = { 0 };
+    expect("the REGISTER did not go to the located address",
+           going_to(stack, "REGISTER ", destination, sizeof destination) &&
+               strcmp(destination, "203.0.113.50:5080") == 0);
+
+    sipral_pinned_certificate_t pinned = { 0 };
+    pinned.size = sizeof pinned;
+    expect("a certificate that is not the pinned one was not refused",
+           sipral_account_check_certificate(stack, account, leaf, sizeof leaf, 0, &pinned) ==
+               SIPRAL_STATUS_CERTIFICATE_REFUSED);
+    sipral_stack_destroy(stack);
+
+    char advertised[64] = { 0 };
+    size_t needed = 0;
+    static const char loopback[] = "127.0.0.1:5060";
+    static const char registrar[] = "203.0.113.5:5060";
+    expect("loopback was advertised toward another machine",
+           sipral_advertised_address(loopback, strlen(loopback), registrar, strlen(registrar),
+                                     advertised, sizeof advertised,
+                                     &needed) == SIPRAL_STATUS_UNREACHABLE_ADDRESS);
+    const char *named = sipral_status_name(SIPRAL_STATUS_UNREACHABLE_ADDRESS);
+    expect("the new status has no name", named != NULL && strcmp(named, "unreachable address") == 0);
 }
 
 static void a_next_hop_is_asked_about_and_answered(void)
@@ -2668,6 +2803,7 @@ int main(void)
     nothing_is_due_on_a_call_with_no_media();
     a_registration_freezes_and_thaws();
     a_next_hop_is_asked_about_and_answered();
+    what_0_34_added();
 
     config.size = sizeof config;
     config.event_callback = on_event;

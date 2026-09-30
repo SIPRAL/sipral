@@ -286,6 +286,22 @@ abstract final class SipralStatus {
   /// clock did not move: read the clock again and ask again. A caller
   /// that keeps getting this has a clock that went backwards.
   static const int clockBehind = 24;
+
+  /// The TLS server's certificate is not the one the account pins
+  /// (ABI 0.34): `sipral_account_check_certificate` compared its
+  /// SHA-256 fingerprint with `sipral_account_config_t::tls_pin_sha256`
+  /// and they differ. Refuse the handshake: with a pin, the
+  /// fingerprint is the whole verdict (`docs/22-tls.md`).
+  static const int certificateRefused = 25;
+
+  /// This end was about to advertise an address the peer cannot reach
+  /// it at (ABI 0.34): a loopback address, in a `Contact` or a session
+  /// description, handed to a peer that is not on this machine, or the
+  /// unspecified address in a `Contact`. Nothing was sent; the last
+  /// error names both addresses. Bind to, and advertise, the address
+  /// of the interface that routes to the peer —
+  /// `sipral_advertised_address` finds it.
+  static const int unreachableAddress = 26;
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -436,6 +452,17 @@ abstract final class SipralSrtp {
   /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
   /// `SIPRAL_FEATURE_DTLS_SRTP`.
   static const int dtlsOrSdes = 6;
+
+  /// Offer SDES on plain `RTP/AVP`: the call is encrypted when the
+  /// answer takes one of the `a=crypto` lines and plain when it takes
+  /// none — the "SRTP optional" of desk phones, for a server that may
+  /// or may not encrypt and answers an offer on `RTP/SAVP` with 488
+  /// when it does not. RFC 4568 writes the attribute for the secure
+  /// profiles, so this is interoperability rather than a standard.
+  /// Answering, an offer on `RTP/AVP` carrying a line this end takes
+  /// is answered with a key, and anything else as under `Offered`.
+  /// ABI 0.34.
+  static const int bestEffort = 7;
 }
 
 /// What a call or a stack says about ICE. Names for
@@ -1444,6 +1471,30 @@ abstract final class SipralEventKind {
   /// `sipral_local_conference_talker_at`. `account` and `call` are
   /// `SIPRAL_HANDLE_NONE`: a conference is neither.
   static const int localConferenceChanged = 54;
+
+  /// A DNS lookup is wanted to locate an account's server by RFC 3263
+  /// (ABI 0.34): the account named its registrar or its outbound proxy
+  /// with `server_uri` rather than an address.
+  ///
+  /// `payload.locate` names the query: `name`, and `record`, what to
+  /// ask it for. Ask the platform's resolver and hand the answer to
+  /// `sipral_account_looked_up` — every one, a failure included, since
+  /// the procedure waits for each. Several may be outstanding at once,
+  /// one per host an SRV answer named. `account` is the account.
+  static const int lookupWanted = 55;
+
+  /// An account's server was located, or located again once the last
+  /// answer's time-to-live ran out (ABI 0.34): `payload.locate.targets`
+  /// is every address the answer named, first the one the account's
+  /// requests go to now. `account` is the account.
+  static const int located = 56;
+
+  /// A lookup of an account's server named no address (ABI 0.34):
+  /// `payload.locate.failure` says why, and `retry_in_ms` when the name
+  /// is looked up again. A REGISTER that was waiting for it is reported
+  /// failed as well, and backs off; an address an earlier answer named
+  /// stays in use meanwhile. `account` is the account.
+  static const int locateFailed = 57;
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1512,6 +1563,14 @@ abstract final class SipralRegistrationFailure {
   /// The registrar moved. Following it needs an address, which is the
   /// caller's to resolve.
   static const int redirected = 4;
+
+  /// The account's `Contact` names an address the registrar cannot
+  /// reach this end at — loopback, to a registrar that is not, or the
+  /// unspecified address — and nothing was sent (ABI 0.34). Trying
+  /// again cannot help until the account is given one it can:
+  /// `sipral_account_rebind`, with an address `sipral_advertised_address`
+  /// found.
+  static const int unreachableContact = 5;
 }
 
 /// Where a call is. Names for `sipral_call_event_t::state`, and what
@@ -2752,6 +2811,67 @@ abstract final class SipralDeparture {
   static const int incompatible = 3;
 }
 
+/// Which kind of DNS record a lookup asks for. Names for
+/// `sipral_locate_event_t::record` and `sipral_account_looked_up`'s
+/// `record`.
+abstract final class SipralDnsRecordType {
+  /// Not a lookup: the value on a `SIPRAL_EVENT_KIND_LOCATED` or a
+  /// `SIPRAL_EVENT_KIND_LOCATE_FAILED`.
+  static const int none = 0;
+
+  /// RFC 3403: which services a domain offers, and under which names.
+  static const int naptr = 1;
+
+  /// RFC 2782: which hosts, at which ports, serve one service.
+  static const int srv = 2;
+
+  /// An IPv4 address.
+  static const int a = 3;
+
+  /// An IPv6 address.
+  static const int aaaa = 4;
+}
+
+/// What the application's resolver said to a lookup. Names for
+/// `sipral_account_looked_up`'s `answer`.
+abstract final class SipralDnsAnswer {
+  /// The records it returned, in `records`. None at all reads as
+  /// `SIPRAL_DNS_ANSWER_NOTHING`.
+  static const int records = 1;
+
+  /// The name has no record of that kind, or does not exist at all.
+  /// Also the right answer from a resolver that cannot ask for the
+  /// kind: a platform lookup that only knows addresses answers every
+  /// NAPTR and SRV query with this, and the host's own addresses are
+  /// asked for next.
+  static const int nothing = 2;
+
+  /// The resolver could not answer: no server reachable, a timeout, a
+  /// server failure.
+  static const int failed = 3;
+}
+
+/// Why a lookup of an account's server named no address. Names for
+/// `sipral_locate_event_t::failure`.
+abstract final class SipralLocateFailure {
+  /// Nothing failed.
+  static const int none = 0;
+
+  /// The DNS answered, and what it answered names no address of the
+  /// family the account's transport can reach: no record, or an SRV
+  /// target of `.`.
+  static const int notFound = 1;
+
+  /// The resolver failed on every lookup that could have given an
+  /// address.
+  static const int unanswered = 2;
+
+  /// The transport has no RFC 3263 procedure: WebSocket names no SRV
+  /// service and no default port, so only a numeric host, or a host
+  /// with a port, can be located for it.
+  static const int unsupported = 3;
+}
+
 /// The version of the ABI this library provides.
 ///
 /// Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -3420,6 +3540,86 @@ final class SipralStackConfig extends ffi.Struct {
   /// The highest port of that range, or zero with `rtp_port_min`.
   @ffi.Uint32()
   external int rtpPortMax;
+
+  /// The SRTP suites every call on this stack offers and accepts,
+  /// unless its account names its own
+  /// (`sipral_account_config_t::srtp_suites`): the names RFC 4568
+  /// section 6.2 and RFC 7714 section 14.2 give them, separated by
+  /// commas, most preferred first. Null for this build's own order
+  /// (ABI 0.34).
+  ///
+  /// An SDES offer names these, in this order, and an answer takes
+  /// the offerer's first that is among them; a DTLS-SRTP handshake
+  /// offers the ones with a protection profile. Every `a=crypto` line
+  /// is in the INVITE, so past two or three suites an offer over UDP
+  /// needs a stream (RFC 3261 section 18.1.1). A name this library
+  /// does not run, or one named twice, is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+  external ffi.Pointer<ffi.Char> srtpSuites;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int srtpSuitesLen;
+
+  /// The MTU of the path toward the server, in bytes, when the
+  /// deployment knows it; zero for unknown (ABI 0.34). RFC 3261
+  /// section 18.1.1 moves a request to a stream when it comes within
+  /// 200 bytes of the MTU, and with the MTU unknown past 1300 bytes: a
+  /// path known to carry more lets a larger request stay on UDP. Under
+  /// 576 is `SIPRAL_STATUS_INVALID_ARGUMENT` — an IPv4 host must take
+  /// that much (RFC 791).
+  @ffi.Uint32()
+  external int pathMtu;
+
+  /// The largest request to send over UDP anyway, once no stream to
+  /// its server can be had, in bytes; zero for never (ABI 0.34).
+  ///
+  /// **A deliberate deviation from RFC 3261 section 18.1.1**, for a
+  /// server that takes SIP over UDP alone: such a PBX answers nothing
+  /// to a request it cannot receive over a stream, and takes a
+  /// 1,444-byte INVITE over UDP from every other phone on its network.
+  /// A request past the section's line asks for a stream as always
+  /// (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`); once the application says
+  /// none is coming (`sipral_stack_transport_failed` on the number it
+  /// was going to bind) or the wait runs out, what was waiting goes
+  /// over UDP up to this size, and each such request is written to the
+  /// call's diagnostic record as `transport.kept.datagram` with its
+  /// size and this limit. A stream bound later is preferred again. A
+  /// request past this size ends as it would without it. At most
+  /// 65 507, what one UDP datagram carries over IPv4; a figure not past
+  /// the section's own line changes nothing.
+  @ffi.Uint32()
+  external int datagramWithoutStreamBytes;
+
+  /// A salt the application keeps for the installation, keying the
+  /// pseudonyms this stack's log and state text write for users,
+  /// numbers and addresses, so that the same value has the same
+  /// pseudonym in every run and two runs' traces compare line by line
+  /// (ABI 0.34). At least 16 bytes, drawn once from the platform's
+  /// generator; null for pseudonyms keyed from `media_seed`, which are
+  /// fresh every run. It is a secret like a key: whoever holds it can
+  /// test a guessed address against a pseudonym. Copied.
+  external ffi.Pointer<ffi.Uint8> pseudonymSalt;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int pseudonymSaltLen;
+
+  /// A `SipralToggle`: whether the log's trace writes SIP messages
+  /// whole, with the peer they went to, instead of pseudonymised; off
+  /// by default (ABI 0.34). For a diagnosis only: every user, display
+  /// name, number and address is then written as it went on the wire.
+  /// What is never written, in either mode, is a credential or a key:
+  /// every `Authorization` and `Proxy-Authorization` value, every
+  /// `a=crypto` `inline:` key, every `k=` key and every `a=key-mgmt`
+  /// payload is taken out first. `sipral_stack_diagnostic_trace`
+  /// turns it on and off while the stack runs.
+  @ffi.Uint32()
+  external int diagnosticTrace;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// What one call to sipral_stack_poll did.
@@ -3573,6 +3773,15 @@ final class SipralStackSettings extends ffi.Struct {
   /// See `rtp_port_min`.
   @ffi.Uint32()
   external int rtpPortMax;
+
+  /// The path MTU as given, zero for unknown (ABI 0.34).
+  @ffi.Uint32()
+  external int pathMtu;
+
+  /// The largest request sent over UDP once no stream is coming, as
+  /// given; zero for never (ABI 0.34).
+  @ffi.Uint32()
+  external int datagramWithoutStreamBytes;
 }
 
 /// One header field an application hands over: a name and a value, UTF-8,
@@ -3639,8 +3848,9 @@ final class SipralAccountConfig extends ffi.Struct {
   /// Where this account's requests go, as `host:port`: the registrar's
   /// address for an account that registers, and the outbound proxy for
   /// one configured with no registrar. A call that names no destination
-  /// of its own goes here either way, so it is required either way. An
-  /// address, not a name: RFC 3263 resolution is the caller's.
+  /// of its own goes here either way, so it is required unless
+  /// `server_uri` names the server instead. An address, not a name: a
+  /// server known by name is `server_uri`'s.
   external ffi.Pointer<ffi.Char> registrarAddress;
 
   /// How many bytes of it.
@@ -3888,6 +4098,74 @@ final class SipralAccountConfig extends ffi.Struct {
   /// may have left unwritten, and are never read.
   @ffi.Uint64()
   external int recordingInClear;
+
+  /// How often, in milliseconds, this account keeps its flow to its
+  /// registrar — to its outbound proxy, for one that never registers —
+  /// open, whatever STUN found; zero for never, which leaves it to
+  /// `sipral_stack_config_t::registrar_keepalive` (ABI 0.34).
+  ///
+  /// For a network whose NAT forgets a UDP flow sooner than the
+  /// REGISTER refresh comes round, with STUN off. On UDP a double CRLF
+  /// goes out alone in a datagram, which a registrar ignores (RFC 3261
+  /// §7.5); on TCP or TLS the connection is pinged at this interval
+  /// instead of the stack's own (RFC 5626 §4.4.1). Each interval is
+  /// drawn between 80% and 100% of it. From 1 000 to 120 000, and
+  /// anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+  @ffi.Uint64()
+  external int keepaliveMs;
+
+  /// The server this account's requests go to, as a URI whose host RFC
+  /// 3263 locates — `sip:pbx.example.com`, `sips:example.com:5061` —
+  /// in place of `registrar_address`: exactly one of the two is given
+  /// (ABI 0.34). The registrar for an account that registers (usually
+  /// the same URI as `registrar`), the outbound proxy for one that
+  /// does not.
+  ///
+  /// The lookups are the application's resolver's, asked for with
+  /// `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and answered with
+  /// `sipral_account_looked_up`; the order they go in, the SRV ranking
+  /// and the fallback to the host's own addresses are the stack's.
+  /// The first REGISTER waits for the first answer, and a call placed
+  /// before it with no `destination` of its own is
+  /// `SIPRAL_STATUS_WRONG_STATE`. A REGISTER that times out, whose
+  /// transport fails or that is answered 503 moves to the next address
+  /// found at once (§4.3); the name is looked up again when the
+  /// answer's time-to-live runs out, and when the stack's recovery
+  /// asks for an address. A host with a port skips SRV, and a numeric
+  /// host asks nothing.
+  external ffi.Pointer<ffi.Char> serverUri;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int serverUriLen;
+
+  /// The SHA-256 fingerprint of the one TLS server certificate this
+  /// account trusts, in place of a trust anchor, for a PBX that serves
+  /// a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
+  /// either case, with a colon between each byte or none, optionally
+  /// after `sha-256 ` or `SHA256=` — the forms `openssl x509
+  /// -fingerprint -sha256` and RFC 8122 print. Null for none.
+  ///
+  /// TLS is the application's, so this is what its certificate
+  /// verifier asks, with `sipral_account_check_certificate`: with a
+  /// pin, the fingerprint is the whole verdict, and no chain, trust
+  /// anchor or host name is consulted (`docs/22-tls.md`).
+  external ffi.Pointer<ffi.Char> tlsPinSha256;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int tlsPinSha256Len;
+
+  /// A `SipralToggle`: whether `server_uri`'s domain is asked for NAPTR
+  /// records before SRV (RFC 3263 §4.1). Off by default: most domains
+  /// publish none, and the account's transport is already chosen.
+  /// Refused without a `server_uri` (ABI 0.34).
+  @ffi.Uint32()
+  external int serverNaptr;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// What a call is placed with.
@@ -5950,6 +6228,50 @@ final class SipralLocalConferenceEvent extends ffi.Struct {
   external int loudest;
 }
 
+/// What a SipralEventKind.lookupWanted,
+/// a SipralEventKind.located
+/// and a SipralEventKind.locateFailed
+/// carry, the account being `sipral_event_t::account`.
+///
+/// One struct for the three, the way `sipral_subscription_event_t`
+/// answers for two kinds: a member meaningless on one kind is zero or
+/// null there. Every pointer is the library's, valid for the duration of
+/// the callback.
+final class SipralLocateEvent extends ffi.Struct {
+  /// A SipralDnsRecordType: what to ask `name` for, on a lookup.
+  @ffi.Uint32()
+  external int record;
+
+  /// A SipralLocateFailure: why a lookup named no address.
+  @ffi.Uint32()
+  external int failure;
+
+  /// The name to ask, on a lookup: `_sip._udp.example.com`, or a
+  /// host. Handed back to sipral_account_looked_up with the answer.
+  /// UTF-8, not NUL-terminated.
+  external ffi.Pointer<ffi.Char> name;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int nameLen;
+
+  /// Where the account's server was located: every address the answer
+  /// named, as `host:port` separated by commas, in RFC 3263 section
+  /// 4.3's order from the one the account's requests go to now. UTF-8,
+  /// not NUL-terminated.
+  external ffi.Pointer<ffi.Char> targets;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int targetsLen;
+
+  /// When the name is looked up again after a failure, in
+  /// milliseconds. An address an earlier answer named stays in use
+  /// meanwhile.
+  @ffi.Uint64()
+  external int retryInMs;
+}
+
 /// The arm of an event that its kind names.
 ///
 /// The whole union is zeroed before that one arm is written, so every
@@ -6033,6 +6355,10 @@ final class SipralEventPayload extends ffi.Union {
 
   /// For SipralEventKind.localConferenceChanged.
   external SipralLocalConferenceEvent localConference;
+
+  /// For SipralEventKind.lookupWanted, SipralEventKind.located
+  /// and SipralEventKind.locateFailed.
+  external SipralLocateEvent locate;
 }
 
 /// Something the library has to tell the application.
@@ -7008,6 +7334,48 @@ final class SipralLocalConferenceMember extends ffi.Struct {
   external int reserved;
 }
 
+/// What sipral_account_check_certificate found: whether the account's
+/// pin decided, and what the certificate's dates say.
+///
+/// Set `size` to `sizeof(sipral_pinned_certificate_t)` before the call.
+final class SipralPinnedCertificate extends ffi.Struct {
+  /// How many bytes of this struct the library filled in.
+  @ffi.Size()
+  external int size;
+
+  /// The certificate's `notBefore`, in seconds since 1 January 1970,
+  /// or zero when its DER could not be read that far.
+  @ffi.Uint64()
+  external int notBefore;
+
+  /// Its `notAfter`, the same way.
+  @ffi.Uint64()
+  external int notAfter;
+
+  /// One when the account pins a certificate and this is it: accept
+  /// the handshake, whoever signed it. Zero when the account pins
+  /// none: the platform's own checks apply, as they would without
+  /// this call.
+  @ffi.Uint32()
+  external int pinned;
+
+  /// One when `unix_seconds` is past `not_after`. Accepted all the
+  /// same: its dates were written by the holder of the pinned key, and
+  /// a PBX whose self-signed certificate lapsed would otherwise go
+  /// silent. Worth a warning.
+  @ffi.Uint32()
+  external int expired;
+
+  /// One when `unix_seconds` is before `not_before`: a clock set wrong,
+  /// or a certificate minted with a future date. Accepted too.
+  @ffi.Uint32()
+  external int notYetValid;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reserved;
+}
+
 /// Why the library could not be opened, or cannot serve this binding.
 final class SipralLoadError extends Error {
   SipralLoadError(this.message);
@@ -7092,7 +7460,7 @@ final class Sipral {
   /// does not ask about. The
   /// rule for all three numbers is the Versioning section of
   /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-  static const int abiVersionMinor = 33;
+  static const int abiVersionMinor = 34;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -7447,11 +7815,11 @@ final class Sipral {
         'sipral_abi_version_t': [ffi.sizeOf<SipralAbiVersion>(), 24, 20, 20],
         'sipral_capabilities_t': [ffi.sizeOf<SipralCapabilities>(), 24, 16, 16],
         'sipral_counters_t': [ffi.sizeOf<SipralCounters>(), 232, 228, 232],
-        'sipral_stack_config_t': [ffi.sizeOf<SipralStackConfig>(), 368, 248, 256],
+        'sipral_stack_config_t': [ffi.sizeOf<SipralStackConfig>(), 416, 280, 288],
         'sipral_poll_result_t': [ffi.sizeOf<SipralPollResult>(), 48, 28, 32],
-        'sipral_stack_settings_t': [ffi.sizeOf<SipralStackSettings>(), 112, 104, 112],
+        'sipral_stack_settings_t': [ffi.sizeOf<SipralStackSettings>(), 120, 112, 120],
         'sipral_header_t': [ffi.sizeOf<SipralHeader>(), 32, 16, 16],
-        'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 392, 208, 216],
+        'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 440, 240, 248],
         'sipral_call_config_t': [ffi.sizeOf<SipralCallConfig>(), 152, 84, 84],
         'sipral_codec_info_t': [ffi.sizeOf<SipralCodecInfo>(), 32, 28, 28],
         'sipral_codec_candidate_t': [ffi.sizeOf<SipralCodecCandidate>(), 24, 20, 20],
@@ -7485,6 +7853,7 @@ final class Sipral {
         'sipral_presence_event_t': [ffi.sizeOf<SipralPresenceEvent>(), 88, 64, 72],
         'sipral_transport_failed_event_t': [ffi.sizeOf<SipralTransportFailedEvent>(), 32, 24, 24],
         'sipral_local_conference_event_t': [ffi.sizeOf<SipralLocalConferenceEvent>(), 40, 40, 40],
+        'sipral_locate_event_t': [ffi.sizeOf<SipralLocateEvent>(), 48, 32, 32],
         'sipral_event_payload_t': [ffi.sizeOf<SipralEventPayload>(), 328, 208, 216],
         'sipral_event_t': [ffi.sizeOf<SipralEvent>(), 384, 248, 264],
         'sipral_suspending_t': [ffi.sizeOf<SipralSuspending>(), 32, 16, 16],
@@ -7508,6 +7877,7 @@ final class Sipral {
         'sipral_local_conference_config_t': [ffi.sizeOf<SipralLocalConferenceConfig>(), 24, 20, 20],
         'sipral_local_conference_info_t': [ffi.sizeOf<SipralLocalConferenceInfo>(), 56, 48, 48],
         'sipral_local_conference_member_t': [ffi.sizeOf<SipralLocalConferenceMember>(), 40, 36, 40],
+        'sipral_pinned_certificate_t': [ffi.sizeOf<SipralPinnedCertificate>(), 40, 36, 40],
       };
 
   /// Copy the calling thread's last error message into `buffer`.
@@ -11128,4 +11498,107 @@ final class Sipral {
   late final int Function(int conference) localConferenceRecordStop = library.lookupFunction<
       ffi.Int32 Function(SipralHandle conference),
       int Function(int conference)>('sipral_local_conference_record_stop');
+
+  /// Hand the resolver's answer to a
+  /// SIPRAL_EVENT_KIND_LOOKUP_WANTED
+  /// back to the account that asked.
+  ///
+  /// `name` and `record` are the event's, as it named them; `answer` is a
+  /// SipralDnsAnswer. With `SIPRAL_DNS_ANSWER_RECORDS`, `records` is
+  /// what the resolver returned, every record of the kind asked for,
+  /// separated by commas, each its fields separated by spaces: the
+  /// time-to-live in seconds, then the data as a zone file writes it —
+  /// an address for A and AAAA (`300 192.0.2.40`); priority, weight,
+  /// port and target for SRV (`300 10 60 5060 sip1.example.com`); order,
+  /// preference, flags, service and replacement for NAPTR, the regular
+  /// expression left out since RFC 3263 follows none (`300 10 50 S
+  /// SIP+D2U _sip._udp.example.com`). Null or empty for none, which
+  /// reads as `SIPRAL_DNS_ANSWER_NOTHING`. Text, rather than an array of
+  /// structs, because it is what a platform resolver prints and what
+  /// every binding hands over as it is.
+  ///
+  /// Answer every lookup, a resolver that failed included: the procedure
+  /// waits for each. An answer to a lookup nothing is waiting for any
+  /// more — the account was located since, or it has been asked for
+  /// again — is `SIPRAL_STATUS_OK` and changes nothing, as is one for an
+  /// account that locates nothing.
+  ///
+  /// Safety
+  ///
+  /// `name` must be readable for `name_len` bytes and `records` for
+  /// `records_len`.
+  late final int Function(int stack, int account, ffi.Pointer<ffi.Char> name, int nameLen, int record, int answer, ffi.Pointer<ffi.Char> records, int recordsLen, int nowMs) accountLookedUp = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Char> name, ffi.Size nameLen, ffi.Uint32 record, ffi.Uint32 answer, ffi.Pointer<ffi.Char> records, ffi.Size recordsLen, ffi.Uint64 nowMs),
+      int Function(int stack, int account, ffi.Pointer<ffi.Char> name, int nameLen, int record, int answer, ffi.Pointer<ffi.Char> records, int recordsLen, int nowMs)>('sipral_account_looked_up');
+
+  /// Check the certificate a TLS server presented against the one the
+  /// account pins, from inside the application's certificate verifier.
+  ///
+  /// `certificate` is the DER encoding of the leaf, the first certificate
+  /// the server sent, and `unix_seconds` the wall clock, which only the
+  /// dates reported in `out_pinned` are read against. The fingerprint
+  /// is SHA-256 over those exact bytes, compared in constant time.
+  ///
+  /// `SIPRAL_STATUS_OK` with `pinned` set: the certificate is the pinned
+  /// one, and the handshake is to be accepted whatever its chain, its name
+  /// or its dates. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: the account pins a
+  /// certificate and this is another; refuse the handshake, and nothing is
+  /// written. `SIPRAL_STATUS_OK` with `pinned` zero: the account pins
+  /// nothing, and the platform's own checks decide.
+  ///
+  /// Safety
+  ///
+  /// `certificate` must be readable for `certificate_len` bytes, and
+  /// `out_pinned` must point at a `sipral_pinned_certificate_t` whose
+  /// `size` member says how long it is.
+  late final int Function(int stack, int account, ffi.Pointer<ffi.Uint8> certificate, int certificateLen, int unixSeconds, ffi.Pointer<SipralPinnedCertificate> outPinned) accountCheckCertificate = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Uint8> certificate, ffi.Size certificateLen, ffi.Uint64 unixSeconds, ffi.Pointer<SipralPinnedCertificate> outPinned),
+      int Function(int stack, int account, ffi.Pointer<ffi.Uint8> certificate, int certificateLen, int unixSeconds, ffi.Pointer<SipralPinnedCertificate> outPinned)>('sipral_account_check_certificate');
+
+  /// The address to advertise — in a `Contact`, a `bind_address`, a
+  /// `media_address` — for a socket bound at `bound` whose traffic goes to
+  /// `peer`, as `host:port`, written into `buffer` with a NUL after it.
+  ///
+  /// A socket bound to a specific address advertises it, unless it is a
+  /// loopback address and `peer` is not: `SIPRAL_STATUS_UNREACHABLE_ADDRESS`,
+  /// with nothing written. A socket bound to the wildcard address
+  /// (`0.0.0.0:5060`, `[::]:5060`) advertises the address of the
+  /// operating system's route toward `peer`, with its own port; the route
+  /// is found by connecting a datagram socket and closing it, and nothing
+  /// is sent. No route to `peer` at all is `SIPRAL_STATUS_TRANSPORT_DOWN`.
+  /// `peer` is the registrar for the signalling socket, and the far end —
+  /// or the registrar, while the far end is not known yet — for a media
+  /// socket. Both are `host:port` addresses, not names.
+  ///
+  /// Callable from any thread at any time: it names no stack. Text out as
+  /// every such call writes it: `out_needed` receives the length with the
+  /// NUL counted, `buffer` may be null with a `capacity` of zero to ask for
+  /// it, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes nothing.
+  ///
+  /// Safety
+  ///
+  /// `bound` and `peer` must be readable for their lengths, `buffer` must
+  /// be writable for `capacity` bytes or be null with a capacity of zero,
+  /// and `out_needed` must point at one `size_t` or be null.
+  late final int Function(ffi.Pointer<ffi.Char> bound, int boundLen, ffi.Pointer<ffi.Char> peer, int peerLen, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) advertisedAddress = library.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Char> bound, ffi.Size boundLen, ffi.Pointer<ffi.Char> peer, ffi.Size peerLen, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(ffi.Pointer<ffi.Char> bound, int boundLen, ffi.Pointer<ffi.Char> peer, int peerLen, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_advertised_address');
+
+  /// Turn the diagnostic trace on or off while the stack runs: `on` is a
+  /// `SipralToggle`, and zero leaves it as it is (ABI 0.34).
+  ///
+  /// On, the trace level of `sipral_stack_log` writes every SIP message
+  /// whole, with the peer it went to or came from, and prose lines
+  /// without pseudonyms: for a diagnosis, where pseudonyms would hide the
+  /// difference between two runs. What is never written, on or off, is a
+  /// credential or a key — `sipral_stack_config_t::diagnostic_trace` has
+  /// the list. Off, the trace is pseudonymised as it always was. Nothing
+  /// is written at all unless the log is at `SIPRAL_LOG_LEVEL_TRACE`.
+  ///
+  /// Safety
+  ///
+  /// Safe to call with any handle value.
+  late final int Function(int stack, int on) stackDiagnosticTrace = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Uint32 on),
+      int Function(int stack, int on)>('sipral_stack_diagnostic_trace');
 }

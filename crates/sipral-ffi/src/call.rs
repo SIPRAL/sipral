@@ -205,6 +205,7 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
             SipralStatus::StaleHandle
         }
         UaError::NotAFocus => SipralStatus::NotAFocus,
+        UaError::UnreachableAddress { .. } => SipralStatus::UnreachableAddress,
         // a document that cannot be written and metadata that does not fit a
         // recording session are both values that would be taken corrected
         UaError::Publish(sipral_ua::PublishError::Unwritable(_)) | UaError::Recording(_) => {
@@ -219,6 +220,9 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         | UaError::ChangeInProgress
         | UaError::CannotRenegotiate
         | UaError::NoWallClock
+        // a located account whose first answer has not come: a moment
+        // wrong, and the next `SIPRAL_EVENT_KIND_LOCATED` ends it
+        | UaError::NotLocated
         | UaError::Publish(sipral_ua::PublishError::NothingPublished) => SipralStatus::WrongState,
         // an account configured without a registrar is the wrong account to
         // register rather than the wrong moment: a corrected configuration
@@ -2293,6 +2297,13 @@ a=recvonly\r\n";
             stir_origid_len: 0,
             stir_attestation: 0,
             recording_in_clear: 0,
+            keepalive_ms: 0,
+            server_uri: ptr::null(),
+            server_uri_len: 0,
+            tls_pin_sha256: ptr::null(),
+            tls_pin_sha256_len: 0,
+            server_naptr: 0,
+            reserved: 0,
         }
     }
 
@@ -5996,7 +6007,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         let mut observed = Observed::default();
         let (handle, account) = media_line(&mut observed, |_| {});
         let mut call_config = managed_config();
-        call_config.srtp = 7;
+        call_config.srtp = 8;
         let (status, call) = place(handle, account, &call_config, 1_000);
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert_eq!(call, SIPRAL_HANDLE_NONE);
@@ -6014,7 +6025,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         let (handle, first) = connected(&mut observed);
         let _ = sent(handle);
         let mut config = call_config();
-        config.srtp = 7;
+        config.srtp = 8;
         let mut second = SIPRAL_HANDLE_NONE;
         let status = unsafe {
             sipral_call_consult(

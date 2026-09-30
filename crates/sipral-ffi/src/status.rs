@@ -150,6 +150,20 @@ codes! {
         /// clock did not move: read the clock again and ask again. A caller
         /// that keeps getting this has a clock that went backwards.
         ClockBehind = 24,
+        /// The TLS server's certificate is not the one the account pins
+        /// (ABI 0.34): `sipral_account_check_certificate` compared its
+        /// SHA-256 fingerprint with `sipral_account_config_t::tls_pin_sha256`
+        /// and they differ. Refuse the handshake: with a pin, the
+        /// fingerprint is the whole verdict (`docs/22-tls.md`).
+        CertificateRefused = 25,
+        /// This end was about to advertise an address the peer cannot reach
+        /// it at (ABI 0.34): a loopback address, in a `Contact` or a session
+        /// description, handed to a peer that is not on this machine, or the
+        /// unspecified address in a `Contact`. Nothing was sent; the last
+        /// error names both addresses. Bind to, and advertise, the address
+        /// of the interface that routes to the peer —
+        /// `sipral_advertised_address` finds it.
+        UnreachableAddress = 26,
     }
 }
 
@@ -190,6 +204,8 @@ entry! {
             22 => c"transport down".as_ptr(),
             23 => c"conference refused".as_ptr(),
             24 => c"clock behind".as_ptr(),
+            25 => c"certificate refused".as_ptr(),
+            26 => c"unreachable address".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -239,6 +255,8 @@ mod tests {
             SipralStatus::TransportDown,
             SipralStatus::ConferenceRefused,
             SipralStatus::ClockBehind,
+            SipralStatus::CertificateRefused,
+            SipralStatus::UnreachableAddress,
         ];
         for status in all {
             let code = status as i32;
@@ -249,7 +267,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in (0..=16).chain(18..=24) {
+        for code in (0..=16).chain(18..=26) {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -261,7 +279,7 @@ mod tests {
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
         assert!(name(17).is_none());
-        assert!(name(25).is_none());
+        assert!(name(27).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -297,5 +315,7 @@ mod tests {
         assert_eq!(SipralStatus::TransportDown as i32, 22);
         assert_eq!(SipralStatus::ConferenceRefused as i32, 23);
         assert_eq!(SipralStatus::ClockBehind as i32, 24);
+        assert_eq!(SipralStatus::CertificateRefused as i32, 25);
+        assert_eq!(SipralStatus::UnreachableAddress as i32, 26);
     }
 }

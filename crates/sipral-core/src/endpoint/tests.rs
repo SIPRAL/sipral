@@ -2088,6 +2088,67 @@ fn two_messages_in_one_read_are_both_taken() {
 }
 
 #[test]
+fn a_tapped_stream_hands_over_each_message_whole_however_the_reads_cut_it() {
+    let t0 = Instant::now();
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [3; 32]).unwrap();
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0,
+        )
+        .expect("binding TCP");
+    transmits(&mut endpoint);
+
+    let first = incoming("OPTIONS", "s1", "");
+    let second = incoming("MESSAGE", "s2", "");
+    let mut stream = first.clone();
+    stream.extend_from_slice(&second);
+    let read = |endpoint: &mut Endpoint, data: &[u8]| {
+        endpoint
+            .receive(
+                Input::StreamData {
+                    transport: TCP,
+                    data,
+                },
+                t0,
+            )
+            .expect("a read");
+    };
+
+    // untapped, nothing is kept
+    read(&mut endpoint, &first);
+    assert!(endpoint.take_stream_messages().is_empty());
+
+    // one read ending in the middle of the second message, one finishing it
+    endpoint.tap_streams(true);
+    let cut = first.len() + 10;
+    read(&mut endpoint, &stream[..cut]);
+    let taken = endpoint.take_stream_messages();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(&*taken[0].bytes, &first[..]);
+    assert_eq!((taken[0].transport, taken[0].remote), (TCP, Some(peer())));
+    read(&mut endpoint, &stream[cut..]);
+    let taken = endpoint.take_stream_messages();
+    assert_eq!(
+        taken
+            .iter()
+            .map(|message| &*message.bytes)
+            .collect::<Vec<_>>(),
+        [&second[..]]
+    );
+    assert!(endpoint.take_stream_messages().is_empty(), "taken once");
+
+    endpoint.tap_streams(false);
+    read(&mut endpoint, &first);
+    assert!(endpoint.take_stream_messages().is_empty());
+}
+
+#[test]
 fn a_ping_on_a_stream_is_answered_with_a_single_crlf() {
     // RFC 5626 4.4.1 makes the pong a MUST
     let t0 = Instant::now();

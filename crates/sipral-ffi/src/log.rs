@@ -46,6 +46,7 @@ use crate::abi::{Number, alias, codes, constants, record};
 use crate::diagnostics::copy_out;
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
+use crate::media::SipralToggle;
 use crate::stack::{StackState, with_stack};
 use crate::status::SipralStatus;
 
@@ -372,6 +373,40 @@ entry! {
     }
 }
 
+entry! {
+    /// Turn the diagnostic trace on or off while the stack runs: `on` is a
+    /// `SipralToggle`, and zero leaves it as it is (ABI 0.34).
+    ///
+    /// On, the trace level of `sipral_stack_log` writes every SIP message
+    /// whole, with the peer it went to or came from, and prose lines
+    /// without pseudonyms: for a diagnosis, where pseudonyms would hide the
+    /// difference between two runs. What is never written, on or off, is a
+    /// credential or a key — `sipral_stack_config_t::diagnostic_trace` has
+    /// the list. Off, the trace is pseudonymised as it always was. Nothing
+    /// is written at all unless the log is at `SIPRAL_LOG_LEVEL_TRACE`.
+    ///
+    /// # Safety
+    ///
+    /// Safe to call with any handle value.
+    fn sipral_stack_diagnostic_trace(stack: SipralHandle, on: Number<SipralToggle>) {
+        let on = match on {
+            0 => return Ok(()),
+            1 => true,
+            2 => false,
+            other => {
+                return Err(fail(
+                    SipralStatus::InvalidArgument,
+                    format!("on is {other}, and a toggle is 0 to leave it, 1 for on or 2 for off"),
+                ));
+            }
+        };
+        with_stack(stack, |state| {
+            state.log.set_diagnostic(on);
+            Ok(())
+        })
+    }
+}
+
 /// The snapshot text for a stack whose entry is in hand: fresh when its lock
 /// is free, the kept one otherwise.
 pub(crate) fn snapshot_of(
@@ -404,15 +439,16 @@ pub(crate) fn log_for(key: &[u8]) -> Log {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
-        SIPRAL_STATE_TEXT_MAX, SipralLogLevel, SipralLogRecord, sipral_stack_log,
-        sipral_stack_state_text,
+        SIPRAL_STATE_TEXT_MAX, SipralLogLevel, SipralLogRecord, sipral_stack_diagnostic_trace,
+        sipral_stack_log, sipral_stack_state_text,
     };
     use crate::call::tests::{account_on, invitation};
     use crate::counters::{SipralCounters, sipral_stack_counters};
     use crate::error::last_error_text;
     use crate::handle::SipralHandle;
+    use crate::media::SipralToggle;
     use crate::ports::sipral_stack_rtp_port_reserve;
     use crate::screening::{SIPRAL_SCREEN_ACCEPT, SipralScreenRequest, sipral_stack_screen};
     use crate::stack::tests::{Observed, poll, stack};
@@ -425,8 +461,8 @@ mod tests {
     /// Every line a stack's log delivered, and what calling back into that
     /// stack from inside the callback answered.
     #[derive(Default)]
-    struct Heard {
-        lines: Mutex<Vec<(u32, String, String, u64)>>,
+    pub(crate) struct Heard {
+        pub(crate) lines: Mutex<Vec<(u32, String, String, u64)>>,
         reentered: Mutex<Vec<SipralStatus>>,
     }
 
@@ -454,7 +490,7 @@ mod tests {
         heard.reentered.lock().unwrap().push(status);
     }
 
-    fn listen(handle: SipralHandle, level: SipralLogLevel, heard: &Heard) {
+    pub(crate) fn listen(handle: SipralHandle, level: SipralLogLevel, heard: &Heard) {
         let status = unsafe {
             sipral_stack_log(
                 handle,
@@ -575,6 +611,138 @@ mod tests {
                 .iter()
                 .any(|(_, target, line, _)| target == "call" && line.contains("incoming")),
             "{lines:#?}"
+        );
+    }
+
+    /// The SIP lines a log delivered.
+    fn sip_lines(heard: &Heard) -> Vec<String> {
+        heard
+            .lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, target, _, _)| target == "sip")
+            .map(|(_, _, message, _)| message.clone())
+            .collect()
+    }
+
+    fn diagnostic(handle: SipralHandle, on: SipralToggle) {
+        let status = unsafe { sipral_stack_diagnostic_trace(handle, on as u32) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    }
+
+    /// Turned on, the trace carries the message as it came, with the peer;
+    /// turned off again, it is pseudonymised as before. The credential it
+    /// carried is never written either way.
+    #[test]
+    fn a_diagnostic_trace_writes_whole_messages_until_it_is_turned_off() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let _ = account_on(handle);
+        let heard = Heard::default();
+        listen(handle, SipralLogLevel::Trace, &heard);
+        diagnostic(handle, SipralToggle::On);
+        let secret = "Proxy-Authorization: Digest username=\"bob\", response=\"f00dfeed\"";
+        let invite = crate::call::tests::insert_header(&invitation(), secret);
+        receive(handle, &invite, 1_000);
+        let whole = sip_lines(&heard);
+        assert!(
+            whole
+                .iter()
+                .any(|line| line.contains("received from 203.0.113.5:5060") && line.contains("bob")),
+            "{whole:#?}"
+        );
+        assert!(
+            whole.iter().all(|line| !line.contains("f00dfeed")),
+            "{whole:#?}"
+        );
+
+        heard.lines.lock().unwrap().clear();
+        diagnostic(handle, SipralToggle::Default);
+        receive(handle, &invite, 1_100);
+        assert!(
+            sip_lines(&heard)
+                .iter()
+                .any(|line| line.contains("203.0.113.5")),
+            "zero leaves it as it is"
+        );
+        heard.lines.lock().unwrap().clear();
+        diagnostic(handle, SipralToggle::Off);
+        receive(handle, &invite, 1_200);
+        let redacted = sip_lines(&heard);
+        assert!(!redacted.is_empty());
+        for line in &redacted {
+            for personal in ["bob", "203.0.113.5", "f00dfeed"] {
+                assert!(!line.contains(personal), "{personal} in {line}");
+            }
+        }
+        assert_eq!(
+            unsafe { sipral_stack_diagnostic_trace(handle, 3) },
+            SipralStatus::InvalidArgument
+        );
+    }
+
+    /// The trace a configuration asked for from the start.
+    #[test]
+    fn a_stack_created_with_the_diagnostic_trace_writes_whole_messages() {
+        let mut observed = Observed::default();
+        let mut config = crate::stack::tests::config(crate::stack::tests::record, &mut observed);
+        config.diagnostic_trace = SipralToggle::On as u32;
+        let (status, handle) = crate::stack::tests::create(&config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = account_on(handle);
+        let heard = Heard::default();
+        listen(handle, SipralLogLevel::Trace, &heard);
+        receive(handle, &invitation(), 1_000);
+        assert!(
+            sip_lines(&heard)
+                .iter()
+                .any(|line| line.contains("203.0.113.5")),
+            "{:#?}",
+            sip_lines(&heard)
+        );
+    }
+
+    /// Two stacks given one installation's salt write the same pseudonyms
+    /// for the same message; two left to their media seeds do not.
+    #[test]
+    fn a_pseudonym_salt_gives_the_same_pseudonyms_in_every_run() {
+        fn traced(salt: Option<&[u8]>, seed: u8) -> Vec<String> {
+            let mut observed = Observed::default();
+            let mut config =
+                crate::stack::tests::config(crate::stack::tests::record, &mut observed);
+            let media_seed = [seed; 32];
+            config.media_seed = media_seed.as_ptr();
+            config.media_seed_len = media_seed.len();
+            if let Some(salt) = salt {
+                config.pseudonym_salt = salt.as_ptr();
+                config.pseudonym_salt_len = salt.len();
+            }
+            let (status, handle) = crate::stack::tests::create(&config);
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            let _ = account_on(handle);
+            let heard = Heard::default();
+            listen(handle, SipralLogLevel::Trace, &heard);
+            receive(handle, &invitation(), 1_000);
+            let lines = sip_lines(&heard);
+            assert!(!lines.is_empty());
+            lines
+        }
+        let salt = [0x5a_u8; sipral::MIN_SALT];
+        assert_eq!(traced(Some(&salt), 0x61), traced(Some(&salt), 0x62));
+        assert_ne!(traced(None, 0x61), traced(None, 0x62));
+
+        let mut observed = Observed::default();
+        let mut config = crate::stack::tests::config(crate::stack::tests::record, &mut observed);
+        let short = [1_u8; sipral::MIN_SALT - 1];
+        config.pseudonym_salt = short.as_ptr();
+        config.pseudonym_salt_len = short.len();
+        let (status, _) = crate::stack::tests::create(&config);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("pseudonym_salt"),
+            "{}",
+            last_error_text()
         );
     }
 

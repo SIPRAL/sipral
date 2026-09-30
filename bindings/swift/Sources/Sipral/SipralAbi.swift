@@ -152,6 +152,20 @@ public enum SipralStatus: Int32, Sendable {
     /// clock did not move: read the clock again and ask again. A caller
     /// that keeps getting this has a clock that went backwards.
     case clockBehind = 24
+    /// The TLS server's certificate is not the one the account pins
+    /// (ABI 0.34): `sipral_account_check_certificate` compared its
+    /// SHA-256 fingerprint with `sipral_account_config_t::tls_pin_sha256`
+    /// and they differ. Refuse the handshake: with a pin, the
+    /// fingerprint is the whole verdict (`docs/22-tls.md`).
+    case certificateRefused = 25
+    /// This end was about to advertise an address the peer cannot reach
+    /// it at (ABI 0.34): a loopback address, in a `Contact` or a session
+    /// description, handed to a peer that is not on this machine, or the
+    /// unspecified address in a `Contact`. Nothing was sent; the last
+    /// error names both addresses. Bind to, and advertise, the address
+    /// of the interface that routes to the peer —
+    /// `sipral_advertised_address` finds it.
+    case unreachableAddress = 26
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -282,6 +296,16 @@ public enum SipralSrtp: UInt32, Sendable {
     /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
     /// `SIPRAL_FEATURE_DTLS_SRTP`.
     case dtlsOrSdes = 6
+    /// Offer SDES on plain `RTP/AVP`: the call is encrypted when the
+    /// answer takes one of the `a=crypto` lines and plain when it takes
+    /// none — the "SRTP optional" of desk phones, for a server that may
+    /// or may not encrypt and answers an offer on `RTP/SAVP` with 488
+    /// when it does not. RFC 4568 writes the attribute for the secure
+    /// profiles, so this is interoperability rather than a standard.
+    /// Answering, an offer on `RTP/AVP` carrying a line this end takes
+    /// is answered with a key, and anything else as under `Offered`.
+    /// ABI 0.34.
+    case bestEffort = 7
 }
 
 /// What a call or a stack says about ICE. Names for
@@ -1168,6 +1192,27 @@ public enum SipralEventKind: UInt32, Sendable {
     /// `sipral_local_conference_talker_at`. `account` and `call` are
     /// `SIPRAL_HANDLE_NONE`: a conference is neither.
     case localConferenceChanged = 54
+    /// A DNS lookup is wanted to locate an account's server by RFC 3263
+    /// (ABI 0.34): the account named its registrar or its outbound proxy
+    /// with `server_uri` rather than an address.
+    ///
+    /// `payload.locate` names the query: `name`, and `record`, what to
+    /// ask it for. Ask the platform's resolver and hand the answer to
+    /// `sipral_account_looked_up` — every one, a failure included, since
+    /// the procedure waits for each. Several may be outstanding at once,
+    /// one per host an SRV answer named. `account` is the account.
+    case lookupWanted = 55
+    /// An account's server was located, or located again once the last
+    /// answer's time-to-live ran out (ABI 0.34): `payload.locate.targets`
+    /// is every address the answer named, first the one the account's
+    /// requests go to now. `account` is the account.
+    case located = 56
+    /// A lookup of an account's server named no address (ABI 0.34):
+    /// `payload.locate.failure` says why, and `retry_in_ms` when the name
+    /// is looked up again. A REGISTER that was waiting for it is reported
+    /// failed as well, and backs off; an address an earlier answer named
+    /// stays in use meanwhile. `account` is the account.
+    case locateFailed = 57
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1222,6 +1267,13 @@ public enum SipralRegistrationFailure: UInt32, Sendable {
     /// The registrar moved. Following it needs an address, which is the
     /// caller's to resolve.
     case redirected = 4
+    /// The account's `Contact` names an address the registrar cannot
+    /// reach this end at — loopback, to a registrar that is not, or the
+    /// unspecified address — and nothing was sent (ABI 0.34). Trying
+    /// again cannot help until the account is given one it can:
+    /// `sipral_account_rebind`, with an address `sipral_advertised_address`
+    /// found.
+    case unreachableContact = 5
 }
 
 /// Where a call is. Names for `sipral_call_event_t::state`, and what
@@ -2239,6 +2291,58 @@ public enum SipralDeparture: UInt32, Sendable {
     case incompatible = 3
 }
 
+/// Which kind of DNS record a lookup asks for. Names for
+/// `sipral_locate_event_t::record` and `sipral_account_looked_up`'s
+/// `record`.
+public enum SipralDnsRecordType: UInt32, Sendable {
+    /// Not a lookup: the value on a `SIPRAL_EVENT_KIND_LOCATED` or a
+    /// `SIPRAL_EVENT_KIND_LOCATE_FAILED`.
+    case none = 0
+    /// RFC 3403: which services a domain offers, and under which names.
+    case naptr = 1
+    /// RFC 2782: which hosts, at which ports, serve one service.
+    case srv = 2
+    /// An IPv4 address.
+    case a = 3
+    /// An IPv6 address.
+    case aaaa = 4
+}
+
+/// What the application's resolver said to a lookup. Names for
+/// `sipral_account_looked_up`'s `answer`.
+public enum SipralDnsAnswer: UInt32, Sendable {
+    /// The records it returned, in `records`. None at all reads as
+    /// `SIPRAL_DNS_ANSWER_NOTHING`.
+    case records = 1
+    /// The name has no record of that kind, or does not exist at all.
+    /// Also the right answer from a resolver that cannot ask for the
+    /// kind: a platform lookup that only knows addresses answers every
+    /// NAPTR and SRV query with this, and the host's own addresses are
+    /// asked for next.
+    case nothing = 2
+    /// The resolver could not answer: no server reachable, a timeout, a
+    /// server failure.
+    case failed = 3
+}
+
+/// Why a lookup of an account's server named no address. Names for
+/// `sipral_locate_event_t::failure`.
+public enum SipralLocateFailure: UInt32, Sendable {
+    /// Nothing failed.
+    case none = 0
+    /// The DNS answered, and what it answered names no address of the
+    /// family the account's transport can reach: no record, or an SRV
+    /// target of `.`.
+    case notFound = 1
+    /// The resolver failed on every lookup that could have given an
+    /// address.
+    case unanswered = 2
+    /// The transport has no RFC 3263 procedure: WebSocket names no SRV
+    /// service and no default port, so only a numeric host, or a host
+    /// with a port, can be located for it.
+    case unsupported = 3
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -2661,6 +2765,16 @@ public extension sipral_local_conference_member_t {
     }
 }
 
+public extension sipral_pinned_certificate_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -2769,7 +2883,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 33
+    public static let abiVersionMinor: UInt32 = 34
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -3178,11 +3292,11 @@ public enum Sipral {
         ("sipral_abi_version_t", MemoryLayout<sipral_abi_version_t>.size, 24, 20, 20),
         ("sipral_capabilities_t", MemoryLayout<sipral_capabilities_t>.size, 24, 16, 16),
         ("sipral_counters_t", MemoryLayout<sipral_counters_t>.size, 232, 228, 232),
-        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 368, 248, 256),
+        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 416, 280, 288),
         ("sipral_poll_result_t", MemoryLayout<sipral_poll_result_t>.size, 48, 28, 32),
-        ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 112, 104, 112),
+        ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 120, 112, 120),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
-        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 392, 208, 216),
+        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 440, 240, 248),
         ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 152, 84, 84),
         ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
         ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),
@@ -3216,6 +3330,7 @@ public enum Sipral {
         ("sipral_presence_event_t", MemoryLayout<sipral_presence_event_t>.size, 88, 64, 72),
         ("sipral_transport_failed_event_t", MemoryLayout<sipral_transport_failed_event_t>.size, 32, 24, 24),
         ("sipral_local_conference_event_t", MemoryLayout<sipral_local_conference_event_t>.size, 40, 40, 40),
+        ("sipral_locate_event_t", MemoryLayout<sipral_locate_event_t>.size, 48, 32, 32),
         ("sipral_event_payload_t", MemoryLayout<sipral_event_payload_t>.size, 328, 208, 216),
         ("sipral_event_t", MemoryLayout<sipral_event_t>.size, 384, 248, 264),
         ("sipral_suspending_t", MemoryLayout<sipral_suspending_t>.size, 32, 16, 16),
@@ -3239,6 +3354,7 @@ public enum Sipral {
         ("sipral_local_conference_config_t", MemoryLayout<sipral_local_conference_config_t>.size, 24, 20, 20),
         ("sipral_local_conference_info_t", MemoryLayout<sipral_local_conference_info_t>.size, 56, 48, 48),
         ("sipral_local_conference_member_t", MemoryLayout<sipral_local_conference_member_t>.size, 40, 36, 40),
+        ("sipral_pinned_certificate_t", MemoryLayout<sipral_pinned_certificate_t>.size, 40, 36, 40),
     ]
 
     /// The short name of a status code, as a static NUL-terminated string, or
@@ -7707,6 +7823,144 @@ public enum Sipral {
     public static func localConferenceRecordStop(conference: SipralHandle) throws {
         try ensureAbi()
         let status = sipral_local_conference_record_stop(conference)
+        try check(status)
+    }
+
+    /// Hand the resolver's answer to a
+    /// SIPRAL_EVENT_KIND_LOOKUP_WANTED
+    /// back to the account that asked.
+    ///
+    /// `name` and `record` are the event's, as it named them; `answer` is a
+    /// SipralDnsAnswer. With `SIPRAL_DNS_ANSWER_RECORDS`, `records` is
+    /// what the resolver returned, every record of the kind asked for,
+    /// separated by commas, each its fields separated by spaces: the
+    /// time-to-live in seconds, then the data as a zone file writes it —
+    /// an address for A and AAAA (`300 192.0.2.40`); priority, weight,
+    /// port and target for SRV (`300 10 60 5060 sip1.example.com`); order,
+    /// preference, flags, service and replacement for NAPTR, the regular
+    /// expression left out since RFC 3263 follows none (`300 10 50 S
+    /// SIP+D2U _sip._udp.example.com`). Null or empty for none, which
+    /// reads as `SIPRAL_DNS_ANSWER_NOTHING`. Text, rather than an array of
+    /// structs, because it is what a platform resolver prints and what
+    /// every binding hands over as it is.
+    ///
+    /// Answer every lookup, a resolver that failed included: the procedure
+    /// waits for each. An answer to a lookup nothing is waiting for any
+    /// more — the account was located since, or it has been asked for
+    /// again — is `SIPRAL_STATUS_OK` and changes nothing, as is one for an
+    /// account that locates nothing.
+    ///
+    /// Safety
+    ///
+    /// `name` must be readable for `name_len` bytes and `records` for
+    /// `records_len`.
+    public static func accountLookedUp(stack: SipralHandle, account: SipralHandle, name: String, record: UInt32, answer: UInt32, records: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(name.utf8).withUnsafeBufferPointer { raw2 in
+                raw2.withMemoryRebound(to: CChar.self) { p2 in
+                    Array(records.utf8).withUnsafeBufferPointer { raw5 in
+                        raw5.withMemoryRebound(to: CChar.self) { p5 in
+                            sipral_account_looked_up(stack, account, p2.baseAddress, p2.count, record, answer, p5.baseAddress, p5.count, nowMs)
+                        }
+                    }
+                }
+            }
+        try check(status)
+    }
+
+    /// Check the certificate a TLS server presented against the one the
+    /// account pins, from inside the application's certificate verifier.
+    ///
+    /// `certificate` is the DER encoding of the leaf, the first certificate
+    /// the server sent, and `unix_seconds` the wall clock, which only the
+    /// dates reported in `out_pinned` are read against. The fingerprint
+    /// is SHA-256 over those exact bytes, compared in constant time.
+    ///
+    /// `SIPRAL_STATUS_OK` with `pinned` set: the certificate is the pinned
+    /// one, and the handshake is to be accepted whatever its chain, its name
+    /// or its dates. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: the account pins a
+    /// certificate and this is another; refuse the handshake, and nothing is
+    /// written. `SIPRAL_STATUS_OK` with `pinned` zero: the account pins
+    /// nothing, and the platform's own checks decide.
+    ///
+    /// Safety
+    ///
+    /// `certificate` must be readable for `certificate_len` bytes, and
+    /// `out_pinned` must point at a `sipral_pinned_certificate_t` whose
+    /// `size` member says how long it is.
+    public static func accountCheckCertificate(stack: SipralHandle, account: SipralHandle, certificate: [UInt8], unixSeconds: UInt64) throws -> sipral_pinned_certificate_t {
+        try ensureAbi()
+        var pinned = sipral_pinned_certificate_t.sized()
+        let status =
+            certificate.withUnsafeBufferPointer { p2 in
+                sipral_account_check_certificate(stack, account, p2.baseAddress, p2.count, unixSeconds, &pinned)
+            }
+        try check(status)
+        return pinned
+    }
+
+    /// The address to advertise — in a `Contact`, a `bind_address`, a
+    /// `media_address` — for a socket bound at `bound` whose traffic goes to
+    /// `peer`, as `host:port`, written into `buffer` with a NUL after it.
+    ///
+    /// A socket bound to a specific address advertises it, unless it is a
+    /// loopback address and `peer` is not: `SIPRAL_STATUS_UNREACHABLE_ADDRESS`,
+    /// with nothing written. A socket bound to the wildcard address
+    /// (`0.0.0.0:5060`, `[::]:5060`) advertises the address of the
+    /// operating system's route toward `peer`, with its own port; the route
+    /// is found by connecting a datagram socket and closing it, and nothing
+    /// is sent. No route to `peer` at all is `SIPRAL_STATUS_TRANSPORT_DOWN`.
+    /// `peer` is the registrar for the signalling socket, and the far end —
+    /// or the registrar, while the far end is not known yet — for a media
+    /// socket. Both are `host:port` addresses, not names.
+    ///
+    /// Callable from any thread at any time: it names no stack. Text out as
+    /// every such call writes it: `out_needed` receives the length with the
+    /// NUL counted, `buffer` may be null with a `capacity` of zero to ask for
+    /// it, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes nothing.
+    ///
+    /// Safety
+    ///
+    /// `bound` and `peer` must be readable for their lengths, `buffer` must
+    /// be writable for `capacity` bytes or be null with a capacity of zero,
+    /// and `out_needed` must point at one `size_t` or be null.
+    public static func advertisedAddress(bound: String, peer: String, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var needed = Int()
+        let status =
+            Array(bound.utf8).withUnsafeBufferPointer { raw0 in
+                raw0.withMemoryRebound(to: CChar.self) { p0 in
+                    Array(peer.utf8).withUnsafeBufferPointer { raw1 in
+                        raw1.withMemoryRebound(to: CChar.self) { p1 in
+                            buffer.withUnsafeMutableBufferPointer { p2 in
+                                sipral_advertised_address(p0.baseAddress, p0.count, p1.baseAddress, p1.count, p2.baseAddress, p2.count, &needed)
+                            }
+                        }
+                    }
+                }
+            }
+        try check(status)
+        return needed
+    }
+
+    /// Turn the diagnostic trace on or off while the stack runs: `on` is a
+    /// `SipralToggle`, and zero leaves it as it is (ABI 0.34).
+    ///
+    /// On, the trace level of `sipral_stack_log` writes every SIP message
+    /// whole, with the peer it went to or came from, and prose lines
+    /// without pseudonyms: for a diagnosis, where pseudonyms would hide the
+    /// difference between two runs. What is never written, on or off, is a
+    /// credential or a key — `sipral_stack_config_t::diagnostic_trace` has
+    /// the list. Off, the trace is pseudonymised as it always was. Nothing
+    /// is written at all unless the log is at `SIPRAL_LOG_LEVEL_TRACE`.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func stackDiagnosticTrace(stack: SipralHandle, on: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_stack_diagnostic_trace(stack, on)
         try check(status)
     }
 

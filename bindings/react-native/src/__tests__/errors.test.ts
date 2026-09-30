@@ -9,7 +9,15 @@ function rejected(code: string): {code: string; message: string} {
 
 describe('a native rejection', () => {
   it('keeps every status the library names, as the native halves spell it', () => {
-    for (const code of ['notAFocus', 'clockBehind', 'conferenceRefused', 'busy', 'transportDown']) {
+    for (const code of [
+      'notAFocus',
+      'clockBehind',
+      'conferenceRefused',
+      'busy',
+      'transportDown',
+      'certificateRefused',
+      'unreachableAddress',
+    ]) {
       const error = fromNative(rejected(code));
       expect(error).toBeInstanceOf(SipralError);
       expect(error.code).toBe(code);

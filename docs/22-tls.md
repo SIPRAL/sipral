@@ -90,7 +90,10 @@ certificate by the SHA-256 fingerprint of its DER encoding
 `sha-256 ` or `SHA256=`. The application's certificate verifier hands the leaf
 certificate the server presented to `CertificatePin::check`, which compares
 the digests in constant time; `crates/sipral/examples/tls.rs` does it as a
-`rustls` verifier (`--pin`).
+`rustls` verifier (`--pin`). Over the C ABI the pin is
+`sipral_account_config_t::tls_pin_sha256` and the check
+`sipral_account_check_certificate`, which answers
+`SIPRAL_STATUS_CERTIFICATE_REFUSED` for another certificate.
 
 With a pin, the fingerprint is the whole verdict:
 

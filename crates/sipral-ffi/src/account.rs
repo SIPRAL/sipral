@@ -29,7 +29,7 @@ use std::time::Duration;
 use sipral::AccountSrtp;
 use sipral_core::auth::Credentials;
 use sipral_core::msg::{HeaderName, Uri};
-use sipral_ua::{Account, HeadersFor, Push};
+use sipral_ua::{Account, CertificatePin, HeadersFor, Push};
 
 use crate::abi::{Number, record};
 use crate::call::ua_failed;
@@ -38,7 +38,7 @@ use crate::event::{SipralRegistrationState, registration_state};
 use crate::handle::SipralHandle;
 use crate::header::{SipralHeader, supplied};
 use crate::identity::SipralSessionTimer;
-use crate::media::{SipralSrtp, media_failed};
+use crate::media::{SipralSrtp, SipralToggle, media_failed, toggled};
 use crate::security::{SipralAttestation, SipralStirVerification};
 use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
@@ -75,8 +75,9 @@ record! {
         /// Where this account's requests go, as `host:port`: the registrar's
         /// address for an account that registers, and the outbound proxy for
         /// one configured with no registrar. A call that names no destination
-        /// of its own goes here either way, so it is required either way. An
-        /// address, not a name: RFC 3263 resolution is the caller's.
+        /// of its own goes here either way, so it is required unless
+        /// `server_uri` names the server instead. An address, not a name: a
+        /// server known by name is `server_uri`'s.
         pub registrar_address: *const c_char,
         /// How many bytes of it.
         pub registrar_address_len: usize,
@@ -257,6 +258,62 @@ record! {
         /// of those were padding, which a caller built against that header
         /// may have left unwritten, and are never read.
         pub recording_in_clear: u64,
+        /// How often, in milliseconds, this account keeps its flow to its
+        /// registrar — to its outbound proxy, for one that never registers —
+        /// open, whatever STUN found; zero for never, which leaves it to
+        /// `sipral_stack_config_t::registrar_keepalive` (ABI 0.34).
+        ///
+        /// For a network whose NAT forgets a UDP flow sooner than the
+        /// REGISTER refresh comes round, with STUN off. On UDP a double CRLF
+        /// goes out alone in a datagram, which a registrar ignores (RFC 3261
+        /// §7.5); on TCP or TLS the connection is pinged at this interval
+        /// instead of the stack's own (RFC 5626 §4.4.1). Each interval is
+        /// drawn between 80% and 100% of it. From 1 000 to 120 000, and
+        /// anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        pub keepalive_ms: u64,
+        /// The server this account's requests go to, as a URI whose host RFC
+        /// 3263 locates — `sip:pbx.example.com`, `sips:example.com:5061` —
+        /// in place of `registrar_address`: exactly one of the two is given
+        /// (ABI 0.34). The registrar for an account that registers (usually
+        /// the same URI as `registrar`), the outbound proxy for one that
+        /// does not.
+        ///
+        /// The lookups are the application's resolver's, asked for with
+        /// `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and answered with
+        /// `sipral_account_looked_up`; the order they go in, the SRV ranking
+        /// and the fallback to the host's own addresses are the stack's.
+        /// The first REGISTER waits for the first answer, and a call placed
+        /// before it with no `destination` of its own is
+        /// `SIPRAL_STATUS_WRONG_STATE`. A REGISTER that times out, whose
+        /// transport fails or that is answered 503 moves to the next address
+        /// found at once (§4.3); the name is looked up again when the
+        /// answer's time-to-live runs out, and when the stack's recovery
+        /// asks for an address. A host with a port skips SRV, and a numeric
+        /// host asks nothing.
+        pub server_uri: *const c_char,
+        /// How many bytes of it.
+        pub server_uri_len: usize,
+        /// The SHA-256 fingerprint of the one TLS server certificate this
+        /// account trusts, in place of a trust anchor, for a PBX that serves
+        /// a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
+        /// either case, with a colon between each byte or none, optionally
+        /// after `sha-256 ` or `SHA256=` — the forms `openssl x509
+        /// -fingerprint -sha256` and RFC 8122 print. Null for none.
+        ///
+        /// TLS is the application's, so this is what its certificate
+        /// verifier asks, with `sipral_account_check_certificate`: with a
+        /// pin, the fingerprint is the whole verdict, and no chain, trust
+        /// anchor or host name is consulted (`docs/22-tls.md`).
+        pub tls_pin_sha256: *const c_char,
+        /// How many bytes of it.
+        pub tls_pin_sha256_len: usize,
+        /// A `SipralToggle`: whether `server_uri`'s domain is asked for NAPTR
+        /// records before SRV (RFC 3263 §4.1). Off by default: most domains
+        /// publish none, and the account's transport is already chosen.
+        /// Refused without a `server_uri` (ABI 0.34).
+        pub server_naptr: Number<SipralToggle>,
+        /// Zero.
+        pub reserved: u32,
     }
 }
 
@@ -417,6 +474,110 @@ unsafe fn push_from(config: &SipralAccountConfig) -> Result<Option<Push>, Fail> 
     Ok(Some(push))
 }
 
+/// Where an account's requests go: the address `registrar_address` gives, or
+/// the URI `server_uri` names for RFC 3263 to locate, exactly one of the two.
+///
+/// # Safety
+///
+/// `config.registrar_address` and `config.server_uri` must be readable for
+/// the lengths beside them.
+unsafe fn destination_of(
+    config: &SipralAccountConfig,
+    registering: bool,
+) -> Result<(SocketAddr, Option<Uri>), Fail> {
+    let remote = unsafe {
+        text(
+            config.registrar_address,
+            config.registrar_address_len,
+            "registrar_address",
+        )
+    }?;
+    let server = unsafe { text(config.server_uri, config.server_uri_len, "server_uri") }?;
+    match (remote, server) {
+        (Some(_), Some(_)) => Err(fail(
+            SipralStatus::InvalidArgument,
+            "server_uri and registrar_address both name where this account's requests go: \
+             give the address, or the URI whose server is located, not both",
+        )),
+        (Some(remote), None) => Ok((address(remote, "registrar_address")?, None)),
+        // located: the address is the first answer's, and nothing is sent
+        // before it comes
+        (None, Some(server)) => Ok((
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+            Some(uri(server, "server_uri")?),
+        )),
+        // said for the trunk in its own words, because a caller who left
+        // the registrar out on purpose reads "required" as a contradiction
+        (None, None) => Err(fail(
+            SipralStatus::InvalidArgument,
+            if registering {
+                "registrar_address or server_uri is required and neither was given"
+            } else {
+                "registrar_address or server_uri is required and neither was given: with \
+                 registrar_len zero the account never registers, and registrar_address is the \
+                 outbound proxy every request it places is sent to"
+            },
+        )),
+    }
+}
+
+/// How an account reaches its server and keeps reaching it: the server
+/// located by RFC 3263, NAPTR first when asked, its own keep-alive, and the
+/// one TLS certificate it trusts.
+///
+/// # Safety
+///
+/// `config.tls_pin_sha256` must be readable for the length beside it.
+unsafe fn with_reach(
+    mut account: Account,
+    config: &SipralAccountConfig,
+    server: Option<Uri>,
+) -> Result<Account, Fail> {
+    let naptr = toggled(config.server_naptr, "server_naptr", false)?;
+    match server {
+        Some(server) => {
+            account = account.locate(server);
+            if naptr {
+                account = account.naptr();
+            }
+        }
+        None if naptr => {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "server_naptr asks how server_uri is located, and no server_uri was given",
+            ));
+        }
+        None => {}
+    }
+    if config.keepalive_ms != 0 {
+        account = account
+            .keepalive(Duration::from_millis(config.keepalive_ms))
+            .map_err(|error| {
+                fail(
+                    SipralStatus::InvalidArgument,
+                    format!("keepalive_ms: {error}"),
+                )
+            })?;
+    }
+    let pin = unsafe {
+        text(
+            config.tls_pin_sha256,
+            config.tls_pin_sha256_len,
+            "tls_pin_sha256",
+        )
+    }?;
+    if let Some(pin) = pin {
+        let pin = CertificatePin::parse(pin).map_err(|error| {
+            fail(
+                SipralStatus::InvalidArgument,
+                format!("tls_pin_sha256 is {pin:?}: {error}"),
+            )
+        })?;
+        account = account.tls_pin(pin);
+    }
+    Ok(account)
+}
+
 /// Turn what crossed the boundary into an account, or say what was wrong.
 ///
 /// # Safety
@@ -427,27 +588,7 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
     // no registrar is an account that never registers, not a mistake
     let registrar = unsafe { text(config.registrar, config.registrar_len, "registrar") }?;
     let contact = unsafe { required_text(config.contact, config.contact_len, "contact") }?;
-    let remote = unsafe {
-        text(
-            config.registrar_address,
-            config.registrar_address_len,
-            "registrar_address",
-        )
-    }?;
-    // said for the trunk in its own words, because a caller who left the
-    // registrar out on purpose reads "required" as a contradiction
-    let Some(remote) = remote else {
-        return Err(fail(
-            SipralStatus::InvalidArgument,
-            if registrar.is_some() {
-                "registrar_address is required and was not given"
-            } else {
-                "registrar_address is required and was not given: with registrar_len zero the \
-                 account never registers, and registrar_address is the outbound proxy every \
-                 request it places is sent to"
-            },
-        ));
-    };
+    let (remote, server) = unsafe { destination_of(config, registrar.is_some()) }?;
     let display = unsafe { text(config.display_name, config.display_name_len, "display_name") }?;
     let user = unsafe { text(config.auth_user, config.auth_user_len, "auth_user") }?;
     let password = unsafe {
@@ -487,12 +628,12 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
         .map(|registrar| uri(registrar, "registrar"))
         .transpose()?;
     let contact = uri(contact, "contact")?;
-    let remote = address(remote, "registrar_address")?;
     let transport = crate::transport::named(state, config.transport)?;
     let mut account = match registrar {
         Some(registrar) => Account::new(aor, registrar, contact, transport, remote),
         None => Account::unregistered(aor, contact, transport, remote),
     };
+    account = unsafe { with_reach(account, config, server) }?;
     if let Some(display) = display {
         account = account.display_name(display);
     }
@@ -771,6 +912,13 @@ pub(crate) mod tests {
             stir_origid_len: 0,
             stir_attestation: 0,
             recording_in_clear: 0,
+            keepalive_ms: 0,
+            server_uri: ptr::null(),
+            server_uri_len: 0,
+            tls_pin_sha256: ptr::null(),
+            tls_pin_sha256_len: 0,
+            server_naptr: 0,
+            reserved: 0,
         }
     }
 
@@ -1047,6 +1195,96 @@ pub(crate) mod tests {
         assert!(
             !out.iter().any(|(bytes, _)| bytes.starts_with(b"REGISTER ")),
             "a REGISTER went out beside the call"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// An account's own keep-alive goes out at its interval whatever STUN
+    /// found — here with no STUN at all — to the address its requests go
+    /// to, and not at all without one.
+    #[test]
+    fn an_account_keepalive_goes_to_its_proxy_at_its_own_interval() {
+        let crlf = |out: &[(Vec<u8>, String)]| {
+            out.iter()
+                .filter(|(bytes, to)| bytes == b"\r\n\r\n" && to == ADDRESS)
+                .count()
+        };
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let (status, _) = add(
+            handle,
+            &SipralAccountConfig {
+                keepalive_ms: 1_000,
+                ..trunk_config()
+            },
+        );
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        poll(handle, 0);
+        let _ = written(handle);
+        poll(handle, 1_000);
+        assert_eq!(crlf(&written(handle)), 1, "one at the interval");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let (status, _) = add(handle, &trunk_config());
+        assert_eq!(status, SipralStatus::Ok);
+        poll(handle, 0);
+        poll(handle, 1_000);
+        assert_eq!(crlf(&written(handle)), 0, "none unless asked for");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        for millis in [999, 120_001] {
+            let (status, _) = add(
+                handle,
+                &SipralAccountConfig {
+                    keepalive_ms: millis,
+                    ..trunk_config()
+                },
+            );
+            assert_eq!(status, SipralStatus::InvalidArgument, "{millis}");
+            assert!(
+                last_error_text().contains("keepalive_ms"),
+                "{}",
+                last_error_text()
+            );
+        }
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A loopback `Contact` handed to a registrar on another machine is
+    /// refused with nothing sent, as its own status, and so is a call a
+    /// trunk would place with one.
+    #[test]
+    fn a_loopback_contact_toward_another_machine_is_refused_as_unreachable() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let mut config = account_config();
+        (config.contact, config.contact_len) = text("sip:alice@127.0.0.1:5060");
+        let (status, account) = add(handle, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::UnreachableAddress
+        );
+        let said = last_error_text();
+        assert!(
+            said.contains("127.0.0.1") && said.contains("203.0.113.5"),
+            "{said}"
+        );
+        assert!(drain(handle).is_empty(), "nothing went");
+
+        let mut trunk = trunk_config();
+        (trunk.contact, trunk.contact_len) = text("sip:alice@127.0.0.1:5060");
+        let (status, account) = add(handle, &trunk);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let call = call_config();
+        let mut placed = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_call_place(handle, account, ptr::from_ref(&call), &raw mut placed, 0) },
+            SipralStatus::UnreachableAddress
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }

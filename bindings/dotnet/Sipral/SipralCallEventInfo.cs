@@ -226,6 +226,19 @@ public sealed record SipralMessageEventInfo(
     uint UrgentOldMessages,
     string? MessageAccount);
 
+/// <summary>What <see cref="SipralEventKind.LookupWanted"/>,
+/// <see cref="SipralEventKind.Located"/> and
+/// <see cref="SipralEventKind.LocateFailed"/> carry: the DNS query an
+/// account's server is located with, every address it was located at
+/// (<c>host:port</c> separated by commas, the one in use first), or why it
+/// was not and when it is asked again.</summary>
+public sealed record SipralLocateEventInfo(
+    SipralDnsRecordType Record,
+    SipralLocateFailure Failure,
+    string? Name,
+    string? Targets,
+    ulong RetryInMs);
+
 /// <summary>What <see cref="SipralEventKind.ResolveNeeded"/> carries.</summary>
 public sealed record SipralResolveEventInfo(
     ulong Dialog,

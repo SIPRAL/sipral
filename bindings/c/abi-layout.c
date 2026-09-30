@@ -79,7 +79,7 @@ _Static_assert(offsetof(sipral_counters_t, transactions_timed_out) == SIPRAL_LAY
 _Static_assert(offsetof(sipral_counters_t, requests_refused_at_limit) == SIPRAL_LAYOUT(224, 220, 224), "sipral_counters_t::requests_refused_at_limit");
 _Static_assert(offsetof(sipral_counters_t, requests_refused_at_limit) + sizeof(((sipral_counters_t *)0)->requests_refused_at_limit) == SIPRAL_LAYOUT(232, 228, 232), "sipral_counters_t is pinned through requests_refused_at_limit");
 
-_Static_assert(sizeof(sipral_stack_config_t) == SIPRAL_LAYOUT(368, 248, 256), "sipral_stack_config_t");
+_Static_assert(sizeof(sipral_stack_config_t) == SIPRAL_LAYOUT(416, 280, 288), "sipral_stack_config_t");
 _Static_assert(offsetof(sipral_stack_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_stack_config_t::size");
 _Static_assert(offsetof(sipral_stack_config_t, event_callback) == SIPRAL_LAYOUT(8, 4, 4), "sipral_stack_config_t::event_callback");
 _Static_assert(offsetof(sipral_stack_config_t, event_user_data) == SIPRAL_LAYOUT(16, 8, 8), "sipral_stack_config_t::event_user_data");
@@ -135,6 +135,14 @@ _Static_assert(offsetof(sipral_stack_config_t, stun_fallbacks) == SIPRAL_LAYOUT(
 _Static_assert(offsetof(sipral_stack_config_t, stun_fallbacks_len) == SIPRAL_LAYOUT(352, 236, 244), "sipral_stack_config_t::stun_fallbacks_len");
 _Static_assert(offsetof(sipral_stack_config_t, rtp_port_min) == SIPRAL_LAYOUT(360, 240, 248), "sipral_stack_config_t::rtp_port_min");
 _Static_assert(offsetof(sipral_stack_config_t, rtp_port_max) == SIPRAL_LAYOUT(364, 244, 252), "sipral_stack_config_t::rtp_port_max");
+_Static_assert(offsetof(sipral_stack_config_t, srtp_suites) == SIPRAL_LAYOUT(368, 248, 256), "sipral_stack_config_t::srtp_suites");
+_Static_assert(offsetof(sipral_stack_config_t, srtp_suites_len) == SIPRAL_LAYOUT(376, 252, 260), "sipral_stack_config_t::srtp_suites_len");
+_Static_assert(offsetof(sipral_stack_config_t, path_mtu) == SIPRAL_LAYOUT(384, 256, 264), "sipral_stack_config_t::path_mtu");
+_Static_assert(offsetof(sipral_stack_config_t, datagram_without_stream_bytes) == SIPRAL_LAYOUT(388, 260, 268), "sipral_stack_config_t::datagram_without_stream_bytes");
+_Static_assert(offsetof(sipral_stack_config_t, pseudonym_salt) == SIPRAL_LAYOUT(392, 264, 272), "sipral_stack_config_t::pseudonym_salt");
+_Static_assert(offsetof(sipral_stack_config_t, pseudonym_salt_len) == SIPRAL_LAYOUT(400, 268, 276), "sipral_stack_config_t::pseudonym_salt_len");
+_Static_assert(offsetof(sipral_stack_config_t, diagnostic_trace) == SIPRAL_LAYOUT(408, 272, 280), "sipral_stack_config_t::diagnostic_trace");
+_Static_assert(offsetof(sipral_stack_config_t, reserved) == SIPRAL_LAYOUT(412, 276, 284), "sipral_stack_config_t::reserved");
 _Static_assert(offsetof(sipral_stack_config_t, rtp_port_max) + sizeof(((sipral_stack_config_t *)0)->rtp_port_max) == SIPRAL_LAYOUT(368, 248, 256), "sipral_stack_config_t is pinned through rtp_port_max");
 
 _Static_assert(sizeof(sipral_poll_result_t) == SIPRAL_LAYOUT(48, 28, 32), "sipral_poll_result_t");
@@ -146,7 +154,7 @@ _Static_assert(offsetof(sipral_poll_result_t, has_deadline) == SIPRAL_LAYOUT(32,
 _Static_assert(offsetof(sipral_poll_result_t, next_poll_in_ms) == SIPRAL_LAYOUT(40, 20, 24), "sipral_poll_result_t::next_poll_in_ms");
 _Static_assert(offsetof(sipral_poll_result_t, next_poll_in_ms) + sizeof(((sipral_poll_result_t *)0)->next_poll_in_ms) == SIPRAL_LAYOUT(48, 28, 32), "sipral_poll_result_t is pinned through next_poll_in_ms");
 
-_Static_assert(sizeof(sipral_stack_settings_t) == SIPRAL_LAYOUT(112, 104, 112), "sipral_stack_settings_t");
+_Static_assert(sizeof(sipral_stack_settings_t) == SIPRAL_LAYOUT(120, 112, 120), "sipral_stack_settings_t");
 _Static_assert(offsetof(sipral_stack_settings_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_stack_settings_t::size");
 _Static_assert(offsetof(sipral_stack_settings_t, transport) == SIPRAL_LAYOUT(8, 4, 4), "sipral_stack_settings_t::transport");
 _Static_assert(offsetof(sipral_stack_settings_t, retransmits) == SIPRAL_LAYOUT(12, 8, 8), "sipral_stack_settings_t::retransmits");
@@ -168,6 +176,8 @@ _Static_assert(offsetof(sipral_stack_settings_t, diagnostic_decisions) == SIPRAL
 _Static_assert(offsetof(sipral_stack_settings_t, diagnostic_records) == SIPRAL_LAYOUT(100, 92, 100), "sipral_stack_settings_t::diagnostic_records");
 _Static_assert(offsetof(sipral_stack_settings_t, rtp_port_min) == SIPRAL_LAYOUT(104, 96, 104), "sipral_stack_settings_t::rtp_port_min");
 _Static_assert(offsetof(sipral_stack_settings_t, rtp_port_max) == SIPRAL_LAYOUT(108, 100, 108), "sipral_stack_settings_t::rtp_port_max");
+_Static_assert(offsetof(sipral_stack_settings_t, path_mtu) == SIPRAL_LAYOUT(112, 104, 112), "sipral_stack_settings_t::path_mtu");
+_Static_assert(offsetof(sipral_stack_settings_t, datagram_without_stream_bytes) == SIPRAL_LAYOUT(116, 108, 116), "sipral_stack_settings_t::datagram_without_stream_bytes");
 _Static_assert(offsetof(sipral_stack_settings_t, rtp_port_max) + sizeof(((sipral_stack_settings_t *)0)->rtp_port_max) == SIPRAL_LAYOUT(112, 104, 112), "sipral_stack_settings_t is pinned through rtp_port_max");
 
 _Static_assert(sizeof(sipral_header_t) == SIPRAL_LAYOUT(32, 16, 16), "sipral_header_t");
@@ -176,7 +186,7 @@ _Static_assert(offsetof(sipral_header_t, name_len) == SIPRAL_LAYOUT(8, 4, 4), "s
 _Static_assert(offsetof(sipral_header_t, value) == SIPRAL_LAYOUT(16, 8, 8), "sipral_header_t::value");
 _Static_assert(offsetof(sipral_header_t, value_len) == SIPRAL_LAYOUT(24, 12, 12), "sipral_header_t::value_len");
 
-_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t");
+_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(440, 240, 248), "sipral_account_config_t");
 _Static_assert(offsetof(sipral_account_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_account_config_t::size");
 _Static_assert(offsetof(sipral_account_config_t, aor) == SIPRAL_LAYOUT(8, 4, 4), "sipral_account_config_t::aor");
 _Static_assert(offsetof(sipral_account_config_t, aor_len) == SIPRAL_LAYOUT(16, 8, 8), "sipral_account_config_t::aor_len");
@@ -226,6 +236,13 @@ _Static_assert(offsetof(sipral_account_config_t, stir_origid) == SIPRAL_LAYOUT(3
 _Static_assert(offsetof(sipral_account_config_t, stir_origid_len) == SIPRAL_LAYOUT(368, 192, 200), "sipral_account_config_t::stir_origid_len");
 _Static_assert(offsetof(sipral_account_config_t, stir_attestation) == SIPRAL_LAYOUT(376, 196, 204), "sipral_account_config_t::stir_attestation");
 _Static_assert(offsetof(sipral_account_config_t, recording_in_clear) == SIPRAL_LAYOUT(384, 200, 208), "sipral_account_config_t::recording_in_clear");
+_Static_assert(offsetof(sipral_account_config_t, keepalive_ms) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t::keepalive_ms");
+_Static_assert(offsetof(sipral_account_config_t, server_uri) == SIPRAL_LAYOUT(400, 216, 224), "sipral_account_config_t::server_uri");
+_Static_assert(offsetof(sipral_account_config_t, server_uri_len) == SIPRAL_LAYOUT(408, 220, 228), "sipral_account_config_t::server_uri_len");
+_Static_assert(offsetof(sipral_account_config_t, tls_pin_sha256) == SIPRAL_LAYOUT(416, 224, 232), "sipral_account_config_t::tls_pin_sha256");
+_Static_assert(offsetof(sipral_account_config_t, tls_pin_sha256_len) == SIPRAL_LAYOUT(424, 228, 236), "sipral_account_config_t::tls_pin_sha256_len");
+_Static_assert(offsetof(sipral_account_config_t, server_naptr) == SIPRAL_LAYOUT(432, 232, 240), "sipral_account_config_t::server_naptr");
+_Static_assert(offsetof(sipral_account_config_t, reserved) == SIPRAL_LAYOUT(436, 236, 244), "sipral_account_config_t::reserved");
 _Static_assert(offsetof(sipral_account_config_t, recording_in_clear) + sizeof(((sipral_account_config_t *)0)->recording_in_clear) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t is pinned through recording_in_clear");
 
 _Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(152, 84, 84), "sipral_call_config_t");
@@ -677,6 +694,15 @@ _Static_assert(offsetof(sipral_local_conference_event_t, members) == SIPRAL_LAYO
 _Static_assert(offsetof(sipral_local_conference_event_t, talkers) == SIPRAL_LAYOUT(28, 28, 28), "sipral_local_conference_event_t::talkers");
 _Static_assert(offsetof(sipral_local_conference_event_t, loudest) == SIPRAL_LAYOUT(32, 32, 32), "sipral_local_conference_event_t::loudest");
 
+_Static_assert(sizeof(sipral_locate_event_t) == SIPRAL_LAYOUT(48, 32, 32), "sipral_locate_event_t");
+_Static_assert(offsetof(sipral_locate_event_t, record) == SIPRAL_LAYOUT(0, 0, 0), "sipral_locate_event_t::record");
+_Static_assert(offsetof(sipral_locate_event_t, failure) == SIPRAL_LAYOUT(4, 4, 4), "sipral_locate_event_t::failure");
+_Static_assert(offsetof(sipral_locate_event_t, name) == SIPRAL_LAYOUT(8, 8, 8), "sipral_locate_event_t::name");
+_Static_assert(offsetof(sipral_locate_event_t, name_len) == SIPRAL_LAYOUT(16, 12, 12), "sipral_locate_event_t::name_len");
+_Static_assert(offsetof(sipral_locate_event_t, targets) == SIPRAL_LAYOUT(24, 16, 16), "sipral_locate_event_t::targets");
+_Static_assert(offsetof(sipral_locate_event_t, targets_len) == SIPRAL_LAYOUT(32, 20, 20), "sipral_locate_event_t::targets_len");
+_Static_assert(offsetof(sipral_locate_event_t, retry_in_ms) == SIPRAL_LAYOUT(40, 24, 24), "sipral_locate_event_t::retry_in_ms");
+
 _Static_assert(sizeof(sipral_event_payload_t) == SIPRAL_LAYOUT(328, 208, 216), "sipral_event_payload_t");
 _Static_assert(offsetof(sipral_event_payload_t, registration) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::registration");
 _Static_assert(offsetof(sipral_event_payload_t, call) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::call");
@@ -701,6 +727,7 @@ _Static_assert(offsetof(sipral_event_payload_t, text) == SIPRAL_LAYOUT(0, 0, 0),
 _Static_assert(offsetof(sipral_event_payload_t, presence) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::presence");
 _Static_assert(offsetof(sipral_event_payload_t, transport_failed) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::transport_failed");
 _Static_assert(offsetof(sipral_event_payload_t, local_conference) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::local_conference");
+_Static_assert(offsetof(sipral_event_payload_t, locate) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::locate");
 
 _Static_assert(sizeof(sipral_event_t) == SIPRAL_LAYOUT(384, 248, 264), "sipral_event_t");
 _Static_assert(offsetof(sipral_event_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_t::size");
@@ -932,4 +959,14 @@ _Static_assert(offsetof(sipral_local_conference_member_t, gain_input) == SIPRAL_
 _Static_assert(offsetof(sipral_local_conference_member_t, gain_output) == SIPRAL_LAYOUT(32, 28, 32), "sipral_local_conference_member_t::gain_output");
 _Static_assert(offsetof(sipral_local_conference_member_t, reserved) == SIPRAL_LAYOUT(36, 32, 36), "sipral_local_conference_member_t::reserved");
 _Static_assert(offsetof(sipral_local_conference_member_t, reserved) + sizeof(((sipral_local_conference_member_t *)0)->reserved) == SIPRAL_LAYOUT(40, 36, 40), "sipral_local_conference_member_t is pinned through reserved");
+
+_Static_assert(sizeof(sipral_pinned_certificate_t) == SIPRAL_LAYOUT(40, 36, 40), "sipral_pinned_certificate_t");
+_Static_assert(offsetof(sipral_pinned_certificate_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_pinned_certificate_t::size");
+_Static_assert(offsetof(sipral_pinned_certificate_t, not_before) == SIPRAL_LAYOUT(8, 4, 8), "sipral_pinned_certificate_t::not_before");
+_Static_assert(offsetof(sipral_pinned_certificate_t, not_after) == SIPRAL_LAYOUT(16, 12, 16), "sipral_pinned_certificate_t::not_after");
+_Static_assert(offsetof(sipral_pinned_certificate_t, pinned) == SIPRAL_LAYOUT(24, 20, 24), "sipral_pinned_certificate_t::pinned");
+_Static_assert(offsetof(sipral_pinned_certificate_t, expired) == SIPRAL_LAYOUT(28, 24, 28), "sipral_pinned_certificate_t::expired");
+_Static_assert(offsetof(sipral_pinned_certificate_t, not_yet_valid) == SIPRAL_LAYOUT(32, 28, 32), "sipral_pinned_certificate_t::not_yet_valid");
+_Static_assert(offsetof(sipral_pinned_certificate_t, reserved) == SIPRAL_LAYOUT(36, 32, 36), "sipral_pinned_certificate_t::reserved");
+_Static_assert(offsetof(sipral_pinned_certificate_t, reserved) + sizeof(((sipral_pinned_certificate_t *)0)->reserved) == SIPRAL_LAYOUT(40, 36, 40), "sipral_pinned_certificate_t is pinned through reserved");
 

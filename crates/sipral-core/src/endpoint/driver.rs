@@ -67,6 +67,19 @@ pub(super) enum Deadline {
     UnansweredNonInvite(TransactionId<NonInviteServer>),
 }
 
+/// One whole message framed off a connection, as it arrived, for a trace
+/// ([`Endpoint::tap_streams`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamMessage {
+    /// The connection it arrived on.
+    pub transport: TransportId,
+    /// Its far end, or `None` for a connection bound without one named
+    /// (`Input::TransportBound`'s `remote`).
+    pub remote: Option<SocketAddr>,
+    /// The message, from its start line to the end of its body.
+    pub bytes: Box<[u8]>,
+}
+
 /// What an endpoint has had to send twice, and what it stopped waiting for,
 /// since it was created.
 ///
@@ -176,6 +189,10 @@ pub struct Endpoint {
     /// the open transport, so that a connection bound again under the same
     /// name keeps the interval its owner asked for.
     pub(super) stream_keepalives: HashMap<TransportId, core::time::Duration>,
+    /// Every message framed off a connection since the last
+    /// [`Endpoint::take_stream_messages`], while [`Endpoint::tap_streams`]
+    /// has it kept; `None` while it does not.
+    pub(super) stream_tap: Option<Vec<StreamMessage>>,
 }
 
 impl Endpoint {
@@ -228,7 +245,35 @@ impl Endpoint {
             streams_wanted: HashSet::new(),
             streamless: HashSet::new(),
             stream_keepalives: HashMap::new(),
+            stream_tap: None,
         })
+    }
+
+    /// Keep a copy of every message framed off a connection, whole, for
+    /// [`Endpoint::take_stream_messages`] to hand over — or stop, and drop
+    /// what was kept.
+    ///
+    /// A datagram is a message already, and a caller that traces one has it
+    /// in hand. What arrives on a connection is bytes in whatever sizes the
+    /// reads came in (§18.3), and only the framing here knows where one
+    /// message ends: a trace written off the reads would cut messages in two
+    /// and run two together. Off by default, since the copy is only worth
+    /// its cost to a caller that writes it somewhere.
+    pub fn tap_streams(&mut self, on: bool) {
+        match (on, self.stream_tap.is_some()) {
+            (true, false) => self.stream_tap = Some(Vec::new()),
+            (false, true) => self.stream_tap = None,
+            _ => {}
+        }
+    }
+
+    /// The messages [`Endpoint::tap_streams`] kept, in the order they were
+    /// framed, and none of them again. Empty when the tap is off.
+    pub fn take_stream_messages(&mut self) -> Vec<StreamMessage> {
+        self.stream_tap
+            .as_mut()
+            .map(core::mem::take)
+            .unwrap_or_default()
     }
 
     /// The stream a `TransportWanted` asked for cannot be had: the caller

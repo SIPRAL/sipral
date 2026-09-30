@@ -619,6 +619,7 @@ pub const MIN_SIZES: &[(&str, &str, usize)] = pinned![
     crate::local_conference::SipralLocalConferenceConfig,
     crate::local_conference::SipralLocalConferenceInfo,
     crate::local_conference::SipralLocalConferenceMember,
+    crate::pin::SipralPinnedCertificate,
 ];
 
 /// The versioned-shaped structs with no pinned length, and why.
@@ -736,6 +737,9 @@ pub const SURFACE: Surface = Surface {
         crate::presence::SipralPublishFailure::ABI,
         crate::local_conference::SipralLocalConferenceChange::ABI,
         crate::local_conference::SipralDeparture::ABI,
+        crate::locate::SipralDnsRecordType::ABI,
+        crate::locate::SipralDnsAnswer::ABI,
+        crate::locate::SipralLocateFailure::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -779,6 +783,7 @@ pub const SURFACE: Surface = Surface {
         crate::presence::SipralPresenceEvent::ABI,
         crate::transport::SipralTransportFailedEvent::ABI,
         crate::local_conference::SipralLocalConferenceEvent::ABI,
+        crate::locate::SipralLocateEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -802,6 +807,7 @@ pub const SURFACE: Surface = Surface {
         crate::local_conference::SipralLocalConferenceConfig::ABI,
         crate::local_conference::SipralLocalConferenceInfo::ABI,
         crate::local_conference::SipralLocalConferenceMember::ABI,
+        crate::pin::SipralPinnedCertificate::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -992,6 +998,10 @@ pub const SURFACE: Surface = Surface {
         crate::local_conference::sipral_local_conference_poll_transmit::ABI,
         crate::local_conference::sipral_local_conference_record_start::ABI,
         crate::local_conference::sipral_local_conference_record_stop::ABI,
+        crate::locate::sipral_account_looked_up::ABI,
+        crate::pin::sipral_account_check_certificate::ABI,
+        crate::advertise::sipral_advertised_address::ABI,
+        crate::log::sipral_stack_diagnostic_trace::ABI,
     ],
 };
 
@@ -1231,6 +1241,7 @@ mod tests {
             "SipralPresenceEvent",
             "SipralTransportFailedEvent",
             "SipralLocalConferenceEvent",
+            "SipralLocateEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

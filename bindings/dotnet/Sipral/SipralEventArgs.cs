@@ -94,6 +94,10 @@ public sealed class SipralEventArgs : EventArgs
     /// <see cref="SipralEventKind.MessageSent"/> and
     /// <see cref="SipralEventKind.MessagesWaiting"/>.</summary>
     public SipralMessageEventInfo? MessageInfo { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.LookupWanted"/>,
+    /// <see cref="SipralEventKind.Located"/> and
+    /// <see cref="SipralEventKind.LocateFailed"/>.</summary>
+    public SipralLocateEventInfo? Locate { get; private init; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
@@ -335,7 +339,15 @@ public sealed class SipralEventArgs : EventArgs
         SipralRecoveryEventInfo? recovery = null;
         SipralAnnounceEventInfo? announce = null;
         SipralMessageEventInfo? messageInfo = null;
-        if (kind is SipralEventKind.SubscriptionChanged or SipralEventKind.Notified)
+        SipralLocateEventInfo? locate = null;
+        if (kind is SipralEventKind.LookupWanted or SipralEventKind.Located or SipralEventKind.LocateFailed)
+        {
+            var l = evt.Payload.Locate;
+            locate = new SipralLocateEventInfo(
+                (SipralDnsRecordType)l.Record, (SipralLocateFailure)l.Failure, ReadUtf8(l.Name, l.NameLen),
+                ReadUtf8(l.Targets, l.TargetsLen), l.RetryInMs);
+        }
+        else if (kind is SipralEventKind.SubscriptionChanged or SipralEventKind.Notified)
         {
             var s = evt.Payload.Subscription;
             subscription = new SipralSubscriptionEventInfo(
@@ -378,6 +390,7 @@ public sealed class SipralEventArgs : EventArgs
             Recovery = recovery,
             Announce = announce,
             MessageInfo = messageInfo,
+            Locate = locate,
         };
     }
 

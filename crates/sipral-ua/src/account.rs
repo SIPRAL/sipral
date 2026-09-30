@@ -412,6 +412,20 @@ impl Account {
         account
     }
 
+    /// Send this account's requests to the server `server` names, found by
+    /// RFC 3263 as [`Account::located`] finds a registrar, rather than to the
+    /// address it was made with: for an account that registers with one URI
+    /// and reaches its registrar through an outbound proxy known by name, or
+    /// for a binding that builds every account the same way and names the
+    /// server last. The `registrar` a REGISTER is addressed to is unchanged.
+    #[must_use]
+    pub fn locate(mut self, server: Uri) -> Self {
+        self.server = Some(server);
+        self.located = false;
+        self.remote = SocketAddr::from(([0, 0, 0, 0], 0));
+        self
+    }
+
     /// Ask the server's domain for NAPTR records before SRV (RFC 3263 §4.1),
     /// for an account made with [`Account::located`] or
     /// [`Account::unregistered_located`]. Off by default: most domains
@@ -624,7 +638,7 @@ impl Account {
     /// RFC 3261 §7.5 has a registrar ignore; on a stream the endpoint pings
     /// the connection at this interval instead of its own (RFC 5626 §4.4.1's
     /// double CRLF, with its single-CRLF pong). Each interval is drawn
-    /// between 80% and 100% of `every`, as §4.4.1 asks, so what the NAT
+    /// between 80% and 100% of `every`, as §4.4 asks, so what the NAT
     /// sees is never further apart than `every`.
     ///
     /// Sent while the account's registration holds a binding or is getting

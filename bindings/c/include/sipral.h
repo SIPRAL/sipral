@@ -141,7 +141,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)33)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)34)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -624,6 +624,7 @@ typedef struct sipral_text_event sipral_text_event_t;
 typedef struct sipral_presence_event sipral_presence_event_t;
 typedef struct sipral_transport_failed_event sipral_transport_failed_event_t;
 typedef struct sipral_local_conference_event sipral_local_conference_event_t;
+typedef struct sipral_locate_event sipral_locate_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -647,6 +648,7 @@ typedef struct sipral_record_config sipral_record_config_t;
 typedef struct sipral_local_conference_config sipral_local_conference_config_t;
 typedef struct sipral_local_conference_info sipral_local_conference_info_t;
 typedef struct sipral_local_conference_member sipral_local_conference_member_t;
+typedef struct sipral_pinned_certificate sipral_pinned_certificate_t;
 
 /**
  * The result of a call across the C ABI.
@@ -833,6 +835,24 @@ enum {
      * that keeps getting this has a clock that went backwards.
      */
     SIPRAL_STATUS_CLOCK_BEHIND = 24,
+    /**
+     * The TLS server's certificate is not the one the account pins
+     * (ABI 0.34): `sipral_account_check_certificate` compared its
+     * SHA-256 fingerprint with `sipral_account_config_t::tls_pin_sha256`
+     * and they differ. Refuse the handshake: with a pin, the
+     * fingerprint is the whole verdict (`docs/22-tls.md`).
+     */
+    SIPRAL_STATUS_CERTIFICATE_REFUSED = 25,
+    /**
+     * This end was about to advertise an address the peer cannot reach
+     * it at (ABI 0.34): a loopback address, in a `Contact` or a session
+     * description, handed to a peer that is not on this machine, or the
+     * unspecified address in a `Contact`. Nothing was sent; the last
+     * error names both addresses. Bind to, and advertise, the address
+     * of the interface that routes to the peer —
+     * `sipral_advertised_address` finds it.
+     */
+    SIPRAL_STATUS_UNREACHABLE_ADDRESS = 26,
 };
 
 /**
@@ -1028,6 +1048,18 @@ enum {
      * `SIPRAL_FEATURE_DTLS_SRTP`.
      */
     SIPRAL_SRTP_DTLS_OR_SDES = 6,
+    /**
+     * Offer SDES on plain `RTP/AVP`: the call is encrypted when the
+     * answer takes one of the `a=crypto` lines and plain when it takes
+     * none — the "SRTP optional" of desk phones, for a server that may
+     * or may not encrypt and answers an offer on `RTP/SAVP` with 488
+     * when it does not. RFC 4568 writes the attribute for the secure
+     * profiles, so this is interoperability rather than a standard.
+     * Answering, an offer on `RTP/AVP` carrying a line this end takes
+     * is answered with a key, and anything else as under `Offered`.
+     * ABI 0.34.
+     */
+    SIPRAL_SRTP_BEST_EFFORT = 7,
 };
 
 /**
@@ -2228,6 +2260,33 @@ enum {
      * `SIPRAL_HANDLE_NONE`: a conference is neither.
      */
     SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED = 54,
+    /**
+     * A DNS lookup is wanted to locate an account's server by RFC 3263
+     * (ABI 0.34): the account named its registrar or its outbound proxy
+     * with `server_uri` rather than an address.
+     *
+     * `payload.locate` names the query: `name`, and `record`, what to
+     * ask it for. Ask the platform's resolver and hand the answer to
+     * `sipral_account_looked_up` — every one, a failure included, since
+     * the procedure waits for each. Several may be outstanding at once,
+     * one per host an SRV answer named. `account` is the account.
+     */
+    SIPRAL_EVENT_KIND_LOOKUP_WANTED = 55,
+    /**
+     * An account's server was located, or located again once the last
+     * answer's time-to-live ran out (ABI 0.34): `payload.locate.targets`
+     * is every address the answer named, first the one the account's
+     * requests go to now. `account` is the account.
+     */
+    SIPRAL_EVENT_KIND_LOCATED = 56,
+    /**
+     * A lookup of an account's server named no address (ABI 0.34):
+     * `payload.locate.failure` says why, and `retry_in_ms` when the name
+     * is looked up again. A REGISTER that was waiting for it is reported
+     * failed as well, and backs off; an address an earlier answer named
+     * stays in use meanwhile. `account` is the account.
+     */
+    SIPRAL_EVENT_KIND_LOCATE_FAILED = 57,
 };
 
 /**
@@ -2320,6 +2379,15 @@ enum {
      * caller's to resolve.
      */
     SIPRAL_REGISTRATION_FAILURE_REDIRECTED = 4,
+    /**
+     * The account's `Contact` names an address the registrar cannot
+     * reach this end at — loopback, to a registrar that is not, or the
+     * unspecified address — and nothing was sent (ABI 0.34). Trying
+     * again cannot help until the account is given one it can:
+     * `sipral_account_rebind`, with an address `sipral_advertised_address`
+     * found.
+     */
+    SIPRAL_REGISTRATION_FAILURE_UNREACHABLE_CONTACT = 5,
 };
 
 /**
@@ -4064,6 +4132,91 @@ enum {
 };
 
 /**
+ * Which kind of DNS record a lookup asks for. Names for
+ * `sipral_locate_event_t::record` and `sipral_account_looked_up`'s
+ * `record`.
+ */
+typedef uint32_t sipral_dns_record_type_t;
+enum {
+    /**
+     * Not a lookup: the value on a `SIPRAL_EVENT_KIND_LOCATED` or a
+     * `SIPRAL_EVENT_KIND_LOCATE_FAILED`.
+     */
+    SIPRAL_DNS_RECORD_TYPE_NONE = 0,
+    /**
+     * RFC 3403: which services a domain offers, and under which names.
+     */
+    SIPRAL_DNS_RECORD_TYPE_NAPTR = 1,
+    /**
+     * RFC 2782: which hosts, at which ports, serve one service.
+     */
+    SIPRAL_DNS_RECORD_TYPE_SRV = 2,
+    /**
+     * An IPv4 address.
+     */
+    SIPRAL_DNS_RECORD_TYPE_A = 3,
+    /**
+     * An IPv6 address.
+     */
+    SIPRAL_DNS_RECORD_TYPE_AAAA = 4,
+};
+
+/**
+ * What the application's resolver said to a lookup. Names for
+ * `sipral_account_looked_up`'s `answer`.
+ */
+typedef uint32_t sipral_dns_answer_t;
+enum {
+    /**
+     * The records it returned, in `records`. None at all reads as
+     * `SIPRAL_DNS_ANSWER_NOTHING`.
+     */
+    SIPRAL_DNS_ANSWER_RECORDS = 1,
+    /**
+     * The name has no record of that kind, or does not exist at all.
+     * Also the right answer from a resolver that cannot ask for the
+     * kind: a platform lookup that only knows addresses answers every
+     * NAPTR and SRV query with this, and the host's own addresses are
+     * asked for next.
+     */
+    SIPRAL_DNS_ANSWER_NOTHING = 2,
+    /**
+     * The resolver could not answer: no server reachable, a timeout, a
+     * server failure.
+     */
+    SIPRAL_DNS_ANSWER_FAILED = 3,
+};
+
+/**
+ * Why a lookup of an account's server named no address. Names for
+ * `sipral_locate_event_t::failure`.
+ */
+typedef uint32_t sipral_locate_failure_t;
+enum {
+    /**
+     * Nothing failed.
+     */
+    SIPRAL_LOCATE_FAILURE_NONE = 0,
+    /**
+     * The DNS answered, and what it answered names no address of the
+     * family the account's transport can reach: no record, or an SRV
+     * target of `.`.
+     */
+    SIPRAL_LOCATE_FAILURE_NOT_FOUND = 1,
+    /**
+     * The resolver failed on every lookup that could have given an
+     * address.
+     */
+    SIPRAL_LOCATE_FAILURE_UNANSWERED = 2,
+    /**
+     * The transport has no RFC 3263 procedure: WebSocket names no SRV
+     * service and no default port, so only a numeric host, or a host
+     * with a port, can be located for it.
+     */
+    SIPRAL_LOCATE_FAILURE_UNSUPPORTED = 3,
+};
+
+/**
  * The one callback a stack has.
  *
  * It is called from inside `sipral_stack_poll`, on the thread that called
@@ -4847,6 +5000,88 @@ struct sipral_stack_config {
      * The highest port of that range, or zero with `rtp_port_min`.
      */
     uint32_t rtp_port_max;
+    /**
+     * The SRTP suites every call on this stack offers and accepts,
+     * unless its account names its own
+     * (`sipral_account_config_t::srtp_suites`): the names RFC 4568
+     * section 6.2 and RFC 7714 section 14.2 give them, separated by
+     * commas, most preferred first. Null for this build's own order
+     * (ABI 0.34).
+     *
+     * An SDES offer names these, in this order, and an answer takes
+     * the offerer's first that is among them; a DTLS-SRTP handshake
+     * offers the ones with a protection profile. Every `a=crypto` line
+     * is in the INVITE, so past two or three suites an offer over UDP
+     * needs a stream (RFC 3261 section 18.1.1). A name this library
+     * does not run, or one named twice, is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     */
+    const char *srtp_suites;
+    /**
+     * How many bytes of it.
+     */
+    size_t srtp_suites_len;
+    /**
+     * The MTU of the path toward the server, in bytes, when the
+     * deployment knows it; zero for unknown (ABI 0.34). RFC 3261
+     * section 18.1.1 moves a request to a stream when it comes within
+     * 200 bytes of the MTU, and with the MTU unknown past 1300 bytes: a
+     * path known to carry more lets a larger request stay on UDP. Under
+     * 576 is `SIPRAL_STATUS_INVALID_ARGUMENT` — an IPv4 host must take
+     * that much (RFC 791).
+     */
+    uint32_t path_mtu;
+    /**
+     * The largest request to send over UDP anyway, once no stream to
+     * its server can be had, in bytes; zero for never (ABI 0.34).
+     *
+     * **A deliberate deviation from RFC 3261 section 18.1.1**, for a
+     * server that takes SIP over UDP alone: such a PBX answers nothing
+     * to a request it cannot receive over a stream, and takes a
+     * 1,444-byte INVITE over UDP from every other phone on its network.
+     * A request past the section's line asks for a stream as always
+     * (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`); once the application says
+     * none is coming (`sipral_stack_transport_failed` on the number it
+     * was going to bind) or the wait runs out, what was waiting goes
+     * over UDP up to this size, and each such request is written to the
+     * call's diagnostic record as `transport.kept.datagram` with its
+     * size and this limit. A stream bound later is preferred again. A
+     * request past this size ends as it would without it. At most
+     * 65 507, what one UDP datagram carries over IPv4; a figure not past
+     * the section's own line changes nothing.
+     */
+    uint32_t datagram_without_stream_bytes;
+    /**
+     * A salt the application keeps for the installation, keying the
+     * pseudonyms this stack's log and state text write for users,
+     * numbers and addresses, so that the same value has the same
+     * pseudonym in every run and two runs' traces compare line by line
+     * (ABI 0.34). At least 16 bytes, drawn once from the platform's
+     * generator; null for pseudonyms keyed from `media_seed`, which are
+     * fresh every run. It is a secret like a key: whoever holds it can
+     * test a guessed address against a pseudonym. Copied.
+     */
+    const uint8_t *pseudonym_salt;
+    /**
+     * How many bytes of it.
+     */
+    size_t pseudonym_salt_len;
+    /**
+     * A `sipral_toggle_t`: whether the log's trace writes SIP messages
+     * whole, with the peer they went to, instead of pseudonymised; off
+     * by default (ABI 0.34). For a diagnosis only: every user, display
+     * name, number and address is then written as it went on the wire.
+     * What is never written, in either mode, is a credential or a key:
+     * every `Authorization` and `Proxy-Authorization` value, every
+     * `a=crypto` `inline:` key, every `k=` key and every `a=key-mgmt`
+     * payload is taken out first. `sipral_stack_diagnostic_trace`
+     * turns it on and off while the stack runs.
+     */
+    sipral_toggle_t diagnostic_trace;
+    /**
+     * Zero.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -5006,6 +5241,15 @@ struct sipral_stack_settings {
      * See `rtp_port_min`.
      */
     uint32_t rtp_port_max;
+    /**
+     * The path MTU as given, zero for unknown (ABI 0.34).
+     */
+    uint32_t path_mtu;
+    /**
+     * The largest request sent over UDP once no stream is coming, as
+     * given; zero for never (ABI 0.34).
+     */
+    uint32_t datagram_without_stream_bytes;
 };
 
 /**
@@ -5083,8 +5327,9 @@ struct sipral_account_config {
      * Where this account's requests go, as `host:port`: the registrar's
      * address for an account that registers, and the outbound proxy for
      * one configured with no registrar. A call that names no destination
-     * of its own goes here either way, so it is required either way. An
-     * address, not a name: RFC 3263 resolution is the caller's.
+     * of its own goes here either way, so it is required unless
+     * `server_uri` names the server instead. An address, not a name: a
+     * server known by name is `server_uri`'s.
      */
     const char *registrar_address;
     /**
@@ -5348,6 +5593,76 @@ struct sipral_account_config {
      * may have left unwritten, and are never read.
      */
     uint64_t recording_in_clear;
+    /**
+     * How often, in milliseconds, this account keeps its flow to its
+     * registrar — to its outbound proxy, for one that never registers —
+     * open, whatever STUN found; zero for never, which leaves it to
+     * `sipral_stack_config_t::registrar_keepalive` (ABI 0.34).
+     *
+     * For a network whose NAT forgets a UDP flow sooner than the
+     * REGISTER refresh comes round, with STUN off. On UDP a double CRLF
+     * goes out alone in a datagram, which a registrar ignores (RFC 3261
+     * §7.5); on TCP or TLS the connection is pinged at this interval
+     * instead of the stack's own (RFC 5626 §4.4.1). Each interval is
+     * drawn between 80% and 100% of it. From 1 000 to 120 000, and
+     * anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     */
+    uint64_t keepalive_ms;
+    /**
+     * The server this account's requests go to, as a URI whose host RFC
+     * 3263 locates — `sip:pbx.example.com`, `sips:example.com:5061` —
+     * in place of `registrar_address`: exactly one of the two is given
+     * (ABI 0.34). The registrar for an account that registers (usually
+     * the same URI as `registrar`), the outbound proxy for one that
+     * does not.
+     *
+     * The lookups are the application's resolver's, asked for with
+     * `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and answered with
+     * `sipral_account_looked_up`; the order they go in, the SRV ranking
+     * and the fallback to the host's own addresses are the stack's.
+     * The first REGISTER waits for the first answer, and a call placed
+     * before it with no `destination` of its own is
+     * `SIPRAL_STATUS_WRONG_STATE`. A REGISTER that times out, whose
+     * transport fails or that is answered 503 moves to the next address
+     * found at once (§4.3); the name is looked up again when the
+     * answer's time-to-live runs out, and when the stack's recovery
+     * asks for an address. A host with a port skips SRV, and a numeric
+     * host asks nothing.
+     */
+    const char *server_uri;
+    /**
+     * How many bytes of it.
+     */
+    size_t server_uri_len;
+    /**
+     * The SHA-256 fingerprint of the one TLS server certificate this
+     * account trusts, in place of a trust anchor, for a PBX that serves
+     * a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
+     * either case, with a colon between each byte or none, optionally
+     * after `sha-256 ` or `SHA256=` — the forms `openssl x509
+     * -fingerprint -sha256` and RFC 8122 print. Null for none.
+     *
+     * TLS is the application's, so this is what its certificate
+     * verifier asks, with `sipral_account_check_certificate`: with a
+     * pin, the fingerprint is the whole verdict, and no chain, trust
+     * anchor or host name is consulted (`docs/22-tls.md`).
+     */
+    const char *tls_pin_sha256;
+    /**
+     * How many bytes of it.
+     */
+    size_t tls_pin_sha256_len;
+    /**
+     * A `sipral_toggle_t`: whether `server_uri`'s domain is asked for NAPTR
+     * records before SRV (RFC 3263 §4.1). Off by default: most domains
+     * publish none, and the account's transport is already chosen.
+     * Refused without a `server_uri` (ABI 0.34).
+     */
+    sipral_toggle_t server_naptr;
+    /**
+     * Zero.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -7569,6 +7884,55 @@ struct sipral_local_conference_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_LOOKUP_WANTED,
+ * a SIPRAL_EVENT_KIND_LOCATED
+ * and a SIPRAL_EVENT_KIND_LOCATE_FAILED
+ * carry, the account being `sipral_event_t::account`.
+ *
+ * One struct for the three, the way `sipral_subscription_event_t`
+ * answers for two kinds: a member meaningless on one kind is zero or
+ * null there. Every pointer is the library's, valid for the duration of
+ * the callback.
+ */
+struct sipral_locate_event {
+    /**
+     * A sipral_dns_record_type_t: what to ask `name` for, on a lookup.
+     */
+    sipral_dns_record_type_t record;
+    /**
+     * A sipral_locate_failure_t: why a lookup named no address.
+     */
+    sipral_locate_failure_t failure;
+    /**
+     * The name to ask, on a lookup: `_sip._udp.example.com`, or a
+     * host. Handed back to sipral_account_looked_up with the answer.
+     * UTF-8, not NUL-terminated.
+     */
+    const char *name;
+    /**
+     * How many bytes of it.
+     */
+    size_t name_len;
+    /**
+     * Where the account's server was located: every address the answer
+     * named, as `host:port` separated by commas, in RFC 3263 section
+     * 4.3's order from the one the account's requests go to now. UTF-8,
+     * not NUL-terminated.
+     */
+    const char *targets;
+    /**
+     * How many bytes of it.
+     */
+    size_t targets_len;
+    /**
+     * When the name is looked up again after a failure, in
+     * milliseconds. An address an earlier answer named stays in use
+     * meanwhile.
+     */
+    uint64_t retry_in_ms;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * The whole union is zeroed before that one arm is written, so every
@@ -7677,6 +8041,11 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED.
      */
     sipral_local_conference_event_t local_conference;
+    /**
+     * For SIPRAL_EVENT_KIND_LOOKUP_WANTED, SIPRAL_EVENT_KIND_LOCATED
+     * and SIPRAL_EVENT_KIND_LOCATE_FAILED.
+     */
+    sipral_locate_event_t locate;
 };
 
 /**
@@ -8732,6 +9101,51 @@ struct sipral_local_conference_member {
      * past the length a caller built against this header declares, never
      * in padding inside it. The library writes zero here and reads nothing
      * from it.
+     */
+    uint32_t reserved;
+};
+
+/**
+ * What sipral_account_check_certificate found: whether the account's
+ * pin decided, and what the certificate's dates say.
+ *
+ * Set `size` to `sizeof(sipral_pinned_certificate_t)` before the call.
+ */
+struct sipral_pinned_certificate {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * The certificate's `notBefore`, in seconds since 1 January 1970,
+     * or zero when its DER could not be read that far.
+     */
+    uint64_t not_before;
+    /**
+     * Its `notAfter`, the same way.
+     */
+    uint64_t not_after;
+    /**
+     * One when the account pins a certificate and this is it: accept
+     * the handshake, whoever signed it. Zero when the account pins
+     * none: the platform's own checks apply, as they would without
+     * this call.
+     */
+    uint32_t pinned;
+    /**
+     * One when `unix_seconds` is past `not_after`. Accepted all the
+     * same: its dates were written by the holder of the pinned key, and
+     * a PBX whose self-signed certificate lapsed would otherwise go
+     * silent. Worth a warning.
+     */
+    uint32_t expired;
+    /**
+     * One when `unix_seconds` is before `not_before`: a clock set wrong,
+     * or a certificate minted with a future date. Accepted too.
+     */
+    uint32_t not_yet_valid;
+    /**
+     * Zero.
      */
     uint32_t reserved;
 };
@@ -12354,6 +12768,109 @@ sipral_status_t sipral_local_conference_record_start(sipral_handle_t conference,
  * Safe to call with any handle value.
  */
 sipral_status_t sipral_local_conference_record_stop(sipral_handle_t conference);
+
+/**
+ * Hand the resolver's answer to a
+ * SIPRAL_EVENT_KIND_LOOKUP_WANTED
+ * back to the account that asked.
+ *
+ * `name` and `record` are the event's, as it named them; `answer` is a
+ * sipral_dns_answer_t. With `SIPRAL_DNS_ANSWER_RECORDS`, `records` is
+ * what the resolver returned, every record of the kind asked for,
+ * separated by commas, each its fields separated by spaces: the
+ * time-to-live in seconds, then the data as a zone file writes it —
+ * an address for A and AAAA (`300 192.0.2.40`); priority, weight,
+ * port and target for SRV (`300 10 60 5060 sip1.example.com`); order,
+ * preference, flags, service and replacement for NAPTR, the regular
+ * expression left out since RFC 3263 follows none (`300 10 50 S
+ * SIP+D2U _sip._udp.example.com`). Null or empty for none, which
+ * reads as `SIPRAL_DNS_ANSWER_NOTHING`. Text, rather than an array of
+ * structs, because it is what a platform resolver prints and what
+ * every binding hands over as it is.
+ *
+ * Answer every lookup, a resolver that failed included: the procedure
+ * waits for each. An answer to a lookup nothing is waiting for any
+ * more — the account was located since, or it has been asked for
+ * again — is `SIPRAL_STATUS_OK` and changes nothing, as is one for an
+ * account that locates nothing.
+ *
+ * Safety
+ *
+ * `name` must be readable for `name_len` bytes and `records` for
+ * `records_len`.
+ */
+sipral_status_t sipral_account_looked_up(sipral_handle_t stack, sipral_handle_t account, const char *name, size_t name_len, sipral_dns_record_type_t record, sipral_dns_answer_t answer, const char *records, size_t records_len, uint64_t now_ms);
+
+/**
+ * Check the certificate a TLS server presented against the one the
+ * account pins, from inside the application's certificate verifier.
+ *
+ * `certificate` is the DER encoding of the leaf, the first certificate
+ * the server sent, and `unix_seconds` the wall clock, which only the
+ * dates reported in `out_pinned` are read against. The fingerprint
+ * is SHA-256 over those exact bytes, compared in constant time.
+ *
+ * `SIPRAL_STATUS_OK` with `pinned` set: the certificate is the pinned
+ * one, and the handshake is to be accepted whatever its chain, its name
+ * or its dates. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: the account pins a
+ * certificate and this is another; refuse the handshake, and nothing is
+ * written. `SIPRAL_STATUS_OK` with `pinned` zero: the account pins
+ * nothing, and the platform's own checks decide.
+ *
+ * Safety
+ *
+ * `certificate` must be readable for `certificate_len` bytes, and
+ * `out_pinned` must point at a `sipral_pinned_certificate_t` whose
+ * `size` member says how long it is.
+ */
+sipral_status_t sipral_account_check_certificate(sipral_handle_t stack, sipral_handle_t account, const uint8_t *certificate, size_t certificate_len, uint64_t unix_seconds, sipral_pinned_certificate_t *out_pinned);
+
+/**
+ * The address to advertise — in a `Contact`, a `bind_address`, a
+ * `media_address` — for a socket bound at `bound` whose traffic goes to
+ * `peer`, as `host:port`, written into `buffer` with a NUL after it.
+ *
+ * A socket bound to a specific address advertises it, unless it is a
+ * loopback address and `peer` is not: `SIPRAL_STATUS_UNREACHABLE_ADDRESS`,
+ * with nothing written. A socket bound to the wildcard address
+ * (`0.0.0.0:5060`, `[::]:5060`) advertises the address of the
+ * operating system's route toward `peer`, with its own port; the route
+ * is found by connecting a datagram socket and closing it, and nothing
+ * is sent. No route to `peer` at all is `SIPRAL_STATUS_TRANSPORT_DOWN`.
+ * `peer` is the registrar for the signalling socket, and the far end —
+ * or the registrar, while the far end is not known yet — for a media
+ * socket. Both are `host:port` addresses, not names.
+ *
+ * Callable from any thread at any time: it names no stack. Text out as
+ * every such call writes it: `out_needed` receives the length with the
+ * NUL counted, `buffer` may be null with a `capacity` of zero to ask for
+ * it, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes nothing.
+ *
+ * Safety
+ *
+ * `bound` and `peer` must be readable for their lengths, `buffer` must
+ * be writable for `capacity` bytes or be null with a capacity of zero,
+ * and `out_needed` must point at one `size_t` or be null.
+ */
+sipral_status_t sipral_advertised_address(const char *bound, size_t bound_len, const char *peer, size_t peer_len, char *buffer, size_t capacity, size_t *out_needed);
+
+/**
+ * Turn the diagnostic trace on or off while the stack runs: `on` is a
+ * `sipral_toggle_t`, and zero leaves it as it is (ABI 0.34).
+ *
+ * On, the trace level of `sipral_stack_log` writes every SIP message
+ * whole, with the peer it went to or came from, and prose lines
+ * without pseudonyms: for a diagnosis, where pseudonyms would hide the
+ * difference between two runs. What is never written, on or off, is a
+ * credential or a key — `sipral_stack_config_t::diagnostic_trace` has
+ * the list. Off, the trace is pseudonymised as it always was. Nothing
+ * is written at all unless the log is at `SIPRAL_LOG_LEVEL_TRACE`.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_stack_diagnostic_trace(sipral_handle_t stack, sipral_toggle_t on);
 
 #ifdef __cplusplus
 } /* extern "C" */

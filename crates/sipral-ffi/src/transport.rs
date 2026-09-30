@@ -668,16 +668,23 @@ entry! {
         let read = unsafe { arrived(data, len, "a read") }?;
         with_stack_at(stack, now_ms, |state, now| {
             let transport = named(state, transport)?;
-            state.log.line(sipral::LogLevel::Trace, "sip", now, || {
-                format!(
-                    "{} bytes read on transport {}, whole messages once framed",
-                    read.len(),
-                    transport.0
-                )
-            });
+            // a read is not a message: the endpoint's framing is what knows
+            // where each one ends, so the trace takes them from there, whole,
+            // and only while there is a trace to write them to
+            let tracing = state.log.enabled(sipral::LogLevel::Trace);
+            state.agent.endpoint().tap_streams(tracing);
             let received = state
                 .agent
                 .receive(Input::StreamData { transport, data: read }, now);
+            for framed in state.agent.endpoint().take_stream_messages() {
+                let travel = sipral::Travel::Received;
+                match framed.remote {
+                    Some(remote) => state.log.sip_message(travel, remote, &framed.bytes, now),
+                    None => state
+                        .log
+                        .sip_message_on_a_connection(travel, &framed.bytes, now),
+                }
+            }
             if let Err(ReceiveError::Malformed(ref broken)) = received {
                 // the framing is lost with it and the endpoint has already
                 // forgotten the transport: a loss like any other, said the
@@ -1394,6 +1401,13 @@ pub(crate) mod tests {
             stir_origid_len: 0,
             stir_attestation: 0,
             recording_in_clear: 0,
+            keepalive_ms: 0,
+            server_uri: ptr::null(),
+            server_uri_len: 0,
+            tls_pin_sha256: ptr::null(),
+            tls_pin_sha256_len: 0,
+            server_naptr: 0,
+            reserved: 0,
         }
     }
 
@@ -3053,9 +3067,27 @@ pub(crate) mod tests {
     /// A stack whose call a PBX has just challenged with a nonce long enough
     /// that the answer outgrows a datagram, driven through the C ABI alone.
     fn challenged_past_the_line(seen: &mut Outgrown) -> SipralHandle {
+        let (handle, out) = challenged(seen, |_| {});
+        assert!(
+            out.iter().all(|message| message.starts_with(b"ACK ")),
+            "only the ACK to the refusal went: {:?}",
+            out.iter()
+                .map(|message| start_of(message))
+                .collect::<Vec<_>>()
+        );
+        handle
+    }
+
+    /// The same, on a stack `tune` configured, with what went out after the
+    /// challenge.
+    fn challenged(
+        seen: &mut Outgrown,
+        tune: impl FnOnce(&mut crate::stack::SipralStackConfig),
+    ) -> (SipralHandle, Vec<Vec<u8>>) {
         let mut observed = Observed::default();
         let mut settings = config(keep_outgrown, &mut observed);
         settings.event_user_data = ptr::from_mut(seen).cast::<std::ffi::c_void>();
+        tune(&mut settings);
         let (status, handle) = create(&settings);
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let account = line(handle);
@@ -3095,15 +3127,154 @@ pub(crate) mod tests {
             last_error_text()
         );
         poll(handle, 1_010);
-        let out = drain(handle);
+        (handle, drain(handle))
+    }
+
+    /// A PBX that takes SIP over UDP alone, and a stack told so with
+    /// `datagram_without_stream_bytes`: once the application says the stream
+    /// cannot be opened, the whole retry goes over the datagram, the call
+    /// goes on, and the stack's diagnostic record says the rule was set
+    /// aside and by how much.
+    #[test]
+    fn a_retry_goes_over_udp_once_no_stream_is_coming_when_the_stack_allows_it() {
+        let mut seen = Outgrown::default();
+        let (handle, out) = challenged(&mut seen, |config| {
+            config.datagram_without_stream_bytes = 4_000;
+        });
         assert!(
             out.iter().all(|message| message.starts_with(b"ACK ")),
-            "only the ACK to the refusal went: {:?}",
-            out.iter()
-                .map(|message| start_of(message))
-                .collect::<Vec<_>>()
+            "§18.1.1 first"
         );
-        handle
+        assert!(!seen.wanted.is_empty(), "a stream was asked for");
+        assert_eq!(
+            unsafe {
+                sipral_stack_transport_failed(
+                    handle,
+                    2,
+                    SipralTransportError::ConnectionRefused as u32,
+                    1_060,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_060);
+        let (retry, to, _) = take_one(handle);
+        assert!(retry.starts_with(b"INVITE "), "{}", start_of(&retry));
+        assert_eq!(to, REGISTRAR);
+        assert!(retry.len() > 1_300, "the whole retry: {}", retry.len());
+        assert!(header(&retry, HeaderName::Via).starts_with(b"SIP/2.0/UDP "));
+        assert!(!header(&retry, HeaderName::Authorization).is_empty());
+        assert!(seen.ended.is_empty(), "the call goes on");
+
+        let mut needed = 0_usize;
+        let _ = unsafe {
+            crate::diagnostics::sipral_stack_diagnostics_json(
+                handle,
+                ptr::null_mut(),
+                0,
+                &raw mut needed,
+            )
+        };
+        let mut json = vec![0_u8; needed];
+        let status = unsafe {
+            crate::diagnostics::sipral_stack_diagnostics_json(
+                handle,
+                json.as_mut_ptr().cast::<c_char>(),
+                json.len(),
+                &raw mut needed,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let json = String::from_utf8_lossy(&json);
+        assert!(json.contains("transport.kept.datagram"), "{json}");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A path whose MTU the deployment knows to be larger moves RFC 3261
+    /// §18.1.1's line with it: the same retry fits, and goes at once.
+    #[test]
+    fn a_known_path_mtu_keeps_a_retry_that_fits_it_on_udp() {
+        let mut seen = Outgrown::default();
+        let (handle, out) = challenged(&mut seen, |config| config.path_mtu = 9_000);
+        assert!(seen.wanted.is_empty(), "no stream was asked for");
+        let retry = out
+            .iter()
+            .find(|message| message.starts_with(b"INVITE "))
+            .expect("the retry went");
+        assert!(retry.len() > 1_300, "{}", retry.len());
+        assert!(header(retry, HeaderName::Via).starts_with(b"SIP/2.0/UDP "));
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A message split across reads, and two in one, are each traced whole
+    /// once framed, with the far end they came from.
+    #[test]
+    fn a_stream_is_traced_a_whole_message_at_a_time() {
+        let mut observed = Observed::default();
+        let handle = speaking(&mut observed, SipralTransport::Tcp);
+        assert_eq!(
+            rebind(handle, 900),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let account = line(handle);
+        let heard = crate::log::tests::Heard::default();
+        crate::log::tests::listen(handle, crate::log::SipralLogLevel::Trace, &heard);
+        let on = crate::media::SipralToggle::On as u32;
+        assert_eq!(
+            unsafe { crate::log::sipral_stack_diagnostic_trace(handle, on) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::Ok
+        );
+        let (first, _, _) = take_one(handle);
+        let challenge = reply(&first, 401, "Unauthorized", CHALLENGE);
+        let granted = reply(
+            &first,
+            200,
+            "OK",
+            "Contact: <sip:alice@192.0.2.10:5060>;expires=3600\r\n",
+        );
+        let mut both = challenge.clone();
+        both.extend_from_slice(&granted);
+        let cut = challenge.len() + 20;
+        heard.lines.lock().unwrap().clear();
+        for read in [&both[..cut], &both[cut..]] {
+            let status = unsafe {
+                sipral_stack_receive_stream(
+                    handle,
+                    SIPRAL_TRANSPORT_MAIN,
+                    read.as_ptr(),
+                    read.len(),
+                    1_100,
+                )
+            };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        }
+        let received: Vec<String> = heard
+            .lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, target, message, _)| target == "sip" && message.starts_with("received"))
+            .map(|(_, _, message, _)| message.clone())
+            .collect();
+        assert_eq!(received.len(), 2, "{received:#?}");
+        let whole = |message: &[u8]| {
+            format!(
+                "received from {REGISTRAR}, {} bytes:\n{}",
+                message.len(),
+                String::from_utf8_lossy(message)
+            )
+        };
+        assert_eq!(received[0], whole(&challenge));
+        assert_eq!(received[1], whole(&granted));
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
     /// RFC 3261 §18.1.1 on the answer to a challenge, as a C application sees

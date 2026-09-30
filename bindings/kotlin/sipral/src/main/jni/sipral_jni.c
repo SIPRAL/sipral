@@ -59,7 +59,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
         if (jni_event_callback_class == NULL) {
             return JNI_ERR;
         }
-        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJJJ[B[J[B[B[B[B[B[B[B[B[B[B[B[B[J[B[J[B[J[J[J[B[J[J[J[B[J[B[B[B[J[B[B[B[J[B[B[B[B[J[B[B[J[B[B[J[J[B[B[J[B[B[B[B[J[J[J[B[J[B[B[J[B[J[J)V");
+        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJJJ[B[J[B[B[B[B[B[B[B[B[B[B[B[B[J[B[J[B[J[J[J[B[J[J[J[B[J[B[B[B[J[B[B[B[J[B[B[B[B[J[B[B[J[B[B[J[J[B[B[J[B[B[B[B[J[J[J[B[J[B[B[J[B[J[J[B[B[J)V");
         if (jni_event_callback_deliver == NULL) {
             return JNI_ERR;
         }
@@ -238,6 +238,9 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     jbyteArray payloadTransportFailedDetail = NULL;
     jlongArray payloadTransportFailedNumbers = NULL;
     jlongArray payloadLocalConferenceNumbers = NULL;
+    jbyteArray payloadLocateName = NULL;
+    jbyteArray payloadLocateTargets = NULL;
+    jlongArray payloadLocateNumbers = NULL;
 
     if (jni_vm == NULL || event == NULL) {
         return;
@@ -992,8 +995,36 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
             (*env)->SetLongArrayRegion(env, payloadLocalConferenceNumbers, 0, 7, slots);
         }
     }
+    if (built && (event->kind == SIPRAL_EVENT_KIND_LOOKUP_WANTED || event->kind == SIPRAL_EVENT_KIND_LOCATED || event->kind == SIPRAL_EVENT_KIND_LOCATE_FAILED) && JNI_REACHES(event, sipral_event_t, payload.locate.name_len) && event->payload.locate.name != NULL) {
+        payloadLocateName = (*env)->NewByteArray(env, (jsize)event->payload.locate.name_len);
+        if (payloadLocateName == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, payloadLocateName, 0, (jsize)event->payload.locate.name_len, (const jbyte *)event->payload.locate.name);
+        }
+    }
+    if (built && (event->kind == SIPRAL_EVENT_KIND_LOOKUP_WANTED || event->kind == SIPRAL_EVENT_KIND_LOCATED || event->kind == SIPRAL_EVENT_KIND_LOCATE_FAILED) && JNI_REACHES(event, sipral_event_t, payload.locate.targets_len) && event->payload.locate.targets != NULL) {
+        payloadLocateTargets = (*env)->NewByteArray(env, (jsize)event->payload.locate.targets_len);
+        if (payloadLocateTargets == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, payloadLocateTargets, 0, (jsize)event->payload.locate.targets_len, (const jbyte *)event->payload.locate.targets);
+        }
+    }
     if (built) {
-        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, JNI_REACHES(event, sipral_event_t, account) ? (jlong)event->account : 0, JNI_REACHES(event, sipral_event_t, call) ? (jlong)event->call : 0, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget, payloadTransferNumbers, payloadMediaReason, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost, payloadResolveNumbers, payloadMessageContentType, payloadMessageBody, payloadMessageMessageAccount, payloadMessageNumbers, payloadNatLocal, payloadNatMapped, payloadNatPrevious, payloadNatNumbers, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason, payloadRelayNumbers, payloadReferralTarget, payloadReferralReferredBy, payloadReferralNumbers, payloadTurnStreamLocal, payloadTurnStreamServer, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer, payloadStunServerPrevious, payloadStunServerNumbers, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText, payloadTextNumbers, payloadPresenceEntity, payloadPresenceNote, payloadPresenceNumbers, payloadTransportFailedDetail, payloadTransportFailedNumbers, payloadLocalConferenceNumbers);
+        jlong slots[3] = { 0 };
+        slots[0] = JNI_REACHES(event, sipral_event_t, payload.locate.record) ? (jlong)event->payload.locate.record : 0;
+        slots[1] = JNI_REACHES(event, sipral_event_t, payload.locate.failure) ? (jlong)event->payload.locate.failure : 0;
+        slots[2] = JNI_REACHES(event, sipral_event_t, payload.locate.retry_in_ms) ? (jlong)event->payload.locate.retry_in_ms : 0;
+        payloadLocateNumbers = (*env)->NewLongArray(env, 3);
+        if (payloadLocateNumbers == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetLongArrayRegion(env, payloadLocateNumbers, 0, 3, slots);
+        }
+    }
+    if (built) {
+        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, JNI_REACHES(event, sipral_event_t, account) ? (jlong)event->account : 0, JNI_REACHES(event, sipral_event_t, call) ? (jlong)event->call : 0, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget, payloadTransferNumbers, payloadMediaReason, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost, payloadResolveNumbers, payloadMessageContentType, payloadMessageBody, payloadMessageMessageAccount, payloadMessageNumbers, payloadNatLocal, payloadNatMapped, payloadNatPrevious, payloadNatNumbers, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason, payloadRelayNumbers, payloadReferralTarget, payloadReferralReferredBy, payloadReferralNumbers, payloadTurnStreamLocal, payloadTurnStreamServer, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer, payloadStunServerPrevious, payloadStunServerNumbers, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText, payloadTextNumbers, payloadPresenceEntity, payloadPresenceNote, payloadPresenceNumbers, payloadTransportFailedDetail, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName, payloadLocateTargets, payloadLocateNumbers);
     }
     /* deliver hands what a listener throws to the thread's own handler, so
      * what is pending here is the JVM's -- an array it could not make --
@@ -1196,6 +1227,15 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     }
     if (payloadLocalConferenceNumbers != NULL) {
         (*env)->DeleteLocalRef(env, payloadLocalConferenceNumbers);
+    }
+    if (payloadLocateName != NULL) {
+        (*env)->DeleteLocalRef(env, payloadLocateName);
+    }
+    if (payloadLocateTargets != NULL) {
+        (*env)->DeleteLocalRef(env, payloadLocateTargets);
+    }
+    if (payloadLocateNumbers != NULL) {
+        (*env)->DeleteLocalRef(env, payloadLocateNumbers);
     }
     if (attached) {
         (*jni_vm)->DetachCurrentThread(jni_vm);
@@ -1707,7 +1747,7 @@ Java_org_sipral_SipralNative_sipral_1capabilities(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlong configRegistrarKeepalive, jlong configRegistrarKeepaliveMs, jlong configTurnTransport, jlong configAudio, jlong configAudioActivation, jlong configAudioTransmitCallback, jlong configAudioProbeMs, jlong configAudioDeviceRateHz, jlong configMaxDialogs, jlong configMaxServerTransactions, jlong configDiagnosticDecisions, jlong configDiagnosticRecords, jlong configDtmfDetection, jbyteArray configStunFallbacks, jlong configRtpPortMin, jlong configRtpPortMax, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlong configRegistrarKeepalive, jlong configRegistrarKeepaliveMs, jlong configTurnTransport, jlong configAudio, jlong configAudioActivation, jlong configAudioTransmitCallback, jlong configAudioProbeMs, jlong configAudioDeviceRateHz, jlong configMaxDialogs, jlong configMaxServerTransactions, jlong configDiagnosticDecisions, jlong configDiagnosticRecords, jlong configDtmfDetection, jbyteArray configStunFallbacks, jlong configRtpPortMin, jlong configRtpPortMax, jbyteArray configSrtpSuites, jlong configPathMtu, jlong configDatagramWithoutStreamBytes, jbyteArray configPseudonymSalt, jlong configDiagnosticTrace, jlong configReserved, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -1788,6 +1828,18 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     config_value.stun_fallbacks_len = (size_t)configStunFallbacks_size;
     config_value.rtp_port_min = (uint32_t)configRtpPortMin;
     config_value.rtp_port_max = (uint32_t)configRtpPortMax;
+    jbyte *configSrtpSuites_data = configSrtpSuites ? (*env)->GetByteArrayElements(env, configSrtpSuites, NULL) : NULL;
+    jsize configSrtpSuites_size = configSrtpSuites ? (*env)->GetArrayLength(env, configSrtpSuites) : 0;
+    config_value.srtp_suites = (const char *)configSrtpSuites_data;
+    config_value.srtp_suites_len = (size_t)configSrtpSuites_size;
+    config_value.path_mtu = (uint32_t)configPathMtu;
+    config_value.datagram_without_stream_bytes = (uint32_t)configDatagramWithoutStreamBytes;
+    jbyte *configPseudonymSalt_data = configPseudonymSalt ? (*env)->GetByteArrayElements(env, configPseudonymSalt, NULL) : NULL;
+    jsize configPseudonymSalt_size = configPseudonymSalt ? (*env)->GetArrayLength(env, configPseudonymSalt) : 0;
+    config_value.pseudonym_salt = (const uint8_t *)configPseudonymSalt_data;
+    config_value.pseudonym_salt_len = (size_t)configPseudonymSalt_size;
+    config_value.diagnostic_trace = (sipral_toggle_t)configDiagnosticTrace;
+    config_value.reserved = (uint32_t)configReserved;
     sipral_handle_t stack_value = 0;
     sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
     if (configBindAddress) {
@@ -1820,6 +1872,12 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     if (configStunFallbacks) {
         (*env)->ReleaseByteArrayElements(env, configStunFallbacks, configStunFallbacks_data, JNI_ABORT);
     }
+    if (configSrtpSuites) {
+        (*env)->ReleaseByteArrayElements(env, configSrtpSuites, configSrtpSuites_data, JNI_ABORT);
+    }
+    if (configPseudonymSalt) {
+        (*env)->ReleaseByteArrayElements(env, configPseudonymSalt, configPseudonymSalt_data, JNI_ABORT);
+    }
     {
         jlong slot = (jlong)stack_value;
         (*env)->SetLongArrayRegion(env, stack, 0, 1, &slot);
@@ -1837,7 +1895,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
     settings_value.size = sizeof settings_value;
     sipral_status_t status = sipral_stack_settings((sipral_handle_t)stack, &settings_value);
     {
-        jlong slots[21];
+        jlong slots[23];
         slots[0] = (jlong)settings_value.size;
         slots[1] = (jlong)settings_value.transport;
         slots[2] = (jlong)settings_value.retransmits;
@@ -1859,7 +1917,9 @@ Java_org_sipral_SipralNative_sipral_1stack_1settings(JNIEnv *env, jobject self, 
         slots[18] = (jlong)settings_value.diagnostic_records;
         slots[19] = (jlong)settings_value.rtp_port_min;
         slots[20] = (jlong)settings_value.rtp_port_max;
-        (*env)->SetLongArrayRegion(env, settings, 0, 21, slots);
+        slots[21] = (jlong)settings_value.path_mtu;
+        slots[22] = (jlong)settings_value.datagram_without_stream_bytes;
+        (*env)->SetLongArrayRegion(env, settings, 0, 23, slots);
     }
     return (jint)status;
 }
@@ -2190,7 +2250,7 @@ Java_org_sipral_SipralNative_sipral_1account_1push_1echo(JNIEnv *env, jobject se
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jbyteArray configQualityReportUri, jlong configSessionTimer, jlong configSessionIntervalSeconds, jlong configPrivacy, jbyteArray configTrustedPeers, jlong configSrtp, jbyteArray configSrtpSuites, jlong configStirVerification, jbyteArray configStirKey, jbyteArray configStirCertificateUrl, jbyteArray configStirOrig, jbyteArray configStirOrigid, jlong configStirAttestation, jlong configRecordingInClear, jlongArray account)
+Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jbyteArray configQualityReportUri, jlong configSessionTimer, jlong configSessionIntervalSeconds, jlong configPrivacy, jbyteArray configTrustedPeers, jlong configSrtp, jbyteArray configSrtpSuites, jlong configStirVerification, jbyteArray configStirKey, jbyteArray configStirCertificateUrl, jbyteArray configStirOrig, jbyteArray configStirOrigid, jlong configStirAttestation, jlong configRecordingInClear, jlong configKeepaliveMs, jbyteArray configServerUri, jbyteArray configTlsPinSha256, jlong configServerNaptr, jlong configReserved, jlongArray account)
 {
     (void)env;
     (void)self;
@@ -2279,6 +2339,17 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     config_value.stir_origid_len = (size_t)configStirOrigid_size;
     config_value.stir_attestation = (sipral_attestation_t)configStirAttestation;
     config_value.recording_in_clear = (uint64_t)configRecordingInClear;
+    config_value.keepalive_ms = (uint64_t)configKeepaliveMs;
+    jbyte *configServerUri_data = configServerUri ? (*env)->GetByteArrayElements(env, configServerUri, NULL) : NULL;
+    jsize configServerUri_size = configServerUri ? (*env)->GetArrayLength(env, configServerUri) : 0;
+    config_value.server_uri = (const char *)configServerUri_data;
+    config_value.server_uri_len = (size_t)configServerUri_size;
+    jbyte *configTlsPinSha256_data = configTlsPinSha256 ? (*env)->GetByteArrayElements(env, configTlsPinSha256, NULL) : NULL;
+    jsize configTlsPinSha256_size = configTlsPinSha256 ? (*env)->GetArrayLength(env, configTlsPinSha256) : 0;
+    config_value.tls_pin_sha256 = (const char *)configTlsPinSha256_data;
+    config_value.tls_pin_sha256_len = (size_t)configTlsPinSha256_size;
+    config_value.server_naptr = (sipral_toggle_t)configServerNaptr;
+    config_value.reserved = (uint32_t)configReserved;
     sipral_handle_t account_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -2348,6 +2419,12 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     }
     if (configStirOrigid) {
         (*env)->ReleaseByteArrayElements(env, configStirOrigid, configStirOrigid_data, JNI_ABORT);
+    }
+    if (configServerUri) {
+        (*env)->ReleaseByteArrayElements(env, configServerUri, configServerUri_data, JNI_ABORT);
+    }
+    if (configTlsPinSha256) {
+        (*env)->ReleaseByteArrayElements(env, configTlsPinSha256, configTlsPinSha256_data, JNI_ABORT);
     }
     if (ready) {
         {
@@ -5070,6 +5147,91 @@ Java_org_sipral_SipralNative_sipral_1local_1conference_1record_1stop(JNIEnv *env
     (void)env;
     (void)self;
     sipral_status_t status = sipral_local_conference_record_stop((sipral_handle_t)conference);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1looked_1up(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray name, jlong record, jlong answer, jbyteArray records, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *name_data = name ? (*env)->GetByteArrayElements(env, name, NULL) : NULL;
+    jsize name_size = name ? (*env)->GetArrayLength(env, name) : 0;
+    jbyte *records_data = records ? (*env)->GetByteArrayElements(env, records, NULL) : NULL;
+    jsize records_size = records ? (*env)->GetArrayLength(env, records) : 0;
+    sipral_status_t status = sipral_account_looked_up((sipral_handle_t)stack, (sipral_handle_t)account, (const char *)name_data, (size_t)name_size, (sipral_dns_record_type_t)record, (sipral_dns_answer_t)answer, (const char *)records_data, (size_t)records_size, (uint64_t)nowMs);
+    if (name) {
+        (*env)->ReleaseByteArrayElements(env, name, name_data, JNI_ABORT);
+    }
+    if (records) {
+        (*env)->ReleaseByteArrayElements(env, records, records_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1check_1certificate(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray certificate, jlong unixSeconds, jlongArray pinned)
+{
+    (void)env;
+    (void)self;
+    jbyte *certificate_data = certificate ? (*env)->GetByteArrayElements(env, certificate, NULL) : NULL;
+    jsize certificate_size = certificate ? (*env)->GetArrayLength(env, certificate) : 0;
+    sipral_pinned_certificate_t pinned_value;
+    memset(&pinned_value, 0, sizeof pinned_value);
+    pinned_value.size = sizeof pinned_value;
+    sipral_status_t status = sipral_account_check_certificate((sipral_handle_t)stack, (sipral_handle_t)account, (const uint8_t *)certificate_data, (size_t)certificate_size, (uint64_t)unixSeconds, &pinned_value);
+    if (certificate) {
+        (*env)->ReleaseByteArrayElements(env, certificate, certificate_data, JNI_ABORT);
+    }
+    {
+        jlong slots[7];
+        slots[0] = (jlong)pinned_value.size;
+        slots[1] = (jlong)pinned_value.not_before;
+        slots[2] = (jlong)pinned_value.not_after;
+        slots[3] = (jlong)pinned_value.pinned;
+        slots[4] = (jlong)pinned_value.expired;
+        slots[5] = (jlong)pinned_value.not_yet_valid;
+        slots[6] = (jlong)pinned_value.reserved;
+        (*env)->SetLongArrayRegion(env, pinned, 0, 7, slots);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1advertised_1address(JNIEnv *env, jobject self, jbyteArray bound, jbyteArray peer, jbyteArray buffer, jlongArray needed)
+{
+    (void)env;
+    (void)self;
+    jbyte *bound_data = bound ? (*env)->GetByteArrayElements(env, bound, NULL) : NULL;
+    jsize bound_size = bound ? (*env)->GetArrayLength(env, bound) : 0;
+    jbyte *peer_data = peer ? (*env)->GetByteArrayElements(env, peer, NULL) : NULL;
+    jsize peer_size = peer ? (*env)->GetArrayLength(env, peer) : 0;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t needed_value = 0;
+    sipral_status_t status = sipral_advertised_address((const char *)bound_data, (size_t)bound_size, (const char *)peer_data, (size_t)peer_size, (char *)buffer_data, (size_t)buffer_size, &needed_value);
+    if (bound) {
+        (*env)->ReleaseByteArrayElements(env, bound, bound_data, JNI_ABORT);
+    }
+    if (peer) {
+        (*env)->ReleaseByteArrayElements(env, peer, peer_data, JNI_ABORT);
+    }
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)needed_value;
+        (*env)->SetLongArrayRegion(env, needed, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1diagnostic_1trace(JNIEnv *env, jobject self, jlong stack, jlong on)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_diagnostic_trace((sipral_handle_t)stack, (sipral_toggle_t)on);
     return (jint)status;
 }
 

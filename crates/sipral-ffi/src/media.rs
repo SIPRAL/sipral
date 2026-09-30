@@ -173,6 +173,16 @@ codes! {
         /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
         /// `SIPRAL_FEATURE_DTLS_SRTP`.
         DtlsOrSdes = 6,
+        /// Offer SDES on plain `RTP/AVP`: the call is encrypted when the
+        /// answer takes one of the `a=crypto` lines and plain when it takes
+        /// none — the "SRTP optional" of desk phones, for a server that may
+        /// or may not encrypt and answers an offer on `RTP/SAVP` with 488
+        /// when it does not. RFC 4568 writes the attribute for the secure
+        /// profiles, so this is interoperability rather than a standard.
+        /// Answering, an offer on `RTP/AVP` carrying a line this end takes
+        /// is answered with a key, and anything else as under `Offered`.
+        /// ABI 0.34.
+        BestEffort = 7,
     }
 }
 
@@ -1283,6 +1293,7 @@ pub(crate) fn srtp_policy(value: u32, name: &'static str) -> Result<Option<SrtpP
         5 => Ok(Some(SrtpPolicy::DtlsRequired)),
         #[cfg(feature = "dtls")]
         6 => Ok(Some(SrtpPolicy::DtlsOrSdes)),
+        7 => Ok(Some(SrtpPolicy::BestEffort)),
         #[cfg(not(feature = "dtls"))]
         4..=6 => Err(fail(
             SipralStatus::NotSupported,
@@ -1295,8 +1306,8 @@ pub(crate) fn srtp_policy(value: u32, name: &'static str) -> Result<Option<SrtpP
             SipralStatus::InvalidArgument,
             format!(
                 "{name} is {other}, and srtp is 0 to leave it unspecified, 1 for not offered, 2 \
-                 for offered, 3 for required, 4 for DTLS-SRTP, 5 for DTLS-SRTP required or 6 \
-                 for DTLS-SRTP falling back to SDES"
+                 for offered, 3 for required, 4 for DTLS-SRTP, 5 for DTLS-SRTP required, 6 for \
+                 DTLS-SRTP falling back to SDES or 7 for SDES offered on RTP/AVP"
             ),
         )),
     }
@@ -3586,11 +3597,15 @@ a=sendrecv\r\n";
             srtp_policy(SipralSrtp::Required as u32, "srtp").expect("named"),
             Some(SrtpPolicy::Required)
         );
+        assert_eq!(
+            srtp_policy(SipralSrtp::BestEffort as u32, "srtp").expect("named"),
+            Some(SrtpPolicy::BestEffort)
+        );
     }
 
     #[test]
     fn srtp_policy_refuses_anything_else() {
-        let refused = srtp_policy(7, "srtp").expect_err("7 names no policy");
+        let refused = srtp_policy(8, "srtp").expect_err("8 names no policy");
         assert_eq!(refused.status, SipralStatus::InvalidArgument);
     }
 
