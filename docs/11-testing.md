@@ -669,8 +669,8 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | Swift agent example | pass | 2026-09-30 |
 | Asterisk | 22.10.1 | Kotlin agent example | pass | 2026-09-30 |
 | Asterisk | 22.10.1 | .NET agent example | pass | 2026-09-30 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2008 ms, nothing after it (C ABI) | pass | 2026-09-30 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 46 ms (C ABI) | pass | 2026-09-30 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2029 ms, nothing after it (C ABI) | pass | 2026-09-30 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 49 ms (C ABI) | pass | 2026-09-30 |
 | Asterisk | 22.10.1 | SDES required by the account (C ABI) | pass | 2026-09-30 |
 | Asterisk | 22.10.1 | DTLS-SRTP required by the account (C ABI) | pass | 2026-09-30 |
 | Asterisk | 22.10.1 | SRTP off on the account (C ABI) | pass | 2026-09-30 |
@@ -830,6 +830,21 @@ registered afterwards.
 | a call out with no SRTP | pass: held, resumed, hung up; 501 packets sent, 495 received |
 | call in: the PBX originates a call that plays a prompt | pass: 1513 packets received, 1509 sent back |
 | DTMF: the PBX originates a call that sends `1`, `2`, `#` (RFC 4733) | pass: the three digits read and the call hung up on `#`. In the first attempt the PBX hung up as it sent `#`, and the agent printed `1` and `2` only; with the PBX waiting two seconds after `#`, it read all three |
+
+On 1 October 2026 the tree that freezes the C ABI (0.33, every binding
+regenerated) ran the same short set against the same PBX, the same way: the
+Python layer in a container on the PBX host's network, the library built on
+that host from this tree, the datagram caller to the echo feature code and the
+example agent registered as an extension. Nothing was left registered
+afterwards.
+
+| Flow | Result |
+|---|---|
+| SDES offering both suites, challenged, with TCP allowed (`stream_server` at the PBX's TCP port) | pass: the answer to the challenge was 1338 bytes and went over TCP; held 50 s in, past the first keep-alive ping, resumed and hung up, the three INVITEs, their ACKs and the BYE over that connection; 2751 packets sent, 2728 received |
+| a call out with no SRTP | pass: held, resumed, hung up; 500 packets sent, 495 received |
+| register, and the binding given back | pass: one contact while registered, none afterwards |
+| call in: the PBX originates a call that plays a prompt | pass: 1513 packets received, 1509 sent back, none lost |
+| DTMF: the PBX originates a call that sends `1`, `2`, `#` (RFC 4733), waiting after `#` | pass: the three digits read and the call hung up on `#` |
 
 Known peer behaviours worth writing down rather than rediscovering:
 
