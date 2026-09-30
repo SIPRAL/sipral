@@ -136,7 +136,7 @@ public sealed class AudioEngineTests
             }
             catch (SipralException refused)
             {
-                // macOS runs the microphone and the loudspeaker as one unit
+                // a platform whose route is the audio session's (iOS)
                 Assert.Equal(SipralStatus.NotSupported, refused.Status);
                 continue;
             }

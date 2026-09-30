@@ -93,6 +93,9 @@ pub enum Error {
     /// No voice-processing I/O unit is registered here. On a Mac that is a
     /// broken installation rather than a configuration to fix.
     UnitMissing,
+    /// A voice-processing unit is already open in this process, and there is
+    /// room for one.
+    Busy,
     /// Shutting down could not establish that the framework's callbacks had
     /// left the memory they were given, so none of it was freed and none of it
     /// ever will be. Something is wedged inside the audio stack; the leak is
@@ -108,6 +111,7 @@ impl fmt::Display for Error {
         match *self {
             Self::Call { call, status } => write!(f, "{call} returned {status}"),
             Self::UnitMissing => f.write_str("no voice-processing I/O unit on this system"),
+            Self::Busy => f.write_str("a voice-processing I/O unit is already open in this process"),
             Self::Draining { waited_millis } => write!(
                 f,
                 "a device callback was still running after {waited_millis} ms, so nothing was freed"

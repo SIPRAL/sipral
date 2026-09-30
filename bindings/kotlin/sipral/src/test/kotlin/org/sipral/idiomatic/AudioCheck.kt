@@ -85,9 +85,13 @@ private fun theListKeepsItsIdsAndEachRoleIsRefusedByStatus(): String {
         audio.select(SipralAudioRole.SPEAKER, null as SipralAudioDeviceInfo?)
         assertNull(audio.selection(SipralAudioRole.SPEAKER).selected)
         if (System.getProperty("os.name").lowercase().contains("mac")) {
+            // the microphone is named apart from the loudspeaker, on the one
+            // voice-processing unit's other element
             val microphone = assertNotNull(first.firstOrNull { it.isPresent && it.canServe(SipralAudioRole.MICROPHONE) })
-            val refused = assertFailsWith<SipralException> { audio.select(SipralAudioRole.MICROPHONE, microphone) }
-            assertEquals(SipralStatus.NOT_SUPPORTED, refused.status, "one voice-processing unit, one microphone")
+            audio.select(SipralAudioRole.MICROPHONE, microphone)
+            assertEquals(microphone.id, audio.selection(SipralAudioRole.MICROPHONE).selected)
+            audio.select(SipralAudioRole.MICROPHONE, null as SipralAudioDeviceInfo?)
+            assertNull(audio.selection(SipralAudioRole.MICROPHONE).selected)
         }
         return "${first.size} devices listed under ids a refresh kept, every role refused by status"
     }

@@ -191,9 +191,8 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
      * Refused before anything is opened: `NO_SUCH_DEVICE` for an id the list
      * never held, `DEVICE_UNUSABLE` for a device with no channels for the
      * role or one that is not plugged in, and `NOT_SUPPORTED` where the
-     * platform cannot put the role on a device of its own -- on macOS the
-     * call's microphone and loudspeaker are one unit, so the microphone
-     * follows the system's input and the ring goes through the loudspeaker.
+     * platform cannot put the role on a device of its own -- on iOS, whose
+     * route is the audio session's, the microphone and the ringer.
      * While the engine is active the role moves at once, with its
      * direction's gain and mute carried over.
      */

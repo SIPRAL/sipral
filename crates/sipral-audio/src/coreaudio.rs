@@ -1,39 +1,53 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
-//! macOS and iOS, over `sipral-io-coreaudio`'s voice-processing unit.
+//! macOS and iOS, over `sipral-io-coreaudio`'s units.
 //!
-//! The unit is duplex and there is one per process, so the microphone and
-//! the loudspeaker are the two halves of one stream, opened together on the
-//! loudspeaker's device: the engine asks for the loudspeaker first and the
-//! microphone second, and the second answer is the other half of the first.
-//! Naming a microphone of its own is refused ([`Backend::duplex_only`]);
-//! which device the microphone actually landed on is read back from the
-//! unit and reported. On iOS there is no device list at all — the route is
-//! the audio session's and the application's — so the list is empty and
-//! the unit follows the session.
+//! A call's microphone and loudspeaker are the two halves of one
+//! voice-processing unit, the one a process may have: the engine asks for
+//! both at once ([`Backend::open_duplex`]) and the unit opens with each half
+//! on its own device — on macOS the microphone is named apart from the
+//! loudspeaker, without moving the system's default input. Which device each
+//! half actually landed on is read back from the unit and reported.
+//!
+//! A ringer on a device of its own is not a second voice-processing unit.
+//! It only plays, needs no echo canceller and no microphone, and a second
+//! voice unit beside the call's is what the framework does not support; so
+//! it is a plain output unit ([`StreamKind::Playback`]), which opens on any
+//! output device beside the call's. A ringer on the loudspeaker's device is
+//! mixed into the call's unit by the engine and opens nothing.
+//!
+//! On iOS there is no device list at all — the route is the audio session's
+//! and the application's — so the list is empty, the unit follows the
+//! session, and only the loudspeaker role is offered for choosing.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sipral_io_common::level::Controls;
-use sipral_io_coreaudio::{Stream, StreamConfig, StreamEvent, StreamFormat};
+use sipral_io_coreaudio::{Stream, StreamConfig, StreamEvent, StreamFormat, StreamKind};
 
 use crate::backend::{
-    Backend, BackendError, CaptureStream, Format, Notice, PlaybackStream, RawDevice, StreamCommon,
+    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, RawDevice,
+    StreamCommon,
 };
+use crate::device::Role;
+
+/// How long an open waits for the process's voice unit to be given back by
+/// the halves the engine has just let go of, which the pump drops on its
+/// own thread. Within the engine's probe wait, so that a unit held for good
+/// — by another stack in the same process — is a refusal and not a hang.
+const ROOM_WAIT: Duration = Duration::from_secs(2);
 
 /// The platform's backend.
 pub(crate) struct CoreAudioBackend {
     #[cfg(target_os = "macos")]
     monitor: Option<sipral_io_coreaudio::DeviceMonitor>,
-    /// The unit the last `open_playback` opened, waiting for its
-    /// microphone half to be asked for.
-    pending: Option<Arc<Unit>>,
 }
 
-/// One voice-processing unit, shared by its two halves.
+/// One unit, shared by its halves: two for the voice unit, one for a unit
+/// that only plays.
 struct Unit {
     stream: Mutex<Option<Stream>>,
     lost: AtomicBool,
@@ -41,6 +55,7 @@ struct Unit {
     output: String,
     input: String,
     latency: Duration,
+    voice: bool,
 }
 
 impl Unit {
@@ -68,11 +83,17 @@ impl CoreAudioBackend {
         Self {
             #[cfg(target_os = "macos")]
             monitor: sipral_io_coreaudio::DeviceMonitor::new().ok(),
-            pending: None,
         }
     }
 
-    fn open_unit(identity: Option<&str>, wanted: Format) -> Result<Arc<Unit>, BackendError> {
+    /// Open a unit of `kind`, the loudspeaker's half on `speaker` and — for
+    /// the voice unit — the microphone's on `microphone`.
+    fn open_unit(
+        kind: StreamKind,
+        speaker: Option<&str>,
+        microphone: Option<&str>,
+        wanted: Format,
+    ) -> Result<Arc<Unit>, BackendError> {
         let frame = u32::try_from(wanted.frame_samples).unwrap_or(960);
         let format = StreamFormat::new(wanted.sample_rate_hz, frame).ok_or_else(|| {
             BackendError::Refused(format!(
@@ -80,17 +101,29 @@ impl CoreAudioBackend {
                 wanted.sample_rate_hz, wanted.frame_samples
             ))
         })?;
-        let config = match identity {
-            #[cfg(target_os = "macos")]
-            Some(uid) => StreamConfig::preferring(uid, format),
-            // iOS has no device to name: the route is the session's
-            #[cfg(not(target_os = "macos"))]
-            Some(_) => StreamConfig::new(format),
-            None => StreamConfig::new(format),
-        };
+        let mut config = StreamConfig::new(format);
+        config.kind = kind;
+        #[cfg(target_os = "macos")]
+        {
+            use sipral_io_coreaudio::DeviceChoice;
+            let preferred = |identity: Option<&str>| {
+                identity.map_or(DeviceChoice::System, |uid| {
+                    DeviceChoice::Preferred(uid.to_owned())
+                })
+            };
+            config.device = preferred(speaker);
+            config.capture_device = preferred(microphone);
+        }
+        // iOS has no device to name: the route is the session's
+        #[cfg(not(target_os = "macos"))]
+        let _ = (speaker, microphone);
+        let voice = kind == StreamKind::Voice;
+        if voice {
+            wait_for_room();
+        }
         let mut stream = Stream::open(config).map_err(|error| refused(&error))?;
         stream.start().map_err(|error| refused(&error))?;
-        let (output, input) = landed(&stream);
+        let (output, input) = landed(&stream, voice);
         let latency = stream.latency();
         Ok(Arc::new(Unit {
             stream: Mutex::new(Some(stream)),
@@ -99,7 +132,19 @@ impl CoreAudioBackend {
             output,
             input,
             latency,
+            voice,
         }))
+    }
+}
+
+/// Wait, a bounded time, for the process's voice unit to be free: the
+/// engine reopens a call's pair by letting go of the old halves first, and
+/// the pump drops them on its own thread. Past the wait the open goes ahead
+/// and is refused by the unit itself if the room is still taken.
+fn wait_for_room() {
+    let started = Instant::now();
+    while sipral_io_coreaudio::voice_units_open() > 0 && started.elapsed() < ROOM_WAIT {
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -108,9 +153,9 @@ fn refused(error: &sipral_io_coreaudio::Error) -> BackendError {
 }
 
 /// The identities of the devices each half landed on, on macOS; on iOS the
-/// session's route, unnamed.
+/// session's route, unnamed. A unit that only plays has no microphone half.
 #[cfg(target_os = "macos")]
-fn landed(stream: &Stream) -> (String, String) {
+fn landed(stream: &Stream, voice: bool) -> (String, String) {
     let identity = |device: Result<sipral_io_coreaudio::DeviceId, _>| {
         device
             .ok()
@@ -123,11 +168,16 @@ fn landed(stream: &Stream) -> (String, String) {
             .map(identity_of)
             .unwrap_or_default()
     };
-    (identity(stream.device()), identity(stream.capture_device()))
+    let input = if voice {
+        identity(stream.capture_device())
+    } else {
+        String::new()
+    };
+    (identity(stream.device()), input)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn landed(_: &Stream) -> (String, String) {
+fn landed(_: &Stream, _: bool) -> (String, String) {
     (String::new(), String::new())
 }
 
@@ -187,21 +237,35 @@ impl Backend for CoreAudioBackend {
         }
     }
 
+    fn open_duplex(
+        &mut self,
+        microphone: Option<&str>,
+        speaker: Option<&str>,
+        wanted: Format,
+    ) -> Duplex {
+        match Self::open_unit(StreamKind::Voice, speaker, microphone, wanted) {
+            Ok(unit) => (
+                Ok(Box::new(Half {
+                    unit: Arc::clone(&unit),
+                    capture: true,
+                })),
+                Ok(Box::new(Half {
+                    unit,
+                    capture: false,
+                })),
+            ),
+            Err(error) => (Err(error.clone()), Err(error)),
+        }
+    }
+
     fn open_capture(
         &mut self,
-        _identity: Option<&str>,
+        identity: Option<&str>,
         wanted: Format,
     ) -> Result<Box<dyn CaptureStream>, BackendError> {
-        // the other half of the unit the loudspeaker just opened, or a unit
-        // on the system's route when the loudspeaker was not asked for first
-        let unit = match self.pending.take() {
-            Some(unit) => unit,
-            None => Self::open_unit(None, wanted)?,
-        };
-        Ok(Box::new(Half {
-            unit,
-            capture: true,
-        }))
+        // a microphone is only ever the voice unit's, whose loudspeaker half
+        // is let go of here and plays nothing
+        self.open_duplex(identity, None, wanted).0
     }
 
     fn open_playback(
@@ -209,8 +273,9 @@ impl Backend for CoreAudioBackend {
         identity: Option<&str>,
         wanted: Format,
     ) -> Result<Box<dyn PlaybackStream>, BackendError> {
-        let unit = Self::open_unit(identity, wanted)?;
-        self.pending = Some(Arc::clone(&unit));
+        // an output on its own — the ringer's — is a unit that only plays,
+        // beside the call's voice unit rather than a second one of those
+        let unit = Self::open_unit(StreamKind::Playback, identity, None, wanted)?;
         Ok(Box::new(Half {
             unit,
             capture: false,
@@ -220,9 +285,15 @@ impl Backend for CoreAudioBackend {
     fn duplex_only(&self) -> bool {
         true
     }
+
+    fn chooses(&self, role: Role) -> bool {
+        // iOS routes by the audio session, and a ringer there is the
+        // application's to play; a Mac names every device
+        cfg!(target_os = "macos") || role == Role::Speaker
+    }
 }
 
-/// One half of the unit.
+/// One half of a unit.
 struct Half {
     unit: Arc<Unit>,
     capture: bool,
@@ -267,9 +338,10 @@ impl StreamCommon for Half {
     }
 
     fn latency(&self) -> Duration {
-        // the unit reports the loop once; the capture half carries it so
-        // that the sum of the two halves is the loop and not twice it
-        if self.capture {
+        // the voice unit reports the loop once; its capture half carries it
+        // so that the sum of the two halves is the loop and not twice it. A
+        // unit that only plays has the one half, which carries its own.
+        if self.capture || !self.unit.voice {
             self.unit.latency
         } else {
             Duration::ZERO

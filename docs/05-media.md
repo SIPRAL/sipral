@@ -2425,11 +2425,18 @@ against a backend made of fakes, with no device in the room:
 
 What each platform gives it: on macOS and iOS the voice-processing unit is
 duplex and there is one per process, so the microphone and the loudspeaker
-are the two halves of one stream opened on the loudspeaker's device, the
-microphone follows the system's input and cannot be chosen apart, a second
-output for the ring cannot be opened beside it, and the old unit is closed
-before the new one is opened on a device change — two alive at once is what
-blocks inside the framework. The system cancels the echo. On Windows an
+are the two halves of one stream, opened together with each half on its own
+device — on macOS the microphone is named on the unit's input element apart
+from the loudspeaker's, without moving the system's default input — and the
+old unit is closed, and the pump confirms it let go, before the new one is
+opened on a device change: two alive at once is what blocks inside the
+framework, and `sipral-io-coreaudio` refuses a second one outright. A ring
+on a device other than the loudspeaker's plays through a plain output unit
+beside the call's, never a second voice-processing unit. The capture
+callback renders exactly the frames it is told of, into a buffer that holds
+a whole device slice converted to the stream's rate, or not at all. On iOS
+the route is the audio session's, so only the loudspeaker role is chosen.
+The system cancels the echo. On Windows an
 endpoint is one direction, so all three roles open streams of their own,
 each asked for as a communications stream; whether Windows took it as one is
 what the engine reports as system echo cancellation, and where it did not

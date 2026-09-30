@@ -909,3 +909,150 @@ fn a_duplex_only_platform_refuses_a_microphone_or_ringer_of_its_own() {
     );
     assert_eq!(engine.select(Role::Microphone, Selection::System), Ok(()));
 }
+
+/// A duplex platform like the Mac's: the call's microphone and loudspeaker
+/// one unit, each on a device of its own, and every role chosen.
+fn a_duplex_desk() -> FakeControl {
+    let fake = a_desk();
+    fake.set_duplex_only(true);
+    fake.set_chooses_every_role(true);
+    fake
+}
+
+/// On a duplex platform that names every device, the microphone goes on a
+/// device apart from the loudspeaker's — opened as the other half of the
+/// same unit — and survives the loudspeaker moving and the microphone's
+/// device being unplugged and plugged back.
+#[test]
+fn a_duplex_platform_puts_the_microphone_on_a_device_of_its_own() {
+    let fake = a_duplex_desk();
+    let (mut engine, _) = engine_with(Activation::Manual, &fake);
+    engine.refresh().unwrap();
+    let webcam = handle_of(&engine, "webcam");
+    let headset = handle_of(&engine, "headset");
+    engine
+        .select(Role::Microphone, Selection::Device(webcam))
+        .unwrap();
+    engine.activate().unwrap();
+    assert_eq!(engine.running_on(Role::Microphone), Some(webcam));
+    assert_eq!(
+        engine.running_on(Role::Speaker),
+        Some(handle_of(&engine, "builtin-out"))
+    );
+    assert_eq!(fake.units_opened(), 1, "one unit for the two halves");
+
+    // the loudspeaker moves: the unit is reopened, the microphone with it
+    engine
+        .select(Role::Speaker, Selection::Device(headset))
+        .unwrap();
+    assert_eq!(engine.running_on(Role::Speaker), Some(headset));
+    assert_eq!(engine.running_on(Role::Microphone), Some(webcam));
+
+    // the webcam goes and comes back: the microphone follows it home
+    fake.unplug("webcam");
+    for _ in 0..3 {
+        engine.service();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(
+        engine.running_on(Role::Microphone),
+        Some(handle_of(&engine, "builtin-mic"))
+    );
+    fake.plug("webcam", "Webcam", 2, 0);
+    engine.service();
+    assert_eq!(engine.running_on(Role::Microphone), Some(webcam));
+    assert_eq!(fake.units_at_most(), 1);
+    engine.deactivate();
+    assert_eq!(fake.units_alive(), 0);
+}
+
+/// The ring on a device of its own, on a duplex platform, is an output of
+/// its own beside the call's unit — never a second duplex unit.
+#[test]
+fn a_duplex_platform_rings_on_a_device_of_its_own_without_a_second_unit() {
+    let fake = a_duplex_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    let headset = handle_of(&engine, "headset");
+    let builtin = handle_of(&engine, "builtin-out");
+    engine
+        .select(Role::Speaker, Selection::Device(headset))
+        .unwrap();
+    engine
+        .select(Role::Ringer, Selection::Device(builtin))
+        .unwrap();
+    engine.ring(vec![1_000; 800], 8_000, true).unwrap();
+    assert_eq!(fake.ringer_opens(), 1);
+    assert_eq!(fake.units_opened(), 1, "the call's unit, and only that");
+    wait_ticks(&engine, 4);
+    assert!(fake.played_by("builtin-out").iter().any(|s| *s != 0));
+    assert!(fake.played_by("headset").iter().all(|s| *s == 0));
+    engine.stop_ringing();
+    assert_eq!(fake.units_alive(), 0);
+}
+
+/// What an application in device mode does around a call, three times
+/// over, with every role on a device of its own part of the way: at no
+/// point are two of the platform's one duplex unit open at once.
+#[test]
+fn the_call_sequence_never_has_two_duplex_units_open() {
+    let fake = a_duplex_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    let headset = handle_of(&engine, "headset");
+    let builtin = handle_of(&engine, "builtin-out");
+    let webcam = handle_of(&engine, "webcam");
+    for round in 0..3 {
+        engine.activate().unwrap();
+        engine.ring(vec![700; 160], 8_000, true).unwrap();
+        wait_ticks(&engine, 2);
+        engine.service();
+        engine.stop_ringing();
+        engine.activate().unwrap();
+        engine
+            .select(Role::Speaker, Selection::Device(builtin))
+            .unwrap();
+        if round == 1 {
+            engine
+                .select(Role::Microphone, Selection::Device(webcam))
+                .unwrap();
+            engine
+                .select(Role::Ringer, Selection::Device(headset))
+                .unwrap();
+            engine.ring(vec![700; 160], 8_000, true).unwrap();
+            engine
+                .select(Role::Speaker, Selection::Device(headset))
+                .unwrap();
+            engine.stop_ringing();
+        }
+        engine.service();
+        engine.deactivate();
+        assert_eq!(fake.units_alive(), 0, "round {round} left a unit open");
+    }
+    assert_eq!(fake.units_at_most(), 1);
+    assert!(fake.units_opened() >= 3);
+}
+
+/// A reopen of the duplex unit waits for the pump to have let the old one
+/// go, however long the pump is held up in a device: the new unit is not
+/// opened beside the old.
+#[test]
+fn a_duplex_reopen_waits_for_the_old_unit_even_behind_a_slow_pump() {
+    let fake = a_duplex_desk();
+    let (mut engine, _) = engine_with(Activation::Manual, &fake);
+    engine.refresh().unwrap();
+    let headset = handle_of(&engine, "headset");
+    engine.activate().unwrap();
+    // the pump is inside a write that takes longer than a tick or two
+    fake.stall_next_write("builtin-out", Duration::from_millis(400));
+    let started = Instant::now();
+    while !fake.stalled("builtin-out") {
+        assert!(started.elapsed() < Duration::from_secs(5), "never stalled");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    engine
+        .select(Role::Speaker, Selection::Device(headset))
+        .unwrap();
+    assert_eq!(engine.running_on(Role::Speaker), Some(headset));
+    assert_eq!(fake.units_at_most(), 1, "the new unit opened beside the old");
+}

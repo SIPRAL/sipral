@@ -83,11 +83,14 @@ final class AudioDeviceModeTests: XCTestCase {
         try audio.select(nil as AudioDevice?, for: .speaker)
         XCTAssertNil(try audio.selection(for: .speaker).selected)
 
-        #if os(macOS) || os(iOS)
+        #if os(macOS)
+        // the microphone is named apart from the loudspeaker, on the one
+        // voice-processing unit's other element
         let microphone = try XCTUnwrap(devices.first { $0.isPresent && $0.canServe(.microphone) })
-        XCTAssertThrowsError(try audio.select(microphone, for: .microphone)) {
-            XCTAssertEqual(($0 as? SipralError)?.status, .notSupported, "one voice-processing unit, one microphone")
-        }
+        try audio.select(microphone, for: .microphone)
+        XCTAssertEqual(try audio.selection(for: .microphone).selected, microphone.id)
+        try audio.select(nil as AudioDevice?, for: .microphone)
+        XCTAssertNil(try audio.selection(for: .microphone).selected)
         #endif
     }
 

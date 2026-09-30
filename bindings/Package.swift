@@ -62,4 +62,12 @@ package.targets.append(
         linkerSettings: linkAgainstSipralFfi
     )
 )
+// Built with the rest and run only by hand: it opens the machine's real
+// microphone and loudspeaker, which the gate has neither of.
+package.targets.append(
+    .executableTarget(
+        name: "SipralDeviceCheck", dependencies: ["Sipral"], path: "swift/Sources/SipralDeviceCheck",
+        linkerSettings: linkAgainstSipralFfi
+    )
+)
 #endif

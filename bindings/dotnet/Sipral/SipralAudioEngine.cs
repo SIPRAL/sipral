@@ -142,8 +142,8 @@ public sealed class SipralAudioEngine
     /// for an id the list never held, <see cref="SipralStatus.DeviceUnusable"/>
     /// for a device with no channels in the role's direction or one not
     /// plugged in, <see cref="SipralStatus.NotSupported"/> where the platform
-    /// cannot put the role on a device of its own (macOS runs the microphone
-    /// and the loudspeaker as one unit). While the devices are open the role
+    /// cannot put the role on a device of its own (iOS, for the microphone and
+    /// the ringer: the route is the audio session's). While the devices are open the role
     /// moves at once, keeping its direction's gain and mute. A chosen device
     /// later unplugged stays the choice: the role runs on the system's route
     /// meanwhile and goes back when it returns.</summary>

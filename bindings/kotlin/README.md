@@ -136,9 +136,8 @@ platform's route. `SipralCallAudios` calls it itself.
 and an unplug; `select(role, device)` puts the `MICROPHONE`, the `SPEAKER` or
 the `RINGER` on one, or back on the system's route with null, refused by
 status before anything opens (`NO_SUCH_DEVICE`, `DEVICE_UNUSABLE`,
-`NOT_SUPPORTED` where the platform cannot -- on macOS the microphone follows
-the voice-processing unit's system input and the ring plays on the
-loudspeaker); `selection(role)` says what was asked and what runs while a
+`NOT_SUPPORTED` where the platform cannot -- on iOS, whose route is the audio
+session's, the microphone and the ringer); `selection(role)` says what was asked and what runs while a
 chosen device is unplugged; `setGain(direction, factor)` (1.0 is unity, the
 input direction is the microphone's gain) and `setMuted` belong to the
 direction and survive a change of device; `level(direction)` is the meter, 0
