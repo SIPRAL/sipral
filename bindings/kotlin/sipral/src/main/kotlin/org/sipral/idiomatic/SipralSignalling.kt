@@ -449,6 +449,13 @@ internal class SignallingLink(
         reconnectLater()
     }
 
+    /** Close the connection the stack let go of, if it is still the one
+     * held here, and connect again: the stack already knows, so nothing more
+     * is said to it. */
+    fun letGo() {
+        current.get()?.let { lose(it, null, tell = false) }
+    }
+
     /** Start the thread that connects again, unless one runs. */
     fun reconnectLater() {
         if (client.isClosed || !reconnecting.compareAndSet(false, true)) {

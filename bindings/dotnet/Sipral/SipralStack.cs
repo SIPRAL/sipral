@@ -1733,6 +1733,7 @@ public sealed partial class SipralStack : IDisposable
             DrainFarewells();
             ActOnTurnStreams();
             ActOnStreamsWanted();
+            ActOnMainLetGo();
             while (_turnLost.TryDequeue(out var lost))
             {
                 LoseTurnStream(lost, tell: true);

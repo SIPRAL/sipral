@@ -31,6 +31,8 @@ import threading
 import unittest
 
 from sipral import InviteLimit, Stack, TlsTrust
+from sipral._sipral_cffi import lib
+from sipral.errors import call as retry_busy
 from sipral.enums import AudioMode, EventKind, RegistrationState, TlsFailure, Transport, TransportError
 
 _SERVER_NAME = "registrar.sipral.test"
@@ -349,6 +351,34 @@ class AConnectionLostIsMadeAgain(_OverAConnection):
         self.assertNotEqual(stack.bind_address, first, "a new connection, from a new port")
         self.assertIn(stack.bind_address, _header("Contact", again[0]), "the Contact moved with it")
         self.assertIn(";transport=tcp", _header("Contact", again[0]))
+
+    async def test_a_connection_the_stack_let_go_of_is_made_again(self) -> None:
+        # the stack retires the main connection on its own when a flow that
+        # answered keep-alives stops answering them (RFC 5626 Section 4.4.1),
+        # with the socket still open here; said here the way it says it
+        registrar = self.registrar()
+        stack = self.stack(registrar.address, signalling=Transport.TCP)
+        account = stack.add_account(
+            "sip:alice@sipral.invalid", registrar="sip:sipral.invalid", registrar_address=registrar.address
+        )
+        account.register()
+        await self.registered(stack)
+        first = stack.bind_address
+
+        await asyncio.to_thread(
+            retry_busy,
+            lambda: lib.sipral_stack_transport_failed(
+                stack.handle, lib.SIPRAL_TRANSPORT_MAIN, TransportError.TIMED_OUT, stack.now_ms()
+            ),
+            "sipral_stack_transport_failed",
+        )
+        lost = await self.next_event(stack, EventKind.TRANSPORT_FAILED)
+        self.assertEqual(lost.fields["transport"], lib.SIPRAL_TRANSPORT_MAIN)
+        await self.until(lambda: any(number == 2 for number, _ in registrar.registers()), seconds=10)
+        again = [message for number, message in registrar.registers() if number == 2]
+        self.assertTrue(again, "no REGISTER on a second connection")
+        self.assertNotEqual(stack.bind_address, first, "a new connection, from a new port")
+        self.assertIn(stack.bind_address, _header("Contact", again[0]), "the Contact moved with it")
 
 
 class TheInviteRateFloor(unittest.IsolatedAsyncioTestCase):

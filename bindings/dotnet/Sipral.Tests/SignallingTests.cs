@@ -398,6 +398,37 @@ public sealed class SignallingTests
         Assert.Contains(";transport=tcp", Header("Contact", again!));
     }
 
+    /// <summary>The stack retires the main connection on its own when a
+    /// flow that answered keep-alives stops answering them (RFC 5626
+    /// §4.4.1), with the socket still open here; said here the way it says
+    /// it.</summary>
+    [Fact]
+    public async Task AConnectionTheStackLetGoOfIsMadeAgain()
+    {
+        using var registrar = new Registrar();
+        using var stack = Over(registrar.Address, SipralTransport.Tcp, name: null);
+        var account = stack.AddAccount("sip:alice@sipral.invalid", registrar.Address, registrar: "sip:sipral.invalid");
+        account.Register();
+        await Registered(stack);
+        var first = stack.BindAddress;
+
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_transport_failed(
+                stack.Handle, global::Sipral.Sipral.TransportMain, (uint)SipralTransportError.TimedOut, stack.NowMs),
+            "sipral_stack_transport_failed");
+        var lost = await NextEvent(stack, SipralEventKind.TransportFailed);
+        Assert.Equal(global::Sipral.Sipral.TransportMain, lost.TransportFailed!.Transport);
+        var deadline = DateTime.UtcNow + Timeout;
+        while (!registrar.Registers().Any(r => r.Connection == 2) && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+        }
+        var again = registrar.Registers().Where(r => r.Connection == 2).Select(r => r.Message).FirstOrDefault();
+        Assert.NotNull(again);
+        Assert.NotEqual(first, stack.BindAddress);
+        Assert.Contains(stack.BindAddress, Header("Contact", again!));
+    }
+
     /// <summary>Twenty INVITEs from one address at once: how many were
     /// answered 480, each counted once however often its refusal is sent
     /// again for want of an ACK.</summary>

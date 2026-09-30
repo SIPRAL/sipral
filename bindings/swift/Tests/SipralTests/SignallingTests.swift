@@ -298,6 +298,41 @@ final class SignallingTests: XCTestCase {
         XCTAssertTrue(FakeRegistrar.header("Contact", again)?.contains(";transport=tcp") == true)
     }
 
+    /// The stack retires the main connection on its own when a flow that
+    /// answered keep-alives stops answering them (RFC 5626 §4.4.1), with the
+    /// socket still open here; said here the way it says it.
+    func testAConnectionTheStackLetGoOfIsMadeAgain() async throws {
+        let registrar = try FakeRegistrar()
+        defer { registrar.stop() }
+        let stack = try stack(registrar.address, .tcp, name: nil)
+        defer { stack.close() }
+        let events = stack.events()
+        let account = try stack.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: registrar.address, registrar: "sip:sipral.invalid"
+        )
+        try account.register()
+        try await registered(account)
+        let first = stack.bindAddress
+        try retryingBusy {
+            try Sipral.stackTransportFailed(
+                stack: stack.handle, transport: Sipral.transportMain,
+                error: SipralTransportError.timedOut.rawValue, nowMs: stack.nowMs()
+            )
+        }
+        for await event in events where event.kind == .transportFailed {
+            XCTAssertEqual(event.transportFailedData?.transport, Sipral.transportMain)
+            break
+        }
+        for _ in 0..<200 where !registrar.registers.contains(where: { $0.connection == 2 }) {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let again = try XCTUnwrap(
+            registrar.registers.first { $0.connection == 2 }?.message, "no REGISTER on a second connection"
+        )
+        XCTAssertNotEqual(stack.bindAddress, first)
+        XCTAssertTrue(FakeRegistrar.header("Contact", again)?.contains(stack.bindAddress) == true)
+    }
+
     /// Twenty INVITEs from one address at once: how many were answered
     /// 480, each counted once however often its refusal is sent again.
     private func rush(_ limit: InviteLimit?) async throws -> Int {

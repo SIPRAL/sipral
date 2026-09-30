@@ -103,9 +103,14 @@ public final class SipralStack: @unchecked Sendable {
     private var reconnecting = false
     private let origin: DispatchTime
     /// The TCP connections to recording servers, by the transport id each
-    /// was bound under, guarded by `signallingQueue`; and the next id.
+    /// was bound under, guarded by `signallingQueue`.
     private var recordingLinks: [UInt32: SignallingConnection] = [:]
-    private var nextRecordingLink: UInt32 = SipralStack.firstRecordingLink
+    /// The next transport id a connection this layer opens is bound under --
+    /// to a recording server, or for `SipralEventKind.transportWanted` --
+    /// guarded by `signallingQueue`: one count for every kind of connection,
+    /// so that two of them never share an id however many recordings a
+    /// long-running stack makes (`takeLinkId()`).
+    var nextLink: UInt32 = SipralStack.firstLink
     /// Whether a request too large for a datagram gets a connection
     /// (`streamFallback`).
     private let streamFallback: Bool
@@ -113,17 +118,22 @@ public final class SipralStack: @unchecked Sendable {
     /// (`streamServer`).
     private let streamServer: String?
     /// The TCP connections opened for requests too large for a datagram, by
-    /// the transport id each was bound under, with where each goes; the
-    /// destinations one is being opened to; the next id; and where
+    /// the transport id each was bound under (`takeLinkId()`), with where
+    /// each goes; the destinations one is being opened to; and where
     /// `SipralEventKind.transportWanted` asked for one during the poll that
     /// raised it. All guarded by `signallingQueue`.
     private var streamLinks: [UInt32: (destination: String, link: SignallingConnection)] = [:]
     private var streamsOpening: Set<String> = []
-    private var nextStreamLink: UInt32 = SipralStack.firstStreamLink
     private var streamsAsked: [String] = []
     /// The transport ids `SipralEventKind.transportFailed` named during that
     /// same poll, acted on at the same moment; guarded by `signallingQueue`.
     private var streamsLetGo: [UInt32] = []
+    /// Whether that same poll named the main transport of a stack that
+    /// signals over TCP or TLS: the stack retires a connection that stopped
+    /// answering keep-alives (RFC 5626 §4.4.1) with its socket still open
+    /// here, and sends nothing on it again until a new one is bound. Guarded
+    /// by `signallingQueue`.
+    private var mainLetGo = false
     /// The recording sessions running, by handle: the call each records and
     /// the connection it went over, guarded by `callsQueue`.
     private var recordings: [SipralHandle: (call: Call, link: UInt32?)] = [:]
@@ -616,6 +626,20 @@ public final class SipralStack: @unchecked Sendable {
         reconnectLater()
     }
 
+    /// Close the connection the stack let go of in the poll that just ran,
+    /// if it is still the one held here, and connect again: the stack
+    /// already knows, so nothing more is said to it.
+    private func actOnMainLetGo() {
+        let made = signallingQueue.sync { () -> SignallingConnection? in
+            guard mainLetGo else { return nil }
+            mainLetGo = false
+            return link
+        }
+        if let made {
+            lose(made, nil, tell: false)
+        }
+    }
+
     /// Start connecting again, unless that is already under way.
     private func reconnectLater() {
         let start = stateQueue.sync { () -> Bool in
@@ -658,10 +682,21 @@ public final class SipralStack: @unchecked Sendable {
 
     // MARK: - connections to recording servers
 
-    /// The first transport id a connection to a recording server is bound
-    /// under. The number is the caller's to choose, and this layer binds no
-    /// other transport but `Sipral.transportMain`.
-    private static let firstRecordingLink: UInt32 = 64
+    /// The first transport id a connection this layer opens is bound under,
+    /// one more for each after it, whatever it is for: clear of
+    /// `Sipral.transportMain` and of the small numbers an application driving
+    /// the C layer itself would pick. The number is the caller's to choose.
+    static let firstLink: UInt32 = 64
+
+    /// The next transport id for a connection this layer opens, past any a
+    /// connection still holds. Called on `signallingQueue`.
+    private func takeLinkId() -> UInt32 {
+        while recordingLinks[nextLink] != nil || streamLinks[nextLink] != nil || nextLink == Sipral.transportMain {
+            nextLink &+= 1
+        }
+        defer { nextLink &+= 1 }
+        return nextLink
+    }
 
     /// Connect over TCP to a recording server at `destination` (`host:port`)
     /// and bind the connection as a transport of its own, for
@@ -678,10 +713,7 @@ public final class SipralStack: @unchecked Sendable {
         } catch let refusal as SignallingRefusal {
             throw SipralError(status: .transportDown, message: "the recording server \(destination): \(refusal.detail)")
         }
-        let id = signallingQueue.sync { () -> UInt32 in
-            defer { nextRecordingLink += 1 }
-            return nextRecordingLink
-        }
+        let id = signallingQueue.sync { takeLinkId() }
         do {
             _ = try retryingBusy {
                 try Sipral.stackTransportBind(
@@ -744,13 +776,6 @@ public final class SipralStack: @unchecked Sendable {
 
     // MARK: - RFC 3261 §18.1.1: a request too large for a datagram
 
-    /// The first transport id a connection opened for
-    /// `SipralEventKind.transportWanted` is bound under, one more for each
-    /// destination after it: clear of `Sipral.transportMain`, of the
-    /// recording servers' ids, and of the small numbers an application
-    /// driving the C layer itself would pick.
-    static let firstStreamLink: UInt32 = 1024
-
     /// Remember a transport the stack let go of, for after the poll that said
     /// so: a connection opened here that stopped answering keep-alives
     /// (RFC 5626 §4.4.1) is retired by the stack while its socket is still
@@ -784,11 +809,10 @@ public final class SipralStack: @unchecked Sendable {
                     || streamLinks.values.contains(where: { $0.destination == destination }) {
                     return nil
                 }
-                defer { nextStreamLink += 1 }
                 if streamFallback {
                     streamsOpening.insert(destination)
                 }
-                return nextStreamLink
+                return takeLinkId()
             }
             guard let id else { continue }
             guard streamFallback else {
@@ -1866,8 +1890,12 @@ public final class SipralStack: @unchecked Sendable {
         if signalling == .udp, let wanted = event.transportWantedData {
             signallingQueue.sync { streamsAsked.append(wanted.destination) }
         }
-        if signalling == .udp, let lost = event.transportFailedData {
-            noteStreamLetGo(lost.transport)
+        if let lost = event.transportFailedData {
+            if signalling == .udp {
+                noteStreamLetGo(lost.transport)
+            } else if lost.transport == Sipral.transportMain {
+                signallingQueue.sync { mainLetGo = true }
+            }
         }
         noteNat(event)
         if let call = callFor(event.call) {
@@ -2000,6 +2028,7 @@ public final class SipralStack: @unchecked Sendable {
             drainFarewells()
             actOnTurnStreams()
             actOnStreamsWanted()
+            actOnMainLetGo()
         }
         closedSemaphore.signal()
     }

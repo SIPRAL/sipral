@@ -62,6 +62,71 @@ public struct SipralEvent: Sendable {
     /// `payload.local_conference`, for `SipralEventKind.localConferenceChanged`
     /// only.
     public internal(set) var localConferenceData: LocalConferenceEventData? = nil
+    /// `payload.subscription`, for `SipralEventKind.subscriptionChanged` and
+    /// `.notified` only.
+    public internal(set) var subscriptionData: SubscriptionEventData? = nil
+    /// `payload.recovery`, for `SipralEventKind.recovery` only.
+    public internal(set) var recoveryData: RecoveryEventData? = nil
+    /// `payload.resolve`, for `SipralEventKind.resolveNeeded` only.
+    public internal(set) var resolveData: ResolveEventData? = nil
+    /// `payload.message`, for `SipralEventKind.messageReceived`,
+    /// `.messageSent` and `.messagesWaiting` only.
+    public internal(set) var messageData: MessageEventData? = nil
+}
+
+/// What `SipralEventKind.subscriptionChanged` and `.notified` carry
+/// (`sipral_subscription_event_t`): which subscription, where it is now and
+/// why it ended, the SIP status behind it, whether the NOTIFY's body was a
+/// dialog-info document, its lifetime and when the stack refreshes or retries
+/// it, and the subscription a fork of it came from.
+public struct SubscriptionEventData: Sendable {
+    public let subscription: SipralHandle
+    public let state: SipralSubscriptionState?
+    public let reason: SipralSubscriptionEnd?
+    public let statusCode: UInt32
+    public let hasDialogInfo: Bool
+    public let expiresMs: UInt64
+    public let refreshInMs: UInt64
+    public let retryInMs: UInt64
+    public let forkedFrom: SipralHandle
+}
+
+/// What `SipralEventKind.recovery` carries (`sipral_recovery_event_t`): how
+/// the recovery settled, the rung it reached, why it gave up, and how many
+/// registrations it could not prove.
+public struct RecoveryEventData: Sendable {
+    public let state: SipralRecoveryOutcome?
+    public let rung: SipralRecoveryRung?
+    public let reason: SipralRecoveryFailure?
+    public let unverified: UInt32
+}
+
+/// What `SipralEventKind.resolveNeeded` carries (`sipral_resolve_event_t`):
+/// the dialog whose next hop needs a name resolved, and where.
+public struct ResolveEventData: Sendable {
+    public let dialog: SipralHandle
+    public let host: String?
+    public let port: UInt32
+    /// A `SipralTransport` raw value.
+    public let protocolRaw: UInt32
+}
+
+/// What `SipralEventKind.messageReceived`, `.messageSent` and
+/// `.messagesWaiting` carry (`sipral_message_event_t`): a MESSAGE's handle,
+/// body and type, the status its sender was answered with, and a message
+/// summary's counts.
+public struct MessageEventData: Sendable {
+    public let message: SipralHandle
+    public let subscription: SipralHandle
+    public let statusCode: UInt32
+    public let contentType: String?
+    public let body: [UInt8]?
+    public let waiting: Bool
+    public let newMessages: UInt32
+    public let oldMessages: UInt32
+    public let urgentNewMessages: UInt32
+    public let urgentOldMessages: UInt32
+    public let messageAccount: String?
 }
 
 /// What a `SipralEventKind.localConferenceChanged` carries
@@ -340,6 +405,8 @@ enum SipralEventDecoder {
         SipralEventKind.mediaSecured.rawValue,
         SipralEventKind.mediaPathChosen.rawValue,
         SipralEventKind.inBandDigit.rawValue,
+        SipralEventKind.qualityReportSent.rawValue,
+        SipralEventKind.mediaUnjoined.rawValue,
     ]
 
     private static func progressData(_ progress: sipral_progress_event_t) -> ProgressEventData {
@@ -672,6 +739,56 @@ enum SipralEventDecoder {
         }
         if kindRaw == SipralEventKind.presenceChanged.rawValue {
             event.presenceData = presenceData(raw.payload.presence)
+        }
+        if kindRaw == SipralEventKind.subscriptionChanged.rawValue || kindRaw == SipralEventKind.notified.rawValue {
+            let told = raw.payload.subscription
+            event.subscriptionData = SubscriptionEventData(
+                subscription: told.subscription,
+                state: SipralSubscriptionState(rawValue: told.state),
+                reason: SipralSubscriptionEnd(rawValue: told.reason),
+                statusCode: told.status_code,
+                hasDialogInfo: told.has_dialog_info != 0,
+                expiresMs: told.expires_ms,
+                refreshInMs: told.refresh_in_ms,
+                retryInMs: told.retry_in_ms,
+                forkedFrom: told.forked_from
+            )
+        }
+        if kindRaw == SipralEventKind.recovery.rawValue {
+            let told = raw.payload.recovery
+            event.recoveryData = RecoveryEventData(
+                state: SipralRecoveryOutcome(rawValue: told.state),
+                rung: SipralRecoveryRung(rawValue: told.rung),
+                reason: SipralRecoveryFailure(rawValue: told.reason),
+                unverified: told.unverified
+            )
+        }
+        if kindRaw == SipralEventKind.resolveNeeded.rawValue {
+            let told = raw.payload.resolve
+            event.resolveData = ResolveEventData(
+                dialog: told.dialog,
+                host: textC(told.host, told.host_len),
+                port: told.port,
+                protocolRaw: told.protocol
+            )
+        }
+        if kindRaw == SipralEventKind.messageReceived.rawValue
+            || kindRaw == SipralEventKind.messageSent.rawValue
+            || kindRaw == SipralEventKind.messagesWaiting.rawValue {
+            let told = raw.payload.message
+            event.messageData = MessageEventData(
+                message: told.message,
+                subscription: told.subscription,
+                statusCode: told.status_code,
+                contentType: textC(told.content_type, told.content_type_len),
+                body: bytes(told.body, told.body_len),
+                waiting: told.waiting != 0,
+                newMessages: told.new_messages,
+                oldMessages: told.old_messages,
+                urgentNewMessages: told.urgent_new_messages,
+                urgentOldMessages: told.urgent_old_messages,
+                messageAccount: textC(told.message_account, told.message_account_len)
+            )
         }
         return event
     }

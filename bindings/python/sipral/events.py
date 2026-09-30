@@ -736,8 +736,64 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "refresh_in_ms": int(presence.refresh_in_ms),
         }
 
-    # Unknown or not yet decoded here: the caller still has `message` and
-    # the raw `kind`/`kind_name`, which is what a generic event is for.
+    # A subscription moved (`SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED`), or a
+    # NOTIFY arrived on it (`SIPRAL_EVENT_KIND_NOTIFIED`).
+    if kind in (lib.SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED, lib.SIPRAL_EVENT_KIND_NOTIFIED):
+        subscription = payload.subscription
+        return {
+            "subscription": int(subscription.subscription),
+            "state": int(subscription.state),
+            "reason": int(subscription.reason),
+            "status_code": int(subscription.status_code),
+            "has_dialog_info": bool(subscription.has_dialog_info),
+            "expires_ms": int(subscription.expires_ms),
+            "refresh_in_ms": int(subscription.refresh_in_ms),
+            "retry_in_ms": int(subscription.retry_in_ms),
+            "forked_from": int(subscription.forked_from),
+        }
+
+    # The stack's own recovery after a network loss or a resume: which rung
+    # of the ladder it reached, and how it settled.
+    if kind == lib.SIPRAL_EVENT_KIND_RECOVERY:
+        recovery = payload.recovery
+        return {
+            "state": int(recovery.state),
+            "rung": int(recovery.rung),
+            "reason": int(recovery.reason),
+            "unverified": int(recovery.unverified),
+        }
+
+    # A call announced by a push, and one that never came.
+    if kind in (lib.SIPRAL_EVENT_KIND_CALL_ANNOUNCED, lib.SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING):
+        announce = payload.announce
+        return {
+            "announcement": int(announce.announcement),
+            "waited_ms": int(announce.waited_ms),
+        }
+
+    # A MESSAGE received or answered, and a message-summary's counts.
+    if kind in (
+        lib.SIPRAL_EVENT_KIND_MESSAGE_RECEIVED,
+        lib.SIPRAL_EVENT_KIND_MESSAGE_SENT,
+        lib.SIPRAL_EVENT_KIND_MESSAGES_WAITING,
+    ):
+        message = payload.message
+        return {
+            "message": int(message.message),
+            "subscription": int(message.subscription),
+            "status_code": int(message.status_code),
+            "content_type": _text(message.content_type, message.content_type_len),
+            "body": _bytes(message.body, message.body_len),
+            "waiting": bool(message.waiting),
+            "new_messages": int(message.new_messages),
+            "old_messages": int(message.old_messages),
+            "urgent_new_messages": int(message.urgent_new_messages),
+            "urgent_old_messages": int(message.urgent_old_messages),
+            "message_account": _text(message.message_account, message.message_account_len),
+        }
+
+    # Unknown to this version of the layer: the caller still has `message`
+    # and the raw `kind`/`kind_name`, which is what a generic event is for.
     return {}
 
 
@@ -778,6 +834,8 @@ _MEDIA_KINDS = frozenset(
         lib.SIPRAL_EVENT_KIND_MEDIA_SECURED,
         lib.SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN,
         lib.SIPRAL_EVENT_KIND_IN_BAND_DIGIT,
+        lib.SIPRAL_EVENT_KIND_QUALITY_REPORT_SENT,
+        lib.SIPRAL_EVENT_KIND_MEDIA_UNJOINED,
     }
 )
 

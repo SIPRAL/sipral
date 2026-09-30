@@ -256,11 +256,41 @@ final class DatagramLimitTests: XCTestCase {
         XCTAssertEqual(pbx.connections, 1)
         XCTAssertEqual(pbx.closedByTheStack, 0, "the connection outlives the call")
 
-        stack.noteStreamLetGo(SipralStack.firstStreamLink)
+        stack.noteStreamLetGo(SipralStack.firstLink)
         for _ in 0..<150 where pbx.closedByTheStack == 0 {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTAssertEqual(pbx.closedByTheStack, 1, "the connection was let go of")
+    }
+
+    /// A connection to a recording server and one opened for a request too
+    /// large for a datagram never share a transport id: a stack that has
+    /// made enough recordings for the count to reach an id a stream still
+    /// holds binds the next recording past it, and what the stack sends
+    /// under the stream's id still goes to the stream.
+    func testARecordingConnectionNeverTakesAnIdAStreamHolds() async throws {
+        let pbx = try ChallengingPbx(tcp: true)
+        defer { pbx.stop() }
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let ending = Task { try await untilTheEnd(stack) }
+        try place(stack, pbx)
+        _ = try await ending.value
+        XCTAssertEqual(pbx.connections, 1, "the stream is open, under the first id")
+
+        stack.nextLink = SipralStack.firstLink
+        let recording = try stack.openRecordingLink(to: pbx.address)
+        defer { stack.closeRecordingLink(recording) }
+        XCTAssertNotEqual(recording, SipralStack.firstLink, "the stream's id was taken again")
+        XCTAssertEqual(pbx.connections, 2)
+
+        // the stream is still the one the stack reaches under its id: the
+        // stack letting it go closes that connection, not the recording's
+        stack.noteStreamLetGo(SipralStack.firstLink)
+        for _ in 0..<150 where pbx.closedByTheStack == 0 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(pbx.closedByTheStack, 1)
     }
 }
 #endif

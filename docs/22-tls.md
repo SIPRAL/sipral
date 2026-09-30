@@ -1002,7 +1002,13 @@ registering, rather than leave it to the next back-off. A registration asked
 for while the connection is down is kept for then; a call placed meanwhile
 is refused with `SIPRAL_STATUS_TRANSPORT_DOWN`. A connection the server
 closes is told with `sipral_stack_stream_closed` and is raised with
-`SIPRAL_TRANSPORT_ERROR_CLOSED`.
+`SIPRAL_TRANSPORT_ERROR_CLOSED`. A connection the stack itself let go of —
+one that answered keep-alive pings and then left one unanswered for ten
+seconds (RFC 5626 §4.4.1), or one that carried bytes no message starts
+with — arrives as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` on
+`SIPRAL_TRANSPORT_MAIN` with the socket still open in the layer: the layer
+closes it after that poll, says nothing more to the stack, and connects
+again the same way.
 
 How each platform's error becomes a `SipralTlsFailure`:
 

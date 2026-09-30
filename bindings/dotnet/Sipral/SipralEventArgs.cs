@@ -82,6 +82,18 @@ public sealed class SipralEventArgs : EventArgs
     public SipralPresenceEventInfo? Presence { get; private init; }
     /// <summary>Set for <see cref="SipralEventKind.LocalConferenceChanged"/>.</summary>
     public SipralLocalConferenceEventInfo? LocalConference { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.SubscriptionChanged"/> and
+    /// <see cref="SipralEventKind.Notified"/>.</summary>
+    public SipralSubscriptionEventInfo? Subscription { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.Recovery"/>.</summary>
+    public SipralRecoveryEventInfo? Recovery { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.CallAnnounced"/> and
+    /// <see cref="SipralEventKind.AnnouncedCallMissing"/>.</summary>
+    public SipralAnnounceEventInfo? Announce { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.MessageReceived"/>,
+    /// <see cref="SipralEventKind.MessageSent"/> and
+    /// <see cref="SipralEventKind.MessagesWaiting"/>.</summary>
+    public SipralMessageEventInfo? MessageInfo { get; private init; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
@@ -126,7 +138,8 @@ public sealed class SipralEventArgs : EventArgs
         SipralEventKind.MediaStatistics, SipralEventKind.MediaStalled, SipralEventKind.MediaStarted,
         SipralEventKind.MediaChanged, SipralEventKind.MediaResumed, SipralEventKind.MediaFailed,
         SipralEventKind.RecordingStopped, SipralEventKind.DigitReceived, SipralEventKind.MediaSecured,
-        SipralEventKind.MediaPathChosen, SipralEventKind.InBandDigit,
+        SipralEventKind.MediaPathChosen, SipralEventKind.InBandDigit, SipralEventKind.QualityReportSent,
+        SipralEventKind.MediaUnjoined,
     };
 
     /// <summary>
@@ -318,6 +331,39 @@ public sealed class SipralEventArgs : EventArgs
                 l.Members, l.Talkers, l.Loudest);
         }
 
+        SipralSubscriptionEventInfo? subscription = null;
+        SipralRecoveryEventInfo? recovery = null;
+        SipralAnnounceEventInfo? announce = null;
+        SipralMessageEventInfo? messageInfo = null;
+        if (kind is SipralEventKind.SubscriptionChanged or SipralEventKind.Notified)
+        {
+            var s = evt.Payload.Subscription;
+            subscription = new SipralSubscriptionEventInfo(
+                s.Subscription, (SipralSubscriptionState)s.State, (SipralSubscriptionEnd)s.Reason, s.StatusCode,
+                s.HasDialogInfo != 0, s.ExpiresMs, s.RefreshInMs, s.RetryInMs, s.ForkedFrom);
+        }
+        else if (kind == SipralEventKind.Recovery)
+        {
+            var r = evt.Payload.Recovery;
+            recovery = new SipralRecoveryEventInfo(
+                (SipralRecoveryOutcome)r.State, (SipralRecoveryRung)r.Rung, (SipralRecoveryFailure)r.Reason,
+                r.Unverified);
+        }
+        else if (kind is SipralEventKind.CallAnnounced or SipralEventKind.AnnouncedCallMissing)
+        {
+            var a = evt.Payload.Announce;
+            announce = new SipralAnnounceEventInfo(a.Announcement, a.WaitedMs);
+        }
+        else if (kind is SipralEventKind.MessageReceived or SipralEventKind.MessageSent
+                 or SipralEventKind.MessagesWaiting)
+        {
+            var m = evt.Payload.Message;
+            messageInfo = new SipralMessageEventInfo(
+                m.Message, m.Subscription, m.StatusCode, ReadUtf8(m.ContentType, m.ContentTypeLen),
+                ReadBytes(m.Body, m.BodyLen), m.Waiting != 0, m.NewMessages, m.OldMessages, m.UrgentNewMessages,
+                m.UrgentOldMessages, ReadUtf8(m.MessageAccount, m.MessageAccountLen));
+        }
+
         return new SipralEventArgs(kind, kindName, evt.Stack, evt.Account, evt.Call, message,
             registration, callInfo, media, transfer, resolve, nat, relay, referral, turnStream, audio,
             stunServer, verification, progress)
@@ -328,6 +374,10 @@ public sealed class SipralEventArgs : EventArgs
             Text = text,
             Presence = presence,
             LocalConference = localConference,
+            Subscription = subscription,
+            Recovery = recovery,
+            Announce = announce,
+            MessageInfo = messageInfo,
         };
     }
 

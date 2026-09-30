@@ -566,6 +566,29 @@ public sealed partial class SipralStack
         ReconnectLater();
     }
 
+    /// <summary>Whether the poll that just ran named the main transport of a
+    /// stack that signals over TCP or TLS: the stack retires a connection
+    /// that stopped answering keep-alives (RFC 5626 §4.4.1) with its socket
+    /// still open here, and sends nothing on it again until a new one is
+    /// bound. Read and written on the poll thread only.</summary>
+    private bool _mainLetGo;
+
+    /// <summary>Closes the connection the stack let go of in the poll that
+    /// just ran, if it is still the one held here, and connects again: the
+    /// stack already knows, so nothing more is said to it.</summary>
+    private void ActOnMainLetGo()
+    {
+        if (!_mainLetGo)
+        {
+            return;
+        }
+        _mainLetGo = false;
+        if (Volatile.Read(ref _link) is { } link)
+        {
+            LoseLink(link, null, tell: false);
+        }
+    }
+
     /// <summary>Starts the thread that connects again, unless one runs.</summary>
     private void ReconnectLater()
     {

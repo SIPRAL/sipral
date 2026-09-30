@@ -173,6 +173,59 @@ public sealed record SipralReferralEventInfo(
     string? Target,
     string? ReferredBy);
 
+/// <summary>What <see cref="SipralEventKind.SubscriptionChanged"/> and
+/// <see cref="SipralEventKind.Notified"/> carry — the fields of
+/// <c>sipral_subscription_event_t</c>: which subscription, where it is now
+/// and why it ended, the SIP status behind it, whether the NOTIFY's body was
+/// a dialog-info document, its lifetime and when the stack refreshes or
+/// retries it, and the subscription a fork of it came from.</summary>
+public sealed record SipralSubscriptionEventInfo(
+    ulong Subscription,
+    SipralSubscriptionState State,
+    SipralSubscriptionEnd Reason,
+    uint StatusCode,
+    bool HasDialogInfo,
+    ulong ExpiresMs,
+    ulong RefreshInMs,
+    ulong RetryInMs,
+    ulong ForkedFrom);
+
+/// <summary>What <see cref="SipralEventKind.Recovery"/> carries — the fields
+/// of <c>sipral_recovery_event_t</c>: how the recovery settled, the rung it
+/// reached, why it gave up, and how many registrations it could not
+/// prove.</summary>
+public sealed record SipralRecoveryEventInfo(
+    SipralRecoveryOutcome State,
+    SipralRecoveryRung Rung,
+    SipralRecoveryFailure Reason,
+    uint Unverified);
+
+/// <summary>What <see cref="SipralEventKind.CallAnnounced"/> and
+/// <see cref="SipralEventKind.AnnouncedCallMissing"/> carry — the fields of
+/// <c>sipral_announce_event_t</c>.</summary>
+public sealed record SipralAnnounceEventInfo(
+    ulong Announcement,
+    ulong WaitedMs);
+
+/// <summary>What <see cref="SipralEventKind.MessageReceived"/>,
+/// <see cref="SipralEventKind.MessageSent"/> and
+/// <see cref="SipralEventKind.MessagesWaiting"/> carry — the fields of
+/// <c>sipral_message_event_t</c>: a MESSAGE's handle, body and type, the
+/// status its sender was answered with, and a message summary's
+/// counts.</summary>
+public sealed record SipralMessageEventInfo(
+    ulong Message,
+    ulong Subscription,
+    uint StatusCode,
+    string? ContentType,
+    byte[]? Body,
+    bool Waiting,
+    uint NewMessages,
+    uint OldMessages,
+    uint UrgentNewMessages,
+    uint UrgentOldMessages,
+    string? MessageAccount);
+
 /// <summary>What <see cref="SipralEventKind.ResolveNeeded"/> carries.</summary>
 public sealed record SipralResolveEventInfo(
     ulong Dialog,

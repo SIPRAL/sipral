@@ -79,6 +79,11 @@ public sealed partial class SipralStack
         {
             NoteStreamLetGo(lost.Transport);
         }
+        if (Streamed && args.Kind == SipralEventKind.TransportFailed
+            && args.TransportFailed?.Transport == global::Sipral.Sipral.TransportMain)
+        {
+            _mainLetGo = true;
+        }
     }
 
     /// <summary>Remembers a transport the stack let go of, for after the poll

@@ -35,6 +35,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import org.sipral.Sipral
 import org.sipral.SipralEventKind
 import org.sipral.SipralRegistrationState
 import org.sipral.SipralTlsFailure
@@ -320,6 +321,41 @@ private suspend fun aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(): Stri
     return "a lost connection is made again and the account registers on it"
 }
 
+/** The stack retires the main connection on its own when a flow that
+ * answered keep-alives stops answering them (RFC 5626 §4.4.1), with the
+ * socket still open here; said here the way it says it. */
+private suspend fun aConnectionTheStackLetGoOfIsMadeAgain(): String {
+    Registrar().use { registrar ->
+        over(registrar.address, signalling = SipralTransport.TCP, name = null).use { client ->
+            val account = client.addAccount(
+                aor = "sip:alice@sipral.invalid", registrarAddress = registrar.address, registrar = "sip:sipral.invalid",
+            )
+            account.register()
+            registered(client, account)
+            val first = client.bindAddress
+            val (_, lost) = client.events.awaitNext(SipralEventKind.TRANSPORT_FAILED, timeoutMs = 10_000) {
+                retryBusy {
+                    Sipral.stackTransportFailed(
+                        client.handle, Sipral.TRANSPORT_MAIN, SipralTransportError.TIMED_OUT.value.toLong(), client.nowMs(),
+                    )
+                }
+            }
+            assertEquals(Sipral.TRANSPORT_MAIN, assertNotNull(transportFailedOf(lost)).transport)
+            repeat(200) {
+                if (registrar.registers().any { it.first == 2 }) {
+                    return@repeat
+                }
+                delay(50)
+            }
+            val again = registrar.registers().firstOrNull { it.first == 2 }?.second
+            assertNotNull(again, "no REGISTER on a second connection after the stack let the first go")
+            assertNotEquals(first, client.bindAddress)
+            assertTrue(header("Contact", again)!!.contains(client.bindAddress))
+        }
+    }
+    return "a connection the stack let go of is made again and the account registers on it"
+}
+
 /** Twenty INVITEs from one address at once: how many were answered 480,
  * each counted once however often its refusal is sent again. */
 private fun rush(limit: SipralInviteLimit?): Int {
@@ -379,6 +415,7 @@ internal suspend fun tlsSignallingChecks(): String {
             aPrivateAuthorityIsTrustedBesideThePlatforms(good),
             eachRefusalSaysWhy(good, expired),
             aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(),
+            aConnectionTheStackLetGoOfIsMadeAgain(),
             theVoiceAgentPresetTakesARushTheDefaultAnswers480(),
         ).joinToString(", ")
     } finally {

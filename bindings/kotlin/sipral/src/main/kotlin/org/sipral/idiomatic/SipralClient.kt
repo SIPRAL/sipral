@@ -1214,6 +1214,13 @@ class SipralClient private constructor(
      * that same poll, acted on at the same moment. */
     private val streamsLetGo = java.util.concurrent.ConcurrentLinkedQueue<Long>()
 
+    /** Whether that same poll named the main transport of a client that
+     * signals over TCP or TLS: the stack retires a connection that stopped
+     * answering keep-alives (RFC 5626 §4.4.1) with its socket still open
+     * here, and sends nothing on it again until a new one is bound. Read and
+     * written on the poll thread only. */
+    private var mainLetGo = false
+
     /** Remember a transport the stack let go of, for after the poll that
      * said so: a connection opened here that stopped answering keep-alives
      * (RFC 5626 §4.4.1) is retired by the stack while its socket is still
@@ -1801,6 +1808,8 @@ class SipralClient private constructor(
         if (link == null) {
             transportWantedOf(event)?.destination?.let { streamsAsked.add(it) }
             transportFailedOf(event)?.let { noteStreamLetGo(it.transport) }
+        } else if (transportFailedOf(event)?.transport == Sipral.TRANSPORT_MAIN) {
+            mainLetGo = true
         }
         noteNat(event)
         calls[event.call]?.deliver(event)
@@ -1932,6 +1941,10 @@ class SipralClient private constructor(
             drainFarewells()
             actOnTurnStreams()
             actOnStreamsWanted()
+            if (mainLetGo) {
+                mainLetGo = false
+                link?.letGo()
+            }
         }
     }
 

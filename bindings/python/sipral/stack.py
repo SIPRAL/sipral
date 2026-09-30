@@ -400,6 +400,11 @@ class Stack:
         #: The transport numbers `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` named
         #: during that same poll, acted on at the same moment.
         self._streams_let_go: list[int] = []
+        #: Whether that same poll named the main transport of a stack that
+        #: signals over TCP or TLS: the stack retires a connection that stopped
+        #: answering keep-alives (RFC 5626 Section 4.4.1) with its socket still
+        #: open here, and nothing is sent on it again until a new one is bound.
+        self._main_let_go = False
         #: Every connection opened for one, by the transport number it is
         #: bound at, and the destinations a connection is being opened to;
         #: both under :attr:`_stream_lock`.
@@ -1412,8 +1417,11 @@ class Stack:
         # read its state, and that state has to already be current.
         if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_WANTED and not self._streamed:
             self._streams_asked.append(event.fields["destination"])
-        if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED and not self._streamed:
-            self._streams_let_go.append(event.fields["transport"])
+        if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED:
+            if not self._streamed:
+                self._streams_let_go.append(event.fields["transport"])
+            elif event.fields["transport"] == lib.SIPRAL_TRANSPORT_MAIN:
+                self._main_let_go = True
         if event.kind == lib.SIPRAL_EVENT_KIND_TURN_STREAM:
             fields = event.fields
             self._turn_asked.append(
@@ -2307,6 +2315,9 @@ class Stack:
             self._drain_farewells()
             self._act_on_turn_streams()
             self._act_on_streams_wanted()
+            if self._main_let_go:
+                self._main_let_go = False
+                self._lose_link(lib.SIPRAL_TRANSPORT_ERROR_OTHER, lib.SIPRAL_TLS_FAILURE_NONE, "", tell=False)
             with self._nat_lock:
                 lost, self._turn_lost = self._turn_lost, []
             for local in lost:
