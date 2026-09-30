@@ -41,7 +41,10 @@ Anywhere else it throws `UnsatisfiedLinkError` naming the platform; on a
 glibc older than 2.28 the `UnsatisfiedLinkError` is the dynamic linker's. `-Dsipral.native.dir=DIR` loads
 the pair from `DIR` instead, for a library built locally. Calling
 `SipralNatives.load()` at start-up makes a server fail at once rather than at
-its first call.
+its first call. From Java 24 the JVM warns when a jar on the class path calls
+`System.load`, and says a later release will refuse it; start the server with
+`--enable-native-access=ALL-UNNAMED` (or the name of the module the jar is
+on), as `scripts/check.sh` runs these tests.
 
 ## From Java
 

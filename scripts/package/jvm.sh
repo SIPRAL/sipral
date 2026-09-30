@@ -24,8 +24,10 @@
 #       carry a call, not only to be there.
 #
 #   scripts/package/jvm.sh --out DIR --dry-run [--with-opus]
-#       what the gate calls: no Docker and nothing cross-compiled. The
-#       host's own pair (linux-x64 or linux-arm64) is built with the host's
+#       for a Linux host without Docker: nothing cross-compiled. The gate
+#       does not call it, since a Mac has no pair to build; it compiles and
+#       runs bindings/jvm's sources itself (scripts/check.sh). The host's
+#       own pair (linux-x64 or linux-arm64) is built with the host's
 #       cargo and cc and is the only one staged; the same Maven build and
 #       tests run over it, and the jar's layout is checked as far as that
 #       pair goes. Maven resolves its plugins and the jar's dependencies from
