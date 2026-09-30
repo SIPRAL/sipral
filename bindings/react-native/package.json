@@ -1,0 +1,61 @@
+{
+  "name": "sipral-react-native",
+  "version": "0.0.1",
+  "description": "The Sipral SIP stack for React Native: accounts, registration, calls and events over the New Architecture.",
+  "license": "AGPL-3.0-only OR LicenseRef-Sipral-Commercial",
+  "author": "Tiberiu Balasea",
+  "homepage": "https://sipral.org",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SIPRAL/sipral",
+    "directory": "bindings/react-native"
+  },
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "files": [
+    "src",
+    "!src/__tests__",
+    "android/build.gradle.kts",
+    "android/src",
+    "ios/*.mm",
+    "ios/Bridge/*.swift",
+    "sipral-react-native.podspec",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "jest"
+  },
+  "codegenConfig": {
+    "name": "SipralReactNativeSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "org.sipral.reactnative"
+    },
+    "ios": {
+      "modulesProvider": {
+        "Sipral": "SipralModule"
+      }
+    }
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": ">=0.87.1"
+  },
+  "devDependencies": {
+    "@babel/core": "8.0.6",
+    "@babel/plugin-transform-modules-commonjs": "8.0.1",
+    "@babel/preset-typescript": "8.0.1",
+    "@react-native/codegen": "0.87.1",
+    "@types/jest": "30.0.0",
+    "@types/react": "19.3.0",
+    "babel-jest": "30.5.2",
+    "jest": "30.5.2",
+    "react": "19.3.0",
+    "react-native": "0.87.1",
+    "typescript": "7.0.2"
+  }
+}

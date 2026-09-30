@@ -1104,7 +1104,15 @@ without the scanner has not looked. The exceptions are the toolchains a
 plain Rust clone will not have: the fuzz nightly and `cargo-fuzz`, a JDK (the
 JNI shim), the .NET SDK, a Kotlin compiler and a full Xcode for SwiftPM. Each
 of those steps says `skip` and names what to install, and a run with any
-skip has not checked that binding. It must exit zero before a commit
+skip has not checked that binding. The React Native package
+(`bindings/react-native`) does not skip: jest and the type check over its
+TypeScript, codegen over its spec, its Android half's logic on the JVM and its
+iOS half's Swift under `swift test` over real stacks on loopback, its Android
+library built by Gradle offline against a classes-only `sipral.aar`, and its
+Objective-C++ module compiled for iOS against React Native's headers. What it
+needs and does not find -- `node_modules`, `gradle`, the Android SDK, a
+Gradle cache filled by one online build -- fails the step and says how to
+get it. It must exit zero before a commit
 exists. `--hygiene-only` skips the build for a fast pass.
 
 The linux-arm64 native cross-compiles in an unprivileged Docker container

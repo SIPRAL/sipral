@@ -475,6 +475,39 @@ binary is carried in this tree: `android.sh` generates it from the Gradle
 distribution in the image, whose SHA-256 is pinned, and checks that it
 reproduces the committed `gradle-wrapper.properties`.
 
+### The React Native package
+
+`bindings/react-native` has no runtime dependency of its own
+(`dependencies` in its `package.json` is empty, and `scripts/check.sh` fails
+when it is not): React Native and React are the application's, named as peer
+dependencies, and an application that ships the package ships them under
+its own terms. What the package's Android library adds to the application
+is what the Kotlin binding already needs.
+
+| Component | What it is | Used by | Licence |
+|---|---|---|---|
+| React Native 0.87.1, with `com.facebook.react:react-android` | the framework the module is written for, the application's own | the application, at run time | MIT |
+| React 19.3.0 | React Native's peer | the application, at run time | MIT |
+| `kotlinx-coroutines-android` 1.11.0 | the Android half's event collection | the Android half, at run time | Apache-2.0 |
+
+Everything else under `devDependencies` builds and tests the package and is
+in no artefact: TypeScript 7.0.2 (Apache-2.0) for the type check, Jest 30.5.2
+with `babel-jest`, Babel 8 (`@babel/core`, `@babel/preset-typescript`,
+`@babel/plugin-transform-modules-commonjs`) and `@types/jest` for the tests,
+`@react-native/codegen` 0.87.1 for the spec, all MIT unless named. Every
+package in the tree they resolve to, `package-lock.json`, declares MIT, ISC,
+Apache-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD, BlueOak-1.0.0 or CC-BY-4.0
+(the browser table `caniuse-lite` carries), or a choice between MIT and
+CC0-1.0 or Apache-2.0. The lockfile is committed without npm's
+deprecation notices, one of which carries an address.
+
+The Android library builds with the pair React Native 0.87.1 builds with
+itself: Gradle 9.4.1, which the wrapper in `android/gradle/wrapper` pins,
+and the Android Gradle Plugin 9.2.1 (both Apache-2.0). Not the newest, and
+for a reason: React Native's Gradle plugin is compiled by Kotlin 2.2, which
+cannot read the Kotlin 2.4 metadata of the standard library Gradle 9.7 and
+later embed, and the Android Gradle Plugin 9.4 needs Gradle 9.6 or later.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`

@@ -348,6 +348,17 @@ public final class Call: @unchecked Sendable {
         }
     }
 
+    /// `sipral_call_transfer`: ask the far end to call `target` instead, a
+    /// blind transfer (RFC 3515). This end stays in the call until the far
+    /// end reports the new call up; `.transferProgress` and then
+    /// `.transferDone` arrive on `events()`, their `transferData` saying how
+    /// it went.
+    public func transfer(to target: String) throws {
+        try retryingBusy {
+            try Sipral.callTransfer(stack: stack.handle, call: handle, target: target, nowMs: stack.nowMs())
+        }
+    }
+
     /// `sipral_call_restart_ice`: offer the call again with new ICE
     /// credentials (RFC 8445 §9) and check every pair again once the far end
     /// answers, while the path it has carries the audio -- the remedy for a

@@ -50,14 +50,14 @@ tracked() {
 others() { tracked "$@" | grep -v "^$SELF$"; }
 
 step "licence headers"
-missing=$(tracked '*.rs' '*.sh' '*.h' '*.c' '*.swift' '*.cs' '*.kt' | while read -r f; do
+missing=$(tracked '*.rs' '*.sh' '*.h' '*.c' '*.swift' '*.cs' '*.kt' '*.kts' '*.ts' '*.js' '*.mm' '*.podspec' | while read -r f; do
     head -3 "$f" | grep -q 'SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial' || echo "$f"
 done)
 if [ -z "$missing" ]; then pass "SPDX header present"; else
     fail "SPDX header missing:"; printf '        %s\n' $missing
 fi
 
-nocopy=$(tracked '*.rs' '*.sh' '*.h' '*.c' '*.swift' '*.cs' '*.kt' | while read -r f; do
+nocopy=$(tracked '*.rs' '*.sh' '*.h' '*.c' '*.swift' '*.cs' '*.kt' '*.kts' '*.ts' '*.js' '*.mm' '*.podspec' | while read -r f; do
     head -4 "$f" | grep -q 'Copyright (c) 2026 Tiberiu Balasea' || echo "$f"
 done)
 [ -z "$nocopy" ] && pass "copyright line present" || {
@@ -110,15 +110,18 @@ ws=$(awk -F'"' '/^\[workspace.package\]/{p=1} p && /^version = /{print $2; exit}
 cs=$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' bindings/dotnet/Sipral/Sipral.csproj 2>/dev/null)
 ci=$(sed -n 's/.*Version = "\(.*\)".*/\1/p' bindings/dotnet/Sipral/SipralInfo.cs 2>/dev/null)
 py=$(sed -n 's/^version = "\(.*\)"$/\1/p' bindings/python/pyproject.toml 2>/dev/null)
-if [ "$ws" = "$cs" ] && [ "$ws" = "$ci" ] && [ "$ws" = "$py" ]; then
-    pass "workspace, csproj, SipralInfo.cs and pyproject.toml all say $ws"
+# the React Native package's, which its Android half also reads to name the
+# org.sipral:sipral it depends on
+rn=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' bindings/react-native/package.json 2>/dev/null)
+if [ "$ws" = "$cs" ] && [ "$ws" = "$ci" ] && [ "$ws" = "$py" ] && [ "$ws" = "$rn" ]; then
+    pass "workspace, csproj, SipralInfo.cs, pyproject.toml and the React Native package.json all say $ws"
 else
-    fail "version drift: workspace=$ws csproj=$cs SipralInfo.cs=$ci pyproject.toml=$py"
+    fail "version drift: workspace=$ws csproj=$cs SipralInfo.cs=$ci pyproject.toml=$py react-native=$rn"
 fi
 
 step "no addresses to harvest"
 mails=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.yaml' \
-    '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
+    '*.h' '*.c' '*.swift' '*.cs' '*.kt' '*.kts' '*.ts' '*.js' '*.mm' '*.json' '*.podspec' '*.xml' \
     | xargs grep -InE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' 2>/dev/null \
     | grep -v 'users\.noreply\.github\.com' \
     | grep -v 'thetestcall@sip2sip\.info' \
@@ -142,6 +145,7 @@ fi
 
 step "language of the published tree"
 dia=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
+    '*.kts' '*.ts' '*.js' '*.mm' '*.json' '*.podspec' '*.xml' \
     | xargs grep -lI '[ăâîșțĂÂÎȘȚşţŞŢ]' 2>/dev/null || true)
 [ -z "$dia" ] && pass "English only" || {
     fail "Romanian text in published files:"; printf '        %s\n' $dia
@@ -149,7 +153,7 @@ dia=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.h' '*.c' '*.swift' '*.cs' 
 
 step "provenance"
 forbidden='pjsip\|pjproject\|pjmedia\|sofia-sip\|osip2\|exosip\|linphone\|bcg729\|spandsp\|libnice\|janus'
-hits=$(others '*.rs' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
+hits=$(others '*.rs' '*.h' '*.c' '*.swift' '*.cs' '*.kt' '*.kts' '*.ts' '*.js' '*.mm' \
     | xargs grep -lin "$forbidden" 2>/dev/null || true)
 [ -z "$hits" ] && pass "no forbidden-source references in code" || {
     fail "review provenance in:"; printf '        %s\n' $hits
@@ -339,6 +343,7 @@ fi
 # credit. The patterns are literal on purpose: a looser one fails the gate on
 # ordinary prose.
 traces=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
+    '*.kts' '*.ts' '*.js' '*.mm' '*.json' '*.podspec' '*.xml' \
     | xargs grep -lin 'co-authored-by: claude\|generated with \[claude\|copilot' 2>/dev/null || true)
 [ -z "$traces" ] && pass "no assistant traces" || {
     fail "assistant traces in:"; printf '        %s\n' $traces
@@ -1393,11 +1398,18 @@ elif command -v kotlinc >/dev/null 2>&1; then
     # which this machine does not carry. It is built, with the Android SDK,
     # by scripts/package/android.sh; its logic is not in there but in
     # org.sipral.telecom, which is compiled and run here.
+    #
+    # The React Native package's Android logic goes in with it the same way:
+    # org.sipral.reactnative.core has nothing of React Native in it, and its
+    # check runs below beside the Kotlin layer's. The TurboModule around it
+    # is built by Gradle in the React Native step.
     kotlin_sources=()
     while IFS= read -r -d '' one; do
         kotlin_sources+=("$one")
     done < <(find "$ROOT/bindings/kotlin" -path "$ROOT/bindings/kotlin/android" -prune \
-        -o -name '*.kt' -print0 2>/dev/null)
+            -o -name '*.kt' -print0 2>/dev/null
+        find "$ROOT/bindings/react-native/android/src/main/java/org/sipral/reactnative/core" \
+            "$ROOT/bindings/react-native/android/jvm-check" -name '*.kt' -print0 2>/dev/null)
     # BindingCheck.kt is compiled with the rest and asserts with kotlin.test,
     # which ships in the lib/ of the distribution kotlinc runs from, beside
     # the standard library the JVM run below needs as well. The directory is
@@ -1541,6 +1553,28 @@ if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
                 printf '%s\n' "$warned" | sed 's/^/        /'
             else
                 pass "${said#kotlin telecom: }"
+            fi
+
+            # The React Native package's Android half without React Native:
+            # SipralReactCore over three real stacks, driven the way the
+            # TurboModule drives it.
+            ran=$("$jdk/bin/java" -Xcheck:jni -Djava.library.path="$work" \
+                -cp "$kotlin_classes:$kotlin_lib/kotlin-stdlib.jar:$kotlin_lib/kotlin-test.jar:$COROUTINES_JAR" \
+                org.sipral.reactnative.core.SipralReactCoreCheckKt 2>&1)
+            exited=$?
+            said=$(printf '%s\n' "$ran" | grep '^react native core: ' || true)
+            warned=$(printf '%s\n' "$ran" \
+                | grep -E 'WARNING in native method|WARNING: JNI|FATAL ERROR in native method' || true)
+            if [ "$exited" -ne 0 ]; then
+                fail "SipralReactCoreCheck.kt did not come back zero:"
+                printf '%s\n' "$ran" | sed 's/^/        /'
+            elif [ -z "$said" ]; then
+                fail "SipralReactCoreCheck.kt came back zero and said nothing, so nothing was checked"
+            elif [ -n "$warned" ]; then
+                fail "-Xcheck:jni found something wrong under the React Native package's Android half:"
+                printf '%s\n' "$warned" | sed 's/^/        /'
+            else
+                pass "the React Native Android half: ${said#react native core: }"
             fi
         fi
         rm -rf "$work"
@@ -1750,6 +1784,167 @@ pkg_run "nuget.sh pack --dry-run" \
 
 pkg_run "aar.sh assemble --dry-run" \
     scripts/package/aar.sh assemble --out "$PKG_WORK/aar" --natives "$PKG_WORK/no-natives" --dry-run
+
+# bindings/react-native: the TypeScript layer and its spec, the Android
+# library, and the iOS module. Its Android half's logic already ran on the
+# JVM above, beside the Kotlin layer's checks; what is left is everything
+# around it. Nothing here downloads: node_modules comes from `npm ci`, run
+# once, and Gradle runs --offline over the cache one online build filled, so
+# what is missing fails and says how to get it.
+step "the react native package"
+RN="$ROOT/bindings/react-native"
+RN_MODULES="$RN/node_modules"
+rn_run() {
+    local label="$1"; shift
+    if "$@" >"$PKG_WORK/rn-log" 2>&1; then
+        pass "$label"
+    else
+        fail "$label:"
+        tail -40 "$PKG_WORK/rn-log" | sed 's/^/        /'
+    fi
+}
+
+# No runtime dependency of its own: React Native and React are the
+# application's, as peers (THIRD-PARTY-NOTICES.md).
+if ! command -v node >/dev/null 2>&1; then
+    fail "node is not installed (brew install node)"
+elif [ -n "$(node -e 'const p=require(process.argv[1]); process.stdout.write(Object.keys(p.dependencies||{}).join(" "))' "$RN/package.json")" ]; then
+    fail "bindings/react-native/package.json has runtime dependencies; the package takes only peers"
+else
+    pass "no runtime dependency in bindings/react-native/package.json"
+fi
+
+if [ ! -d "$RN_MODULES/react-native" ] || ! npm --prefix "$RN" ls >/dev/null 2>&1; then
+    fail "bindings/react-native/node_modules is missing or not what package-lock.json names: npm ci --prefix bindings/react-native"
+else
+    # What jest printed is read as well as how it exited: a run that found
+    # no test exits zero too.
+    if (cd "$RN" && npx --no-install jest --ci) >"$PKG_WORK/rn-jest" 2>&1; then
+        ran=$(grep -Eo 'Tests: +[0-9]+ passed, [0-9]+ total' "$PKG_WORK/rn-jest" | head -1 | sed 's/^Tests: *//')
+        [ -n "$ran" ] && pass "jest, bindings/react-native: $ran" \
+            || fail "jest came back zero and reported no test"
+    else
+        fail "jest, bindings/react-native:"
+        tail -40 "$PKG_WORK/rn-jest" | sed 's/^/        /'
+    fi
+    rn_run "tsc --noEmit, the spec and the TypeScript layer" "$RN_MODULES/.bin/tsc" -p "$RN" --noEmit
+
+    # Codegen reads the spec the way an application's build will, into the
+    # schema both halves are generated from; the module has to come out as
+    # "Sipral" with its event emitter.
+    if node "$RN_MODULES/@react-native/codegen/lib/cli/combine/combine-js-to-schema-cli.js" \
+        "$PKG_WORK/rn-schema.json" "$RN/src/NativeSipral.ts" >"$PKG_WORK/rn-log" 2>&1 \
+        && node -e '
+            const s = require(process.argv[1]).modules.NativeSipral;
+            if (!s || s.moduleName !== "Sipral") process.exit(1);
+            if (!s.spec.eventEmitters.some((e) => e.name === "onEvent")) process.exit(2);
+            process.stdout.write(String(s.spec.methods.length));' "$PKG_WORK/rn-schema.json" >"$PKG_WORK/rn-methods"; then
+        pass "codegen reads src/NativeSipral.ts: module Sipral, $(cat "$PKG_WORK/rn-methods") methods and onEvent"
+    else
+        fail "codegen could not read src/NativeSipral.ts into a Sipral module with onEvent:"
+        tail -20 "$PKG_WORK/rn-log" | sed 's/^/        /'
+    fi
+
+    # The Android library, TurboModule and codegen included, against the
+    # classes-only sipral.aar the dry run above assembled. The wrapper's jar
+    # is a binary and never committed: it is made here from the Gradle on the
+    # machine, and has to name the version and checksum the committed
+    # properties pin.
+    wrapper="$RN/android/gradle/wrapper/gradle-wrapper.properties"
+    android_sdk="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
+    if [ ! -f "$RN/android/gradlew" ] || [ ! -f "$RN/android/gradle/wrapper/gradle-wrapper.jar" ]; then
+        if command -v gradle >/dev/null 2>&1; then
+            gen="$PKG_WORK/rn-wrapper"
+            mkdir -p "$gen" && touch "$gen/settings.gradle.kts"
+            version=$(sed -n 's|^distributionUrl=.*/gradle-\(.*\)-bin\.zip$|\1|p' "$wrapper")
+            sha=$(sed -n 's/^distributionSha256Sum=//p' "$wrapper")
+            if gradle -p "$gen" --no-daemon -q wrapper --gradle-version "$version" \
+                --gradle-distribution-sha256-sum "$sha" --no-validate-url >"$PKG_WORK/rn-log" 2>&1 \
+                && [ "$(grep -E '^distribution(Url|Sha256Sum)=' "$gen/gradle/wrapper/gradle-wrapper.properties")" \
+                    = "$(grep -E '^distribution(Url|Sha256Sum)=' "$wrapper")" ]; then
+                cp "$gen/gradlew" "$RN/android/gradlew"
+                cp "$gen/gradle/wrapper/gradle-wrapper.jar" "$RN/android/gradle/wrapper/"
+            fi
+        fi
+    fi
+    if [ ! -f "$RN/android/gradlew" ]; then
+        fail "no Gradle wrapper in bindings/react-native/android, and none could be made: brew install gradle"
+    elif [ ! -d "$android_sdk/platforms" ] && [ ! -d "$android_sdk/platform-tools" ]; then
+        fail "no Android SDK at $android_sdk (ANDROID_HOME names another)"
+    elif [ ! -f "$PKG_WORK/aar/sipral.aar" ]; then
+        fail "the React Native Android library: aar.sh assemble --dry-run wrote no sipral.aar to build against"
+    else
+        version=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' "$RN/package.json")
+        repo="$PKG_WORK/rn-maven/org/sipral/sipral/$version"
+        mkdir -p "$repo"
+        cp "$PKG_WORK/aar/sipral.aar" "$repo/sipral-$version.aar"
+        printf '<?xml version="1.0" encoding="UTF-8"?>\n<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>org.sipral</groupId><artifactId>sipral</artifactId><version>%s</version><packaging>aar</packaging><dependencies><dependency><groupId>org.jetbrains.kotlinx</groupId><artifactId>kotlinx-coroutines-core</artifactId><version>1.11.0</version><scope>runtime</scope></dependency></dependencies></project>\n' \
+            "$version" >"$repo/sipral-$version.pom"
+        rm -rf "$RN/android/build"
+        if ANDROID_HOME="$android_sdk" "$RN/android/gradlew" -p "$RN/android" --offline --no-daemon --console=plain \
+            -Psipral.repo="$PKG_WORK/rn-maven" assembleRelease >"$PKG_WORK/rn-gradle" 2>&1; then
+            classes=$(unzip -p "$RN/android/build/outputs/aar/sipral-react-native-release.aar" classes.jar 2>/dev/null \
+                >"$PKG_WORK/rn-classes.jar" && unzip -l "$PKG_WORK/rn-classes.jar" 2>/dev/null)
+            missing=""
+            for class in org/sipral/reactnative/NativeSipralSpec.class org/sipral/reactnative/SipralModule.class \
+                org/sipral/reactnative/SipralPackage.class org/sipral/reactnative/core/SipralReactCore.class; do
+                printf '%s\n' "$classes" | grep -q " $class\$" || missing="$missing $class"
+            done
+            [ -z "$missing" ] && pass "gradle assembleRelease, bindings/react-native/android: the TurboModule over the codegen spec" || {
+                fail "the React Native Android library was built without:"; printf '        %s\n' $missing
+            }
+        else
+            fail "gradle assembleRelease --offline, bindings/react-native/android (a cache never filled needs one online run of the same command):"
+            grep -E '^e: |error:|What went wrong' -A3 "$PKG_WORK/rn-gradle" | head -30 | sed 's/^/        /'
+        fi
+    fi
+
+    # The iOS half: its Swift over bindings/swift, built and tested on macOS
+    # over real stacks; then the Objective-C++ module compiled for iOS
+    # against React Native's own headers laid out as CocoaPods lays them out,
+    # codegen's output for the spec, and the header the Swift half exports.
+    if [ ! -s "$ROOT/$DYLIB" ]; then
+        fail "the React Native iOS half: $DYLIB is not there to link its tests against"
+    else
+        rn_run "swift test, bindings/react-native/ios" \
+            xcrun --toolchain default swift test --package-path "$RN/ios"
+    fi
+    swift_header=$(find "$RN/ios/.build" -path '*SipralReactBridge.build/include/SipralReactBridge-Swift.h' 2>/dev/null | head -1)
+    rn_native="$RN_MODULES/react-native"
+    inc="$PKG_WORK/rn-include"
+    if [ -z "$swift_header" ]; then
+        fail "the Swift half exported no Objective-C header, so SipralModule.mm was compiled against nothing"
+    elif ! node "$rn_native/scripts/generate-specs-cli.js" --platform ios --schemaPath "$PKG_WORK/rn-schema.json" \
+        --outputDir "$PKG_WORK/rn-ios" --libraryName SipralReactNativeSpec >"$PKG_WORK/rn-log" 2>&1; then
+        fail "codegen wrote no iOS spec:"; tail -20 "$PKG_WORK/rn-log" | sed 's/^/        /'
+    else
+        mkdir -p "$inc/React" "$inc/RCTRequired" "$inc/RCTTypeSafety" "$inc/ReactCommon" \
+            "$inc/RCTDeprecation" "$inc/SipralReactNativeSpec"
+        headers_into() {
+            local into="$1"; shift
+            find "$@" -maxdepth "${DEPTH:-99}" -name '*.h' -print0 | while IFS= read -r -d '' h; do
+                ln -sf "$h" "$into/$(basename "$h")"
+            done
+        }
+        headers_into "$inc/React" "$rn_native/React"
+        headers_into "$inc/RCTRequired" "$rn_native/Libraries/Required"
+        headers_into "$inc/RCTTypeSafety" "$rn_native/Libraries/TypeSafety"
+        headers_into "$inc/RCTDeprecation" "$rn_native/ReactApple/Libraries/RCTFoundation/RCTDeprecation/Exported"
+        DEPTH=1 headers_into "$inc/ReactCommon" "$rn_native/ReactCommon/react/nativemodule/core/platform/ios/ReactCommon" \
+            "$rn_native/ReactCommon/react/nativemodule/core/ReactCommon" "$rn_native/ReactCommon/callinvoker/ReactCommon" \
+            "$rn_native/ReactCommon/react/bridging"
+        cp "$PKG_WORK/rn-ios/SipralReactNativeSpec/SipralReactNativeSpec.h" "$inc/SipralReactNativeSpec/"
+        cp "$swift_header" "$inc/sipral_react_native-Swift.h"
+        rn_run "clang++ -fsyntax-only for iOS, bindings/react-native/ios/SipralModule.mm" \
+            xcrun clang++ -fsyntax-only -Werror -x objective-c++ -std=c++20 -fobjc-arc -fmodules -fcxx-modules \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -target arm64-apple-ios16.0 \
+            -I "$inc" -I "$rn_native/Libraries/FBLazyVector" -I "$rn_native/ReactCommon" \
+            -I "$rn_native/ReactCommon/jsi" -I "$rn_native/ReactCommon/callinvoker" \
+            -I "$rn_native/ReactCommon/runtimeexecutor" -I "$rn_native/ReactCommon/reactperflogger" \
+            -I "$rn_native/ReactCommon/logger" "$RN/ios/SipralModule.mm"
+    fi
+fi
+rn_run "ruby -c, bindings/react-native/sipral-react-native.podspec" ruby -c "$RN/sipral-react-native.podspec"
 
 rm -rf "$PKG_WORK"
 

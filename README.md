@@ -12,7 +12,7 @@ Copyright (c) 2026 Tiberiu Balasea
 
 A SIP user agent stack written in Rust: memory-safe, sans-I/O at the core, no
 audio device inside it, one C ABI, and thin bindings for Swift, .NET, Kotlin and
-Python. Small enough to embed in an AI voice agent, complete enough to run a
+Python, with a React Native package over the Swift and Kotlin ones. Small enough to embed in an AI voice agent, complete enough to run a
 softphone.
 
 > **Status: pre-alpha, phase 1.** Registration, calls, hold, and blind and
@@ -198,7 +198,10 @@ Rust 1.95 or newer, edition 2024. The toolchain is pinned in
 targets `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` and
 `aarch64-apple-ios`. It skips, and reports the skip, when a JDK, the .NET SDK,
 `kotlinc`, a full Xcode (for SwiftPM) or a nightly toolchain with `cargo-fuzz`
-is missing, and a run with a skip has not checked that part. Use
+is missing, and a run with a skip has not checked that part. The React Native
+package's step needs Node with `npm ci` run once in `bindings/react-native`,
+`gradle`, the Android SDK, and one online build of its Android library to
+fill Gradle's cache; it fails, naming which, when one is missing. Use
 `./scripts/check.sh --hygiene-only` for the tree checks without a build.
 
 ## Where to start reading

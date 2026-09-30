@@ -2729,6 +2729,28 @@ ratio; `Event` grew the typed views `identity`, `answering`, `cause` and
 microphone: device mode is only ever activated manually there, and the
 transmit callback is handed a record the test builds.
 
+## React Native
+
+`bindings/react-native` is not a sixth back end: nothing in it is printed,
+and none of it calls the ABI. It is a TurboModule whose native halves are
+written over the Kotlin layer on Android (`SipralClient`, `SipralAccount`,
+`SipralCall`) and the Swift layer on iOS (`SipralStack`, `Account`, `Call`),
+so it speaks whatever ABI those two speak and moves when they do.
+
+What crosses to JavaScript is the codegen spec, `src/NativeSipral.ts`: a
+client, its accounts and calls named by their handles as decimal strings (a
+handle is 64 bits and a JavaScript number carries 53 exactly), and one event
+type, flattened, whose kind and states are the library's names in lower
+camel case (`SIPRAL_CALL_STATE_EARLY_MEDIA` is `earlyMedia`). The typed API
+above it keeps each call's state from those events and refuses what the
+state does not allow before crossing, with the status the library would
+answer. Audio is device mode on both phones, never application mode: nothing
+in JavaScript could carry a call's frames. Each half's logic is a class with
+nothing of React Native in it (`SipralReactCore`, in Kotlin and in Swift),
+which `scripts/check.sh` runs over real stacks on loopback; the TurboModule
+around it only moves arguments and promises. `bindings/react-native/README.md`
+has the API and what is tested where.
+
 ## Versioning
 
 The C ABI carries its own version, independent of the crate version. It is

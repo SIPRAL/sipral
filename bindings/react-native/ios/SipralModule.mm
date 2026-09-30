@@ -1,0 +1,206 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+//
+// The TurboModule on iOS. NativeSipralSpec is what codegen writes from
+// src/NativeSipral.ts; each method here reads what JavaScript handed over
+// and passes it to SipralReactBridge (Bridge/, over bindings/swift), which
+// settles the promise. Nothing else lives here.
+
+#import <SipralReactNativeSpec/SipralReactNativeSpec.h>
+
+#if __has_include(<sipral_react_native/sipral_react_native-Swift.h>)
+#import <sipral_react_native/sipral_react_native-Swift.h>
+#else
+#import "sipral_react_native-Swift.h"
+#endif
+
+@interface SipralModule : NativeSipralSpecBase <NativeSipralSpec>
+@end
+
+// What JavaScript left out is left out here too, so that the Swift side
+// sees the default rather than an empty string or a zero it did not send.
+static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
+{
+  if (value != nil) {
+    into[key] = value;
+  }
+}
+
+@implementation SipralModule {
+  SipralReactBridge *_bridge;
+}
+
++ (NSString *)moduleName
+{
+  return @"Sipral";
+}
+
+- (instancetype)init
+{
+  if (self = [super init]) {
+    __weak SipralModule *weakSelf = self;
+    _bridge = [[SipralReactBridge alloc] initWithEmit:^(NSDictionary<NSString *, id> *event) {
+      [weakSelf emitOnEvent:event];
+    }];
+  }
+  return self;
+}
+
+- (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
+    (const facebook::react::ObjCTurboModule::InitParams &)params
+{
+  return std::make_shared<facebook::react::NativeSipralSpecJSI>(params);
+}
+
+- (void)invalidate
+{
+  [_bridge invalidate];
+}
+
+- (void)open:(JS::NativeSipral::NativeOpenOptions &)options
+     resolve:(RCTPromiseResolveBlock)resolve
+      reject:(RCTPromiseRejectBlock)reject
+{
+  NSMutableDictionary *given = [NSMutableDictionary dictionary];
+  put(given, @"bindHost", options.bindHost());
+  if (options.bindPort().has_value()) {
+    put(given, @"bindPort", @(options.bindPort().value()));
+  }
+  put(given, @"userAgent", options.userAgent());
+  put(given, @"codecs", options.codecs());
+  put(given, @"signalling", options.signalling());
+  put(given, @"signallingServer", options.signallingServer());
+  put(given, @"stunServer", options.stunServer());
+  if (options.manualAudio().has_value()) {
+    put(given, @"manualAudio", @(options.manualAudio().value()));
+  }
+  [_bridge open:given resolve:resolve reject:reject];
+}
+
+- (void)close:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge closeWithResolve:resolve reject:reject];
+}
+
+- (void)addAccount:(JS::NativeSipral::NativeAccountOptions &)options
+           resolve:(RCTPromiseResolveBlock)resolve
+            reject:(RCTPromiseRejectBlock)reject
+{
+  NSMutableDictionary *given = [NSMutableDictionary dictionary];
+  put(given, @"aor", options.aor());
+  put(given, @"registrarAddress", options.registrarAddress());
+  put(given, @"registrar", options.registrar());
+  put(given, @"contact", options.contact());
+  put(given, @"displayName", options.displayName());
+  put(given, @"authUser", options.authUser());
+  put(given, @"authPassword", options.authPassword());
+  if (options.expiresSeconds().has_value()) {
+    put(given, @"expiresSeconds", @(options.expiresSeconds().value()));
+  }
+  [_bridge addAccount:given resolve:resolve reject:reject];
+}
+
+- (void)register:(NSString *)account resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge register:account resolve:resolve reject:reject];
+}
+
+- (void)unregister:(NSString *)account resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge unregister:account resolve:resolve reject:reject];
+}
+
+- (void)removeAccount:(NSString *)account
+              resolve:(RCTPromiseResolveBlock)resolve
+               reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge removeAccount:account resolve:resolve reject:reject];
+}
+
+- (void)placeCall:(NSString *)account
+           target:(NSString *)target
+          options:(JS::NativeSipral::NativeCallOptions &)options
+          resolve:(RCTPromiseResolveBlock)resolve
+           reject:(RCTPromiseRejectBlock)reject
+{
+  NSMutableDictionary *given = [NSMutableDictionary dictionary];
+  put(given, @"destination", options.destination());
+  put(given, @"codecs", options.codecs());
+  [_bridge placeCall:account target:target options:given resolve:resolve reject:reject];
+}
+
+- (void)answer:(NSString *)call resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge answer:call resolve:resolve reject:reject];
+}
+
+- (void)reject:(NSString *)call
+          code:(NSInteger)code
+       resolve:(RCTPromiseResolveBlock)resolve
+        reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge reject:call code:code resolve:resolve reject:reject];
+}
+
+- (void)hangup:(NSString *)call resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge hangup:call resolve:resolve reject:reject];
+}
+
+- (void)hold:(NSString *)call resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge hold:call resolve:resolve reject:reject];
+}
+
+- (void)resume:(NSString *)call resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge resume:call resolve:resolve reject:reject];
+}
+
+- (void)transfer:(NSString *)call
+          target:(NSString *)target
+         resolve:(RCTPromiseResolveBlock)resolve
+          reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge transfer:call target:target resolve:resolve reject:reject];
+}
+
+- (void)acceptTransfer:(NSString *)call
+               resolve:(RCTPromiseResolveBlock)resolve
+                reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge acceptTransfer:call resolve:resolve reject:reject];
+}
+
+- (void)rejectTransfer:(NSString *)call
+                  code:(NSInteger)code
+               resolve:(RCTPromiseResolveBlock)resolve
+                reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge rejectTransfer:call code:code resolve:resolve reject:reject];
+}
+
+- (void)sendDtmf:(NSString *)call
+          digits:(NSString *)digits
+         resolve:(RCTPromiseResolveBlock)resolve
+          reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge sendDtmf:call digits:digits resolve:resolve reject:reject];
+}
+
+- (void)activateAudio:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge activateAudioWithResolve:resolve reject:reject];
+}
+
+- (void)deactivateAudio:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge deactivateAudioWithResolve:resolve reject:reject];
+}
+
+- (void)setMuted:(BOOL)muted resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge setMuted:muted resolve:resolve reject:reject];
+}
+
+@end

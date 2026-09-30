@@ -427,6 +427,17 @@ class SipralCall internal constructor(
     }
 
     /**
+     * `sipral_call_transfer`: ask the far end to call [target] instead, a
+     * blind transfer (RFC 3515). This end stays in the call until the far
+     * end reports the new call up; `SIPRAL_EVENT_KIND_TRANSFER_PROGRESS`
+     * and then `SIPRAL_EVENT_KIND_TRANSFER_DONE` arrive on [events], read
+     * with [transferOf].
+     */
+    fun transfer(target: String) {
+        retryBusy { Sipral.callTransfer(client.handle, handle, target, client.nowMs()) }
+    }
+
+    /**
      * `sipral_call_restart_ice`: offer the call again with new ICE
      * credentials (RFC 8445 §9) and check every pair again once the far end
      * answers, while the path it has carries the audio. The new path arrives

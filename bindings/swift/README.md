@@ -170,6 +170,7 @@ for await event in events {
 try call.hold()
 try call.resume()
 try call.sendDtmf("123#")
+try call.transfer(to: "sip:carol@example.invalid")   // blind: .transferDone's transferData says how it went
 try call.hangup(reason: .normalClearing)   // or hangup(), with no Reason
 call.close()
 ```
