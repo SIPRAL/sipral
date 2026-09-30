@@ -136,9 +136,10 @@ AGENT_SECTIONS = {
         "ICE-lite, Asterisk's ICE calling in",
     ),
 }
-# Steps where lab.sh prints one `ok`/`FAIL` line per example agent, each
-# opening with the agent's name and what it signalled over -- SIP over TCP
-# and TLS through the four idiomatic layers -- mapped to the peer and to the
+# Steps where lab.sh prints one `ok`/`FAIL` line per example agent or case,
+# each opening with its name -- SIP over TCP and TLS through the four
+# idiomatic layers, and the three ends of a challenged INVITE too large for a
+# datagram -- mapped to the peer and to the
 # prefixes those lines open with. Each prefix is a flow label of this file's
 # own, and each line that opens with it is a row. A FAIL line that opens with
 # none of them (the certificates could not be made, Asterisk would not
@@ -152,6 +153,14 @@ LAYER_SECTIONS = {
             "Agent.kt over TLS",
             "Sipral.Sample.Agent over TLS",
             "SipralLabAgent over TCP",
+        ),
+    ),
+    "a challenged INVITE past 1300 bytes -- over TCP where Asterisk listens, trimmed or ended where it does not": (
+        "asterisk",
+        (
+            "a challenged INVITE past 1300 bytes, taken over TCP",
+            "a challenged INVITE past 1300 bytes, trimmed to one SDES suite over UDP",
+            "a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named",
         ),
     ),
 }

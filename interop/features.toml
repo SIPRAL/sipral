@@ -264,6 +264,12 @@ unit_tested = true
 flows = ["agent.py over TLS", "Agent.kt over TLS", "Sipral.Sample.Agent over TLS", "SipralLabAgent over TCP"]
 
 [[feature]]
+name = "A challenged request past the datagram limit: over TCP, trimmed, or ended with the limit named"
+implemented = true
+unit_tested = true
+flows = ["a challenged INVITE past 1300 bytes, taken over TCP", "a challenged INVITE past 1300 bytes, trimmed to one SDES suite over UDP", "a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named"]
+
+[[feature]]
 name = "Local conference of N calls, each on its own codec"
 implemented = true
 unit_tested = true

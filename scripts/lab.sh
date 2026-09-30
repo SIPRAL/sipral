@@ -3606,8 +3606,9 @@ datagram_flow() {
     local ok=0
     DATAGRAM_MARK=$(mktemp)
     ( cd interop && docker compose -f compose.yaml -f datagram/compose.override.yaml up -d asterisk ) \
-        >/dev/null 2>&1 || { printf '  could not restart Asterisk with TCP and a UDP-only port\n'; return 1; }
-    wait_for asterisk "Asterisk Ready" >/dev/null || return 1
+        >/dev/null 2>&1 || { fail "Asterisk could not be restarted with TCP and a UDP-only port"; return 1; }
+    wait_for asterisk "Asterisk Ready" >/dev/null \
+        || { fail "Asterisk did not come back with TCP and a UDP-only port"; return 1; }
     ( cd interop && docker compose exec -T asterisk asterisk -rx 'pjsip set logger on' ) >/dev/null 2>&1
 
     # UDP and TCP both on 5060: the answer goes over a connection the layer
@@ -3617,9 +3618,9 @@ datagram_flow() {
         && datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
         && datagram_said '^ended LOCAL_HANGUP ' \
         && printf '%s\n' "$DATAGRAM_SEEN" | grep -Eq '\(1[3-9][0-9][0-9] bytes\) from TCP:'; then
-        pass "UDP and TCP: the INVITE answering the challenge went over TCP, and the call was held, resumed and hung up"
+        pass "a challenged INVITE past 1300 bytes, taken over TCP: Asterisk on UDP and TCP, the answer to its challenge went on a connection the Python layer opened, and the call was held, resumed and hung up"
     else
-        fail "UDP and TCP: the INVITE answering the challenge over a connection"
+        fail "a challenged INVITE past 1300 bytes, taken over TCP"
         ok=1
     fi
 
@@ -3627,11 +3628,12 @@ datagram_flow() {
     # suite is what fits the datagram
     datagram_call 5070 "$DATAGRAM_SUITES" ""
     if datagram_said '^wanted 2 [0-9.]+:5070 ' && datagram_said '^transport failed [0-9]+ 1$' \
-        && datagram_said '^confirmed$' && datagram_said '^ended LOCAL_HANGUP ' \
+        && datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
+        && datagram_said '^ended LOCAL_HANGUP ' \
         && ! printf '%s\n' "$DATAGRAM_SEEN" | grep -q 'from TCP:'; then
-        pass "UDP alone: the connection refused, the INVITE went again with one SDES suite, and the call went on"
+        pass "a challenged INVITE past 1300 bytes, trimmed to one SDES suite over UDP: Asterisk on UDP alone refused the connection, the INVITE went again over UDP with one SDES suite, and the call was held, resumed and hung up"
     else
-        fail "UDP alone: the INVITE answering the challenge trimmed into a datagram"
+        fail "a challenged INVITE past 1300 bytes, trimmed to one SDES suite over UDP"
         ok=1
     fi
 
@@ -3640,9 +3642,9 @@ datagram_flow() {
     datagram_call 5070 AES_CM_128_HMAC_SHA1_80 "$(printf 'A%.0s' $(seq 1 250))"
     if datagram_said '^transport failed [0-9]+ 1$' \
         && datagram_said '^ended UNREACHABLE 513 513 request of [0-9]+ bytes is over the 1300-byte datagram limit'; then
-        pass "UDP alone and nothing to drop: the call ended at once, 513, the limit named"
+        pass "a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named: one suite and a long From over UDP alone, the call ended at once, 513"
     else
-        fail "UDP alone and nothing to drop: the call ended with the limit named"
+        fail "a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named"
         ok=1
     fi
 
