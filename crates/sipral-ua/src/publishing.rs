@@ -365,12 +365,13 @@ impl UserAgent {
         now: Instant,
     ) -> Option<AnyTransactionId> {
         let config = self.accounts.get(&account)?;
+        let (transport, remote) = config.destination()?;
         let mut to = Vec::with_capacity(target.as_bytes().len() + 2);
         to.push(b'<');
         to.extend_from_slice(target.as_bytes());
         to.push(b'>');
         let request = publish.apply(
-            OutgoingRequest::new(Method::Publish, target, config.transport, config.remote)
+            OutgoingRequest::new(Method::Publish, target, transport, remote)
                 .to(&to)
                 .from(&config.sender_value()),
         );

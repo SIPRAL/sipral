@@ -170,6 +170,12 @@ pub struct Endpoint {
     /// Where the caller said no stream is coming
     /// ([`Endpoint::no_stream_coming`]), until one is bound after all.
     pub(super) streamless: HashSet<SocketAddr>,
+    /// The stream transports pinged at an interval of their own rather than
+    /// at [`EndpointConfig::keepalive_interval`]
+    /// ([`Endpoint::keep_stream_alive`]). Keyed by name rather than kept on
+    /// the open transport, so that a connection bound again under the same
+    /// name keeps the interval its owner asked for.
+    pub(super) stream_keepalives: HashMap<TransportId, core::time::Duration>,
 }
 
 impl Endpoint {
@@ -221,6 +227,7 @@ impl Endpoint {
             diag: Records::new(config.diagnostics),
             streams_wanted: HashSet::new(),
             streamless: HashSet::new(),
+            stream_keepalives: HashMap::new(),
         })
     }
 
@@ -438,6 +445,57 @@ impl Endpoint {
         self.transports
             .get(transport)
             .map(|bound| (bound.protocol, bound.local))
+    }
+
+    /// Ping the stream transport `transport` every `every` rather than every
+    /// [`EndpointConfig::keepalive_interval`], or with `None` go back to the
+    /// endpoint's own interval (RFC 5626 §4.4.1's double CRLF, jittered
+    /// between 80% and 100% of the interval like every other ping here).
+    ///
+    /// For a layer above that knows a flow needs to be kept open more often
+    /// than the endpoint as a whole does — an account behind a NAT that
+    /// forgets a connection sooner than the default — or at all, when the
+    /// endpoint's own keep-alive is off. The interval is kept under the
+    /// transport's name, so a connection bound again under it keeps it; a
+    /// datagram transport, or a name not bound yet, is pinged only once it is
+    /// a stream. What was scheduled on the transport is drawn again from the
+    /// new interval at once.
+    ///
+    /// # Errors
+    /// [`TimerConfigError::KeepaliveUnarmable`] for an interval of zero, which
+    /// would re-arm a ping at the instant it went; nothing changes.
+    pub fn keep_stream_alive(
+        &mut self,
+        transport: TransportId,
+        every: Option<core::time::Duration>,
+        now: Instant,
+    ) -> Result<(), TimerConfigError> {
+        match every {
+            Some(core::time::Duration::ZERO) => return Err(TimerConfigError::KeepaliveUnarmable),
+            Some(interval) => {
+                self.stream_keepalives.insert(transport, interval);
+            }
+            None => {
+                self.stream_keepalives.remove(&transport);
+            }
+        }
+        if let Some(handle) = self
+            .transports
+            .get_mut(transport)
+            .and_then(|bound| bound.keepalive.take())
+        {
+            self.deadlines.cancel(handle);
+        }
+        self.arm_keepalives(now);
+        Ok(())
+    }
+
+    /// The interval a stream transport is pinged at, as
+    /// [`Endpoint::keep_stream_alive`] and the configuration leave it, or
+    /// `None` when it is not pinged at all.
+    #[must_use]
+    pub fn stream_keepalive(&self, transport: TransportId) -> Option<core::time::Duration> {
+        self.keepalive_interval_of(transport)
     }
 
     /// What this endpoint was configured with, as it stands.

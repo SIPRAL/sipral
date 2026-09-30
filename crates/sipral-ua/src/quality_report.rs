@@ -336,17 +336,15 @@ impl UserAgent {
         to.extend_from_slice(collector.as_bytes());
         to.push(b'>');
 
-        let request = OutgoingRequest::new(
-            Method::Publish,
-            collector.clone(),
-            account.transport,
-            account.remote,
-        )
-        .to(&to)
-        .from(&account.sender_value())
-        .header(HeaderName::Event, EVENT_PACKAGE)
-        .header(HeaderName::Expires, b"0")
-        .body(CONTENT_TYPE, Arc::from(body(&identity, direction, metrics)));
+        let Some((transport, remote)) = account.destination() else {
+            return Ok(false);
+        };
+        let request = OutgoingRequest::new(Method::Publish, collector.clone(), transport, remote)
+            .to(&to)
+            .from(&account.sender_value())
+            .header(HeaderName::Event, EVENT_PACKAGE)
+            .header(HeaderName::Expires, b"0")
+            .body(CONTENT_TYPE, Arc::from(body(&identity, direction, metrics)));
 
         self.endpoint.request(&request, now)?;
         Ok(true)

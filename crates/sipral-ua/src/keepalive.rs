@@ -43,6 +43,17 @@
 //! §4.4.1), a trunk has no binding to keep, and an account whose address
 //! STUN found to be its own has no NAT to keep open.
 //!
+//! **Or when the application says so.** An account given an interval of its
+//! own ([`Account::keepalive`](crate::Account::keepalive)) is kept open at it
+//! whatever STUN found — or with no STUN at all, which is the case the rule
+//! above cannot see: a NAT with a short UDP timeout in front of a stack that
+//! was never given a STUN server loses every call between two REGISTERs. It
+//! applies on any transport: a datagram flow gets the double CRLF above from
+//! this agent, and a stream is pinged by the endpoint at the account's
+//! interval instead of its own, RFC 5626 §4.4.1's ping and pong. An account
+//! with no registrar is kept open toward its outbound proxy while the agent
+//! runs, since a trunk behind a NAT loses its calls the same way.
+//!
 //! **How often.** Every
 //! [`DEFAULT_KEEPALIVE`](crate::keepalive::DEFAULT_KEEPALIVE) unless set
 //! otherwise ([`UserAgent::keep_registrar_flows_alive`]), each interval drawn
@@ -67,7 +78,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sipral_core::endpoint::{Transmit, TransportProtocol};
+use sipral_core::endpoint::{Transmit, TransportId, TransportProtocol};
 
 use crate::account::AccountId;
 use crate::agent::UserAgent;
@@ -100,8 +111,14 @@ pub(crate) struct Keepalives {
     every: Option<Duration>,
     /// The accounts a STUN answer showed to be behind a NAT.
     behind: HashSet<AccountId>,
-    /// When each account that is being kept alive sends next.
-    due: HashMap<AccountId, Instant>,
+    /// When each account kept alive over a datagram transport sends next,
+    /// and at what interval.
+    due: HashMap<AccountId, (Instant, Duration)>,
+    /// The stream transports this agent asked the endpoint to ping at an
+    /// account's own interval, and that interval.
+    streams: HashMap<TransportId, Duration>,
+    /// The accounts whose stream is being pinged for them.
+    streamed: HashSet<AccountId>,
     /// Pings on their way out through [`UserAgent::poll_transmit`].
     out: VecDeque<Transmit>,
 }
@@ -112,6 +129,8 @@ impl Default for Keepalives {
             every: Some(DEFAULT_KEEPALIVE),
             behind: HashSet::new(),
             due: HashMap::new(),
+            streams: HashMap::new(),
+            streamed: HashSet::new(),
             out: VecDeque::new(),
         }
     }
@@ -122,11 +141,15 @@ impl UserAgent {
     /// or `None` to send nothing (see [`crate::keepalive`]). On, every
     /// [`DEFAULT_KEEPALIVE`], unless said otherwise.
     ///
-    /// What was already scheduled is drawn again from the new interval.
+    /// What was already scheduled is drawn again from the new interval. An
+    /// account with an interval of its own ([`Account::keepalive`]) keeps
+    /// it, whatever this says.
     ///
     /// # Errors
     /// [`UaError::InvalidKeepalive`] for an interval under [`MIN_KEEPALIVE`]
     /// or over [`MAX_KEEPALIVE`]; nothing changes.
+    ///
+    /// [`Account::keepalive`]: crate::Account::keepalive
     pub fn keep_registrar_flows_alive(
         &mut self,
         every: Option<Duration>,
@@ -151,11 +174,14 @@ impl UserAgent {
     }
 
     /// Whether this account's registrar flow is being kept open right now:
-    /// it is behind a NAT, on UDP, holding a binding or getting one, and the
-    /// stack is not suspended.
+    /// it is behind a NAT, on UDP, or has an interval of its own
+    /// ([`Account::keepalive`]) on any transport; it holds a binding or is
+    /// getting one; and the stack is not suspended.
+    ///
+    /// [`Account::keepalive`]: crate::Account::keepalive
     #[must_use]
     pub fn keeping_registrar_flow_alive(&self, account: AccountId) -> bool {
-        self.keepalives.due.contains_key(&account)
+        self.keepalives.due.contains_key(&account) || self.keepalives.streamed.contains(&account)
     }
 
     /// Whether a STUN answer said this account is behind a NAT, from what
@@ -168,10 +194,13 @@ impl UserAgent {
         }
     }
 
-    /// The account is gone, and nothing is kept for it.
+    /// The account is gone, and nothing is kept for it. A stream it had
+    /// asked for is handed back to the endpoint's own interval at the end of
+    /// the next round of work.
     pub(crate) fn forget_keepalive(&mut self, account: AccountId) {
         self.keepalives.behind.remove(&account);
         self.keepalives.due.remove(&account);
+        self.keepalives.streamed.remove(&account);
     }
 
     /// The next ping on its way out.
@@ -181,22 +210,19 @@ impl UserAgent {
 
     /// When the next one is due.
     pub(crate) fn keepalive_deadline(&self) -> Option<Instant> {
-        self.keepalives.due.values().min().copied()
+        self.keepalives.due.values().map(|(at, _)| *at).min()
     }
 
     /// Send every ping that is due, and draw the next.
     pub(crate) fn fire_keepalives(&mut self, now: Instant) {
-        let Some(every) = self.keepalives.every else {
-            return;
-        };
-        let due: Vec<AccountId> = self
+        let due: Vec<(AccountId, Duration)> = self
             .keepalives
             .due
             .iter()
-            .filter(|(_, at)| **at <= now)
-            .map(|(account, _)| *account)
+            .filter(|(_, (at, _))| *at <= now)
+            .map(|(account, (_, every))| (*account, *every))
             .collect();
-        for account in due {
+        for (account, every) in due {
             let Some(config) = self.accounts.get(&account) else {
                 self.keepalives.due.remove(&account);
                 continue;
@@ -209,7 +235,7 @@ impl UserAgent {
                 protocol: TransportProtocol::Udp,
             });
             let next = now + self.jittered(every);
-            self.keepalives.due.insert(account, next);
+            self.keepalives.due.insert(account, (next, every));
         }
     }
 
@@ -217,49 +243,108 @@ impl UserAgent {
     /// Run at the end of every round of work, so that a registration won or
     /// lost, a suspend or a wake, an account added or moved is followed at
     /// once.
+    ///
+    /// A datagram flow is this agent's to ping; a stream is the endpoint's,
+    /// which is asked to ping it at the shortest interval any account on it
+    /// wants, and handed back to its own interval when none does.
     pub(crate) fn settle_keepalives(&mut self, now: Instant) {
-        let Some(every) = self.keepalives.every else {
-            self.keepalives.due.clear();
-            return;
-        };
         let accounts: Vec<AccountId> = self.accounts.keys().copied().collect();
+        let mut streams: HashMap<TransportId, Duration> = HashMap::new();
+        let mut streamed = HashSet::new();
         for account in accounts {
-            let wanted = self.qualifies(account);
-            let scheduled = self.keepalives.due.contains_key(&account);
-            if wanted && !scheduled {
-                let first = now + self.jittered(every);
-                self.keepalives.due.insert(account, first);
-            } else if !wanted && scheduled {
-                self.keepalives.due.remove(&account);
+            let wanted = self.wanted_keepalive(account);
+            let protocol = self.accounts.get(&account).and_then(|config| {
+                self.endpoint
+                    .bound_transport(config.transport)
+                    .map(|(protocol, _)| (config.transport, protocol))
+            });
+            match (wanted, protocol) {
+                (Some(every), Some((_, TransportProtocol::Udp))) => {
+                    let scheduled = self
+                        .keepalives
+                        .due
+                        .get(&account)
+                        .map(|(_, interval)| *interval);
+                    if scheduled != Some(every) {
+                        let first = now + self.jittered(every);
+                        self.keepalives.due.insert(account, (first, every));
+                    }
+                }
+                (Some(every), Some((transport, protocol))) if protocol.is_stream() => {
+                    self.keepalives.due.remove(&account);
+                    streams
+                        .entry(transport)
+                        .and_modify(|shortest| *shortest = (*shortest).min(every))
+                        .or_insert(every);
+                    streamed.insert(account);
+                }
+                _ => {
+                    self.keepalives.due.remove(&account);
+                }
             }
         }
+        let released: Vec<TransportId> = self
+            .keepalives
+            .streams
+            .keys()
+            .filter(|transport| !streams.contains_key(transport))
+            .copied()
+            .collect();
+        for transport in released {
+            // `None` is always taken
+            let _ = self.endpoint.keep_stream_alive(transport, None, now);
+        }
+        for (transport, every) in &streams {
+            if self.keepalives.streams.get(transport) != Some(every) {
+                // never zero: an account's interval is at least MIN_KEEPALIVE
+                let _ = self
+                    .endpoint
+                    .keep_stream_alive(*transport, Some(*every), now);
+            }
+        }
+        self.keepalives.streams = streams;
+        self.keepalives.streamed = streamed;
     }
 
-    /// Whether this account's registrar flow is one to keep open.
-    fn qualifies(&self, account: AccountId) -> bool {
+    /// The interval this account's flow is to be kept open at right now, or
+    /// `None` when it is not one to keep open.
+    ///
+    /// An account with an interval of its own ([`Account::keepalive`]) is
+    /// kept open on any transport, STUN or no STUN, while its registration
+    /// holds a binding or is getting one — or, with no registrar, while the
+    /// agent runs. Any other is kept open only when a STUN answer showed it
+    /// behind a NAT, over UDP, at the agent's interval, while it registers.
+    /// The transport's protocol is [`UserAgent::settle_keepalives`]'s to
+    /// weigh.
+    ///
+    /// [`Account::keepalive`]: crate::Account::keepalive
+    fn wanted_keepalive(&self, account: AccountId) -> Option<Duration> {
         if !matches!(
             self.lifecycle(),
             LifecycleState::Running | LifecycleState::Recovering | LifecycleState::ResolutionLost
         ) {
-            return false;
+            return None;
         }
-        if !self.keepalives.behind.contains(&account) {
-            return false;
-        }
-        let Some(config) = self.accounts.get(&account) else {
-            return false;
+        let config = self
+            .accounts
+            .get(&account)
+            .filter(|config| config.located)?;
+        let every = if let Some(own) = config.keepalive {
+            own
+        } else {
+            let datagram = self
+                .endpoint
+                .bound_transport(config.transport)
+                .is_some_and(|(protocol, _)| protocol == TransportProtocol::Udp);
+            if !datagram || !self.keepalives.behind.contains(&account) {
+                return None;
+            }
+            self.keepalives.every?
         };
         if config.registrar.is_none() {
-            return false;
+            return config.keepalive.map(|_| every);
         }
-        let datagram = self
-            .endpoint
-            .bound_transport(config.transport)
-            .is_some_and(|(protocol, _)| protocol == TransportProtocol::Udp);
-        if !datagram {
-            return false;
-        }
-        self.registrations.get(&account).is_some_and(|reg| {
+        let registering = self.registrations.get(&account).is_some_and(|reg| {
             !reg.unregistering
                 && matches!(
                     reg.state,
@@ -269,7 +354,8 @@ impl UserAgent {
                         | RegistrationState::Retrying
                         | RegistrationState::Restored
                 )
-        })
+        });
+        registering.then_some(every)
     }
 
     /// RFC 5626 §4.4: "randomly distributed between 80% and 100%" of the

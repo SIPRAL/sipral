@@ -131,6 +131,17 @@ Nothing in this tree opens one. The core says where a message should go and
 what has to be resolved (`Event::ResolveNeeded`, `Event::TransportWanted`); the
 caller answers.
 
+An account can name its registrar or its outbound proxy by a URI rather than
+an address (`Account::located`). RFC 3263 is then this tree's and the lookups
+are the caller's: `sipral_core::endpoint::Locator` decides what to ask — NAPTR
+when asked for, SRV for the account's transport, then A or AAAA for its
+address family — and ranks what comes back, and the user agent hands each
+query out as `UaEvent::LookupWanted` and takes the answer with
+`UserAgent::looked_up`. Every address found is kept for §4.3's failover, and
+the name is looked up again when they have all failed or the answer's
+time-to-live runs out, so a PBX that changes address is followed without a
+restart.
+
 `sipral-ua` ships a reference loop for callers who do not want to write one. It
 is deliberately the plainest thing that works — `std::net`, blocking sockets,
 one thread each, UDP and TCP — and it is **off by default**, behind the
@@ -139,7 +150,8 @@ deployment needs:
 
 - **NAPTR and SRV.** `std::net` resolves a name to addresses and nothing else,
   so the reference loop answers `ResolveNeeded` with an A lookup and takes what
-  it gets. A deployment that has to reach a carrier through SRV supplies its own
+  it gets, and answers an account's NAPTR and SRV queries with nothing, which
+  leaves the locator the host's own addresses. A deployment that has to reach a carrier through SRV supplies its own
   resolver — the platform has one, and on mobile it is the only one allowed to
   answer while the radio is asleep.
 - **TLS.** No TLS implementation is linked here, and none will be: a stack that

@@ -283,7 +283,13 @@ The decisions, and why each one is what it is:
   woken by a push (RFC 8599) and registers then. `scripts/lab.sh nat-idle`
   is the proof: a call placed 330 seconds after the REGISTER, behind the
   lab's filtering NAT, rings with the keep-alive on and is dropped at the NAT
-  with it off. A media
+  with it off. That rule needs STUN to see the NAT, and a stack given no STUN
+  server sees none: an account can instead be given an interval of its own
+  (`Account::keepalive`, one to 120 seconds, off by default), and is then
+  kept open at it whatever STUN found, on any transport — the double CRLF
+  above on UDP, and on TCP or TLS the endpoint's own ping and pong (RFC 5626
+  §4.4.1) at the account's interval rather than at its 25 seconds. A trunk
+  given one keeps its outbound proxy's flow open the same way. A media
   socket is asked on the same schedule while it waits for its call — an
   application that maps the next call's socket when the last call ends may
   place that call many minutes later, and nothing else crosses the binding in

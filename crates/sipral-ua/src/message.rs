@@ -154,13 +154,13 @@ impl UserAgent {
         {
             return Err(UaError::MessagePending);
         }
+        let (transport, remote) = config.destination().ok_or(UaError::NotLocated)?;
         let call_id = CallId::new(&self.endpoint.token());
-        let request =
-            OutgoingRequest::new(Method::Message, target, config.transport, config.remote)
-                .to(&target_key)
-                .from(&config.sender_value())
-                .call_id(call_id)
-                .body(content_type, Arc::from(body));
+        let request = OutgoingRequest::new(Method::Message, target, transport, remote)
+            .to(&target_key)
+            .from(&config.sender_value())
+            .call_id(call_id)
+            .body(content_type, Arc::from(body));
         // §22.2's caching: nothing goes on unless this destination has
         // challenged this account before, so the first MESSAGE of a session
         // is unaffected and a later one skips the round trip a fresh 401

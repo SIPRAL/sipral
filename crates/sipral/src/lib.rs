@@ -55,7 +55,12 @@
 //! everywhere else in this tree: it reads a datagram and hands it over, and it
 //! takes a frame of PCM and gives it to whichever `sipral-io-*` it linked. A
 //! facade that opened a socket would be a facade that could not be embedded in
-//! the runtimes this stack exists to be embedded in.
+//! the runtimes this stack exists to be embedded in. The one exception is
+//! [`route_to`], which opens a datagram socket of its own, connects it to ask
+//! the operating system which address its route toward a peer leaves from,
+//! and closes it, without sending anything: the answer to "which address do
+//! I advertise", which an application that forgot to choose would otherwise
+//! answer with `127.0.0.1` ([`advertised_address`]).
 //!
 //! **No clock.** `now: Instant` arrives at every entry point that needs one,
 //! which is what makes an hour of a call a test that finishes in a
@@ -170,11 +175,14 @@ mod log;
 #[cfg(feature = "stun")]
 mod nat;
 mod payloads;
+#[cfg(test)]
+mod pin_tests;
 mod pipeline;
 mod ports;
 mod record;
 #[cfg(feature = "ice")]
 mod relay;
+mod route;
 mod session;
 mod share;
 mod siprec;
@@ -222,13 +230,17 @@ pub use local_conference::{
     LocalConferenceConfig, MAX_CONFERENCE_MEMBERS, Member,
 };
 #[cfg(feature = "redaction")]
-pub use log::{BURST, Log, LogLevel, LogRecord, LogSink, PER_SECOND, QUEUE_CEILING, Travel};
+pub use log::{
+    BURST, Log, LogLevel, LogRecord, LogSink, MIN_SALT, PER_SECOND, QUEUE_CEILING, SaltTooShort,
+    Travel, pseudonym_key,
+};
 #[cfg(feature = "stun")]
 pub use nat::{DEFAULT_REFRESH, Keep, MappingEvent, MappingState, Mappings, StunDatagram};
 pub use ports::{PortsExhausted, RtpPorts, RtpPortsError};
 pub use record::{RecordingFormat, RecordingLayout, RecordingOptions, RecordingSink};
 #[cfg(feature = "ice")]
 pub use relay::{Relay, RelayDatagram, RelayEvent, Relays};
+pub use route::{AdvertiseError, advertised_address, route_to};
 pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback, StreamEncryption};
 pub use share::{SessionGuard, SessionShare, SessionUnavailable};
 /// Why a STUN transaction ended without an address, as
@@ -286,6 +298,10 @@ pub use sipral_ua::Direction as CallDirection;
 /// What [`UserAgent::stop_recording`] hands back, for `redacted_recording`
 /// to be named against.
 pub use sipral_ua::Recording;
+/// RFC 3263 for an account that names its registrar or its outbound proxy
+/// ([`Account::located`]): the lookups [`UaEvent::LookupWanted`] asks for, the
+/// answers [`UserAgent::looked_up`] takes, and the procedure itself.
+pub use sipral_ua::locate::{MAX_TTL as MAX_LOCATION_TTL, MIN_TTL as MIN_LOCATION_TTL};
 /// The whole user agent, so that a softphone depends on this crate and nothing
 /// else: accounts, registration, calls, hold, transfer, and the five calls
 /// that drive them.
@@ -296,6 +312,9 @@ pub use sipral_ua::{
     Refusals, RegistrationFailure, RegistrationState, Replacing, STREAM_WAIT, Screen, Screening,
     StatusCode, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit,
     TransportId, TransportProtocol, UaError, UaEvent, Uri, UserAgent,
+};
+pub use sipral_ua::{
+    AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
 };
 /// Who is on a call and how it asked to be answered, why it ended, and where
 /// to send it instead: RFC 3325's asserted identity behind a per-account
@@ -311,6 +330,10 @@ pub use sipral_ua::{
 pub use sipral_ua::{
     Attestation, CallerVerification, StirVerification, VerificationFailure, VerificationOutcome,
 };
+/// A PBX's self-signed TLS certificate, trusted by its SHA-256 fingerprint
+/// ([`Account::tls_pin`]) and checked by the application's certificate
+/// verifier with [`CertificatePin::check`].
+pub use sipral_ua::{CertificatePin, PinError, PinMismatch, PinnedCertificate};
 /// STIR/SHAKEN in calls: what an account signs with, and what the agent
 /// verifies against — [`UserAgent::set_stir`], [`Account::stir_signing`].
 #[cfg(feature = "stir")]

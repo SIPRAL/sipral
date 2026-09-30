@@ -34,6 +34,7 @@ pub mod diag;
 pub mod dialog;
 pub mod endpoint;
 pub mod msg;
+pub mod pin;
 pub mod replay;
 pub mod sdp;
 pub mod transaction;

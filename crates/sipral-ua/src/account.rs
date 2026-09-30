@@ -28,6 +28,7 @@ use std::time::Duration;
 use sipral_core::auth::Credentials;
 use sipral_core::endpoint::{TransportId, TransportProtocol};
 use sipral_core::msg::{HeaderName, Uri};
+use sipral_core::pin::CertificatePin;
 
 use crate::identity::{ANONYMOUS_FROM, Privacy};
 
@@ -253,6 +254,23 @@ pub struct Account {
     /// See [`Account::stir_signing`].
     #[cfg(feature = "stir")]
     pub(crate) stir_signing: Option<crate::StirSigning>,
+    /// How often this account keeps its flow to `remote` open whatever STUN
+    /// found, or `None` to leave that to the agent's NAT rule. See
+    /// [`Account::keepalive`].
+    pub(crate) keepalive: Option<Duration>,
+    /// The URI whose server `remote` is found from by RFC 3263, for an
+    /// account made with a name rather than an address. See
+    /// [`Account::located`].
+    pub(crate) server: Option<Uri>,
+    /// Whether a NAPTR lookup comes first for `server`. See
+    /// [`Account::naptr`].
+    pub(crate) naptr: bool,
+    /// Whether `remote` is an address yet: always for an account made with
+    /// one, and for a located one once the first lookup has answered.
+    pub(crate) located: bool,
+    /// The one TLS server certificate this account trusts, by fingerprint,
+    /// in place of a trust anchor. See [`Account::tls_pin`].
+    pub(crate) tls_pin: Option<CertificatePin>,
 }
 
 impl Account {
@@ -328,6 +346,97 @@ impl Account {
             stir_verification: crate::StirVerification::default(),
             #[cfg(feature = "stir")]
             stir_signing: None,
+            keepalive: None,
+            server: None,
+            naptr: false,
+            located: true,
+            tls_pin: None,
+        }
+    }
+
+    /// An account at `aor`, registering with `registrar`, reachable at
+    /// `contact`, whose registrar is found from `registrar`'s host by RFC
+    /// 3263 rather than given as an address.
+    ///
+    /// The lookups are the application's resolver's, asked for one at a time
+    /// ([`UaEvent::LookupWanted`](crate::UaEvent::LookupWanted), answered
+    /// with [`UserAgent::looked_up`](crate::UserAgent::looked_up)); the order
+    /// they go in, the SRV ranking and the fallback to the host's own
+    /// addresses are this crate's ([`sipral_core::endpoint::Locator`]). The
+    /// transport is `transport`'s, so the SRV name asked is the one that
+    /// serves it: `_sip._udp`, `_sip._tcp` or `_sips._tcp`. A `registrar`
+    /// with a port skips SRV, and one with a numeric host asks nothing.
+    ///
+    /// The first REGISTER waits for the first answer. Every address found is
+    /// kept, and a REGISTER that times out, whose transport fails or that is
+    /// answered 503 moves to the next at once (§4.3); once none is left, or once the shortest
+    /// time-to-live of the answer runs out, the name is looked up again, so a
+    /// registrar that changes address is followed without a restart (see
+    /// [`crate::locate`]). Until the first answer, a call, a MESSAGE, a
+    /// SUBSCRIBE or a PUBLISH that names no destination of its own is
+    /// refused with [`UaError::NotLocated`](crate::UaError::NotLocated).
+    #[must_use]
+    pub fn located(aor: Uri, registrar: Uri, contact: Uri, transport: TransportId) -> Self {
+        let mut account = Self::with(
+            aor,
+            Some(registrar.clone()),
+            contact,
+            transport,
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+        );
+        account.server = Some(registrar);
+        account.located = false;
+        account
+    }
+
+    /// [`Account::unregistered`], with the outbound proxy found from
+    /// `outbound_proxy`'s host by RFC 3263, as [`Account::located`] finds a
+    /// registrar. The first lookup starts with the agent's first round of
+    /// work after the account is added.
+    #[must_use]
+    pub fn unregistered_located(
+        aor: Uri,
+        contact: Uri,
+        transport: TransportId,
+        outbound_proxy: Uri,
+    ) -> Self {
+        let mut account = Self::with(
+            aor,
+            None,
+            contact,
+            transport,
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+        );
+        account.server = Some(outbound_proxy);
+        account.located = false;
+        account
+    }
+
+    /// Ask the server's domain for NAPTR records before SRV (RFC 3263 §4.1),
+    /// for an account made with [`Account::located`] or
+    /// [`Account::unregistered_located`]. Off by default: most domains
+    /// publish none, and a client that already knows its transport may start
+    /// at SRV. No effect on an account made with an address.
+    #[must_use]
+    pub const fn naptr(mut self) -> Self {
+        self.naptr = true;
+        self
+    }
+
+    /// The URI whose server this account locates by RFC 3263, or `None` for
+    /// one made with an address.
+    #[must_use]
+    pub const fn server(&self) -> Option<&Uri> {
+        self.server.as_ref()
+    }
+
+    /// Where this account's requests go when they name nowhere of their own,
+    /// or `None` while a located account has no answer yet.
+    pub(crate) const fn destination(&self) -> Option<(TransportId, SocketAddr)> {
+        if self.located {
+            Some((self.transport, self.remote))
+        } else {
+            None
         }
     }
 
@@ -501,6 +610,71 @@ impl Account {
     pub fn stir_signing(mut self, signing: crate::StirSigning) -> Self {
         self.stir_signing = Some(signing);
         self
+    }
+
+    /// Keep this account's flow to its registrar — to its outbound proxy,
+    /// for one that never registers — open with a CRLF keep-alive every
+    /// `every`, whether or not STUN ran or found a NAT (RFC 5626 §3.5.1,
+    /// §4.4.1).
+    ///
+    /// For a network whose NAT forgets a UDP flow sooner than the REGISTER
+    /// refresh comes round, with STUN off: without a keep-alive, a call the
+    /// registrar forwards between two REGISTERs is dropped at the NAT. On a
+    /// datagram transport a double CRLF goes out alone in a datagram, which
+    /// RFC 3261 §7.5 has a registrar ignore; on a stream the endpoint pings
+    /// the connection at this interval instead of its own (RFC 5626 §4.4.1's
+    /// double CRLF, with its single-CRLF pong). Each interval is drawn
+    /// between 80% and 100% of `every`, as §4.4.1 asks, so what the NAT
+    /// sees is never further apart than `every`.
+    ///
+    /// Sent while the account's registration holds a binding or is getting
+    /// one, and for an account with no registrar while the agent runs, from
+    /// the first round of work after it was added; never while the agent is
+    /// suspended. Left unset — the default — an
+    /// account is kept open only when STUN showed it behind a NAT, at the
+    /// agent's interval ([`crate::keepalive`]).
+    ///
+    /// # Errors
+    /// [`UaError::InvalidKeepalive`](crate::UaError::InvalidKeepalive) for an
+    /// interval under [`MIN_KEEPALIVE`](crate::keepalive::MIN_KEEPALIVE) or
+    /// over [`MAX_KEEPALIVE`](crate::keepalive::MAX_KEEPALIVE).
+    pub fn keepalive(mut self, every: Duration) -> Result<Self, crate::UaError> {
+        if !(crate::keepalive::MIN_KEEPALIVE..=crate::keepalive::MAX_KEEPALIVE).contains(&every) {
+            return Err(crate::UaError::InvalidKeepalive(every));
+        }
+        self.keepalive = Some(every);
+        Ok(self)
+    }
+
+    /// The keep-alive interval [`Account::keepalive`] set, or `None`.
+    #[must_use]
+    pub const fn keepalive_interval(&self) -> Option<Duration> {
+        self.keepalive
+    }
+
+    /// Trust the TLS server this account connects to by the SHA-256
+    /// fingerprint of its certificate, rather than by a trust anchor: for a
+    /// PBX that serves a certificate it signed itself.
+    ///
+    /// TLS is the application's (`docs/22-tls.md`), so this is what its
+    /// certificate verifier asks: [`Account::pinned_certificate`] gives the
+    /// pin, and [`CertificatePin::check`] takes the DER bytes of the leaf
+    /// certificate the server presented and answers in constant time. With a
+    /// pin, the fingerprint is the whole verdict: no chain, no trust anchor
+    /// and no host name is consulted, and an expired certificate that
+    /// matches is accepted and reported as expired. `sipral_core::pin` says
+    /// why for each. Unset by default, and then the platform's own checks
+    /// apply as they always did.
+    #[must_use]
+    pub const fn tls_pin(mut self, pin: CertificatePin) -> Self {
+        self.tls_pin = Some(pin);
+        self
+    }
+
+    /// The pin [`Account::tls_pin`] set, if any.
+    #[must_use]
+    pub const fn pinned_certificate(&self) -> Option<&CertificatePin> {
+        self.tls_pin.as_ref()
     }
 
     /// Whether a peer at `address` is one this account trusts.

@@ -43,6 +43,7 @@
 
 mod account;
 mod admission;
+pub mod advertise;
 mod agent;
 mod announce;
 mod answering;
@@ -73,6 +74,7 @@ mod identity;
 /// bounds a binding checks its own setting against.
 pub mod keepalive;
 mod lifecycle;
+pub mod locate;
 mod message;
 mod mwi;
 mod options;
@@ -169,10 +171,19 @@ pub use verification::{
 /// What a caller needs from the layer below to drive this one, re-exported so
 /// that an application does not have to name `sipral-core` to use a phone.
 pub use sipral_core::auth::Credentials;
+/// RFC 3263's lookups, as [`UaEvent::LookupWanted`] asks for them and
+/// [`UserAgent::looked_up`] takes their answers, and the procedure itself for
+/// an application that locates something of its own.
+pub use sipral_core::endpoint::{
+    AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
+};
 pub use sipral_core::endpoint::{
     EndpointConfig, Input, ReceiveError, Transmit, TransportId, TransportProtocol,
 };
 pub use sipral_core::msg::{StatusCode, Uri};
+/// A TLS server certificate trusted by its SHA-256 fingerprint, per account
+/// ([`Account::tls_pin`]).
+pub use sipral_core::pin::{CertificatePin, PinError, PinMismatch, PinnedCertificate};
 /// Recording a session and feeding it back, which a user agent is driven by
 /// exactly as the endpoint under it is (`docs/18-replay.md`).
 pub use sipral_core::replay::{Driven, Played, Recorder, Recording, Replay};

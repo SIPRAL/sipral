@@ -248,7 +248,22 @@ again across the C ABI in `crates/sipral-ffi/src/log.rs`:
   is derived from the stack's `media_seed` under a label of its own — never
   from `entropy`, which a replay recording carries in clear, so an address
   pseudonym could otherwise be reversed by trying every address. Bytes the
-  parser cannot read are logged by their size only.
+  parser cannot read are logged by their size only. That key is drawn fresh
+  per start, so the same address — `127.0.0.1` most visibly — reads as a
+  different pseudonym in every run. `Log::from_salt` keys the pseudonyms
+  with a salt the application keeps for the installation instead
+  (`sipral::pseudonym_key`, at least `sipral::MIN_SALT` bytes), and two runs
+  of one installation then pseudonymise alike and compare line by line.
+- **A diagnostic trace, only when asked for.** `Log::set_diagnostic(true)`
+  writes every message at trace whole — users, names, numbers and addresses
+  as they went, and the peer's own address — for an operator comparing two
+  runs, and prose lines lose only their credentials. Secrets never appear in
+  either mode: `sipral_diag::strip_secrets` takes every `Authorization` and
+  `Proxy-Authorization` value (a folded second line included), every
+  `a=crypto` `inline:` key however many one line lists, every `k=` key and
+  every `a=key-mgmt` payload out of each message, by line, so bytes the
+  parser refuses are stripped and written rather than withheld. It is off
+  by default and nothing but that call turns it on.
 
 The level is set at run time, as often as wanted: `Log::enable`,
 `Log::set_level` and `Log::disable` in Rust; in C, `sipral_stack_log(stack,

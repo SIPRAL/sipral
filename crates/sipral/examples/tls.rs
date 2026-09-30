@@ -25,7 +25,10 @@
 //! ```
 //!
 //! and, exactly like `call.rs`, add `--wav out.wav` on a machine with no
-//! audio device.
+//! audio device. `--pin <sha-256 fingerprint>` trusts the server's
+//! certificate by its fingerprint instead of by the platform's trust store —
+//! what a PBX serving a certificate it signed itself needs
+//! ([`sipral::CertificatePin`], `docs/22-tls.md`).
 
 #[path = "common/entropy.rs"]
 mod entropy;
@@ -43,13 +46,17 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, RootCertStore};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{
+    CertificateError, ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore,
+    SignatureScheme,
+};
 
 use sipral::{
-    Account, CallHandle, CodecCatalog, DEFAULT_DIGIT, EndpointConfig, Event, Input, MediaConfig,
-    MediaEngine, MediaEvent, OutgoingCall, TransportId, TransportProtocol, UaEvent, Uri, UserAgent,
-    WallClock,
+    Account, CallHandle, CertificatePin, CodecCatalog, DEFAULT_DIGIT, EndpointConfig, Event, Input,
+    MediaConfig, MediaEngine, MediaEvent, OutgoingCall, TransportId, TransportProtocol, UaEvent,
+    Uri, UserAgent, WallClock,
 };
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -90,8 +97,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entropy::seed()?,
     );
     let agent = UserAgent::new(EndpointConfig::default(), entropy::seed()?)?;
-    let roots = TlsTransport::platform_roots();
-    let mut endpoint = Endpoint::connect(remote, HOST, roots, agent, engine, now)?;
+    let trust = match pin_from_args()? {
+        Some(pin) => Trust::Pinned(pin),
+        None => Trust::Roots(TlsTransport::platform_roots()),
+    };
+    let mut endpoint = Endpoint::connect(remote, HOST, trust, agent, engine, now)?;
 
     let aor = Uri::parse_str("sip:sipral-example@invalid.example")?;
     let contact = Uri::parse_str(&format!("sip:sipral-example@{}", endpoint.local))?;
@@ -252,6 +262,21 @@ fn wav_path_from_args() -> Option<String> {
     None
 }
 
+/// What `--pin` named, read as a SHA-256 fingerprint.
+fn pin_from_args() -> Result<Option<CertificatePin>, sipral::PinError> {
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--pin" {
+            return args
+                .next()
+                .as_deref()
+                .map(CertificatePin::parse)
+                .transpose();
+        }
+    }
+    Ok(None)
+}
+
 /// Where to write the WAV file: what `--wav` named, or, on a target with no
 /// audio device to play through instead, `tls.wav`.
 fn wav_path_or_default(explicit: Option<String>) -> Option<String> {
@@ -269,6 +294,85 @@ fn wav_path_or_default(explicit: Option<String>) -> Option<String> {
 }
 
 // -- the TLS transport itself -------------------------------------------------
+
+/// How the server's certificate is trusted.
+enum Trust {
+    /// By a chain to one of these roots, and by name, as `rustls` checks it.
+    Roots(RootCertStore),
+    /// By its fingerprint alone: a PBX's self-signed certificate.
+    Pinned(CertificatePin),
+}
+
+/// A `rustls` verifier that trusts one certificate by its SHA-256
+/// fingerprint and nothing else ([`sipral::CertificatePin`]).
+///
+/// The fingerprint replaces the chain, the trust anchors and the host name,
+/// and an expired certificate that matches is accepted, as the pin's own
+/// documentation says why. The handshake signature is still verified the
+/// ordinary way: a matching certificate proves nothing until the server has
+/// shown it holds the certificate's private key.
+#[derive(Debug)]
+struct PinnedServer {
+    pin: CertificatePin,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl ServerCertVerifier for PinnedServer {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        match self.pin.check(end_entity.as_ref(), now.as_secs()) {
+            Ok(pinned) => {
+                if pinned.expired {
+                    eprintln!("the pinned certificate has expired; accepted by its pin");
+                }
+                Ok(ServerCertVerified::assertion())
+            }
+            Err(_) => Err(rustls::Error::InvalidCertificate(
+                CertificateError::ApplicationVerificationFailure,
+            )),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
 
 /// One SIP connection over TLS: a non-blocking `TcpStream` with a `rustls`
 /// client on top of it, checked against the platform's own trust store —
@@ -297,13 +401,18 @@ impl TlsTransport {
         roots
     }
 
-    fn connect(remote: SocketAddr, server_name: &str, roots: RootCertStore) -> io::Result<Self> {
+    fn connect(remote: SocketAddr, server_name: &str, trust: Trust) -> io::Result<Self> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = ClientConfig::builder_with_provider(provider)
+        let versions = ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
-            .map_err(io::Error::other)?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+            .map_err(io::Error::other)?;
+        let config = match trust {
+            Trust::Roots(roots) => versions.with_root_certificates(roots).with_no_client_auth(),
+            Trust::Pinned(pin) => versions
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(PinnedServer { pin, provider }))
+                .with_no_client_auth(),
+        };
         let name = ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?;
         let conn = ClientConnection::new(Arc::new(config), name).map_err(io::Error::other)?;
         let tcp = TcpStream::connect(remote)?;
@@ -355,6 +464,10 @@ impl TlsTransport {
             }
         }
         if let Err(error) = self.conn.process_new_packets() {
+            // the alert saying why goes out before the connection is given
+            // up, so that the server hears a refused certificate at once
+            // rather than a silence it has to time out
+            let _ = self.flush_tls();
             return Err(io::Error::other(error));
         }
         let mut buffer = [0_u8; 4_096];
@@ -403,12 +516,12 @@ impl Endpoint {
     fn connect(
         remote: SocketAddr,
         server_name: &str,
-        roots: RootCertStore,
+        trust: Trust,
         mut agent: UserAgent,
         engine: MediaEngine,
         now: Instant,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let sip = TlsTransport::connect(remote, server_name, roots)?;
+        let sip = TlsTransport::connect(remote, server_name, trust)?;
         let local = sip.tcp.local_addr()?;
         let transport = TransportId(1);
         agent.receive(
@@ -603,7 +716,7 @@ mod tests {
 
         let mut roots = RootCertStore::empty();
         roots.add(cert_der).unwrap();
-        let mut client = TlsTransport::connect(remote, "localhost", roots).unwrap();
+        let mut client = TlsTransport::connect(remote, "localhost", Trust::Roots(roots)).unwrap();
 
         let mut sent = false;
         let mut received = Vec::new();
@@ -625,5 +738,112 @@ mod tests {
             received, RESPONSE,
             "the client read something other than what the server sent"
         );
+    }
+
+    /// A server on loopback with a self-signed certificate for `name`, valid
+    /// between the two years, answering one request; its certificate in DER
+    /// and its address. What it read, or why the handshake failed, comes
+    /// back from the thread.
+    fn pbx(
+        name: &str,
+        from: i32,
+        until: i32,
+    ) -> (Vec<u8>, SocketAddr, thread::JoinHandle<io::Result<Vec<u8>>>) {
+        let (der, key) = mint(name, from, until);
+        let key_der = PrivatePkcs8KeyDer::from(key.serialize_der());
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let remote = listener.local_addr().unwrap();
+        let server_cert = CertificateDer::from(der.clone());
+        let server = thread::spawn(move || -> io::Result<Vec<u8>> {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let config = ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![server_cert], PrivateKeyDer::Pkcs8(key_der))
+                .unwrap();
+            let mut conn = ServerConnection::new(Arc::new(config)).unwrap();
+            let (mut tcp, _) = listener.accept()?;
+            tcp.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
+            let mut request = vec![0_u8; PING.len()];
+            tls.read_exact(&mut request)?;
+            tls.write_all(PONG)?;
+            Ok(request)
+        });
+        (der, remote, server)
+    }
+
+    /// A self-signed certificate for `name`, valid between the two years, in
+    /// DER, and its key.
+    fn mint(name: &str, from: i32, until: i32) -> (Vec<u8>, rcgen::KeyPair) {
+        let mut params = rcgen::CertificateParams::new(vec![name.to_owned()]).unwrap();
+        params.not_before = rcgen::date_time_ymd(from, 1, 1);
+        params.not_after = rcgen::date_time_ymd(until, 1, 1);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let der = params.self_signed(&key).unwrap().der().to_vec();
+        (der, key)
+    }
+
+    const PING: &[u8] = b"OPTIONS sip:pbx SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+    const PONG: &[u8] = b"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";
+
+    /// Send `PING` and read until `PONG` has arrived, the connection fails,
+    /// or ten seconds pass.
+    fn exchange(client: &mut TlsTransport) -> io::Result<Vec<u8>> {
+        let mut sent = false;
+        let mut received = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while received.len() < PONG.len() && Instant::now() < deadline {
+            if !sent {
+                client.send(PING)?;
+                sent = true;
+            }
+            let outcome = client.poll(|chunk| received.extend_from_slice(chunk))?;
+            if outcome.closed {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Ok(received)
+    }
+
+    /// The PBX's own certificate, trusted by its fingerprint alone: a name
+    /// that does not match and no root that vouches for it, and the
+    /// connection carries SIP both ways.
+    #[test]
+    fn a_pinned_self_signed_certificate_is_trusted_by_its_fingerprint_alone() {
+        let (der, remote, server) = pbx("factory-default.invalid", 2024, 2099);
+        let pin = CertificatePin::parse(&CertificatePin::of(&der).to_string()).unwrap();
+        let mut client = TlsTransport::connect(remote, "localhost", Trust::Pinned(pin)).unwrap();
+        assert_eq!(exchange(&mut client).unwrap(), PONG);
+        assert_eq!(server.join().unwrap().unwrap(), PING);
+    }
+
+    /// Any other certificate is refused in the handshake, before a byte of
+    /// SIP is written to it.
+    #[test]
+    fn a_certificate_other_than_the_pinned_one_is_refused_in_the_handshake() {
+        let (_, remote, server) = pbx("localhost", 2024, 2099);
+        let (other, _) = mint("localhost", 2024, 2099);
+        let pin = CertificatePin::of(&other);
+        let mut client = TlsTransport::connect(remote, "localhost", Trust::Pinned(pin)).unwrap();
+        let refused = exchange(&mut client).expect_err("the handshake is refused");
+        assert!(refused.to_string().contains("certificate"), "{refused}");
+        assert!(
+            server.join().unwrap().is_err(),
+            "the server read no request"
+        );
+    }
+
+    /// The certificate lapsed years ago, and it is still the pinned one: the
+    /// connection goes, as `sipral::CertificatePin` decides.
+    #[test]
+    fn an_expired_pinned_certificate_still_connects() {
+        let (der, remote, server) = pbx("localhost", 2018, 2020);
+        let pin = CertificatePin::of(&der);
+        let mut client = TlsTransport::connect(remote, "localhost", Trust::Pinned(pin)).unwrap();
+        assert_eq!(exchange(&mut client).unwrap(), PONG);
+        assert_eq!(server.join().unwrap().unwrap(), PING);
     }
 }

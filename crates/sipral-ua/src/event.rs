@@ -115,6 +115,12 @@ pub enum RegistrationFailure {
     /// address, and resolving one is the caller's, so the redirect is reported
     /// rather than chased.
     Redirected,
+    /// The account's `Contact` names an address the registrar cannot reach
+    /// this end at — loopback, to a registrar that is not, or the unspecified
+    /// address — and nothing was sent (see [`crate::UaError::UnreachableAddress`]).
+    /// Trying again cannot help until the account is given an address the
+    /// registrar can reach ([`UserAgent::rebind`](crate::UserAgent::rebind)).
+    UnreachableContact,
 }
 
 impl RegistrationFailure {
@@ -132,6 +138,10 @@ impl RegistrationFailure {
                 "a registrar that refuses every binding is usually configured to allow none; \
                  check max_contacts on the address of record",
             ),
+            Self::UnreachableContact => Some(
+                "the Contact names a loopback address the registrar cannot reach; bind to the \
+                 address of the interface that routes to the registrar",
+            ),
             Self::BadCredentials | Self::Unreachable | Self::Redirected => None,
         }
     }
@@ -144,6 +154,7 @@ impl core::fmt::Display for RegistrationFailure {
             Self::BadCredentials => "credentials refused",
             Self::Unreachable => "registrar unreachable",
             Self::Redirected => "registrar moved",
+            Self::UnreachableContact => "contact unreachable from the registrar",
         })
     }
 }
@@ -765,6 +776,40 @@ pub enum UaEvent {
         rung: Option<Rung>,
         /// How long until the next rung, when there is going to be one.
         next_in: Option<Duration>,
+    },
+    /// A DNS lookup is needed to locate an account's server by RFC 3263
+    /// ([`Account::located`](crate::Account::located)).
+    ///
+    /// Make it with the platform's resolver and hand the answer to
+    /// [`UserAgent::looked_up`](crate::UserAgent::looked_up) — every one,
+    /// failures included, since the procedure waits for each answer. Several
+    /// can be outstanding at once: one per SRV target's host.
+    LookupWanted {
+        /// The account whose server is being located.
+        account: AccountId,
+        /// The name and the kind of record to ask for.
+        query: sipral_core::endpoint::Query,
+    },
+    /// An account's server was located, or located again once the last
+    /// answer's time-to-live ran out: every address the answer named, first
+    /// the one the account's requests now go to.
+    Located {
+        /// The account.
+        account: AccountId,
+        /// The addresses, in RFC 3263 §4.3's order from the one in use.
+        targets: Vec<std::net::SocketAddr>,
+    },
+    /// A lookup of an account's server named no address. A REGISTER that was
+    /// waiting for it is reported failed as well, and backs off; anything
+    /// else is looked up again after `retry_in`. An address an earlier
+    /// answer named stays in use meanwhile.
+    LocateFailed {
+        /// The account.
+        account: AccountId,
+        /// Why.
+        reason: sipral_core::endpoint::LocateError,
+        /// How long until the next lookup.
+        retry_in: Duration,
     },
     /// The address this call's media was described at is gone: the network
     /// changed under it ([`Recovery::Rebuild`](crate::Recovery::Rebuild)),

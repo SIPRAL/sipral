@@ -730,7 +730,10 @@ impl UserAgent {
         };
         let expires = held.wanted.expires;
         let learned = self.learned_for(held.account, held.wanted.destination, now);
-        let request = build_subscribe(account, held, expires, learned);
+        let Some(request) = build_subscribe(account, held, expires, learned) else {
+            self.unsendable(subscription);
+            return;
+        };
         let Ok(id) = self.endpoint.request(&request, now) else {
             self.unsendable(subscription);
             return;
@@ -954,7 +957,7 @@ fn build_subscribe(
     held: &Subscription,
     expires: Duration,
     learned: Option<&RegistrarInfo>,
-) -> OutgoingRequest {
+) -> Option<OutgoingRequest> {
     let seconds = expires.as_secs().to_string();
     let mut from = account.sender_value().to_vec();
     from.extend_from_slice(b";tag=");
@@ -963,10 +966,7 @@ fn build_subscribe(
     to.push(b'<');
     to.extend_from_slice(held.wanted.target.as_bytes());
     to.push(b'>');
-    let (transport, remote) = held
-        .wanted
-        .destination
-        .unwrap_or((account.transport, account.remote));
+    let (transport, remote) = held.wanted.destination.or_else(|| account.destination())?;
 
     let mut request = OutgoingRequest::new(
         Method::Subscribe,
@@ -1004,7 +1004,7 @@ fn build_subscribe(
             request = request.header(name, &extra.value);
         }
     }
-    request
+    Some(request)
 }
 
 /// The in-dialog one that refreshes or ends it. A refresh is a target refresh
