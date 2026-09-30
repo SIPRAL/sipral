@@ -22,17 +22,19 @@
 //! the address it gave stays in use: a PBX that moves is followed as soon as
 //! its DNS says so, without a restart and without a failed request first.
 //!
-//! **Failing over.** RFC 3263 §4.3 keeps every address the answer named, in
-//! order, and has the client try the next one when the first "proved to be
-//! unusable" — no answer, a transport that failed — or answered 503. A
-//! REGISTER that times out, whose transport fails, or that is answered 503
-//! is sent again at once to the next address; RFC 3261 §10.2.7's "SHOULD NOT
-//! immediately re-attempt a registration to the same registrar" is about the
-//! one that failed. Once every address has failed, the account backs off as
-//! it always does (RFC 5626 §4.5), and the attempt after the wait looks the
-//! name up again. Any other final response — a 404, a 500 — is an answer
-//! from the right server and moves nothing. (§4.3's wording is recalled
-//! rather than quoted here.)
+//! **Failing over.** RFC 3263 §4.3: "failure occurs if the transaction layer
+//! reports a 503 error response or a transport failure of some sort", or
+//! "if the transaction layer times out without ever having received any
+//! response", and then "the client SHOULD create a new request, which is
+//! identical to the previous, but has a different value of the Via branch
+//! ID", sent "to the next element in the list". A REGISTER that times out,
+//! whose transport fails, or that is answered 503 is sent again at once to
+//! the next address; RFC 3261 §10.2.7's "SHOULD NOT immediately re-attempt a
+//! registration to the same registrar" is about the one that failed. Once
+//! every address has failed, the account backs off as it always does (RFC
+//! 5626 §4.5), and the attempt after the wait looks the name up again. Any
+//! other final response — a 404, a 500 — is an answer from the right server
+//! and moves nothing.
 //!
 //! **A time-to-live.** Honoured, but with a floor of [`MIN_TTL`] so that a
 //! zone publishing zero does not turn an account into a stream of lookups,
@@ -46,6 +48,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use sipral_core::endpoint::{AddressFamily, Answer, LocateError, Located, Locator, Query};
+use sipral_core::msg::{HostRef, Uri};
 
 use crate::account::AccountId;
 use crate::agent::UserAgent;
@@ -83,6 +86,11 @@ struct Location {
 #[derive(Debug, Default)]
 pub(crate) struct Locations {
     held: HashMap<AccountId, Location>,
+    /// The accounts a [`Rung::WantAddress`](crate::Rung::WantAddress) looked
+    /// up again and that have not answered yet.
+    relocating: Vec<AccountId>,
+    /// Whether one of them has named an address since that rung.
+    relocated: bool,
 }
 
 impl UserAgent {
@@ -118,8 +126,59 @@ impl UserAgent {
             return Ok(());
         }
         self.pump_lookup(account, now);
+        if self.locations.relocated && self.locations.relocating.is_empty() {
+            self.locations.relocated = false;
+            self.address_found(now);
+        }
         self.drain(now);
         Ok(())
+    }
+
+    /// What [`Rung::WantAddress`](crate::Rung::WantAddress) does for the
+    /// accounts that locate their server by a name: look each one up again,
+    /// the application's resolver answering as it does any other lookup. A
+    /// lookup already running is waited for as it is. Once every one has
+    /// answered and one of them named an address, the ladder climbs at once,
+    /// as it does when the application answers the rung with
+    /// [`UserAgent::rebind`] — the answer is what the rung was waiting for.
+    /// A server written as an address never needed a resolver and is not
+    /// looked up.
+    pub(crate) fn relocate(&mut self, now: Instant) {
+        self.locations.relocating.clear();
+        self.locations.relocated = false;
+        let named: Vec<AccountId> = self
+            .accounts
+            .iter()
+            .filter(|(_, config)| {
+                config
+                    .server
+                    .as_ref()
+                    .and_then(Uri::sip)
+                    .is_some_and(|uri| matches!(uri.host, HostRef::Name(_)))
+            })
+            .map(|(account, _)| *account)
+            .collect();
+        for account in named {
+            let idle = self
+                .locations
+                .held
+                .get(&account)
+                .is_none_or(|location| location.lookup.is_none());
+            if idle {
+                if let Some(location) = self.locations.held.get_mut(&account) {
+                    location.again = None;
+                }
+                self.start_lookup(account, now);
+            }
+            let running = self
+                .locations
+                .held
+                .get(&account)
+                .is_some_and(|location| location.lookup.is_some());
+            if running {
+                self.locations.relocating.push(account);
+            }
+        }
     }
 
     /// Every address the last lookup for `account` named, first the one its
@@ -304,6 +363,15 @@ impl UserAgent {
     }
 
     fn on_located(&mut self, account: AccountId, located: Located, now: Instant) {
+        if let Some(at) = self
+            .locations
+            .relocating
+            .iter()
+            .position(|id| *id == account)
+        {
+            self.locations.relocating.swap_remove(at);
+            self.locations.relocated = true;
+        }
         let Some(location) = self.locations.held.get_mut(&account) else {
             return;
         };
@@ -373,6 +441,7 @@ impl UserAgent {
     }
 
     fn on_locate_failed(&mut self, account: AccountId, reason: LocateError, now: Instant) {
+        self.locations.relocating.retain(|id| *id != account);
         let entropy = self.endpoint.token();
         let Some(location) = self.locations.held.get_mut(&account) else {
             return;
@@ -836,6 +905,40 @@ mod tests {
         let later = at + Duration::from_secs(300);
         let seen = run(&mut agent, id, &moved, at, later);
         assert_eq!(seen.registers(), [addr("203.0.113.77:5060")]);
+    }
+
+    #[test]
+    fn a_lost_resolver_has_a_located_account_looked_up_again_and_the_ladder_climbs_on_the_answer() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(located("sip:pbx.example.com"));
+        agent.register(id, t0).unwrap();
+        let seen = settle(&mut agent, id, &pbx(3_600), t0);
+        let (_, request) = seen.sent.last().unwrap();
+        deliver(&mut agent, addr("192.0.2.40:5080"), &granted(request), t0);
+        let _ = settle(&mut agent, id, &pbx(3_600), t0);
+
+        // the resolver comes back naming another server: the rung that
+        // asks for an address asks it of the resolver, and the REGISTER
+        // goes there as soon as it answers, not a transaction's time later
+        let t1 = t0 + Duration::from_secs(10);
+        agent.name_resolution_lost(t1);
+        let moved = Dns::default()
+            .srv(
+                "_sip._udp.pbx.example.com",
+                &[(5060, "sip3.example.com")],
+                3_600,
+            )
+            .a("sip3.example.com", "203.0.113.90", 3_600);
+        let seen = settle(&mut agent, id, &moved, t1);
+        assert_eq!(
+            seen.asked
+                .iter()
+                .map(|query| query.name.to_string())
+                .collect::<Vec<_>>(),
+            ["_sip._udp.pbx.example.com", "sip3.example.com"]
+        );
+        assert_eq!(seen.registers(), [addr("203.0.113.90:5060")]);
     }
 
     #[test]

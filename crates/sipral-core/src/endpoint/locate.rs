@@ -13,8 +13,8 @@
 //! [`Answer`] the caller's resolver gave, and ends with the addresses to try,
 //! first to last, and how long the DNS said they hold.
 //!
-//! What it does, section by section, written from the RFCs; where the text of
-//! a section is recalled rather than quoted, the comment says so.
+//! What it does, section by section, written from the RFCs, whose words are
+//! quoted where they decide something.
 //!
 //! - §4.1: the transport is not chosen here. It is the one the caller already
 //!   has bound for the traffic — an account's transport — so a NAPTR lookup,
@@ -483,9 +483,9 @@ impl Locator {
                 })
                 .collect(),
             // NAPTR is optional in practice: a domain with none, or a
-            // resolver that cannot ask, goes on to SRV (§4.1, as recalled:
-            // "If no NAPTR records are found, the client constructs SRV
-            // queries for those transport protocols it supports")
+            // resolver that cannot ask, goes on to SRV (§4.1: "If no NAPTR
+            // records are found, the client constructs SRV queries for those
+            // transport protocols it supports")
             Answer::Nothing | Answer::Failed => Vec::new(),
         };
         usable.sort_by_key(|naptr| (naptr.order, naptr.preference));

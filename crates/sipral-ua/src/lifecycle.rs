@@ -682,6 +682,17 @@ impl UserAgent {
         Ok(())
     }
 
+    /// An account that locates its server by a name has been located again
+    /// while [`Rung::WantAddress`] waited: the answer the rung asked for, and
+    /// the ladder climbs at once, as [`UserAgent::rebind`] has it do.
+    pub(crate) fn address_found(&mut self, now: Instant) {
+        if matches!(self.life.last(), Some(Rung::WantAddress)) && self.life.due.is_some() {
+            self.life.told = true;
+            self.life.due = None;
+            self.climb(now);
+        }
+    }
+
     /// This end is reached at `to` now, where it was reached at `from`: every
     /// account on `transport` whose `Contact` names `from` is rewritten to
     /// name `to`, and says so to its registrar.
@@ -913,7 +924,14 @@ impl UserAgent {
             // an event and nothing else. Whoever owns the socket and whoever
             // owns the resolver is the application, and this is the only way
             // to reach either of them
-            Rung::WantTransport | Rung::WantAddress => After::Wait,
+            Rung::WantTransport => After::Wait,
+            // and an account that locates its server by a name has the
+            // stack ask the resolver itself, through the same lookups it
+            // locates with (`crate::locate`)
+            Rung::WantAddress => {
+                self.relocate(now);
+                After::Wait
+            }
             Rung::GiveUp => {
                 self.give_up_recovering();
                 After::Stop

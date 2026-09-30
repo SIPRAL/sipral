@@ -290,7 +290,7 @@ address and never a name. That distinction is the whole reason this is not just 
 | Rung | What it does | Then |
 |---|---|---|
 | `Distrust` | bindings and subscriptions that needed a name stop being evidence, timers included | at once |
-| `WantAddress` | an event: the address held was learned from a name, and the application owns the resolver | 64·T1, or at once on `rebind` |
+| `WantAddress` | an event: the address held was learned from a name, and the application owns the resolver; an account located by RFC 3263 (`Account::located`) is looked up again through `UaEvent::LookupWanted` | 64·T1, or at once on `rebind` or once every such lookup has answered and one named an address |
 | `Reregister` | try the address already held, and resubscribe whatever `Distrust` demoted | 64·T1 |
 | `WantAddress` | ask again | 64·T1 |
 | `Reregister` | try again, and resubscribe whatever is still owed one | 64·T1 |
