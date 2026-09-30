@@ -554,6 +554,16 @@ pub(crate) const fn crypto_suite(suite: Suite) -> CryptoSuite {
     }
 }
 
+/// Whether `suite` protects at least as well as `floor`: a key at least as
+/// long and an authentication tag at least as long. The two measures are
+/// the ones the suites differ by (RFC 4568 §6.2, RFC 6188, RFC 7714), and a
+/// suite longer in one and shorter in the other is not counted as at least
+/// as strong — `AES_256_CM_HMAC_SHA1_32` is not, against
+/// `AES_CM_128_HMAC_SHA1_80`.
+pub(crate) const fn at_least_as_strong(suite: Suite, floor: Suite) -> bool {
+    suite.key_len() >= floor.key_len() && suite.tag() >= floor.tag()
+}
+
 /// The transform a suite names, on the media side of the boundary. Two
 /// enumerations of the same seven suites, because the crate that reads SDP
 /// and the crate that encrypts packets do not depend on each other.

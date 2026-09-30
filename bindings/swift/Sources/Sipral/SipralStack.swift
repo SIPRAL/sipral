@@ -106,6 +106,21 @@ public final class SipralStack: @unchecked Sendable {
     /// was bound under, guarded by `signallingQueue`; and the next id.
     private var recordingLinks: [UInt32: SignallingConnection] = [:]
     private var nextRecordingLink: UInt32 = SipralStack.firstRecordingLink
+    /// Whether a request too large for a datagram gets a connection
+    /// (`streamFallback`).
+    private let streamFallback: Bool
+    /// Where such a connection goes, when not to the address asked for
+    /// (`streamServer`).
+    private let streamServer: String?
+    /// The TCP connections opened for requests too large for a datagram, by
+    /// the transport id each was bound under, with where each goes; the
+    /// destinations one is being opened to; the next id; and where
+    /// `SipralEventKind.transportWanted` asked for one during the poll that
+    /// raised it. All guarded by `signallingQueue`.
+    private var streamLinks: [UInt32: (destination: String, link: SignallingConnection)] = [:]
+    private var streamsOpening: Set<String> = []
+    private var nextStreamLink: UInt32 = SipralStack.firstStreamLink
+    private var streamsAsked: [String] = []
     /// The recording sessions running, by handle: the call each records and
     /// the connection it went over, guarded by `callsQueue`.
     private var recordings: [SipralHandle: (call: Call, link: UInt32?)] = [:]
@@ -307,6 +322,25 @@ public final class SipralStack: @unchecked Sendable {
     /// `InviteLimit.standard` (what every stack starts with, ten INVITEs at
     /// once then one every two seconds, past which a call is answered 480)
     /// or `.voiceAgent` for a service taking a trunk's calls.
+    ///
+    /// `streamFallback` is what a stack signalling over UDP does when a
+    /// request is too large for a datagram -- nearly always the answer to a
+    /// challenge, whose `Authorization` takes a call offering two SRTP suites
+    /// past RFC 3261 §18.1.1's 1300 bytes. On (the default),
+    /// `SipralEventKind.transportWanted` is answered by opening a TCP
+    /// connection to the address it names -- the registrar or proxy the
+    /// request was going to, on the same port -- and binding it
+    /// (`sipral_stack_transport_bind`): the request the stack was holding
+    /// goes on it, and the call or registration carries on over it. When
+    /// that connection is refused or times out, or with `false`, the stack is
+    /// told at once (`sipral_stack_transport_failed`), and what was waiting
+    /// ends rather than hanging: a call as unreachable, its `endCause` a SIP
+    /// 513 whose text names the size and the limit. The event reaches
+    /// `events()` either way. `streamServer` (`host:port`) is where that
+    /// connection goes instead, for a server that takes TCP on another port
+    /// than UDP -- a PBX on 5060 for one and 5160 for the other: the
+    /// connection stands for the address the event named, and everything the
+    /// stack sends there goes on it.
     public init(
         audio: AudioMode = .platformDefault,
         bindHost: String = "127.0.0.1",
@@ -338,8 +372,12 @@ public final class SipralStack: @unchecked Sendable {
         signallingServer: String? = nil,
         tlsServerName: String? = nil,
         tlsTrust: TLSTrust = .platform,
-        inviteLimit: InviteLimit? = nil
+        inviteLimit: InviteLimit? = nil,
+        streamFallback: Bool = true,
+        streamServer: String? = nil
     ) throws {
+        self.streamFallback = streamFallback
+        self.streamServer = streamServer
         self.rtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? nil : (rtpPortMin, rtpPortMax)
         guard signalling == .udp || signalling == .tcp || signalling == .tls else {
             throw SipralError(status: .invalidArgument, message: "signalling is .udp, .tcp or .tls")
@@ -699,6 +737,129 @@ public final class SipralStack: @unchecked Sendable {
         } else {
             _ = try? retryingBusy { try Sipral.stackStreamClosed(stack: handle, transport: id, nowMs: nowMs()) }
         }
+    }
+
+    // MARK: - RFC 3261 §18.1.1: a request too large for a datagram
+
+    /// The first transport id a connection opened for
+    /// `SipralEventKind.transportWanted` is bound under, one more for each
+    /// destination after it: clear of `Sipral.transportMain`, of the
+    /// recording servers' ids, and of the small numbers an application
+    /// driving the C layer itself would pick.
+    private static let firstStreamLink: UInt32 = 1024
+
+    /// Answer what `SipralEventKind.transportWanted` asked for in the poll
+    /// that just ran: a connection to each destination not already connected
+    /// or being connected to, opened off the poll thread, or -- with
+    /// `streamFallback` off -- the word that none is coming.
+    private func actOnStreamsWanted() {
+        let asked = signallingQueue.sync { () -> [String] in
+            defer { streamsAsked = [] }
+            return streamsAsked
+        }
+        var seen: Set<String> = []
+        for destination in asked where seen.insert(destination).inserted {
+            let id = signallingQueue.sync { () -> UInt32? in
+                if streamsOpening.contains(destination)
+                    || streamLinks.values.contains(where: { $0.destination == destination }) {
+                    return nil
+                }
+                defer { nextStreamLink += 1 }
+                if streamFallback {
+                    streamsOpening.insert(destination)
+                }
+                return nextStreamLink
+            }
+            guard let id else { continue }
+            guard streamFallback else {
+                sayNoStream(id, .connectionRefused)
+                continue
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.openStreamLink(id, to: destination)
+            }
+        }
+    }
+
+    /// Connect over TCP to `destination` -- or to `streamServer` when one was
+    /// given -- and bind the connection under `id` as the stream to
+    /// `destination`; a connection that cannot be made is told to the stack
+    /// under that same id, which ends what was waiting for it.
+    private func openStreamLink(_ id: UInt32, to destination: String) {
+        let made: SignallingConnection
+        let server = streamServer ?? destination
+        do {
+            made = try SignallingConnection(
+                server: server, bindHost: signallingQueue.sync { linkHost }, transport: .tcp,
+                serverName: UDPSocket.parse(server).host, trust: .platform, patienceMs: Self.patienceMs
+            )
+        } catch {
+            signallingQueue.sync { _ = streamsOpening.remove(destination) }
+            sayNoStream(id, (error as? SignallingRefusal)?.error ?? .other)
+            return
+        }
+        let closing = isClosed
+        signallingQueue.sync {
+            streamsOpening.remove(destination)
+            if !closing {
+                streamLinks[id] = (destination, made)
+            }
+        }
+        guard !closing else {
+            made.close()
+            return
+        }
+        do {
+            _ = try retryingBusy {
+                try Sipral.stackTransportBind(
+                    stack: handle, transport: id, protocol: SipralTransport.tcp.rawValue,
+                    local: made.local, remote: destination, nowMs: nowMs()
+                )
+            }
+        } catch {
+            loseStreamLink(id, tell: false)
+            sayNoStream(id, .other)
+            return
+        }
+        made.start(
+            bytes: { [weak self] bytes in self?.streamReceived(id, bytes) },
+            lost: { [weak self] _ in self?.loseStreamLink(id, tell: true) }
+        )
+    }
+
+    /// `sipral_stack_transport_failed` for a connection that was not made,
+    /// never throwing on the way out.
+    private func sayNoStream(_ id: UInt32, _ error: SipralTransportError) {
+        _ = try? retryingBusy {
+            try Sipral.stackTransportFailed(stack: handle, transport: id, error: error.rawValue, nowMs: nowMs())
+        }
+    }
+
+    /// What a connection opened for a request too large for a datagram
+    /// carried, to `sipral_stack_receive_stream`, every byte in order.
+    private func streamReceived(_ id: UInt32, _ bytes: [UInt8]) {
+        while !isClosed {
+            do {
+                try Sipral.stackReceiveStream(stack: handle, transport: id, data: bytes, nowMs: nowMs())
+                return
+            } catch let error as SipralError where error.status == .busy {
+                usleep(1000)
+            } catch {
+                // the framing is lost: the stack retired the transport itself
+                loseStreamLink(id, tell: false)
+                return
+            }
+        }
+    }
+
+    /// Close the connection bound under `id` and, when `tell`, say so with
+    /// `sipral_stack_stream_closed`.
+    private func loseStreamLink(_ id: UInt32, tell: Bool) {
+        let open = signallingQueue.sync { streamLinks.removeValue(forKey: id) }
+        guard let open else { return }
+        open.link.close()
+        guard tell, !isClosed else { return }
+        _ = try? retryingBusy { try Sipral.stackStreamClosed(stack: handle, transport: id, nowMs: nowMs()) }
     }
 
     /// A recording session is running for `call`, over `link` when it has a
@@ -1682,6 +1843,9 @@ public final class SipralStack: @unchecked Sendable {
         if let stream = event.turnStreamData {
             natQueue.sync { turnAsked.append(stream) }
         }
+        if signalling == .udp, let wanted = event.transportWantedData {
+            signallingQueue.sync { streamsAsked.append(wanted.destination) }
+        }
         noteNat(event)
         if let call = callFor(event.call) {
             call.deliver(event)
@@ -1705,8 +1869,11 @@ public final class SipralStack: @unchecked Sendable {
             guard transmit.len > 0 else { return }
             let payload = Array(UnsafeBufferPointer(start: transmitData, count: transmit.len))
             if transmit.transport != Sipral.transportMain {
-                // a recording session's own connection
-                signallingQueue.sync { recordingLinks[transmit.transport] }?.send(payload)
+                // a recording session's own connection, or one opened for a
+                // request too large for a datagram
+                signallingQueue.sync {
+                    recordingLinks[transmit.transport] ?? streamLinks[transmit.transport]?.link
+                }?.send(payload)
                 continue
             }
             if signalling != .udp {
@@ -1809,6 +1976,7 @@ public final class SipralStack: @unchecked Sendable {
             drainStun()
             drainFarewells()
             actOnTurnStreams()
+            actOnStreamsWanted()
         }
         closedSemaphore.signal()
     }
@@ -1869,6 +2037,11 @@ public final class SipralStack: @unchecked Sendable {
             return Array(recordingLinks.values)
         }
         toRecorders.forEach { $0.close() }
+        let streams = signallingQueue.sync { () -> [SignallingConnection] in
+            defer { streamLinks = [:] }
+            return streamLinks.values.map(\.link)
+        }
+        streams.forEach { $0.close() }
         try? Sipral.stackDestroy(stack: handle)
         eventBroadcast.finish()
         signallingQueue.sync { socket?.close() }

@@ -44,6 +44,7 @@ import org.sipral.SipralTransport
 import org.sipral.SipralTransportError
 import org.sipral.SipralTransportFailedEvent
 import org.sipral.SipralTransportFailure
+import org.sipral.SipralTransportWantedEvent
 
 /**
  * Which authorities a TLS connection to the SIP server trusts -- the three
@@ -114,6 +115,15 @@ data class SipralInviteLimit(val burst: Long, val everyMs: Long) {
  */
 fun transportFailedOf(event: SipralEvent): SipralTransportFailedEvent? =
     if (event.kind == SipralEventKind.TRANSPORT_FAILED.value.toLong()) event.payload.transportFailed else null
+
+/**
+ * The `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` payload -- a request too large for
+ * a datagram (RFC 3261 §18.1.1), where it was going, its size and the limit
+ * -- or null for an event of any other kind. A client opened with
+ * `streamFallback` opens the stream itself.
+ */
+fun transportWantedOf(event: SipralEvent): SipralTransportWantedEvent? =
+    if (event.kind == SipralEventKind.TRANSPORT_WANTED.value.toLong()) event.payload.transportWanted else null
 
 /** A connection that could not be made, and what the stack is to call it. */
 internal class SignallingRefused(

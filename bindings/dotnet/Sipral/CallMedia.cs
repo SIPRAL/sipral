@@ -540,9 +540,10 @@ public sealed class CallMedia : IDisposable
 
     private void Run()
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var schedule = new FrameSchedule(_frameSeconds, () => clock.Elapsed.TotalSeconds);
         while (!_closed.IsSet)
         {
-            var started = DateTime.UtcNow;
             DrainReceive();
 
             if (_active && Pumped)
@@ -589,11 +590,10 @@ public sealed class CallMedia : IDisposable
                 }
             }
 
-            var elapsed = (DateTime.UtcNow - started).TotalSeconds;
-            var remaining = _frameSeconds - elapsed;
-            if (remaining > 0)
+            var wait = schedule.Next();
+            if (wait > TimeSpan.Zero)
             {
-                _closed.Wait(TimeSpan.FromSeconds(remaining));
+                _closed.Wait(wait);
             }
         }
     }

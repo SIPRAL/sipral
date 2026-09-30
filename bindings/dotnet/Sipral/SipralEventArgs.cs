@@ -72,6 +72,8 @@ public sealed class SipralEventArgs : EventArgs
     public SipralProgressEventInfo? Progress { get; }
     /// <summary>Set for <see cref="SipralEventKind.TransportFailed"/>.</summary>
     public SipralTransportFailedEventInfo? TransportFailed { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.TransportWanted"/>.</summary>
+    public SipralTransportWantedEventInfo? TransportWanted { get; private init; }
     /// <summary>Set for <see cref="SipralEventKind.ConferenceChanged"/>.</summary>
     public SipralConferenceEventInfo? Conference { get; private init; }
     /// <summary>Set for <see cref="SipralEventKind.TextReceived"/>.</summary>
@@ -276,6 +278,14 @@ public sealed class SipralEventArgs : EventArgs
                 (SipralTransportError)t.Error, (SipralTlsFailure)t.Tls, ReadUtf8(t.Detail, t.DetailLen));
         }
 
+        SipralTransportWantedEventInfo? transportWanted = null;
+        if (kind == SipralEventKind.TransportWanted)
+        {
+            var w = evt.Payload.TransportWanted;
+            transportWanted = new SipralTransportWantedEventInfo((SipralTransport)w.Protocol,
+                ReadUtf8(w.Destination, w.DestinationLen), w.RequestBytes, w.LimitBytes);
+        }
+
         SipralConferenceEventInfo? conference = null;
         SipralTextEventInfo? text = null;
         SipralPresenceEventInfo? presence = null;
@@ -313,6 +323,7 @@ public sealed class SipralEventArgs : EventArgs
             stunServer, verification, progress)
         {
             TransportFailed = transportFailed,
+            TransportWanted = transportWanted,
             Conference = conference,
             Text = text,
             Presence = presence,

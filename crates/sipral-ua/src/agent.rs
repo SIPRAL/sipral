@@ -154,6 +154,13 @@ pub struct UserAgent {
     /// What this layer sends inside a dialog by itself and RFC 3261 §18.1.1
     /// would not let out over a datagram, waiting for a stream.
     pub(crate) parked: Vec<Parked>,
+    /// When whatever is waiting for a stream stops waiting
+    /// ([`crate::oversize`]). `None` while nothing is.
+    pub(crate) stream_deadline: Option<Instant>,
+    /// The request size and the limit the latest `TransportWanted` carried,
+    /// for the text of the 513 a request that never got its stream ends
+    /// with.
+    pub(crate) oversize: Option<(usize, u32)>,
     pub(crate) events: VecDeque<UaEvent>,
     /// What an incoming INVITE meets before anything else here does, and the
     /// count of what it turned away.
@@ -288,6 +295,8 @@ impl UserAgent {
             by_message: HashMap::new(),
             publications: crate::publishing::Publications::default(),
             parked: Vec::new(),
+            stream_deadline: None,
+            oversize: None,
             events: VecDeque::new(),
             guard: Guard::default(),
             referrals: Referrals::default(),
@@ -379,6 +388,7 @@ impl UserAgent {
         #[cfg(feature = "stir")]
         self.fire_stir_timers(now);
         self.fire_publication_timers(now);
+        self.fire_stream_wait(now);
         self.drain(now);
     }
 
@@ -479,6 +489,7 @@ impl UserAgent {
             .chain(self.keepalive_deadline())
             .chain(self.verification_deadline())
             .chain(self.publication_deadline())
+            .chain(self.stream_deadline)
             .min();
         match (self.endpoint.poll_timeout(), mine) {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -899,6 +910,14 @@ impl UserAgent {
     /// Turn everything the endpoint has to say into what the application does.
     pub(crate) fn drain(&mut self, now: Instant) {
         while let Some(event) = self.endpoint.poll_event() {
+            if let Event::TransportWanted {
+                request_bytes,
+                limit_bytes,
+                ..
+            } = event
+            {
+                self.oversize = Some((request_bytes, limit_bytes));
+            }
             if let Some(event) = self.on_core_event(event, now) {
                 self.events.push_back(UaEvent::Unclaimed(event));
             }
@@ -917,6 +936,9 @@ impl UserAgent {
         self.send_waiting_holds(now);
         // and after every registration this round won or lost
         self.settle_keepalives(now);
+        // last of all: whatever this round left waiting for a stream is
+        // what the wait covers
+        self.watch_the_stream_wait(now);
     }
 
     /// `None` when this layer claimed the event; the event back when nothing
@@ -1415,7 +1437,7 @@ impl UserAgent {
     }
 
     /// Something that trying again cannot fix.
-    fn give_up(
+    pub(crate) fn give_up(
         &mut self,
         account: AccountId,
         reason: RegistrationFailure,

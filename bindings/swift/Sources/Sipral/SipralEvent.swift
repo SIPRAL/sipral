@@ -47,6 +47,9 @@ public struct SipralEvent: Sendable {
     public internal(set) var progressData: ProgressEventData? = nil
     /// `payload.transport_failed`, for `SipralEventKind.transportFailed` only.
     public var transportFailedData: TransportFailedEventData? = nil
+    /// `payload.transport_wanted`, for `SipralEventKind.transportWanted`
+    /// only.
+    public internal(set) var transportWantedData: TransportWantedEventData? = nil
     /// `payload.conference`, for `SipralEventKind.conferenceChanged` only.
     public internal(set) var conferenceData: ConferenceEventData? = nil
     /// `payload.text`, for `SipralEventKind.textReceived` only.
@@ -597,6 +600,15 @@ enum SipralEventDecoder {
         )
         if kindRaw == SipralEventKind.progressDetected.rawValue {
             event.progressData = progressData(raw.payload.progress)
+        }
+        if kindRaw == SipralEventKind.transportWanted.rawValue {
+            let wanted = raw.payload.transport_wanted
+            event.transportWantedData = TransportWantedEventData(
+                protocolRaw: wanted.protocol,
+                destination: textC(wanted.destination, wanted.destination_len) ?? "",
+                requestBytes: wanted.request_bytes,
+                limitBytes: wanted.limit_bytes
+            )
         }
         if kindRaw == SipralEventKind.transportFailed.rawValue {
             let lost = raw.payload.transport_failed

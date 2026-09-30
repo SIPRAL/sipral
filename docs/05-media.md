@@ -2610,13 +2610,24 @@ it.
 **An encrypted call is recorded encrypted** (RFC 7866 §12.2). When the recorded
 call is keyed with SRTP, SDES or DTLS-SRTP alike, both streams are offered as
 `RTP/SAVP` with an RFC 4568 `a=crypto` line per suite the account's calls
-offer, each stream with keys of its own drawn from the engine's media seed.
-Each stream's copies are protected under this end's key for the line the
-server's answer took, and a stream the server refused, answered as plain RTP,
-or answered with a line that was not offered or cannot be held to gets
+offer that protects at least as well as the suite the recorded call runs — a
+key at least as long and an authentication tag at least as long — each
+stream with keys of its own drawn from the engine's media seed. §12.2 has the
+recording protected at least as well as the call, and a server offered a
+weaker suite beside the call's would be free to take it; when none of the
+account's suites is that strong, the call's own suite is offered alone, and a
+call whose handshake has not named its suite yet is offered what the account
+offers. Each stream's copies are protected under this end's key for the line
+the server's answer took, and a stream the server refused, answered as plain
+RTP, or answered with a line that was not offered or cannot be held to gets
 nothing: the copies never leave the encryption behind. A re-offer for a codec
-change carries the same keys, and a stream that carries on under the same
-line keeps its place in the keystream. Copies that move to a call that
+change carries the same keys, and a stream keyed again by a line that has
+keyed it before — the one it had, or one it went back to after the server
+moved it — takes up the protector that line had and its place in the
+keystream: a protector is kept for every line a stream has used, for the life
+of the recording, because one built afresh would start its rollover counter
+at zero and, past a wrap of the sequence numbers, send an index the key had
+already covered. Copies that move to a call that
 replaced the recorded one, or to a stream the server took back, carry their
 numbering on rather than starting it over, so no SRTP index goes out twice
 under one key (RFC 3711 §9.1). An unencrypted call is recorded as plain

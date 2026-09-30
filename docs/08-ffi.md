@@ -467,6 +467,23 @@ is refused with `SIPRAL_STATUS_NOT_SENT`, nothing on the wire; the application
 answers it with `sipral_stack_transport_bind`, and once that returns
 `SIPRAL_STATUS_OK` it asks again — places the call, registers — and the
 request leaves on that stream. There is no separate "it went" event.
+A request the stack itself sends again — the answer to a challenge, which is
+where a request most often outgrows a datagram, its `Authorization` added to
+an INVITE offering two SDES suites — is not asked for again: the stack holds
+it and sends it the moment the bind succeeds, and the call, registration or
+session change behind it carries on over the stream. An application that
+cannot open the stream says so with `sipral_stack_transport_failed` (or
+`_failure`) naming the transport number it would have bound it at: a failure
+told of a transport that is not up while the stack waits for a stream is a
+connection that could not be opened, and everything waiting stops at once. A
+call's INVITE goes again over the datagram with one SDES suite per stream
+when that fits; otherwise the call ends with
+`SIPRAL_CALL_END_REASON_UNREACHABLE`, `status_code` and `cause_sip` 513 and
+a `cause_text` naming the size and the limit, and a registration fails as
+unreachable with a 513. An application that says nothing gets the same ten
+seconds after the event. The four idiomatic layers answer the event
+themselves (`stream_fallback`, on by default, and `stream_server` for a
+server that takes TCP on another port than UDP).
 `sipral_transmit_t::protocol` is still the seam that made this possible
 without a second `sipral_stack_poll_transmit`: it says what the message went
 out over rather than what the socket is, which is what lets one account's

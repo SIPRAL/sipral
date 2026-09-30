@@ -418,11 +418,11 @@ pub(crate) struct Subscription {
     unsubscribing: bool,
     /// A challenge came back and it is not yet known whether anything could
     /// read it. The refusal is kept for the event that says so.
-    unanswered: Option<OwnedMessage>,
+    pub(crate) unanswered: Option<OwnedMessage>,
     /// The challenged SUBSCRIBE whose answer §18.1.1 would not let out over a
     /// datagram, waiting for the connection the endpoint asked for. While
     /// this is set the refusal above is not a refusal yet.
-    waiting_for_stream: Option<AnyTransactionId>,
+    pub(crate) waiting_for_stream: Option<AnyTransactionId>,
     /// RFC 4235 §4.3's table, for the one package that has one.
     table: DialogInfoTable,
     /// The last `application/simple-message-summary` document a `NOTIFY`
@@ -1932,7 +1932,7 @@ impl UserAgent {
 // -- ending, and starting again ----------------------------------------------
 
 impl UserAgent {
-    fn retry_or_end(
+    pub(crate) fn retry_or_end(
         &mut self,
         subscription: SubscriptionHandle,
         reason: SubscriptionEnd,

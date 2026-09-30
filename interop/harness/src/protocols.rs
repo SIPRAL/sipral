@@ -257,16 +257,17 @@ fn bound_stream(endpoint: &mut Endpoint, stream: &TcpStream, now: Instant) {
 }
 
 /// The recorder's key for the stream at `index`, when it answers as SRTP: any
-/// thirty octets are an AES_CM_128_HMAC_SHA1_80 key and salt, and these are
+/// forty-four octets are an AEAD_AES_256_GCM key and salt, and these are
 /// nobody's.
 const RECORDER_KEYS: [&str; 2] = [
-    "inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR",
-    "inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz",
+    "inline:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKyw=",
+    "inline:ZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fX5/gIGCg4SFhoeIiYqLjI2Oj5A=",
 ];
 
-/// The `AES_CM_128_HMAC_SHA1_80` line the offer carries on each of its two
-/// streams, if it offered SRTP: what the recorder takes, and the key it opens
-/// the copies with.
+/// The `AEAD_AES_256_GCM` line the offer carries on each of its two streams,
+/// if it offered SRTP: the suite the recorded call runs, so the one the offer
+/// has to carry (RFC 7866 §12.2), what the recorder takes, and the key it
+/// opens the copies with.
 fn offered_lines(offer: &str) -> Vec<Crypto> {
     let mut lines = Vec::new();
     let mut section = 0_usize;
@@ -276,7 +277,7 @@ fn offered_lines(offer: &str) -> Vec<Crypto> {
         }
         if let Some(value) = line.strip_prefix("a=crypto:")
             && let Some(crypto) = Crypto::parse(value.trim())
-            && crypto.suite == "AES_CM_128_HMAC_SHA1_80"
+            && crypto.suite == "AEAD_AES_256_GCM"
             && lines.len() < section
         {
             lines.push(crypto);
@@ -290,14 +291,14 @@ fn opener(line: &Crypto) -> Unprotector {
     let policy = line.policy().expect("a line the offerer wrote");
     let keys = &policy.keys.first().expect("one key").keys;
     Unprotector::new(
-        Policy::new(Suite::AesCm80),
+        Policy::new(Suite::AeadAes256Gcm),
         Master::new(keys.key(), keys.salt()),
     )
 }
 
 /// The recorder's answer: one receive-only stream per label, on the codec
 /// the offer names, at the two sockets it counts on — as SRTP, under the
-/// offered AES_CM_128_HMAC_SHA1_80 line and a key of its own, when the offer
+/// offered AEAD_AES_256_GCM line and a key of its own, when the offer
 /// was.
 fn recorder_answer(offer: &str, first: SocketAddr, second: SocketAddr) -> Arc<[u8]> {
     let format = offer
@@ -320,7 +321,7 @@ fn recorder_answer(offer: &str, first: SocketAddr, second: SocketAddr) -> Arc<[u
             Some(line) => (
                 "RTP/SAVP",
                 format!(
-                    "a=crypto:{} AES_CM_128_HMAC_SHA1_80 {}\r\n",
+                    "a=crypto:{} AEAD_AES_256_GCM {}\r\n",
                     line.tag, RECORDER_KEYS[index]
                 ),
             ),

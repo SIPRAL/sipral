@@ -13273,9 +13273,18 @@ fn both_directions_of_the_call_are_copied_to_the_server_as_they_went() {
     assert_eq!(rtp_parts(&far[0].2).1, rtp_parts(&back[1]).1);
 }
 
-/// A server that takes each stream under the offered AES_CM_128_HMAC_SHA1_80
-/// line — tag 2, after AEAD_AES_256_GCM — with keys of its own.
+/// A server that takes each stream under the offered AEAD_AES_256_GCM line —
+/// tag 1, the suite the recorded call runs — with keys of its own.
 fn srtp_server(now: Instant) -> Server {
+    Server::new(now).keyed([
+        "1 AEAD_AES_256_GCM inline:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKyw=",
+        "1 AEAD_AES_256_GCM inline:ZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fX5/gIGCg4SFhoeIiYqLjI2Oj5A=",
+    ])
+}
+
+/// A server that would take each stream under an AES_CM_128_HMAC_SHA1_80
+/// line — tag 2 of what this end offers a call it keys itself.
+fn weaker_server(now: Instant) -> Server {
     Server::new(now).keyed([
         "2 AES_CM_128_HMAC_SHA1_80 inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR",
         "2 AES_CM_128_HMAC_SHA1_80 inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz",
@@ -13304,21 +13313,107 @@ fn recording_offer(server: &Server) -> SessionDescription {
 }
 
 /// What opens the copies of `stream`: the key this end offered on it under
-/// the line the server took, tag 2.
+/// the line the server took, tag 1.
 fn copy_opener(offer: &SessionDescription, stream: usize) -> sipral_rtp::srtp::Unprotector {
     let line = offer.media[stream]
         .attributes
         .iter()
         .filter(|attribute| attribute.name == "crypto")
         .filter_map(|attribute| Crypto::parse(attribute.value.as_deref()?))
-        .find(|line| line.tag == 2)
-        .expect("an AES_CM_128_HMAC_SHA1_80 line");
+        .find(|line| line.tag == 1)
+        .expect("an AEAD_AES_256_GCM line");
     let policy = line.policy().expect("a line this end wrote");
     let key = &policy.keys[0].keys;
     sipral_rtp::srtp::Unprotector::new(
-        sipral_rtp::srtp::Policy::new(sipral_rtp::srtp::Suite::AesCm80),
+        sipral_rtp::srtp::Policy::new(sipral_rtp::srtp::Suite::AeadAes256Gcm),
         sipral_rtp::srtp::Master::new(key.key(), key.salt()),
     )
+}
+
+/// The suites a recording offer names on each stream, in order.
+fn offered_suites(offer: &SessionDescription) -> Vec<Vec<String>> {
+    offer
+        .media
+        .iter()
+        .map(|stream| {
+            stream
+                .attributes
+                .iter()
+                .filter(|attribute| attribute.name == "crypto")
+                .filter_map(|attribute| Crypto::parse(attribute.value.as_deref()?))
+                .map(|line| line.suite.clone())
+                .collect()
+        })
+        .collect()
+}
+
+/// RFC 7866 §12.2: a recording is protected at least as well as the call it
+/// records. A call running AEAD_AES_256_GCM is recorded under that suite
+/// alone, so a server that would have taken AES_CM_128_HMAC_SHA1_80 has
+/// nothing weaker to take, and nothing is copied to it.
+#[test]
+fn a_recording_offer_names_no_suite_weaker_than_the_call_it_records() {
+    let (mut pair, server, call, remote, _) =
+        recorded_call_with(encrypted_catalog(), weaker_server, |_, _| {});
+    let running = pair
+        .caller
+        .engine
+        .encryption(call)
+        .expect("the call's streams")
+        .iter()
+        .find_map(|stream| stream.suite);
+    assert_eq!(running, Some(sipral_rtp::srtp::Suite::AeadAes256Gcm));
+    let offer = recording_offer(&server);
+    assert_eq!(
+        offered_suites(&offer),
+        [
+            vec!["AEAD_AES_256_GCM".to_owned()],
+            vec!["AEAD_AES_256_GCM".to_owned()]
+        ],
+        "the account offers AES_CM_128_HMAC_SHA1_80 as well, and the recording does not"
+    );
+    let samples = vec![1_000_i16; 160];
+    for _ in 0..3 {
+        let _ = pair.speak(call, remote, &samples);
+        pair.advance();
+    }
+    assert_eq!(copies(&mut pair, call), [], "nothing under a weaker suite");
+}
+
+/// A call running the weaker of the account's suites is recorded with every
+/// suite at least as strong as it offered, its own among them.
+#[test]
+fn a_recording_offer_keeps_every_suite_at_least_as_strong_as_the_call() {
+    let (_, server, _, _, _) = recorded_call_with(
+        encrypted_catalog()
+            .with_srtp_suites(&[sipral_rtp::srtp::Suite::AesCm80])
+            .expect("one suite"),
+        weaker_server,
+        |pair, call| {
+            let account = pair.caller.agent.call_account(call).expect("an account");
+            let mut srtp = pair
+                .caller
+                .engine
+                .account_srtp(account)
+                .cloned()
+                .unwrap_or_default();
+            srtp.suites = Some(vec![
+                sipral_rtp::srtp::Suite::AesCm32,
+                sipral_rtp::srtp::Suite::AesCm80,
+                sipral_rtp::srtp::Suite::AeadAes128Gcm,
+            ]);
+            pair.caller
+                .engine
+                .set_account_srtp(account, srtp)
+                .expect("the account's policy");
+        },
+    );
+    let offer = recording_offer(&server);
+    assert_eq!(
+        offered_suites(&offer)[0],
+        ["AES_CM_128_HMAC_SHA1_80", "AEAD_AES_128_GCM"],
+        "the 32-bit tag is weaker than the call's 80, and is left out"
+    );
 }
 
 /// RFC 7866 §12.2: the copies of an encrypted call reach the recording server
@@ -13769,4 +13864,194 @@ Call-ID: replacing@example.com\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n"
 fn rtp_parts(datagram: &[u8]) -> (sipral_rtp::RtpHeader, Vec<u8>) {
     let packet = sipral_rtp::RtpPacket::parse(datagram).expect("an RTP packet");
     (packet.header(), packet.payload().to_vec())
+}
+
+// -- RFC 3261 §18.1.1 on a challenged call -----------------------------------
+
+/// The value of one header field of a message on the wire.
+fn wire_header(message: &[u8], name: sipral_core::msg::HeaderName<'_>) -> String {
+    let mut scratch = ParseScratch::new();
+    sipral_core::msg::parse(message, &mut scratch, ParseMode::Lenient)
+        .ok()
+        .and_then(|parsed| parsed.header(name).map(<[u8]>::to_vec))
+        .map(|value| String::from_utf8_lossy(&value).into_owned())
+        .unwrap_or_default()
+}
+
+/// The 401 a PBX answers an INVITE with, its nonce long enough that the
+/// answer takes the INVITE past what a datagram may carry.
+fn a_long_challenge_to(invite: &[u8]) -> Vec<u8> {
+    use sipral_core::msg::HeaderName;
+    let nonce = "n".repeat(700);
+    format!(
+        "SIP/2.0 401 Unauthorized\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=pbx\r\nCall-ID: {}\r\n\
+         CSeq: {}\r\nWWW-Authenticate: Digest realm=\"asterisk\", nonce=\"{nonce}\", \
+         qop=\"auth\"\r\nContent-Length: 0\r\n\r\n",
+        wire_header(invite, HeaderName::Via),
+        wire_header(invite, HeaderName::From),
+        wire_header(invite, HeaderName::To),
+        wire_header(invite, HeaderName::CallId),
+        wire_header(invite, HeaderName::CSeq),
+    )
+    .into_bytes()
+}
+
+/// A caller offering both SDES suites an account can, whose INVITE the PBX
+/// at [`callee_sip`] has just challenged: the stack, the call, and what the
+/// challenge left it saying.
+fn a_secure_call_challenged_past_the_line(now: Instant) -> (Stack, CallHandle, Vec<Event>) {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered)
+        .with_srtp_suites(&[crate::SrtpSuite::AeadAes256Gcm, crate::SrtpSuite::AesCm80])
+        .expect("two suites");
+    let mut caller = Stack::new(1, caller_sip(), caller_media(), catalog, now);
+    let account = caller.agent.add_account(
+        Account::new(
+            uri("sip:alice@example.com"),
+            uri("sip:example.com"),
+            uri("sip:alice@192.0.2.1"),
+            UDP,
+            callee_sip(),
+        )
+        .credentials(crate::Credentials::new("alice", "open sesame")),
+    );
+    let call = caller
+        .engine
+        .place(
+            &mut caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")),
+            caller_media(),
+            now,
+        )
+        .expect("the INVITE goes");
+    caller.drain(now, false);
+    let invite = caller
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("the INVITE");
+    assert_eq!(
+        String::from_utf8_lossy(&invite)
+            .matches("a=crypto:")
+            .count(),
+        2,
+        "both suites are offered"
+    );
+    caller.heard.clear();
+    caller.deliver(&a_long_challenge_to(&invite), callee_sip(), now);
+    caller.drain(now, false);
+    let out = caller.outbound();
+    assert!(
+        !out.iter().any(|message| message.starts_with(b"INVITE ")),
+        "the answer to the challenge is over the line"
+    );
+    let heard = core::mem::take(&mut caller.heard);
+    (caller, call, heard)
+}
+
+#[test]
+fn a_secure_call_whose_answer_to_a_challenge_outgrew_the_datagram_goes_over_tcp() {
+    let now = Instant::now();
+    let (mut caller, call, heard) = a_secure_call_challenged_past_the_line(now);
+    let wanted = heard.iter().find_map(|event| match *event {
+        Event::Signalling(UaEvent::Unclaimed(sipral_core::endpoint::Event::TransportWanted {
+            protocol,
+            destination,
+            request_bytes,
+            limit_bytes,
+        })) => Some((protocol, destination, request_bytes, limit_bytes)),
+        _ => None,
+    });
+    let (protocol, destination, request_bytes, limit_bytes) =
+        wanted.expect("the application is asked for a stream");
+    assert_eq!(protocol, TransportProtocol::Tcp);
+    assert_eq!(destination, callee_sip());
+    assert!(request_bytes > 1_300 && limit_bytes == 1_300);
+
+    let tcp = TransportId(2);
+    caller
+        .agent
+        .receive(
+            Input::TransportBound {
+                transport: tcp,
+                protocol: TransportProtocol::Tcp,
+                local: "192.0.2.1:49152".parse().expect("an address"),
+                remote: Some(callee_sip()),
+            },
+            now,
+        )
+        .expect("the stream is bound");
+    caller.drain(now, false);
+    let mut retries = Vec::new();
+    while let Some(transmit) = caller.agent.poll_transmit() {
+        if transmit.payload.starts_with(b"INVITE ") {
+            retries.push((transmit.transport, transmit.payload.to_vec()));
+        }
+    }
+    assert_eq!(retries.len(), 1);
+    let (carried_on, retry) = &retries[0];
+    assert_eq!(*carried_on, tcp);
+    assert!(wire_header(retry, sipral_core::msg::HeaderName::Via).starts_with("SIP/2.0/TCP "));
+    assert!(!wire_header(retry, sipral_core::msg::HeaderName::Authorization).is_empty());
+    assert!(
+        !caller.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::CallEnded { call: ended, .. }) if *ended == call
+        )),
+        "the call is still being placed"
+    );
+}
+
+#[test]
+fn a_secure_call_no_stream_can_carry_ends_with_a_513_that_names_the_limit() {
+    let now = Instant::now();
+    let (mut caller, call, _) = a_secure_call_challenged_past_the_line(now);
+    // one suite fewer is still over the line with a nonce this long, so the
+    // offer cannot be trimmed into a datagram either
+    caller.agent.stream_unavailable(now);
+    caller.drain(now, false);
+    assert!(
+        !caller
+            .outbound()
+            .iter()
+            .any(|message| message.starts_with(b"INVITE ")),
+        "nothing goes"
+    );
+    let ended = caller.heard.iter().find_map(|event| match event {
+        Event::Signalling(UaEvent::CallEnded {
+            call: ended,
+            reason,
+            status,
+            causes,
+            ..
+        }) if *ended == call => Some((*reason, *status, causes.clone())),
+        _ => None,
+    });
+    let (reason, status, causes) = ended.expect("the call ends now");
+    assert_eq!(reason, crate::CallEndReason::Unreachable);
+    assert_eq!(status.map(crate::StatusCode::get), Some(513));
+    let text = causes
+        .first()
+        .and_then(|cause| cause.text.as_deref())
+        .unwrap_or_default();
+    assert!(
+        text.contains("1300-byte") && text.contains("18.1.1"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_secure_call_nobody_opens_a_stream_for_ends_when_the_wait_runs_out() {
+    let now = Instant::now();
+    let (mut caller, call, _) = a_secure_call_challenged_past_the_line(now);
+    let later = now + crate::STREAM_WAIT;
+    caller.agent.handle_timeout(later);
+    caller.drain(later, false);
+    assert!(caller.heard.iter().any(|event| matches!(
+        event,
+        Event::Signalling(UaEvent::CallEnded { call: ended, status: Some(status), .. })
+            if *ended == call && status.get() == 513
+    )));
 }

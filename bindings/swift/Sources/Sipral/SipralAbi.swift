@@ -5511,6 +5511,15 @@ public enum Sipral {
     /// socket over it would drop the calls that were fine. This is for the
     /// socket that is over.
     ///
+    /// It is also the answer to a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` the
+    /// application could not honour: a failure told of a transport that is
+    /// not up — the number it would have bound the stream at, never bound or
+    /// retired — while the stack waits for that stream is a connection that
+    /// could not be opened, and every request waiting for it stops waiting
+    /// now (RFC 3261 §18.1.1: trimmed into a datagram when it then fits,
+    /// ended with a 513 naming the limit otherwise). A number never bound is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` while nothing is waiting.
+    ///
     /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
     /// of what the failure did to the registrations and calls on it.
     /// sipral_stack_transport_failure is the same call with the TLS
@@ -5539,6 +5548,9 @@ public enum Sipral {
     /// nothing, and the bind that follows the reconnect undoes it. A
     /// transport already down is not retired twice, and the failure is still
     /// raised: that is how each attempt to connect again that fails is told.
+    /// A stream a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for and that
+    /// could not be opened is told here as well, as
+    /// sipral_stack_transport_failed says.
     ///
     /// A TLS reason on a transport that does not speak TLS or WSS is
     /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and so is a detail longer than

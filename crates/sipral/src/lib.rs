@@ -293,9 +293,9 @@ pub use sipral_ua::{
     Account, AccountId, CallEndReason, CallHandle, CallState, Credentials, DtmfError, DtmfInfoForm,
     EndpointConfig, ForkPolicy, Hold, Incoming, Input, Link, MAX_UNSAFE_BODY_BYTES, MessageHandle,
     MessageSummary, Network, OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Recovery,
-    Refusals, RegistrationFailure, RegistrationState, Replacing, Screen, Screening, StatusCode,
-    Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit, TransportId,
-    TransportProtocol, UaError, UaEvent, Uri, UserAgent,
+    Refusals, RegistrationFailure, RegistrationState, Replacing, STREAM_WAIT, Screen, Screening,
+    StatusCode, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit,
+    TransportId, TransportProtocol, UaError, UaEvent, Uri, UserAgent,
 };
 /// Who is on a call and how it asked to be answered, why it ended, and where
 /// to send it instead: RFC 3325's asserted identity behind a per-account

@@ -326,7 +326,27 @@ public sealed partial class SipralStack : IDisposable
     /// starts with, ten INVITEs at once then one every two seconds, past
     /// which a call is answered 480) or
     /// <see cref="SipralInviteLimit.VoiceAgent"/> for a service taking a
-    /// trunk's calls.</summary>
+    /// trunk's calls.
+    ///
+    /// <paramref name="streamFallback"/> is what a stack signalling over UDP
+    /// does when a request is too large for a datagram — nearly always the
+    /// answer to a challenge, whose <c>Authorization</c> takes a call offering
+    /// two SRTP suites past RFC 3261 §18.1.1's 1300 bytes. On (the default),
+    /// <see cref="SipralEventKind.TransportWanted"/> is answered by opening a
+    /// TCP connection to the address it names — the registrar or proxy the
+    /// request was going to, on the same port — and binding it
+    /// (<c>sipral_stack_transport_bind</c>): the request the stack was holding
+    /// goes on it, and the call or registration carries on over it. When that
+    /// connection is refused or times out, or with <see langword="false"/>,
+    /// the stack is told at once (<c>sipral_stack_transport_failed</c>), and
+    /// what was waiting ends rather than hanging: a call as unreachable, its
+    /// <see cref="SipralCallEventInfo.Cause"/> a SIP 513 whose text names the
+    /// size and the limit. The event reaches <see cref="Events"/>
+    /// either way. <paramref name="streamServer"/> (<c>host:port</c>) is
+    /// where that connection goes instead, for a server that takes TCP on
+    /// another port than UDP — a PBX on 5060 for one and 5160 for the other:
+    /// the connection stands for the address the event named, and everything
+    /// the stack sends there goes on it.</summary>
     public SipralStack(
         string bindHost = "127.0.0.1",
         int bindPort = 0,
@@ -364,9 +384,13 @@ public sealed partial class SipralStack : IDisposable
         string? signallingServer = null,
         string? tlsServerName = null,
         SipralTlsTrust? tlsTrust = null,
-        SipralInviteLimit? inviteLimit = null)
+        SipralInviteLimit? inviteLimit = null,
+        bool streamFallback = true,
+        string? streamServer = null)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
+        _streamFallback = streamFallback;
+        _streamServer = streamServer;
         _nat = nat;
         _turn = turnServer is not null;
         _turnTransport = turnTransport;
@@ -1209,6 +1233,7 @@ public sealed partial class SipralStack : IDisposable
         {
             _turnAsked.Enqueue(asked);
         }
+        NoteStreamWanted(args);
         if (args.Kind is SipralEventKind.NatMapping or SipralEventKind.NatRelay)
         {
             var local = args.Nat?.Local ?? args.Relay?.Local;
@@ -1309,6 +1334,11 @@ public sealed partial class SipralStack : IDisposable
             }
             var payload = new byte[(int)transmit.Len];
             Marshal.Copy(_transmitData, payload, 0, payload.Length);
+            if (transmit.Transport >= FirstStream)
+            {
+                WriteSipStream(transmit.Transport, payload);
+                continue;
+            }
             var socket = _socket;
             if (socket is null)
             {
@@ -1702,6 +1732,7 @@ public sealed partial class SipralStack : IDisposable
             DrainStun();
             DrainFarewells();
             ActOnTurnStreams();
+            ActOnStreamsWanted();
             while (_turnLost.TryDequeue(out var lost))
             {
                 LoseTurnStream(lost, tell: true);
@@ -1992,6 +2023,7 @@ public sealed partial class SipralStack : IDisposable
         {
             LoseTurnStream(local, tell: false);
         }
+        CloseSipStreams();
         _events.Writer.TryComplete();
 
         CloseLink();

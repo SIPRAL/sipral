@@ -1089,8 +1089,14 @@ impl UserAgent {
     /// The core answers a challenge once; the same nonce coming back is §22.1
     /// saying the password is wrong, and repeating it is how an account gets
     /// locked. So the silence after it is the answer.
+    ///
+    /// Except one the endpoint is holding until a connection exists: its
+    /// retry has not been sent yet, so there is no silence to read.
     pub(crate) fn settle_offer_challenges(&mut self) {
-        let parked: Vec<(AnyTransactionId, ParkedOffer)> = self.challenged_offers.drain().collect();
+        let parked: Vec<(AnyTransactionId, ParkedOffer)> =
+            crate::calls::settled(&mut self.challenged_offers, |offer| {
+                offer.waiting_for_stream
+            });
         for (id, offer) in parked {
             self.on_offer_refused(offer.call, id, offer.status, offer.response);
         }

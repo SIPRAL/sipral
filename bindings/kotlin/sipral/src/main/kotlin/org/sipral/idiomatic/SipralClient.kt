@@ -58,6 +58,7 @@ import org.sipral.SipralStirConfig
 import org.sipral.SipralStatus
 import org.sipral.SipralToggle
 import org.sipral.SipralTransport
+import org.sipral.SipralTransportError
 
 private const val TRANSMIT_BYTES = 1 shl 16
 private const val ADDRESS_BYTES = 64
@@ -66,6 +67,13 @@ private const val PACKET_BYTES = 1500
 /** The first transport id a connection to a recording server is bound
  * under. */
 private const val FIRST_RECORDING_LINK = 64L
+
+/** The first transport id a connection opened for
+ * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is bound under, one more for each
+ * destination after it: clear of the main transport, of the recording
+ * servers' ids, and of the small numbers an application driving
+ * [org.sipral.Sipral] itself would pick. */
+private const val FIRST_STREAM_LINK = 1024L
 
 internal fun formatAddress(host: String, port: Int): String = "$host:$port"
 
@@ -318,6 +326,26 @@ class SipralClient private constructor(
          * INVITEs at once then one every two seconds, past which a call is
          * answered 480) or [SipralInviteLimit.VOICE_AGENT] for a service
          * taking a trunk's calls.
+         *
+         * [streamFallback] is what a client signalling over UDP does when a
+         * request is too large for a datagram -- nearly always the answer to
+         * a challenge, whose `Authorization` takes a call offering two SRTP
+         * suites past RFC 3261 §18.1.1's 1300 bytes. On (the default),
+         * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` (read with
+         * [transportWantedOf]) is answered by opening a TCP connection to the
+         * address it names -- the registrar or proxy the request was going
+         * to, on the same port -- and binding it
+         * (`sipral_stack_transport_bind`): the request the stack was holding
+         * goes on it, and the call or registration carries on over it. When
+         * that connection is refused or times out, or with false, the stack
+         * is told at once (`sipral_stack_transport_failed`), and what was
+         * waiting ends rather than hanging: a call as unreachable, its
+         * `causeSip` 513 and its `causeText` naming the size and the limit.
+         * The event reaches [events] either way. [streamServer]
+         * (`host:port`) is where that connection goes instead, for a server
+         * that takes TCP on another port than UDP -- a PBX on 5060 for one
+         * and 5160 for the other: the connection stands for the address the
+         * event named, and everything the stack sends there goes on it.
          */
         fun open(
             bindHost: String = "127.0.0.1",
@@ -349,6 +377,8 @@ class SipralClient private constructor(
             tlsServerName: String? = null,
             tlsTrust: SipralTlsTrust = SipralTlsTrust.Platform,
             inviteLimit: SipralInviteLimit? = null,
+            streamFallback: Boolean = true,
+            streamServer: String? = null,
         ): SipralClient {
             require(signalling == SipralTransport.UDP || signalling == SipralTransport.TCP || signalling == SipralTransport.TLS) {
                 "signalling is UDP, TCP or TLS"
@@ -386,6 +416,8 @@ class SipralClient private constructor(
                 if (rtpPortMin == 0 && rtpPortMax == 0) null else rtpPortMin to rtpPortMax,
             )
             link?.owner = client
+            client.streamFallback = streamFallback
+            client.streamServer = streamServer
             try {
                 client.start(
                     userAgent, codecs, ice, turn, g729AnnexB, referrals,
@@ -1159,6 +1191,163 @@ class SipralClient private constructor(
         }
     }
 
+    // -- RFC 3261 §18.1.1: a request too large for a datagram -----------------
+
+    /** Whether a request too large for a datagram gets a connection
+     * ([open]'s `streamFallback`). */
+    private var streamFallback = true
+
+    /** Where such a connection goes, when not to the address asked for
+     * ([open]'s `streamServer`). */
+    private var streamServer: String? = null
+
+    /** The TCP connections opened for requests too large for a datagram, by
+     * the transport id each was bound under, with where each goes; the
+     * destinations one is being opened to; the next id; and where
+     * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for one during the poll that
+     * raised it, acted on right after that poll. */
+    private val streamLinks = ConcurrentHashMap<Long, Pair<String, Socket>>()
+    private val streamsOpening: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val nextStreamLink = java.util.concurrent.atomic.AtomicLong(FIRST_STREAM_LINK)
+    private val streamsAsked = java.util.concurrent.ConcurrentLinkedQueue<String>()
+
+    /** Answer what `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for in the poll
+     * that just ran: a connection to each destination not already connected
+     * or being connected to, opened on a thread of its own, or -- with
+     * `streamFallback` off -- the word that none is coming. */
+    private fun actOnStreamsWanted() {
+        val seen = HashSet<String>()
+        while (true) {
+            val destination = streamsAsked.poll() ?: return
+            if (!seen.add(destination) || streamLinks.values.any { it.first == destination }) {
+                continue
+            }
+            if (!streamFallback) {
+                sayNoStream(nextStreamLink.getAndIncrement(), SipralTransportError.CONNECTION_REFUSED)
+                continue
+            }
+            if (!streamsOpening.add(destination)) {
+                continue
+            }
+            val id = nextStreamLink.getAndIncrement()
+            Thread({ openStreamLink(id, destination) }, "sipral-stream-$id").apply {
+                isDaemon = true
+                start()
+            }
+        }
+    }
+
+    /** Connect over TCP to [destination] -- or to `streamServer` when one
+     * was given -- and bind the connection under [id] as the stream to
+     * [destination], then read it until it closes; a connection that cannot
+     * be made is told to the stack under that same id, which ends what was
+     * waiting for it. */
+    private fun openStreamLink(id: Long, destination: String) {
+        val socket = Socket()
+        try {
+            socket.bind(InetSocketAddress(InetAddress.getByName(currentHost), 0))
+            socket.connect(parseHostPort(streamServer ?: destination), SignallingLink.PATIENCE_MS)
+            socket.tcpNoDelay = true
+        } catch (refused: Exception) {
+            socket.close()
+            streamsOpening.remove(destination)
+            sayNoStream(id, classify(refused, handshaking = false).error)
+            return
+        }
+        streamLinks[id] = destination to socket
+        streamsOpening.remove(destination)
+        if (closed.get()) {
+            loseStreamLink(id, tell = false)
+            return
+        }
+        val local = formatAddress(socket.localAddress.hostAddress, socket.localPort)
+        try {
+            retryBusy {
+                Sipral.stackTransportBind(handle, id, SipralTransport.TCP.value.toLong(), local, destination, nowMs())
+            }
+        } catch (_: SipralException) {
+            loseStreamLink(id, tell = false)
+            sayNoStream(id, SipralTransportError.OTHER)
+            return
+        }
+        readStreamLink(id, socket)
+    }
+
+    /** `sipral_stack_transport_failed` for a connection that was not made;
+     * never throwing on the way out. */
+    private fun sayNoStream(id: Long, error: SipralTransportError) {
+        try {
+            retryBusy { Sipral.stackTransportFailed(handle, id, error.value.toLong(), nowMs()) }
+        } catch (_: SipralException) {
+            // nothing was waiting any more, or the stack is going away
+        }
+    }
+
+    private fun writeStreamLink(id: Long, payload: ByteArray, len: Int) {
+        val socket = streamLinks[id]?.second ?: return
+        try {
+            synchronized(socket) {
+                socket.getOutputStream().write(payload, 0, len)
+                socket.getOutputStream().flush()
+            }
+        } catch (_: Exception) {
+            loseStreamLink(id, tell = true)
+        }
+    }
+
+    /** What the connection carried, to `sipral_stack_receive_stream`, every
+     * byte in order; the far end closing it is `sipral_stack_stream_closed`. */
+    private fun readStreamLink(id: Long, socket: Socket) {
+        val buffer = ByteArray(TRANSMIT_BYTES)
+        val input = try {
+            socket.getInputStream()
+        } catch (_: Exception) {
+            loseStreamLink(id, tell = true)
+            return
+        }
+        while (!closed.get()) {
+            val read = try {
+                input.read(buffer)
+            } catch (_: Exception) {
+                -1
+            }
+            if (read < 0) {
+                loseStreamLink(id, tell = true)
+                return
+            }
+            if (read == 0) {
+                continue
+            }
+            val bytes = buffer.copyOfRange(0, read)
+            try {
+                retryBusy(deadlineMs = 5_000) { Sipral.stackReceiveStream(handle, id, bytes, nowMs()) }
+            } catch (_: SipralException) {
+                // the framing is lost: the stack retired the transport itself
+                loseStreamLink(id, tell = false)
+                return
+            }
+        }
+    }
+
+    /** Close the connection bound under [id] and, when [tell], say so with
+     * `sipral_stack_stream_closed`. */
+    private fun loseStreamLink(id: Long, tell: Boolean) {
+        val (_, socket) = streamLinks.remove(id) ?: return
+        try {
+            socket.close()
+        } catch (_: Exception) {
+            // closed either way
+        }
+        if (!tell || closed.get()) {
+            return
+        }
+        try {
+            retryBusy { Sipral.stackStreamClosed(handle, id, nowMs()) }
+        } catch (_: SipralException) {
+            // the stack is going away
+        }
+    }
+
     // -- media sockets behind a NAT ------------------------------------------
 
     // Media sockets `sipral_stack_nat_map` named whose call has no media
@@ -1592,6 +1781,9 @@ class SipralClient private constructor(
         // already current, the same ordering `sipral.call.Call.deliver`
         // (the Python binding) keeps for the same reason.
         turnStreamOf(event)?.let { turnAsked.add(it) }
+        if (link == null) {
+            transportWantedOf(event)?.destination?.let { streamsAsked.add(it) }
+        }
         noteNat(event)
         calls[event.call]?.deliver(event)
         if (event.kind == SipralEventKind.CALL_ENDED.value.toLong()) {
@@ -1609,6 +1801,11 @@ class SipralClient private constructor(
             val len = lens[0].toInt()
             if (status != SipralStatus.OK.value || len == 0) {
                 return
+            }
+            if (lens[3] >= FIRST_STREAM_LINK) {
+                // a connection opened for a request too large for a datagram
+                writeStreamLink(lens[3], data, len)
+                continue
             }
             if (lens[3] != 0L) {
                 // a recording session's own connection
@@ -1716,6 +1913,7 @@ class SipralClient private constructor(
             drainStun()
             drainFarewells()
             actOnTurnStreams()
+            actOnStreamsWanted()
         }
     }
 
@@ -1768,6 +1966,9 @@ class SipralClient private constructor(
         link?.close()
         for (id in recordingLinks.keys.toList()) {
             recordingLinks.remove(id)?.close()
+        }
+        for (id in streamLinks.keys.toList()) {
+            loseStreamLink(id, tell = false)
         }
         Sipral.stackDestroy(handle)
         socket?.close()

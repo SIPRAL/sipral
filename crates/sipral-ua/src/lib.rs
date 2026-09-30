@@ -76,6 +76,7 @@ mod lifecycle;
 mod message;
 mod mwi;
 mod options;
+mod oversize;
 mod parked;
 /// Presence documents (RFC 3863) with the rich presence activities of
 /// RFC 4480 — under their own path because `Tuple`, `Note` and `Contact`
@@ -142,6 +143,7 @@ pub use lifecycle::{
 };
 pub use message::{MAX_UNSAFE_BODY_BYTES, MessageHandle};
 pub use mwi::{MessageClass, MessageSummary, MessageSummaryError};
+pub use oversize::STREAM_WAIT;
 pub use presence::{Presence, PresenceError};
 pub use publish::{
     Publication, PublishError, PublishEvent, PublishFailure, PublishKind, PublishRequest,

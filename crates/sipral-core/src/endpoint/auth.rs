@@ -309,6 +309,53 @@ impl Endpoint {
         self.send_retry(failed, held, credentials, now)
     }
 
+    /// Rewrite the body a challenged request will go again with.
+    ///
+    /// For a caller that has to make the retry smaller: RFC 3261 §18.1.1
+    /// refused it a datagram, and no stream came to carry it instead.
+    /// `reshape` is handed the body the request went out with and returns the
+    /// one to send in its place, or `None` to leave it as it is. The retry
+    /// still goes through [`Self::retry_with_credentials`], under the same
+    /// handle and held to the same rules; §22.2 makes it a new request, and
+    /// nothing about answering a challenge ties it to the body the refused
+    /// one carried.
+    ///
+    /// `true` when the body was replaced; `false` when there is no challenge
+    /// under this handle, `reshape` left it alone, or the request could not
+    /// be written again around the new body.
+    pub fn reshape_challenged_body(
+        &mut self,
+        failed: AnyTransactionId,
+        reshape: impl FnOnce(&[u8]) -> Option<Vec<u8>>,
+    ) -> bool {
+        let Some(mut held) = self.challenges.take(failed) else {
+            return false;
+        };
+        let reshaped = {
+            let raw = held.request.as_raw();
+            match (raw.header(HeaderName::Via), raw.cseq()) {
+                (Some(via), Ok(cseq)) => reshape(raw.body())
+                    .and_then(|body| rebuild_with(&raw, via, cseq.seq, &[], &body).ok()),
+                _ => None,
+            }
+        };
+        let replaced = reshaped.is_some();
+        if let Some(message) = reshaped {
+            held.request = message;
+        }
+        self.challenges.remember(failed, held);
+        replaced
+    }
+
+    /// Stop holding a challenge nobody is going to answer.
+    ///
+    /// A retry §18.1.1 held back for a stream that never came is the one
+    /// case: the challenge would otherwise sit in the store until newer ones
+    /// pushed it out. `true` when there was one.
+    pub fn abandon_challenge(&mut self, failed: AnyTransactionId) -> bool {
+        self.challenges.take(failed).is_some()
+    }
+
     /// The retry itself, with the challenge already out of the store.
     ///
     /// Split from [`Self::retry_with_credentials`] only so that the one error
@@ -679,6 +726,18 @@ fn rebuild(
     cseq: u32,
     credentials: &[(HeaderName<'static>, String)],
 ) -> Result<OwnedMessage, crate::msg::BuildError> {
+    rebuild_with(request, via, cseq, credentials, request.body())
+}
+
+/// [`rebuild`], carrying `body` in place of the one the request had, under
+/// the `Content-Type` it had.
+fn rebuild_with(
+    request: &RawMessage<'_>,
+    via: &[u8],
+    cseq: u32,
+    credentials: &[(HeaderName<'static>, String)],
+    body: &[u8],
+) -> Result<OwnedMessage, crate::msg::BuildError> {
     use crate::msg::BuildError;
 
     let method = request.method().ok_or(BuildError::MissingField("method"))?;
@@ -737,7 +796,6 @@ fn rebuild(
         builder = builder.header(*name, value.as_bytes());
     }
 
-    let body = request.body();
     if !body.is_empty()
         && let Some(kind) = request.header(HeaderName::ContentType)
     {

@@ -76,6 +76,19 @@
 #                               the NAT pair's call with its first STUN
 #                               server dead, both ends moving to coturn.
 #                               About three minutes
+#   scripts/lab.sh datagram     only a call whose INVITE, once it answers
+#                               Asterisk's challenge, is past RFC 3261
+#                               §18.1.1's 1300 bytes, placed from the Python
+#                               layer with four SDES suites offered
+#                               (interop/datagram/caller.py): at a port where
+#                               Asterisk listens on TCP too, the answer goes
+#                               over a connection the layer opens by itself
+#                               and the call is held, resumed and hung up; at
+#                               one with UDP alone, the INVITE goes again with
+#                               one suite and fits; and made too large even
+#                               for that, the call ends at once with a 513
+#                               that names the limit (part of a run that names
+#                               nothing too)
 #   scripts/lab.sh security     only the SRTP policy per account, through the
 #                               C ABI -- SDES required, DTLS-SRTP required
 #                               and off, set on the account and read back
@@ -3542,6 +3555,112 @@ if [ "$WANT" = all ] || [ "$WANT" = tls ]; then
         wait_for asterisk "Asterisk Ready" >/dev/null || true
         rm -rf "$SIPRAL_TLS_CERTS"
         unset SIPRAL_TLS_CERTS
+    fi
+fi
+
+# RFC 3261 §18.1.1 on a challenged call, through the Python layer
+# (interop/datagram/caller.py): an account whose INVITE, once it carries
+# Asterisk's `Authorization`, is past 1300 bytes. `$1` is where the INVITE
+# goes, `$2` the SDES suites the account offers, `$3` a display name to make
+# it larger, empty for none; what the caller printed is left in DATAGRAM_LOG,
+# and what Asterisk took, and over what, in DATAGRAM_SEEN: pjsip's logger is
+# on for the run. Four suites are about 1100 bytes and 1450 answered; one
+# suite and 250 bytes of display name about 1150 and 1500, with no suite to
+# drop.
+DATAGRAM_SUITES=AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80,AEAD_AES_128_GCM,AES_256_CM_HMAC_SHA1_80
+datagram_call() {
+    local port="$1" suites="$2" display="$3" beside
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    ( cd interop && docker compose logs --no-color asterisk 2>/dev/null ) | wc -l > "$DATAGRAM_MARK"
+    DATAGRAM_LOG=$(lab_run "the datagram caller" $((LAB_START_APT_S + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
+        -e SIPRAL_AOR=sip:labuser-big@asterisk \
+        -e SIPRAL_AUTH_USER=labuser-big -e SIPRAL_AUTH_PASSWORD=labpass \
+        -e SIPRAL_TARGET=sip:9002@asterisk \
+        -e SIPRAL_SUITES="$suites" \
+        -e SIPRAL_DISPLAY_NAME="$display" \
+        -e SIPRAL_DWELL_MS="$LAB_DWELL_MS" -e SIPRAL_PATIENCE_MS="$LAB_PATIENCE_MS" \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/python:/python:ro" \
+        -v "$ROOT/interop/datagram:/datagram:ro" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
+            address=\$(getent hosts asterisk | cut -d' ' -f1)
+            SIPRAL_SERVER=\"\$address:$port\" exec python3 -u /datagram/caller.py" 2>&1)
+    printf '%s\n' "$DATAGRAM_LOG" | sed 's/^/    /'
+    DATAGRAM_SEEN=$( ( cd interop && docker compose logs --no-color asterisk 2>/dev/null ) \
+        | tail -n +"$(( $(cat "$DATAGRAM_MARK") + 1 ))" \
+        | grep -o 'Received SIP request ([0-9]* bytes) from [A-Z]*:' || true)
+    printf '%s\n' "$DATAGRAM_SEEN" | sed 's/^/    asterisk: /'
+}
+
+# Whether the caller's own lines say `$1`.
+datagram_said() {
+    printf '%s\n' "$DATAGRAM_LOG" | grep -Eq "$1"
+}
+
+datagram_flow() {
+    local ok=0
+    DATAGRAM_MARK=$(mktemp)
+    ( cd interop && docker compose -f compose.yaml -f datagram/compose.override.yaml up -d asterisk ) \
+        >/dev/null 2>&1 || { printf '  could not restart Asterisk with TCP and a UDP-only port\n'; return 1; }
+    wait_for asterisk "Asterisk Ready" >/dev/null || return 1
+    ( cd interop && docker compose exec -T asterisk asterisk -rx 'pjsip set logger on' ) >/dev/null 2>&1
+
+    # UDP and TCP both on 5060: the answer goes over a connection the layer
+    # opened by itself, and the call carries on to the hold and the hangup
+    datagram_call 5060 "$DATAGRAM_SUITES" ""
+    if datagram_said '^wanted 2 [0-9.]+:5060 1[3-9][0-9][0-9] 1300$' \
+        && datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
+        && datagram_said '^ended LOCAL_HANGUP ' \
+        && printf '%s\n' "$DATAGRAM_SEEN" | grep -Eq '\(1[3-9][0-9][0-9] bytes\) from TCP:'; then
+        pass "UDP and TCP: the INVITE answering the challenge went over TCP, and the call was held, resumed and hung up"
+    else
+        fail "UDP and TCP: the INVITE answering the challenge over a connection"
+        ok=1
+    fi
+
+    # UDP alone on 5070: the connection is refused, and the offer with one
+    # suite is what fits the datagram
+    datagram_call 5070 "$DATAGRAM_SUITES" ""
+    if datagram_said '^wanted 2 [0-9.]+:5070 ' && datagram_said '^transport failed [0-9]+ 1$' \
+        && datagram_said '^confirmed$' && datagram_said '^ended LOCAL_HANGUP ' \
+        && ! printf '%s\n' "$DATAGRAM_SEEN" | grep -q 'from TCP:'; then
+        pass "UDP alone: the connection refused, the INVITE went again with one SDES suite, and the call went on"
+    else
+        fail "UDP alone: the INVITE answering the challenge trimmed into a datagram"
+        ok=1
+    fi
+
+    # UDP alone, one suite and a long From: nothing to drop, and the call
+    # ends at once, with the limit named
+    datagram_call 5070 AES_CM_128_HMAC_SHA1_80 "$(printf 'A%.0s' $(seq 1 250))"
+    if datagram_said '^transport failed [0-9]+ 1$' \
+        && datagram_said '^ended UNREACHABLE 513 513 request of [0-9]+ bytes is over the 1300-byte datagram limit'; then
+        pass "UDP alone and nothing to drop: the call ended at once, 513, the limit named"
+    else
+        fail "UDP alone and nothing to drop: the call ended with the limit named"
+        ok=1
+    fi
+
+    ( cd interop && docker compose exec -T asterisk asterisk -rx 'pjsip set logger off' ) >/dev/null 2>&1
+    ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
+    wait_for asterisk "Asterisk Ready" >/dev/null || true
+    rm -f "$DATAGRAM_MARK"
+    return "$ok"
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = datagram ]; then
+    step "a challenged INVITE past 1300 bytes -- over TCP where Asterisk listens, trimmed or ended where it does not"
+    if [ -n "$HARNESS_C" ]; then
+        datagram_flow || true
+    elif [ "$WANT" = datagram ]; then
+        fail "the datagram flows: there is no libsipral_ffi for the Python layer to load"
+    else
+        printf '  note  no libsipral_ffi, so the datagram flows are skipped with the other C flows\n'
     fi
 fi
 

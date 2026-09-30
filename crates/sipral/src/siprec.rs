@@ -400,25 +400,44 @@ impl Copy {
     }
 }
 
-/// How the copies are protected: whether they have to be, and each stream's
-/// protector with the tag of the line it keys.
+/// How the copies are protected: whether they have to be, every protector each
+/// stream has had with the tag of the line it keys, and which line keys it
+/// now.
+///
+/// A protector is kept for the life of the recording, not for as long as its
+/// line is the one in use. The keys are drawn once per recording and a line's
+/// tag names the same key for as long as the recording runs, so a server
+/// that moves a stream to another line and back is keying it again with a
+/// key that has already protected packets: a protector built afresh for it
+/// would start its rollover counter at zero, and once the sequence numbers
+/// had wrapped it would send an index the key had already covered — the one
+/// thing SRTP must never do (RFC 3711 §9.1). The kept protector carries its
+/// counter on.
 #[derive(Default)]
 struct Protection {
     required: bool,
-    streams: [Option<(u32, Protector)>; 2],
+    kept: [Vec<(u32, Protector)>; 2],
+    active: [Option<u32>; 2],
+}
+
+impl Protection {
+    /// The protector of the line keying `stream` now.
+    fn of(&mut self, stream: usize) -> Option<&mut Protector> {
+        let tag = (*self.active.get(stream)?)?;
+        self.kept
+            .get_mut(stream)?
+            .iter_mut()
+            .find(|(kept, _)| *kept == tag)
+            .map(|(_, protector)| protector)
+    }
 }
 
 impl std::fmt::Debug for Protection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tags = self
-            .streams
-            .iter()
-            .map(|stream| stream.as_ref().map(|(tag, _)| *tag))
-            .collect::<Vec<_>>();
         f.debug_struct("Protection")
             .field("required", &self.required)
-            .field("tags", &tags)
-            .finish()
+            .field("tags", &self.active)
+            .finish_non_exhaustive()
     }
 }
 
@@ -522,16 +541,26 @@ impl Tap {
 
     /// Protect the copies as the server's answer said ([`protection`]), for
     /// a recording session offered as SRTP: from here on a stream is copied
-    /// only while it has a protector, and never in the clear. A stream that
-    /// carries on under the line it had keeps its protector, and with it its
-    /// place in the keystream.
+    /// only while it has a protector, and never in the clear. A stream keyed
+    /// by a line that has keyed it before — the one it had, or one it had
+    /// earlier and went back to — takes up the protector that line had, and
+    /// with it its place in the keystream; the one `answered` built afresh
+    /// is dropped.
     pub(crate) fn protect(&mut self, answered: [Option<(u32, Protector)>; 2]) {
         self.protection.required = true;
-        for (slot, answered) in self.protection.streams.iter_mut().zip(answered) {
-            match (slot.as_ref(), answered) {
-                (Some((kept, _)), Some((tag, _))) if *kept == tag => {}
-                (_, answered) => *slot = answered,
-            }
+        for ((kept, active), answered) in self
+            .protection
+            .kept
+            .iter_mut()
+            .zip(self.protection.active.iter_mut())
+            .zip(answered)
+        {
+            *active = answered.map(|(tag, fresh)| {
+                if !kept.iter().any(|(known, _)| *known == tag) {
+                    kept.push((tag, fresh));
+                }
+                tag
+            });
         }
     }
 
@@ -579,12 +608,7 @@ impl Tap {
             return;
         };
         if self.protection.required {
-            let Some((_, protector)) = self
-                .protection
-                .streams
-                .get_mut(stream)
-                .and_then(Option::as_mut)
-            else {
+            let Some(protector) = self.protection.of(stream) else {
                 return;
             };
             let length = packet.len();
@@ -744,5 +768,58 @@ mod tests {
         tap.protect([None, Some((2, key()))]);
         tap.sent(&packet(0, 9_001), &[7; 40]);
         assert_eq!(sequences(&mut tap), []);
+    }
+
+    /// A server that moves a stream to another line and back keys it again
+    /// with a key that has protected packets before, and past a wrap of the
+    /// sequence numbers a protector built afresh for it would send indices
+    /// that key already covered (RFC 3711 §9.1). Every copy here carries the
+    /// same payload, so an index protected twice under one key would show as
+    /// the same ciphertext twice.
+    #[test]
+    fn a_stream_moved_to_another_line_and_back_never_protects_an_index_twice_under_one_key() {
+        use sipral_rtp::srtp::{Master, Policy, Protector, Suite};
+        use std::collections::HashSet;
+
+        let key = |tag: u8| {
+            Protector::new(
+                Policy::new(Suite::AesCm80),
+                Master::new(&[tag; 16], &[tag; 14]),
+            )
+        };
+        let mut tap = Tap::new(&record_to(), destinations(), (0, 0), [(1, 0, 0), (2, 0, 0)]);
+        let mut seen = HashSet::new();
+        let mut copied = 0_u32;
+        let mut sequence = 0_u16;
+        let mut send = |tap: &mut Tap, count: u32| {
+            for _ in 0..count {
+                tap.sent(&packet(0, sequence), &[7; 40]);
+                sequence = sequence.wrapping_add(1);
+                while let Some(copy) = tap.poll() {
+                    // the forty bytes of ciphertext, without the tag after
+                    let payload = RtpPacket::parse(copy.payload)
+                        .expect("RTP")
+                        .payload()
+                        .get(..40)
+                        .expect("the payload, encrypted")
+                        .to_vec();
+                    assert!(
+                        seen.insert(payload),
+                        "copy {copied} went under an index its key had already covered"
+                    );
+                    copied += 1;
+                }
+            }
+        };
+
+        // under line 1 past a wrap of the sequence numbers
+        tap.protect([Some((1, key(1))), None]);
+        send(&mut tap, 65_536 + 10);
+        // the server moves the stream to line 2, and then back to line 1
+        tap.protect([Some((2, key(2))), None]);
+        send(&mut tap, 5);
+        tap.protect([Some((1, key(1))), None]);
+        send(&mut tap, 20);
+        assert_eq!(copied, 65_536 + 35, "every packet was copied");
     }
 }

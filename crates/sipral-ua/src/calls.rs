@@ -75,7 +75,7 @@ const NOT_NOW: StatusCode = StatusCode::BUSY_HERE;
 /// Draining the lot, which is what these used to do, turns a retry waiting on
 /// a socket into a refusal reported in the same breath as the request for the
 /// socket.
-fn settled<K, V>(parked: &mut HashMap<K, V>, waiting: impl Fn(&V) -> bool) -> Vec<(K, V)>
+pub(crate) fn settled<K, V>(parked: &mut HashMap<K, V>, waiting: impl Fn(&V) -> bool) -> Vec<(K, V)>
 where
     K: Copy + Eq + std::hash::Hash,
 {
@@ -2520,7 +2520,7 @@ impl UserAgent {
 
     /// The retry is a transaction now, so everything that named the refused
     /// one names this one.
-    fn call_retry_went(
+    pub(crate) fn call_retry_went(
         &mut self,
         call: CallHandle,
         transaction: AnyTransactionId,

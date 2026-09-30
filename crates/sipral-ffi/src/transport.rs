@@ -92,6 +92,20 @@
 //! there is no separate "it went" event, the same as for a request that fit
 //! the first time.
 //!
+//! The answer to a challenge is where a request most often crosses the line,
+//! and there nobody asks again: the stack holds the retry itself and sends it
+//! the moment the bind succeeds. An application that cannot open the stream
+//! — the far end refused the connection, it timed out, or it opens none at
+//! all — says so with [`sipral_stack_transport_failed`] or
+//! [`sipral_stack_transport_failure`] naming the number it would have bound,
+//! and everything waiting stops waiting at once: a call's INVITE is tried
+//! once more over the datagram with one SDES suite per media stream, when
+//! that fits, and what still does not fit ends — a call with
+//! `SIPRAL_CALL_END_REASON_UNREACHABLE`, `cause_sip` 513 and a `cause_text`
+//! naming the size and the limit; a registration failed as unreachable with
+//! a 513. An application that says nothing gets the same ten seconds after
+//! the event (`sipral_ua::STREAM_WAIT`).
+//!
 //! # A datagram, a stream, and a WebSocket
 //!
 //! A datagram carries exactly one message and says where it came from. Stream
@@ -814,6 +828,15 @@ entry! {
     /// socket over it would drop the calls that were fine. This is for the
     /// socket that is over.
     ///
+    /// It is also the answer to a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` the
+    /// application could not honour: a failure told of a transport that is
+    /// not up — the number it would have bound the stream at, never bound or
+    /// retired — while the stack waits for that stream is a connection that
+    /// could not be opened, and every request waiting for it stops waiting
+    /// now (RFC 3261 §18.1.1: trimmed into a datagram when it then fits,
+    /// ended with a 513 naming the limit otherwise). A number never bound is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` while nothing is waiting.
+    ///
     /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
     /// of what the failure did to the registrations and calls on it.
     /// [`sipral_stack_transport_failure`] is the same call with the TLS
@@ -857,6 +880,9 @@ entry! {
     /// nothing, and the bind that follows the reconnect undoes it. A
     /// transport already down is not retired twice, and the failure is still
     /// raised: that is how each attempt to connect again that fails is told.
+    /// A stream a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for and that
+    /// could not be opened is told here as well, as
+    /// [`sipral_stack_transport_failed`] says.
     ///
     /// A TLS reason on a transport that does not speak TLS or WSS is
     /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and so is a detail longer than
@@ -929,6 +955,13 @@ entry! {
 }
 
 /// Retire a transport, and queue the event that says so.
+///
+/// A failure told of a transport that is not up — one never bound, or one
+/// already retired — is a connection that could not be opened. While the
+/// stack is waiting for the stream a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`
+/// asked for, that is the answer to it, and everything waiting stops
+/// waiting now (`sipral_ua::UserAgent::stream_unavailable`). A number never
+/// bound is refused when nothing is waiting, as it always was.
 fn lose(
     state: &mut StackState,
     transport: u32,
@@ -937,7 +970,22 @@ fn lose(
     detail: String,
     now: std::time::Instant,
 ) -> Result<(), Fail> {
-    let id = named(state, transport)?;
+    let waiting = state.agent.wants_a_stream();
+    let Some(id) = state.transports.resolve(transport) else {
+        if !waiting {
+            return named(state, transport).map(|_| ());
+        }
+        state.agent.stream_unavailable(now);
+        state.lost.push(Lost {
+            transport,
+            protocol: 0,
+            error,
+            tls,
+            detail,
+        });
+        return Ok(());
+    };
+    let was_up = state.agent.endpoint().bound_transport(id).is_some();
     // a transport already down is not retired twice, and the failure is
     // still raised: an attempt to connect again that failed
     state
@@ -950,6 +998,9 @@ fn lose(
             now,
         )
         .map_err(|error| received_badly(&error))?;
+    if waiting && !was_up {
+        state.agent.stream_unavailable(now);
+    }
     state.lost.push(Lost {
         transport,
         protocol: protocol_number(state, transport),
@@ -2909,6 +2960,230 @@ pub(crate) mod tests {
             "the transport is still up: {}",
             last_error_text()
         );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// What a call challenged past RFC 3261 §18.1.1's line said, copied out
+    /// while the callback ran: the stream asked for, and how the call ended.
+    #[derive(Default)]
+    struct Outgrown {
+        wanted: Vec<(u32, String, usize, u32)>,
+        ended: Vec<(u32, u32, u32, String)>,
+        lost: Vec<(u32, u32)>,
+    }
+
+    unsafe extern "C" fn keep_outgrown(
+        event: *const crate::event::SipralEvent,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let seen = unsafe { &mut *user_data.cast::<Outgrown>() };
+        let event = unsafe { &*event };
+        let text = |pointer: *const u8, len: usize| {
+            if pointer.is_null() {
+                String::new()
+            } else {
+                String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(pointer, len) })
+                    .into_owned()
+            }
+        };
+        match event.kind {
+            SipralEventKind::TransportWanted => {
+                let payload = unsafe { event.payload.transport_wanted };
+                seen.wanted.push((
+                    payload.protocol,
+                    text(payload.destination.cast::<u8>(), payload.destination_len),
+                    payload.request_bytes,
+                    payload.limit_bytes,
+                ));
+            }
+            SipralEventKind::CallEnded => {
+                let payload = unsafe { event.payload.call };
+                seen.ended.push((
+                    payload.end_reason,
+                    payload.status_code,
+                    payload.cause_sip,
+                    text(payload.cause_text, payload.cause_text_len),
+                ));
+            }
+            SipralEventKind::TransportFailed => {
+                let payload = unsafe { event.payload.transport_failed };
+                seen.lost.push((payload.transport, payload.error));
+            }
+            _ => {}
+        }
+    }
+
+    /// A stack whose call a PBX has just challenged with a nonce long enough
+    /// that the answer outgrows a datagram, driven through the C ABI alone.
+    fn challenged_past_the_line(seen: &mut Outgrown) -> SipralHandle {
+        let mut observed = Observed::default();
+        let mut settings = config(keep_outgrown, &mut observed);
+        settings.event_user_data = ptr::from_mut(seen).cast::<std::ffi::c_void>();
+        let (status, handle) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = line(handle);
+        let (status, _) =
+            crate::call::tests::place(handle, account, &crate::call::tests::call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let (invite, to, _) = take_one(handle);
+        assert!(invite.starts_with(b"INVITE "), "{}", start_of(&invite));
+        assert_eq!(to, REGISTRAR);
+        let nonce = "n".repeat(1_200);
+        let to_tagged = format!(
+            "{};tag=pbx",
+            String::from_utf8_lossy(&header(&invite, HeaderName::To))
+        );
+        let challenge = reply(
+            &invite,
+            401,
+            "Unauthorized",
+            &format!(
+                "WWW-Authenticate: Digest realm=\"example.com\", nonce=\"{nonce}\", \
+                 qop=\"auth\"\r\n"
+            ),
+        );
+        // the To of a UAS's refusal carries its tag
+        let challenge = String::from_utf8_lossy(&challenge).replacen(
+            &format!(
+                "To: {}",
+                String::from_utf8_lossy(&header(&invite, HeaderName::To))
+            ),
+            &format!("To: {to_tagged}"),
+            1,
+        );
+        assert_eq!(
+            feed(handle, REGISTRAR, challenge.as_bytes(), 1_010),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_010);
+        let out = drain(handle);
+        assert!(
+            out.iter().all(|message| message.starts_with(b"ACK ")),
+            "only the ACK to the refusal went: {:?}",
+            out.iter()
+                .map(|message| start_of(message))
+                .collect::<Vec<_>>()
+        );
+        handle
+    }
+
+    /// RFC 3261 §18.1.1 on the answer to a challenge, as a C application sees
+    /// it: `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` with both sizes, and once the
+    /// application binds the stream, the retry on it with a `Via` that says so,
+    /// without the call being placed again.
+    #[test]
+    fn a_challenged_call_whose_answer_outgrew_the_datagram_goes_on_the_stream_bound_for_it() {
+        let mut seen = Outgrown::default();
+        let handle = challenged_past_the_line(&mut seen);
+        let (protocol, destination, request_bytes, limit_bytes) = seen
+            .wanted
+            .first()
+            .cloned()
+            .expect("SIPRAL_EVENT_KIND_TRANSPORT_WANTED was raised");
+        assert_eq!(protocol, SipralTransport::Tcp as u32);
+        assert_eq!(destination, REGISTRAR);
+        assert_eq!(limit_bytes, 1_300);
+        assert!(request_bytes > 1_300, "{request_bytes}");
+        assert!(seen.ended.is_empty(), "the call is still being placed");
+
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                2,
+                protocol,
+                "192.0.2.10:49152".as_ptr().cast::<c_char>(),
+                "192.0.2.10:49152".len(),
+                destination.as_ptr().cast::<c_char>(),
+                destination.len(),
+                1_050,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        poll(handle, 1_050);
+        let mut buffers = Buffers::new();
+        let mut transmit = buffers.transmit();
+        let status = unsafe { sipral_stack_poll_transmit(handle, &raw mut transmit) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(transmit.transport, 2, "the retry went on the stream");
+        assert_eq!(transmit.protocol, SipralTransport::Tcp as u32);
+        let (retry, to, _) = buffers.taken(&transmit);
+        assert!(retry.starts_with(b"INVITE "), "{}", start_of(&retry));
+        assert_eq!(to, REGISTRAR);
+        assert!(
+            retry.len() > 1_300,
+            "the whole request, over the line: {}",
+            retry.len()
+        );
+        assert!(
+            header(&retry, HeaderName::Via).starts_with(b"SIP/2.0/TCP 192.0.2.10:49152;"),
+            "{}",
+            String::from_utf8_lossy(&header(&retry, HeaderName::Via))
+        );
+        assert!(!header(&retry, HeaderName::Authorization).is_empty());
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// And when the application cannot open that stream, it says so on the
+    /// number it would have bound, and the call ends on that poll with the
+    /// limit named rather than hanging.
+    #[test]
+    fn a_stream_that_could_not_be_opened_ends_the_call_waiting_for_it_with_the_limit_named() {
+        let mut seen = Outgrown::default();
+        let handle = challenged_past_the_line(&mut seen);
+        let request_bytes = seen.wanted.first().map(|wanted| wanted.2).expect("wanted");
+        assert_eq!(
+            unsafe {
+                sipral_stack_transport_failed(
+                    handle,
+                    2,
+                    SipralTransportError::ConnectionRefused as u32,
+                    1_060,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_060);
+        assert_eq!(
+            seen.lost,
+            vec![(2, SipralTransportError::ConnectionRefused as u32)],
+            "the refused connection is told like any other"
+        );
+        assert_eq!(seen.ended.len(), 1, "the call ended on this poll");
+        let (reason, status, cause, text) = seen.ended[0].clone();
+        assert_eq!(
+            reason,
+            crate::event::SipralCallEndReason::Unreachable as u32
+        );
+        assert_eq!(status, 513);
+        assert_eq!(cause, 513);
+        assert!(text.contains(&format!("{request_bytes} bytes")), "{text}");
+        assert!(text.contains("1300-byte"), "{text}");
+        assert!(drain(handle).is_empty(), "nothing went");
+        // nothing waits any more, so a number never bound is refused again
+        assert_eq!(
+            unsafe { sipral_stack_transport_failed(handle, 2, 0, 1_070) },
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A C application that never answers the event is not left with a call
+    /// that hangs: the wait runs out on the stack's own clock.
+    #[test]
+    fn a_stream_nobody_opens_ends_the_call_when_the_wait_runs_out() {
+        let mut seen = Outgrown::default();
+        let handle = challenged_past_the_line(&mut seen);
+        let wait = u64::try_from(sipral_ua::STREAM_WAIT.as_millis()).expect("milliseconds");
+        poll(handle, 1_010 + wait - 1);
+        assert!(seen.ended.is_empty(), "not yet");
+        poll(handle, 1_010 + wait);
+        assert_eq!(seen.ended.len(), 1);
+        assert_eq!(seen.ended[0].1, 513);
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 }

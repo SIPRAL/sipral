@@ -3718,6 +3718,40 @@ impl MediaEngine {
         })
     }
 
+    /// Keys for one stream of a recording session's offer: the suites
+    /// `catalog` offers that protect at least as well as `call`, the suite
+    /// the recorded call runs, and the call's own suite alone when none of
+    /// them does.
+    ///
+    /// RFC 7866 §12.2: the SRC "SHOULD" protect the recording at least as
+    /// well as the communication session it records, and a recording server
+    /// offered a weaker suite beside the call's is free to take it (RFC 4568
+    /// §5.1.2 leaves the answerer its own choice). Offering only suites at
+    /// least as strong leaves it no weaker one to take. A call whose suite
+    /// is not known yet — one waiting for its handshake — is offered what
+    /// `catalog` offers.
+    fn draw_recording_keys(
+        &mut self,
+        catalog: &CodecCatalog,
+        call: Option<sipral_rtp::srtp::Suite>,
+    ) -> Vec<(CryptoSuite, KeySalt)> {
+        let Some(call) = call else {
+            return self.draw_offer_keys(catalog);
+        };
+        let mut suites: Vec<CryptoSuite> = catalog
+            .sdes_offered()
+            .into_iter()
+            .filter(|suite| keying::at_least_as_strong(keying::transform(*suite), call))
+            .collect();
+        if suites.is_empty() {
+            suites.push(keying::crypto_suite(call));
+        }
+        suites
+            .into_iter()
+            .map(|suite| (suite, draw_key_for(suite, &mut self.keys)))
+            .collect()
+    }
+
     /// One key per suite `catalog` offers, in that order, for a fresh offer
     /// this end is about to write. Each width matches the suite it is drawn
     /// for, and RFC 4568 §6.1's "MUST be unique ... with respect to other
@@ -4296,11 +4330,27 @@ impl MediaEngine {
         if self.recordings.values().any(|held| held.recorded == call) {
             return Err(MediaError::AlreadyRecording);
         }
-        let (codec, direction, encrypted) = {
+        let (codec, direction, encrypted, suite) = {
             let held = self.sessions.get(&call).ok_or(MediaError::NoDescription)?;
             let slot = share::lock(held);
             let plan = slot.session.plan();
-            (plan.codec.clone(), plan.direction, plan.keying.is_some())
+            // the transform the call runs: the one a handshake keyed, or
+            // failing that the one its SDES line names
+            let suite = slot
+                .session
+                .encryption()
+                .iter()
+                .find_map(|stream| stream.suite)
+                .or(match plan.keying {
+                    Some(Keying::Sdes { ref local, .. }) => Some(keying::transform(local.suite)),
+                    _ => None,
+                });
+            (
+                plan.codec.clone(),
+                plan.direction,
+                plan.keying.is_some(),
+                suite,
+            )
         };
         let account = agent
             .call_account(call)
@@ -4315,8 +4365,8 @@ impl MediaEngine {
         let keys = (encrypted && !in_clear).then(|| {
             let catalog = self.account_catalog(account);
             [
-                self.draw_offer_keys(&catalog),
-                self.draw_offer_keys(&catalog),
+                self.draw_recording_keys(&catalog, suite),
+                self.draw_recording_keys(&catalog, suite),
             ]
         });
         let ends = call_ends(agent, call).ok_or(MediaError::NoSuchCall)?;

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# Gives the lab's Asterisk SIP over TCP beside UDP on 5060, and UDP alone on
+# 5070, for scripts/lab.sh's `datagram` step alone: a call whose answer to a
+# challenge is too large for a datagram, taken over a connection where there
+# is one and ended cleanly where there is none. Applied with `-f`, on top of
+# ../compose.yaml, and taken off again as soon as that step is over, so every
+# other flow meets Asterisk exactly as compose.yaml describes it. pjsip.conf's
+# own last line includes the path pjsip_local.conf is mounted at, empty by
+# default.
+services:
+  asterisk:
+    volumes:
+      - ./datagram/pjsip_local.conf:/etc/asterisk/pjsip_local.conf:ro

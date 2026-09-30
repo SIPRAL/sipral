@@ -635,6 +635,17 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "loudest": int(changed.loudest),
         }
 
+    # A request too large for a datagram (RFC 3261 Section 18.1.1), and the
+    # stream it asks for; `Stack(stream_fallback=True)` opens it itself.
+    if kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_WANTED:
+        wanted = payload.transport_wanted
+        return {
+            "protocol": int(wanted.protocol),
+            "destination": _text(wanted.destination, wanted.destination_len),
+            "request_bytes": int(wanted.request_bytes),
+            "limit_bytes": int(wanted.limit_bytes),
+        }
+
     # The signalling connection failed or closed, with the TLS library's
     # reason when TLS refused it (`Stack(signalling=Transport.TLS)`).
     if kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED:

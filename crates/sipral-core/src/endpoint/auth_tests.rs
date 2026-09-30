@@ -1120,3 +1120,76 @@ fn a_challenged_call_retried_after_another_took_its_room_is_held_to_the_ceiling(
         .expect("the retry goes once there is room");
     assert!(sent(&mut endpoint).starts_with(b"INVITE "));
 }
+
+#[test]
+fn a_challenged_request_goes_again_with_the_body_it_was_reshaped_to() {
+    // the last resort before a retry §18.1.1 refused a datagram is given up
+    // on: a smaller body, under the same handle and the same rules
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let with_body = register_request()
+        .header(HeaderName::UserAgent, b"sipral")
+        .body(
+            b"application/sdp",
+            std::sync::Arc::from(&b"v=0\r\na=long\r\na=short\r\n"[..]),
+        );
+    let id = AnyTransactionId::NonInviteClient(
+        endpoint.request(&with_body, t0).expect("the REGISTER goes"),
+    );
+    let bytes = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &challenge(&bytes, 401, "WWW-Authenticate", &digest(NONCE, None)),
+        t0,
+    );
+    events(&mut endpoint);
+
+    let mut seen = Vec::new();
+    assert!(endpoint.reshape_challenged_body(id, |body| {
+        seen = body.to_vec();
+        Some(b"v=0\r\na=short\r\n".to_vec())
+    }));
+    assert_eq!(
+        seen, b"v=0\r\na=long\r\na=short\r\n",
+        "handed the body as sent"
+    );
+    // declining leaves what is there
+    assert!(!endpoint.reshape_challenged_body(id, |_| None));
+
+    endpoint
+        .retry_with_credentials(id, &credentials(), t0)
+        .expect("the retry goes");
+    let second = sent(&mut endpoint);
+    assert!(with(&second, |m| m.body() == b"v=0\r\na=short\r\n"));
+    assert_eq!(
+        header(&second, HeaderName::ContentLength),
+        b"14",
+        "the length follows the body"
+    );
+    assert_eq!(header(&second, HeaderName::ContentType), b"application/sdp");
+    assert_eq!(header(&second, HeaderName::UserAgent), b"sipral");
+    assert_eq!(header(&second, HeaderName::CSeq), b"2 REGISTER");
+    assert_eq!(
+        with(&second, |m| m.header_count(HeaderName::Authorization)),
+        1
+    );
+    assert!(
+        !endpoint.reshape_challenged_body(id, |_| Some(Vec::new())),
+        "nothing is held under a handle that has been retried"
+    );
+}
+
+#[test]
+fn a_challenge_abandoned_cannot_be_answered_any_more() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, id) = refused(&mut endpoint, t0);
+    events(&mut endpoint);
+    assert!(endpoint.abandon_challenge(id));
+    assert!(!endpoint.abandon_challenge(id), "once");
+    assert!(matches!(
+        endpoint.retry_with_credentials(id, &credentials(), t0),
+        Err(AuthRetryError::NoChallenge)
+    ));
+    assert!(transmits(&mut endpoint).is_empty());
+}

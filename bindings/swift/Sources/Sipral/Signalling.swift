@@ -65,6 +65,21 @@ public struct TransportFailedEventData: Sendable {
     public let detail: String?
 }
 
+/// What `SipralEventKind.transportWanted` carries
+/// (`sipral_transport_wanted_event_t`): a request too large for a datagram
+/// (RFC 3261 §18.1.1), where it was going, and the two sizes that say why.
+/// `SipralStack(streamFallback:)` opens the stream itself.
+public struct TransportWantedEventData: Sendable {
+    /// What to open, a `SipralTransport` raw value.
+    public let protocolRaw: UInt32
+    /// Where the request was going, `host:port`.
+    public let destination: String
+    /// How large the request is.
+    public let requestBytes: Int
+    /// The largest a datagram may carry here.
+    public let limitBytes: UInt32
+}
+
 /// A connection that could not be made, and what the stack is to call it.
 struct SignallingRefusal: Error, Sendable {
     let error: SipralTransportError

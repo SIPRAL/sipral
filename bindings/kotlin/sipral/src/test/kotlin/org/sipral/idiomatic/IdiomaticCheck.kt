@@ -39,7 +39,8 @@ fun main() {
         runBlocking {
             everything() + "; " + natChecks() + "; " + referralChecks() + "; " + signallingChecks() + "; " +
                 audioChecks() + "; " + loggingChecks() + "; " + securityChecks() + "; " + inBandChecks() + "; " +
-                tlsSignallingChecks() + "; " + protocolsChecks() + "; " + localConferenceChecks()
+                tlsSignallingChecks() + "; " + protocolsChecks() + "; " + localConferenceChecks() + "; " +
+                datagramLimitChecks()
         }
     } catch (failure: Throwable) {
         failure.printStackTrace()

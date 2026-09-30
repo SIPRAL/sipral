@@ -97,6 +97,11 @@ _SIGNALLING_PATIENCE = 5.0
 #: server refusing the certificate is asked every second for ever.
 _RECONNECT_FIRST = 1.0
 _RECONNECT_MOST = 30.0
+#: The first number a connection this class opens for
+#: `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is bound at (``stream_fallback``), one
+#: more for each destination after it: well clear of `SIPRAL_TRANSPORT_MAIN`
+#: and of the small numbers an application driving `lib` itself would pick.
+_FIRST_STREAM = 1024
 
 
 def _toggle(value: bool | None) -> int:
@@ -128,6 +133,22 @@ class _TurnStream:
 
     def __init__(self, local: str, sock: socket.socket) -> None:
         self.local = local
+        self.sock = sock
+        self.lock = threading.Lock()
+
+
+class _SipStream:
+    """One TCP connection opened because a request was too large for a
+    datagram (RFC 3261 Section 18.1.1), bound at :attr:`transport`.
+
+    Read and written by the poll thread; :attr:`lock` is still held for
+    every operation, since the thread that opened it hands it over while
+    the poll thread may already be writing to it.
+    """
+
+    def __init__(self, transport: int, destination: str, sock: socket.socket) -> None:
+        self.transport = transport
+        self.destination = destination
         self.sock = sock
         self.lock = threading.Lock()
 
@@ -184,6 +205,8 @@ class Stack:
         tls_server_name: str | None = None,
         tls_trust: TlsTrust | None = None,
         invite_limit: InviteLimit | tuple[int, int] | None = None,
+        stream_fallback: bool = True,
+        stream_server: str | None = None,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
 
@@ -316,6 +339,25 @@ class Stack:
         operating system. Every pair taken raises
         ``SIPRAL_STATUS_EXHAUSTED`` rather than binding outside the range.
 
+        ``stream_fallback`` is what a stack signalling over UDP does when a
+        request is too large for a datagram -- nearly always the answer to a
+        challenge, whose ``Authorization`` takes a call offering two SRTP
+        suites past RFC 3261 Section 18.1.1's 1300 bytes. On (the default),
+        `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is answered by opening a TCP
+        connection to the address it names -- the registrar or proxy the
+        request was going to, on the same port -- and binding it
+        (`sipral_stack_transport_bind`): the request the stack was holding
+        goes on it, and the call or registration carries on over it. When
+        that connection is refused or times out, or with ``False``, the
+        stack is told at once (`sipral_stack_transport_failed`), and what
+        was waiting ends rather than hanging: a call as unreachable, its
+        `cause_sip` 513 and its `cause_text` naming the size and the limit.
+        The event reaches :attr:`events` either way. ``stream_server``
+        (``host:port``) is where that connection goes instead, for a server
+        that takes TCP on another port than UDP -- a PBX on 5060 for one and
+        5160 for the other: the connection stands for the address the event
+        named, and everything the stack sends there goes on it.
+
         ``dtmf_detection`` (a :class:`sipral.enums.DtmfDetection`) is when a
         call listens for keypad digits in the far end's audio: ``AUTO``
         (``0``) on the calls that negotiated no telephone event, ``ALWAYS``
@@ -348,6 +390,20 @@ class Stack:
         #: on that connection. Under :attr:`_nat_lock`.
         self._turn_sockets: dict[int, str] = {}
         self._turn_streamed = turn_transport in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS)
+        #: Whether a request too large for a datagram gets a connection.
+        self._stream_fallback = stream_fallback
+        #: Where such a connection goes, when not to the address asked for.
+        self._stream_server = parse_address(stream_server) if stream_server else None
+        #: Where `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for a stream,
+        #: during the poll that raised it, acted on right after that poll.
+        self._streams_asked: list[str] = []
+        #: Every connection opened for one, by the transport number it is
+        #: bound at, and the destinations a connection is being opened to;
+        #: both under :attr:`_stream_lock`.
+        self._stream_lock = threading.Lock()
+        self._sip_streams: dict[int, _SipStream] = {}
+        self._streams_opening: set[str] = set()
+        self._next_stream = _FIRST_STREAM
 
         #: Media sockets currently named with `sipral_stack_nat_map`, keyed
         #: by their own `host:port` text -- from that call until either
@@ -1351,6 +1407,8 @@ class Stack:
         # reason `Call.deliver` orders its own steps that way: a consumer
         # of `self.events` may look up `self.call_for(event.call)` and
         # read its state, and that state has to already be current.
+        if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_WANTED and not self._streamed:
+            self._streams_asked.append(event.fields["destination"])
         if event.kind == lib.SIPRAL_EVENT_KIND_TURN_STREAM:
             fields = event.fields
             self._turn_asked.append(
@@ -1438,6 +1496,9 @@ class Stack:
             if transmit.len == 0:
                 return
             payload = bytes(ffi.buffer(transmit.data, transmit.len))
+            if transmit.transport >= _FIRST_STREAM:
+                self._write_sip_stream(int(transmit.transport), payload)
+                continue
             if self._socket is None:
                 # one connection carries everything, whatever it names:
                 # the server it reaches is the outbound proxy
@@ -1785,6 +1846,166 @@ class Stack:
         if tell:
             self._say_turn(lib.sipral_stack_turn_closed, local.encode("utf-8"))
 
+    # -- RFC 3261 Section 18.1.1: a request too large for a datagram -------
+
+    def _act_on_streams_wanted(self) -> None:
+        """Answer what `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for in the
+        poll that just ran: a connection to each destination not already
+        connected or being connected to, opened on a thread of its own, or
+        -- with ``stream_fallback`` off -- the word that none is coming."""
+        asked, self._streams_asked = self._streams_asked, []
+        for destination in dict.fromkeys(asked):
+            with self._stream_lock:
+                if destination in self._streams_opening or any(
+                    stream.destination == destination for stream in self._sip_streams.values()
+                ):
+                    continue
+                transport = self._next_stream
+                self._next_stream += 1
+                if self._stream_fallback:
+                    self._streams_opening.add(destination)
+            if not self._stream_fallback:
+                self._say_no_stream(transport, lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED)
+                continue
+            threading.Thread(
+                target=self._open_sip_stream,
+                args=(transport, destination),
+                name="sipral-stream",
+                daemon=True,
+            ).start()
+
+    def _open_sip_stream(self, transport: int, destination: str) -> None:
+        """Connect over TCP to ``destination`` -- or to ``stream_server``
+        when one was given -- and bind the connection at ``transport`` as
+        the stream to ``destination``; a connection that cannot be made is
+        told to the stack on that same number, which ends what was waiting
+        for it."""
+        try:
+            host, port = self._stream_server or parse_address(destination)
+            sock = socket.create_connection((host, port), timeout=_SIGNALLING_PATIENCE)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.settimeout(_SIGNALLING_PATIENCE)
+            local = format_address(*sock.getsockname()[:2])
+        except (OSError, ValueError) as refused:
+            with self._stream_lock:
+                self._streams_opening.discard(destination)
+            error, _tls, _detail = classify(refused)
+            self._say_no_stream(transport, error)
+            return
+        stream = _SipStream(transport, destination, sock)
+        with self._stream_lock:
+            self._streams_opening.discard(destination)
+            if self._closed.is_set():
+                sock.close()
+                return
+            self._sip_streams[transport] = stream
+        local_bytes = local.encode("utf-8")
+        far = destination.encode("utf-8")
+        try:
+            _retry(
+                lambda: lib.sipral_stack_transport_bind(
+                    self.handle,
+                    transport,
+                    lib.SIPRAL_TRANSPORT_TCP,
+                    local_bytes,
+                    len(local_bytes),
+                    far,
+                    len(far),
+                    self.now_ms(),
+                    ffi.NULL,
+                ),
+                "sipral_stack_transport_bind",
+            )
+        except Exception:  # noqa: BLE001 -- told as a connection that failed
+            self._lose_sip_stream(transport, tell=False)
+            self._say_no_stream(transport, lib.SIPRAL_TRANSPORT_ERROR_OTHER)
+            return
+        # read from here on: nothing arrives before the request the bind
+        # just released, and a selector reports what is already waiting
+        self._selector.register(sock, selectors.EVENT_READ, data=("sip", transport))
+
+    def _say_no_stream(self, transport: int, error: int) -> None:
+        """`sipral_stack_transport_failed` for a connection that was not
+        made; never raising on the way out."""
+        try:
+            _retry(
+                lambda: lib.sipral_stack_transport_failed(self.handle, transport, error, self.now_ms()),
+                "sipral_stack_transport_failed",
+            )
+        except Exception:  # noqa: BLE001 -- nothing was waiting any more
+            pass
+
+    def _write_sip_stream(self, transport: int, payload: bytes) -> None:
+        """One message on the connection bound at ``transport``, whole; a
+        write that fails loses the connection."""
+        with self._stream_lock:
+            stream = self._sip_streams.get(transport)
+        if stream is None:
+            return
+        try:
+            with stream.lock:
+                stream.sock.sendall(payload)
+        except OSError:
+            self._lose_sip_stream(transport, tell=True)
+
+    def _read_sip_stream(self, transport: int) -> None:
+        """What the connection bound at ``transport`` carried, to
+        `sipral_stack_receive_stream`, every byte and in order; the far end
+        closing it is `sipral_stack_stream_closed`."""
+        with self._stream_lock:
+            stream = self._sip_streams.get(transport)
+        if stream is None:
+            return
+        try:
+            with stream.lock:
+                stream.sock.settimeout(0.0)
+                try:
+                    data = stream.sock.recv(_TRANSMIT_BYTES)
+                finally:
+                    stream.sock.settimeout(_SIGNALLING_PATIENCE)
+        except (BlockingIOError, socket.timeout):
+            return
+        except OSError:
+            data = b""
+        if not data:
+            self._lose_sip_stream(transport, tell=True)
+            return
+        while True:
+            status = lib.sipral_stack_receive_stream(
+                self.handle, transport, data, len(data), self.now_ms()
+            )
+            if status != lib.SIPRAL_STATUS_BUSY or self._closed.is_set():
+                break
+            time.sleep(0.001)
+        if status not in (lib.SIPRAL_STATUS_OK, lib.SIPRAL_STATUS_BUSY):
+            # the framing is lost: the stack retired the transport itself
+            self._lose_sip_stream(transport, tell=False)
+
+    def _lose_sip_stream(self, transport: int, *, tell: bool) -> None:
+        """Close the connection bound at ``transport`` and, when ``tell``,
+        say so with `sipral_stack_stream_closed`."""
+        with self._stream_lock:
+            stream = self._sip_streams.pop(transport, None)
+        if stream is None:
+            return
+        try:
+            self._selector.unregister(stream.sock)
+        except (KeyError, ValueError, OSError):
+            pass
+        with stream.lock:
+            try:
+                stream.sock.close()
+            except OSError:
+                pass
+        if tell:
+            try:
+                _retry(
+                    lambda: lib.sipral_stack_stream_closed(self.handle, transport, self.now_ms()),
+                    "sipral_stack_stream_closed",
+                )
+            except Exception:  # noqa: BLE001 -- the stack is going away
+                pass
+
     # -- SIP over TCP or TLS: the one connection signalling travels on -----
 
     @property
@@ -2015,6 +2236,8 @@ class Stack:
             for key, _mask in events:
                 if isinstance(key.data, tuple) and key.data[0] == "turn":
                     self._read_turn_stream(key.data[1])
+                elif isinstance(key.data, tuple) and key.data[0] == "sip":
+                    self._read_sip_stream(key.data[1])
                 elif key.data == "signalling":
                     self._read_link()
                 elif key.data == "main":
@@ -2069,6 +2292,7 @@ class Stack:
             self._drain_stun()
             self._drain_farewells()
             self._act_on_turn_streams()
+            self._act_on_streams_wanted()
             with self._nat_lock:
                 lost, self._turn_lost = self._turn_lost, []
             for local in lost:
@@ -2135,6 +2359,10 @@ class Stack:
             streams = list(self._turn_streams)
         for local in streams:
             self._lose_turn_stream(local, tell=False)
+        with self._stream_lock:
+            opened = list(self._sip_streams)
+        for transport in opened:
+            self._lose_sip_stream(transport, tell=False)
         lib.sipral_stack_destroy(self.handle)
         self._selector.close()
         if self._socket is not None:

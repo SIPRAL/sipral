@@ -27,8 +27,8 @@ use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::session::Hold;
 use crate::subscription::{Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState};
 use crate::{
-    Credentials, EndpointConfig, Incoming, Input, Rate, RateError, Refusals, Replacing, Screen,
-    Screening, StatusCode, TransportId, TransportProtocol, UaError, Uri,
+    Credentials, EndpointConfig, Incoming, Input, Rate, RateError, Refusals, Replacing,
+    STREAM_WAIT, Screen, Screening, StatusCode, TransportId, TransportProtocol, UaError, Uri,
 };
 
 pub(crate) const UDP: TransportId = TransportId(1);
@@ -15959,4 +15959,382 @@ fn metadata_for_a_call_that_is_not_a_recording_session_is_refused() {
         Err(UaError::WrongState(_))
     ));
     assert!(transmits(&mut agent).is_empty());
+}
+
+// -- §18.1.1 on a retry, when the stream never comes -------------------------
+
+/// An offer with the two SDES suites an account offering both writes, the
+/// stronger first.
+const TWO_SUITES: &[u8] = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/SAVP 0\r\n\
+a=crypto:1 AEAD_AES_256_GCM inline:QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdA==\r\n\
+a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNk\r\n";
+
+/// A 401 whose nonce is long enough that answering it takes a request past
+/// what a datagram may carry.
+fn long_challenge(request: &[u8], nonce_bytes: usize) -> Vec<u8> {
+    let nonce = "n".repeat(nonce_bytes);
+    challenge(
+        request,
+        401,
+        "Unauthorized",
+        &format!(
+            "WWW-Authenticate: Digest realm=\"asterisk\", nonce=\"{nonce}\", qop=\"auth\"\r\n"
+        ),
+    )
+}
+
+fn secure_call() -> OutgoingCall {
+    OutgoingCall::new(uri("sip:bob@example.com")).offer(Arc::from(TWO_SUITES))
+}
+
+/// The size the retry asked a stream for.
+fn wanted_bytes(said: &[UaEvent]) -> Option<usize> {
+    said.iter().find_map(|event| match *event {
+        UaEvent::Unclaimed(Event::TransportWanted { request_bytes, .. }) => Some(request_bytes),
+        _ => None,
+    })
+}
+
+/// A call challenged with a nonce that pushes its retry over the line, on an
+/// agent built with `config`: the call, and what the challenge left said.
+fn challenged_past_the_line(
+    config: EndpointConfig,
+    nonce_bytes: usize,
+    now: Instant,
+) -> (UserAgent, CallHandle, Vec<UaEvent>) {
+    let mut agent = agent_with(config, now);
+    let id = agent.add_account(credentialled());
+    let call = agent
+        .call(id, &secure_call(), now)
+        .expect("the INVITE goes");
+    let first = sent(&mut agent);
+    deliver(&mut agent, &long_challenge(&first, nonce_bytes), now);
+    let out = transmits(&mut agent);
+    let _ = only(&out, "ACK ");
+    assert!(
+        !out.iter().any(|bytes| bytes.starts_with(b"INVITE ")),
+        "the retry is over the line and waits"
+    );
+    let said = events(&mut agent);
+    (agent, call, said)
+}
+
+/// What the call ended with: reason, status and the causes.
+fn call_end(said: &[UaEvent]) -> Option<(CallEndReason, Option<StatusCode>, Vec<crate::Reason>)> {
+    said.iter().find_map(|event| match *event {
+        UaEvent::CallEnded {
+            reason,
+            status,
+            ref causes,
+            ..
+        } => Some((reason, status, causes.to_vec())),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_challenged_invite_over_the_line_goes_over_the_stream_once_one_is_bound() {
+    let t0 = Instant::now();
+    let (mut agent, call, said) = challenged_past_the_line(EndpointConfig::default(), 900, t0);
+    assert!(
+        wanted_bytes(&said).is_some_and(|bytes| bytes > 1_300),
+        "the application is asked for a stream: {said:?}"
+    );
+    assert!(call_end(&said).is_none(), "the call is still being placed");
+    assert_eq!(agent.call_state(call), Some(CallState::Calling));
+
+    let later = t0 + Duration::from_millis(80);
+    open_the_stream(&mut agent, later);
+    let retry = on_the_stream(&written(&mut agent), "INVITE ");
+    credentials_of_long(&retry);
+    assert!(
+        text(&retry, HeaderName::Via).starts_with("SIP/2.0/TCP "),
+        "§18.1.1 and §8.1.1.7: the Via names the transport it went on: {}",
+        text(&retry, HeaderName::Via)
+    );
+    // §8.1.1.8: the Contact is where this end is reached for the rest of
+    // the dialog, and that is still the socket that listens; the connection
+    // carried one request, and its local port takes no new ones
+    assert_eq!(text(&retry, HeaderName::Contact), "<sip:alice@192.0.2.1>");
+    assert_eq!(
+        body_of(&retry).matches("a=crypto:").count(),
+        2,
+        "over a stream the offer goes whole"
+    );
+    assert_eq!(header(&retry, HeaderName::CSeq), b"2 INVITE");
+
+    // and nothing is given up on later: the wait ended when the stream came
+    agent.handle_timeout(later + STREAM_WAIT);
+    assert!(call_end(&events(&mut agent)).is_none());
+    stream(
+        &mut agent,
+        &answered(&retry, 200, "OK", "desk", Some(ANSWER)),
+        later,
+    );
+    on_the_stream(&written(&mut agent), "ACK ");
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+fn credentials_of_long(bytes: &[u8]) {
+    let value = text(bytes, HeaderName::Authorization);
+    assert!(value.starts_with("Digest "), "{value}");
+    assert!(value.contains("username=\"alice\""), "{value}");
+}
+
+#[test]
+fn a_challenged_invite_no_stream_carries_ends_with_the_limit_named_when_the_wait_runs_out() {
+    let t0 = Instant::now();
+    let (mut agent, call, said) = challenged_past_the_line(EndpointConfig::default(), 900, t0);
+    let size = wanted_bytes(&said).expect("a stream was asked for");
+    assert_eq!(
+        agent.poll_timeout().map(|due| due <= t0 + STREAM_WAIT),
+        Some(true),
+        "the wait is on the agent's clock"
+    );
+
+    agent.handle_timeout(t0 + (STREAM_WAIT.saturating_sub(Duration::from_millis(1))));
+    assert!(call_end(&events(&mut agent)).is_none(), "not yet");
+
+    agent.handle_timeout(t0 + STREAM_WAIT);
+    let out = transmits(&mut agent);
+    assert!(
+        !out.iter().any(|bytes| bytes.starts_with(b"INVITE ")),
+        "one suite fewer is still over the line, so nothing goes"
+    );
+    let (reason, status, causes) =
+        call_end(&events(&mut agent)).expect("the call ends rather than hanging");
+    assert_eq!(reason, CallEndReason::Unreachable);
+    assert_eq!(status.map(StatusCode::get), Some(513));
+    assert_eq!(causes.len(), 1, "{causes:?}");
+    assert_eq!(causes[0].cause, Some(513));
+    let said = causes[0].text.as_deref().unwrap_or_default();
+    assert!(said.contains(&format!("{size} bytes")), "{said}");
+    assert!(said.contains("1300-byte"), "{said}");
+    assert!(said.contains("18.1.1"), "{said}");
+    assert_eq!(agent.call_state(call), None);
+    assert_eq!(
+        agent.poll_timeout().filter(|due| *due <= t0 + STREAM_WAIT),
+        None
+    );
+}
+
+#[test]
+fn the_application_saying_no_stream_ends_the_call_at_once() {
+    let t0 = Instant::now();
+    let (mut agent, call, _) = challenged_past_the_line(EndpointConfig::default(), 900, t0);
+    let soon = t0 + Duration::from_millis(3);
+    agent.stream_unavailable(soon);
+    let (reason, status, _) = call_end(&events(&mut agent)).expect("ended now, not in ten seconds");
+    assert_eq!(reason, CallEndReason::Unreachable);
+    assert_eq!(status.map(StatusCode::get), Some(513));
+    assert_eq!(agent.call_state(call), None);
+    // a stream bound afterwards finds nothing left to send
+    open_the_stream(&mut agent, soon);
+    not_written(&written(&mut agent), "INVITE ");
+}
+
+#[test]
+fn a_retry_one_suite_would_fit_goes_over_the_datagram_with_one_suite() {
+    let t0 = Instant::now();
+    // how large the whole retry is, measured on an agent that asks for it
+    let (_, _, said) = challenged_past_the_line(EndpointConfig::default(), 900, t0);
+    let whole = wanted_bytes(&said).expect("the size of the retry");
+    // then the same exchange where the line falls between the retry with two
+    // suites and the retry with one; the seed is the same, so the bytes are
+    let mut config = EndpointConfig::default();
+    config.datagram_limit.max_datagram_bytes = u32::try_from(whole - 10).expect("a size");
+    let (mut agent, call, said) = challenged_past_the_line(config, 900, t0);
+    assert_eq!(wanted_bytes(&said), Some(whole));
+
+    agent.stream_unavailable(t0);
+    let retry = only(&transmits(&mut agent), "INVITE ");
+    assert!(retry.len() <= whole - 10, "{} bytes", retry.len());
+    credentials_of_long(&retry);
+    let body = body_of(&retry);
+    assert_eq!(body.matches("a=crypto:").count(), 1, "{body}");
+    assert!(
+        body.contains("a=crypto:1 AEAD_AES_256_GCM "),
+        "the suite kept is the one preferred: {body}"
+    );
+    assert!(
+        text(&retry, HeaderName::Via).starts_with("SIP/2.0/UDP "),
+        "{}",
+        text(&retry, HeaderName::Via)
+    );
+    assert!(call_end(&events(&mut agent)).is_none());
+    assert_eq!(agent.call_state(call), Some(CallState::Calling));
+
+    deliver(
+        &mut agent,
+        &answered(&retry, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    assert!(sent(&mut agent).starts_with(b"ACK "));
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_register_whose_answer_outgrew_the_datagram_fails_as_too_large_rather_than_as_a_password() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let first = sent(&mut agent);
+    deliver(&mut agent, &long_challenge(&first, 1_400), t0);
+    assert!(transmits(&mut agent).is_empty(), "the retry waits");
+    let said = events(&mut agent);
+    assert!(wanted_bytes(&said).is_some(), "{said:?}");
+    assert!(
+        !said
+            .iter()
+            .any(|event| matches!(*event, UaEvent::RegistrationFailed { .. })),
+        "{said:?}"
+    );
+
+    agent.stream_unavailable(t0);
+    let failures: Vec<(RegistrationFailure, Option<u16>, Option<Duration>)> = events(&mut agent)
+        .iter()
+        .filter_map(|event| match *event {
+            UaEvent::RegistrationFailed {
+                reason,
+                status,
+                retry_in,
+                ..
+            } => Some((reason, status.map(StatusCode::get), retry_in)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        failures,
+        vec![(RegistrationFailure::Unreachable, Some(513), None)],
+        "once, and not as credentials refused"
+    );
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Failed)
+    );
+    open_the_stream(&mut agent, t0);
+    not_written(&written(&mut agent), "REGISTER ");
+}
+
+#[test]
+fn a_register_whose_answer_outgrew_the_datagram_goes_over_the_stream() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let first = sent(&mut agent);
+    deliver(&mut agent, &long_challenge(&first, 1_400), t0);
+    events(&mut agent);
+    open_the_stream(&mut agent, t0);
+    let retry = on_the_stream(&written(&mut agent), "REGISTER ");
+    credentials_of_long(&retry);
+    assert!(text(&retry, HeaderName::Via).starts_with("SIP/2.0/TCP "));
+}
+
+/// A call up over UDP whose re-INVITE a proxy challenges with a nonce long
+/// enough that the answer outgrows the datagram.
+fn hold_challenged_past_the_line(now: Instant) -> (UserAgent, CallHandle) {
+    let mut agent = agent(now);
+    let id = agent.add_account(credentialled());
+    let call = agent.call(id, &outgoing(), now).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        now,
+    );
+    assert!(sent(&mut agent).starts_with(b"ACK "));
+    events(&mut agent);
+
+    agent.hold(call, now).expect("the re-INVITE goes");
+    let reinvite = only(&transmits(&mut agent), "INVITE ");
+    deliver(&mut agent, &long_challenge(&reinvite, 1_400), now);
+    let out = transmits(&mut agent);
+    assert!(
+        !out.iter().any(|bytes| bytes.starts_with(b"INVITE ")),
+        "the retry waits"
+    );
+    (agent, call)
+}
+
+#[test]
+fn a_challenged_reinvite_over_the_line_waits_for_the_stream_rather_than_failing_as_refused() {
+    let t0 = Instant::now();
+    let (mut agent, call) = hold_challenged_past_the_line(t0);
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::SessionChangeFailed { .. })),
+        "a change whose answer has not been sent yet has not failed"
+    );
+    open_the_stream(&mut agent, t0);
+    let retry = on_the_stream(&written(&mut agent), "INVITE ");
+    credentials_of_long(&retry);
+    assert!(body_of(&retry).contains("a=sendonly\r\n"));
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_challenged_reinvite_no_stream_carries_fails_as_too_large_and_the_call_stays() {
+    let t0 = Instant::now();
+    let (mut agent, call) = hold_challenged_past_the_line(t0);
+    events(&mut agent);
+    agent.handle_timeout(t0 + STREAM_WAIT);
+    let failed: Vec<Option<u16>> = events(&mut agent)
+        .iter()
+        .filter_map(|event| match *event {
+            UaEvent::SessionChangeFailed { status, .. } => Some(status.map(StatusCode::get)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, vec![Some(513)]);
+    assert_eq!(
+        agent.call_state(call),
+        Some(CallState::Confirmed),
+        "§14.1: a change that failed leaves the session as it was"
+    );
+}
+
+#[test]
+fn a_hangup_waiting_for_a_stream_the_application_cannot_open_ends_the_call_here() {
+    // the same crossing as above, and this time the stream is refused: the
+    // call is over at this end with the limit named, and the ACK and the BYE
+    // that could never go are not kept for a stream that is not coming
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 180, "Ringing", "desk", None),
+        t0,
+    );
+    events(&mut agent);
+    agent.hangup(call, t0).expect("the CANCEL goes");
+    transmits(&mut agent);
+    deliver(
+        &mut agent,
+        &from_afar(&answered(&invite, 200, "OK", "desk", Some(ANSWER))),
+        t0,
+    );
+    written(&mut agent);
+    assert_eq!(ended(&mut agent), None);
+
+    // the wait running out leaves what the far end is owed where it is
+    agent.handle_timeout(t0 + STREAM_WAIT);
+    assert_eq!(ended(&mut agent), None);
+
+    agent.stream_unavailable(t0 + STREAM_WAIT);
+    let (reason, status, causes) = call_end(&events(&mut agent)).expect("the call ends");
+    assert_eq!(reason, CallEndReason::LocalHangup);
+    assert_eq!(status.map(StatusCode::get), Some(513));
+    assert_eq!(causes.first().and_then(|cause| cause.cause), Some(513));
+    assert_eq!(agent.call_state(call), None);
+    open_the_stream(&mut agent, t0 + STREAM_WAIT);
+    let out = written(&mut agent);
+    not_written(&out, "ACK ");
+    not_written(&out, "BYE ");
 }
