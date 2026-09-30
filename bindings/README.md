@@ -19,12 +19,13 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 
 | Printed file | What it is |
 |---|---|
-| `c/include/sipral.h` | The C header, and the interface the other four are written against |
+| `c/include/sipral.h` | The C header, and the interface the others are written against |
 | `swift/Sources/Sipral/SipralAbi.swift` | The Swift binding, over the C target |
 | `dotnet/Sipral/SipralAbi.cs` | The .NET binding: P/Invoke and the layer above it |
 | `kotlin/sipral/src/main/kotlin/org/sipral/SipralAbi.kt` | The Kotlin binding |
 | `kotlin/sipral/src/main/jni/sipral_jni.c` | The JNI that implements it |
 | `python/sipral/_sipral_cffi.py` | The raw `cffi` ABI-mode surface: `ffi` and `lib` |
+| `dart/lib/src/sipral_abi.dart` | The Dart binding over `dart:ffi` |
 | `c/abi-sizes.txt` | Each sized struct's first published length and its length in this build |
 
 Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
@@ -37,6 +38,8 @@ Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
 `python/pyproject.toml`, `python/sipral/{stack,account,call,media,events,enums,errors}.py`
 (the idiomatic layer `_sipral_cffi.py` is written against), `python/tests/`,
 `python/examples/agent.py`,
+`dart/lib/src/{idiomatic,stack,account,call,media,events}.dart`, `dart/test/`,
+`jvm/` (the Maven build of the Kotlin binding for a server JVM),
 `swift/Sources/Sipral/{SipralStack,Account,Call,Media,SipralEvent,Broadcast,UDPSocket,CStrings,CallKitBridge,PushKitBridge,CallKitAdapter,PushKitAdapter}.swift`
 (the idiomatic layer `SipralAbi.swift` is written against, the same way
 the Python files above are written against `_sipral_cffi.py`),

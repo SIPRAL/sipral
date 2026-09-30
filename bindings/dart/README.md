@@ -50,6 +50,13 @@ each call's audio: `SipralMedia.frames` is the far end's PCM,
 `SipralMedia.sendAudio` queues this end's, and silence goes out when nothing
 is queued.
 
+Signalling is UDP only. The other idiomatic layers answer
+`SIPRAL_EVENT_KIND_TRANSPORT_WANTED` by opening a TCP connection for a
+request that outgrew a datagram; this one does not, so such a request (most
+often the answer to a challenge on a call offering two SRTP suites) waits
+the stack's ten seconds for a stream and is then sent trimmed or ended with
+a 513, as `docs/08-ffi.md` describes for an application that says nothing.
+
 ## The library
 
 `Sipral.open()` takes a path to `libsipral_ffi` or the directory holding it;

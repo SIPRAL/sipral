@@ -2073,9 +2073,9 @@ the one signature that is not an entry point, it is printed into the header
 as a function pointer and into the .NET binding as a delegate, and its
 parameters were the last names in the surface nothing read back.
 `tools/abi-gen/src/names.rs` is the pass, and `tools/abi-gen/golden/` holds a
-small synthetic surface printed as the six files the generator writes — the
+small synthetic surface printed as the seven files the generator writes — the
 header, the Swift binding, the .NET binding, the Kotlin binding with the
-JNI shim beside it, and the Python binding — so a change to an emitter shows up there rather than
+JNI shim beside it, the Python binding and the Dart binding — so a change to an emitter shows up there rather than
 buried in `bindings/`. "Small" and "reaches every emitter path" pull against
 each other, so the second one is counted rather than claimed: a test takes
 the shapes of the real surface and the shapes of the synthetic one and fails
@@ -2728,6 +2728,34 @@ ratio; `Event` grew the typed views `identity`, `answering`, `cause` and
 `tests/test_identity.py` and `tests/test_move.py` prove them without opening a
 microphone: device mode is only ever activated manually there, and the
 transmit callback is handed a record the test builds.
+
+## Dart
+
+The sixth back end: `tools/abi-gen/src/dart.rs` prints
+`bindings/dart/lib/src/sipral_abi.dart` for `dart:ffi`. Each record is a
+`Struct` or `Union` whose integers carry their exact width, each enumeration
+is a set of `int` constants, each callback a native and a Dart function
+type, and every entry point is a method of `Sipral`, looked up in the library
+`Sipral.open()` opened and refused, like every other binding, when
+`sipral_abi_check` says the library cannot serve the ABI the file was printed
+from. A name that is a reserved word in Dart is printed with a `$` after it.
+`Sipral.recordSizes()` lists every record with its `dart:ffi` length, which
+`bindings/dart/test/abi_test.dart` holds to what `sipral_abi_struct_size`
+reports.
+
+`SipralStack`, `SipralAccount`, `SipralCall` and `SipralMedia`, in
+`bindings/dart/lib/src/`, are written by hand against it. Everything runs on
+the isolate that opened the stack: the sockets are `RawDatagramSocket`s, the
+poll and each call's frame clock are timers, and the event callback is a
+`NativeCallable.isolateLocal` the library calls from inside
+`sipral_stack_poll`, on that same thread; the events reach the application
+as a `Stream`. The application carries each call's audio, as in application
+mode everywhere. Signalling is UDP only: unlike the four layers above, this
+one does not answer `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, so a request too
+large for a datagram gets the ten seconds an application that says nothing
+gets. `bindings/dart/test/loopback_test.dart` places a call between
+two stacks on loopback, and `scripts/check.sh`'s `the dart bindings` step
+runs both test files against the library it built.
 
 ## Versioning
 

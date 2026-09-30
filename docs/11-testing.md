@@ -1097,7 +1097,11 @@ so that the list does not publish what it guards) appears in a file or in a
 commit message not yet pushed, and
 whether the seed corpus still matches the targets it belongs to and holds
 only what the rest of the tree is allowed to hold, the dotnet and Kotlin/JVM
-bindings built and tested, the Swift package built and tested, and a
+bindings built and tested, `bindings/jvm`'s loader and Java layer compiled
+without Maven and their tests that run off Linux run by the JUnit console
+launcher, the Dart binding analysed and tested against the library, the
+documentation site built by `scripts/site.sh` with its links, hosts and
+addresses checked, the Swift package built and tested, and a
 `package --dry-run` over `scripts/package/*.sh`. A tool that
 is missing fails the step rather than skipping it: a gate that goes green
 without the scanner has not looked. The exceptions are the toolchains a
@@ -1122,7 +1126,12 @@ release or after a change to anything under `scripts/package/`:
 `scripts/package/qemu-verify.sh` running `bindings/c/smoke.c` and
 `bindings/python/tests` against it) and `scripts/package/nuget.sh collect
 --out DIR --rid linux-arm64` (the native `nuget.sh pack` then places under
-`runtimes/linux-arm64/native/`).
+`runtimes/linux-arm64/native/`). The JVM jar is the same lab step:
+`scripts/package/jvm.sh --out DIR` builds linux-x64 in manylinux_2_28 and
+linux-arm64 in the cross image, holds all four libraries to glibc 2.28, runs
+`mvn verify` (the loader's seven tests and the Kotlin and Java loopback calls
+against the packaged jar, under `-Xcheck:jni`) and the same nine tests again
+on an arm64 JVM under qemu; it needs Maven and a JDK on the Linux host.
 
 The Swift suite also runs on the iOS Simulator, outside the gate: against
 the XCFramework's simulator slice, from the distribution package
