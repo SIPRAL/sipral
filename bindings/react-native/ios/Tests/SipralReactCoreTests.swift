@@ -189,4 +189,11 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(options.signalling, "tls")
         XCTAssertEqual(SipralAccountOptions(["aor": "sip:a@b", "registrarAddress": "c:1", "expiresSeconds": NSNumber(value: 300)]).expiresSeconds, 300)
     }
+
+    /// A status reaches JavaScript by its name, and one this build has no
+    /// name for as the platform's, as the Android half says it.
+    func testALibraryRefusalIsNamedByItsStatus() {
+        XCTAssertEqual(SipralReactCore.refusal(of: SipralError(status: .busy, message: "")).code, "busy")
+        XCTAssertEqual(SipralReactCore.refusal(of: SipralError(code: 999, message: "")).code, "platform")
+    }
 }

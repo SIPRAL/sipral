@@ -26,9 +26,10 @@ export type SipralErrorCode =
   | 'securityPolicy'
   | 'recordingFailed'
   | 'notNegotiated'
-  | 'notAfocus'
+  | 'notAFocus'
   | 'transportDown'
   | 'conferenceRefused'
+  | 'clockBehind'
   /** The client was closed, or never opened. */
   | 'closed'
   /** The platform refused: a socket that would not bind, an address that would not parse. */
@@ -54,9 +55,10 @@ const LIBRARY_CODES: ReadonlySet<string> = new Set<SipralErrorCode>([
   'securityPolicy',
   'recordingFailed',
   'notNegotiated',
-  'notAfocus',
+  'notAFocus',
   'transportDown',
   'conferenceRefused',
+  'clockBehind',
   'closed',
   'platform',
 ]);

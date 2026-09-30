@@ -368,7 +368,7 @@ public final class SipralReactCore: @unchecked Sendable {
         case let refused as SipralRefusal:
             return refused
         case let failed as SipralError:
-            return SipralRefusal(String(describing: failed.status), failed.message)
+            return SipralRefusal(failed.status.map { String(describing: $0) } ?? "platform", failed.message)
         default:
             return SipralRefusal("platform", String(describing: failure))
         }
