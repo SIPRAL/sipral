@@ -37,8 +37,8 @@ initialised, so an application never has to call it. It picks
 libraries' ELF headers name that machine, writes them to a directory only the
 JVM's user can read, loads them by absolute path (the shim finds the ABI
 beside itself through its `$ORIGIN` run path) and deletes the files again.
-Anywhere else, or with glibc older than 2.28, it throws
-`UnsatisfiedLinkError` naming the platform. `-Dsipral.native.dir=DIR` loads
+Anywhere else it throws `UnsatisfiedLinkError` naming the platform; on a
+glibc older than 2.28 the `UnsatisfiedLinkError` is the dynamic linker's. `-Dsipral.native.dir=DIR` loads
 the pair from `DIR` instead, for a library built locally. Calling
 `SipralNatives.load()` at start-up makes a server fail at once rather than at
 its first call.
