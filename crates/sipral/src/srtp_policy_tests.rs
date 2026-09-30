@@ -313,6 +313,136 @@ mod fallback {
     }
 }
 
+/// SRTP best effort: SDES offered on plain `RTP/AVP`, keyed when the answer
+/// takes a line and plain when it takes none.
+mod best_effort {
+    use super::*;
+
+    /// A far end's own key for `AES_CM_128_HMAC_SHA1_80`: thirty octets of
+    /// key and salt.
+    const PBX_KEY: &str = "inline:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+
+    /// The one suite every SDES answerer takes, alone, as a stack told to
+    /// offer only it does.
+    fn best_effort() -> CodecCatalog {
+        pcmu()
+            .with_srtp(SrtpPolicy::BestEffort)
+            .with_srtp_suites(&[Suite::AesCm80])
+            .expect("one suite")
+    }
+
+    /// The call placed on `pair`, answered by a PBX that wrote `answer` —
+    /// its own description, as a PBX writes one.
+    fn answered_by_a_pbx(pair: &mut Pair, answer: &str) -> sipral_ua::CallHandle {
+        let remote = pair.ring();
+        pair.callee
+            .agent
+            .answer(
+                remote,
+                Some(std::sync::Arc::from(answer.as_bytes())),
+                pair.now,
+            )
+            .expect("the PBX's own answer");
+        for datagram in pair.callee.outbound() {
+            pair.caller.deliver(&datagram, callee_sip(), pair.now);
+        }
+        pair.caller.drain(pair.now, false);
+        pair.caller
+            .heard
+            .iter()
+            .find_map(|event| match event {
+                Event::Signalling(UaEvent::CallConfirmed { call, .. }) => Some(*call),
+                _ => None,
+            })
+            .expect("the call is up")
+    }
+
+    fn pbx_answer(line: Option<&str>) -> String {
+        format!(
+            "v=0\r\no=pbx 7 7 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+             m=audio 40002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n{}a=sendrecv\r\n",
+            line.map_or_else(String::new, |line| format!("a=crypto:{line}\r\n"))
+        )
+    }
+
+    #[test]
+    fn the_offer_is_on_rtp_avp_with_a_crypto_line_for_each_suite_chosen() {
+        let mut pair = Pair::new(best_effort());
+        pair.connect();
+        let offer = one_stream(&pair.callee.offer_received().expect("an offer"));
+        assert_eq!(offer.proto, "RTP/AVP");
+        let lines: Vec<String> = offer
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.name == "crypto")
+            .filter_map(|attribute| attribute.value.clone())
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("1 AES_CM_128_HMAC_SHA1_80 inline:"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_answer_that_takes_a_crypto_line_keys_the_call() {
+        let mut pair = Pair::asymmetric(best_effort(), pcmu());
+        let call = answered_by_a_pbx(
+            &mut pair,
+            &pbx_answer(Some(&format!("1 AES_CM_128_HMAC_SHA1_80 {PBX_KEY}"))),
+        );
+        let keyed = report(&pair, call, true);
+        assert!(keyed.encrypted, "{keyed:?}");
+        assert_eq!(keyed.key_exchange, Some(SrtpKeying::Sdes));
+        assert_eq!(keyed.suite, Some(Suite::AesCm80));
+    }
+
+    #[test]
+    fn a_pbx_answering_rtp_avp_without_a_crypto_line_gets_a_plain_call() {
+        let mut pair = Pair::asymmetric(best_effort(), pcmu());
+        let call = answered_by_a_pbx(&mut pair, &pbx_answer(None));
+        let plain = report(&pair, call, true);
+        assert!(!plain.encrypted);
+        assert_eq!(plain.key_exchange, None);
+        assert!(
+            !pair
+                .caller
+                .media_events()
+                .iter()
+                .any(|event| matches!(event, MediaEvent::Failed(_))),
+            "{:?}",
+            pair.caller.media_events()
+        );
+        assert!(
+            !pair
+                .caller
+                .outbound()
+                .iter()
+                .any(|bytes| bytes.starts_with(b"BYE ")),
+            "a plain answer is a call, not a refusal"
+        );
+    }
+
+    #[test]
+    fn two_ends_on_best_effort_key_their_call_and_one_that_does_not_offer_keeps_it_plain() {
+        let mut pair = Pair::new(best_effort());
+        let call = pair.connect();
+        let remote = pair.callee.call().expect("the callee's call");
+        let answer = one_stream(&pair.caller.answer_received().expect("an answer"));
+        assert_eq!(answer.proto, "RTP/AVP");
+        assert!(answer.attribute("crypto").is_some());
+        let keyed = report(&pair, call, true);
+        assert!(keyed.encrypted);
+        assert_eq!(keyed.suite, Some(Suite::AesCm80));
+        assert_eq!(report(&pair, remote, false), keyed);
+
+        // a stack that does not offer SRTP reads no key on the plain profile
+        let mut pair = Pair::asymmetric(best_effort(), pcmu());
+        let call = pair.connect();
+        assert!(!report(&pair, call, true).encrypted);
+    }
+}
+
 /// The policy per account: two accounts on one engine, one of them holding
 /// its calls to SRTP and the other not.
 #[test]

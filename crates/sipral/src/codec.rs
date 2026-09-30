@@ -921,6 +921,10 @@ impl CodecCatalog {
         #[cfg(not(feature = "dtls"))]
         let _ = dtls;
         match keys.filter(|_| self.srtp.offers()) {
+            // `SrtpPolicy::BestEffort`: the same lines, on the plain profile
+            Some(keys) if self.srtp.on_plain_profile() => {
+                capabilities.with_srtp(SrtpSupport::SdesOnAvp(keying::offer_lines(keys)))
+            }
             Some(keys) => capabilities.with_srtp(SrtpSupport::Sdes(keying::offer_lines(keys))),
             None => capabilities,
         }

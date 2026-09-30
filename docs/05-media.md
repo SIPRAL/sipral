@@ -966,6 +966,7 @@ agree with the call it stands in for.
 |---|---|---|---|
 | `NotOffered` — **the default** | `RTP/AVP`, no key in the body | answered plainly | answered, with a key of our own |
 | `Offered` | `RTP/SAVP`, one `a=crypto` per suite | answered plainly | answered, with a key of our own |
+| `BestEffort` | `RTP/AVP`, one `a=crypto` per suite: keyed if the answer takes a line, plain if it takes none | answered plainly; one on `RTP/AVP` carrying a line we take is answered with a key | answered, with a key of our own |
 | `Required` | `RTP/SAVP`, one `a=crypto` per suite | **refused, 488** | answered, with a key of our own |
 | `DtlsOffered` | `UDP/TLS/RTP/SAVP`, `a=fingerprint` | answered plainly | answered with our fingerprint |
 | `DtlsRequired` | `UDP/TLS/RTP/SAVP`, `a=fingerprint` | **refused, 488** | answered with our fingerprint |
@@ -989,6 +990,18 @@ writes. A peer that has already put `RTP/SAVP` and a key in front of us has
 asked for encryption; refusing there would turn a call that would have worked,
 encrypted, into a silent one, and buys nothing. So every policy answers a
 secure offer with a key, and only `Required` refuses a plain one.
+
+**Why `BestEffort` exists beside `Offered`.** `Offered` names `RTP/SAVP`, and
+a PBX that does not do SRTP rejects a stream on a profile it does not know
+(RFC 4568 §7.4) — 488, and no audio. `BestEffort` is the "SRTP optional" of
+desk phones: the same crypto lines on `RTP/AVP`, which such a PBX takes while
+ignoring the lines, and which a PBX that does SDES answers with a line of its
+own. RFC 4568 writes the attribute for the secure profiles, so this is
+interoperability rather than a standard; whether the call ended up encrypted
+is `MediaEngine::encryption`'s answer, never an assumption. The suites offered
+are the catalogue's or the account's (`with_srtp_suites`), and one suite —
+`AES_CM_128_HMAC_SHA1_80` alone — keeps an authenticated INVITE under RFC 3261
+§18.1.1's 1300 bytes where two would not.
 
 **Why `Offered` and `Required` are two settings.** They write the same offer,
 and a peer that refuses `RTP/SAVP` leaves the call with no audio under both —

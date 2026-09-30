@@ -5410,6 +5410,14 @@ fn take_stream(
             (Some(line), Some(keys)) => Some(keying::answer_line(&line, keys.clone())),
             _ => return StreamAnswer::Reject,
         }
+    } else if catalog.srtp().on_plain_profile() {
+        // `SrtpPolicy::BestEffort`, answering its own kind of offer: a line
+        // on the plain profile this end can take keys the stream, and an
+        // offer with none is answered plainly rather than refused
+        match (keying::acceptable(offered, catalog.srtp_suites()), keys) {
+            (Some(line), Some(keys)) => Some(keying::answer_line(&line, keys.clone())),
+            _ => None,
+        }
     } else {
         None
     };

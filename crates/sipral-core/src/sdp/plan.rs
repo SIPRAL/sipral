@@ -252,6 +252,17 @@ pub enum SrtpSupport {
     /// cannot know; the caller decides not to offer SDES over a transport that
     /// leaks it.
     Sdes(Vec<Crypto>),
+    /// The same `a=crypto` lines on plain `RTP/AVP`: the stream is keyed when
+    /// the answer takes one of them, and plain when it takes none.
+    ///
+    /// Not a mechanism RFC 4568 defines — it writes the attribute for the
+    /// secure profiles — but the "SRTP optional" of desk phones, for a far
+    /// end that rejects a stream on a secure profile it does not do (RFC 4568
+    /// §7.4) and ignores attribute lines it does not understand. What the
+    /// negotiation makes of it is what [`SessionDescription::media_plan`]
+    /// makes of any two descriptions: keyed where both carry a line with the
+    /// same tag and suite, plain where the answer carries none.
+    SdesOnAvp(Vec<Crypto>),
     /// DTLS-SRTP on `UDP/TLS/RTP/SAVP` (RFC 5764 §4.1): the offer carries the
     /// fingerprint of our certificate and the role we will take, and the keys
     /// come from a handshake this crate has no part in.
@@ -268,7 +279,7 @@ impl SrtpSupport {
     #[must_use]
     pub const fn proto(&self) -> &'static str {
         match self {
-            Self::None => "RTP/AVP",
+            Self::None | Self::SdesOnAvp(_) => "RTP/AVP",
             Self::Sdes(_) => "RTP/SAVP",
             Self::Dtls { .. } => "UDP/TLS/RTP/SAVP",
         }
@@ -445,7 +456,7 @@ impl MediaCapabilities {
         }
         match &self.srtp {
             SrtpSupport::None => {}
-            SrtpSupport::Sdes(offered) => {
+            SrtpSupport::Sdes(offered) | SrtpSupport::SdesOnAvp(offered) => {
                 stream
                     .attributes
                     .extend(offered.iter().map(Crypto::attribute));
@@ -1958,6 +1969,25 @@ KDR=1 UNENCRYPTED_SRTCP",
         assert_eq!(sdes.proto, "RTP/SAVP");
         assert_eq!(
             sdes.attribute("crypto").expect("a=crypto").value.as_deref(),
+            Some(format!("1 AES_CM_128_HMAC_SHA1_80 {key}").as_str())
+        );
+
+        // the same key offered on the plain profile: the lines are there, and
+        // the transport is the one a far end without SRTP still takes
+        let optional = MediaCapabilities::new(vec![pcmu()])
+            .with_srtp(SrtpSupport::SdesOnAvp(vec![Crypto::new(
+                1,
+                "AES_CM_128_HMAC_SHA1_80",
+                key,
+            )]))
+            .offer("audio", 5004, Direction::SendRecv);
+        assert_eq!(optional.proto, "RTP/AVP");
+        assert_eq!(
+            optional
+                .attribute("crypto")
+                .expect("a=crypto")
+                .value
+                .as_deref(),
             Some(format!("1 AES_CM_128_HMAC_SHA1_80 {key}").as_str())
         );
 
