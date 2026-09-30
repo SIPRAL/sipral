@@ -3562,17 +3562,18 @@ fi
 # (interop/datagram/caller.py): an account whose INVITE, once it carries
 # Asterisk's `Authorization`, is past 1300 bytes. `$1` is where the INVITE
 # goes, `$2` the SDES suites the account offers, `$3` a display name to make
-# it larger, empty for none; what the caller printed is left in DATAGRAM_LOG,
+# it larger, empty for none, `$4` how many seconds the call is up before the
+# hold, empty for the dwell; what the caller printed is left in DATAGRAM_LOG,
 # and what Asterisk took, and over what, in DATAGRAM_SEEN: pjsip's logger is
 # on for the run. Four suites are about 1100 bytes and 1450 answered; one
 # suite and 250 bytes of display name about 1150 and 1500, with no suite to
 # drop.
 DATAGRAM_SUITES=AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80,AEAD_AES_128_GCM,AES_256_CM_HMAC_SHA1_80
 datagram_call() {
-    local port="$1" suites="$2" display="$3" beside
+    local port="$1" suites="$2" display="$3" hold_after="${4:-0}" beside
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
     ( cd interop && docker compose logs --no-color asterisk 2>/dev/null ) | wc -l > "$DATAGRAM_MARK"
-    DATAGRAM_LOG=$(lab_run "the datagram caller" $((LAB_START_APT_S + LAB_CALL_S)) \
+    DATAGRAM_LOG=$(lab_run "the datagram caller" $((LAB_START_APT_S + LAB_CALL_S + hold_after)) \
         --network "$LAB_NETWORK" \
         -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
         -e SIPRAL_AOR=sip:labuser-big@asterisk \
@@ -3581,6 +3582,7 @@ datagram_call() {
         -e SIPRAL_SUITES="$suites" \
         -e SIPRAL_DISPLAY_NAME="$display" \
         -e SIPRAL_DWELL_MS="$LAB_DWELL_MS" -e SIPRAL_PATIENCE_MS="$LAB_PATIENCE_MS" \
+        -e SIPRAL_HOLD_AFTER_MS=$((hold_after * 1000)) \
         -v "$beside:/lib-sipral:ro" \
         -v "$ROOT/bindings/python:/python:ro" \
         -v "$ROOT/interop/datagram:/datagram:ro" \
@@ -3612,13 +3614,16 @@ datagram_flow() {
     ( cd interop && docker compose exec -T asterisk asterisk -rx 'pjsip set logger on' ) >/dev/null 2>&1
 
     # UDP and TCP both on 5060: the answer goes over a connection the layer
-    # opened by itself, and the call carries on to the hold and the hangup
-    datagram_call 5060 "$DATAGRAM_SUITES" ""
+    # opened by itself, and the call carries on to the hold and the hangup.
+    # The hold comes 45 seconds in: past the first keep-alive ping on the
+    # connection, which Asterisk does not answer, and past the ten seconds
+    # a flow that has answered one is given (RFC 5626 section 4.4.1)
+    datagram_call 5060 "$DATAGRAM_SUITES" "" 45
     if datagram_said '^wanted 2 [0-9.]+:5060 1[3-9][0-9][0-9] 1300$' \
         && datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
         && datagram_said '^ended LOCAL_HANGUP ' \
         && printf '%s\n' "$DATAGRAM_SEEN" | grep -Eq '\(1[3-9][0-9][0-9] bytes\) from TCP:'; then
-        pass "a challenged INVITE past 1300 bytes, taken over TCP: Asterisk on UDP and TCP, the answer to its challenge went on a connection the Python layer opened, and the call was held, resumed and hung up"
+        pass "a challenged INVITE past 1300 bytes, taken over TCP: Asterisk on UDP and TCP, the answer to its challenge went on a connection the Python layer opened, and the call was held 45 seconds in, resumed and hung up"
     else
         fail "a challenged INVITE past 1300 bytes, taken over TCP"
         ok=1
