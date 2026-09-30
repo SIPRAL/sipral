@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+-->
+<!--
+The JVM server artefact: bindings/kotlin's classes, compiled for a plain JVM,
+with libsipral_ffi.so and libsipral_jni.so for linux-x64 and linux-arm64
+inside the jar and a loader that picks the pair the running JVM needs.
+
+The group id is a property the owner sets once it is decided
+(-Dsipral.groupId=...); the placeholder below is never meant to be
+published. The version is the workspace's, handed over by
+scripts/package/jvm.sh as -Drevision. The natives are staged by that script
+under ${sipral.natives}; a build without them compiles and runs the loader's
+own tests, and the loopback tests then fail at the first native call.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>${sipral.groupId}</groupId>
+    <artifactId>sipral-jvm</artifactId>
+    <version>${revision}</version>
+    <packaging>jar</packaging>
+
+    <name>Sipral for the JVM</name>
+    <description>Sipral - Session Initiation Protocol Rust Audio Layer. The Kotlin binding for a server JVM, with the Linux x64 and arm64 native libraries inside the jar.</description>
+    <url>https://sipral.org</url>
+
+    <licenses>
+        <license>
+            <name>AGPL-3.0-only</name>
+            <url>https://www.gnu.org/licenses/agpl-3.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+        <license>
+            <name>LicenseRef-Sipral-Commercial</name>
+            <url>https://github.com/SIPRAL/sipral/blob/main/LICENSE-COMMERCIAL.md</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <name>Tiberiu Balasea</name>
+        </developer>
+    </developers>
+
+    <scm>
+        <url>https://github.com/SIPRAL/sipral</url>
+        <connection>scm:git:https://github.com/SIPRAL/sipral.git</connection>
+    </scm>
+
+    <properties>
+        <sipral.groupId>org.sipral.placeholder</sipral.groupId>
+        <revision>0.0.1</revision>
+
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <java.release>17</java.release>
+        <maven.compiler.release>${java.release}</maven.compiler.release>
+
+        <kotlin.version>2.4.20</kotlin.version>
+        <!-- The language and API version the classes are compiled for, the
+             same as scripts/package/aar.sh's KOTLIN_TARGET: a consumer on
+             Kotlin 2.1 or later compiles against them. -->
+        <kotlin.target>2.2</kotlin.target>
+        <coroutines.version>1.11.0</coroutines.version>
+        <junit.version>5.13.4</junit.version>
+
+        <sipral.root>${project.basedir}/../..</sipral.root>
+        <!-- Where the build writes; scripts/package/jvm.sh points it under
+             its own output directory. -->
+        <sipral.build>${project.basedir}/target</sipral.build>
+        <sipral.kotlin.sources>${sipral.root}/bindings/kotlin/sipral/src/main/kotlin</sipral.kotlin.sources>
+        <sipral.generated>${project.build.directory}/generated-sources/sipral-kotlin</sipral.generated>
+        <sipral.natives>${project.build.directory}/natives</sipral.natives>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-stdlib</artifactId>
+            <version>${kotlin.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.kotlinx</groupId>
+            <artifactId>kotlinx-coroutines-core-jvm</artifactId>
+            <version>${coroutines.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <directory>${sipral.build}</directory>
+        <resources>
+            <resource>
+                <directory>${sipral.natives}</directory>
+                <includes>
+                    <include>org/sipral/jvm/native/**</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>${sipral.root}</directory>
+                <targetPath>META-INF</targetPath>
+                <includes>
+                    <include>LICENSE</include>
+                    <include>LICENSE-COMMERCIAL.md</include>
+                    <include>THIRD-PARTY-LICENSES.txt</include>
+                    <include>THIRD-PARTY-NOTICES.md</include>
+                </includes>
+            </resource>
+        </resources>
+
+        <plugins>
+            <!-- bindings/kotlin's sources, copied as they are except for the
+                 one line each native-bearing object opens with:
+                 System.loadLibrary("sipral_jni") only ever searches
+                 java.library.path, which a jar cannot add to, so it becomes
+                 SipralNatives.load(), which takes the pair out of the jar.
+                 The build fails if a System.loadLibrary( is left, or if
+                 nothing was replaced. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <id>binding-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <delete dir="${sipral.generated}"/>
+                                <copy todir="${sipral.generated}">
+                                    <fileset dir="${sipral.kotlin.sources}" includes="**/*.kt"/>
+                                </copy>
+                                <replace dir="${sipral.generated}" includes="**/*.kt"
+                                         token="System.loadLibrary(&quot;sipral_jni&quot;)"
+                                         value="org.sipral.jvm.SipralNatives.load()"/>
+                                <resourcecount property="sipral.load.left">
+                                    <fileset dir="${sipral.generated}" includes="**/*.kt">
+                                        <containsregexp expression="System\.loadLibrary\("/>
+                                    </fileset>
+                                </resourcecount>
+                                <resourcecount property="sipral.load.replaced">
+                                    <fileset dir="${sipral.generated}" includes="**/*.kt">
+                                        <contains text="org.sipral.jvm.SipralNatives.load()"/>
+                                    </fileset>
+                                </resourcecount>
+                                <fail message="${sipral.load.left} file(s) under ${sipral.kotlin.sources} still call System.loadLibrary( in a form this build does not rewrite">
+                                    <condition>
+                                        <not>
+                                            <equals arg1="${sipral.load.left}" arg2="0"/>
+                                        </not>
+                                    </condition>
+                                </fail>
+                                <fail message="no System.loadLibrary(&quot;sipral_jni&quot;) found under ${sipral.kotlin.sources}: nothing would load the natives">
+                                    <condition>
+                                        <equals arg1="${sipral.load.replaced}" arg2="0"/>
+                                    </condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.2</version>
+                <executions>
+                    <execution>
+                        <id>kotlin-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${project.basedir}/src/main/kotlin</source>
+                                <source>${sipral.generated}</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>kotlin-test-sources</id>
+                        <phase>generate-test-sources</phase>
+                        <goals>
+                            <goal>add-test-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${project.basedir}/src/test/kotlin</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <version>${kotlin.version}</version>
+                <configuration>
+                    <jvmTarget>${java.release}</jvmTarget>
+                    <languageVersion>${kotlin.target}</languageVersion>
+                    <apiVersion>${kotlin.target}</apiVersion>
+                    <args>
+                        <arg>-Xjdk-release=${java.release}</arg>
+                        <arg>-Xjvm-default=all</arg>
+                    </args>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>compile</id>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>test-compile</id>
+                        <phase>test-compile</phase>
+                        <goals>
+                            <goal>test-compile</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- javac after kotlinc, so that the Java tests compile against
+                 the Kotlin classes. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+                <executions>
+                    <execution>
+                        <id>default-compile</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
+                        <id>java-compile</id>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>java-test-compile</id>
+                        <phase>test-compile</phase>
+                        <goals>
+                            <goal>testCompile</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.3.1</version>
+            </plugin>
+
+            <!-- The loader's own tests, against target/classes. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.4</version>
+                <configuration>
+                    <redirectTestOutputToFile>true</redirectTestOutputToFile>
+                </configuration>
+            </plugin>
+
+            <!-- The loopback calls, against the packaged jar: the natives
+                 come out of the jar itself, not out of target/classes. Run
+                 under -Xcheck:jni, as scripts/check.sh runs the binding. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>3.5.4</version>
+                <configuration>
+                    <argLine>-Xcheck:jni</argLine>
+                    <redirectTestOutputToFile>true</redirectTestOutputToFile>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <Automatic-Module-Name>org.sipral.jvm</Automatic-Module-Name>
+                            <Implementation-Title>${project.name}</Implementation-Title>
+                            <Implementation-Version>${project.version}</Implementation-Version>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.3.1</version>
+                <executions>
+                    <execution>
+                        <id>sources</id>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- The POM that installs is the interpolated one, with the group
+                 id and the version written out rather than left as
+                 properties. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.7.3</version>
+                <configuration>
+                    <flattenMode>ossrh</flattenMode>
+                    <outputDirectory>${project.build.directory}</outputDirectory>
+                    <updatePomFile>true</updatePomFile>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>flatten</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>flatten-clean</id>
+                        <phase>clean</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
