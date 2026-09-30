@@ -2372,6 +2372,209 @@ mod tests {
         assert_eq!(run_until(&mut agent, t0, t0 + Duration::from_secs(120)), 0);
     }
 
+    /// Every keep-alive that left, on any transport, as (transport,
+    /// destination, protocol), from `from` up to `until`.
+    fn every_ping_until(
+        agent: &mut UserAgent,
+        from: Instant,
+        until: Instant,
+    ) -> Vec<(TransportId, SocketAddr, TransportProtocol, Instant)> {
+        let mut seen = Vec::new();
+        let mut now = from;
+        loop {
+            while let Some(transmit) = agent.poll_transmit() {
+                if &*transmit.payload == b"\r\n\r\n" {
+                    seen.push((
+                        transmit.transport,
+                        transmit.destination,
+                        transmit.protocol,
+                        now,
+                    ));
+                }
+            }
+            let _ = events(agent);
+            match agent.poll_timeout() {
+                Some(due) if due <= until => {
+                    now = due.max(now);
+                    agent.handle_timeout(now);
+                }
+                _ => return seen,
+            }
+        }
+    }
+
+    #[test]
+    fn with_no_stun_and_no_interval_of_its_own_an_account_sends_no_keep_alive() {
+        // the default is what it was: nothing leaves for a registrar unless
+        // STUN showed the account behind a NAT
+        let t0 = Instant::now();
+        let (mut agent, id) = registered(t0);
+        assert!(!agent.keeping_registrar_flow_alive(id));
+        let seen = every_ping_until(&mut agent, t0, t0 + Duration::from_secs(300));
+        assert!(seen.is_empty(), "{seen:?}");
+    }
+
+    #[test]
+    fn an_account_with_an_interval_of_its_own_keeps_its_registrars_flow_open_without_stun() {
+        // the trial's failure: STUN off, a NAT that forgets a UDP flow in
+        // 30 s, and every call between two REGISTERs lost at it
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(
+            account()
+                .keepalive(Duration::from_secs(15))
+                .expect("fifteen seconds"),
+        );
+        assert!(
+            !agent.keeping_registrar_flow_alive(id),
+            "nothing before the account registers"
+        );
+        agent.register(id, t0).expect("a REGISTER");
+        let request = transmits(&mut agent).pop().expect("the REGISTER");
+        deliver(&mut agent, &granted(&request, 3_600), t0);
+        let _ = events(&mut agent);
+        assert!(agent.keeping_registrar_flow_alive(id));
+
+        let seen = every_ping_until(&mut agent, t0, t0 + Duration::from_secs(150));
+        assert!((10..=13).contains(&seen.len()), "{} pings", seen.len());
+        let mut last = t0;
+        for (transport, destination, protocol, at) in seen {
+            assert_eq!(
+                (transport, destination, protocol),
+                (UDP, registrar(), TransportProtocol::Udp)
+            );
+            let gap = at - last;
+            assert!(
+                gap >= Duration::from_secs(12) && gap <= Duration::from_secs(15),
+                "{gap:?}"
+            );
+            last = at;
+        }
+    }
+
+    #[test]
+    fn an_accounts_own_interval_holds_with_the_agents_nat_keep_alive_off() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        agent
+            .keep_registrar_flows_alive(None, t0)
+            .expect("off is always taken");
+        let id = agent.add_account(
+            account()
+                .keepalive(Duration::from_secs(20))
+                .expect("twenty seconds"),
+        );
+        agent.register(id, t0).expect("a REGISTER");
+        let request = transmits(&mut agent).pop().expect("the REGISTER");
+        deliver(&mut agent, &granted(&request, 3_600), t0);
+        let seen = every_ping_until(&mut agent, t0, t0 + Duration::from_secs(100));
+        assert!((5..=6).contains(&seen.len()), "{} pings", seen.len());
+
+        // and it stops with the binding
+        let later = t0 + Duration::from_secs(100);
+        agent
+            .unregister(id, later)
+            .expect("the de-registration goes");
+        let _ = transmits(&mut agent);
+        assert!(!agent.keeping_registrar_flow_alive(id));
+    }
+
+    #[test]
+    fn an_interval_outside_one_second_to_two_minutes_is_refused_on_the_account() {
+        for refused in [
+            Duration::ZERO,
+            Duration::from_millis(999),
+            Duration::from_secs(121),
+        ] {
+            assert_eq!(
+                account().keepalive(refused).map(|_| ()),
+                Err(UaError::InvalidKeepalive(refused))
+            );
+        }
+        let taken = account()
+            .keepalive(Duration::from_secs(1))
+            .expect("one second");
+        assert_eq!(taken.keepalive_interval(), Some(Duration::from_secs(1)));
+        assert_eq!(account().keepalive_interval(), None);
+    }
+
+    #[test]
+    fn a_trunk_with_an_interval_of_its_own_keeps_its_proxys_flow_open() {
+        // no binding to hold, but the calls the proxy sends in cross the
+        // same NAT
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let proxy: SocketAddr = "198.51.100.20:5060".parse().expect("the proxy");
+        let id = agent.add_account(
+            trunk()
+                .keepalive(Duration::from_secs(10))
+                .expect("ten seconds"),
+        );
+        // taken up by the next round of work, whatever it is
+        agent.handle_timeout(t0);
+        let seen = every_ping_until(&mut agent, t0, t0 + Duration::from_secs(60));
+        assert!(agent.keeping_registrar_flow_alive(id));
+        assert!((6..=7).contains(&seen.len()), "{} pings", seen.len());
+        assert!(seen.iter().all(|(_, to, _, _)| *to == proxy));
+
+        agent.suspending(t0 + Duration::from_secs(60));
+        assert!(!agent.keeping_registrar_flow_alive(id));
+    }
+
+    #[test]
+    fn an_account_on_a_stream_has_its_connection_pinged_at_its_own_interval() {
+        // RFC 5626 §4.4.1 on the connection: the endpoint pings it at the
+        // account's interval rather than at its own 25 s
+        const TCP: TransportId = TransportId(2);
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        agent
+            .receive(
+                Input::TransportBound {
+                    transport: TCP,
+                    protocol: TransportProtocol::Tcp,
+                    local: local(),
+                    remote: Some(registrar()),
+                },
+                t0,
+            )
+            .expect("binding TCP");
+        let streamed = Account::new(
+            uri("sip:alice@example.com"),
+            uri("sip:example.com;transport=tcp"),
+            uri("sip:alice@192.0.2.1;transport=tcp"),
+            TCP,
+            registrar(),
+        )
+        .keepalive(Duration::from_secs(10))
+        .expect("ten seconds");
+        let id = agent.add_account(streamed);
+        agent.register(id, t0).expect("a REGISTER");
+        let request = transmits(&mut agent).pop().expect("the REGISTER");
+        deliver(&mut agent, &granted(&request, 3_600), t0);
+        let _ = events(&mut agent);
+        assert!(agent.keeping_registrar_flow_alive(id));
+        assert_eq!(
+            agent.endpoint_ref().stream_keepalive(TCP),
+            Some(Duration::from_secs(10))
+        );
+        let seen = every_ping_until(&mut agent, t0, t0 + Duration::from_secs(100));
+        assert!((10..=12).contains(&seen.len()), "{} pings", seen.len());
+        assert!(
+            seen.iter()
+                .all(|(transport, _, protocol, _)| *transport == TCP
+                    && *protocol == TransportProtocol::Tcp)
+        );
+
+        // an account removed hands the connection back to the endpoint
+        agent.remove_account(id);
+        agent.handle_timeout(t0 + Duration::from_secs(100));
+        assert_eq!(
+            agent.endpoint_ref().stream_keepalive(TCP),
+            Some(Duration::from_secs(25))
+        );
+    }
+
     #[test]
     fn a_register_sent_before_the_nat_answer_is_taken_back_by_the_one_after() {
         // the account registered its private address, because the STUN

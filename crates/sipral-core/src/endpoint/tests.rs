@@ -20,7 +20,7 @@ use super::{
 use crate::msg::{HeaderName, Method, ParseMode, ParseScratch, RawMessage, StatusCode, Uri, parse};
 use crate::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteClientState, NonInviteClientState,
-    NonInviteServerState, TransactionId,
+    NonInviteServerState, TimerConfigError, TransactionId,
 };
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -2183,6 +2183,122 @@ fn a_stream_transport_is_pinged_on_a_jittered_interval() {
     );
     let next = endpoint.poll_timeout().expect("and again");
     assert!(next > due, "the keepalive rearmed itself");
+}
+
+/// The instants the pings on `transport` go out at, from `from` up to
+/// `until`, running every deadline on the way.
+fn pings_until(endpoint: &mut Endpoint, from: Instant, until: Instant) -> Vec<Instant> {
+    let mut at = Vec::new();
+    let mut now = from;
+    while let Some(due) = endpoint.poll_timeout() {
+        if due > until {
+            break;
+        }
+        now = due.max(now);
+        endpoint.handle_timeout(now);
+        for transmit in transmits(endpoint) {
+            if &*transmit.payload == b"\r\n\r\n" {
+                at.push(now);
+            }
+        }
+    }
+    at
+}
+
+fn bound_tcp(config: EndpointConfig, now: Instant) -> Endpoint {
+    let mut endpoint = Endpoint::new(config, [7; 32]).unwrap();
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            now,
+        )
+        .expect("binding TCP");
+    endpoint
+}
+
+#[test]
+fn a_stream_given_its_own_interval_is_pinged_at_it_and_not_at_the_endpoints() {
+    // an account whose NAT forgets a connection in 15 s asks for more than
+    // the endpoint's 25 s; RFC 5626 §4.4.1's jitter still applies
+    let t0 = Instant::now();
+    let mut endpoint = bound_tcp(EndpointConfig::default(), t0);
+    endpoint
+        .keep_stream_alive(TCP, Some(Duration::from_secs(10)), t0)
+        .expect("ten seconds");
+    assert_eq!(
+        endpoint.stream_keepalive(TCP),
+        Some(Duration::from_secs(10))
+    );
+    let pings = pings_until(&mut endpoint, t0, t0 + Duration::from_secs(100));
+    assert!((10..=12).contains(&pings.len()), "{} pings", pings.len());
+    let mut last = t0;
+    for at in pings {
+        let gap = at - last;
+        assert!(
+            gap >= Duration::from_secs(8) && gap <= Duration::from_secs(10),
+            "{gap:?}"
+        );
+        last = at;
+    }
+
+    // and back to the endpoint's own when the owner lets go of it
+    let later = t0 + Duration::from_secs(100);
+    endpoint
+        .keep_stream_alive(TCP, None, later)
+        .expect("none is always taken");
+    let pings = pings_until(&mut endpoint, later, later + Duration::from_secs(100));
+    assert!((4..=5).contains(&pings.len()), "{} pings", pings.len());
+}
+
+#[test]
+fn a_stream_given_its_own_interval_is_pinged_with_the_endpoints_keep_alive_off() {
+    let t0 = Instant::now();
+    let config = EndpointConfig {
+        keepalive_interval: None,
+        ..EndpointConfig::default()
+    };
+    let mut endpoint = bound_tcp(config, t0);
+    assert_eq!(endpoint.poll_timeout(), None, "nothing pings with it off");
+    endpoint
+        .keep_stream_alive(TCP, Some(Duration::from_secs(15)), t0)
+        .expect("fifteen seconds");
+    let pings = pings_until(&mut endpoint, t0, t0 + Duration::from_secs(60));
+    assert!((4..=5).contains(&pings.len()), "{} pings", pings.len());
+}
+
+#[test]
+fn a_streams_own_interval_outlives_a_rebind_and_zero_is_refused() {
+    let t0 = Instant::now();
+    let mut endpoint = bound_tcp(EndpointConfig::default(), t0);
+    assert_eq!(
+        endpoint.keep_stream_alive(TCP, Some(Duration::ZERO), t0),
+        Err(TimerConfigError::KeepaliveUnarmable)
+    );
+    assert_eq!(
+        endpoint.stream_keepalive(TCP),
+        Some(Duration::from_secs(25))
+    );
+    endpoint
+        .keep_stream_alive(TCP, Some(Duration::from_secs(5)), t0)
+        .expect("five seconds");
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0,
+        )
+        .expect("the same name, bound again");
+    let due = endpoint.poll_timeout().expect("a ping is due");
+    assert!(due <= t0 + Duration::from_secs(5), "{:?}", due - t0);
 }
 
 #[test]

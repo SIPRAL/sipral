@@ -253,6 +253,10 @@ pub struct Account {
     /// See [`Account::stir_signing`].
     #[cfg(feature = "stir")]
     pub(crate) stir_signing: Option<crate::StirSigning>,
+    /// How often this account keeps its flow to `remote` open whatever STUN
+    /// found, or `None` to leave that to the agent's NAT rule. See
+    /// [`Account::keepalive`].
+    pub(crate) keepalive: Option<Duration>,
 }
 
 impl Account {
@@ -328,6 +332,7 @@ impl Account {
             stir_verification: crate::StirVerification::default(),
             #[cfg(feature = "stir")]
             stir_signing: None,
+            keepalive: None,
         }
     }
 
@@ -501,6 +506,46 @@ impl Account {
     pub fn stir_signing(mut self, signing: crate::StirSigning) -> Self {
         self.stir_signing = Some(signing);
         self
+    }
+
+    /// Keep this account's flow to its registrar — to its outbound proxy,
+    /// for one that never registers — open with a CRLF keep-alive every
+    /// `every`, whether or not STUN ran or found a NAT (RFC 5626 §3.5.1,
+    /// §4.4.1).
+    ///
+    /// For a network whose NAT forgets a UDP flow sooner than the REGISTER
+    /// refresh comes round, with STUN off: without a keep-alive, a call the
+    /// registrar forwards between two REGISTERs is dropped at the NAT. On a
+    /// datagram transport a double CRLF goes out alone in a datagram, which
+    /// RFC 3261 §7.5 has a registrar ignore; on a stream the endpoint pings
+    /// the connection at this interval instead of its own (RFC 5626 §4.4.1's
+    /// double CRLF, with its single-CRLF pong). Each interval is drawn
+    /// between 80% and 100% of `every`, as §4.4.1 asks, so what the NAT
+    /// sees is never further apart than `every`.
+    ///
+    /// Sent while the account's registration holds a binding or is getting
+    /// one, and for an account with no registrar while the agent runs, from
+    /// the first round of work after it was added; never while the agent is
+    /// suspended. Left unset — the default — an
+    /// account is kept open only when STUN showed it behind a NAT, at the
+    /// agent's interval ([`crate::keepalive`]).
+    ///
+    /// # Errors
+    /// [`UaError::InvalidKeepalive`](crate::UaError::InvalidKeepalive) for an
+    /// interval under [`MIN_KEEPALIVE`](crate::keepalive::MIN_KEEPALIVE) or
+    /// over [`MAX_KEEPALIVE`](crate::keepalive::MAX_KEEPALIVE).
+    pub fn keepalive(mut self, every: Duration) -> Result<Self, crate::UaError> {
+        if !(crate::keepalive::MIN_KEEPALIVE..=crate::keepalive::MAX_KEEPALIVE).contains(&every) {
+            return Err(crate::UaError::InvalidKeepalive(every));
+        }
+        self.keepalive = Some(every);
+        Ok(self)
+    }
+
+    /// The keep-alive interval [`Account::keepalive`] set, or `None`.
+    #[must_use]
+    pub const fn keepalive_interval(&self) -> Option<Duration> {
+        self.keepalive
     }
 
     /// Whether a peer at `address` is one this account trusts.

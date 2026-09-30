@@ -19,7 +19,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::driver::{Deadline, Endpoint, assemble_response};
 use super::error::ReceiveError;
@@ -1494,10 +1494,10 @@ impl Endpoint {
     }
 
     pub(super) fn arm_keepalives(&mut self, now: Instant) {
-        let Some(interval) = self.config.keepalive_interval else {
-            return;
-        };
         for transport in self.transports.streams_without_keepalive() {
+            let Some(interval) = self.keepalive_interval_of(transport) else {
+                continue;
+            };
             let at = now + self.tokens.jitter(interval);
             let handle = self.schedule(at, Deadline::Keepalive(transport));
             if let Some(bound) = self.transports.get_mut(transport) {
@@ -1522,8 +1522,7 @@ impl Endpoint {
         }
         self.queue(flow.transmit(Arc::from(PING)));
         let next = self
-            .config
-            .keepalive_interval
+            .keepalive_interval_of(transport)
             .map(|interval| now + self.tokens.jitter(interval))
             .map(|at| self.schedule(at, Deadline::Keepalive(transport)));
         // one deadline for the flow rather than one per ping: a pong is not
@@ -1549,6 +1548,15 @@ impl Endpoint {
             bound.keepalive = next;
             bound.pong = overdue;
         }
+    }
+
+    /// How often a stream transport is pinged: the interval its owner asked
+    /// for it ([`Endpoint::keep_stream_alive`]), or the endpoint's own.
+    pub(super) fn keepalive_interval_of(&self, transport: super::TransportId) -> Option<Duration> {
+        self.stream_keepalives
+            .get(&transport)
+            .copied()
+            .or(self.config.keepalive_interval)
     }
 
     /// The far end answered, so the flow is alive, the clock stops, and from
