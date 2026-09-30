@@ -161,7 +161,7 @@ internal fun classify(failure: Throwable, handshaking: Boolean): SignallingRefus
 }
 
 /** One line of at most `SIPRAL_TRANSPORT_DETAIL_BYTES` bytes of UTF-8. */
-private fun sentence(text: String): String {
+internal fun sentence(text: String): String {
     var line = text.map { if (it.isISOControl()) ' ' else it }.joinToString("").trim()
     while (line.toByteArray(Charsets.UTF_8).size > Sipral.TRANSPORT_DETAIL_BYTES) {
         line = line.dropLast(1)

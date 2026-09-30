@@ -149,6 +149,14 @@ pub(crate) const UNIT_TYPE_OUTPUT: u32 = code(*b"auou");
 /// cancellation and the voice-chat behaviour of the audio session behind it.
 pub(crate) const UNIT_SUBTYPE_VOICE_PROCESSING: u32 = code(*b"vpio");
 
+/// The unit that only plays: `kAudioUnitSubType_HALOutput` on macOS, which
+/// takes a device of its own, and `kAudioUnitSubType_RemoteIO` on iOS, which
+/// follows the audio session's route.
+#[cfg(target_os = "macos")]
+pub(crate) const UNIT_SUBTYPE_PLAIN_OUTPUT: u32 = code(*b"ahal");
+#[cfg(target_os = "ios")]
+pub(crate) const UNIT_SUBTYPE_PLAIN_OUTPUT: u32 = code(*b"rioc");
+
 /// `kAudioUnitManufacturer_Apple`.
 pub(crate) const MANUFACTURER_APPLE: u32 = code(*b"appl");
 

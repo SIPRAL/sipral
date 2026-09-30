@@ -206,6 +206,9 @@ final class DatagramLimitTests: XCTestCase {
 
         let lost = seen.compactMap(\.transportFailedData)
         XCTAssertEqual(lost.first?.error, .connectionRefused)
+        // where the connection was going and what became of it, for a log
+        let detail = lost.first?.detail ?? ""
+        XCTAssertTrue(detail.hasPrefix("TCP to \(pbx.address) refused"), detail)
         let ended = try XCTUnwrap(seen.last?.callData)
         XCTAssertEqual(ended.endReason, .unreachable)
         XCTAssertEqual(ended.statusCode, 513)
@@ -239,6 +242,8 @@ final class DatagramLimitTests: XCTestCase {
         let seen = try await ending.value
         XCTAssertEqual(seen.last?.callData?.statusCode, 513)
         XCTAssertEqual(pbx.connections, 0, "nothing was opened")
+        let detail = seen.compactMap(\.transportFailedData).first?.detail ?? ""
+        XCTAssertEqual(detail, "TCP to \(pbx.address) not tried: streamFallback is off")
     }
 
     /// RFC 5626 §4.4.1: the stack retires a stream that stopped answering

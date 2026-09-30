@@ -921,6 +921,10 @@ impl CodecCatalog {
         #[cfg(not(feature = "dtls"))]
         let _ = dtls;
         match keys.filter(|_| self.srtp.offers()) {
+            // `SrtpPolicy::BestEffort`: the same lines, on the plain profile
+            Some(keys) if self.srtp.on_plain_profile() => {
+                capabilities.with_srtp(SrtpSupport::SdesOnAvp(keying::offer_lines(keys)))
+            }
             Some(keys) => capabilities.with_srtp(SrtpSupport::Sdes(keying::offer_lines(keys))),
             None => capabilities,
         }
@@ -1083,7 +1087,16 @@ pub(crate) mod tests {
         let offer = catalog
             .capabilities()
             .offer("audio", 40_000, Direction::SendRecv);
-        assert_eq!(offer.formats, ["96", "97", "0", "98"]);
+        // and named events on each of the two clocks the codecs run on
+        assert_eq!(offer.formats, ["96", "97", "0", "98", "99"]);
+        assert_eq!(
+            offer.rtpmap(98).map(|map| map.to_value()).as_deref(),
+            Some("98 telephone-event/16000")
+        );
+        assert_eq!(
+            offer.rtpmap(99).map(|map| map.to_value()).as_deref(),
+            Some("99 telephone-event/8000")
+        );
         assert_eq!(
             offer.rtpmap(96).map(|map| map.to_value()).as_deref(),
             Some("96 L16/16000")
@@ -1446,9 +1459,14 @@ pub(crate) mod tests {
             .offer("audio", 40_000, Direction::SendRecv);
         #[cfg(feature = "opus")]
         {
-            assert_eq!(offer.formats, ["96", "9", "0", "8", "97"]);
+            // named events on Opus's clock and on the others' eight
+            // kilohertz, G.722's RTP clock included (RFC 3551 §4.5.2)
+            assert_eq!(offer.formats, ["96", "9", "0", "8", "97", "98"]);
             assert_eq!(offer.fmtp(96), Some("useinbandfec=1"));
             assert_eq!(offer.fmtp(97), Some("0-15"));
+            assert_eq!(offer.rtpmap(97).map(|map| map.clock_rate), Some(48_000));
+            assert_eq!(offer.fmtp(98), Some("0-15"));
+            assert_eq!(offer.rtpmap(98).map(|map| map.clock_rate), Some(8_000));
         }
         #[cfg(not(feature = "opus"))]
         {

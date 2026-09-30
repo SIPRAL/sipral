@@ -9,13 +9,15 @@
 //! holds the [`FakeBackend`] and sees exactly what a platform would show it.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use sipral_io_common::level::{Channel, Controls, window_samples};
 
 use crate::backend::{
-    Backend, BackendError, CaptureStream, Format, Notice, PlaybackStream, RawDevice, StreamCommon,
+    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, RawDevice,
+    StreamCommon,
 };
 use crate::call::{CallAudio, CallGone, Outgoing};
 
@@ -29,8 +31,14 @@ struct FakeDevice {
     played: Vec<i16>,
     /// Set when the device is pulled out from under its streams.
     lost: bool,
+    /// How long the next write to it takes, once.
+    stall: Option<Duration>,
+    /// Set when a write has started taking that long.
+    stalled: bool,
 }
 
+// each flag is one independent way a test bends the fake platform
+#[allow(clippy::struct_excessive_bools)]
 struct State {
     devices: Vec<RawDevice>,
     plugged: Vec<Arc<Mutex<FakeDevice>>>,
@@ -42,6 +50,36 @@ struct State {
     opens: usize,
     ringer_opens: usize,
     duplex_only: bool,
+    chooses_every_role: bool,
+    units: Arc<Units>,
+}
+
+/// The duplex units a duplex fake has open, counted the way a platform with
+/// room for one would have to count them: each pair of halves is one unit,
+/// alive until both halves are gone.
+#[derive(Default)]
+struct Units {
+    alive: AtomicUsize,
+    most: AtomicUsize,
+    opened: AtomicUsize,
+}
+
+/// One duplex unit, shared by its two halves.
+struct UnitHeld(Arc<Units>);
+
+impl UnitHeld {
+    fn open(units: &Arc<Units>) -> Arc<Self> {
+        let alive = units.alive.fetch_add(1, Ordering::AcqRel) + 1;
+        units.most.fetch_max(alive, Ordering::AcqRel);
+        units.opened.fetch_add(1, Ordering::AcqRel);
+        Arc::new(Self(Arc::clone(units)))
+    }
+}
+
+impl Drop for UnitHeld {
+    fn drop(&mut self) {
+        self.0.alive.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// The test's side of the fake platform.
@@ -71,6 +109,8 @@ impl FakeControl {
                     opens: 0,
                     ringer_opens: 0,
                     duplex_only: false,
+                    chooses_every_role: false,
+                    units: Arc::new(Units::default()),
                 }),
                 Condvar::new(),
             )),
@@ -172,9 +212,35 @@ impl FakeControl {
         lock(&self.state).system_echo_cancellation = on;
     }
 
-    /// Whether the fake behaves like a duplex-only platform.
+    /// Whether the fake behaves like a duplex-only platform: the microphone
+    /// and the loudspeaker opened together as one unit.
     pub fn set_duplex_only(&self, on: bool) {
         lock(&self.state).duplex_only = on;
+    }
+
+    /// Whether a duplex fake lets every role be chosen, as macOS does —
+    /// the microphone named apart from the loudspeaker, a ringer opened as
+    /// an output of its own — rather than only the loudspeaker.
+    pub fn set_chooses_every_role(&self, on: bool) {
+        lock(&self.state).chooses_every_role = on;
+    }
+
+    /// How many duplex units are open right now.
+    #[must_use]
+    pub fn units_alive(&self) -> usize {
+        lock(&self.state).units.alive.load(Ordering::Acquire)
+    }
+
+    /// The most duplex units that were ever open at once.
+    #[must_use]
+    pub fn units_at_most(&self) -> usize {
+        lock(&self.state).units.most.load(Ordering::Acquire)
+    }
+
+    /// How many duplex units were opened so far.
+    #[must_use]
+    pub fn units_opened(&self) -> usize {
+        lock(&self.state).units.opened.load(Ordering::Acquire)
     }
 
     /// Make every platform call block until [`FakeControl::release`].
@@ -209,6 +275,27 @@ impl FakeControl {
                 .microphone
                 .push_back(frame.to_vec());
         }
+    }
+
+    /// Make the next write to a device take `how_long`, as a driver that
+    /// holds the pump's thread does.
+    pub fn stall_next_write(&self, identity: &str, how_long: Duration) {
+        if let Some(device) = self.device(identity) {
+            let mut device = device.lock().unwrap_or_else(PoisonError::into_inner);
+            device.stall = Some(how_long);
+            device.stalled = false;
+        }
+    }
+
+    /// Whether the write [`FakeControl::stall_next_write`] set up has begun.
+    #[must_use]
+    pub fn stalled(&self, identity: &str) -> bool {
+        self.device(identity).is_some_and(|device| {
+            device
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .stalled
+        })
     }
 
     /// Everything a device has played so far.
@@ -325,14 +412,41 @@ impl Backend for FakeBackend {
         identity: Option<&str>,
         wanted: Format,
     ) -> Result<Box<dyn CaptureStream>, BackendError> {
-        let (identity, device, format, aec) = self.open(identity, wanted, true)?;
-        Ok(Box::new(FakeStream {
-            identity,
-            device,
-            format,
-            channel: Arc::new(Channel::new(window_samples(format.sample_rate_hz))),
-            aec,
-        }))
+        Ok(Box::new(FakeStream::new(
+            self.open(identity, wanted, true)?,
+            None,
+        )))
+    }
+
+    fn open_duplex(
+        &mut self,
+        microphone: Option<&str>,
+        speaker: Option<&str>,
+        wanted: Format,
+    ) -> Duplex {
+        let playback = self.open(speaker, wanted, false);
+        let capture = self.open(microphone, wanted, true);
+        // a duplex fake's two halves are one unit, alive until the second
+        // half goes; any other fake's are two streams
+        let unit = if capture.is_ok() && playback.is_ok() {
+            let state = lock(&self.state);
+            state.duplex_only.then(|| UnitHeld::open(&state.units))
+        } else {
+            None
+        };
+        (
+            capture.map(|opened| -> Box<dyn CaptureStream> {
+                Box::new(FakeStream::new(opened, unit.clone()))
+            }),
+            playback.map(|opened| -> Box<dyn PlaybackStream> {
+                Box::new(FakeStream::new(opened, unit))
+            }),
+        )
+    }
+
+    fn chooses(&self, role: crate::device::Role) -> bool {
+        let state = lock(&self.state);
+        state.chooses_every_role || role == crate::device::Role::Speaker || !state.duplex_only
     }
 
     fn open_playback(
@@ -340,14 +454,10 @@ impl Backend for FakeBackend {
         identity: Option<&str>,
         wanted: Format,
     ) -> Result<Box<dyn PlaybackStream>, BackendError> {
-        let (identity, device, format, aec) = self.open(identity, wanted, false)?;
-        Ok(Box::new(FakeStream {
-            identity,
-            device,
-            format,
-            channel: Arc::new(Channel::new(window_samples(format.sample_rate_hz))),
-            aec,
-        }))
+        Ok(Box::new(FakeStream::new(
+            self.open(identity, wanted, false)?,
+            None,
+        )))
     }
 
     fn open_ringer(
@@ -371,6 +481,22 @@ struct FakeStream {
     format: Format,
     channel: Arc<Channel>,
     aec: bool,
+    /// The duplex unit this stream is half of, where it is half of one:
+    /// held, never read, so that the unit goes when its last half does.
+    _unit: Option<Arc<UnitHeld>>,
+}
+
+impl FakeStream {
+    fn new((identity, device, format, aec): OpenedFake, unit: Option<Arc<UnitHeld>>) -> Self {
+        Self {
+            identity,
+            device,
+            format,
+            channel: Arc::new(Channel::new(window_samples(format.sample_rate_hz))),
+            aec,
+            _unit: unit,
+        }
+    }
 }
 
 impl StreamCommon for FakeStream {
@@ -424,6 +550,19 @@ impl CaptureStream for FakeStream {
 
 impl PlaybackStream for FakeStream {
     fn write(&mut self, frame: &[i16]) -> bool {
+        let stall = self
+            .device
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stall
+            .take();
+        if let Some(stall) = stall {
+            self.device
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .stalled = true;
+            std::thread::sleep(stall);
+        }
         let mut device = self.device.lock().unwrap_or_else(PoisonError::into_inner);
         if device.lost {
             return false;

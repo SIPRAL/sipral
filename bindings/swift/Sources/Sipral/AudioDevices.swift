@@ -225,11 +225,12 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
     /// Refused before anything is opened: `.noSuchDevice` for an id the list
     /// never held, `.deviceUnusable` for a device with no channels for the
     /// role or one that is not plugged in, and `.notSupported` where the
-    /// platform cannot put the role on a device of its own -- on macOS and
-    /// iOS the call's microphone and loudspeaker are one unit, so the
-    /// microphone follows the system's input and the ring goes through the
-    /// loudspeaker. While the engine is active the role moves at once, with
-    /// its direction's gain and mute carried over.
+    /// platform cannot put the role on a device of its own -- on iOS, whose
+    /// route is the audio session's, the microphone and the ringer. On macOS
+    /// the microphone is chosen apart from the speaker without moving the
+    /// system's default input, and a ringer on another device plays through
+    /// an output of its own. While the engine is active the role moves at
+    /// once, with its direction's gain and mute carried over.
     public func select(_ device: UInt32?, for role: SipralAudioRole) throws {
         try Sipral.audioSelect(stack: stack.handle, role: role.rawValue, device: device ?? 0)
     }

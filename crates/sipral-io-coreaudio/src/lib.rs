@@ -118,7 +118,7 @@ mod stream;
 mod sys;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-pub use stream::{Capture, Playback, Stream, StreamConfig};
+pub use stream::{Capture, Playback, Stream, StreamConfig, StreamKind, voice_units_open};
 
 // The hardware abstraction layer is macOS only. iOS routes through
 // `AVAudioSession`, which is Objective-C and belongs to the application.

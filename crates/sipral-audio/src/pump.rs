@@ -19,7 +19,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -69,6 +69,8 @@ pub(crate) enum Command {
     Ring(Ring),
     /// Stop playing it.
     StopRing,
+    /// Say so, once every command sent before this one has been acted on.
+    Settled(Sender<()>),
     /// Finish.
     Quit,
 }
@@ -422,6 +424,10 @@ impl Pump {
                 Ok(Command::Replace(role, stream)) => self.replace(role, stream),
                 Ok(Command::Ring(ring)) => self.ringing = Some(Ringing::new(ring)),
                 Ok(Command::StopRing) => self.ringing = None,
+                Ok(Command::Settled(done)) => {
+                    // a caller that stopped waiting is not this pump's concern
+                    let _ = done.send(());
+                }
                 Ok(Command::Quit) | Err(TryRecvError::Disconnected) => {
                     self.quit = true;
                     return;

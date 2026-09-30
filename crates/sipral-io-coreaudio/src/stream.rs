@@ -23,7 +23,7 @@
 //! other.
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 use std::cell::UnsafeCell;
 use std::panic::{self, AssertUnwindSafe};
@@ -61,17 +61,57 @@ use crate::sys;
 /// reports it.
 const MAX_FRAMES_PER_SLICE: u32 = 4096;
 
+/// The slowest rate a device delivers at: a Bluetooth headset in its
+/// narrowband mode.
+const SLOWEST_DEVICE_RATE_HZ: u32 = 8_000;
+
+/// How many samples the input callback's buffer holds at `format`'s rate.
+///
+/// Not [`MAX_FRAMES_PER_SLICE`]. The limit is counted at the device's rate,
+/// and the unit converts the device's slice to the stream's rate before the
+/// callback is told how many frames there are: a MacBook Air microphone on a
+/// 4,096-frame slice at 44.1 kHz asks a 48 kHz stream for 4,458. So the buffer
+/// holds one whole slice of the slowest device there is, converted up to this
+/// stream's rate, and a callback that still asks for more is refused rather
+/// than handed a buffer that is too small (see `Shared::record`).
+fn capture_capacity(format: StreamFormat) -> usize {
+    let slice = usize::try_from(MAX_FRAMES_PER_SLICE).unwrap_or(0);
+    let ratio = format
+        .sample_rate_hz()
+        .div_ceil(SLOWEST_DEVICE_RATE_HZ)
+        .max(1);
+    slice.saturating_mul(usize::try_from(ratio).unwrap_or(1))
+}
+
 /// Frames each ring holds unless the caller says otherwise: enough to ride out
 /// a scheduling hiccup, short enough that a stalled reader is heard as a gap
 /// rather than as a delay that never recovers.
 const DEFAULT_DEPTH_FRAMES: usize = 16;
+
+/// Which unit a stream is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StreamKind {
+    /// The voice-processing unit: the microphone and the speaker together,
+    /// with the system's echo canceller between them. At most one is open in
+    /// a process at a time ([`voice_units_open`]).
+    #[default]
+    Voice,
+    /// A plain output unit — the hardware output unit on macOS, the remote
+    /// I/O unit on iOS — that only plays: no microphone, no echo canceller,
+    /// and no claim on the voice-processing unit, so it opens beside a call's.
+    /// What a ring on a device of its own is played through. Reading from
+    /// one delivers nothing.
+    Playback,
+}
 
 /// What to open, and how much slack to leave.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamConfig {
     /// Rate and frame length. Both directions use it.
     pub format: StreamFormat,
-    /// Which device, and what to do when it is not there.
+    /// Which unit.
+    pub kind: StreamKind,
+    /// Which device the speaker is on, and what to do when it is not there.
     ///
     /// macOS only, because naming a device is: on iOS the route is the audio
     /// session's and the application's, and there is no property to set. The
@@ -79,6 +119,11 @@ pub struct StreamConfig {
     /// written down at all.
     #[cfg(target_os = "macos")]
     pub device: DeviceChoice,
+    /// Which device the microphone is on, chosen apart from the speaker's
+    /// and without touching the system's default input. macOS only, as
+    /// `device`; ignored by a [`StreamKind::Playback`] stream.
+    #[cfg(target_os = "macos")]
+    pub capture_device: DeviceChoice,
     /// Frames of buffering between the device and the caller, per direction.
     pub depth_frames: usize,
 }
@@ -89,9 +134,33 @@ impl StreamConfig {
     pub const fn new(format: StreamFormat) -> Self {
         Self {
             format,
+            kind: StreamKind::Voice,
             #[cfg(target_os = "macos")]
             device: DeviceChoice::System,
+            #[cfg(target_os = "macos")]
+            capture_device: DeviceChoice::System,
             depth_frames: DEFAULT_DEPTH_FRAMES,
+        }
+    }
+
+    /// A stream that only plays, on the system's current output.
+    #[must_use]
+    pub fn playback(format: StreamFormat) -> Self {
+        Self {
+            kind: StreamKind::Playback,
+            ..Self::new(format)
+        }
+    }
+
+    /// The same configuration with the microphone on a saved selection: the
+    /// device carrying that identity when the stream opens, and the system's
+    /// default input when the machine does not have it.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn capturing_from(self, uid: impl Into<String>) -> Self {
+        Self {
+            capture_device: DeviceChoice::Preferred(uid.into()),
+            ..self
         }
     }
 
@@ -117,6 +186,53 @@ impl Default for StreamConfig {
     }
 }
 
+/// Room for one voice-processing unit.
+///
+/// Apple supports one such unit per process: a second one opened beside the
+/// first was seen to block inside the framework, and two with their
+/// microphones enabled hand the canceller two captures of one room. So the
+/// room is taken before a unit is created and given back only once it has
+/// been disposed of, and a stream that was deliberately leaked keeps it for
+/// good, because its unit was never taken down either.
+struct Slot(AtomicBool);
+
+/// The room held, for as long as this lives.
+struct Claim(&'static Slot);
+
+impl Slot {
+    const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    fn take(&'static self) -> Option<Claim> {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Claim(self))
+    }
+
+    fn held(&self) -> usize {
+        usize::from(self.0.load(Ordering::Acquire))
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.0.0.store(false, Ordering::Release);
+    }
+}
+
+static VOICE_UNIT: Slot = Slot::new();
+
+/// How many voice-processing units this process has open right now: zero or
+/// one. A [`StreamKind::Voice`] stream opened while it is one is refused with
+/// [`Error::Busy`]; a caller reopening one that is on its way down can wait
+/// for this to read zero.
+#[must_use]
+pub fn voice_units_open() -> usize {
+    VOICE_UNIT.held()
+}
+
 /// What the realtime side has to say, in numbers because it cannot speak.
 ///
 /// Every one of these is relaxed: nothing else depends on having seen them, a
@@ -130,6 +246,7 @@ struct Meters {
     played: AtomicU64,
     playback_starved: AtomicU64,
     render_failures: AtomicU64,
+    capture_oversized: AtomicU64,
     panics: AtomicU64,
 }
 
@@ -145,6 +262,7 @@ impl Meters {
             played: self.played.load(Ordering::Relaxed),
             playback_starved: self.playback_starved.load(Ordering::Relaxed),
             render_failures: self.render_failures.load(Ordering::Relaxed),
+            capture_oversized: self.capture_oversized.load(Ordering::Relaxed),
             panics: self.panics.load(Ordering::Relaxed),
         }
     }
@@ -206,7 +324,7 @@ impl Shared {
             gate: Gate::new(),
             capture: Ring::new(samples),
             playback: Ring::new(samples),
-            scratch: UnsafeCell::new(vec![0; slice].into_boxed_slice()),
+            scratch: UnsafeCell::new(vec![0; capture_capacity(format)].into_boxed_slice()),
             meters: Meters::default(),
             microphone,
             speaker,
@@ -280,8 +398,18 @@ impl Shared {
         // SAFETY: the input callback is not re-entered for a unit, so this is
         // the only live reference to the scratch buffer.
         let scratch = unsafe { &mut *self.scratch.get() };
-        let wanted = usize::try_from(frames).unwrap_or(0).min(scratch.len());
+        let wanted = usize::try_from(frames).unwrap_or(usize::MAX);
         if wanted == 0 {
+            return;
+        }
+        // The unit renders `frames` frames whatever the buffer list says:
+        // asking it for fewer, into a buffer sized for fewer, was seen to have
+        // the voice-processing unit copy past the end of its own buffers. So
+        // the render is for exactly what the callback was told, into a buffer
+        // that holds all of it at the format `configure` read back (mono,
+        // sixteen bits, two octets a frame) — or it is not made at all.
+        if wanted > scratch.len() {
+            Meters::add(&self.meters.capture_oversized, 1);
             return;
         }
         let Ok(byte_size) = u32::try_from(wanted * 2) else {
@@ -502,6 +630,9 @@ pub struct Stream {
     /// Set when teardown could not prove the callbacks were out. Nothing is
     /// then freed, ever.
     leak: bool,
+    /// The process's room for a voice-processing unit, held by a
+    /// [`StreamKind::Voice`] stream until its unit has been disposed of.
+    claim: Option<Claim>,
 }
 
 /// The device object under each half of a stream.
@@ -541,15 +672,18 @@ unsafe impl Send for Stream {}
 impl Stream {
     /// Open the device, without starting it.
     ///
-    /// One per process. A softphone has one call's worth of audio at a time,
-    /// and opening a second voice-processing unit while the first is alive was
-    /// observed to block inside the framework rather than to fail.
+    /// A [`StreamKind::Voice`] stream is one per process. A softphone has one
+    /// call's worth of audio at a time, and opening a second voice-processing
+    /// unit while the first is alive was observed to block inside the
+    /// framework rather than to fail, so it is refused here instead. A
+    /// [`StreamKind::Playback`] stream opens beside it.
     ///
     /// # Errors
-    /// [`Error::UnitMissing`] when the system has no voice-processing unit,
-    /// and [`Error::Call`] naming whichever framework call refused: a device
-    /// that is gone, a format it will not take, a microphone the user has not
-    /// granted.
+    /// [`Error::Busy`] for a second voice-processing unit,
+    /// [`Error::UnitMissing`] when the system has no unit of the kind asked
+    /// for, and [`Error::Call`] naming whichever framework call refused: a
+    /// device that is gone, a format it will not take, a microphone the user
+    /// has not granted.
     pub fn open(config: StreamConfig) -> Result<Self, Error> {
         let window = window_samples(config.format.sample_rate_hz());
         Self::open_with(
@@ -566,9 +700,18 @@ impl Stream {
         microphone: Arc<Channel>,
         speaker: Arc<Channel>,
     ) -> Result<Self, Error> {
+        // the room is taken before the unit exists, so that two threads
+        // opening at once cannot both get one
+        let claim = match config.kind {
+            StreamKind::Voice => Some(VOICE_UNIT.take().ok_or(Error::Busy)?),
+            StreamKind::Playback => None,
+        };
         let wanted = abi::ComponentDescription {
             component_type: abi::UNIT_TYPE_OUTPUT,
-            subtype: abi::UNIT_SUBTYPE_VOICE_PROCESSING,
+            subtype: match config.kind {
+                StreamKind::Voice => abi::UNIT_SUBTYPE_VOICE_PROCESSING,
+                StreamKind::Playback => abi::UNIT_SUBTYPE_PLAIN_OUTPUT,
+            },
             manufacturer: abi::MANUFACTURER_APPLE,
             flags: 0,
             flags_mask: 0,
@@ -611,9 +754,15 @@ impl Stream {
             health: Health::Stopped,
             closed: false,
             leak: false,
+            claim,
         };
         configure(unit, &stream.config, &stream.shared)?;
         stream.route = route_of(unit);
+        if stream.config.kind == StreamKind::Playback {
+            // no microphone half, so no device under one to watch or to
+            // count the delay of
+            stream.route.capture = None;
+        }
         stream.delay = stream.current_delay();
         Ok(stream)
     }
@@ -991,6 +1140,8 @@ impl Stream {
         let uninitialized = unsafe { sys::uninitialize_unit(self.unit) };
         // SAFETY: as above.
         let disposed = unsafe { sys::dispose_component(self.unit) };
+        // the unit is gone, and with it the reason to keep the room
+        self.claim = None;
 
         sys::check("AudioOutputUnitStop", stopped)?;
         sys::check("AudioUnitUninitialize", uninitialized)?;
@@ -1008,6 +1159,9 @@ impl Drop for Stream {
             // never freed is a number in a memory graph; a buffer freed under
             // a callback is a crash in the middle of somebody's call.
             core::mem::forget(Arc::clone(&self.shared));
+            // And a unit that was never disposed of is still the process's
+            // one voice-processing unit.
+            core::mem::forget(self.claim.take());
         }
     }
 }
@@ -1057,6 +1211,10 @@ impl Playback<'_> {
 /// device comes before the formats, and initialising comes last, because the
 /// unit works out what it can do from what it has been told so far.
 fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Result<(), Error> {
+    let voice = config.kind == StreamKind::Voice;
+    // the plain output unit plays and nothing else: its input stays off, so
+    // it asks nothing of the microphone and needs no permission for it
+    let capture_enabled = u32::from(voice);
     let enabled: u32 = 1;
     set(
         unit,
@@ -1064,7 +1222,7 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
         abi::PROPERTY_ENABLE_IO,
         abi::SCOPE_INPUT,
         abi::BUS_INPUT,
-        &enabled,
+        &capture_enabled,
     )?;
     set(
         unit,
@@ -1075,25 +1233,8 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
         &enabled,
     )?;
 
-    // Global scope, element zero, and before initialising: the device is only
-    // settable while the unit is uninitialised, which is why a device cannot
-    // be changed under a running stream and why `Stream::recover` reopens.
-    // Element zero is the speaker's half. On an uninitialised unit, naming a
-    // device here was seen to leave element one, the microphone's, on the
-    // system's default input, so what each half is on is read back from the
-    // unit once it is initialised rather than assumed from this choice.
     #[cfg(target_os = "macos")]
-    if let Some(device) = crate::hal::choose(&config.device)? {
-        let id = device.get();
-        set(
-            unit,
-            "AudioUnitSetProperty (CurrentDevice)",
-            abi::PROPERTY_CURRENT_DEVICE,
-            abi::SCOPE_GLOBAL,
-            0,
-            &id,
-        )?;
-    }
+    name_devices(unit, config, voice)?;
 
     set(
         unit,
@@ -1103,19 +1244,79 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
         0,
         &MAX_FRAMES_PER_SLICE,
     )?;
+    formats_and_callbacks(unit, config, shared, voice)
+}
 
+/// The device under each half, on the global scope and before initialising:
+/// the device is only settable while the unit is uninitialised, which is why
+/// a device cannot be changed under a running stream and why
+/// `Stream::recover` reopens. Element zero is the speaker's half and element
+/// one the microphone's. Naming the speaker's device on element zero was seen
+/// to leave element one on the system's default input, so the microphone's is
+/// named on element one separately, and what each half is on is read back
+/// from the unit once it is initialised rather than assumed from these
+/// choices.
+#[cfg(target_os = "macos")]
+fn name_devices(unit: sys::Unit, config: &StreamConfig, voice: bool) -> Result<(), Error> {
+    {
+        let halves: &[(&DeviceChoice, u32, &'static str)] = if voice {
+            &[
+                (
+                    &config.device,
+                    abi::BUS_OUTPUT,
+                    "AudioUnitSetProperty (CurrentDevice, speaker)",
+                ),
+                (
+                    &config.capture_device,
+                    abi::BUS_INPUT,
+                    "AudioUnitSetProperty (CurrentDevice, microphone)",
+                ),
+            ]
+        } else {
+            &[(
+                &config.device,
+                abi::BUS_OUTPUT,
+                "AudioUnitSetProperty (CurrentDevice, speaker)",
+            )]
+        };
+        for &(choice, element, call) in halves {
+            if let Some(device) = crate::hal::choose(choice)? {
+                let id = device.get();
+                set(
+                    unit,
+                    call,
+                    abi::PROPERTY_CURRENT_DEVICE,
+                    abi::SCOPE_GLOBAL,
+                    element,
+                    &id,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The formats, the callbacks, the initialisation, and the format read back.
+fn formats_and_callbacks(
+    unit: sys::Unit,
+    config: &StreamConfig,
+    shared: &Arc<Shared>,
+    voice: bool,
+) -> Result<(), Error> {
     // The scopes read the way the unit sees them, not the way we do: what the
     // caller reads off bus 1 is that bus's output, and what the caller writes
     // to bus 0 is that bus's input.
     let description = abi::StreamDescription::mono_pcm(config.format.sample_rate_hz());
-    set(
-        unit,
-        "AudioUnitSetProperty (StreamFormat, capture)",
-        abi::PROPERTY_STREAM_FORMAT,
-        abi::SCOPE_OUTPUT,
-        abi::BUS_INPUT,
-        &description,
-    )?;
+    if voice {
+        set(
+            unit,
+            "AudioUnitSetProperty (StreamFormat, capture)",
+            abi::PROPERTY_STREAM_FORMAT,
+            abi::SCOPE_OUTPUT,
+            abi::BUS_INPUT,
+            &description,
+        )?;
+    }
     set(
         unit,
         "AudioUnitSetProperty (StreamFormat, playback)",
@@ -1137,17 +1338,19 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
             context,
         },
     )?;
-    set(
-        unit,
-        "AudioUnitSetProperty (SetInputCallback)",
-        abi::PROPERTY_SET_INPUT_CALLBACK,
-        abi::SCOPE_GLOBAL,
-        0,
-        &sys::RenderCallback {
-            procedure: record,
-            context,
-        },
-    )?;
+    if voice {
+        set(
+            unit,
+            "AudioUnitSetProperty (SetInputCallback)",
+            abi::PROPERTY_SET_INPUT_CALLBACK,
+            abi::SCOPE_GLOBAL,
+            0,
+            &sys::RenderCallback {
+                procedure: record,
+                context,
+            },
+        )?;
+    }
 
     // SAFETY: the unit is open and fully described.
     sys::check("AudioUnitInitialize", unsafe { sys::initialize_unit(unit) })?;
@@ -1155,13 +1358,20 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
     // Read the format back rather than assume it took. A unit that quietly
     // settled on something else would not fail here, it would hand over
     // samples at a rate nobody expects, and that arrives as a call that sounds
-    // wrong rather than as an error.
+    // wrong rather than as an error. The capture side is the one whose
+    // octets per frame `record` sizes its render by; a unit that only plays
+    // has only the other side.
+    let (scope, bus) = if voice {
+        (abi::SCOPE_OUTPUT, abi::BUS_INPUT)
+    } else {
+        (abi::SCOPE_INPUT, abi::BUS_OUTPUT)
+    };
     let settled: abi::StreamDescription = get(
         unit,
         "AudioUnitGetProperty (StreamFormat)",
         abi::PROPERTY_STREAM_FORMAT,
-        abi::SCOPE_OUTPUT,
-        abi::BUS_INPUT,
+        scope,
+        bus,
     )?;
     let same_rate = (settled.sample_rate - description.sample_rate).abs() < 0.5;
     if !same_rate
@@ -1364,6 +1574,64 @@ mod tests {
         let slice = usize::try_from(MAX_FRAMES_PER_SLICE).unwrap();
         assert!(shared.capture.free() >= slice);
         assert!(shared.playback.free() >= slice);
+    }
+
+    #[test]
+    fn the_capture_buffer_holds_a_whole_slice_of_the_slowest_device_at_the_stream_rate() {
+        let (microphone, speaker) = channels();
+        let wideband = StreamFormat::with_frame_millis(48_000, 20).unwrap();
+        let shared = Shared::new(ptr::null_mut(), wideband, 16, microphone, speaker);
+        let slice = usize::try_from(MAX_FRAMES_PER_SLICE).unwrap();
+        // what a MacBook Air's microphone asked a 48 kHz stream for, on a
+        // 4,096-frame slice at 44.1 kHz
+        let seen = 4_458;
+        // and the worst there is: the same slice from a narrowband headset
+        let worst = slice * 6;
+        let held = unsafe { (&*shared.scratch.get()).len() };
+        assert!(held >= seen, "{held} samples cannot take {seen}");
+        assert!(held >= worst, "{held} samples cannot take {worst}");
+        assert_eq!(super::capture_capacity(StreamFormat::narrowband()), slice);
+    }
+
+    #[test]
+    fn a_capture_told_of_more_frames_than_its_buffer_holds_renders_nothing() {
+        // the unit in this `Shared` is null: a render that was attempted
+        // would come back refused and be counted as a render failure, so a
+        // clean count of those is what says none was attempted
+        let shared = shared();
+        let held = unsafe { (&*shared.scratch.get()).len() };
+
+        let mut flags = 0u32;
+        let status = unsafe {
+            record(
+                context(&shared),
+                &raw mut flags,
+                ptr::null(),
+                abi::BUS_INPUT,
+                u32::try_from(held + 1).unwrap(),
+                ptr::null_mut(),
+            )
+        };
+
+        assert_eq!(status, 0);
+        let counters = shared.meters.read();
+        assert_eq!(counters.capture_oversized, 1);
+        assert_eq!(counters.render_failures, 0);
+        assert_eq!(counters.captured, 0);
+    }
+
+    #[test]
+    fn there_is_room_for_one_voice_unit_and_it_comes_back_when_the_unit_goes() {
+        // a slot of this test's own: the process's is the real streams'
+        static ROOM: super::Slot = super::Slot::new();
+
+        let first = ROOM.take().expect("the room is free");
+        assert_eq!(ROOM.held(), 1);
+        assert!(ROOM.take().is_none(), "a second unit beside the first");
+        drop(first);
+        assert_eq!(ROOM.held(), 0);
+        let again = ROOM.take();
+        assert!(again.is_some(), "the room came back with the unit gone");
     }
 
     #[test]
@@ -1996,10 +2264,10 @@ mod tests {
         );
     }
 
-    /// The only test here that touches hardware, and everything it checks is
-    /// in the one function on purpose: two voice-processing units open at once
-    /// in one process block inside the framework, and the test harness runs
-    /// its tests on several threads.
+    /// The default route end to end, everything in the one function on
+    /// purpose: a process has room for one voice-processing unit, the test
+    /// harness runs its tests on several threads, and a second unit is
+    /// refused while the first is open.
     #[test]
     #[ignore = "opens the real default device"]
     fn a_loopback_on_the_default_device_moves_frames() {
@@ -2032,6 +2300,23 @@ mod tests {
         #[cfg(target_os = "macos")]
         on_the_system_route(&stream);
         stream.start().expect("start the device");
+
+        // the process's one voice unit is this one: a second is refused
+        // without going near the framework, and a unit that only plays opens
+        // beside it and runs
+        assert_eq!(super::voice_units_open(), 1);
+        assert!(matches!(
+            Stream::open(StreamConfig::new(format)),
+            Err(Error::Busy)
+        ));
+        let mut beside =
+            Stream::open(StreamConfig::playback(format)).expect("a player beside the call");
+        beside.start().expect("start the player");
+        assert!(beside.write(&vec![0; format.frame_samples()]));
+        thread::sleep(Duration::from_millis(100));
+        assert!(beside.counters().played > 0, "the player took nothing");
+        assert_eq!(beside.counters().captured, 0);
+        beside.close().expect("close the player");
 
         // a quiet sawtooth, so that what goes to the speaker is not silence
         // and the counters can tell the two directions apart
@@ -2112,6 +2397,69 @@ mod tests {
         stream.stop().expect("stop the reopened device");
 
         stream.close().expect("close the device");
+        assert_eq!(super::voice_units_open(), 0, "the room came back");
+    }
+
+    /// The microphone on a device of its own, apart from the speaker's and
+    /// without the system's default input moving: element one of the unit
+    /// named separately from element zero.
+    ///
+    /// Needs a second input. `SIPRAL_AUDIO_MIC` names it by a fragment of its
+    /// name — a virtual loopback device will do. Run it with
+    /// `--test-threads=1` beside the loopback test: each holds the process's
+    /// one voice unit, and the other is refused while it does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "opens the real devices and needs a second input named by SIPRAL_AUDIO_MIC"]
+    fn the_microphone_is_chosen_apart_from_the_speaker() {
+        use super::{Stream, StreamConfig};
+        use crate::device::Direction;
+        use crate::hal::{default_device, devices};
+
+        let wanted = std::env::var("SIPRAL_AUDIO_MIC").expect("SIPRAL_AUDIO_MIC names an input");
+        let input = devices()
+            .expect("the list")
+            .into_iter()
+            .find(|device| device.is_input() && device.name.contains(&wanted))
+            .expect("an input named like that");
+        let default_input = default_device(Direction::Input).expect("the default input");
+        let default_output = default_device(Direction::Output).expect("the default output");
+        assert_ne!(
+            Some(input.id),
+            default_input,
+            "pick an input that is not the default"
+        );
+
+        let format = StreamFormat::with_frame_millis(48_000, 20).expect("a twenty ms frame");
+        let config =
+            StreamConfig::new(format).capturing_from(input.uid.clone().expect("a uid to save"));
+        let mut stream = Stream::open(config).expect("open with the microphone apart");
+        println!(
+            "speaker on {:?}, microphone on {:?}",
+            stream.device(),
+            stream.capture_device()
+        );
+        assert_eq!(stream.capture_device(), Ok(input.id));
+        assert_eq!(stream.device().ok(), default_output);
+        assert_eq!(
+            default_device(Direction::Input),
+            Ok(default_input),
+            "the system's default input moved"
+        );
+        stream.start().expect("start");
+        std::thread::sleep(Duration::from_millis(300));
+        let mut frame = vec![0i16; format.frame_samples()];
+        let mut arrived = 0;
+        while stream.read(&mut frame) {
+            arrived += 1;
+        }
+        println!(
+            "{arrived} frames from {}; {}",
+            input.name,
+            stream.counters()
+        );
+        assert!(arrived > 0, "nothing came from the chosen microphone");
+        stream.close().expect("close");
     }
 
     /// The loss of a device in the middle of a call, end to end: reported,
@@ -2200,6 +2548,7 @@ mod tests {
             health: Health::Stopped,
             closed: false,
             leak: false,
+            claim: None,
         }
     }
 

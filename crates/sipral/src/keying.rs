@@ -97,6 +97,27 @@ pub enum SrtpPolicy {
     ///
     /// What a caller who would rather have a plain call than none asks for.
     Offered,
+    /// Offer SDES on plain `RTP/AVP`: the call is encrypted when the answer
+    /// takes one of the `a=crypto` lines, and plain when it takes none — the
+    /// "SRTP optional" of desk phones.
+    ///
+    /// [`SrtpPolicy::Offered`] names `RTP/SAVP`, and a server that does not
+    /// do SRTP rejects a stream on a profile it does not know (RFC 4568
+    /// §7.4) — with 488, and the call has no audio. On `RTP/AVP` the same
+    /// server takes the stream and ignores the lines it does not
+    /// understand, while one that does SDES answers a line and keys the
+    /// call. RFC 4568 writes the attribute for the secure profiles, so this
+    /// is interoperability rather than a standard, and it is what the
+    /// application chooses where its server may or may not encrypt.
+    ///
+    /// Answering, an offer on the secure profile is answered with keys as
+    /// under [`SrtpPolicy::Offered`], an offer on `RTP/AVP` carrying a line
+    /// this end takes is answered with one — the other half of the same
+    /// arrangement — and an offer carrying none is answered plainly. A call
+    /// that started keyed is never re-negotiated into the clear, nor a plain
+    /// one into keys: a re-offer that asks for either is refused, as on
+    /// every call.
+    BestEffort,
     /// Offer SDES, and let no stream on this call carry audio unencrypted.
     ///
     /// A plain INVITE is not answered ([`MediaError::SrtpRequired`] comes
@@ -165,8 +186,16 @@ impl SrtpPolicy {
             Self::NotOffered => false,
             #[cfg(feature = "dtls")]
             Self::DtlsOffered | Self::DtlsRequired | Self::DtlsOrSdes => true,
-            Self::Offered | Self::Required => true,
+            Self::Offered | Self::Required | Self::BestEffort => true,
         }
+    }
+
+    /// Whether an SDES offer under this policy goes on plain `RTP/AVP` and
+    /// an answer takes crypto lines offered there
+    /// ([`SrtpPolicy::BestEffort`]).
+    #[must_use]
+    pub(crate) const fn on_plain_profile(self) -> bool {
+        matches!(self, Self::BestEffort)
     }
 
     /// Whether a call under this policy would rather have no audio than
@@ -178,7 +207,7 @@ impl SrtpPolicy {
     #[must_use]
     pub(crate) const fn requires(self) -> bool {
         match self {
-            Self::NotOffered | Self::Offered => false,
+            Self::NotOffered | Self::Offered | Self::BestEffort => false,
             #[cfg(feature = "dtls")]
             Self::DtlsOffered => false,
             #[cfg(feature = "dtls")]
@@ -197,7 +226,7 @@ impl SrtpPolicy {
     #[cfg_attr(not(feature = "dtls"), allow(dead_code))]
     pub(crate) const fn wants_dtls(self) -> bool {
         match self {
-            Self::NotOffered | Self::Offered | Self::Required => false,
+            Self::NotOffered | Self::Offered | Self::Required | Self::BestEffort => false,
             #[cfg(feature = "dtls")]
             Self::DtlsOffered | Self::DtlsRequired | Self::DtlsOrSdes => true,
         }

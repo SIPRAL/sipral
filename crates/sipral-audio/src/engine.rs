@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use sipral_io_common::level::{Controls, Gain, Level};
 
-use crate::backend::{Backend, BackendError, CaptureStream, Format, Notice, PlaybackStream};
+use crate::backend::{
+    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream,
+};
 use crate::call::{CallAudio, CallId, Outgoing};
 use crate::device::{
     AudioEvent, Change, DeviceHandle, DeviceInfo, Direction, Origin, Role, SelectError, Selection,
@@ -115,14 +117,17 @@ struct PumpHandle {
 }
 
 impl PumpHandle {
-    /// Wait for the pump to have turned once more, so that a command sent
-    /// before this has been acted on — a stream dropped, in particular —
-    /// or give up after a bounded wait on a pump that is not turning.
-    fn wait_a_tick(&self) {
-        let from = self.report.ticks();
-        let started = Instant::now();
-        while self.report.ticks() == from && started.elapsed() < Duration::from_millis(250) {
-            std::thread::sleep(Duration::from_millis(2));
+    /// Wait for the pump to have acted on every command sent before this one
+    /// — a stream dropped, in particular — or give up after a bounded wait
+    /// on a pump that is not turning.
+    ///
+    /// The pump answers in the order it takes commands, so the answer is
+    /// proof rather than a guess from a tick count: a tick already under way
+    /// when a command was sent counts itself without having seen it.
+    fn settle(&self) {
+        let (done, answer) = mpsc::channel();
+        if self.sender.send(Command::Settled(done)).is_ok() {
+            let _ = answer.recv_timeout(Duration::from_secs(1));
         }
     }
 }
@@ -136,6 +141,8 @@ impl PumpHandle {
 pub struct Engine {
     backend: Arc<Mutex<Box<dyn Backend>>>,
     duplex_only: bool,
+    /// Which roles the platform lets the application put on a device.
+    chooses: PerRole<bool>,
     config: Config,
     devices: Vec<DeviceInfo>,
     next_handle: u32,
@@ -207,12 +214,6 @@ impl<T> PerDirection<T> {
 /// calls it was carrying.
 type PumpThread = JoinHandle<Finished>;
 
-/// The two halves of a call's audio, as a platform answered for them.
-type OpenedPair = (
-    Result<Box<dyn CaptureStream>, BackendError>,
-    Result<Box<dyn PlaybackStream>, BackendError>,
-);
-
 impl Engine {
     /// An engine over `backend`.
     ///
@@ -227,9 +228,15 @@ impl Engine {
         now: Arc<dyn Fn() -> Instant + Send + Sync>,
     ) -> Self {
         let duplex_only = backend.duplex_only();
+        let chooses = PerRole {
+            microphone: backend.chooses(Role::Microphone),
+            speaker: backend.chooses(Role::Speaker),
+            ringer: backend.chooses(Role::Ringer),
+        };
         Self {
             backend: Arc::new(Mutex::new(backend)),
             duplex_only,
+            chooses,
             config,
             devices: Vec::new(),
             next_handle: 1,
@@ -360,7 +367,7 @@ impl Engine {
             if !device.present {
                 return Err(SelectError::Absent);
             }
-            if self.duplex_only && matches!(role, Role::Microphone | Role::Ringer) {
+            if !*self.chooses.get(role) {
                 return Err(SelectError::NotSupported);
             }
         }
@@ -647,7 +654,7 @@ impl Engine {
     /// on a device other than the loudspeaker's, and only where a second
     /// output can be opened beside the first.
     fn wants_own_ringer(&self) -> bool {
-        !self.duplex_only
+        *self.chooses.get(Role::Ringer)
             && self.selection(Role::Ringer) != Selection::System
             && self.selection(Role::Ringer) != self.selection(Role::Speaker)
     }
@@ -664,7 +671,7 @@ impl Engine {
         }
     }
 
-    fn open_pair(&mut self) -> OpenedPair {
+    fn open_pair(&mut self) -> Duplex {
         let microphone = self.identity_for(Role::Microphone);
         let speaker = self.identity_for(Role::Speaker);
         let wanted = Format::twenty_ms(self.config.device_rate_hz);
@@ -675,12 +682,9 @@ impl Engine {
                 Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(TryLockError::WouldBlock) => return Err(BackendError::TimedOut),
             };
-            // the loudspeaker first: a duplex platform opens its one unit
-            // on the loudspeaker's device and answers the microphone with
-            // the other half of it
-            let playback = backend.open_playback(speaker.as_deref(), wanted);
-            let capture = backend.open_capture(microphone.as_deref(), wanted);
-            Ok((capture, playback))
+            // both devices at once: a duplex platform opens its one unit
+            // with each half on its own device and answers with the two
+            Ok(backend.open_duplex(microphone.as_deref(), speaker.as_deref(), wanted))
         });
         match opened {
             Ok(pair) => pair,
@@ -791,7 +795,7 @@ impl Engine {
             if let Some(pump) = self.pump.as_ref() {
                 let _ = pump.sender.send(Command::Replace(Role::Microphone, None));
                 let _ = pump.sender.send(Command::Replace(Role::Speaker, None));
-                pump.wait_a_tick();
+                pump.settle();
             }
             *self.running.get_mut(Role::Microphone) = None;
             *self.running.get_mut(Role::Speaker) = None;
@@ -803,6 +807,11 @@ impl Engine {
                 Change::Reopened(Role::Microphone),
             );
             let _ = self.install(Role::Speaker, speaker, origin, change);
+            if role == Role::Speaker {
+                // a ringer on its own device may now be on the loudspeaker's,
+                // or the other way round
+                self.settle_ringer(origin);
+            }
             return;
         }
         match role {

@@ -110,7 +110,7 @@ class TheDevicesAreTheLibrarys(unittest.TestCase):
             try:
                 self.audio.select(role, device)
             except SipralError as refused:
-                # macOS runs the microphone and the loudspeaker as one unit
+                # a platform whose route is the audio session's (iOS)
                 self.assertEqual(refused.status, Status.NOT_SUPPORTED)
                 continue
             self.assertEqual(self.audio.selection(role), (device.id, None))

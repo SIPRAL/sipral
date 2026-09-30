@@ -169,8 +169,16 @@ impl UserAgent {
     }
 
     /// Stop waiting, for every answer to a challenge.
+    ///
+    /// Where the endpoint was configured to set §18.1.1 aside once no stream
+    /// is coming (`DatagramLimit::without_stream_bytes`), everything held is
+    /// first sent again: what now fits that limit goes over the datagram,
+    /// and only what still does not is given up on below.
     fn give_up_on_a_stream(&mut self, now: Instant) {
         self.stream_deadline = None;
+        if self.endpoint.no_stream_coming() {
+            self.resume_what_waited_for_a_stream(now);
+        }
         let text = self.too_large_text();
         let status = StatusCode::new(TOO_LARGE).ok();
         self.give_up_calls(&text, status, now);

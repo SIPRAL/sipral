@@ -219,6 +219,9 @@ private suspend fun aPbxOnUdpAloneEndsTheCallAtOnceWithTheLimitNamed(): String {
             assertTrue(System.currentTimeMillis() - started < 5_000, "ended by the refusal, not by the wait")
             val lost = seen.mapNotNull { transportFailedOf(it) }
             assertEquals(SipralTransportError.CONNECTION_REFUSED.value.toLong(), lost.firstOrNull()?.error)
+            // where the connection was going and what became of it, for a log
+            val detail = lost.firstOrNull()?.detail ?: ""
+            assertTrue(detail.startsWith("TCP to ${pbx.address} refused"), detail)
             val ended = seen.last().payload.call
             assertEquals(SipralCallEndReason.UNREACHABLE.value.toLong(), ended.endReason)
             assertEquals(513L, ended.statusCode)
@@ -252,6 +255,10 @@ private suspend fun aClientToldToOpenNoStreamEndsTheCallWithoutTrying(): String 
                 val seen = untilTheEnd(client) { place(client, pbx) }
                 assertEquals(513L, seen.last().payload.call.statusCode)
                 assertEquals(0, pbx.connections, "nothing was opened")
+                assertEquals(
+                    "TCP to ${pbx.address} not tried: streamFallback is off",
+                    seen.firstNotNullOfOrNull { transportFailedOf(it) }?.detail,
+                )
             }
     }
     return "and so does one told to open none"

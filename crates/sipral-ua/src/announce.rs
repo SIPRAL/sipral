@@ -472,6 +472,13 @@ impl UserAgent {
         // there is no bound stream — that is why it parked — so which one
         // will carry it is not known until one exists. Anything the endpoint
         // still will not send simply parks again.
+        self.resume_what_waited_for_a_stream(now);
+    }
+
+    /// Send again everything §18.1.1 held back for want of a stream: what
+    /// answered a challenge, then what this layer sends inside a dialog by
+    /// itself, last because hanging a call up drains on its way out.
+    pub(crate) fn resume_what_waited_for_a_stream(&mut self, now: Instant) {
         self.resume_parked_registrations(now);
         self.resume_parked_calls(now);
         self.resume_parked_requests(now);
@@ -479,8 +486,6 @@ impl UserAgent {
         self.resume_parked_subscriptions(now);
         self.resume_parked_messages(now);
         self.resume_parked_publications(now);
-        // Then what this layer sends inside a dialog by itself, last because
-        // hanging a call up drains on its way out
         self.resume_parked_sends(now);
     }
 }

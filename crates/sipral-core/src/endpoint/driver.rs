@@ -164,6 +164,12 @@ pub struct Endpoint {
     /// What this endpoint decided, per call and for itself
     /// (`docs/14-diagnostics.md`).
     pub(super) diag: Records,
+    /// Where `Event::TransportWanted` asked for a stream that nobody has
+    /// bound yet.
+    pub(super) streams_wanted: HashSet<SocketAddr>,
+    /// Where the caller said no stream is coming
+    /// ([`Endpoint::no_stream_coming`]), until one is bound after all.
+    pub(super) streamless: HashSet<SocketAddr>,
 }
 
 impl Endpoint {
@@ -213,7 +219,31 @@ impl Endpoint {
             admitted: HashSet::new(),
             unanswered: HashMap::new(),
             diag: Records::new(config.diagnostics),
+            streams_wanted: HashSet::new(),
+            streamless: HashSet::new(),
         })
+    }
+
+    /// The stream a `TransportWanted` asked for cannot be had: the caller
+    /// tried and failed, or opens none.
+    ///
+    /// Under [`DatagramLimit::without_stream_bytes`](super::DatagramLimit::without_stream_bytes),
+    /// every address a stream was asked for is from now on sent a request up
+    /// to that size over the datagram — the retries held back for want of the
+    /// stream included, once the caller sends them again — each one recorded
+    /// as `transport.kept.datagram`; until a stream to that address is bound,
+    /// which is preferred again from then on. Without it, nothing changes.
+    ///
+    /// `true` when something did: a request held back may now go.
+    pub fn no_stream_coming(&mut self) -> bool {
+        if self.config.datagram_limit.without_stream_bytes.is_none()
+            || self.streams_wanted.is_empty()
+        {
+            self.streams_wanted.clear();
+            return false;
+        }
+        self.streamless.extend(self.streams_wanted.drain());
+        true
     }
 
     /// Bytes, or news about a transport.
@@ -249,6 +279,18 @@ impl Endpoint {
                 if let Some(old) = replaced {
                     for handle in [old.keepalive, old.pong].into_iter().flatten() {
                         self.deadlines.cancel(handle);
+                    }
+                }
+                // a stream after all: what was asked for is had, and what was
+                // sent over the datagram for want of it goes on the stream
+                if protocol.is_reliable() {
+                    if let Some(remote) = remote {
+                        self.streams_wanted.remove(&remote);
+                        self.streamless.remove(&remote);
+                    } else {
+                        // bound without a far end, it may carry anything
+                        self.streams_wanted.clear();
+                        self.streamless.clear();
                     }
                 }
                 self.arm_keepalives(now);
@@ -1291,6 +1333,7 @@ impl Endpoint {
                 .config
                 .datagram_limit
                 .too_big_for_a_datagram(message.len())
+            && !self.keep_on_datagram(flow, message.len(), Some(&call_id))
         {
             let overlong = message.len();
             let stream = self.stream_to(request.remote, overlong, Some(&call_id))?;
@@ -1341,6 +1384,9 @@ impl Endpoint {
     ) -> Result<Option<(Flow, SocketAddr)>, SendError> {
         if flow.protocol.is_reliable() || !self.config.datagram_limit.too_big_for_a_datagram(bytes)
         {
+            return Ok(None);
+        }
+        if self.keep_on_datagram(flow, bytes, call) {
             return Ok(None);
         }
         let stream = self.stream_to(flow.destination, bytes, call)?;
@@ -1400,6 +1446,31 @@ impl Endpoint {
         );
     }
 
+    /// Whether a request too large for a datagram goes over one anyway: no
+    /// stream is coming to its address ([`Endpoint::no_stream_coming`]), none
+    /// is open there, and it fits
+    /// [`DatagramLimit::without_stream_bytes`](super::DatagramLimit::without_stream_bytes).
+    /// Written down, measured against that limit, when it does.
+    fn keep_on_datagram(&mut self, flow: Flow, bytes: usize, call: Option<&[u8]>) -> bool {
+        let kept = self.streamless.contains(&flow.destination)
+            && self.config.datagram_limit.fits_without_stream(bytes)
+            && self
+                .transports
+                .speaking_to(TransportProtocol::Tcp, flow.destination)
+                .is_none();
+        if kept {
+            let limit = self.config.datagram_limit.without_stream_bytes.unwrap_or(0);
+            self.note(
+                call,
+                Decision::of(Reason::TransportKeptOnDatagram)
+                    .at_address(flow.destination)
+                    .over(flow.protocol)
+                    .measured(bytes, limit),
+            );
+        }
+        kept
+    }
+
     /// The largest request that would still have gone in a datagram.
     ///
     /// Nothing fits at all is reported as nothing fits, which is what a path
@@ -1433,6 +1504,7 @@ impl Endpoint {
             return Ok(stream);
         }
         let limit_bytes = self.datagram_limit_bytes();
+        self.streams_wanted.insert(destination);
         self.events.push_back(Event::TransportWanted {
             protocol: TransportProtocol::Tcp,
             destination,

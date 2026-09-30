@@ -212,6 +212,8 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         lost = [event.fields for event in seen if event.kind == EventKind.TRANSPORT_FAILED]
         self.assertTrue(lost, seen)
         self.assertEqual(lost[0]["error"], TransportError.CONNECTION_REFUSED)
+        # where the connection was going and what became of it, for a log
+        self.assertTrue(lost[0]["detail"].startswith(f"TCP to {pbx.address} refused"), lost[0]["detail"])
         ended = seen[-1]
         self.assertEqual(ended.fields["end_reason"], CallEndReason.UNREACHABLE)
         self.assertEqual(ended.fields["status_code"], 513)
@@ -239,6 +241,8 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         seen = await self.events_until_the_end(stack, seconds=4.0)
         self.assertEqual(seen[-1].fields["status_code"], 513)
         self.assertEqual(pbx.connections, 0, "nothing was opened")
+        lost = [event.fields for event in seen if event.kind == EventKind.TRANSPORT_FAILED]
+        self.assertEqual(lost[0]["detail"], f"TCP to {pbx.address} not tried: stream_fallback is off")
 
     async def test_a_connection_the_stack_let_go_of_is_closed_here_too(self) -> None:
         # RFC 5626 Section 4.4.1: the stack retires a stream that stopped

@@ -277,6 +277,8 @@ public sealed class DatagramLimitTests
         var lost = seen.Where(args => args.Kind == SipralEventKind.TransportFailed).ToList();
         Assert.NotEmpty(lost);
         Assert.Equal(SipralTransportError.ConnectionRefused, lost[0].TransportFailed!.Error);
+        // where the connection was going and what became of it, for a log
+        Assert.StartsWith($"TCP to {pbx.Address} refused", lost[0].TransportFailed!.Detail);
         var ended = seen[^1].CallInfo!;
         Assert.Equal(SipralCallEndReason.Unreachable, ended.EndReason);
         Assert.Equal(513u, ended.StatusCode);
@@ -308,6 +310,8 @@ public sealed class DatagramLimitTests
         var seen = await UntilTheEnd(stack);
         Assert.Equal(513u, seen[^1].CallInfo!.StatusCode);
         Assert.Equal(0, pbx.Connections);
+        var lost = seen.First(args => args.Kind == SipralEventKind.TransportFailed);
+        Assert.Equal($"TCP to {pbx.Address} not tried: streamFallback is off", lost.TransportFailed!.Detail);
     }
 
     [Fact]

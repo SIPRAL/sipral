@@ -30,6 +30,11 @@ pub struct Counters {
     /// is not kept: it cannot be reported from there, and the count is what
     /// says whether it happened once or is happening constantly.
     pub render_failures: u64,
+    /// Times the capture callback was told of more frames than its buffer
+    /// holds, and let that slice go rather than render into a buffer too
+    /// small for it. Above zero means a device ran a longer slice than the
+    /// unit was allowed; the microphone missed those samples.
+    pub capture_oversized: u64,
     /// Times a panic was caught at the callback boundary and turned into
     /// silence. Any number above zero is a bug in this crate.
     pub panics: u64,
@@ -39,12 +44,13 @@ impl fmt::Display for Counters {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "captured {} (-{}), played {} (-{}), render failures {}, panics {}",
+            "captured {} (-{}), played {} (-{}), render failures {}, oversized slices {}, panics {}",
             self.captured,
             self.capture_dropped,
             self.played,
             self.playback_starved,
             self.render_failures,
+            self.capture_oversized,
             self.panics
         )
     }
@@ -59,7 +65,7 @@ mod tests {
         let counters = Counters::default();
         assert_eq!(
             counters.to_string(),
-            "captured 0 (-0), played 0 (-0), render failures 0, panics 0"
+            "captured 0 (-0), played 0 (-0), render failures 0, oversized slices 0, panics 0"
         );
     }
 

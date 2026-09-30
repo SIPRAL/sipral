@@ -122,6 +122,17 @@ def parse_address(text: str) -> tuple[str, int]:
     return host, int(port)
 
 
+def _verdict(error: int) -> str:
+    """What became of a connection, in the words a log line reads."""
+    return {
+        lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED: "refused",
+        lib.SIPRAL_TRANSPORT_ERROR_TIMED_OUT: "timed out",
+        lib.SIPRAL_TRANSPORT_ERROR_UNREACHABLE: "unreachable",
+        lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_RESET: "reset",
+        lib.SIPRAL_TRANSPORT_ERROR_CLOSED: "closed",
+    }.get(error, "failed")
+
+
 class _TurnStream:
     """One media socket's TCP or TLS connection to the TURN server.
 
@@ -349,7 +360,9 @@ class Stack:
         (`sipral_stack_transport_bind`): the request the stack was holding
         goes on it, and the call or registration carries on over it. When
         that connection is refused or times out, or with ``False``, the
-        stack is told at once (`sipral_stack_transport_failed`), and what
+        stack is told at once (`sipral_stack_transport_failure`, whose detail
+        names where the connection was going and whether it was refused,
+        timed out or not tried), and what
         was waiting ends rather than hanging: a call as unreachable, its
         `cause_sip` 513 and its `cause_text` naming the size and the limit.
         The event reaches :attr:`events` either way. ``stream_server``
@@ -1887,7 +1900,11 @@ class Stack:
                 if self._stream_fallback:
                     self._streams_opening.add(destination)
             if not self._stream_fallback:
-                self._say_no_stream(transport, lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED)
+                self._say_no_stream(
+                    transport,
+                    lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED,
+                    f"to {destination} not tried: stream_fallback is off",
+                )
                 continue
             threading.Thread(
                 target=self._open_sip_stream,
@@ -1911,8 +1928,11 @@ class Stack:
         except (OSError, ValueError) as refused:
             with self._stream_lock:
                 self._streams_opening.discard(destination)
-            error, _tls, _detail = classify(refused)
-            self._say_no_stream(transport, error)
+            error, _tls, said = classify(refused)
+            server = format_address(*self._stream_server) if self._stream_server else destination
+            target = destination if server == destination else f"{server} (for {destination})"
+            why = f": {said}" if said else ""
+            self._say_no_stream(transport, error, f"to {target} {_verdict(error)}{why}")
             return
         stream = _SipStream(transport, destination, sock)
         with self._stream_lock:
@@ -1938,21 +1958,39 @@ class Stack:
                 ),
                 "sipral_stack_transport_bind",
             )
-        except Exception:  # noqa: BLE001 -- told as a connection that failed
+        except Exception as refused:  # noqa: BLE001 -- told as a connection that failed
             self._lose_sip_stream(transport, tell=False)
-            self._say_no_stream(transport, lib.SIPRAL_TRANSPORT_ERROR_OTHER)
+            self._say_no_stream(
+                transport,
+                lib.SIPRAL_TRANSPORT_ERROR_OTHER,
+                f"to {destination} connected, and the stack would not bind it: {refused}",
+            )
             return
         # read from here on: nothing arrives before the request the bind
         # just released, and a selector reports what is already waiting
         self._selector.register(sock, selectors.EVENT_READ, data=("sip", transport))
 
-    def _say_no_stream(self, transport: int, error: int) -> None:
-        """`sipral_stack_transport_failed` for a connection that was not
-        made; never raising on the way out."""
+    def _say_no_stream(self, transport: int, error: int, what: str) -> None:
+        """`sipral_stack_transport_failure` for a connection that was not
+        made; never raising on the way out. ``what`` finishes a sentence
+        that begins "TCP" -- where the connection was going and what became
+        of it -- carried to the event's detail."""
+        text = f"TCP {what}"
+        text = "".join(" " if ord(ch) < 0x20 or ord(ch) == 0x7F else ch for ch in text)
+        encoded = text.encode("utf-8")[: lib.SIPRAL_TRANSPORT_DETAIL_BYTES].decode("utf-8", "ignore")
+        detail = encoded.encode("utf-8")
+        failure = ffi.new("sipral_transport_failure_t *")
+        failure.size = ffi.sizeof("sipral_transport_failure_t")
+        failure.transport = transport
+        failure.error = error
+        failure.tls = lib.SIPRAL_TLS_FAILURE_NONE
+        detail_buf = ffi.new("char[]", detail)
+        failure.detail = detail_buf
+        failure.detail_len = len(detail)
         try:
             _retry(
-                lambda: lib.sipral_stack_transport_failed(self.handle, transport, error, self.now_ms()),
-                "sipral_stack_transport_failed",
+                lambda: lib.sipral_stack_transport_failure(self.handle, failure, self.now_ms()),
+                "sipral_stack_transport_failure",
             )
         except Exception:  # noqa: BLE001 -- nothing was waiting any more
             pass

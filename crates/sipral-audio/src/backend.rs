@@ -17,7 +17,7 @@ use core::time::Duration;
 
 use sipral_io_common::level::Controls;
 
-use crate::device::Direction;
+use crate::device::{Direction, Role};
 
 /// One device as a platform lists it, before the engine has named it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,13 +147,48 @@ pub trait Backend: Send {
         self.open_playback(identity, wanted)
     }
 
+    /// Open a call's microphone and loudspeaker together, each on its own
+    /// device (`None` for the system's), as close to `wanted` as the platform
+    /// allows.
+    ///
+    /// Two separate opens by default. A platform that runs the two as one
+    /// unit ([`Backend::duplex_only`]) opens that unit here, once, with both
+    /// devices named up front, and answers with its two halves.
+    fn open_duplex(
+        &mut self,
+        microphone: Option<&str>,
+        speaker: Option<&str>,
+        wanted: Format,
+    ) -> Duplex {
+        // the loudspeaker first, as the engine always asked
+        let playback = self.open_playback(speaker, wanted);
+        let capture = self.open_capture(microphone, wanted);
+        (capture, playback)
+    }
+
     /// Whether this platform runs the microphone and the loudspeaker as one
-    /// unit on one device pair, so that a second, separate output cannot be
-    /// opened beside the call's and the two halves are reopened together.
+    /// unit, so that the two halves are opened and reopened together
+    /// ([`Backend::open_duplex`]).
     fn duplex_only(&self) -> bool {
         false
     }
+
+    /// Whether a role can be put on a device of the application's choosing.
+    ///
+    /// Every role by default, and the loudspeaker everywhere. A duplex
+    /// platform that cannot name the microphone's device apart from the
+    /// loudspeaker's, or open a ringer beside the call's unit, says no for
+    /// those two — iOS, whose route is the audio session's.
+    fn chooses(&self, role: Role) -> bool {
+        role == Role::Speaker || !self.duplex_only()
+    }
 }
+
+/// A call's two halves, as a platform answered for each.
+pub type Duplex = (
+    Result<Box<dyn CaptureStream>, BackendError>,
+    Result<Box<dyn PlaybackStream>, BackendError>,
+);
 
 /// What every stream answers, whichever way it runs.
 pub trait StreamCommon: Send {

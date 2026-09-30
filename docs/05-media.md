@@ -966,6 +966,7 @@ agree with the call it stands in for.
 |---|---|---|---|
 | `NotOffered` — **the default** | `RTP/AVP`, no key in the body | answered plainly | answered, with a key of our own |
 | `Offered` | `RTP/SAVP`, one `a=crypto` per suite | answered plainly | answered, with a key of our own |
+| `BestEffort` | `RTP/AVP`, one `a=crypto` per suite: keyed if the answer takes a line, plain if it takes none | answered plainly; one on `RTP/AVP` carrying a line we take is answered with a key | answered, with a key of our own |
 | `Required` | `RTP/SAVP`, one `a=crypto` per suite | **refused, 488** | answered, with a key of our own |
 | `DtlsOffered` | `UDP/TLS/RTP/SAVP`, `a=fingerprint` | answered plainly | answered with our fingerprint |
 | `DtlsRequired` | `UDP/TLS/RTP/SAVP`, `a=fingerprint` | **refused, 488** | answered with our fingerprint |
@@ -989,6 +990,18 @@ writes. A peer that has already put `RTP/SAVP` and a key in front of us has
 asked for encryption; refusing there would turn a call that would have worked,
 encrypted, into a silent one, and buys nothing. So every policy answers a
 secure offer with a key, and only `Required` refuses a plain one.
+
+**Why `BestEffort` exists beside `Offered`.** `Offered` names `RTP/SAVP`, and
+a PBX that does not do SRTP rejects a stream on a profile it does not know
+(RFC 4568 §7.4) — 488, and no audio. `BestEffort` is the "SRTP optional" of
+desk phones: the same crypto lines on `RTP/AVP`, which such a PBX takes while
+ignoring the lines, and which a PBX that does SDES answers with a line of its
+own. RFC 4568 writes the attribute for the secure profiles, so this is
+interoperability rather than a standard; whether the call ended up encrypted
+is `MediaEngine::encryption`'s answer, never an assumption. The suites offered
+are the catalogue's or the account's (`with_srtp_suites`), and one suite —
+`AES_CM_128_HMAC_SHA1_80` alone — keeps an authenticated INVITE under RFC 3261
+§18.1.1's 1300 bytes where two would not.
 
 **Why `Offered` and `Required` are two settings.** They write the same offer,
 and a peer that refuses `RTP/SAVP` leaves the call with no audio under both —
@@ -2425,11 +2438,18 @@ against a backend made of fakes, with no device in the room:
 
 What each platform gives it: on macOS and iOS the voice-processing unit is
 duplex and there is one per process, so the microphone and the loudspeaker
-are the two halves of one stream opened on the loudspeaker's device, the
-microphone follows the system's input and cannot be chosen apart, a second
-output for the ring cannot be opened beside it, and the old unit is closed
-before the new one is opened on a device change — two alive at once is what
-blocks inside the framework. The system cancels the echo. On Windows an
+are the two halves of one stream, opened together with each half on its own
+device — on macOS the microphone is named on the unit's input element apart
+from the loudspeaker's, without moving the system's default input — and the
+old unit is closed, and the pump confirms it let go, before the new one is
+opened on a device change: two alive at once is what blocks inside the
+framework, and `sipral-io-coreaudio` refuses a second one outright. A ring
+on a device other than the loudspeaker's plays through a plain output unit
+beside the call's, never a second voice-processing unit. The capture
+callback renders exactly the frames it is told of, into a buffer that holds
+a whole device slice converted to the stream's rate, or not at all. On iOS
+the route is the audio session's, so only the loudspeaker role is chosen.
+The system cancels the echo. On Windows an
 endpoint is one direction, so all three roles open streams of their own,
 each asked for as a communications stream; whether Windows took it as one is
 what the engine reports as system echo cancellation, and where it did not

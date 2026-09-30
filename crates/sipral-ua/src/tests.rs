@@ -16184,6 +16184,81 @@ fn a_retry_one_suite_would_fit_goes_over_the_datagram_with_one_suite() {
     assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
 }
 
+/// A server on UDP alone, and a stack configured to set §18.1.1 aside for it
+/// (`DatagramLimit::without_stream_bytes`): once no stream is coming, the
+/// whole retry — both suites — goes over the datagram, whether the
+/// application said so or the wait ran out, and the call carries on.
+#[test]
+fn a_challenged_invite_goes_whole_over_the_datagram_when_the_setting_allows_it() {
+    let t0 = Instant::now();
+    let (_, _, said) = challenged_past_the_line(EndpointConfig::default(), 900, t0);
+    let whole = wanted_bytes(&said).expect("the size of the retry");
+    let mut config = EndpointConfig::default();
+    config.datagram_limit.without_stream_bytes = Some(u32::try_from(whole).expect("a size"));
+
+    for told in [true, false] {
+        let (mut agent, call, said) = challenged_past_the_line(config, 900, t0);
+        assert_eq!(wanted_bytes(&said), Some(whole), "§18.1.1 first");
+        assert!(transmits(&mut agent).is_empty(), "the retry waits");
+        let when = if told {
+            agent.stream_unavailable(t0);
+            t0
+        } else {
+            agent.handle_timeout(t0 + STREAM_WAIT);
+            t0 + STREAM_WAIT
+        };
+        let retry = only(&transmits(&mut agent), "INVITE ");
+        assert_eq!(retry.len(), whole);
+        credentials_of_long(&retry);
+        assert_eq!(body_of(&retry).matches("a=crypto:").count(), 2);
+        assert!(text(&retry, HeaderName::Via).starts_with("SIP/2.0/UDP "));
+        assert!(call_end(&events(&mut agent)).is_none(), "told {told}");
+        let recorded = agent
+            .endpoint()
+            .call_record(&CallId::new(&header(&retry, HeaderName::CallId)))
+            .expect("the call's record")
+            .decisions()
+            .filter(|decision| decision.reason.as_str() == "transport.kept.datagram")
+            .filter_map(|decision| decision.measure)
+            .collect::<Vec<_>>();
+        assert_eq!(recorded.len(), 1, "told {told}");
+        assert_eq!(recorded[0].size, whole);
+
+        deliver(
+            &mut agent,
+            &answered(&retry, 200, "OK", "desk", Some(ANSWER)),
+            when,
+        );
+        assert!(sent(&mut agent).starts_with(b"ACK "));
+        assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+    }
+
+    // a byte short of the whole retry, the one with a single suite is what
+    // goes over the datagram
+    config.datagram_limit.without_stream_bytes = Some(u32::try_from(whole - 1).expect("a size"));
+    let (mut agent, call, _) = challenged_past_the_line(config, 900, t0);
+    agent.stream_unavailable(t0);
+    let retry = only(&transmits(&mut agent), "INVITE ");
+    assert!(retry.len() < whole, "{} bytes", retry.len());
+    assert_eq!(body_of(&retry).matches("a=crypto:").count(), 1);
+    assert!(text(&retry, HeaderName::Via).starts_with("SIP/2.0/UDP "));
+    assert_eq!(agent.call_state(call), Some(CallState::Calling));
+
+    // and a setting no larger than §18.1.1's own line reaches nothing: the
+    // call ends as it would without one
+    config.datagram_limit.without_stream_bytes = Some(1_300);
+    let (mut agent, _, _) = challenged_past_the_line(config, 900, t0);
+    agent.stream_unavailable(t0);
+    assert!(
+        !transmits(&mut agent)
+            .iter()
+            .any(|bytes| bytes.starts_with(b"INVITE "))
+    );
+    let (reason, status, _) = call_end(&events(&mut agent)).expect("ended");
+    assert_eq!(reason, CallEndReason::Unreachable);
+    assert_eq!(status.map(StatusCode::get), Some(513));
+}
+
 #[test]
 fn a_register_whose_answer_outgrew_the_datagram_fails_as_too_large_rather_than_as_a_password() {
     let t0 = Instant::now();

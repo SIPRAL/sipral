@@ -204,6 +204,88 @@ fn the_devices_are_listed_and_a_call_is_pumped_through_them() {
     assert!(!engine.is_active());
 }
 
+/// What an application in device mode does around a call, three times over:
+/// open, ring a looped tone, stop it, put the loudspeaker on a device
+/// explicitly, close. On macOS this is the sequence that once had the
+/// voice-processing unit write past the end of a buffer; run it under the
+/// system's guard allocator to see that it does not:
+///
+/// ```text
+/// DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MallocScribble=1 \
+///   cargo test -p sipral-audio --test real_device -- --ignored --nocapture sequence
+/// ```
+///
+/// `SIPRAL_AUDIO_SPEAKER`, `SIPRAL_AUDIO_MIC` and `SIPRAL_AUDIO_RINGER` put
+/// each role on a device named like that; the loudspeaker goes on the
+/// system's default output otherwise.
+#[test]
+#[ignore = "opens the machine's real devices and plays a tone"]
+fn the_device_mode_sequence_runs_three_times() {
+    let (mut engine, _) = engine();
+    let listed = engine
+        .refresh()
+        .expect("the platform lists its devices")
+        .to_vec();
+    let named = |role: Role, variable: &str| {
+        let wanted = std::env::var(variable).ok()?;
+        listed
+            .iter()
+            .find(|device| device.serves(role) && device.name.contains(&wanted))
+            .map(|device| device.handle)
+    };
+    for (role, variable) in [
+        (Role::Microphone, "SIPRAL_AUDIO_MIC"),
+        (Role::Ringer, "SIPRAL_AUDIO_RINGER"),
+    ] {
+        if let Some(handle) = named(role, variable) {
+            engine
+                .select(role, Selection::Device(handle))
+                .unwrap_or_else(|error| panic!("{role}: {error}"));
+        }
+    }
+    let speaker = named(Role::Speaker, "SIPRAL_AUDIO_SPEAKER").or_else(|| {
+        listed
+            .iter()
+            .find(|device| device.default_output)
+            .map(|device| device.handle)
+    });
+    if let Some(handle) = speaker {
+        engine
+            .select(Role::Speaker, Selection::Device(handle))
+            .expect("the loudspeaker");
+    }
+    let tone: Vec<i16> = (0..8_000)
+        .map(|n| ((n as f32 * core::f32::consts::TAU * 440.0 / 8_000.0).sin() * 3_000.0) as i16)
+        .collect();
+    for round in 1..=3 {
+        engine.activate().expect("the devices open");
+        engine.ring(tone.clone(), 8_000, true).expect("the ring");
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(1_500) {
+            engine.service();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let info = engine.info();
+        println!(
+            "round {round}: {info:?}, microphone on {:?}, speaker on {:?}, ringer on {:?}",
+            engine.running_on(Role::Microphone),
+            engine.running_on(Role::Speaker),
+            engine.running_on(Role::Ringer)
+        );
+        assert!(info.active && info.speaker_rate_hz.is_some());
+        engine.stop_ringing();
+        if let Some(handle) = named(Role::Speaker, "SIPRAL_AUDIO_SPEAKER") {
+            engine
+                .select(Role::Speaker, Selection::Device(handle))
+                .expect("the loudspeaker again");
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        engine.service();
+        engine.deactivate();
+        assert!(!engine.is_active());
+    }
+}
+
 /// The echo return loss of the machine's loudspeaker-to-microphone path:
 /// how much quieter the tone the call plays comes back through the
 /// microphone. On a machine whose microphone and loudspeaker are one
