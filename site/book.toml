@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# The documentation site. Every page is a symlink under src/ into the
+# repository, so docs/ stays the only copy of the text; scripts/site.sh
+# builds it and checks its links.
+
+[book]
+title = "Sipral"
+authors = ["Tiberiu Balasea"]
+description = "Design documents for Sipral, a clean-room SIP stack in Rust"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../target/site"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/SIPRAL/sipral"
+mathjax-support = false
+no-section-label = false
+
+[output.html.fold]
+enable = false
+
+[output.html.search]
+enable = true

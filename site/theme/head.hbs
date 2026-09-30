@@ -1,0 +1,12 @@
+{{!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+
+mdBook writes the site's root index.html as a copy of the first chapter, but
+that chapter is docs/README.md and its links are relative to docs/. The copy
+sends the reader to the chapter itself, where every link resolves.
+--}}
+{{#if is_index}}
+        <meta http-equiv="refresh" content="0; url=docs/index.html">
+        <link rel="canonical" href="docs/index.html">
+{{/if}}

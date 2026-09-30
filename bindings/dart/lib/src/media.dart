@@ -42,14 +42,14 @@ final class _MediaPacket {
 /// What a call's media has done so far, from `sipral_media_statistics`.
 final class SipralMediaStatistics {
   SipralMediaStatistics._(SipralStreamStats stats)
-      : packetsSent = stats.packetsSent,
-        packetsReceived = stats.packetsReceived,
-        packetsLost = stats.packetsLost,
-        jitterUs = stats.jitterUs,
-        roundTripUs = stats.hasRoundTrip != 0 ? stats.roundTripUs : null,
-        framesUnderrun = stats.framesUnderrun,
-        lossRate = stats.lossRate,
-        score = stats.score;
+    : packetsSent = stats.packetsSent,
+      packetsReceived = stats.packetsReceived,
+      packetsLost = stats.packetsLost,
+      jitterUs = stats.jitterUs,
+      roundTripUs = stats.hasRoundTrip != 0 ? stats.roundTripUs : null,
+      framesUnderrun = stats.framesUnderrun,
+      lossRate = stats.lossRate,
+      score = stats.score;
 
   /// RTP packets sent.
   final int packetsSent;
@@ -87,8 +87,11 @@ final class SipralMedia {
     final sipral = call.stack._sipral;
     using((arena) {
       final out = arena<SipralHandle>();
-      _check(sipral, 'sipral_call_media',
-          sipral.callMedia(call.stack.handle, call.handle, out));
+      _check(
+        sipral,
+        'sipral_call_media',
+        sipral.callMedia(call.stack.handle, call.handle, out),
+      );
       handle = out.value;
       final info = arena<SipralMediaInfo>();
       info.ref.size = ffi.sizeOf<SipralMediaInfo>();
@@ -150,15 +153,15 @@ final class SipralMedia {
 
   /// What the media has done so far.
   SipralMediaStatistics statistics() => using((arena) {
-        final stats = arena<SipralStreamStats>();
-        stats.ref.size = ffi.sizeOf<SipralStreamStats>();
-        _check(
-          call.stack._sipral,
-          'sipral_media_statistics',
-          call.stack._sipral.mediaStatistics(handle, call.stack.nowMs(), stats),
-        );
-        return SipralMediaStatistics._(stats.ref);
-      });
+    final stats = arena<SipralStreamStats>();
+    stats.ref.size = ffi.sizeOf<SipralStreamStats>();
+    _check(
+      call.stack._sipral,
+      'sipral_media_statistics',
+      call.stack._sipral.mediaStatistics(handle, call.stack.nowMs(), stats),
+    );
+    return SipralMediaStatistics._(stats.ref);
+  });
 
   void _receive() {
     final sipral = call.stack._sipral;
@@ -214,7 +217,12 @@ final class SipralMedia {
     final sipral = call.stack._sipral;
     final now = call.stack.nowMs();
     final played = sipral.mediaPlayback(
-        handle, _playback, frameSamples, _written, _source);
+      handle,
+      _playback,
+      frameSamples,
+      _written,
+      _source,
+    );
     if (played == SipralStatus.ok && _written.value > 0 && !_frames.isClosed) {
       _frames.add(Int16List.fromList(_playback.asTypedList(_written.value)));
     }
@@ -227,7 +235,12 @@ final class SipralMedia {
     }
     _packet.prepare();
     if (sipral.mediaCapture(
-                handle, now, _capture, frameSamples, _packet.packet) ==
+              handle,
+              now,
+              _capture,
+              frameSamples,
+              _packet.packet,
+            ) ==
             SipralStatus.ok &&
         _packet.packet.ref.len > 0) {
       call._sendPacket(_packet);

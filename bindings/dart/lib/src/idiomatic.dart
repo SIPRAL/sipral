@@ -94,9 +94,10 @@ void _check(Sipral sipral, String operation, int status) {
 }
 
 /// [length] bytes at [data] as UTF-8.
-String _decode(ffi.Pointer<ffi.Uint8> data, int length) => length == 0
-    ? ''
-    : utf8.decode(data.asTypedList(length), allowMalformed: true);
+String _decode(ffi.Pointer<ffi.Uint8> data, int length) =>
+    length == 0
+        ? ''
+        : utf8.decode(data.asTypedList(length), allowMalformed: true);
 
 /// `host:port`, with an IPv6 host in brackets.
 String _formatAddress(InternetAddress host, int port) =>

@@ -49,9 +49,10 @@ final class SipralStackEvent {
       event.call,
       callState: call ? event.payload.call.state : null,
       statusCode: call ? event.payload.call.statusCode : null,
-      registrationState: kind == SipralEventKind.registrationChanged
-          ? event.payload.registration.state
-          : null,
+      registrationState:
+          kind == SipralEventKind.registrationChanged
+              ? event.payload.registration.state
+              : null,
       digit: digit > 0 ? String.fromCharCode(digit) : null,
     );
   }

@@ -1487,6 +1487,17 @@ if [ -s "$COROUTINES_JAR" ]; then
     fi
 fi
 
+# bindings/jvm's tests are JUnit tests, run here without Maven by the JUnit
+# console launcher (EPL-2.0, test-only, never shipped), cached the same way.
+JUNIT_VERSION="6.1.3"
+JUNIT_SHA256="e62b96ac475dbcde8599ea905d088f65d90778f86e259b856a49fa5c4ea256ec"
+JUNIT_JAR="$HOME/.cache/sipral/maven/org/junit/platform/junit-platform-console-standalone/$JUNIT_VERSION/junit-platform-console-standalone-$JUNIT_VERSION.jar"
+junit_ok=0
+if [ -s "$JUNIT_JAR" ] \
+    && [ "$(shasum -a 256 "$JUNIT_JAR" 2>/dev/null | cut -d' ' -f1)" = "$JUNIT_SHA256" ]; then
+    junit_ok=1
+fi
+
 kotlin_classes=""
 kotlin_lib=""
 if [ "$coroutines_ok" -ne 1 ]; then
@@ -1653,6 +1664,70 @@ if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
             else
                 pass "${said#kotlin telecom: }"
             fi
+
+            # bindings/jvm, the server jar's own code, without Maven: its
+            # loader and SipralJava compiled over the classes above, and its
+            # tests run by the JUnit console launcher (cached, checksummed,
+            # like the coroutines jar). What a Mac can run of them runs: the
+            # loader's choice of platform and its ELF reading, and the Java
+            # caller's loopback call through SipralJava, with the shim found
+            # on java.library.path as above. The two tests that need Linux --
+            # the running JVM loading its own pair out of the jar, and the
+            # Kotlin loopback call that asserts it runs from the packaged jar
+            # -- run in scripts/package/jvm.sh, on a Linux host.
+            if [ "$junit_ok" -ne 1 ]; then
+                fail "junit-platform-console-standalone $JUNIT_VERSION is not cached with the right checksum at $JUNIT_JAR (fetch it once from Maven Central and verify its sha256 matches $JUNIT_SHA256)"
+            else
+                jvm_classes=$(mktemp -d)
+                jvm_sources=()
+                while IFS= read -r -d '' one; do
+                    jvm_sources+=("$one")
+                done < <(find "$ROOT/bindings/jvm/src/main/kotlin" "$ROOT/bindings/jvm/src/test/kotlin" \
+                    -name '*.kt' -print0 2>/dev/null)
+                java_sources=()
+                while IFS= read -r -d '' one; do
+                    java_sources+=("$one")
+                done < <(find "$ROOT/bindings/jvm/src/test/java" -name '*.java' -print0 2>/dev/null)
+                if [ "${#jvm_sources[@]}" -eq 0 ] || [ "${#java_sources[@]}" -eq 0 ]; then
+                    fail "no Kotlin or no Java source found under bindings/jvm/src, so nothing was compiled"
+                elif ! kotlinc -cp "$kotlin_classes:$COROUTINES_JAR:$JUNIT_JAR" "${jvm_sources[@]}" \
+                    -d "$jvm_classes" >"$work/jvm-kotlinc" 2>&1; then
+                    fail "kotlinc, over bindings/jvm:"
+                    sed 's/^/        /' "$work/jvm-kotlinc"
+                elif ! "$jdk/bin/javac" -d "$jvm_classes" \
+                    -cp "$jvm_classes:$kotlin_classes:$kotlin_lib/kotlin-stdlib.jar:$COROUTINES_JAR:$JUNIT_JAR" \
+                    "${java_sources[@]}" >"$work/jvm-javac" 2>&1; then
+                    fail "javac, over bindings/jvm/src/test/java:"
+                    sed 's/^/        /' "$work/jvm-javac"
+                else
+                    selected=(--select-class org.sipral.jvm.LoopbackCallJavaIT)
+                    for method in linuxOnX64SpellingsChooseLinuxX64 linuxOnArm64SpellingsChooseLinuxArm64 \
+                        anythingElseChoosesNothing eachPlatformReadsItsOwnDirectory \
+                        theElfMachineIsReadFromTheHeader eachStagedPairIsForItsOwnMachine; do
+                        selected+=(--select-method "org.sipral.jvm.SipralNativesTest#$method")
+                    done
+                    ran=$("$jdk/bin/java" -Xcheck:jni --enable-native-access=ALL-UNNAMED \
+                        -Djava.library.path="$work" -Dsipral.expected.platforms= \
+                        -jar "$JUNIT_JAR" execute --disable-banner --disable-ansi-colors \
+                        --details=summary --fail-if-no-tests \
+                        --class-path "$jvm_classes:$kotlin_classes:$kotlin_lib/kotlin-stdlib.jar:$COROUTINES_JAR" \
+                        "${selected[@]}" 2>&1)
+                    exited=$?
+                    succeeded=$(printf '%s\n' "$ran" | sed -n 's/.*\[ *\([0-9]*\) tests successful *\].*/\1/p' | tail -1)
+                    warned=$(printf '%s\n' "$ran" \
+                        | grep -E 'WARNING in native method|WARNING: JNI|FATAL ERROR in native method' || true)
+                    if [ "$exited" -ne 0 ] || [ "${succeeded:-0}" -ne 7 ]; then
+                        fail "bindings/jvm's tests, the loader's six and the Java loopback call (${succeeded:-0} of 7 passed):"
+                        printf '%s\n' "$ran" | grep -vE '^[[:space:]]+at ' | tail -40 | sed 's/^/        /'
+                    elif [ -n "$warned" ]; then
+                        fail "-Xcheck:jni found something wrong under SipralJava:"
+                        printf '%s\n' "$warned" | sed 's/^/        /'
+                    else
+                        pass "bindings/jvm: the loader's platform and ELF checks, and a Java loopback call through SipralJava (7 tests)"
+                    fi
+                fi
+                rm -rf "$jvm_classes"
+            fi
         fi
         rm -rf "$work"
     fi
@@ -1746,6 +1821,66 @@ else
     else
         fail "python3 -m unittest discover, bindings/python/tests:"
         sed 's/^/        /' "$work/out"
+    fi
+    rm -rf "$work"
+fi
+
+# Like the Python one, bindings/dart/lib/src/sipral_abi.dart is printed by
+# "the header and the bindings" above, so a machine without dart has not
+# checked that step's own output: a missing SDK fails. `dart analyze` is the
+# compiler's front end over the printed file and the layer over it;
+# test/abi_test.dart holds every record's dart:ffi layout to the length
+# the library reports, and test/loopback_test.dart places a call between
+# two stacks against $DYLIB. The package's dependencies come from the pub
+# cache when they are there, and from pub.dev the first time.
+step "the dart bindings"
+if ! command -v dart >/dev/null 2>&1; then
+    fail "dart is not installed (brew install --cask flutter, which carries it)"
+elif [ ! -s "$DYLIB" ]; then
+    fail "the dart bindings: $DYLIB is not there to load (the build step above must pass first)"
+else
+    work=$(mktemp -d)
+    if ! (cd "$ROOT/bindings/dart" && { dart pub get --offline || dart pub get; }) >"$work/pub" 2>&1; then
+        fail "dart pub get, in bindings/dart:"
+        sed 's/^/        /' "$work/pub"
+    else
+        (cd "$ROOT/bindings/dart" && dart analyze --fatal-infos) >"$work/analyze" 2>&1 \
+            && pass "dart analyze, bindings/dart" \
+            || { fail "dart analyze --fatal-infos, in bindings/dart:"; sed 's/^/        /' "$work/analyze"; }
+        # the printed binding is abi-gen's layout, not dart format's
+        handwritten=()
+        while IFS= read -r one; do
+            handwritten+=("$one")
+        done < <(cd "$ROOT/bindings/dart" && find lib test -name '*.dart' ! -path lib/src/sipral_abi.dart | sort)
+        (cd "$ROOT/bindings/dart" && dart format --output=none --set-exit-if-changed "${handwritten[@]}") \
+            >"$work/format" 2>&1 \
+            && pass "dart format, the hand-written layer" \
+            || { fail "dart format, in bindings/dart:"; grep '^Changed' "$work/format" | sed 's/^/        /'; }
+        if (cd "$ROOT/bindings/dart" && SIPRAL_LIBRARY="$ROOT/$DYLIB" dart test --reporter expanded) \
+            >"$work/test" 2>&1; then
+            passed=$(grep -oE '\+[0-9]+: All tests passed' "$work/test" | grep -oE '[0-9]+' | tail -1)
+            pass "dart test, bindings/dart (${passed:-?} tests: record layouts, the ABI version, the loopback call)"
+        else
+            fail "dart test, bindings/dart:"
+            tail -40 "$work/test" | sed 's/^/        /'
+        fi
+    fi
+    rm -rf "$work"
+fi
+
+# The documentation site (site/book.toml) built from docs/, with its links,
+# hosts and addresses checked by scripts/site.sh, which fails on any of the
+# three; nothing is published.
+step "the documentation site"
+if ! command -v mdbook >/dev/null 2>&1; then
+    fail "mdbook is not installed: cargo install mdbook --locked"
+else
+    work=$(mktemp -d)
+    if scripts/site.sh >"$work/site" 2>&1; then
+        pass "$(grep '^site: ' "$work/site" | sed 's/^site: //'), no broken link, foreign host or address"
+    else
+        fail "scripts/site.sh:"
+        tail -40 "$work/site" | sed 's/^/        /'
     fi
     rm -rf "$work"
 fi
