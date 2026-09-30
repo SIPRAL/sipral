@@ -397,6 +397,9 @@ class Stack:
         #: Where `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for a stream,
         #: during the poll that raised it, acted on right after that poll.
         self._streams_asked: list[str] = []
+        #: The transport numbers `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` named
+        #: during that same poll, acted on at the same moment.
+        self._streams_let_go: list[int] = []
         #: Every connection opened for one, by the transport number it is
         #: bound at, and the destinations a connection is being opened to;
         #: both under :attr:`_stream_lock`.
@@ -1409,6 +1412,8 @@ class Stack:
         # read its state, and that state has to already be current.
         if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_WANTED and not self._streamed:
             self._streams_asked.append(event.fields["destination"])
+        if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED and not self._streamed:
+            self._streams_let_go.append(event.fields["transport"])
         if event.kind == lib.SIPRAL_EVENT_KIND_TURN_STREAM:
             fields = event.fields
             self._turn_asked.append(
@@ -1852,7 +1857,16 @@ class Stack:
         """Answer what `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for in the
         poll that just ran: a connection to each destination not already
         connected or being connected to, opened on a thread of its own, or
-        -- with ``stream_fallback`` off -- the word that none is coming."""
+        -- with ``stream_fallback`` off -- the word that none is coming.
+
+        First the connections the stack let go of in that poll: one that
+        stopped answering keep-alives (RFC 5626 Section 4.4.1) is retired by
+        the stack while its socket is still open here, and a connection kept
+        open that the stack will never write to again would stand in for the
+        new one it asks for."""
+        let_go, self._streams_let_go = self._streams_let_go, []
+        for transport in let_go:
+            self._lose_sip_stream(transport, tell=False)
         asked, self._streams_asked = self._streams_asked, []
         for destination in dict.fromkeys(asked):
             with self._stream_lock:

@@ -20,6 +20,7 @@ final class ChallengingPbx: @unchecked Sendable {
     private let lock = NSLock()
     private var _overTcp: [String] = []
     private var _connections = 0
+    private var _closedByTheStack = 0
     private var stopped = false
     let address: String
 
@@ -53,6 +54,8 @@ final class ChallengingPbx: @unchecked Sendable {
     var tcpAddress: String? { listener?.port.map { "127.0.0.1:\($0.rawValue)" } }
     var overTcp: [String] { lock.withLock { _overTcp } }
     var connections: Int { lock.withLock { _connections } }
+    /// How many of those connections the stack closed.
+    var closedByTheStack: Int { lock.withLock { _closedByTheStack } }
 
     func stop() {
         lock.withLock { stopped = true }
@@ -97,6 +100,9 @@ final class ChallengingPbx: @unchecked Sendable {
                 }
             }
             if complete || error != nil {
+                if complete {
+                    self.lock.withLock { self._closedByTheStack += 1 }
+                }
                 connection.cancel()
                 return
             }
@@ -233,6 +239,28 @@ final class DatagramLimitTests: XCTestCase {
         let seen = try await ending.value
         XCTAssertEqual(seen.last?.callData?.statusCode, 513)
         XCTAssertEqual(pbx.connections, 0, "nothing was opened")
+    }
+
+    /// RFC 5626 §4.4.1: the stack retires a stream that stopped answering
+    /// keep-alives and says so with `transportFailed`; the socket is this
+    /// layer's, and one kept open would stand in for the new connection the
+    /// stack asks for next time.
+    func testAConnectionTheStackLetGoOfIsClosedHereToo() async throws {
+        let pbx = try ChallengingPbx(tcp: true)
+        defer { pbx.stop() }
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let ending = Task { try await untilTheEnd(stack) }
+        try place(stack, pbx)
+        _ = try await ending.value
+        XCTAssertEqual(pbx.connections, 1)
+        XCTAssertEqual(pbx.closedByTheStack, 0, "the connection outlives the call")
+
+        stack.noteStreamLetGo(SipralStack.firstStreamLink)
+        for _ in 0..<150 where pbx.closedByTheStack == 0 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(pbx.closedByTheStack, 1, "the connection was let go of")
     }
 }
 #endif

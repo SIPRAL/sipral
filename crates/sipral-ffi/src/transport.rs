@@ -3172,6 +3172,73 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// Polls to `to_ms`, takes everything the stack wants written, and says
+    /// whether a keep-alive ping was among it on `transport`.
+    fn pinged_on(handle: SipralHandle, transport: u32, to_ms: u64) -> bool {
+        poll(handle, to_ms);
+        let mut pinged = false;
+        let mut buffers = Buffers::new();
+        loop {
+            let mut transmit = buffers.transmit();
+            let status = unsafe { sipral_stack_poll_transmit(handle, &raw mut transmit) };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if transmit.len == 0 {
+                return pinged;
+            }
+            let (payload, _, _) = buffers.taken(&transmit);
+            pinged |= transmit.transport == transport && payload == b"\r\n\r\n";
+        }
+    }
+
+    /// RFC 5626 §4.4.1 on a stream a C application opened: once the far end
+    /// has answered a ping and then leaves one unanswered for ten seconds, the
+    /// stack retires the transport, and the application that holds the
+    /// socket hears it as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` rather than
+    /// not at all.
+    #[test]
+    fn a_stream_the_stack_calls_dead_is_told_as_a_transport_failed() {
+        let mut seen = Outgrown::default();
+        let handle = challenged_past_the_line(&mut seen);
+        let (protocol, destination, _, _) = seen.wanted.first().cloned().expect("wanted");
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                2,
+                protocol,
+                "192.0.2.10:49152".as_ptr().cast::<c_char>(),
+                "192.0.2.10:49152".len(),
+                destination.as_ptr().cast::<c_char>(),
+                destination.len(),
+                1_050,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        drain(handle);
+
+        // the first ping is due twenty to twenty-five seconds in, and answered
+        assert!(pinged_on(handle, 2, 1_050 + 25_000), "the first ping");
+        let pong = b"\r\n";
+        assert_eq!(
+            unsafe {
+                sipral_stack_receive_stream(handle, 2, pong.as_ptr(), pong.len(), 1_050 + 25_040)
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert!(seen.lost.is_empty(), "{:?}", seen.lost);
+        // the second is not, and ten seconds after it the flow is dead
+        assert!(pinged_on(handle, 2, 1_050 + 50_000), "the second ping");
+        poll(handle, 1_050 + 60_000);
+        assert_eq!(
+            seen.lost,
+            vec![(2, SipralTransportError::TimedOut as u32)],
+            "the application is told which transport the stack let go"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     /// A C application that never answers the event is not left with a call
     /// that hangs: the wait runs out on the stack's own clock.
     #[test]

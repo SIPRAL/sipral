@@ -448,8 +448,9 @@ pub enum Event {
         /// The transport, when the URI or the scheme named one.
         protocol: Option<TransportProtocol>,
     },
-    /// A keep-alive went unanswered for ten seconds, so RFC 5626 §4.4.1 calls
-    /// the flow dead and this end has taken it down.
+    /// A keep-alive went unanswered for ten seconds on a flow that had answered
+    /// one before, so RFC 5626 §4.4.1 calls the flow dead and this end has
+    /// taken it down.
     ///
     /// Everything running on it has already been failed, and the endpoint has
     /// forgotten the transport. What is left is the caller's: close the socket,

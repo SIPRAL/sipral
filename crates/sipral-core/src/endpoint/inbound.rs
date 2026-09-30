@@ -1507,7 +1507,7 @@ impl Endpoint {
     }
 
     pub(super) fn send_keepalive(&mut self, transport: super::TransportId, now: Instant) {
-        let Some(bound) = self.transports.get(transport) else {
+        let Some(bound) = self.transports.get_mut(transport) else {
             return;
         };
         let flow = Flow {
@@ -1516,6 +1516,10 @@ impl Endpoint {
             source: None,
             protocol: bound.protocol,
         };
+        // the next lone CRLF answers this ping, not the one before it
+        if let Some(framer) = bound.framer.as_mut() {
+            framer.ping_sent();
+        }
         self.queue(flow.transmit(Arc::from(PING)));
         let next = self
             .config
@@ -1524,23 +1528,36 @@ impl Endpoint {
             .map(|at| self.schedule(at, Deadline::Keepalive(transport)));
         // one deadline for the flow rather than one per ping: a pong is not
         // matched to the ping it answers, so the ten seconds run from the
-        // earliest ping still unanswered
-        let armed = self.transports.get(transport).and_then(|bound| bound.pong);
-        let overdue = armed
-            .unwrap_or_else(|| self.schedule(now + PONG_DUE, Deadline::PongOverdue(transport)));
+        // earliest ping still unanswered. And none at all on a flow that has
+        // never answered one: §4.4 lets a UA without an outbound registration
+        // expect a pong only once it has an explicit indication, and Asterisk
+        // answers none, so holding its connection to the ten seconds would
+        // take down every call on it half a minute in.
+        let (armed, answers) = self
+            .transports
+            .get(transport)
+            .map_or((None, false), |bound| (bound.pong, bound.answers_pings));
+        let overdue =
+            if answers {
+                Some(armed.unwrap_or_else(|| {
+                    self.schedule(now + PONG_DUE, Deadline::PongOverdue(transport))
+                }))
+            } else {
+                None
+            };
         if let Some(bound) = self.transports.get_mut(transport) {
             bound.keepalive = next;
-            bound.pong = Some(overdue);
+            bound.pong = overdue;
         }
     }
 
-    /// The far end answered, so the flow is alive and the clock stops.
+    /// The far end answered, so the flow is alive, the clock stops, and from
+    /// here on a ping this flow leaves unanswered counts against it.
     fn pong_arrived(&mut self, transport: super::TransportId) {
-        let Some(handle) = self
-            .transports
-            .get_mut(transport)
-            .and_then(|bound| bound.pong.take())
-        else {
+        let Some(handle) = self.transports.get_mut(transport).and_then(|bound| {
+            bound.answers_pings = true;
+            bound.pong.take()
+        }) else {
             return;
         };
         self.deadlines.cancel(handle);
@@ -1600,8 +1617,9 @@ impl Endpoint {
         );
     }
 
-    /// Ten seconds without a pong: §4.4.1 makes this a dead flow, and a dead
-    /// flow is taken down rather than kept and hoped for.
+    /// Ten seconds without a pong on a flow that has answered one before:
+    /// §4.4.1 makes this a dead flow, and a dead flow is taken down rather
+    /// than kept and hoped for.
     pub(super) fn flow_failed(&mut self, transport: super::TransportId) {
         let Some(bound) = self.transports.get(transport) else {
             return;

@@ -483,7 +483,15 @@ a `cause_text` naming the size and the limit, and a registration fails as
 unreachable with a 513. An application that says nothing gets the same ten
 seconds after the event. The four idiomatic layers answer the event
 themselves (`stream_fallback`, on by default, and `stream_server` for a
-server that takes TCP on another port than UDP).
+server that takes TCP on another port than UDP). The stream stays open for
+the rest of the dialog and is pinged like any other (RFC 5626 §4.4.1), but
+held to the ten-second pong only once it has answered one: Asterisk answers
+none, and a call over its TCP would otherwise lose its connection half a
+minute in. A stream the stack does call dead is raised as
+`SIPRAL_EVENT_KIND_TRANSPORT_FAILED` with `SIPRAL_TRANSPORT_ERROR_TIMED_OUT`:
+the stack has let it go, the socket is the application's to close, and the
+four layers close theirs, so that the next `TRANSPORT_WANTED` to the same
+place opens a new one.
 `sipral_transmit_t::protocol` is still the seam that made this possible
 without a second `sipral_stack_poll_transmit`: it says what the message went
 out over rather than what the socket is, which is what lets one account's

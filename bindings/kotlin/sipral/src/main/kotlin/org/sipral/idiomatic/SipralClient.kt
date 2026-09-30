@@ -1210,11 +1210,29 @@ class SipralClient private constructor(
     private val streamsOpening: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val streamsAsked = java.util.concurrent.ConcurrentLinkedQueue<String>()
 
+    /** The transport ids `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` named during
+     * that same poll, acted on at the same moment. */
+    private val streamsLetGo = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+
+    /** Remember a transport the stack let go of, for after the poll that
+     * said so: a connection opened here that stopped answering keep-alives
+     * (RFC 5626 §4.4.1) is retired by the stack while its socket is still
+     * open here, and a connection kept open that the stack will never write
+     * to again would stand in for the new one it asks for. */
+    internal fun noteStreamLetGo(id: Long) {
+        streamsLetGo.add(id)
+    }
+
     /** Answer what `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for in the poll
      * that just ran: a connection to each destination not already connected
      * or being connected to, opened on a thread of its own, or -- with
-     * `streamFallback` off -- the word that none is coming. */
+     * `streamFallback` off -- the word that none is coming. First the
+     * connections the stack let go of in that poll. */
     private fun actOnStreamsWanted() {
+        while (true) {
+            val letGo = streamsLetGo.poll() ?: break
+            loseStreamLink(letGo, tell = false)
+        }
         val seen = HashSet<String>()
         while (true) {
             val destination = streamsAsked.poll() ?: return
@@ -1782,6 +1800,7 @@ class SipralClient private constructor(
         turnStreamOf(event)?.let { turnAsked.add(it) }
         if (link == null) {
             transportWantedOf(event)?.destination?.let { streamsAsked.add(it) }
+            transportFailedOf(event)?.let { noteStreamLetGo(it.transport) }
         }
         noteNat(event)
         calls[event.call]?.deliver(event)

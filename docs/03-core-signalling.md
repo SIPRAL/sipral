@@ -172,6 +172,14 @@ the socket.
   client MUST treat the flow as failed." The framer counts the answering CRLF
   apart from the ping, ten seconds without one takes the flow down and reports
   `Event::FlowFailed`, and everything running on it fails with the transport.
+  The ten seconds apply only once the flow has answered a ping: §4.4 lets a UA
+  that did not register with outbound expect a pong only on "an explicit
+  indication that CRLF keep-alives are supported", and a pong already received
+  is the indication. Asterisk answers none, and a call it carries on a
+  connection held to the pong would end half a minute in. Until then the pings
+  still go (RFC 3261 §7.5 allows them on any stream) and keep the NAT binding
+  open. Each ping also closes the framer's CRLF run, so the pong to the next
+  one is not paired with the pong to this one and read as a ping.
   The ten seconds are not configurable — the interval between pings is a
   trade-off the RFC leaves open and this is the MUST, and a setting for it would
   be a setting that turns conformance off. Opening the replacement flow is the

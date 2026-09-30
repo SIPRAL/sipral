@@ -67,6 +67,13 @@ pub(crate) struct Bound {
     /// meaning the flow is dead (RFC 5626 §4.4.1). Armed by the ping, cancelled
     /// by the answer.
     pub(crate) pong: Option<TimerHandle>,
+    /// Whether the far end has answered a ping on this connection at least
+    /// once. RFC 5626 §4.4: a UA that did not register with outbound "cannot
+    /// expect a CRLF in response (a \"pong\") unless the UA has an explicit
+    /// indication that CRLF keep-alives are supported", and a pong already
+    /// received is that indication. Until then the pings go (RFC 3261 §7.5
+    /// allows them on any stream) and no deadline hangs on their answer.
+    pub(crate) answers_pings: bool,
 }
 
 /// Every transport the caller has told the endpoint about.
@@ -114,6 +121,7 @@ impl Transports {
                     .then(|| StreamFramer::with_limits(limits)),
                 keepalive: None,
                 pong: None,
+                answers_pings: false,
             },
         )
     }

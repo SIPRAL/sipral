@@ -2220,9 +2220,9 @@ fn a_lost_transport_takes_its_keepalive_deadline_with_it() {
     );
 }
 
-/// An endpoint with one TCP transport bound, and its first keep-alive already
-/// on the wire.
-fn pinged(seed: u8, now: Instant) -> (Endpoint, Instant) {
+/// An endpoint with one TCP transport bound and its first keep-alive on the
+/// wire, the far end not having answered it.
+fn first_ping(seed: u8, now: Instant) -> (Endpoint, Instant) {
     let mut endpoint = Endpoint::new(EndpointConfig::default(), [seed; 32]).unwrap();
     endpoint
         .receive(
@@ -2243,6 +2243,54 @@ fn pinged(seed: u8, now: Instant) -> (Endpoint, Instant) {
         "the ping went"
     );
     (endpoint, due)
+}
+
+/// An endpoint whose TCP flow answered its first keep-alive — the explicit
+/// indication RFC 5626 §4.4 asks for — with its second one on the wire.
+fn pinged(seed: u8, now: Instant) -> (Endpoint, Instant) {
+    let (mut endpoint, first) = first_ping(seed, now);
+    stream(&mut endpoint, b"\r\n", first + Duration::from_millis(40));
+    let due = endpoint.poll_timeout().expect("the next keepalive");
+    endpoint.handle_timeout(due);
+    assert_eq!(
+        transmits(&mut endpoint).first().map(|t| t.payload.to_vec()),
+        Some(b"\r\n\r\n".to_vec()),
+        "the second ping went"
+    );
+    (endpoint, due)
+}
+
+#[test]
+fn a_flow_that_never_answered_a_ping_is_not_held_to_the_pong() {
+    // §4.4: a UA that did not register with outbound "cannot expect a CRLF in
+    // response (a \"pong\") unless the UA has an explicit indication that
+    // CRLF keep-alives are supported". Asterisk answers none, and a call it
+    // carries on this connection must outlive the first ping by more than ten
+    // seconds.
+    let t0 = Instant::now();
+    let (mut endpoint, pinged_at) = first_ping(14, t0);
+    let mut now = pinged_at;
+    for round in 0..6 {
+        now += Duration::from_secs(11);
+        endpoint.handle_timeout(now);
+        let seen = events(&mut endpoint);
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(*event, Event::FlowFailed { .. })),
+            "round {round}: a flow that never ponged was called dead: {seen:?}"
+        );
+        transmits(&mut endpoint);
+    }
+    // the pings still go, keeping the NAT binding the flow crosses open
+    let next = endpoint
+        .poll_timeout()
+        .expect("the keepalive is still armed");
+    endpoint.handle_timeout(next);
+    assert_eq!(
+        transmits(&mut endpoint).first().map(|t| t.payload.to_vec()),
+        Some(b"\r\n\r\n".to_vec()),
+    );
 }
 
 /// Feed bytes in on the stream transport.

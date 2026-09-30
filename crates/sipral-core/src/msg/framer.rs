@@ -272,6 +272,18 @@ impl StreamFramer {
         true
     }
 
+    /// A ping of ours has just gone out on this connection.
+    ///
+    /// A lone CRLF read before now was an answer, or half of a ping torn
+    /// between two reads; the next one to arrive is the answer to this ping
+    /// rather than the other half of that one. Without this, a far end that
+    /// pongs every ping on an idle connection would have its second pong paired
+    /// with its first and read as a ping, and the ping it answered would be
+    /// called unanswered.
+    pub fn ping_sent(&mut self) {
+        self.dangling = false;
+    }
+
     /// How many bytes are held for a message that is not complete yet.
     #[must_use]
     pub fn pending(&self) -> usize {
@@ -547,6 +559,31 @@ Content-Length: 0\r\n\
         assert!(f.take_pong());
         assert!(!f.take_pong());
         assert!(!f.take_ping());
+    }
+
+    #[test]
+    fn a_pong_to_each_of_two_pings_is_two_pongs_and_not_a_ping() {
+        // an idle connection to a server that answers every ping: nothing but
+        // time between the two answers, and the second one answers the second
+        // ping rather than completing the first
+        let mut f = framer();
+        f.ping_sent();
+        f.push(b"\r\n").expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none()
+        );
+        assert!(f.take_pong());
+        f.ping_sent();
+        f.push(b"\r\n").expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none()
+        );
+        assert!(f.take_pong(), "the second ping was answered");
+        assert!(!f.take_ping(), "and the answer is not a ping of theirs");
     }
 
     #[test]

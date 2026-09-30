@@ -2303,6 +2303,35 @@ fn signalling(
     {
         return;
     }
+    // RFC 5626 §4.4.1: a flow that used to answer its pings stopped, and the
+    // endpoint has retired the transport. That is what
+    // `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` says of a transport, so it is said
+    // that way: the application holds the socket, and until it hears this it
+    // keeps a connection the stack will never write to again, and does not
+    // open another when the stack asks for one to the same place.
+    if let UaEvent::Unclaimed(sipral_core::endpoint::Event::FlowFailed { transport }) = said {
+        let lost = crate::transport::Lost {
+            transport: transport.0,
+            protocol: state
+                .transports
+                .protocol_of(transport.0)
+                .map_or(0, crate::stack::SipralTransport::named),
+            error: crate::transport::SipralTransportError::TimedOut,
+            tls: crate::transport::SipralTlsFailure::None,
+            detail: String::from(
+                "no answer to a keep-alive ping within ten seconds (RFC 5626 section 4.4.1)",
+            ),
+        };
+        let (event, text) = lost.raised(stack);
+        raised.push(Delivery {
+            event,
+            _raised: None,
+            _reason: Some(text),
+            _record: None,
+            _identity: None,
+        });
+        return;
+    }
     // built before `said` moves behind the `Arc`, and for the same reason a
     // media reason is built in `media` below: a `SocketAddr` has no bytes of
     // its own to point at, so this is what the event's pointer needs kept

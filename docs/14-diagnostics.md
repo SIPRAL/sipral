@@ -74,7 +74,7 @@ parser took and whose fields could not be read.
 | `transport.promoted.size` | §18.1.1: the request would not fit a datagram, so it went over a stream instead. Carries **size and limit**. |
 | `transport.refused.size` | The same rule with nowhere to go. The request was **not emitted**; the caller was asked to open a connection. Carries size and limit. |
 | `transport.lost` | A transport closed or failed, and what was running on it was failed with it. |
-| `transport.flow.dead` | RFC 5626 §4.4.1: ten seconds with no pong, so the flow was taken down. |
+| `transport.flow.dead` | RFC 5626 §4.4.1: ten seconds with no pong on a flow that has answered one before, so the flow was taken down. |
 | `request.sent` | A request went on the wire, at the size the caller writes. |
 | `request.retransmitted` | A timer fired and the identical bytes went again. |
 | `request.refused.overload` | A stranger's request was answered 503 for want of room. |

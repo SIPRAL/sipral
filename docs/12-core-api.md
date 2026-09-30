@@ -501,6 +501,9 @@ impl StreamFramer {
     pub fn take_ping(&mut self) -> bool;
     /// And the other half: a single CRLF arrived, so a ping of ours was answered.
     pub fn take_pong(&mut self) -> bool;
+    /// A ping of ours went out: the next lone CRLF is its answer, not the
+    /// second half of a ping torn across two reads.
+    pub fn ping_sent(&mut self);
     pub fn pending(&self) -> usize;
     pub fn reset(&mut self);
 }

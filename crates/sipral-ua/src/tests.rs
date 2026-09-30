@@ -10445,6 +10445,20 @@ fn a_consultation_whose_reason_hung_up_is_an_ordinary_call_again() {
 
 // -- a flow that dies under a registration -----------------------------------
 
+/// Let the flow answer its first keep-alive, which is the explicit indication
+/// RFC 5626 §4.4 asks for before a missing pong may count against it, and put
+/// the second one on the wire. Returns when the second one went.
+fn second_ping(agent: &mut UserAgent) -> Instant {
+    let first = agent.poll_timeout().expect("a keepalive is due");
+    agent.handle_timeout(first);
+    transmits(agent);
+    stream(agent, b"\r\n", first + Duration::from_millis(40));
+    let second = agent.poll_timeout().expect("the next keepalive");
+    agent.handle_timeout(second);
+    assert_eq!(transmits(agent), vec![b"\r\n\r\n".to_vec()]);
+    second
+}
+
 #[test]
 fn a_ping_that_is_never_answered_takes_the_registration_with_it() {
     // RFC 5626 §4.4: "If a flow with a registration has failed, the UA follows
@@ -10461,10 +10475,7 @@ fn a_ping_that_is_never_answered_takes_the_registration_with_it() {
         Some(RegistrationState::Registered)
     );
 
-    let ping_at = agent.poll_timeout().expect("a keepalive is due");
-    agent.handle_timeout(ping_at);
-    assert_eq!(transmits(&mut agent), vec![b"\r\n\r\n".to_vec()]);
-
+    let ping_at = second_ping(&mut agent);
     agent.handle_timeout(ping_at + Duration::from_secs(10));
     let events = events(&mut agent);
     assert!(
@@ -12165,10 +12176,9 @@ fn a_dead_flow_stops_the_lamp_saying_anything() {
     );
 
     // RFC 5626 §4.4.1 calls the flow dead when a keep-alive goes ten seconds
-    // unanswered, and the core takes the transport down
-    let ping_at = agent.poll_timeout().expect("a keepalive is due");
-    agent.handle_timeout(ping_at);
-    transmits(&mut agent);
+    // unanswered on a flow that has answered one, and the core takes the
+    // transport down
+    let ping_at = second_ping(&mut agent);
     agent.handle_timeout(ping_at + Duration::from_secs(10));
 
     assert!(

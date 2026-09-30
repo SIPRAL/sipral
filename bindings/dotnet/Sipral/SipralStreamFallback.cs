@@ -30,7 +30,7 @@ public sealed partial class SipralStack
     /// each destination after it: well clear of <c>Sipral.TransportMain</c>
     /// and of the small numbers an application driving the native layer itself
     /// would pick.</summary>
-    private const uint FirstStream = 1024;
+    internal const uint FirstStream = 1024;
 
     private bool _streamFallback = true;
 
@@ -42,6 +42,10 @@ public sealed partial class SipralStack
     /// a stream, during the poll that raised it, acted on right after that
     /// poll.</summary>
     private readonly ConcurrentQueue<string> _streamsAsked = new();
+
+    /// <summary>The transport numbers <see cref="SipralEventKind.TransportFailed"/>
+    /// named during that same poll, acted on at the same moment.</summary>
+    private readonly ConcurrentQueue<uint> _streamsLetGo = new();
 
     /// <summary>Every connection opened for one, by the transport number it
     /// is bound at, and the destinations one is being opened to, both under
@@ -71,15 +75,32 @@ public sealed partial class SipralStack
         {
             _streamsAsked.Enqueue(destination);
         }
+        if (!Streamed && args.Kind == SipralEventKind.TransportFailed && args.TransportFailed is { } lost)
+        {
+            NoteStreamLetGo(lost.Transport);
+        }
     }
+
+    /// <summary>Remembers a transport the stack let go of, for after the poll
+    /// that said so: a connection this class opened that stopped answering
+    /// keep-alives (RFC 5626 §4.4.1) is retired by the stack while its socket
+    /// is still open here, and a connection kept open that the stack will
+    /// never write to again would stand in for the new one it asks
+    /// for.</summary>
+    internal void NoteStreamLetGo(uint transport) => _streamsLetGo.Enqueue(transport);
 
     /// <summary>Answers what <see cref="SipralEventKind.TransportWanted"/>
     /// asked for in the poll that just ran: a connection to each destination
     /// not already connected or being connected to, opened on a thread of its
     /// own, or — with <c>streamFallback</c> off — the word that none is
-    /// coming.</summary>
+    /// coming. First the connections the stack let go of in that
+    /// poll.</summary>
     private void ActOnStreamsWanted()
     {
+        while (_streamsLetGo.TryDequeue(out var letGo))
+        {
+            LoseSipStream(letGo, tell: false);
+        }
         var seen = new HashSet<string>();
         while (_streamsAsked.TryDequeue(out var destination))
         {

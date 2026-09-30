@@ -1539,7 +1539,11 @@ public enum SipralEventKind : uint
     /// application said it failed (`sipral_stack_transport_failed`,
     /// `sipral_stack_transport_failure`) or closed
     /// (`sipral_stack_stream_closed`), or a stream carried bytes no
-    /// message starts with (`sipral_stack_receive_stream`).
+    /// message starts with (`sipral_stack_receive_stream`), or a stream
+    /// that had answered a keep-alive ping left the next one unanswered
+    /// for ten seconds (RFC 5626 §4.4.1, `SIPRAL_TRANSPORT_ERROR_TIMED_OUT`:
+    /// the stack has let the connection go, and the socket is the
+    /// application's to close).
     ///
     /// Raised by the next poll, before what the loss did to the
     /// registrations and calls on it. `payload.transport_failed` says

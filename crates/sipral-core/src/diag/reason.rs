@@ -51,8 +51,8 @@ pub enum Reason {
     /// A transport closed or failed, and everything running on it was failed
     /// with it.
     TransportLost,
-    /// RFC 5626 §4.4.1: ten seconds without a pong, so the flow is dead and
-    /// was taken down.
+    /// RFC 5626 §4.4.1: ten seconds without a pong on a flow that has answered
+    /// one before, so the flow is dead and was taken down.
     FlowDead,
     /// A request went on the wire. Carries its size as the bytes the caller
     /// writes, which is what B1 in `docs/13-client-requirements.md` asks to be

@@ -68,6 +68,8 @@ private class ChallengingPbx(tcp: Boolean, apart: Boolean = false) : AutoCloseab
     val tcpAddress: String? = listener?.let { "127.0.0.1:${it.localPort}" }
     val overTcp: MutableList<String> = Collections.synchronizedList(ArrayList())
     @Volatile var connections = 0
+    /** How many of those connections the client closed. */
+    @Volatile var closedByTheClient = 0
 
     init {
         Thread(::serveUdp, "pbx-udp").apply { isDaemon = true; start() }
@@ -122,7 +124,10 @@ private class ChallengingPbx(tcp: Boolean, apart: Boolean = false) : AutoCloseab
                 } catch (_: Exception) {
                     -1
                 }
-                if (read < 0) return
+                if (read < 0) {
+                    closedByTheClient += 1
+                    return
+                }
                 held += String(buffer, 0, read, Charsets.UTF_8)
                 while (true) {
                     val end = held.indexOf("\r\n\r\n")
@@ -252,9 +257,31 @@ private suspend fun aClientToldToOpenNoStreamEndsTheCallWithoutTrying(): String 
     return "and so does one told to open none"
 }
 
+// RFC 5626 §4.4.1: the stack retires a stream that stopped answering
+// keep-alives and says so with TRANSPORT_FAILED; the socket is this layer's,
+// and one kept open would stand in for the new connection the stack asks for
+// next time
+private suspend fun aConnectionTheStackLetGoOfIsClosedHereToo(): String {
+    ChallengingPbx(tcp = true).use { pbx ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+            untilTheEnd(client) { place(client, pbx) }
+            assertEquals(1, pbx.connections)
+            assertEquals(0, pbx.closedByTheClient, "the connection outlives the call")
+            // the one connection opened is the last id handed out
+            client.noteStreamLetGo(client.nextLink.get() - 1)
+            repeat(150) {
+                if (pbx.closedByTheClient == 0) delay(20)
+            }
+            assertEquals(1, pbx.closedByTheClient, "the connection was let go of")
+        }
+    }
+    return "and a connection the stack let go of is closed here too"
+}
+
 internal suspend fun datagramLimitChecks(): String = listOf(
     aPbxListeningOnTcpGetsTheAnswerOverAConnectionTheClientOpened(),
     aPbxOnUdpAloneEndsTheCallAtOnceWithTheLimitNamed(),
     aPbxTakingTcpOnAnotherPortIsReachedAtTheStreamServer(),
     aClientToldToOpenNoStreamEndsTheCallWithoutTrying(),
+    aConnectionTheStackLetGoOfIsClosedHereToo(),
 ).joinToString(", ")

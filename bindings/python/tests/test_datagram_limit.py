@@ -29,6 +29,7 @@ import unittest
 
 from sipral import Stack
 from sipral._sipral_cffi import lib
+from sipral.events import Event
 from sipral.enums import AudioMode, CallEndReason, EventKind, TransportError
 
 #: How long the nonce is: enough that the retry is over the line even with
@@ -78,6 +79,8 @@ class _Pbx:
         )
         self.over_tcp: list[str] = []
         self.connections = 0
+        #: How many of those connections the stack closed.
+        self.closed_by_the_stack = 0
         self._stop = threading.Event()
         threading.Thread(target=self._serve_udp, daemon=True).start()
         if self._listener is not None:
@@ -116,6 +119,7 @@ class _Pbx:
             except OSError:
                 data = b""
             if not data:
+                self.closed_by_the_stack += 1
                 conn.close()
                 return
             held += data
@@ -235,6 +239,41 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         seen = await self.events_until_the_end(stack, seconds=4.0)
         self.assertEqual(seen[-1].fields["status_code"], 513)
         self.assertEqual(pbx.connections, 0, "nothing was opened")
+
+    async def test_a_connection_the_stack_let_go_of_is_closed_here_too(self) -> None:
+        # RFC 5626 Section 4.4.1: the stack retires a stream that stopped
+        # answering keep-alives and says so with a TRANSPORT_FAILED; the socket
+        # is this layer's, and one kept open would stand in for the new
+        # connection the stack asks for next time
+        pbx = self.pbx(tcp=True)
+        stack = self.stack()
+        self.call(stack, pbx)
+        await self.events_until_the_end(stack)
+        self.assertEqual(pbx.connections, 1)
+        self.assertEqual(pbx.closed_by_the_stack, 0, "the connection outlives the call")
+        (transport,) = list(stack._sip_streams)
+        stack._deliver(
+            Event(
+                kind=lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED,
+                kind_name="transport failed",
+                stack=0,
+                account=0,
+                call=0,
+                message=None,
+                fields={
+                    "transport": transport,
+                    "protocol": lib.SIPRAL_TRANSPORT_TCP,
+                    "error": TransportError.TIMED_OUT,
+                    "tls": 0,
+                    "detail": "",
+                },
+            )
+        )
+        deadline = time.monotonic() + 3.0
+        while pbx.closed_by_the_stack == 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        self.assertEqual(pbx.closed_by_the_stack, 1, "the connection was let go of")
+        self.assertEqual(list(stack._sip_streams), [])
 
 
 if __name__ == "__main__":

@@ -62,6 +62,7 @@ public sealed class DatagramLimitTests
         private readonly Thread _udpThread;
         private volatile bool _stopped;
         private int _connections;
+        private int _closedByTheStack;
 
         public Pbx(bool tcp, bool apart = false)
         {
@@ -90,6 +91,9 @@ public sealed class DatagramLimitTests
         public string? TcpAddress { get; }
 
         public int Connections => Volatile.Read(ref _connections);
+
+        /// <summary>How many of those connections the stack closed.</summary>
+        public int ClosedByTheStack => Volatile.Read(ref _closedByTheStack);
 
         public List<string> OverTcp()
         {
@@ -164,6 +168,7 @@ public sealed class DatagramLimitTests
                 }
                 if (read == 0)
                 {
+                    Interlocked.Increment(ref _closedByTheStack);
                     return;
                 }
                 held += Encoding.UTF8.GetString(buffer, 0, read);
@@ -303,5 +308,28 @@ public sealed class DatagramLimitTests
         var seen = await UntilTheEnd(stack);
         Assert.Equal(513u, seen[^1].CallInfo!.StatusCode);
         Assert.Equal(0, pbx.Connections);
+    }
+
+    [Fact]
+    public async Task AConnectionTheStackLetGoOfIsClosedHereToo()
+    {
+        // RFC 5626 §4.4.1: the stack retires a stream that stopped answering
+        // keep-alives and says so with TransportFailed; the socket is this
+        // layer's, and one kept open would stand in for the new connection
+        // the stack asks for next time
+        using var pbx = new Pbx(tcp: true);
+        using var stack = Stack();
+        Place(stack, pbx);
+        await UntilTheEnd(stack);
+        Assert.Equal(1, pbx.Connections);
+        Assert.Equal(0, pbx.ClosedByTheStack);
+
+        stack.NoteStreamLetGo(SipralStack.FirstStream);
+        var clock = Stopwatch.StartNew();
+        while (pbx.ClosedByTheStack == 0 && clock.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            await Task.Delay(20);
+        }
+        Assert.Equal(1, pbx.ClosedByTheStack);
     }
 }

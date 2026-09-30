@@ -121,6 +121,9 @@ public final class SipralStack: @unchecked Sendable {
     private var streamsOpening: Set<String> = []
     private var nextStreamLink: UInt32 = SipralStack.firstStreamLink
     private var streamsAsked: [String] = []
+    /// The transport ids `SipralEventKind.transportFailed` named during that
+    /// same poll, acted on at the same moment; guarded by `signallingQueue`.
+    private var streamsLetGo: [UInt32] = []
     /// The recording sessions running, by handle: the call each records and
     /// the connection it went over, guarded by `callsQueue`.
     private var recordings: [SipralHandle: (call: Call, link: UInt32?)] = [:]
@@ -746,13 +749,30 @@ public final class SipralStack: @unchecked Sendable {
     /// destination after it: clear of `Sipral.transportMain`, of the
     /// recording servers' ids, and of the small numbers an application
     /// driving the C layer itself would pick.
-    private static let firstStreamLink: UInt32 = 1024
+    static let firstStreamLink: UInt32 = 1024
+
+    /// Remember a transport the stack let go of, for after the poll that said
+    /// so: a connection opened here that stopped answering keep-alives
+    /// (RFC 5626 §4.4.1) is retired by the stack while its socket is still
+    /// open here, and a connection kept open that the stack will never write
+    /// to again would stand in for the new one it asks for.
+    func noteStreamLetGo(_ id: UInt32) {
+        signallingQueue.sync { streamsLetGo.append(id) }
+    }
 
     /// Answer what `SipralEventKind.transportWanted` asked for in the poll
     /// that just ran: a connection to each destination not already connected
     /// or being connected to, opened off the poll thread, or -- with
-    /// `streamFallback` off -- the word that none is coming.
+    /// `streamFallback` off -- the word that none is coming. First the
+    /// connections the stack let go of in that poll.
     private func actOnStreamsWanted() {
+        let letGo = signallingQueue.sync { () -> [UInt32] in
+            defer { streamsLetGo = [] }
+            return streamsLetGo
+        }
+        for id in letGo {
+            loseStreamLink(id, tell: false)
+        }
         let asked = signallingQueue.sync { () -> [String] in
             defer { streamsAsked = [] }
             return streamsAsked
@@ -1845,6 +1865,9 @@ public final class SipralStack: @unchecked Sendable {
         }
         if signalling == .udp, let wanted = event.transportWantedData {
             signallingQueue.sync { streamsAsked.append(wanted.destination) }
+        }
+        if signalling == .udp, let lost = event.transportFailedData {
+            noteStreamLetGo(lost.transport)
         }
         noteNat(event)
         if let call = callFor(event.call) {
