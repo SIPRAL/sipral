@@ -28,6 +28,7 @@ use std::time::Duration;
 use sipral_core::auth::Credentials;
 use sipral_core::endpoint::{TransportId, TransportProtocol};
 use sipral_core::msg::{HeaderName, Uri};
+use sipral_core::pin::CertificatePin;
 
 use crate::identity::{ANONYMOUS_FROM, Privacy};
 
@@ -267,6 +268,9 @@ pub struct Account {
     /// Whether `remote` is an address yet: always for an account made with
     /// one, and for a located one once the first lookup has answered.
     pub(crate) located: bool,
+    /// The one TLS server certificate this account trusts, by fingerprint,
+    /// in place of a trust anchor. See [`Account::tls_pin`].
+    pub(crate) tls_pin: Option<CertificatePin>,
 }
 
 impl Account {
@@ -346,6 +350,7 @@ impl Account {
             server: None,
             naptr: false,
             located: true,
+            tls_pin: None,
         }
     }
 
@@ -645,6 +650,31 @@ impl Account {
     #[must_use]
     pub const fn keepalive_interval(&self) -> Option<Duration> {
         self.keepalive
+    }
+
+    /// Trust the TLS server this account connects to by the SHA-256
+    /// fingerprint of its certificate, rather than by a trust anchor: for a
+    /// PBX that serves a certificate it signed itself.
+    ///
+    /// TLS is the application's (`docs/22-tls.md`), so this is what its
+    /// certificate verifier asks: [`Account::pinned_certificate`] gives the
+    /// pin, and [`CertificatePin::check`] takes the DER bytes of the leaf
+    /// certificate the server presented and answers in constant time. With a
+    /// pin, the fingerprint is the whole verdict: no chain, no trust anchor
+    /// and no host name is consulted, and an expired certificate that
+    /// matches is accepted and reported as expired. `sipral_core::pin` says
+    /// why for each. Unset by default, and then the platform's own checks
+    /// apply as they always did.
+    #[must_use]
+    pub const fn tls_pin(mut self, pin: CertificatePin) -> Self {
+        self.tls_pin = Some(pin);
+        self
+    }
+
+    /// The pin [`Account::tls_pin`] set, if any.
+    #[must_use]
+    pub const fn pinned_certificate(&self) -> Option<&CertificatePin> {
+        self.tls_pin.as_ref()
     }
 
     /// Whether a peer at `address` is one this account trusts.

@@ -170,6 +170,8 @@ mod log;
 #[cfg(feature = "stun")]
 mod nat;
 mod payloads;
+#[cfg(test)]
+mod pin_tests;
 mod pipeline;
 mod ports;
 mod record;
@@ -318,6 +320,10 @@ pub use sipral_ua::{
 pub use sipral_ua::{
     Attestation, CallerVerification, StirVerification, VerificationFailure, VerificationOutcome,
 };
+/// A PBX's self-signed TLS certificate, trusted by its SHA-256 fingerprint
+/// ([`Account::tls_pin`]) and checked by the application's certificate
+/// verifier with [`CertificatePin::check`].
+pub use sipral_ua::{CertificatePin, PinError, PinMismatch, PinnedCertificate};
 /// STIR/SHAKEN in calls: what an account signs with, and what the agent
 /// verifies against — [`UserAgent::set_stir`], [`Account::stir_signing`].
 #[cfg(feature = "stir")]

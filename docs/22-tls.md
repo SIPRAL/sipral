@@ -79,6 +79,35 @@ verified the chain. The C sample below does; the same check in C# and in
 Kotlin is further down, and all three refused the wildcard certificate and
 took the `sip:` URI one when they were run.
 
+## A PBX's own certificate, pinned
+
+A PBX on a LAN usually serves a certificate it signed itself, for
+`localhost` or its factory hostname, and no authority an application ships
+vouches for it. Rather than turn checking off, an account can pin that one
+certificate by the SHA-256 fingerprint of its DER encoding
+(`Account::tls_pin`, `sipral::CertificatePin`): the value `openssl x509
+-noout -fingerprint -sha256` prints, taken with or without colons, or after
+`sha-256 ` or `SHA256=`. The application's certificate verifier hands the leaf
+certificate the server presented to `CertificatePin::check`, which compares
+the digests in constant time; `crates/sipral/examples/tls.rs` does it as a
+`rustls` verifier (`--pin`).
+
+With a pin, the fingerprint is the whole verdict:
+
+- **Chain and trust anchors** are not consulted. The pin replaces them.
+- **The host name is not checked.** The pin names every byte of one
+  certificate, its public key included, which a matching name cannot add
+  to, and the name in a PBX's own certificate is the part most often wrong.
+  Connections without a pin keep RFC 5922's rules above.
+- **An expired certificate that matches is accepted**, and
+  `PinnedCertificate::expired` says so for the application to warn. Its
+  dates were written by the holder of the pinned key, so they protect
+  against nobody else, and a PBX whose year-long self-signed certificate
+  lapsed would otherwise go silent mid-deployment. To stop trusting it, pin
+  the new certificate.
+- **The handshake signature is still verified**: a matching certificate
+  proves nothing until the server has shown it holds the key.
+
 ## The lab's TLS endpoint
 
 The lab has two kinds of TLS listener. Asterisk's, for SIP, are described
