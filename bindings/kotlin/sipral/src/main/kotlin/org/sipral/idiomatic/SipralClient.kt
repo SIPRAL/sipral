@@ -64,16 +64,12 @@ private const val TRANSMIT_BYTES = 1 shl 16
 private const val ADDRESS_BYTES = 64
 private const val PACKET_BYTES = 1500
 
-/** The first transport id a connection to a recording server is bound
- * under. */
-private const val FIRST_RECORDING_LINK = 64L
-
-/** The first transport id a connection opened for
- * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is bound under, one more for each
- * destination after it: clear of the main transport, of the recording
- * servers' ids, and of the small numbers an application driving
- * [org.sipral.Sipral] itself would pick. */
-private const val FIRST_STREAM_LINK = 1024L
+/** The first transport id a connection this layer opens is bound under --
+ * to a recording server, or for `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` -- one
+ * more for each after it, whichever it is for: clear of the main transport
+ * and of the small numbers an application driving [org.sipral.Sipral]
+ * itself would pick. */
+private const val FIRST_LINK = 64L
 
 internal fun formatAddress(host: String, port: Int): String = "$host:$port"
 
@@ -1064,10 +1060,14 @@ class SipralClient private constructor(
     // -- connections to recording servers -------------------------------------
 
     /** The TCP connections to recording servers, by the transport id each
-     * was bound under, and the next id: the number is the caller's to
-     * choose, and this layer binds no other transport but the main one. */
+     * was bound under. */
     private val recordingLinks = ConcurrentHashMap<Long, Socket>()
-    private val nextRecordingLink = java.util.concurrent.atomic.AtomicLong(FIRST_RECORDING_LINK)
+
+    /** The next transport id a connection this layer opens is bound under:
+     * the number is the caller's to choose, and one count for every kind of
+     * connection keeps two of them from ever sharing one, however many
+     * recordings a long-running client makes. */
+    internal val nextLink = java.util.concurrent.atomic.AtomicLong(FIRST_LINK)
 
     /** The recording sessions running, by handle: the call each records and
      * the connection it went over. */
@@ -1089,7 +1089,7 @@ class SipralClient private constructor(
             socket.close()
             throw SipralException(SipralStatus.TRANSPORT_DOWN, "the recording server $destination: ${refused.message}")
         }
-        val id = nextRecordingLink.getAndIncrement()
+        val id = nextLink.getAndIncrement()
         val local = formatAddress(socket.localAddress.hostAddress, socket.localPort)
         val remote = formatAddress(socket.inetAddress.hostAddress, socket.port)
         try {
@@ -1202,13 +1202,12 @@ class SipralClient private constructor(
     private var streamServer: String? = null
 
     /** The TCP connections opened for requests too large for a datagram, by
-     * the transport id each was bound under, with where each goes; the
-     * destinations one is being opened to; the next id; and where
+     * the transport id each was bound under ([nextLink]), with where each
+     * goes; the destinations one is being opened to; and where
      * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for one during the poll that
      * raised it, acted on right after that poll. */
     private val streamLinks = ConcurrentHashMap<Long, Pair<String, Socket>>()
     private val streamsOpening: MutableSet<String> = ConcurrentHashMap.newKeySet()
-    private val nextStreamLink = java.util.concurrent.atomic.AtomicLong(FIRST_STREAM_LINK)
     private val streamsAsked = java.util.concurrent.ConcurrentLinkedQueue<String>()
 
     /** Answer what `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for in the poll
@@ -1223,13 +1222,13 @@ class SipralClient private constructor(
                 continue
             }
             if (!streamFallback) {
-                sayNoStream(nextStreamLink.getAndIncrement(), SipralTransportError.CONNECTION_REFUSED)
+                sayNoStream(nextLink.getAndIncrement(), SipralTransportError.CONNECTION_REFUSED)
                 continue
             }
             if (!streamsOpening.add(destination)) {
                 continue
             }
-            val id = nextStreamLink.getAndIncrement()
+            val id = nextLink.getAndIncrement()
             Thread({ openStreamLink(id, destination) }, "sipral-stream-$id").apply {
                 isDaemon = true
                 start()
@@ -1802,7 +1801,7 @@ class SipralClient private constructor(
             if (status != SipralStatus.OK.value || len == 0) {
                 return
             }
-            if (lens[3] >= FIRST_STREAM_LINK) {
+            if (streamLinks.containsKey(lens[3])) {
                 // a connection opened for a request too large for a datagram
                 writeStreamLink(lens[3], data, len)
                 continue

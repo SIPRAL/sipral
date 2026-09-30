@@ -530,9 +530,11 @@ private suspend fun aCallIsRecordedToARecordingServerOverItsOwnConnection(): Str
 /**
  * The recording session's offer for a call keyed with SDES (RFC 4568),
  * placed from an account that does or does not let its encrypted calls be
- * recorded in the clear.
+ * recorded in the clear; its connection bound under [link] when one is
+ * given, as a client that has opened that many connections already binds
+ * it.
  */
-private suspend fun recordingOfferOfAnEncryptedCall(recordingInClear: Boolean): String {
+private suspend fun recordingOfferOfAnEncryptedCall(recordingInClear: Boolean, link: Long? = null): String {
     val first = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0)).apply { soTimeout = 1 }
     val second = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0)).apply { soTimeout = 1 }
     try {
@@ -560,6 +562,7 @@ private suspend fun recordingOfferOfAnEncryptedCall(recordingInClear: Boolean): 
                                 }
                             }
                             assertTrue(assertNotNull(placed.media).encryption().single().encrypted, "the call itself is keyed")
+                            link?.let { alice.nextLink.set(it) }
                             placed.recordTo("sip:srs@127.0.0.1", destination = server.address)
                             withTimeout(5_000) {
                                 while (server.requests.none { it.startsWith("INVITE ") }) {
@@ -593,6 +596,16 @@ private suspend fun anAccountThatAllowsItRecordsAnEncryptedCallInTheClear(): Str
     return "an account that allows it records an encrypted call in the clear"
 }
 
+/** A client that has made a thousand recordings still reaches the server of
+ * the next: its connection's transport id is past where the ids of the
+ * connections opened for requests too large for a datagram once began, and
+ * what the stack sends on it goes to the recording server all the same. */
+private suspend fun aRecordingPastAThousandConnectionsStillReachesItsServer(): String {
+    val offer = recordingOfferOfAnEncryptedCall(recordingInClear = false, link = 1_100)
+    assertTrue(offer.startsWith("INVITE sip:srs@127.0.0.1"), offer)
+    return "a recording bound past a thousand connections reaches its server"
+}
+
 suspend fun protocolsChecks(): String = listOf(
     realTimeTextIsTypedAndReadBothWays(),
     aFarEndThatTookNoTextLeavesNoneToSend(),
@@ -605,4 +618,5 @@ suspend fun protocolsChecks(): String = listOf(
     aCallIsRecordedToARecordingServerOverItsOwnConnection(),
     anEncryptedCallIsOfferedToItsRecorderAsSrtp(),
     anAccountThatAllowsItRecordsAnEncryptedCallInTheClear(),
+    aRecordingPastAThousandConnectionsStillReachesItsServer(),
 ).joinToString("; ")
